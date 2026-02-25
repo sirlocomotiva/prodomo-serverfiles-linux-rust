@@ -1,0 +1,16 @@
+[package]
+name = "world"
+version = "0.1.0"
+edition = "2021"
+description = "Metin2 game world and map management"
+
+[dependencies]
+tokio = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+common = { path = "../common" }
+protocol = { path = "../protocol" }
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "net"
+version = "0.1.0"
+edition = "2021"
+description = "Metin2 networking layer"
+
+[features]
+default = ["tokio"]
+tokio = ["dep:tokio"]
+
+[dependencies]
+tokio = { workspace = true, optional = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+protocol = { path = "../protocol" }
+
+[lints]
+workspace = true

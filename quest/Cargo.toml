@@ -1,0 +1,14 @@
+[package]
+name = "quest"
+version = "0.1.0"
+edition = "2021"
+description = "Metin2 Lua quest system"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+mlua = { workspace = true }
+common = { path = "../common" }
+
+[lints]
+workspace = true

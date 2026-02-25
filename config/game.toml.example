@@ -1,0 +1,148 @@
+# Metin2 game server configuration (TOML).
+#
+# The legacy `CONFIG` file used `key=value` lines and is no longer read. See
+# `docs/REWRITE_LEDGER.md` section 169 for the legacy-key to TOML-key mapping.
+#
+# Every key below is optional; an omitted key keeps the value shown, which is the
+# compiled-in default. An UNKNOWN key is an error, so a typo fails at startup.
+# Booleans must be real TOML booleans (`true` / `false`), not the legacy `1` / `0`.
+
+# --- Network ---------------------------------------------------------------
+hostname = "game1"
+channel = 1
+mother_port = 50080
+p2p_port = 50900
+bind_ip = "0.0.0.0"
+proxy_ip = ""
+view_range = 5000
+server_id = 0
+mall_url = "www.metin2galaxy.ro"
+
+# Address of the db-server peer socket.
+db_addr = "127.0.0.1"
+db_port = 51000
+
+# --- Maps ------------------------------------------------------------------
+# Map indices clients may enter.
+map_allow = [1, 21, 41]
+
+# --- Auth ------------------------------------------------------------------
+# In auth mode this process answers login, and also runs the `account` lookup
+# itself on `player_sql`, then sends GD_AUTH_LOGIN to db-server. See
+# `docs/STATUS.md`, "Owner decisions", decision 1.
+auth_server = false
+auth_master_ip = ""
+auth_master_port = 0
+
+# --- Admin page ------------------------------------------------------------
+adminpage_ips = ["127.0.0.1"]
+adminpage_password = "CHANGE-ME"
+
+# --- Gameplay and housekeeping --------------------------------------------
+passes_per_sec = 25
+save_event_second_cycle = 3000
+ping_event_second_cycle = 1500
+test_server = true
+no_wander = false
+user_limit = 32768
+empire_whisper = true
+table_postfix = ""
+block_login = ""
+log_keep_days = 0
+traffic_profile = false
+item_count_limit = 5000
+item_bonus_change_time = 60
+db_log_level = 5
+sys_log_level = 5
+skill_disable = false
+block_char_creation = false
+
+# --- Shutdown --------------------------------------------------------------
+shutdowned = false
+no_regen = false
+shutdown_age = 0
+shutdown_enable = 0
+
+# --- Quest -----------------------------------------------------------------
+quest_dir = "./quest"
+quest_object_dirs = ["./quest/object"]
+
+# --- Spam block ------------------------------------------------------------
+spam_block_duration = 900
+spam_block_score = 100
+spam_block_reload_cycle = 600
+spam_block_max_level = 10
+
+# --- Speed hack ------------------------------------------------------------
+speedhack_limit_count = 50
+speedhack_limit_bonus = 80
+synchack_limit_count = 10
+
+# --- Levels ----------------------------------------------------------------
+max_level = 99
+max_conqueror_level = 30
+pk_protect_level = 0
+shout_limit_level = 15
+status_point_get_level_limit = 90
+status_point_set_max_value = 90
+
+# --- Site flags ------------------------------------------------------------
+vrajeste_permanent = false
+intarire_permanent = false
+mantie_permanent = false
+protect_normal_player = false
+notice_battle_zone = false
+
+# --- Feature switches ------------------------------------------------------
+guild_mark_server = true
+guild_mark_min_level = 3
+disable_shop_price_3x = false
+enable_shout_addon = false
+enable_global_shout = false
+disable_prism_need = false
+disable_emotion_mask = false
+enable_all_mount_attack = false
+enable_bootary_check = false
+gm_host_check = false
+guild_invite_limit = false
+guild_infinite_members = false
+china_intoxication_check = false
+enable_speedhack_crash = false
+disable_empire_language_check = false
+check_version_server = true
+check_version_value = "1215955205"
+enable_hack_check = false
+check_multihack = true
+
+# --- Item lifecycle --------------------------------------------------------
+item_destroy_time_autogive = 300
+item_destroy_time_dropgold = 150
+item_destroy_time_dropitem = 300
+skillbook_nextread_min = 28800
+skillbook_nextread_max = 43200
+
+# --- SQL connections -------------------------------------------------------
+# The legacy value was one space-separated string:
+#   player_sql = "<host> <user> <password> <database> [port]"
+# (the DB server order was "<host> <database> <user> <password> <port>")
+
+[player_sql]
+host = "127.0.0.1"
+port = 3306
+user = "metin2"
+password = "CHANGE-ME"
+database = "metin2"
+
+[common_sql]
+host = "127.0.0.1"
+port = 3306
+user = "metin2"
+password = "CHANGE-ME"
+database = "common"
+
+[log_sql]
+host = "127.0.0.1"
+port = 3306
+user = "metin2"
+password = "CHANGE-ME"
+database = "log"

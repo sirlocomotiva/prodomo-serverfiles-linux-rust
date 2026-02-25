@@ -1,0 +1,10 @@
+#ifndef LETTERS_CONFIG
+#define LETTERS_CONFIG
+enum ConfigBox
+{
+	BOX_VNUM_L = 55021,
+};
+
+
+// IN OTHERS UPDATE AND LETTERS CONFIGURABLES
+#endif

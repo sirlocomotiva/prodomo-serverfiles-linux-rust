@@ -1,0 +1,13 @@
+[package]
+name = "protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Metin2 packet protocol definitions"
+
+[dependencies]
+bytes = { workspace = true }
+bytemuck = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "protocol",
+    "common",
+    "net",
+    "db",
+    "world",
+    "quest",
+    "game-server",
+    "db-server",
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+bytemuck = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.7", features = ["mysql", "runtime-tokio"] }
+mlua = { version = "0.9", features = ["lua54", "send"] }
+ring = "0.17"
+toml = "0.8"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"

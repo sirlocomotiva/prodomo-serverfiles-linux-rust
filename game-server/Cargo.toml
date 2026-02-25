@@ -1,0 +1,23 @@
+[package]
+name = "game-server"
+version = "0.1.0"
+edition = "2021"
+description = "Metin2 game server binary"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ring = { workspace = true }
+protocol = { path = "../protocol" }
+common = { path = "../common" }
+net = { path = "../net" }
+db = { path = "../db" }
+world = { path = "../world" }
+quest = { path = "../quest" }
+
+[dev-dependencies]
+rustix = { version = "1", features = ["process"] }
+
+[lints]
+workspace = true

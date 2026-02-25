@@ -1,0 +1,86 @@
+# Agent/runtime state
+/.overlord/
+.omo
+.codegraph
+
+# Superseded planning state
+/.sisyphus/
+
+# Rust/Cargo build output
+/target/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# IDE/editor settings
+.vs/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.rsuser
+*.VC.db
+*.VC.VC.opendb
+*.sdf
+*.opensdf
+*.opendb
+*.ncb
+*.cachefile
+*.vsidx
+ipch/
+*.ipch
+*.vcxproj.user
+
+# Build output directories
+**/[Dd]ebug/
+**/[Dd]ebugPublic/
+**/[Rr]elease/
+**/[Rr]eleases/
+**/x64/
+**/x86/
+**/[Ww][Ii][Nn]32/
+**/[Aa][Rr][Mm]/
+**/[Aa][Rr][Mm]64/
+**/[Bb]in/
+**/[Oo]bj/
+**/[Oo]ut/
+**/[Ll]og/
+**/[Ll]ogs/
+**/bld/
+
+# Build artifacts
+*.obj
+*.iobj
+*.pch
+*.pdb
+*.ipdb
+*.idb
+*.ilk
+*.tlog
+*.tlog/
+*.lastbuildstate
+*.Build.CppClean.log
+*.FileListAbsolute.txt
+*.log
+*.rsp
+*.pgc
+*.pgd
+*.tmp
+*.tmp_proj
+*.sbr
+*.tlb
+*.tli
+*.tlh
+*.aps
+
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Bundled third-party headers contain directories named debug/, log/, x86/, win32/ and arm/
+# that the build-output rules above would otherwise hide. Re-include those directories only;
+# the file-level rules above (for example .DS_Store) still apply inside them.
+!/server/extern/include/**/
+!/client/Extern/include/**/

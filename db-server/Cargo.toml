@@ -1,0 +1,23 @@
+[package]
+name = "db-server"
+version = "0.1.0"
+edition = "2021"
+description = "Metin2 database cache server binary"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+protocol = { path = "../protocol" }
+common = { path = "../common" }
+net = { path = "../net" }
+db = { path = "../db" }
+
+# Test-only. The M3 acceptance test drives the real game-side DB client against
+# this binary. Neither shipped binary depends on the other: `game-server` never
+# links `db-server`, and this edge exists only for `cargo test`.
+[dev-dependencies]
+game-server = { path = "../game-server" }
+
+[lints]
+workspace = true
