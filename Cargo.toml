@@ -9,6 +9,7 @@ members = [
     "world",
     "quest",
     "prodomo",
+    "parity",
 ]
 
 [workspace.package]

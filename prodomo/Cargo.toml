@@ -23,6 +23,7 @@ rustix = { workspace = true, features = ["termios"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+parity = { path = "../parity" }
 
 [lints]
 workspace = true

@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-09-26, after ledger section 180 (the format and Clippy gates run again). Step 1
-is done.
+Last reviewed: 2026-09-26, after ledger section 181 (the Parity inventory and the scripted client).
+Steps 1 and 2 are done; step 3 is next.
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -33,8 +33,8 @@ Each step lands as one or more ledger sections with a gate receipt.
 | step | scope | state |
 |---|---|---|
 | 1. Restructure | Retire the DB-peer and GG code and move the pure rule modules into `gamedata`. Rename `game-server` to the single `prodomo` binary with TOML configuration for the auth and Channel listeners, the Channel map sets, and PostgreSQL. First PostgreSQL schema and migrations. The Operator command that creates accounts and GMs. | **Done.** Retirement and `gamedata` (177). The rename, the TOML document, and the listeners (178). The account and GM schema, store readiness, and the Operator commands (179). |
-| 2. Parity inventory | Every legacy system and handler, listed from the source in `.scratch/parity/`, each with a porting status. The scripted-client test crate. | **Next.** |
-| 3. Vertical slice | Handshake and TEA, auth (`LOGIN3`), login by key, character select, create, and delete, loading, entering the game, movement and chat, a Warp between maps, and logout with save. | Not started. Codecs and reducers exist; see below. |
+| 2. Parity inventory | Every legacy system and handler, listed from the source in `.scratch/parity/`, each with a porting status. The scripted-client test crate. | **Done** (181). 1,643 rows in nine tables; `.scratch/parity/spec.md` has the statuses, the regeneration command, and four findings for the owner. The scripted client is the `parity` crate; its scenarios are `prodomo/tests/parity.rs`. Two rows are `ported` (the keepalive and unknown-header framing rules). |
+| 3. Vertical slice | Handshake and TEA, auth (`LOGIN3`), login by key, character select, create, and delete, loading, entering the game, movement and chat, a Warp between maps, and logout with save. | **Next.** Codecs and reducers exist; see below. First: send the handshake on connect and run `client_live` in `handle_connection`. |
 | 4. Game systems | In dependency order: items and inventory; NPCs, shops, and Transfers (trade, safebox); the quest runtime (`qc` port and Lua 5.1, with its API growing as each later system lands); monsters, combat, drops, and exp; skills and affects; party, guild, messenger, and the cross-Channel bus; dungeons, events, guild war, and OX; the Prodomo custom systems (sash, aura, pets, battle pass, switchbot, item shop, premium shop, and the rest); GM commands, the adminpage, and logs. | Not started. |
 | 5. Game data and play test | Finish the importers, fix what the full data set breaks, then the owner's play test with the Reference client. | Not started. |
 
@@ -48,8 +48,11 @@ through them.
 ### Acceptance
 
 A Parity inventory item is ported only when its scripted-client scenario passes. The scripted client
-is a test-only crate that drives the real `prodomo` binary over TCP, using the `protocol` codecs and
-`DescriptorCrypto` in the client-key role. Each scenario asserts an expected server-to-client
+is the test-only `parity` crate (181): `parity::Server` starts the real `prodomo` binary on ports the
+operating system picks, and `parity::Client` plays raw client bytes over TCP, built with the
+`protocol` codecs (and, from step 3, `DescriptorCrypto` in the client-key role). The scenarios are
+the tests in `prodomo/tests/parity.rs`, because only a `prodomo` test is told where the binary is;
+`inventory_rows_keep_the_rules` checks that every `ported` row names one of them. Each scenario asserts an expected server-to-client
 sequence taken from the legacy source. Transfers and cross-Channel features get scenarios with
 several clients.
 

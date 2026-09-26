@@ -108,9 +108,13 @@ parts exist today.
 | `world/` | Maps, sectors, characters, events, and the gameplay rules that act on them. |
 | `quest/` | The `qc` port and the Lua 5.1 quest runtime. |
 | `prodomo/` | The one binary: listeners, descriptors, the game thread, the in-process bus, and the Operator commands. |
+| `parity/` | The scripted client (test-only): `Server` runs the real `prodomo` binary, `Client` plays raw client bytes over TCP, and `inventory` checks the Parity inventory in `.scratch/parity/`. The scenarios are `prodomo/tests/parity.rs`. |
 
-A scripted-client test crate that drives the real `prodomo` binary over TCP arrives with the Parity
-inventory (build step 2). `server/` is the frozen legacy source; it is not part of the workspace.
+`server/` is the frozen legacy source; it is not part of the workspace.
+
+The Parity inventory is `.scratch/parity/` (`spec.md` explains it). Its generated tables come from
+`python3 .scratch/parity/tools/gen.py`; edit only their `status`, `scenario`, and `note` cells. When a
+change ports a row, set it to `ported`, name the scenario, and add the scenario in the same change.
 
 ## BUILD AND TEST
 

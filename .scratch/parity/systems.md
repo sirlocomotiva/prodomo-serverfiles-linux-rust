@@ -1,0 +1,129 @@
+# Systems
+
+Every legacy system that must behave the same in the Rewrite. Hand-maintained: the generated
+tables (`client-packets.md`, `sub-headers.md`, `server-records.md`, `commands.md`,
+`quest-api.md`, `timed-events.md`, `quests.md`) list the entry points, and this table lists the
+behaviour behind them. A system is `ported` only when its scenario passes; its entry points are
+ported with it.
+
+Sources are relative to `server/server/`. `G/` is `game/`, `D/` is `db/`, `C/` is `common/`.
+"Needs" names the systems that must land first. Every manager named in a source is instantiated
+in `G/main.cpp:345-404`, so none of them is dead code; a feature switch that turns one off is noted.
+
+| id | source | what | needs | status | scenario | note |
+|---|---|---|---|---|---|---|
+| `sys.net.framing` | `G/input.cpp:60-125`, `G/packet_info.cpp` | Fixed-width framing per phase table, keepalive byte, unknown header closes | | partial | | `net` framing and `protocol::cg_inventory` exist; `prodomo` answers keepalive and pong live. |
+| `sys.net.handshake` | `G/input.cpp:180-260`, `G/desc.cpp` | Handshake, time sync, phase switches, TEA key setup | `sys.net.framing` | partial | | `ClientLifecycle`, `handshake`, `DescriptorCrypto`, `client_live` exist; not wired into `handle_connection`. |
+| `sys.net.heartbeat` | `G/desc.cpp`, `G/desc_manager.cpp` | Ping cycle and idle close | `sys.net.handshake` | partial | | Reducer exists. |
+| `sys.net.channel_status` | `G/input.cpp:227-234`, `D/ClientManager.cpp` | `STATE_CHECKER` answers the Channel status list the login screen shows | `sys.net.handshake` | missing | | Served in the handshake phase, before auth. |
+| `sys.net.flood` | `G/char.h` (`ENABLE_ANTI_CMD_FLOOD`), `ENABLE_FLOOD_PRETECTION` | Command and packet flood limits | `sys.net.framing` | missing | | |
+| `sys.net.udp_block` | `G/input_udp.cpp`, `__UDP_BLOCK__` | The legacy UDP listener | | missing | | Decide Divergence: the client never sends UDP to the game. |
+| `sys.net.ip_ban` | `G/ip_ban.cpp`, `G/block_country.cpp` | Blocked IPs and countries at accept | | missing | | |
+| `sys.adminpage` | `G/input.cpp:24-37`, `G/config.cpp` | The adminpage | | missing | | **Finding:** unreachable in legacy. `HEADER_CG_TEXT` (64) is registered (`G/packet_info.cpp:98`) but no analyzer handles it, `IsAdminPage` has no caller, and the password is only logged. Owner to confirm it is dropped. |
+| `sys.auth.login` | `G/input_auth.cpp` | `LOGIN3` credentials, account status, availability, `BLOCK_LOGIN`, login key | `sys.net.handshake` | missing | | argon2id Divergence recorded. |
+| `sys.login.by_key` | `G/input_login.cpp`, `D/ClientManagerLogin.cpp:82-150` | `LOGIN2` by key, duplicate-login kick, empire, player summaries | `sys.auth.login` | missing | | |
+| `sys.login.character` | `G/input_login.cpp:265-515` | Select, create (name rules, defaults per race), delete (delete code) | `sys.login.by_key` | missing | | Index Defects recorded in `AGENTS.md`. |
+| `sys.login.empire` | `G/input_login.cpp` (`Empire`), `FIX_SELECT_EMPIRE_PHASE` | Empire choice for a new account | `sys.login.by_key` | missing | | |
+| `sys.login.change_name` | `G/input_login.cpp` (`ChangeName`) | Forced rename | `sys.login.character` | missing | | |
+| `sys.login.enter` | `G/input_login.cpp` (`Entergame`), `G/char.cpp` | Loading phase, main character records, enter game | `sys.login.character`, `sys.world.map` | missing | | |
+| `sys.world.map` | `G/sectree_manager.cpp`, `G/sectree.cpp`, `G/map_location.cpp` | Map index, attributes (`server_attr`), sectors, towns, start positions | | missing | | |
+| `sys.world.view` | `G/entity.cpp`, `G/entity_view.cpp` | View range, add and remove actors | `sys.world.map` | missing | | |
+| `sys.world.move` | `G/input_main.cpp` (`Move`, `SyncPosition`), `G/char_state.cpp` | Movement, sync, speed checks | `sys.world.view` | missing | | |
+| `sys.world.warp` | `G/char.cpp` (`WarpSet`), `G/map_location.cpp` | Warp between maps and Channels, Shared Channel return | `sys.world.map` | missing | | Shared Channel return is a Divergence. |
+| `sys.world.channel_move` | `ENABLE_MOVE_CHANNEL` | Changing Channel from the game | `sys.world.warp` | missing | | |
+| `sys.world.time` | `G/char.cpp`, `G/main.cpp` | Game time, `GcTime`, day and night | | missing | | |
+| `sys.world.regen` | `G/regen.cpp` | Monster, NPC, stone, and boss spawns from `regen.txt`, `npc.txt`, `stone.txt`, `boss.txt` | `sys.world.map`, `sys.mob.proto` | missing | | |
+| `sys.world.objects` | `G/building.cpp` | Land, buildings, `object_proto` | `sys.world.map`, `sys.guild.core` | missing | | |
+| `sys.char.points` | `G/char.cpp` | Points, status allocation, level, exp table | `sys.login.enter` | missing | | |
+| `sys.char.save` | `G/char.cpp` (`Save`), `D/ClientManagerPlayer.cpp` | Background save, save on logout, Warp, Channel change, shutdown | `sys.login.enter` | missing | | ADR-0003. |
+| `sys.char.logout` | `G/char.cpp`, `G/input_main.cpp` | Logout, quit, select-again timers | `sys.char.save` | missing | | |
+| `sys.char.chat` | `G/input_main.cpp` (`Chat`, `Whisper`), `G/banword.cpp` | Local, party, guild, shout, whisper, banwords, chat block | `sys.world.view` | missing | | |
+| `sys.char.multi_language` | `__MULTI_LANGUAGE_SYSTEM__`, `__EXTENDED_WHISPER_DETAILS__`, `G/locale.cpp` | Per-player language for locale strings | `sys.char.chat` | missing | | 11 languages under `country/`. |
+| `sys.char.emotion` | `G/cmd_emotion.cpp`, `ENABLE_EXPRESSING_EMOTION` | Emotions | `sys.world.view` | missing | | |
+| `sys.char.quickslot` | `G/char_quickslot.cpp` | Quickslots | `sys.login.enter` | missing | | |
+| `sys.char.horse` | `G/char_horse.cpp`, `G/horse_rider.cpp`, `G/horsename_manager.cpp` | Horse levels, riding, horse names | `sys.char.points` | missing | | |
+| `sys.char.mount` | `G/MountSystem.cpp`, `ENABLE_MOUNT_COSTUME_SYSTEM` | Mount costumes | `sys.item.costume` | missing | | |
+| `sys.char.polymorph` | `G/polymorph.cpp` | Polymorph | `sys.combat.core` | missing | | |
+| `sys.char.pk` | `G/pvp.cpp`, `G/char_battle.cpp` | PvP duels, PK mode, alignment | `sys.combat.core` | missing | | Keep the `m_dwKillerPID = 0` reset. |
+| `sys.char.empire_change` | `G/char_change_empire.cpp` | Empire change | `sys.login.enter` | missing | | |
+| `sys.char.top_players` | `ENABLE_TOP_PLAYERS_EFFECT`, `G/RankGlobal.cpp`, `ENABLE_GLOBAL_RANK` | Global rank and top-player effect | `sys.char.points` | missing | | |
+| `sys.item.core` | `G/item.cpp`, `G/item_manager.cpp`, `G/char_item.cpp` | Item instances, inventory windows, move, stack, use, drop, pick up, destroy | `sys.login.enter`, `sys.item.proto` | missing | | |
+| `sys.item.proto` | `G/item_manager_read_tables.cpp` | `item_proto`, `item_names`, special item groups | | missing | | |
+| `sys.item.attr` | `G/item_attribute.cpp`, `__ATTR_6TH_7TH__`, `ENABLE_GLOVE_ITEM_ATTR` | Bonuses, bonus change and add, rare bonuses | `sys.item.core` | missing | | |
+| `sys.item.refine` | `G/refine.cpp`, `ENABLE_REFINE_ELEMENT` | Upgrade, refine element | `sys.item.core` | missing | | |
+| `sys.item.sockets` | `ENABLE_EXTENDED_SOCKETS` | Stones in sockets | `sys.item.core` | missing | | |
+| `sys.item.costume` | `ENABLE_WEAPON_COSTUME_SYSTEM`, `PRODOMO_HIDE_COSTUME` | Costumes and hiding them | `sys.item.core` | missing | | |
+| `sys.item.belt` | `ENABLE_BELT_INVENTORY_EX` | Belt inventory | `sys.item.core` | missing | | |
+| `sys.item.extend_inventory` | `ENABLE_EXTEND_INVEN_SYSTEM`, `ENVANTER_BLACK` | Unlocking inventory pages | `sys.item.core` | missing | | |
+| `sys.item.special_inventory` | `ENABLE_CUSTOM_INVENTORY`, `__SORT_INVENTORY_ITEMS__` | Special inventories and sorting | `sys.item.core` | missing | | |
+| `sys.item.protected` | `__ENABLE_INVENTORY_PROTECTED_SYSTEM__` | Inventory protection | `sys.item.core` | missing | | |
+| `sys.item.blend` | `G/blend_item.cpp` | Blend items (`blend.json`) | `sys.item.core` | missing | | |
+| `sys.item.addon` | `G/item_addon.cpp` | Addon bonuses for skill items | `sys.item.core` | missing | | |
+| `sys.item.stack_attribute` | `G/item_stack_attribute.cpp` | Stack attribute table | `sys.item.core` | missing | | |
+| `sys.item.casket_preview` | `__CASKET_PREVIEW_ENABLE__` | Chest content preview | `sys.item.core` | missing | | |
+| `sys.item.pickup_effect` | `__BL_ENABLE_PICKUP_ITEM_EFFECT__`, `RENEWAL_PICKUP_AFFECT` | Pickup slot effect | `sys.item.core` | missing | | |
+| `sys.item.skin` | `__SKIN_SYSTEM__` | Skins | `sys.item.core` | missing | | |
+| `sys.item.id_range` | `D/ClientManager.cpp`, `db::item_id_range` | Item ID allocation | | partial | | `db::item_id_range` exists. |
+| `sys.npc.shop` | `G/shop.cpp`, `G/shop_manager.cpp`, `G/shopEx.cpp`, `ENABLE_RENEWAL_SHOPEX` | NPC shops, buy, sell | `sys.item.core` | missing | | `gamedata::shop` and `renewal_shop` rules exist. |
+| `sys.npc.safebox` | `G/safebox.cpp`, `__EXTENDED_SAFEBOX__` | Safebox and mall, password | `sys.item.core` | missing | | Transfer. |
+| `sys.trade.exchange` | `G/exchange.cpp`, `__NEW_EXCHANGE_WINDOW__` | Player trade | `sys.item.core` | missing | | Transfer. |
+| `sys.trade.private_shop` | `G/private_shop*.cpp`, `__PREMIUM_PRIVATE_SHOP__` | Offline private shops, search, market prices, premium time, locked slots | `sys.item.core` | missing | | Transfer. |
+| `sys.trade.item_shop` | `ENABLE_ITEMSHOP`, `ENABLE_ITEMSHOP_TO_INVENTORY` | In-game item shop with Coins and Cash | `sys.item.core` | missing | | Currency from `prodomo account`. |
+| `sys.mob.proto` | `G/mob_manager.cpp` | `mob_proto`, `mob_names`, groups, motion data | | missing | | |
+| `sys.mob.ai` | `G/char_state.cpp`, `G/FSM.cpp` | Monster AI, aggro, return | `sys.world.regen`, `sys.combat.core` | missing | | |
+| `sys.combat.core` | `G/char_battle.cpp`, `G/battle.cpp`, `G/input_main.cpp` (`Attack`) | Attacks, damage, death, restart, exp split | `sys.world.move`, `sys.char.points` | missing | | |
+| `sys.combat.drop` | `G/item_manager.cpp` (drops) | Drops from `mob_drop_item`, `common_drop_item`, `etc_drop_item`, `drop_item_group` | `sys.combat.core` | missing | | |
+| `sys.combat.target` | `G/target.cpp`, `__SEND_TARGET_INFO__`, `__VIEW_TARGET_*` | Target info and HP | `sys.combat.core` | missing | | |
+| `sys.combat.resist` | `G/char_resist.cpp`, `NEW_BONUS`, `BONUS_PCT`, `ELEMENT_TARGET` | Resists and extra bonuses | `sys.combat.core` | missing | | |
+| `sys.skill.core` | `G/skill.cpp`, `G/char_skill.cpp`, `G/skill_power.cpp` | Skills, skill books, cooldowns, skill power | `sys.combat.core` | missing | | `gamedata::skill` exists. |
+| `sys.skill.extra` | `__7AND8TH_SKILLS__`, `ENABLE_NEW_PASSIVE_SKILL`, `__ENABLE_ADVANCE_SKILL_SELECT__` | Extra skills and skill select | `sys.skill.core` | missing | | |
+| `sys.skill.affect` | `G/affect.cpp`, `G/char_affect.cpp`, `ENABLE_AFFECT_RENEWAL` | Affects and buffs | `sys.skill.core` | missing | | |
+| `sys.skill.buff_npc` | `G/buff_npc_system.cpp`, `G/ShamanSystem.cpp`, `__ENABLE_SHAMAN_SYSTEM__` | Buff NPC | `sys.skill.affect` | missing | | |
+| `sys.skill.conqueror` | `__CONQUEROR_LEVEL__` | Conqueror level, maps, and bonuses | `sys.char.points` | missing | | |
+| `sys.party` | `G/party.cpp` | Parties, roles, exp share, party skills | `sys.combat.core` | missing | | |
+| `sys.guild.core` | `G/guild.cpp`, `G/guild_manager.cpp`, `ENABLE_D_NJGUILD`, `ENABLE_SHOW_LIDER_AND_GENERAL_GUILD` | Guilds, members, grades, comments, money, skills | `sys.login.enter` | missing | | |
+| `sys.guild.mark` | `G/MarkManager.cpp`, `G/MarkImage.cpp`, `G/MarkConvert.cpp` | Guild marks and symbols (login-phase upload and lists) | `sys.guild.core` | missing | | |
+| `sys.guild.war` | `G/guild_war.cpp`, `G/war_map.cpp` | Guild wars and war maps | `sys.guild.core` | missing | | |
+| `sys.guild.bonuses` | `__GUILD_BONUSES__` | Guild bonuses | `sys.guild.core` | missing | | |
+| `sys.guild.dungeon` | `__DUNGEON_FOR_GUILD__`, `G/MeleyLair.cpp` | Meley's Lair | `sys.guild.core`, `sys.dungeon.core` | missing | | |
+| `sys.messenger` | `G/messenger_manager.cpp`, `ENABLE_MESSENGER_TEAM`, `OFFLINE_MESSAGE_REWORKED` | Friends, team list, offline messages | `sys.login.enter` | missing | | |
+| `sys.marriage` | `G/marriage.cpp`, `G/wedding.cpp` | Marriage and weddings | `sys.char.points` | missing | | |
+| `sys.bus` | `G/p2p.cpp`, `G/input_p2p.cpp` | What legacy relayed over GG: shouts, whispers, notices, find, warp, guild, messenger | `sys.char.chat` | missing | | Replaced by the in-process bus (ADR-0002). |
+| `sys.quest.runtime` | `G/questmanager.cpp`, `G/questlua*.cpp`, `G/questnpc.cpp`, `G/questpc.cpp`, `server/server/quest/` | `qc` port, Lua 5.1 runtime, quest events, flags, letters, `__QUEST_RENEWAL__` | `sys.login.enter` | missing | | ADR-0004. |
+| `sys.dungeon.core` | `G/dungeon.cpp`, `__FIX_DUNGEON_PARTY__` | Dungeon instances | `sys.world.regen`, `sys.quest.runtime` | missing | | |
+| `sys.dungeon.info` | `G/dungeon_info.cpp`, `__DUNGEON_INFO__` | Dungeon info window | `sys.dungeon.core` | missing | | |
+| `sys.dungeon.dragon_lair` | `G/DragonLair.cpp`, `G/BlueDragon*.cpp` | Dragon lair and Blue Dragon | `sys.dungeon.core` | missing | | |
+| `sys.dungeon.ship_defense` | `G/ShipDefense.cpp`, `__SHIP_DEFENSE__` | Hydra | `sys.dungeon.core` | missing | | |
+| `sys.dungeon.temple_ochao` | `G/TempleOchao.cpp` | Temple Ochao | `sys.dungeon.core` | missing | | |
+| `sys.event.core` | `G/event*.cpp`, `G/questevent.cpp` | Timed events | | missing | | See `timed-events.md`. |
+| `sys.event.manager` | `G/event_manager.cpp`, `__EVENT_MANAGER__` | Scheduled game events | `sys.event.core` | missing | | |
+| `sys.event.ox` | `G/OXEvent.cpp`, `ENABLE_KICK_MULTI_IP_OX` | OX quiz | `sys.quest.runtime` | missing | | |
+| `sys.event.arena` | `G/arena.cpp`, `G/BattleArena.cpp` | Arenas and battle arena | `sys.combat.core` | missing | | |
+| `sys.event.threeway_war` | `G/threeway_war.cpp` | Three-way war | `sys.combat.core` | missing | | |
+| `sys.event.xmas` | `G/xmas_event.cpp` | Christmas event | `sys.quest.runtime` | missing | | |
+| `sys.event.fish` | `ENABLE_FISH_EVENT` | Jigsaw fish event | `sys.item.core` | missing | | |
+| `sys.event.world_boss` | `G/worldboss.cpp`, `__WORLD_BOSS_EVENT__` | World boss | `sys.world.regen` | missing | | |
+| `sys.event.castle_monarch` | `G/castle.cpp`, `G/monarch.cpp` | Castles and monarch | `sys.guild.core` | missing | | |
+| `sys.life.fishing` | `G/fishing.cpp` | Fishing | `sys.item.core` | missing | | |
+| `sys.life.mining` | `G/mining.cpp` | Mining | `sys.item.core` | missing | | |
+| `sys.custom.sash` | `__SASH_SYSTEM__` | Sash absorb and combine | `sys.item.core` | missing | | |
+| `sys.custom.aura` | `G/char_aura.cpp`, `__AURA_SYSTEM__` | Aura | `sys.item.core` | missing | | |
+| `sys.custom.change_look` | `__CHANGELOOK_SYSTEM__` | Transmutation | `sys.item.core` | missing | | |
+| `sys.custom.pets` | `G/PetSystem.cpp`, `__PET_SYSTEM__`, `ENABLE_PET_COSTUME_SYSTEM` | Pets | `sys.item.core` | missing | | |
+| `sys.custom.dragon_soul` | `G/DragonSoul.cpp`, `G/char_dragonsoul.cpp`, `G/dragon_soul_table.cpp`, `ENABLE_DRAGONSOUL_ALCHEMY_PLUS` | Dragon soul alchemy and refine | `sys.item.core` | missing | | |
+| `sys.custom.cube` | `G/cuberenewal.cpp`, `ENABLE_CUBE_RENEWAL_WORLDARD` | Cube crafting | `sys.item.core` | missing | | |
+| `sys.custom.gaya` | `G/char_gaya.cpp`, `ENABLE_GAYA_SYSTEM` | Gaya market and craft | `sys.item.core` | missing | | |
+| `sys.custom.attr67` | `G/questlua_attr67add.cpp` | 6th and 7th bonus add | `sys.item.attr` | missing | | |
+| `sys.custom.battle_pass` | `G/BattlePassManager.cpp`, `ENABLE_BATTLE_PASS` | Battle pass (`battlepass.json`) | `sys.quest.runtime` | missing | | |
+| `sys.custom.switchbot` | `G/refactorized_switchbot.cpp`, `ENABLE_SWITCHBOT` | Switchbot | `sys.item.attr` | missing | | |
+| `sys.custom.daily_gift` | `G/char_daily_gifts.cpp`, `__DAILY_GIFT_SYSTEM__` | Daily gift | `sys.item.core` | missing | | |
+| `sys.custom.biologist` | `G/Biologist.cpp`, `__ENABLE_BIOLOGIST_RENEWAL_SYSTEM__` | Biologist | `sys.item.core` | missing | | |
+| `sys.custom.premium` | `__ENABLE_PREMIUM_PLAYERS__` | Premium players | `sys.login.enter` | missing | | |
+| `sys.custom.reward` | `ENABLE_REWARD_SYSTEM` | Reward info | `sys.login.enter` | missing | | |
+| `sys.custom.cards` | `G/char_cards.cpp` | Card game | `sys.item.core` | missing | | |
+| `sys.custom.multi_farm` | `ENABLE_MULTI_FARM_BLOCK` | HWID multi-farm block | `sys.login.enter` | missing | | |
+| `sys.custom.new_set_bonus` | `__NEW_SET_BONUS__`, `G/buff_on_attributes.cpp` | Set bonuses | `sys.item.core` | missing | | |
+| `sys.gm.core` | `G/gm.cpp`, `G/cmd*.cpp`, `C/gm` rules | GM authority, GM commands, observer mode | `sys.login.enter` | partial | | `db::accounts::gm_authority` and `prodomo gm` exist. See `commands.md`. |
+| `sys.gm.priv` | `G/priv_manager.cpp` | Empire and guild rate bonuses | `sys.gm.core` | missing | | |
+| `sys.log` | `G/log.cpp`, `G/dev_log.cpp` | Game logs | | missing | | Schema is ours (ADR-0001). |
+| `sys.shutdown` | `G/shutdown_manager.cpp`, `FLUSH_AT_SHUTDOWN` | Timed shutdown with notices and flush | `sys.char.save` | missing | | |

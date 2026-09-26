@@ -15208,3 +15208,116 @@ Run on 2026-09-26 with rustc 1.85.1, `--locked --offline`:
 
 Test counts are unchanged from 179.11. No stray `*.core` file was left in the workspace root.
 `docs/STATUS.md` drops the note that the two tools are missing.
+
+## 181. The Parity inventory and the scripted client
+
+Build step 2. Every client-observable thing the legacy server does is now a row in
+`.scratch/parity/` with a porting status, and a test-only crate drives the real `prodomo` binary
+over TCP to prove rows `ported`.
+
+### 181.1 The inventory
+
+Nine tables, 1,643 rows. Seven are generated from the legacy source by
+`.scratch/parity/tools/gen.py`; two are kept by hand. `spec.md` explains the statuses and the
+regeneration.
+
+| file | rows | one row is |
+| --- | --- | --- |
+| `client-packets.md` | 109 | a client header handled in one phase (107), plus the framing rules for the keepalive byte and an unregistered header |
+| `sub-headers.md` | 113 | a sub-command a game-phase handler dispatches on |
+| `server-records.md` | 134 | a record in the client's registration table (96 `codec`, 38 `missing`) |
+| `commands.md` | 267 | a chat command in the live `cmd_info` table |
+| `quest-api.md` | 699 | a Lua function the quest runtime registers |
+| `timed-events.md` | 99 | a timed event function |
+| `quests.md` | 62 | a quest script (51) or quest library (11) |
+| `systems.md` | 115 | a system, with its sources and the systems it needs |
+| `gamedata.md` | 45 | a Game data file or table and its legacy reader |
+
+Statuses: 1,529 `missing`, 96 `codec`, 13 `partial`, 2 `ported`, 3 `unused`.
+
+The generator lists only **live** code. `tools/active.py` replaces every ordinary line of a file
+with a numbered marker, keeps the conditional directives, prepends the legacy build's defines
+(FreeBSD, clang, i386, `NDEBUG`, `_THREAD_SAFE`, `prodomodefines.h`, and every non-guard empty
+define in the `common/`, `game/`, and `libthecore` headers), and runs `cpp`. The surviving markers are
+the live lines. Controls on the game sources: every `#if 0` (4) and `__WIN32__` (3) block is
+dropped; every `__SASH_SYSTEM__` (28), `__FreeBSD__` (3), and `ENABLE_QUEST_DIE_EVENT` (7) block
+is kept. 17 `cmd_info` entries sit behind `ENABLE_FULL_NOTICE`, `GIFT_SYSTEM`, `OFFLINE_SHOP`, and
+`ENABLE_SHOP_SEARCH`, which no file in the tree defines, so they are not listed.
+
+Two extraction faults were found by controls and fixed before the tables were kept:
+
+- `ENVANTER_BLACK` (0xe2, inventory expansion) is a client header without the `HEADER_CG_` prefix.
+  Matching only that prefix dropped it; the generator now matches every name in
+  `protocol/src/cg_inventory.rs`. A cross-check then accounts for every CG name: the five with no
+  analyzer arm are the keepalive byte (framing), `HEADER_CG_TEXT` (see 181.3), `KEY_AGREEMENT`
+  (dead), and `ITEM_SELL` and `DUNGEON` (never registered).
+- The quest walk first missed `_basic/guild/` (41 quests instead of 51).
+
+### 181.2 The scripted client
+
+A new workspace crate, `parity` (std only, no new dependency; `Cargo.lock` gained only the path
+entry):
+
+- `parity::Server` writes a `prodomo.toml` with every port 0, starts `prodomo serve`, reads the bound
+  addresses from the log, waits for `Accepting clients`, and kills the process and removes its
+  directory on drop.
+- `parity::Client` sends raw bytes and expects bytes, silence, or a close. It knows no records, so
+  it cannot share a codec bug with the server.
+- `parity::inventory` reads every table, and `check` enforces unique IDs across tables, a known
+  status, and a scenario on exactly the `ported` rows.
+
+The scenarios live in `prodomo/tests/parity.rs`, since only a `prodomo` test gets
+`CARGO_BIN_EXE_prodomo`. `inventory_rows_keep_the_rules` runs in every build and also checks that each
+named scenario is a function in that file. The two framing scenarios need a store and run when
+`DATABASE_URL` is set:
+
+- `keep_alive_bytes_are_single_byte_frames` (`cg.any.keep_alive`): five zero bytes on auth, Channel 1,
+  and the Shared Channel leave the connection open, and the next unregistered byte then closes it,
+  which shows each zero byte was one frame.
+- `an_unregistered_header_closes_the_connection` (`cg.any.unknown_header`): legacy
+  `CInputProcessor::Process` closes on a header its table does not register (`G/input.cpp:81-89`);
+  so does the Rewrite. Control: an idle connection stays open.
+
+Negative controls, each run and then restored by checksum: renaming a row's scenario makes
+`inventory_rows_keep_the_rules` fail and name the row; sending a keepalive where the unregistered
+byte belongs makes the close scenario fail with "should have closed the connection".
+
+The Rewrite still sends no handshake on connect, which legacy does. The keepalive row's note says so,
+and step 3 adds the handshake scenario.
+
+### 181.3 Findings for the owner
+
+Recorded in `spec.md` and on the rows; none changes code yet.
+
+- **The adminpage is unreachable in legacy** (`sys.adminpage`). `HEADER_CG_TEXT` (64) is registered
+  (`G/packet_info.cpp:98`), but no analyzer handles it. `IsAdminPage` and `IsEmptyAdminPage`
+  (`G/input.cpp:24-37`) have no callers, and `g_stAdminPagePassword` is only set and logged. If the
+  owner agrees, the row becomes `unused`.
+- **Unread Game data** (`unused` rows). Nothing opens `BlueDragon.lua` or `monkey_dungeon.lua` (no
+  C++ path and no `dofile`; control: `settings.lua` is opened in `G/questlua.cpp:737`), so
+  `G/BlueDragon_Binder.cpp` always takes its fallbacks. `MapProperty.txt` and `charset.txt` have no
+  reader (controls: `Town.txt`, `Setting.txt`, and `server_attr` are found in
+  `G/sectree_manager.cpp`; every `charset` hit is the SQL connection charset). Neither does
+  `pet_skill_names.txt` (control: `skill_names.txt` in `G/locale_service.cpp:535`).
+- **`HEADER_CG_STATE_CHECKER` (0xce) is served in the handshake phase** (`G/input.cpp:227`): the
+  Channel status list on the login screen, before auth. Row `sys.net.channel_status`, needed by
+  step 3.
+
+### 181.4 Receipt
+
+Run on 2026-09-26 with rustc 1.85.1, `--locked --offline`:
+
+| gate | result |
+| --- | --- |
+| `cargo fmt --all -- --check` | green |
+| `cargo clippy --workspace --all-targets -- -D warnings` | green (one finding, `case_sensitive_file_extension_comparisons`, fixed by refactoring into `is_table`) |
+| `cargo build --workspace` | green, 0 warnings |
+| `cargo test --workspace --all-targets --no-fail-fast`, with `DATABASE_URL` (PostgreSQL 18) | **1,570 passed, 0 failed, 0 ignored**, across 30 test binaries; no skip notice |
+| the same, without `DATABASE_URL` | **1,570 passed, 0 failed** |
+| `cargo test --workspace --doc` | **1 passed** |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | green |
+
+Against 180.3 that is 10 more tests (7 `parity` unit tests and 3 in `prodomo/tests/parity.rs`) and
+two more test binaries (`parity`'s unit tests and `prodomo/tests/parity.rs`). Five new Rust files
+(`parity/src/{lib,client,inventory,server}.rs`, `prodomo/tests/parity.rs`): 146 files, 86,723 lines.
+No scratch database was left behind, and no stray `*.core` file in the workspace root.
