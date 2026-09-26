@@ -221,3 +221,17 @@ The server workspace is x86, C++17, and uses a static runtime. The client uses V
 - `server/server/game/char_battle.cpp`: do not delete `m_dwKillerPID = 0`.
 - `server/server/game/text_file_loader.cpp` and `group_text_parse_tree.cpp`: group names must not contain spaces.
 - `client/Client/SphereLib/spherepack.cpp`: never remove the root node (`SPF_ROOTNODE`).
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs are local markdown files under `.scratch/<feature>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five default roles (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`), recorded on each issue file's `Status:` line. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one root `CONTEXT.md` and `docs/adr/`, created lazily. See `docs/agents/domain.md`.
