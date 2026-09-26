@@ -1,0 +1,44 @@
+quest fishing_event begin
+	state start begin
+		when login or event_begin with game.get_event_flag("fish_event") > 0 begin
+			send_letter(translate.fishing_event._010_npcChat)
+		end
+		
+		when button or info with game.get_event_flag("fish_event") > 0 begin
+			say_title(translate.fishing_event._010_npcChat)
+			say()
+			say(translate.fishing_event._100_say)
+			say()
+			say_reward(translate.fishing_event._110_sayReward)
+			say()
+		end
+		
+		when event_end with game.get_event_flag("fish_event") == 0 begin
+			clear_letter()
+		end
+		
+		when 9009.chat.translate.fishing_event._010_npcChat with game.get_event_flag("fish_event") > 0 begin
+			if pc.count_item(27802) < 3 then
+				say()
+				say(translate.fishing_event._120_say)
+			else
+				say()
+				say(translate.fishing_event._130_say)
+				say()
+				say_reward(translate.fishing_event._140_sayReward)
+				
+				if select(translate.locale.yes, translate.locale.no) == 1 then
+					pc.remove_item(27802, 3)
+					pc.give_item2(50033)
+				end
+			end
+		end
+	end
+end
+			
+			
+			
+			
+			
+			
+			

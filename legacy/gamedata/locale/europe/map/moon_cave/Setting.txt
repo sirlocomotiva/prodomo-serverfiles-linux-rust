@@ -1,0 +1,12 @@
+ScriptType	MapSetting
+
+CellScale	200
+HeightScale	0.500000
+
+ViewRadius	128
+
+MapSize	2	2
+BasePosition	2100000	1600000
+TextureSet	textureset\moon_cave.txt
+Environment	moon_cave.msenv
+

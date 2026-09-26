@@ -1,0 +1,2130 @@
+{
+	"Settings": {
+		"maxDailyMissions": 5,
+		"maxWeeklyMissions": 10,
+		"endTime": 1704578399,
+		"rewardsFree": [
+			[25425, 2],
+			[72704, 1],
+			[72703, 1],
+			[50826, 10],
+			[50823, 10],
+			[50825, 10],
+			[50821, 10],
+			[50822, 10],
+			[25422, 3],
+			[25423, 3],
+			[25424, 3],
+			[50183, 3],
+			[50216, 3],
+			[70015, 25],
+			[70015, 30],
+			[51375, 1],
+			[25371, 1],
+			[80015, 1],
+			[71136, 1],
+			[71143, 1],
+			[71145, 1],
+			[80007, 1],
+			[80007, 2],
+			[80007, 3],
+			[80007, 4],
+			[72712, 4],
+			[80015, 1],
+			[80015, 1],
+			[80015, 1],
+			[80015, 1]
+		  ],
+		  "rewardsPremium": [
+			[25422, 10],
+			[25423, 10],
+			[25424, 10],
+			[38052, 30],
+			[50183, 35],
+			[50216, 35],
+			[80007, 5],
+			[50294, 6],
+			[50288, 4],
+			[50011, 50],
+			[50124, 50],
+			[80007, 5],
+			[80007, 10],
+			[80007, 15],
+			[80007, 20],
+			[50290, 50],
+			[50297, 50],
+			[72712, 1],
+			[71149, 1],
+			[80016, 1],
+			[80016, 1],
+			[80016, 1],
+			[80016, 1],
+			[80017, 1],
+			[25144, 1],
+			[25144, 1],
+			[25144, 1],
+			[51660, 1],
+			[51659, 1],
+			[51658, 1]
+		  ]		  
+	},
+	"missions": [
+
+		{
+			"desc": "Omoara 8x General Yonghan.",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [2492],
+			"maxProgress": 8
+		},
+
+		{
+			"desc": "Omoara 8x Mu-Shu.",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3905],
+			"maxProgress": 8
+		},
+
+		{
+			"desc": "Omoara 2x Ingerul cu Coasa.",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [1093],
+			"maxProgress": 2
+		},
+
+		{
+			"desc": "Omoara 2x Orcul Malefic.",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [693],
+			"maxProgress": 2
+		},
+
+		{
+			"desc": "Omoara 2x Azrael.",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [2598],
+			"maxProgress": 2
+		},		
+
+		{
+			"desc": "Omoara 2x Beran Setaou.",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [2493],
+			"maxProgress": 2
+		},	
+
+		{
+			"desc": "Omoara 2x Nemere.",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [6191],
+			"maxProgress": 2
+		},	
+
+		{
+			"desc": "Omoara 2x Razador.",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [6091],
+			"maxProgress": 2
+		},	
+
+		{
+			"desc": "Omoara 8x Capitanul Shruk.",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3890],
+			"maxProgress": 8
+		},	
+
+		{
+			"desc": "Omoara 2x Jotun Thyrm",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [6418],
+			"maxProgress": 2
+		},
+
+		{
+			"desc": "Omoara 2x Regina Sarpe Nethis",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [6856],
+			"maxProgress": 2
+		},
+
+		{
+			"desc": "Omoara 8x Vrajitoare de Gheata",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [1191],
+			"maxProgress": 8
+		},
+
+		{
+			"desc": "Omoara 8x Gnoll Suprem",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3091],
+			"maxProgress": 8
+		},
+
+		{
+			"desc": "Omoara 8x Gnoll Lord",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3090],
+			"maxProgress": 8
+		},
+
+		{
+			"desc": "Omoara 8x Martyaxwar",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3291],
+			"maxProgress": 8
+		},
+
+		{
+			"desc": "Omoara 8x Craniu",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3590],
+			"maxProgress": 8
+		},
+
+		{
+			"desc": "Omoara 8x Rakshasa",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3290],
+			"maxProgress": 8
+		},
+
+		{
+			"desc": "Omoara 8x Regele Crab",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3691],
+			"maxProgress": 8
+		},
+
+		{
+			"desc": "Omoara 8x Homar General",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3690],
+			"maxProgress": 8
+		},
+
+		{
+			"desc": "Omoara 8x Conducator Rosu",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3591],
+			"maxProgress": 8
+		},
+
+		{
+			"desc": "Omoara 8x Yah-Ki",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3906],
+			"maxProgress": 8
+		},
+
+		{
+			"desc": "Omoara 8x Skeletos",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3910],
+			"maxProgress": 8
+		},
+
+		{
+			"desc": "Omoara 8x Lemures Print",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3390],
+			"maxProgress": 8
+		},
+
+		{
+			"desc": "Omoara 8x Polyphemos",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3191],
+			"maxProgress": 8
+		},
+
+		{
+			"desc": "Omoara 8x Gargoyle",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3790],
+			"maxProgress": 8
+		},
+		
+		{
+			"desc": "Omoara 40x Craniu",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3590],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Omoara 40x Lemures Print",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3390],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Omoara 40x Conducator Rosu",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3591],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Omoara 40x Skeletos",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3910],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Omoara 40x Yah-Ki",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3906],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Omoara 40x Polyphemos",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3191],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Omoara 40x Gargoyle",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3790],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Omoara 40x Regele Crab",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3691],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Omoara 40x Homar General",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3690],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Omoara 40x Gnoll Suprem",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3091],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Omoara 40x Gnoll Lord",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3090],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Omoara 10x Ingerul cu Coasa.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [1093],
+			"maxProgress": 10
+		},
+		
+		{
+			"desc": "Omoara 40x Vrajitoare de Gheata",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [1191],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Omoara 10x Orc Malefic.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [693],
+			"maxProgress": 10
+		},
+		
+		{
+			"desc": "Omoara 40x Capitanul Shruk.",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3890],
+			"maxProgress": 40
+		},	
+
+		{
+			"desc": "Omoara 40x Rakshasa",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3290],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Omoara 40x Martyaxwar",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3291],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Omoara 10x Azrael.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [2598],
+			"maxProgress": 10
+		},		
+		
+		{
+			"desc": "Omoara 10x Beran Setaou.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [2493],
+			"maxProgress": 10
+		},	
+		
+		{
+			"desc": "Omoara 10x Nemere.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [6191],
+			"maxProgress": 10
+		},	
+		
+		{
+			"desc": "Omoara 10x Razador.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [6091],
+			"maxProgress": 10
+		},	
+		
+		{
+			"desc": "Omoara 10x Jotun Thyrm.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [6418],
+			"maxProgress": 10
+		},
+		
+		{
+			"desc": "Omoara 10x Regina Sarpe Nethis.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [6856],
+			"maxProgress": 10
+		},
+
+		{
+			"desc": "Finalizeaza 5x Temnite.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+		
+			"points": 1300,
+		
+			"vnum": [2092, 1093, 693, 2598, 2493, 6091, 6191, 6418, 6856],
+			"maxProgress": 5
+		},
+
+		{
+			"desc": "Finalizeaza 20x Temnite.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [2092, 1093, 693, 2598, 2493, 6091, 6191, 6418, 6856],
+			"maxProgress": 20
+		},
+
+		{
+			"desc": "Dropeaza 100x Minereu De Argint.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+		
+			"points": 1300,
+		
+			"vnum": [50605],
+			"maxProgress": 100
+		},	
+
+		{
+			"desc": "Dropeaza 100x Minereu De Diamant.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+		
+			"points": 1300,
+		
+			"vnum": [50601],
+			"maxProgress": 100
+		},	
+
+		{
+			"desc": "Dropeaza 100x Minereu De Aur.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+		
+			"points": 1300,
+		
+			"vnum": [50606],
+			"maxProgress": 100
+		},	
+
+		{
+			"desc": "Dropeaza 100x Bucata de Perla.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+		
+			"points": 1300,
+		
+			"vnum": [50609],
+			"maxProgress": 100
+		},	
+
+		{
+			"desc": "Dropeaza 100x Minereu de Aur Alb.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+		
+			"points": 1300,
+		
+			"vnum": [50610],
+			"maxProgress": 100
+		},			
+
+		{
+			"desc": "Dropeaza 100x Minereu de Cristal.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+		
+			"points": 1300,
+		
+			"vnum": [50611],
+			"maxProgress": 100
+		},	
+
+		{
+			"desc": "Dropeaza 100x Min. L. Cerului.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+		
+			"points": 1300,
+		
+			"vnum": [50613],
+			"maxProgress": 100
+		},
+		
+		{
+			"desc": "Dropeaza 250x Minereu De Diamant.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50601],
+			"maxProgress": 250
+		},	
+
+		{
+			"desc": "Dropeaza 250x Minereu De Argint.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50605],
+			"maxProgress": 250
+		},	
+		
+		{
+			"desc": "Dropeaza 250x Minereu De Aur.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50606],
+			"maxProgress": 250
+		},	
+		
+		{
+			"desc": "Dropeaza 250x Bucata de Perla.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50609],
+			"maxProgress": 250
+		},	
+		
+		{
+			"desc": "Dropeaza 250x Minereu de Aur Alb.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50610],
+			"maxProgress": 250
+		},			
+		
+		{
+			"desc": "Dropeaza 250x Minereu de Cristal.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50611],
+			"maxProgress": 250
+		},	
+		
+		{
+			"desc": "Dropeaza 250x Min. L. Cerului.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50613],
+			"maxProgress": 250
+		},
+
+		{
+			"desc": "Distruge 100x Metinul Tristetii.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+		
+			"points": 1300,
+		
+			"vnum": [8051],
+			"maxProgress": 100
+		},
+
+		{
+			"desc": "Distruge 100x Metinul Vanitatii.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+		
+			"points": 1300,
+		
+			"vnum": [8053],
+			"maxProgress": 100
+		},
+
+		{
+			"desc": "Distruge 100x Metinul Furiei.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+		
+			"points": 1300,
+		
+			"vnum": [8054],
+			"maxProgress": 100
+		},
+
+		{
+			"desc": "Distruge 100x Metinul Nenorocirilor.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+		
+			"points": 1300,
+		
+			"vnum": [8055],
+			"maxProgress": 100
+		},
+
+		{
+			"desc": "Distruge 100x Metinul Rautatii.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+		
+			"points": 1300,
+		
+			"vnum": [8056],
+			"maxProgress": 100
+		},		
+
+		{
+			"desc": "Distruge 150x Metine din Beta.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+		
+			"points": 1300,
+		
+			"vnum": [8051, 8052, 8053, 8054, 8055, 8056],
+			"maxProgress": 150
+		},
+
+		{
+			"desc": "Distruge 250x Metinul Tristetii.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [8051],
+			"maxProgress": 250
+		},
+
+		{
+			"desc": "Distruge 250x Metinul Vanitatii.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [8053],
+			"maxProgress": 250
+		},
+
+		{
+			"desc": "Distruge 250x Metinul Furiei.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [8054],
+			"maxProgress": 250
+		},
+
+		{
+			"desc": "Distruge 250x Metinul Nenorocirilor.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [8055],
+			"maxProgress": 250
+		},
+
+		{
+			"desc": "Distruge 250x Metinul Rautatii.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [8056],
+			"maxProgress": 250
+		},		
+
+		{
+			"desc": "Distruge 400x Metine din Beta.",
+		
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [8051, 8052, 8053, 8054, 8055, 8056],
+			"maxProgress": 400
+		},
+
+		{
+			"desc": "Dropeaza 20x Scrisoare Ochao.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+		
+			"points": 1300,
+		
+			"vnum": [50289],
+			"maxProgress": 20
+		},
+
+		{
+			"desc": "Dropeaza 75x Scrisoare Ochao.",
+		
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50289],
+			"maxProgress": 75
+		},
+
+		{
+			"desc": "Ucide 100k monstrii.",
+
+			"missionType": "KILL",
+			"missionSpecific": "GLOBAL",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [],
+			"maxProgress": 100000
+		},		
+
+		{
+			"desc": "Ucide 20k monstrii.",
+
+			"missionType": "KILL",
+			"missionSpecific": "GLOBAL",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [],
+			"maxProgress": 20000
+		},	
+
+		{
+			"desc": "Omoara 40x General Yonghan.",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [2492],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Omoara 40x Mu-Shu.",
+
+			"missionType": "KILL",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3905],
+			"maxProgress": 40
+		},
+
+		{
+			"desc": "Foloseste 40k Vrajeste Obiectul.",
+
+			"missionType": "USE_ITEM",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [71084],
+			"maxProgress": 40000
+		},
+
+		{
+			"desc": "Foloseste 200k Vrajeste Obiectul.",
+
+			"missionType": "USE_ITEM",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [71084],
+			"maxProgress": 200000
+		},		
+
+		{
+			"desc": "Striga pe chat de 50 de ori.",
+
+			"missionType": "MESSAGES",
+			"missionSpecific": "GLOBAL",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [],
+			"maxProgress": 50
+		},
+		
+		{
+			"desc": "Striga pe chat de 200 de ori.",
+
+			"missionType": "MESSAGES",
+			"missionSpecific": "GLOBAL",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [],
+			"maxProgress": 200
+		},		
+
+		{
+			"desc": "Crafteaza 40 obiecte.",
+
+			"missionType": "CRAFT",
+			"missionSpecific": "GLOBAL",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [],
+			"maxProgress": 40
+		},	
+
+		{
+			"desc": "Crafteaza 1x Piatra Curcubeu.",
+
+			"missionType": "CRAFT",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [50512],
+			"maxProgress": 1
+		},	
+
+		{
+			"desc": "Crafteaza 1x Inelul Imparatului.",
+
+			"missionType": "CRAFT",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [72712],
+			"maxProgress": 1
+		},	
+
+		{
+			"desc": "Crafteaza 1x Vraja Experientei.",
+
+			"missionType": "CRAFT",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [25425],
+			"maxProgress": 1
+		},	
+
+		{
+			"desc": "Crafteaza 1x Vraja Semi-Oamenilor.",
+
+			"missionType": "CRAFT",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [25424],
+			"maxProgress": 1
+		},	
+
+		{
+			"desc": "Crafteaza 1x Vraja Monstrilor.",
+
+			"missionType": "CRAFT",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [25423],
+			"maxProgress": 1
+		},	
+
+		{
+			"desc": "Crafteaza 1x Vraja Vietii.",
+
+			"missionType": "CRAFT",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [25422],
+			"maxProgress": 1
+		},	
+	
+		{
+			"desc": "Crafteaza 100 obiecte.",
+
+			"missionType": "CRAFT",
+			"missionSpecific": "GLOBAL",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [],
+			"maxProgress": 100
+		},			
+
+		{
+			"desc": "Crafteaza 5x Piatra Curcubeu.",
+
+			"missionType": "CRAFT",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [50512],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Crafteaza 5x Inelul Imparatului.",
+
+			"missionType": "CRAFT",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [72712],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Crafteaza 5x Vraja Experientei.",
+
+			"missionType": "CRAFT",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [25425],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Crafteaza 3x Vraja Semi-Oamenilor.",
+
+			"missionType": "CRAFT",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [25424],
+			"maxProgress": 3
+		},	
+
+		{
+			"desc": "Crafteaza 5x Vraja Vietii.",
+
+			"missionType": "CRAFT",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [25422],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Crafteaza 5x Vraja Monstrilor.",
+
+			"missionType": "CRAFT",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [25423],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Petrece 35 ore online.",
+
+			"missionType": "PLAYTIME",
+			"missionSpecific": "GLOBAL",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [],
+			"maxProgress": 2100
+		},
+
+		{
+			"desc": "Petrece 3 ore online.",
+
+			"missionType": "PLAYTIME",
+			"missionSpecific": "GLOBAL",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [],
+			"maxProgress": 180
+		},	
+		
+		{
+			"desc": "Transforma-te de 5 ori.",
+
+			"missionType": "POLYMORPH",
+			"missionSpecific": "GLOBAL",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [],
+			"maxProgress": 5
+		},	
+		
+		{
+			"desc": "Transforma-te de 50 ori.",
+
+			"missionType": "POLYMORPH",
+			"missionSpecific": "GLOBAL",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [],
+			"maxProgress": 50
+		},			
+
+
+		{
+			"desc": "Distruge 2x Inelul Bucuriei.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [71143],
+			"maxProgress": 2
+		},			
+
+		{
+			"desc": "Distruge 5x Sabie de Batalie +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [149],
+			"maxProgress": 5
+		},		
+
+		{
+			"desc": "Distruge 5x Armura Zeului Dragon +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [11289],
+			"maxProgress": 5
+		},		
+
+		{
+			"desc": "Distruge 5x Costum de Magnolie +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [11489],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Distruge 5x Vesmantul Baronesei +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [11889],
+			"maxProgress": 5
+		},	
+		
+		{
+			"desc": "Distruge 5x Platosa pentru Suflet +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [11689],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Distruge 5x Armura de Otel Negru +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [11299],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Distruge 5x Costum de Vant Negru +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [11499],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Distruge 5x Vesmant Negru +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [11899],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Distruge 5x Platosa Magica +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [11699],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Distruge 25x Armura de Otel Negru +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [11299],
+			"maxProgress": 25
+		},	
+
+		{
+			"desc": "Distruge 25x Costum de Vant Negru +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [11499],
+			"maxProgress": 25
+		},	
+
+		{
+			"desc": "Distruge 25x Vesmant Negru +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [11899],
+			"maxProgress": 25
+		},	
+
+		{
+			"desc": "Distruge 25x Platosa Magica +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [11699],
+			"maxProgress": 25
+		},	
+
+		{
+			"desc": "Distruge 25x Armura Zeului Dragon +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [11289],
+			"maxProgress": 25
+		},		
+
+		{
+			"desc": "Distruge 25x Costum de Magnolie +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [11489],
+			"maxProgress": 25
+		},	
+
+		{
+			"desc": "Distruge 25x Vesmantul Baronesei +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [11889],
+			"maxProgress": 25
+		},	
+		
+		{
+			"desc": "Distruge 25x Platosa pentru Suflet +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [11689],
+			"maxProgress": 25
+		},	
+
+		{
+			"desc": "Distruge 5x Lance Partizan +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [3139],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Distruge 5x Arc Dragon Galben +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [2149],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Distruge 5x Cutit Dragon +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [1109],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Distruge 5x Evantaiul Mantuirii +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [7149],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Distruge 5x Clopot Cer&Pamant +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [5109],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Distruge 5x Lama Dinte Stafie +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [159],
+			"maxProgress": 5
+		},	
+		
+		{
+			"desc": "Distruge 5x Inelul Bucuriei",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [71143],
+			"maxProgress": 5
+		},	
+
+		{
+			"desc": "Distruge 25x Sabie de Batalie +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [149],
+			"maxProgress": 25
+		},	
+
+		{
+			"desc": "Distruge 25x Lance Partizan +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [3139],
+			"maxProgress": 25
+		},	
+
+		{
+			"desc": "Distruge 25x Arc Dragon Galben +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [2149],
+			"maxProgress": 25
+		},	
+
+		{
+			"desc": "Distruge 25x Cutit Dragon +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [1109],
+			"maxProgress": 25
+		},	
+
+		{
+			"desc": "Distruge 25x Evantaiul Mantuirii +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [7149],
+			"maxProgress": 25
+		},	
+
+		{
+			"desc": "Distruge 25x Clopot Cer&Pamant +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [5109],
+			"maxProgress": 25
+		},	
+
+		{
+			"desc": "Distruge 25x Lama Dinte Stafie +9.",
+
+			"missionType": "DESTROY",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [159],
+			"maxProgress": 25
+		},	
+
+		{
+			"desc": "Cumpara 5 obiecte de la Maestru.",
+
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [14229, 16229, 17229, 25422, 25423, 25424, 25425, 27992, 27993, 27994, 50183, 50216, 50512, 50821, 50822, 50823, 50825, 50826, 53010, 70020, 70030, 71107, 71136, 71143, 71145, 72003, 72703, 72704, 80015, 25371,51364, 51365, 51366, 51367, 51368, 51374, 51371, 51375, 51372, 51373, 51369, 51370],
+			"maxProgress": 5
+		},		
+
+		{
+			"desc": "Cumpara 25 obiecte de la Maestru.",
+
+			"missionType": "DROP",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [14229, 16229, 17229, 25422, 25423, 25424, 25425, 27992, 27993, 27994, 50183, 50216, 50512, 50821, 50822, 50823, 50825, 50826, 53010, 70020, 70030, 71107, 71136, 71143, 71145, 72003, 72703, 72704, 80015, 25371,51364, 51365, 51366, 51367, 51368, 51374, 51371, 51375, 51372, 51373, 51369, 51370],
+			"maxProgress": 25
+		},
+
+		{
+			"desc": "Deschide 500 Cufere.",
+
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "GLOBAL",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [],
+			"maxProgress": 500
+		},	
+
+		{
+			"desc": "Deschide 2500 Cufere.",
+
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "GLOBAL",
+			"timeInfo": "WEEKLY",
+
+			"points": 7000,
+
+			"vnum": [],
+			"maxProgress": 2500
+		},			
+
+		{
+			"desc": "Deschide 15x Cufar Roua.",
+
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [38052],
+			"maxProgress": 15
+		},	
+
+		{
+			"desc": "Deschide 30x Cufar cu Pesti.",
+
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [50128],
+			"maxProgress": 30
+		},	
+
+		{
+			"desc": "Deschide 30x Cufarul Inteleptului.",
+
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [50130],
+			"maxProgress": 30
+		},	
+
+
+		{
+			"desc": "Deschide 10x Cufar cu Vopsele.",
+
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [50296],
+			"maxProgress": 10
+		},			
+
+		{
+			"desc": "Deschide 20x Cufar Jotun.",
+
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [50297],
+			"maxProgress": 20
+		},
+
+		{
+			"desc": "Deschide 20x Comoara Sarpe.",
+
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [50290],
+			"maxProgress": 20
+		},
+
+		{
+			"desc": "Deschide 100x Cufar Misterios.",
+
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [50125],
+			"maxProgress": 100
+		},
+
+		{
+			"desc": "Deschide 100x Cufarul Cunoasterii.",
+
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [50131],
+			"maxProgress": 100
+		},
+
+		{
+			"desc": "Deschide 100x Cufarul Apelor.",
+
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "DAILY",
+
+			"points": 1300,
+
+			"vnum": [50127],
+			"maxProgress": 100
+		},		
+
+		{
+			"desc": "Deschide 80x Cufar Roua.",
+		
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [38052],
+			"maxProgress": 80
+		},	
+		
+		{
+			"desc": "Deschide 150 Cufar cu Pesti.",
+		
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50128],
+			"maxProgress": 150
+		},	
+		
+		{
+			"desc": "Deschide 150x Cufarul Inteleptului.",
+		
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50130],
+			"maxProgress": 150
+		},	
+		
+		
+		{
+			"desc": "Deschide 50x Cufar cu Vopsele.",
+		
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50296],
+			"maxProgress": 50
+		},			
+		
+		{
+			"desc": "Deschide 100x Cufar Jotun.",
+		
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50297],
+			"maxProgress": 100
+		},
+		
+		{
+			"desc": "Deschide 130x Comoara Sarpe.",
+		
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50290],
+			"maxProgress": 130
+		},
+		
+		{
+			"desc": "Deschide 1000x Cufar Misterios.",
+		
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50125],
+			"maxProgress": 1000
+		},
+		
+		{
+			"desc": "Deschide 1000x Cufarul Cunoasterii.",
+		
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50131],
+			"maxProgress": 1000
+		},
+		
+		{
+			"desc": "Deschide 650x Cufarul Apelor.",
+		
+			"missionType": "CHEST_OPEN",
+			"missionSpecific": "SPECIFIC",
+			"timeInfo": "WEEKLY",
+		
+			"points": 7000,
+		
+			"vnum": [50127],
+			"maxProgress": 100
+		}		
+	]
+}

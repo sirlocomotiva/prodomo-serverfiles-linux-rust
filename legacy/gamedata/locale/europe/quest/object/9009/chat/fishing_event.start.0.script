@@ -1,0 +1,13 @@
+if pc . count_item ( 27802 ) < 3 then 
+say ( ) 
+say ( translate . fishing_event . _120_say ) 
+else 
+say ( ) 
+say ( translate . fishing_event . _130_say ) 
+say ( ) 
+say_reward ( translate . fishing_event . _140_sayReward ) 
+if select ( translate . locale . yes , translate . locale . no ) == 1 then 
+pc . remove_item ( 27802 , 3 ) 
+pc . give_item2 ( 50033 ) 
+end 
+end 

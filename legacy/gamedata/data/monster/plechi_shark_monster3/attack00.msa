@@ -1,0 +1,33 @@
+ScriptType               MotionData
+
+MotionFileName           "D:\ymir work\monster2\plechito_summer2020\plechi_shark_monster3\attack00.GR2"
+MotionDuration           1.666667
+
+
+
+Group MotionEventData
+{
+    MotionEventDataCount     2
+    Group Event00
+    {
+        MotionEventType      6
+        StartingTime         0.717810
+        
+        AttachingEnable      1
+        AttachingBoneName    "Bip01 R Hand"
+        FlyFileName       "d:/ymir work/effect/plechito/monster/shark_monster3_attack00.msf"
+        FlyPosition       0.000000 0.000000 0.000000
+    }
+    Group Event01
+    {
+        MotionEventType      1
+        StartingTime         0.000000
+        
+        IndependentFlag      0
+        AttachingEnable      1
+        AttachingBoneName    "Bip01 R Hand"
+        FollowingEnable      1
+        EffectFileName       "d:/ymir work/effect/plechito/monster/shark_monster3_attack00_1.mse"
+        EffectPosition       0.000000 0.000000 0.000000
+    }
+}

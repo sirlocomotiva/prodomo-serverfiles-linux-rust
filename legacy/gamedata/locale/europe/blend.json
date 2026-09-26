@@ -1,0 +1,171 @@
+[
+		{
+			"item_vnum": 50821,
+			"apply_type": "CRITICAL_PCT",
+			"apply_value": [20, 20, 20, 20, 20],
+			"apply_duration": [600, 600, 600, 600, 600]
+		},
+
+
+		{
+			"item_vnum": 50822,
+			"apply_type": "PENETRATE_PCT",
+			"apply_value": [20, 20, 20, 20, 20],
+			"apply_duration": [600, 600, 600, 600, 600]
+		},
+		
+		{
+			"item_vnum": 50823,
+			"apply_type": "ATTACK_SPEED",
+			"apply_value": [8, 8, 8, 8, 8],
+			"apply_duration": [600, 600, 600, 600, 600]
+		},
+		
+		{
+			"item_vnum": 50824,
+			"apply_type": "RESIST_MAGIC",
+			"apply_value": [20, 20, 20, 20, 20],
+			"apply_duration": [600, 600, 600, 600, 600]
+		},
+		
+		{
+			"item_vnum": 50825,
+			"apply_type": "ATT_BONUS",
+			"apply_value": [120, 120, 120, 120, 120],
+			"apply_duration": [600, 600, 600, 600, 600]
+		},
+		
+		{
+			"item_vnum": 50826,
+			"apply_type": "DEF_BONUS",
+			"apply_value": [200, 200, 200, 200, 200],
+			"apply_duration": [600, 600, 600, 600, 600]
+		},
+
+		{
+			"item_vnum": 51002,
+			"apply_type": "ENERGY",
+			"apply_value": [10, 10, 10, 10, 10],
+			"apply_duration": [1800, 1800, 1800, 1800, 1800]
+		},
+		
+		{
+			"item_vnum": 20201,
+			"apply_type": "MOVE_SPEED",
+			"apply_value": [30, 30, 30, 30, 30],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+		
+		{
+			"item_vnum": 20202,
+			"apply_type": "ATTACK_SPEED",
+			"apply_value": [30, 30, 30, 30, 30],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+		
+		{
+			"item_vnum": 20203,
+			"apply_type": "CRITICAL_PCT",
+			"apply_value": [20, 20, 20, 20, 20],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+		
+		{
+			"item_vnum": 20204,
+			"apply_type": "PENETRATE_PCT",
+			"apply_value": [20, 20, 20, 20, 20],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+
+		{
+			"item_vnum": 20205,
+			"apply_type": "MAX_HP_PCT",
+			"apply_value": [20, 20, 20, 20, 20],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+
+		{
+			"item_vnum": 20206,
+			"apply_type": "MALL_ATTBONUS",
+			"apply_value": [15, 15, 15, 15, 15],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+
+		{
+			"item_vnum": 20207,
+			"apply_type": "MAX_SP_PCT",
+			"apply_value": [20, 20, 20, 20, 20],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+
+		{
+			"item_vnum": 20208,
+			"apply_type": "MALL_DEFBONUS",
+			"apply_value": [15, 15, 15, 15, 15],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+
+		{
+			"item_vnum": 20210,
+			"apply_type": "CRITICAL_PCT",
+			"apply_value": [20, 20, 20, 20, 20],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+
+
+		{
+			"item_vnum": 20209,
+			"apply_type": "PENETRATE_PCT",
+			"apply_value": [20, 20, 20, 20, 20],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+		
+		{
+			"item_vnum": 20214,
+			"apply_type": "ATTACK_SPEED",
+			"apply_value": [8, 8, 8, 8, 8],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+		
+		{
+			"item_vnum": 20213,
+			"apply_type": "RESIST_MAGIC",
+			"apply_value": [20, 20, 20, 20, 20],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+		
+		{
+			"item_vnum": 20211,
+			"apply_type": "ATT_BONUS",
+			"apply_value": [120, 120, 120, 120, 120],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+		
+		{
+			"item_vnum": 20212,
+			"apply_type": "DEF_BONUS",
+			"apply_value": [200, 200, 200, 200, 200],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+		
+		{
+			"item_vnum": 20215,
+			"apply_type": "ATT_BONUS_TO_MOB",
+			"apply_value": [40, 40, 40, 40, 40],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+
+		{
+			"item_vnum": 20216,
+			"apply_type": "ENERGY",
+			"apply_value": [40, 40, 40, 40, 40],
+			"apply_duration": [0, 0, 0, 0, 0]
+		},
+		
+		{
+			"item_vnum": 20217,
+			"apply_type": "MOVE_SPEED",
+			"apply_value": [30, 30, 30, 30, 30],
+			"apply_duration": [0, 0, 0, 0, 0]
+		}		
+]

@@ -1,0 +1,21 @@
+ScriptType               MotionData
+
+MotionFileName           "D:\ymir work\monster\plechi_desert_stone02\spawn.GR2"
+MotionDuration           0.500000
+
+Group MotionEventData
+{
+    MotionEventDataCount     1
+    Group Event00
+    {
+        MotionEventType      1
+        StartingTime         0.46547
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "plechi_desert_stone02"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/p_desert_stone_spawn.mse"
+        EffectPosition       0.000000 0.000000 0.000000
+    }
+}

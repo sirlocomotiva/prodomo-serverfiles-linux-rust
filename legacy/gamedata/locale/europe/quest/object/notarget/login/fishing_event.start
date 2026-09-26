@@ -1,0 +1,2 @@
+if game . get_event_flag ( "fish_event" ) > 0 then send_letter ( translate . fishing_event . _010_npcChat ) 
+ return end 

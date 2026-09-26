@@ -1,0 +1,61 @@
+# Each week is a random group to generate.
+# Group Name
+# {
+#	ID	ItemVnum	ItemCount	ItemCost
+# }
+#
+# ID, ItemVnum, ItemCount, ItemCost
+# ↑   ↑         ↑          ↑
+# |   |         |          Cost of the item if the user want's to bypass the collect time.
+# |   |         Item count. (Amount of items)
+# |   Item VNUM. (Item)
+# Day of the week. (Max 7.)
+#
+
+Group RandomWeek1
+{
+	Week	1
+	1	55401	1	200
+	2	55402	1	250
+	3	55403	1	300
+	4	55404	1	350
+	5	55405	1	400
+	6	55406	1	450
+	7	55407	1	500
+}
+
+Group RandomWeek2
+{
+	Week	2
+	1	9800	1	300
+	2	10030	1	750
+	3	10260	1	800
+	4	10490	1	1000
+	5	10720	1	1100
+	6	10950	1	1200
+	7	71125	1	1800
+}
+
+Group RandomWeek3
+{
+	Week	3
+	1	53006	1	300
+	2	53015	1	600
+	3	53219	1	900
+	4	53221	1	1200
+	5	53237	1	1500
+	6	53245	1	1800
+	7	53256	1	2100
+}
+
+Group RandomWeek4
+{
+	Week	4
+	1	76002	1	300
+	2	50255	3	600
+	3	100500	3	900
+	4	85001	1	1200
+	5	71145	1	1500
+	6	80023	1	1800
+	7	71125	1	2100
+}

@@ -1,0 +1,21 @@
+siege_war_event={["start"]=0,check_status= function ()if game . get_event_flag ( "siege_shinsoo_score" ) > 0 and pc . get_empire ( ) == 1 then 
+syschat ( translate . siege_war_event . _180_sysChat ) 
+if pc . get_map_index ( ) == 103 then 
+warp_to_village ( ) 
+return false 
+end 
+elseif game . get_event_flag ( "siege_chunjo_score" ) > 0 and pc . get_empire ( ) == 2 then 
+syschat ( translate . siege_war_event . _180_sysChat ) 
+if pc . get_map_index ( ) == 103 then 
+warp_to_village ( ) 
+return false 
+end 
+elseif game . get_event_flag ( "siege_jinno_score" ) > 0 and pc . get_empire ( ) == 3 then 
+syschat ( translate . siege_war_event . _180_sysChat ) 
+if pc . get_map_index ( ) == 103 then 
+warp_to_village ( ) 
+return false 
+end 
+end 
+return true 
+end }

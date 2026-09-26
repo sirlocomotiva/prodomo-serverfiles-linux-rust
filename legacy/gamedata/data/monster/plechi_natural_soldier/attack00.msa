@@ -1,0 +1,50 @@
+ScriptType               MotionData
+
+MotionFileName           "D:\ymir work\monster\plechi_natural_soldier\attack00.GR2"
+MotionDuration           1.466667
+
+Group AttackingData
+{
+    AttackType           0
+    HittingType          2
+    StiffenTime          0.000000
+    InvisibleTime        0.300000
+    ExternalForce        0.000000
+    HitLimitCount        2
+    
+    MotionType           2
+    HitDataCount         1
+    Group HitData00
+    {
+        AttackingStartTime   0.580000
+        AttackingEndTime     0.700000
+        AttackingBone        "Bip01"
+        WeaponLength         80.000000
+        List HitPosition
+        {
+            0.580000 -200.000000 0.000000 280.000000 0.000000 -0.000000 140.000000
+            0.610000 -170.000000 -120.000000 300.000000 0.000000 -0.000000 140.000000
+            0.625000 -90.000000 -230.000000 330.000000 0.000000 -0.000000 140.000000
+            0.640000 0.000000 -320.000000 320.000000 0.000000 -0.000000 140.000000
+            0.650000 80.000000 -320.000000 280.000000 0.000000 -0.000000 140.000000
+            0.665000 170.000000 -310.000000 210.000000 0.000000 -0.000000 140.000000
+		}
+   }
+}
+
+Group MotionEventData
+{
+    MotionEventDataCount     1
+    Group Event00
+    {
+        MotionEventType      1
+        StartingTime         0.625000
+        
+        IndependentFlag      0
+        AttachingEnable      1
+        AttachingBoneName    "Root"
+        FollowingEnable      1
+        EffectFileName       "d:/ymir work/effect/plechito/monster/plechi_natural_mob2_attack.mse"
+        EffectPosition       0.000000 -320.000000 320.000000
+    }
+}

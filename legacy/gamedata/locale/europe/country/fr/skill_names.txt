@@ -1,0 +1,96 @@
+VNUM	LOCALE_NAME
+1	Triple lacération
+106	Jet de Foudre
+107	Invocation de foudre
+108	Griffe de foudre
+109	Soin
+110	Promptitude
+111	Attaque+
+121	Commandement
+122	Combo
+123	Pêche
+124	Extraction
+125	Création d objet
+126	Langue Shinsoo
+127	Langue Chunjo
+128	Langue Jinno
+129	Polymorphie
+130	Equitation
+131	Appel d'une monture
+132	Attaquer automatiquement
+137	Combat equestre
+138	Charge à cheval
+139	Vague de Pouvoir
+140	Grêle de flèches
+151	Yeux du Dragon
+152	Sang du Dieu Dragon
+153	Bénédiction du Dieu Dragon
+154	Armure sacrée
+155	Accélération
+156	La fureur du Dieu Dragon
+157	Aide à la magie
+16	Attaque de l'esprit
+17	Attaque de la paume
+170	Déchiqueter
+171	Souffle de loup
+172	Bond de loup
+173	Griffe de loup
+174	Âme du loup pourpre
+175	Âme du loup indigo
+18	Charge
+19	Corps puissant
+2	Moulinet à l'épée
+20	Coup d'épée
+21	Orbe de l'épée
+221	Parade Moulinet à l'épée
+222	Parade Embuscade
+223	Parade Toucher Brûlant
+224	Parade Dragon Chassant
+225	Parade Attaque de l'esprit
+226	Parade Flèche de feu
+227	Parade Attaque des Ténèbres
+228	Parade Invocation de foudre
+229	Parade Souffle de loup
+236	Bonus Moulinet à l'Épée
+237	 Bonus Embuscade
+238	Bonus Toucher brûlant
+239	Bonus Dragon chassant
+240	Bonus Attaque de l'esprit
+241	Bonus Flèche de feu
+242	Bonus Attaque des Ténèbres
+243	Bonus Invocation de foudre
+244	Bonus Souffle de loup
+3	Berserk
+31	Embuscade
+32	Attaque rapide
+33	Dague filante
+34	Furtif
+35	Brume empoisonnée
+36	Poison insidieux
+4	Aura de l'épée
+46	Tir à répétition
+47	Pluie de flèches
+48	Flèche de feu
+49	Foulée de plume
+5	Accélération
+50	Flèche empoisonnée
+51	Coup étincelant
+6	Volonté de vivre
+61	Toucher brûlant
+62	Tourbillon du Dragon
+63	Lame enchantée
+64	Peur
+65	Armure enchantée
+66	Contre-sort
+76	Attaque des ténèbres
+77	Attaque de flammes
+78	Esprit de flammes
+79	Protection des ténèbres
+80	Frappe de l'esprit
+81	Orbe des ténèbres
+91	Talisman volant
+92	Dragon chassant
+93	Rugissement du Dragon
+94	Bénédiction
+95	Reflet
+96	Aide du Dragon

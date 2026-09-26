@@ -1,0 +1,34 @@
+ScriptType               MotionData
+
+MotionFileName           "D:\ymir work\monster\plechi_natural_metin2\spawn.GR2"
+MotionDuration           0.500000
+
+Group MotionEventData
+{
+    MotionEventDataCount     2
+    Group Event00
+    {
+        MotionEventType      1
+        StartingTime         0.079487
+        
+        IndependentFlag      0
+        AttachingEnable      1
+        AttachingBoneName    "Bone001"
+        FollowingEnable      1
+        EffectFileName       "d:/ymir work/effect/plechito/monster/natural_metinstone2_spawn.mse"
+        EffectPosition       -130.000000 20.000000 0.000000
+    }
+    Group Event01
+    {
+        MotionEventType      1
+        StartingTime         0.484185
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Bone001"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/natural_metinstone2_spawn2.mse"
+        EffectPosition       -50.000000 0.000000 0.000000
+    }
+}
+

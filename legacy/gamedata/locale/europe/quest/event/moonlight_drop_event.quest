@@ -1,0 +1,19 @@
+quest moonlight_drop_event begin
+	state start begin
+		when login or event_begin with game.get_event_flag("moon_drop") > 0 begin
+			send_letter(translate.moonlight_drop_event._010_npcChat)	
+		end
+		
+		when event_end with game.get_event_flag("moon_drop") == 0 begin
+			clear_letter()
+		end
+
+		when button or info with game.get_event_flag("moon_drop") > 0 begin
+			say_title(translate.moonlight_drop_event._010_npcChat)
+			say(translate.moonlight_drop_event._100_say)
+			say()
+			say_reward(translate.moonlight_drop_event._110_sayReward)
+			say()
+		end
+	end
+end

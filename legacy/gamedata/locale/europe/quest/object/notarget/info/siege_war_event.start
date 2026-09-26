@@ -1,0 +1,16 @@
+say_title ( translate . siege_war_event . _010_npcChat ) 
+say ( ) 
+say ( ) 
+say ( translate . siege_war_event . _100_say ) 
+say ( ) 
+say ( translate . siege_war_event . _120_sayReward ) 
+if select ( translate . locale . yes , translate . locale . no ) == 2 then 
+say ( ) 
+say ( translate . siege_war_event . _130_say ) 
+say ( ) 
+else 
+if pc . get_map_index ( ) == 103 then syschat ( translate . siege_war_event . _140_sysChat ) return end 
+if siege_war_event . check_status ( ) then 
+pc . warp ( 0 , 25600 ) 
+end 
+end 

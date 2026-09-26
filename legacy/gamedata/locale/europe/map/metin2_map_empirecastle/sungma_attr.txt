@@ -1,0 +1,4 @@
+sungma_str	0
+sungma_hp	0
+sungma_move	1
+sungma_immune	0

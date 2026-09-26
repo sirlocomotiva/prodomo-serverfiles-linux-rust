@@ -1,0 +1,22 @@
+say_title ( "" .. mob_name ( npc . get_race ( ) ) .. ":" ) 
+say ( translate . oxevent . _20_say ) 
+wait ( ) 
+if game . get_event_flag ( "oxevent_status" ) == 0 then 
+say_title ( "" .. mob_name ( npc . get_race ( ) ) .. ":" ) 
+say ( translate . oxevent . _30_say ) 
+elseif game . get_event_flag ( "oxevent_status" ) == 1 then 
+say_title ( "" .. mob_name ( npc . get_race ( ) ) .. ":" ) 
+say ( translate . oxevent . _40_say ) 
+local s = select ( translate . locale . monkey_dungeon . enter , translate . locale . cancel ) 
+if s == 1 then 
+say_title ( "" .. mob_name ( npc . get_race ( ) ) .. ":" ) 
+say ( translate . oxevent . _50_say ) 
+wait ( ) 
+pc . warp ( 896500 , 24600 ) 
+elseif s == 2 then 
+return 
+end 
+elseif game . get_event_flag ( "oxevent_status" ) == 2 then 
+say_title ( "" .. mob_name ( npc . get_race ( ) ) .. ":" ) 
+say ( translate . oxevent . _60_say ) 
+end 

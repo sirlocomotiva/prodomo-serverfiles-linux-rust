@@ -1,0 +1,96 @@
+VNUM	LOCALE_NAME
+1	Trojcestnı støih
+106	Bleskovı vrh
+107	Zaøíkat blesk
+108	Bleskovı dráp
+109	Ošetøit
+110	Bìet
+111	Útok+
+121	Vedení
+122	Kombo
+123	Chytat ryby
+124	Tìba
+125	Vıroba pøedmìtù
+126	Shinsoo
+127	Chunjo
+128	Jinno
+129	Promìna
+130	Jezdit na koni
+131	Volat na konì
+132	Automaticky útoèit
+137	Boj ze høbetu konì
+138	Dupnutí konì
+139	Hnutí síly
+140	Smrš šípù
+151	Draèí oèi
+152	Krev boha drakù
+153	Poehnání bohem drakù
+154	Svatá vızbroj
+155	Zrychlení
+156	Hnìv boha drakù
+157	Pomoc ke kouzlu
+16	Prùraz
+17	Prudká rána
+170	Trhání
+171	Vlèí dech
+172	Vlèí spár
+173	Vlèí dráp
+174	Duše purpurového vlka
+175	Duše modrého vlka
+18	Dupnutí
+19	Silné tìlo
+2	Smrš meèe
+20	Rána meèem
+21	hnoucí meè
+221	Ochrana pøed Smrští meèe
+222	Ochrana pøed Léèkou
+223	Ochrana pøed Ránou prstem
+224	Ochrana pøed Støílením na draky 
+225	Ochrana pøed Prùrazem
+226	Ochrana pøed Ohnivım šípem
+227	Ochrana pøed Temnou ránou
+228	Ochrana pøed Voláním blesku
+229	Ochrana pøed Vlèím dechem
+236	Zesílení Smršti meèe 
+237	Zesílení Léèky 
+238	Zesílení Rány prstem 
+239	Zesílení Støílení na draky
+240	Zesílení Prùrazu
+241	Zesílení Ohnivého šípu 
+242	Zesílení Temné rány 
+243	Zesílení Volání blesku
+244	Zesílení Vlèího dechu
+3	Bojové zuøení
+31	Léèka
+32	Bleskovı útok
+33	Víøení kordù
+34	Zamaskování
+35	Jedovatı oblak
+36	Záludnı jed
+4	Aura meèe
+46	Opakované vıstøely
+47	Smrš šípù
+48	Ohnivı šíp
+49	Našlapování polehouèku
+5	Pádit
+50	Otrávenı šíp
+51	Jiskra
+6	Síla ivota
+61	Rána prstem
+62	Draèí vír
+63	Zaèarovaná èepel
+64	Strach
+65	Zaèarované brnìní
+66	Zrušit kouzlo
+76	Temná rána
+77	Rána plameny
+78	Duch plamene
+79	Temná ochrana
+80	Rána ducha
+81	Tmavı kámen
+91	Létající talisman
+92	Støílení na draky
+93	Øev drakù
+94	Poehnání
+95	Zrcadlit
+96	Pomoc draka

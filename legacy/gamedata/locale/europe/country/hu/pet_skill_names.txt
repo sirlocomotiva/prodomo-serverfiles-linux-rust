@@ -1,0 +1,24 @@
+VNUM	LOCALE_NAME
+1	Ellenállás (Harcos)
+2	Ellenállás (Sura)
+3	Ellenállás (Nindzsa)
+4	Ellenállás (Sámán)
+5	Ellenállás (Vérfarkas)
+6	Vad harcos
+7	Ellenmágia
+8	Sietség
+9	Átütés
+10	Helyreállítás
+11	Vámpirizmus
+12	Spiritualizmus
+13	Bástya
+14	Türközés
+15	Yang-dobás
+16	Hatótáv
+17	Legyõzhetetlenség
+18	Csodaszer
+19	Mester csapos
+20	Szörny vadász
+21	Sasszem
+22	Élet elszívás
+23	Pehelykönnyûség

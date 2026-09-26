@@ -1,0 +1,67 @@
+ScriptType               MotionData
+
+MotionFileName           "D:\ymir work\monster2\plechito_pyramid_monsters\plechito_pyramid_boss4\attack00.GR2"
+MotionDuration           2.400000
+
+Group MotionEventData
+{
+    MotionEventDataCount     4
+    Group Event00
+    {
+        MotionEventType      4
+        StartingTime         1.142571
+        DuringTime           0.200000
+        EnableHitProcess     0
+        
+        AttackType           0
+        HittingType          1
+        StiffenTime          0.000000
+        InvisibleTime        0.300000
+        ExternalForce        0.000000
+        HitLimitCount        0
+        CollisionType        4
+        
+        SphereDataCount      1
+        Group SphereData00
+        {
+            Radius           350.000000
+            Position         0.000000 -200.000000 100.000000
+        }
+    }
+    Group Event01
+    {
+        MotionEventType      1
+        StartingTime         0.262571
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/p_pyramid_boss4_attack00c.mse"
+        EffectPosition       -200.000000 150.000000 0.000000
+    }
+    Group Event02
+    {
+        MotionEventType      1
+        StartingTime         1.042571
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/p_pyramid_boss4_attack00a.mse"
+        EffectPosition       0.000000 0.000000 0.000000
+    }
+    Group Event03
+    {
+        MotionEventType      1
+        StartingTime         1.402571
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/p_pyramid_boss4_attack00c.mse"
+        EffectPosition       -200.000000 150.000000 0.000000
+    }
+}

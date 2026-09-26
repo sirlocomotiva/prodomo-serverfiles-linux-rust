@@ -1,0 +1,468 @@
+#Energie
+section
+npc	20001
+item	51001	50
+reward	51002	1
+category	ENERGY
+percent	70
+end
+
+#Curele
+section
+npc	20378
+item	30078	75
+reward	18900	1
+gold	2500000
+category	BELT
+percent	100
+end
+
+
+#Curele
+section
+npc	20378
+item	30048	25
+item	30049	25
+item	30046	25
+item	30053	25
+reward	18000	1
+gold	2500000
+category	BELT
+percent	100
+end
+
+#Curele
+section
+npc	20378
+item	30048	25
+item	30049	25
+item	30046	25
+item	30053	25
+reward	18020	1
+gold	2500000
+category	BELT
+percent	100
+end
+
+#Curele
+section
+npc	20378
+item	30048	25
+item	30049	25
+item	30046	25
+item	30053	25
+reward	18030	1
+gold	2500000
+category	BELT
+percent	100
+end
+
+#Curele
+section
+npc	20378
+item	30048	25
+item	30049	25
+item	30046	25
+item	30053	25
+reward	18040	1
+gold	2500000
+category	BELT
+percent	100
+end
+
+#Curele
+section
+npc	20378
+item	30048	25
+item	30049	25
+item	30046	25
+item	30053	25
+reward	18050	1
+gold	2500000
+category	BELT
+percent	100
+end
+
+#Curele
+section
+npc	20378
+item	30048	25
+item	30049	25
+item	30046	25
+item	30053	25
+reward	18060	1
+gold	2500000
+category	BELT
+percent	100
+end
+
+#Curele
+section
+npc	20378
+item	30048	25
+item	30049	25
+item	30046	25
+item	30053	25
+reward	18070	1
+gold	2500000
+category	BELT
+percent	100
+end
+
+#Curele
+section
+npc	20378
+item	30048	25
+item	30049	25
+item	30046	25
+item	30053	25
+reward	18080	1
+gold	2500000
+category	BELT
+percent	100
+end
+
+#WRIST
+section
+npc	20378
+item	50635	10
+item	30518	10
+item	30523	10
+reward	14500	1
+gold	5000000
+category	WRIST
+percent	100	
+end
+
+section
+npc	20378
+item	50636	10
+item	30518	10
+item	30522	10
+reward	14520	1
+gold	10000000
+category	WRIST
+allowCopyAttr	1
+percent	100	
+end
+section
+npc	20378
+item	50637	10
+item	30518	10
+item	30521	10
+reward	14540	1
+gold	10000000
+category	WRIST
+percent	100	
+end
+section
+npc	20378
+item	50638	10
+item	30518	10
+item	30519	10
+reward	14560	1
+gold	10000000
+category	WRIST
+percent	100	
+end
+#coliere
+section
+npc	20378
+item	50635	10
+item	30520	10
+item	30519	10
+reward	16500	1
+gold	10000000
+category	NECK
+percent	100	
+end
+section
+npc	20378
+item	50636	10
+item	30519	10
+item	30521	10
+reward	16520	1
+gold	10000000
+category	NECK
+percent	100	
+end
+section
+npc	20378
+item	50637	10
+item	30523	10
+item	30519	10
+reward	16540	1
+gold	10000000
+category	NECK
+percent	100	
+end
+section
+npc	20378
+item	50638	10
+item	30522	10
+item	30519	10
+reward	16560	1
+gold	10000000
+category	NECK
+percent	100	
+end
+#cercei
+section
+npc	20378
+item	50635	10
+item	30520	10
+item	30521	10
+reward	17500	1
+gold	10000000
+category	EAR
+percent	100	
+end
+section
+npc	20378
+item	50636	10
+item	30520	10
+item	30523	10
+reward	17520	1
+gold	10000000
+category	EAR
+percent	100	
+end
+section
+npc	20378
+item	50637	10
+item	30520	10
+item	30522	10
+reward	17540	1
+gold	10000000
+category	EAR
+percent	100	
+end
+section
+npc	20378
+item	50638	10
+item	30520	10
+item	30518	10
+reward	17560	1
+gold	10000000
+category	EAR
+percent	100	
+end
+#papuci
+section
+npc	20378
+item	15439	1
+item	30600	10
+item	30603	10
+item	30611	10
+reward	15440	1
+gold	10000000
+category	BOOT
+percent	100	
+end
+section
+npc	20378
+item	15379	1
+item	30600	10
+item	30602	10
+item	30611	10
+reward	15450	1
+gold	10000000
+category	BOOT
+percent	100	
+end
+#Arme/armuriRechin
+section
+npc	9338
+item	30091	10
+item	30092	10
+reward	12110	1
+gold	10000000
+category	SHARK
+percent	100	
+end
+section
+npc	9338
+item	30022	10
+item	30023	10
+reward	530	1
+gold	10000000
+category	SHARK
+percent	100	
+end
+section
+npc	9338
+item	30022	10
+item	30023	10
+reward	520	1
+gold	10000000
+category	SHARK
+percent	100	
+end
+section
+npc	9338
+item	30022	10
+item	30023	10
+reward	3520	1
+gold	10000000
+category	SHARK
+percent	100	
+end
+section
+npc	9338
+item	30022	10
+item	30023	10
+reward	1520	1
+gold	10000000
+category	SHARK
+percent	100	
+end
+section
+npc	9338
+item	30022	10
+item	30023	10
+reward	2520	1
+gold	10000000
+category	SHARK
+percent	100	
+end
+section
+npc	9338
+item	30022	10
+item	30023	10
+reward	5520	1
+gold	10000000
+category	SHARK
+percent	100	
+end
+section
+npc	9338
+item	30022	10
+item	30023	10
+reward	7520	1
+gold	10000000
+category	SHARK
+percent	100	
+end
+section
+npc	9338
+item	30022	10
+item	30023	10
+reward	5520	1
+gold	10000000
+category	SHARK
+percent	100	
+end
+section
+npc	60003
+item	51001	200
+item	30032	1
+item	30033	1
+reward	49001	1
+gold	10000000
+category	AURA
+percent	100	
+end
+section
+npc	60003
+item	51001	200
+item	30032	1
+item	30033	1
+reward	4901	1
+gold	10000000
+category	AURA
+percent	100	
+end
+section
+npc	60003
+item	51001	200
+item	30032	1
+item	30033	1
+reward	49021	1
+gold	10000000
+category	AURA
+percent	100	
+end
+section
+npc	60003
+item	51001	200
+item	30032	1
+item	30033	1
+reward	49031	1
+gold	10000000
+category	AURA
+percent	100	
+end
+section
+npc	20090
+item	30055	50
+reward	56002	1
+gold	5000000
+category	ELEMENT
+percent	100	
+end
+section
+npc	20090
+item	30056	50
+reward	56003	1
+gold	5000000
+category	ELEMENT
+percent	100	
+end
+section
+npc	20090
+item	30060	50
+reward	56004	1
+gold	5000000
+category	ELEMENT
+percent	100	
+end
+section
+npc	20090
+item	30059	50
+reward	56005	1
+gold	5000000
+category	ELEMENT
+percent	100	
+end
+section
+npc	20090
+item	30057	50
+reward	56006	1
+gold	5000000
+category	ELEMENT
+percent	100	
+end
+section
+npc	20090
+item	30058	50
+reward	56007	1
+gold	5000000
+category	ELEMENT
+percent	100	
+end
+section
+npc	20090
+item	30055	10
+item	30056	10
+item	30057	10
+item	30058	10
+item	30059	10
+item	30060	10
+reward	56008	1
+gold	5000000
+category	ELEMENT
+percent	100	
+end
+section
+npc	20090
+item	30055	10
+item	30056	10
+item	30057	10
+item	30058	10
+item	30059	10
+item	30060	10
+reward	56009	1
+gold	5000000
+category	ELEMENT
+percent	100	
+end

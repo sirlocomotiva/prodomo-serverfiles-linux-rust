@@ -1,0 +1,3 @@
+if game . get_event_flag ( "siege_war_event" ) > 0 then siege_war_event . check_status ( ) 
+send_letter ( translate . siege_war_event . _010_npcChat ) 
+ return end 

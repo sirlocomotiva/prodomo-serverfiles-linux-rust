@@ -1,0 +1,42 @@
+quest boss_event begin
+	state start begin
+		when login or event_begin with game.get_event_flag("boss_event") > 0 begin
+			if pc.get_map_index() == 230 then
+				notice(translate.boss_event._140_notice)
+				notice(translate.boss_event._150_notice)
+				notice(translate.boss_event._160_notice)
+				notice(translate.boss_event._170_notice)
+				notice(translate.boss_event._180_notice)
+			end
+			send_letter(translate.boss_event._010_npcChat)
+		end
+		
+		when event_end with game.get_event_flag("boss_event") == 0 begin
+			clear_letter()
+		end
+		
+		when button or info with game.get_event_flag("boss_event") > 0 begin
+			say_title(translate.boss_event._010_npcChat)
+			say()
+			say(translate.boss_event._100_say)
+			say()
+			say_reward(translate.common_event._110_sayReward)
+			
+			if select(translate.locale.monkey_dungeon.enter, translate.locale.monkey_dungeon.no_enter) == 1 then
+				if game.get_event_flag("boss_event") > 0 then
+					if pc.get_map_index() == 230 then 
+						syschat(translate.common_event._120_sysChat) 
+						return 
+					end
+					pc.warp(384000, 76800)
+				else
+					say_title(translate.boss_event._010_npcChat)
+					say()
+					say(translate.common_event._130_say)
+					say()
+				end
+			end
+		end
+	end
+end
+			

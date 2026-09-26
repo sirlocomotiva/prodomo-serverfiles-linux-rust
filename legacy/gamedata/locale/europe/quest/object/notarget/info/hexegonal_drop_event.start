@@ -1,0 +1,6 @@
+if game . get_event_flag ( "hexegonal_drop" ) > 0 then say_title ( translate . hexegonal_drop_event . _010_npcChat ) 
+say ( ) 
+say ( translate . hexegonal_drop_event . _100_say ) 
+say ( ) 
+say_reward ( translate . hexegonal_drop_event . _110_sayReward ) 
+ return end 

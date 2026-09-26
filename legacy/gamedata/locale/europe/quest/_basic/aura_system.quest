@@ -1,0 +1,40 @@
+quest acce_system begin
+	state start begin
+		when 60003.chat."About the auras..." begin
+			say_title(mob_name(60003)..":")
+			say("bla")
+			say("blabla")
+			say("blablabla")
+			say("blabla")
+			say("bla")
+			wait()
+			say_title(mob_name(60003)..":")
+			say("bla")
+			say("blabla")
+			say("blablabla")
+			say("blabla")
+			say("bla")
+		end
+		when 60003.chat."Aura: Bonus absorption" begin
+			say_title(mob_name(60003)..":")
+			say("Would you like to absorb bonuses?")
+			if select(locale.yes, locale.no) == 2 then return end
+			setskin(NOWINDOW)
+			game.open_aura_absorb_window()
+		end
+		when 60003.chat."Aura: Refine" begin
+			say_title(mob_name(60003)..":")
+			say("Would you like to refine your aura?[ENTER]")
+			if select(locale.yes, locale.no) == 2 then return end
+			setskin(NOWINDOW)
+			game.open_aura_growth_window()
+		end
+		when 60003.chat."Aura: Evolve" begin
+			say_title(mob_name(60003)..":")
+			say("Would you like to evolve your aura?[ENTER]")
+			if select(locale.yes, locale.no) == 2 then return end
+			setskin(NOWINDOW)
+			game.open_aura_evolve_window()
+		end
+	end
+end

@@ -1,0 +1,11 @@
+ScriptType	MapSetting
+
+CellScale	200
+HeightScale	0.500000
+
+ViewRadius	128
+
+MapSize	2	2
+BasePosition	33300000	33300000
+TextureSet	textureset\rinnegan_map.txt
+Environment	A1.msenv

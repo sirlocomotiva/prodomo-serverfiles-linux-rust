@@ -1,0 +1,5 @@
+if game . get_event_flag ( "oxevent_status" ) > 0 then say_title ( translate . oxevent . _10_npcChat ) 
+say ( ) 
+say ( translate . oxevent . _130_notice_all ) 
+say ( translate . oxevent . _131_notice_all ) 
+ return end 

@@ -1,0 +1,5 @@
+m	720	572	0	0	0	1	1m	100	1	10127		//Donganebene 10551 4881
+m	606	1217	0	0	0	1	1m	100	1	10129	//Namgankluft 12780 4411
+m	76	1459	0	0	0	1	1m	100	1	4019	//Höllenturm-Eingangshalle
+m	700	521	0	0	0	1	1m	100	1	20851		//Kopfgeldj. (Ödl. v. Se.)
+

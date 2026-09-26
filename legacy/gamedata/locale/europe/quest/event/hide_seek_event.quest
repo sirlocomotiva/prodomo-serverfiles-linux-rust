@@ -1,0 +1,19 @@
+quest hide_seek_event begin
+	state start begin
+		when login or event_begin with game.get_event_flag("hide_seek_event") > 0 begin
+			send_letter(translate.hide_seek_event._010_npcChat)
+		end
+		
+		when button or info with game.get_event_flag("hide_seek_event") > 0 begin
+			say_title(translate.hide_seek_event._010_npcChat)
+			say()
+			say(translate.hide_seek_event._100_say)
+			say()
+			say_reward(translate.hide_seek_event._110_sayReward)
+		end
+		
+		when event_end with game.get_event_flag("hide_seek_event") == 0 begin
+			clear_letter()
+		end
+	end
+end

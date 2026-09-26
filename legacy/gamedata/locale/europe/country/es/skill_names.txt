@@ -1,0 +1,96 @@
+VNUM	LOCALE_NAME
+1	Corte de tres maneras
+106	Tiro relámpago
+107	Llamada del relámpago
+108	Garra del relámpago
+109	Curación
+110	Remolinos
+111	Ataque
+121	Liderazgo
+122	Combo
+123	Pesca
+124	Minería
+125	Producción de objetos
+126	Lenguaje Shinsoo
+127	Lenguaje Chunjo
+128	Lenguaje Jinno
+129	Polimorfismo
+130	Montar a Caballo
+131	Llamar a Caballo
+132	Atacar automáticamente
+137	Caballo vertical
+138	Tocón del caballo
+139	Onda de fuerza
+140	Tormenta de flechas
+151	Ojos de Dragón
+152	Sangre del Dios Dragón
+153	Bendición del Dios Dragón
+154	Armadura Santa
+155	Aceleración
+156	Ira del Dios Dragón
+157	Ayuda de carga
+16	Pulso espiritual
+17	Golpe
+170	Desgarrar
+171	Aliento del lobo
+172	Salto lobuno
+173	Zarpa lobuna
+174	Alma lobuna escarlata
+175	Alma lobuna índigo
+18	Tocón
+19	Cuerpo fuerte
+2	Giro de espada
+20	Golpe de espada
+21	Círculo de espada
+221	Contraataque a giro de espada
+222	Contraataque a emboscada
+223	Contraataque a golpe de dedo
+224	Contraataque a disparo de dragón
+225	Contraataque a pulso espiritual
+226	Contraataque a flecha de fuego
+227	Contraataque a golpe oscuro
+228	Contraataque a llamada del relámpago
+229	Contraataque a aliento del lobo
+236	Potenciador de giro de espada
+237	Potenciador de emboscada
+238	Potenciador de golpe de dedo
+239	Potenciador de disparo de dragón
+240	Potenciador de pulso espiritual
+241	Potenciador de flecha de fuego
+242	Potenciador de golpe oscuro
+243	Potenciador de llamada del relámpago
+244	Potenciador de aliento del lobo
+3	Berserk
+31	Emboscada
+32	Ataque rápido
+33	Daga rodante
+34	Camuflaje
+35	Nube tóxica
+36	Veneno lento
+4	Aura de espada
+46	Disparo repetido
+47	Lluvia de flechas
+48	Flecha de fuego
+49	Camino pluma
+5	Rociada
+50	Flecha venenosa
+51	Golpe lumínico
+6	Deseo de vivir
+61	Golpe de dedo
+62	Remolino de dragón
+63	Hoja encantada
+64	Miedo
+65	Armadura encantada
+66	Anular magia
+76	Golpe oscuro
+77	Golpe de llama
+78	Espíritu de la llama
+79	Protección oscura
+80	Golpe espiritual
+81	Orbe oscuro
+91	Talismán volador
+92	Disparo del dragón
+93	Rugido del dragón
+94	Bendición
+95	Reflectar
+96	Ayuda del dragón

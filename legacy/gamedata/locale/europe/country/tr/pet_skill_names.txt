@@ -1,0 +1,24 @@
+VNUM	LOCALE_NAME
+1	Dayanýklýlýk (Savaþçý)
+2	Dayanýklýlýk (Sura)
+3	Dayanýklýlýk (Ninja)
+4	Dayanýklýlýk (Þaman)
+5	Dayanýklýlýk (Lycan)
+6	Berserker
+7	Büyü Bozma
+8	Hýzlandýrma
+9	Talim
+10	Yenileme
+11	Vampir
+12	Hayaletler
+13	Engel
+14	Yansýtma
+15	Yang Düþme
+16	Menzil
+17	Yenilmezlik
+18	Ýyileþtirme
+19	Mayalama ustasý
+20	Canavar avcýsý
+21	Kavrayýþ
+22	Can çekme
+23	Tüy gibi

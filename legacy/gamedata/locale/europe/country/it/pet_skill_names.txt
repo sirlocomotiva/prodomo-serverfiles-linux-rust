@@ -1,0 +1,24 @@
+VNUM	LOCALE_NAME
+1	Resistenza (guerriero)
+2	Resistenza (sura)
+3	Resistenza (ninja)
+4	Resistenza (shamani)
+5	Resistenza (lican)
+6	Berserker
+7	Anti-magia
+8	Accelerazione
+9	Perforazione
+10	Rinnovo
+11	Vampiro
+12	Fanstasmi
+13	Intoppo
+14	Riflesso
+15	Drop di Yang
+16	Portata
+17	Invincibilità
+18	Guarigione
+19	Mastro birraio
+20	Cacciamostri
+21	Perspicacia
+22	Succhiavita
+23	Leggerezza

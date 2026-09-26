@@ -1,0 +1,34 @@
+ScriptType               MotionData
+
+MotionFileName           "D:\ymir work\monster\plechi_natural_gnu\attack00.GR2"
+MotionDuration           2.666667
+
+Group AttackingData
+{
+    AttackType           0
+    HittingType          2
+    StiffenTime          0.000000
+    InvisibleTime        0.300000
+    ExternalForce        0.000000
+    HitLimitCount        2
+    
+    MotionType           2
+    HitDataCount         1
+    Group HitData00
+    {
+        AttackingStartTime   0.850000
+        AttackingEndTime     1.070000
+        AttackingBone        "Bip01"
+        WeaponLength         80.000000
+        List HitPosition
+        {
+            0.8500000 250.000000 0.000000 200.000000 0.000000 -0.000000 160.000000
+            0.8650000 240.000000 -40.000000 200.000000 0.000000 -0.000000 160.000000
+            0.890000 170.000000 -180.000000 160.000000 0.000000 -0.000000 160.000000
+            0.920000 60.000000 -350.000000 160.000000 0.000000 -0.000000 160.000000
+            0.980000 0.000000 -400.000000 160.000000 0.000000 -0.000000 160.000000
+            0.100000 -30.000000 -320.000000 140.000000 0.000000 -0.000000 140.000000
+		}
+   }
+}
+

@@ -1,0 +1,2 @@
+if game . get_event_flag ( "kingdom_war_event" ) > 0 then send_letter ( translate . kingdom_war_event . _010_npcChat ) 
+ return end 

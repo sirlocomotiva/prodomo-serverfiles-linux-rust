@@ -1,0 +1,26 @@
+ScriptType               MotionData
+
+MotionFileName           "D:\ymir work\monster2\plechi_gold_monster1\dead.GR2"
+MotionDuration           9.133334
+
+Group MotionEventData
+{
+    MotionEventDataCount     2
+    Group Event00
+    {
+        MotionEventType      1
+        StartingTime         3.600000
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/gold_monster1_dead.mse"
+        EffectPosition       0.000000 0.000000 0.000000
+    }
+    Group Event01
+    {
+        MotionEventType      8
+        StartingTime         3.608974
+    }
+}

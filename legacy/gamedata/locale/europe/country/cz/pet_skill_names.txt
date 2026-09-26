@@ -1,0 +1,24 @@
+VNUM	LOCALE_NAME
+1	Odolnost (váleèník)
+2	Odolnost (Sura)
+3	Odolnost (ninja)
+4	Odolnost (šaman)
+5	Odolnost (Lykant)
+6	Berserker
+7	Antimagie
+8	Rychlost
+9	Výcvik
+10	Obnova
+11	Upírství
+12	Duševno
+13	Bulwark
+14	Odraz
+15	Padání Yangù
+16	Dosah
+17	Nesmrtelnost
+18	Všelék
+19	Mistr sládek
+20	Lovec pøíšer
+21	Orlí oèi
+22	Vysátí života
+23	Lehký jako pírko

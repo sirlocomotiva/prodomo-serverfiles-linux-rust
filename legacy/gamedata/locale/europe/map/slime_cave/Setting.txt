@@ -1,0 +1,12 @@
+ScriptType	MapSetting
+
+CellScale	200
+HeightScale	0.500000
+
+ViewRadius	128
+
+MapSize	2	2
+BasePosition	1715200	102400
+TextureSet	textureset\slime_cave.txt
+Environment	slime_cave.msenv
+

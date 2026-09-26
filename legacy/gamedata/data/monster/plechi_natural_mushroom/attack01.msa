@@ -1,0 +1,59 @@
+ScriptType               MotionData
+
+MotionFileName           "D:\ymir work\monster\plechi_natural_mushroom\attack01.GR2"
+MotionDuration           0.966667
+
+Group AttackingData
+{
+    AttackType           0
+    HittingType          2
+    StiffenTime          0.000000
+    InvisibleTime        0.300000
+    ExternalForce        0.000000
+    HitLimitCount        2
+    
+    MotionType           2
+    HitDataCount         1
+    Group HitData00
+    {
+        AttackingStartTime   0.090000
+        AttackingEndTime     0.400000
+        AttackingBone        "Bip01"
+        WeaponLength         80.000000
+        List HitPosition
+        {
+            0.090000 0.000000 -240.000000 160.000000 0.000000 -0.000000 50.000000
+            0.210000 0.000000 -240.000000 160.000000 0.000000 -0.000000 50.000000
+            0.320000 0.000000 -240.000000 160.000000 0.000000 -0.000000 50.000000
+		}
+   }
+}
+
+Group MotionEventData
+{
+    MotionEventDataCount     2
+    Group Event00
+    {
+        MotionEventType      1
+        StartingTime         0.090000
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/natural_mushroom_attack01.mse"
+        EffectPosition       0.000000 -220.000000 150.000000
+    }
+    Group Event01
+    {
+        MotionEventType      1
+        StartingTime         0.210000
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/natural_mushroom_attack01.mse"
+        EffectPosition       0.000000 -220.000000 150.000000
+    }
+}

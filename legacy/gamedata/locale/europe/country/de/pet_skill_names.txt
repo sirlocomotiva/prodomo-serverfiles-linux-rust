@@ -1,0 +1,24 @@
+VNUM	LOCALE_NAME
+1	Widerstand (Krieger)
+2	Widerstand (Sura)
+3	Widerstand (Ninja)
+4	Widerstand (Schamane)
+5	Widerstand (Lykaner)
+6	Berserker
+7	Magiebruch
+8	Beschleunigung
+9	Drill
+10	Erneuerung
+11	Vampir
+12	Geister
+13	Hindernis
+14	Spiegeln
+15	Yang Drop
+16	Reichweite
+17	Unbesiegbarkeit
+18	Heilung
+19	Braumeister
+20	Monsterjäger
+21	Scharfblick
+22	Lebensentzug
+23	Federleicht

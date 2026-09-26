@@ -1,0 +1,24 @@
+VNUM	LOCALE_NAME
+1	Resistencia (Guerrero) 
+2	Resistencia (Sura) 
+3	Resistencia (Ninja) 
+4	Resistencia (Chamán) 
+5	Resistencia (Lícano) 
+6	Bersérker
+7	Rompemagia
+8	Aceleración
+9	Perforación
+10	Recuperación
+11	Vampirismo
+12	Espiritismo
+13	Bloqueo
+14	Reflejo
+15	Recogida de Yang
+16	Alcance
+17	Invencibilidad
+18	Curación
+19	Brebaje
+20	Cazamonstruos
+21	Perspicacia
+22	Extracción
+23	Ligereza

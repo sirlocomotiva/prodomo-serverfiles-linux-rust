@@ -1,0 +1,58 @@
+quest siege_war_event begin
+	state start begin
+		function check_status()
+			if game.get_event_flag("siege_shinsoo_score") > 0 and pc.get_empire() == 1 then
+				syschat(translate.siege_war_event._180_sysChat)
+				if pc.get_map_index() == 103 then 
+					warp_to_village() 
+					return false
+				end
+			elseif game.get_event_flag("siege_chunjo_score") > 0 and pc.get_empire() == 2 then
+				syschat(translate.siege_war_event._180_sysChat)
+				if pc.get_map_index() == 103 then 
+					warp_to_village() 
+					return false
+				end
+			elseif game.get_event_flag("siege_jinno_score") > 0 and pc.get_empire() == 3 then
+				syschat(translate.siege_war_event._180_sysChat)
+				if pc.get_map_index() == 103 then 
+					warp_to_village() 
+					return false
+				end
+			end
+			
+			return true
+		end
+		
+		when login or event_begin with game.get_event_flag("siege_war_event") > 0 begin
+			siege_war_event.check_status()
+			
+			send_letter(translate.siege_war_event._010_npcChat)
+		end
+		
+		when event_end with game.get_event_flag("siege_war_event") == 0 begin
+			clear_letter()
+		end
+		
+		when button or info begin
+			say_title(translate.siege_war_event._010_npcChat)
+			say()
+			say()
+			say(translate.siege_war_event._100_say)
+			say()
+			say(translate.siege_war_event._120_sayReward)
+			
+			if select(translate.locale.yes, translate.locale.no) == 2 then
+				say()
+				say(translate.siege_war_event._130_say)
+				say()
+			else
+				if pc.get_map_index() == 103 then syschat(translate.siege_war_event._140_sysChat) return end
+				
+				if siege_war_event.check_status() then
+					pc.warp(0, 25600)
+				end
+			end
+		end
+	end
+end

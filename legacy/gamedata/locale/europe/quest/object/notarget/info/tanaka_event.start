@@ -1,0 +1,6 @@
+if game . get_event_flag ( "tanaka_event" ) > 0 then say_title ( translate . tanaka_event . _010_npcChat ) 
+say ( ) 
+say ( translate . tanaka_event . _100_say ) 
+say ( ) 
+say_reward ( translate . tanaka_event . _110_sayReward ) 
+ return end 

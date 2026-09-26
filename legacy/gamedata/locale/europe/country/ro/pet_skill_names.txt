@@ -1,0 +1,24 @@
+VNUM	LOCALE_NAME
+1	Rezistenþã (Rãzboinic)
+2	Rezistenta (Sura)
+3	Rezistenta (Ninja)
+4	Rezistenta (Saman)
+5	Rezistenta (Lycan)
+6	Berserker
+7	Anti-Magie
+8	Graba
+9	Antrenament
+10	Restaurare
+11	Vampirism
+12	Spiritism
+13	Obstructie
+14	Reflexie
+15	Drop Yang
+16	Distanta
+17	Imortalitate
+18	Remediu
+19	Maestrul Licorilor
+20	Maestru Vânãtor
+21	Ochi de Vultur
+22	Absorbþia Vieþii
+23	Uºor ca un Fulg

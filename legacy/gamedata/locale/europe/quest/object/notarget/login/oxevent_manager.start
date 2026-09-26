@@ -1,0 +1,2 @@
+if game . get_event_flag ( "oxevent_status" ) > 0 then send_letter ( translate . oxevent . _10_npcChat ) 
+ return end 

@@ -1,0 +1,9 @@
+if game . get_event_flag ( "metin_event" ) > 0 then if pc . get_map_index ( ) == 230 then 
+notice ( translate . metin_event . _110_notice ) 
+notice ( translate . metin_event . _120_notice ) 
+notice ( translate . metin_event . _130_notice ) 
+notice ( translate . metin_event . _140_notice ) 
+notice ( translate . metin_event . _150_notice ) 
+end 
+send_letter ( translate . metin_event . _010_npcChat ) 
+ return end 

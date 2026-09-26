@@ -1,0 +1,6 @@
+if game . get_event_flag ( "hide_seek_event" ) > 0 then say_title ( translate . hide_seek_event . _010_npcChat ) 
+say ( ) 
+say ( translate . hide_seek_event . _100_say ) 
+say ( ) 
+say_reward ( translate . hide_seek_event . _110_sayReward ) 
+ return end 

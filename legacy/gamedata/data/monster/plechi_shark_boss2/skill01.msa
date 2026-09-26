@@ -1,0 +1,100 @@
+ScriptType               MotionData
+
+MotionFileName           "D:\ymir work\monster2\plechito_summer2020\plechi_shark_boss2\skill01.GR2"
+MotionDuration           3.000000
+
+Group MotionEventData
+{
+    MotionEventDataCount     7
+     Group Event00
+    {
+        MotionEventType      1
+        StartingTime         1.300000
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/shark_boss2_skill01b.mse"
+        EffectPosition       -800.000000 0.000000 0.000000
+    }
+     Group Event01
+    {
+        MotionEventType      1
+        StartingTime         1.350000
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/shark_boss2_skill01b.mse"
+        EffectPosition       -500.000000 -600.000000 0.000000
+    }
+     Group Event02
+    {
+        MotionEventType      1
+        StartingTime         1.390000
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/shark_boss2_skill01b.mse"
+        EffectPosition       0.000000 -900.000000 0.000000
+    }
+     Group Event03
+    {
+        MotionEventType      1
+        StartingTime         1.440000
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/shark_boss2_skill01b.mse"
+        EffectPosition       450.000000 -600.000000 0.000000
+    }
+     Group Event04
+    {
+        MotionEventType      1
+        StartingTime         1.460000
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/shark_boss2_skill01b.mse"
+        EffectPosition       800.000000 0.000000 0.000000
+    }
+    Group Event05
+    {
+        MotionEventType      2
+        StartingTime         1.350000
+        
+        DuringTime           0.3857452
+        Power                50
+        AffectingRange       1400
+    }
+    Group Event06
+    {
+        MotionEventType      4
+        StartingTime         1.350000
+        DuringTime           0.4857452
+        EnableHitProcess     0
+        
+        AttackType           0
+        HittingType          2
+        StiffenTime          0.000000
+        InvisibleTime        0.300000
+        ExternalForce        0.000000
+        HitLimitCount        3
+        CollisionType        4
+        
+        SphereDataCount      1
+        Group SphereData00
+        {
+            Radius           1100.000000
+            Position         0.000000 -200.000000 0.000000
+        }
+    }
+}

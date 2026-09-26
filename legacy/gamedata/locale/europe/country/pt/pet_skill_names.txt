@@ -1,0 +1,24 @@
+VNUM	LOCALE_NAME
+1	Resistência (Guerreiro)
+2	Resistência (Sura)
+3	Resistência (Ninja)
+4	Resistência (Xamã)
+5	Resistência (Lycan)
+6	Enfurecido
+7	Anti-Magia
+8	Celeridade
+9	Perfuração
+10	Recuperação
+11	Vampirismo
+12	Espiritualismo
+13	Baluarte
+14	Reflexão
+15	Queda de Yang
+16	Alcance
+17	Imortal
+18	Panaceia
+19	Mestre das Bebidas
+20	Caçador de Monstros
+21	Olho de Falcão
+22	Suga-Vida
+23	Leve como uma Pena

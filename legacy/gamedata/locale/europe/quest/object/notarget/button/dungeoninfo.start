@@ -1,0 +1,12 @@
+cmdchat ( "getinputbegin" ) 
+local cmd = split ( input ( cmdchat ( "dungeon_info_cmd" ) ) , "#" ) 
+cmdchat ( "getinputend" ) 
+local mobIdx = tonumber ( cmd [ 2 ] ) 
+syschat ( "input is " .. mobIdx ) 
+if cmd [ 1 ] == "ENTER" then 
+syschat ( "you can put directly enter dungeon via quest." ) 
+elseif cmd [ 1 ] == "WARP" then 
+syschat ( "you can put warp via quest." ) 
+elseif cmd [ 1 ] == "TEST" then 
+syschat ( "you can put test boss via quest." ) 
+end 

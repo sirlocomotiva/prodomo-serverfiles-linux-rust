@@ -1,0 +1,24 @@
+VNUM	LOCALE_NAME
+1	Odpornoœæ (wojownik) 
+2	Odpornoœæ (sura) 
+3	Odpornoœæ (ninja) 
+4	Odpornoœæ (szaman) 
+5	Odpornoœæ (Likan) 
+6	Berserk
+7	Antymagia 
+8	Przyspieszenie
+9	Przebicie
+10	Odnowa
+11	Wampir
+12	Duchy
+13	Przeszkoda
+14	Zwierciad³o
+15	Drop Yang
+16	Zasiêg
+17	Nieœmiertelnoœæ
+18	Uzdrowienie
+19	Browarnik
+20	£owca potworów
+21	Spostrzegawczoœæ
+22	Absorpcja ¿ycia
+23	Lekkie jak piórko

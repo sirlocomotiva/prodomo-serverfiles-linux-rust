@@ -1,0 +1,49 @@
+ScriptType               MotionData
+
+MotionFileName           "D:\ymir work\monster\plechi_summer2018_crab1\attack00.GR2"
+MotionDuration           1.966667
+
+Group AttackingData
+{
+    AttackType           0
+    HittingType          2
+    StiffenTime          0.000000
+    InvisibleTime        0.300000
+    ExternalForce        0.000000
+    HitLimitCount        2
+    
+    MotionType           2
+    HitDataCount         1
+    Group HitData00
+    {
+        AttackingStartTime   1.000000
+        AttackingEndTime     1.500000
+        AttackingBone        "Bip01"
+        WeaponLength         80.000000
+        List HitPosition
+        {
+            1.090000 110.000000 -130.000000 150.000000 0.000000 -0.000000 50.000000
+            1.090001 -110.000000 -130.000000 150.000000 0.000000 -0.000000 50.000000
+            1.120000 70.000000 -200.000000 50.000000 0.000000 -0.000000 50.000000
+            1.120001 -70.000000 -200.000000 50.000000 0.000000 -0.000000 50.000000
+            1.140000 0.000000 -180.000000 50.000000 0.000000 -0.000000 50.000000
+		}
+   }
+}
+
+Group MotionEventData
+{
+    MotionEventDataCount     1
+    Group Event00
+    {
+        MotionEventType      1
+        StartingTime         1.140000
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/summer2018_crab1_attack.mse"
+        EffectPosition       0.000000 -150.000000 50.000000
+    }
+}

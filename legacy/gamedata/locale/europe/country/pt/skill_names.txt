@@ -1,0 +1,96 @@
+VNUM	LOCALE_NAME
+1	Ataque Triplo
+106	Atirar Raio
+107	Invocar Raio
+108	Garra de Raios
+109	Curar
+110	Rapidez
+111	Energia
+121	Liderança
+122	Combo
+123	Pescar
+124	Garimpar
+125	Criar Objectos
+126	Língua Shinsoo
+127	Língua Chunjo
+128	Língua Jinno
+129	Transformação
+130	Equitação
+131	Chamar Cavalo
+132	Atacar automaticamente
+137	Ataque a Cavalo
+138	Investida do Cavalo
+139	Onda de Energia
+140	Tempestade de Setas
+151	Olhos de Dragão
+152	Sangue do Deus Dragão
+153	Bênção do Deus Dragão
+154	Armadura Sagrada
+155	Aceleração
+156	Fúria do Deus Dragão
+157	Invocar Assistência
+16	Força do Golpe
+17	Ataque Destrutivo
+170	Retalho
+171	Sopro do Lobo
+172	Salto do Lobo
+173	Garra do Lobo
+174	Alma do Lobo Rubro
+175	Alma do Lobo Anil
+18	Terramoto
+19	Corpo Forte
+2	Espada Rotativa
+20	Ataque de Espada
+21	Orbe da Espada
+221	Guarda da Espada Rotativa
+222	Guarda da Emboscada
+223	Guarda do Ataque do Dedo
+224	Guarda do Ataque do Dragão
+225	Guarda do Ataque Espiritual
+226	Guarda da Flecha de Fogo
+227	Guarda do Ataque Obscuro
+228	Guarda de Invocar Raio
+229	Guarda do Sopro do Lobo
+236	Reforço da Espada Rotativa
+237	Reforço da Emboscada
+238	Reforço do Ataque do Dedo
+239	Reforço do Ataque do Dragão
+240	Reforço do Ataque Espiritual
+241	Reforço da Flecha de Fogo
+242	Reforço do Ataque Obscuro
+243	Reforço de Invocar Raio
+244	Reforço do Sopro do Lobo
+3	Raiva
+31	Emboscar
+32	Ataque Rápido
+33	Adaga Rotativa
+34	Modo Furtivo
+35	Nuvem Venenosa
+36	Veneno Insidioso
+4	Aura da Espada
+46	Tiro Duplo
+47	Chuva de Setas
+48	Seta de Fogo
+49	Flutuar
+5	Investida
+50	Seta Envenenada
+51	Faísca
+6	Força Vital
+61	Ataque do Dedo
+62	Espiral do Dragão
+63	Lâmina Encantada
+64	Receio
+65	Armadura Negra
+66	Remover Efeito
+76	Ataque Obscuro
+77	Ataque Chama
+78	Espírito Chama
+79	Protecção Sombria
+80	Ataque Espiritual
+81	Bola da Escuridão
+91	Talismã Voador
+92	Ataque do Dragão
+93	Rugido do Dragão
+94	Bênção
+95	Poder Reflectivo
+96	Ajuda do Dragão

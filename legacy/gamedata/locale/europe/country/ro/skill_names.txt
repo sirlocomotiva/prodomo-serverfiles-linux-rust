@@ -1,0 +1,96 @@
+VNUM	LOCALE_NAME
+1	Incizie Triplã
+106	Aruncarea Fulgerului
+107	Chemarea Fulgerului
+108	Gheara Fulgerului
+109	Leac
+110	Accelerare
+111	Atac Forþat
+121	Conducere
+122	Combo
+123	Pescuit
+124	Minerit
+125	Crearea Obiectelor
+126	Shinsoo
+127	Chunjo
+128	Jinno
+129	Transformare
+130	Calarit
+131	Cheamã Calul.
+132	Atacã automat
+137	Lupta Calare
+138	Zdruncinare
+139	Atac in Valuri
+140	Rafala de Sageti
+151	Ochi de Dragon
+152	Sangele Zeului Dragon
+153	Binecuvantarea Zeului Dragon
+154	Armurã Sfântã
+155	Accelerare
+156	Furia Zeului Dragon
+157	Ajutor Fermecat
+16	Atacul Spiritului
+17	Zdrobire
+170	Sfâºie
+171	Suflul Lupului
+172	Sãritura Lupului
+173	Dinþii Lupului
+174	Sufletul Lupului Roºu
+175	Sufletul Lupului Indigo
+18	Zdruncinare
+19	Corp Rezistent
+2	Vârtejul Sabiei
+20	Atacul Sabiei
+21	Sfera Sabiei
+221	Respingere Vârtejul Sabiei
+222	Respingere Ambuscadã
+223	Respingere Lovitura Degetului
+224	Respingere Aruncarea Dragonului
+225	Respingere Atacul Spiritului
+226	Respingere Sageatã de Foc
+227	Respingere Loviturã Întunecatã
+228	Respingere Chemarea Fulgerului
+229	Respingere Suflul Lupului
+236	Ajutor Vârtejul Sabiei
+237	Ajutor Ambuscadã
+238	Ajutor Lovitura Degetului
+239	Ajutor Aruncarea Dragonului
+240	Ajutor Atacul Spiritului
+241	Ajutor Sageatã de Foc
+242	Ajutor Loviturã Întunecatã
+243	Ajutor Chemarea Fulgerului
+244	Ajutor Suflul Lupului
+3	Iureº
+31	Ambuscadã
+32	Atac fulger
+33	Pumnal Rulant
+34	Camuflaj
+35	Nor Otrãvitor
+36	Otravã Subtilã
+4	Aura Sabiei
+46	Foc Repetat
+47	Ploaie de Sãgeþi
+48	Sãgeatã de Foc
+49	Mers de Fulg
+5	Izbiturã
+50	Sãgeatã Otrãvitã
+51	Scânteie
+6	Puterea Vieþii
+61	Lovitura Degetului
+62	Vârtejul Dragonului
+63	Tãiº Vrãjit
+64	Teamã
+65	Armurã Vrajitã
+66	Risipirea Magiei
+76	Loviturã Întunecatã
+77	Lovitura Focului
+78	Spiritul Flãcãrii
+79	Protecþie Întunecatã
+80	Lovitura Spiritului
+81	Sferã Întunecatã
+91	Talisman Zburãtor
+92	Aruncarea Dragonului
+93	Rãgetul Dragonului
+94	Binecuvântare
+95	Reflexie
+96	Ajutorul Dragonului

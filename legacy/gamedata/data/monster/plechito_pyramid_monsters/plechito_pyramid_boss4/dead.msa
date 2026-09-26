@@ -1,0 +1,26 @@
+ScriptType               MotionData
+
+MotionFileName           "D:\ymir work\monster2\plechito_pyramid_monsters\plechito_pyramid_boss4\dead.GR2"
+MotionDuration           3.600000
+
+Group MotionEventData
+{
+    MotionEventDataCount     2
+    Group Event00
+    {
+        MotionEventType      1
+        StartingTime         2.690000
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/p_pyramid_boss4_dead.mse"
+        EffectPosition       0.000000 0.000000 500.000000
+    }
+    Group Event01
+    {
+        MotionEventType      8
+        StartingTime         2.708974
+    }
+}

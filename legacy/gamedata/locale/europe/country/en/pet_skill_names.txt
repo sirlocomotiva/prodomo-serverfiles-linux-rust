@@ -1,0 +1,24 @@
+VNUM	LOCALE_NAME
+1	Resistance (Warrior)
+2	Resistance (Sura)
+3	Resistance (Ninja)
+4	Resistance (Shaman)
+5	Resistance (Lycan)
+6	Berserker
+7	Anti-Magic
+8	Haste
+9	Drill
+10	Restoration
+11	Vampirism
+12	Spiritualism
+13	Bulwark
+14	Reflection
+15	Yang Drop
+16	Range
+17	Immortal
+18	Panacea
+19	Master Brewer
+20	Monster Hunter
+21	Eagle Eyes
+22	Life Drain
+23	Light as a Feather

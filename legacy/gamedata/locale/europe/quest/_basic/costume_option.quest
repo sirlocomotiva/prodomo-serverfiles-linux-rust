@@ -1,0 +1,52 @@
+quest costume_option begin
+	state start begin
+		when login begin
+			local msg = gameforge.costume_option._100_say .. " "
+			local val = 0
+
+			if pc.getqf("hide_body") == 1 then
+				val = val + 1
+				msg = msg .. gameforge.costume_option._110_say .. " "
+				pc.hide_costume(1, true)
+			else
+				pc.hide_costume(1, false)
+			end
+
+			if pc.getqf("hide_hair") == 1 then
+				val = val + 1
+				msg = msg .. gameforge.costume_option._120_say .. " "
+				pc.hide_costume(2, true)
+			else
+				pc.hide_costume(2, false)
+			end
+
+			if pc.getqf("hide_sash") == 1 then
+				val = val + 1
+				msg = msg .. gameforge.costume_option._130_say .. " "
+				pc.hide_costume(3, true)
+			else
+				pc.hide_costume(3, false)
+			end
+
+			if pc.getqf("hide_aura") == 1 then
+				val = val + 1
+				msg = msg .. gameforge.costume_option._150_say .. " "
+				pc.hide_costume(4, true)
+			else
+				pc.hide_costume(4, false)
+			end
+
+			if pc.getqf("hide_weapon") == 1 then
+				val = val + 1
+				msg = msg .. gameforge.costume_option._140_say .. " "
+				pc.hide_costume(5, true)
+			else
+				pc.hide_costume(5, false)
+			end
+
+			if val != 0 then
+				syschat(msg)
+			end
+		end
+	end
+end

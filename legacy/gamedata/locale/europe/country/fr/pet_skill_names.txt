@@ -1,0 +1,24 @@
+VNUM	LOCALE_NAME
+1	Résistance (Guerrier)
+2	Résistance (Sura)
+3	Résistance (Ninja)
+4	Résistance (Chamane)
+5	Résistance (Lycan)
+6	Berserker
+7	Anti-magie
+8	Accélération
+9	Drill
+10	Renouvellement
+11	Vampire
+12	Fantômes
+13	Obstacle
+14	Miroir
+15	Chute de Yangs
+16	Portée
+17	Invincibilité
+18	Soins
+19	Maître brasseur
+20	Chasseur de monstres
+21	Regard perçant
+22	Sangsue
+23	Poids plume

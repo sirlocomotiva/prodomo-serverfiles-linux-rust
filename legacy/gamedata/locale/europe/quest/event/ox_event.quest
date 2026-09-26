@@ -1,0 +1,51 @@
+quest oxevent_manager begin
+    state start begin
+		when login or event_begin with game.get_event_flag("oxevent_status") > 0 begin
+			send_letter(translate.oxevent._10_npcChat)
+		end
+		
+		when event_end with game.get_event_flag("oxevent_status") == 0 begin
+			clear_letter()
+		end
+		
+		when button or info with game.get_event_flag("oxevent_status") > 0 begin
+			say_title(translate.oxevent._10_npcChat)
+			say()
+			say(translate.oxevent._130_notice_all)
+			say(translate.oxevent._131_notice_all)
+		end
+		
+        when 20011.chat.translate.oxevent._10_npcChat begin
+
+            say_title(""..mob_name(npc.get_race())..":")
+            say(translate.oxevent._20_say)
+            wait()
+
+            if game.get_event_flag("oxevent_status") == 0 then
+                say_title(""..mob_name(npc.get_race())..":")
+                say(translate.oxevent._30_say)
+
+            elseif game.get_event_flag("oxevent_status") == 1 then
+                say_title(""..mob_name(npc.get_race())..":")
+                say(translate.oxevent._40_say)
+
+                local s =  select(translate.locale.monkey_dungeon.enter, translate.locale.cancel)
+
+                if s == 1 then
+                    say_title(""..mob_name(npc.get_race())..":")
+                    say(translate.oxevent._50_say)
+                    wait()
+
+                     pc.warp(896500, 24600)
+                elseif s == 2 then
+                    return
+                end
+
+            elseif game.get_event_flag("oxevent_status") == 2 then
+                say_title(""..mob_name(npc.get_race())..":")
+                say(translate.oxevent._60_say)
+
+            end
+        end
+    end
+end

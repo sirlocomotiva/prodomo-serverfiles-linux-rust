@@ -1,0 +1,41 @@
+ScriptType               MotionData
+
+MotionFileName           "D:\ymir work\monster2\plechi_duratus_monster5\attack00.GR2"
+MotionDuration           1.766667
+
+Group MotionEventData
+{
+    MotionEventDataCount     2
+    Group Event00
+    {
+        MotionEventType      4
+        StartingTime         0.550000
+        DuringTime           0.300000
+        EnableHitProcess     1
+        
+        AttackType           0
+        HittingType          2
+        StiffenTime          0.000000
+        InvisibleTime        0.300000
+        ExternalForce        0.000000
+        HitLimitCount        0
+        CollisionType        4
+        
+        SphereDataCount      1
+        Group SphereData00
+        {
+            Radius           200.000000
+            Position         0.000000 -200.000000 100.000000
+        }
+    }
+    Group Event01
+    {
+        MotionEventType      6
+        StartingTime         0.358613
+        
+        AttachingEnable      1
+        AttachingBoneName    "Bip01 L Hand"
+        FlyFileName       "d:/ymir work/effect/plechito/monster/duratus_monster5_attack00.msf"
+        FlyPosition       0.000000 0.000000 0.000000
+    }
+}

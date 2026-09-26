@@ -1,0 +1,96 @@
+VNUM	LOCALE_NAME
+1	Háromirányú vágás
+106	Villám hajítás
+107	Villámidézés
+108	Villám karom
+109	Kezelés
+110	Gyorsaság
+111	Támadás+
+121	Vezetés
+122	Kombó
+123	Horgászat
+124	Bányászat
+125	Tárgyak készítése
+126	Shinsoo
+127	Chunjo
+128	Jinno
+129	Átváltozás
+130	Lovaglás
+131	Ló hívás
+132	Automatikus támadás
+137	Harc lóhátról
+138	Ló dübörgés
+139	Erõ hullám
+140	Nyílzápor
+151	Sárkányszem
+152	A Sárkányisten vére
+153	A Sárkányisten áldása
+154	Szent felszerelés
+155	Gyorsítás
+156	A Sárkányisten dühe
+157	Varázs-segély
+16	Áthatolás
+17	Heves csapás
+170	Széttépés
+171	Farkaslehelet
+172	Farkasugrás
+173	Farkaskarmolás
+174	Bíborfarkas-lélek
+175	Indigófarkas-lélek
+18	Dübörgés
+19	Erõs test
+2	Forgó kard
+20	Kard ütés
+21	Kardkör
+221	Forgó kard elhárítás
+222	Leshely elhárítás
+223	Ujjcsapás elhárítás
+224	Sárkány lövés elhárítás
+225	Áthatolás elhárítás
+226	Tûznyíl elhárítás
+227	Sötét csapás elhárítás
+228	Villám könyörgés elhárítás
+229	Farkaslehelet ellenállás
+236	Forgó kard fokozás
+237	Leshely fokozás
+238	Ujjcsapás fokozó
+239	Sárkány lövés fokozás
+240	Áthatolás fokozás
+241	Tûznyíl fokozás
+242	Sötét csapás fokozás
+243	Villám könyörgés fokozás
+244	Farkaslehelet fokozás
+3	Harci mámor
+31	Leshely
+32	Villám támadás
+33	Kard forgatag
+34	Álcázás
+35	Méreg felhõ
+36	Alattomos méreg
+4	A kard aurája
+46	Ismételt lövés
+47	Nyílesõ
+48	Tûznyíl
+49	Pehelykönnyû lépések
+5	Száguldás
+50	Mérgezett nyíl
+51	Szikra
+6	Életenergia
+61	Ujjcsapás
+62	Sárkány örvény
+63	Elvarázsolt penge
+64	Félelem
+65	Elvarázsolt vértezés
+66	Varázslat kioltás
+76	Sötét csapás
+77	Láng csapás
+78	Láng lelke
+79	Sötét védelem
+80	Szellem csapás
+81	Sötét kõ
+91	Repülõ talizmán
+92	Sárkány lövés
+93	Sárkány ordítás
+94	Áldás
+95	Visszaverés
+96	Sárkány segítsége

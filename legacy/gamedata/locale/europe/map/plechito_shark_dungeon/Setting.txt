@@ -1,0 +1,12 @@
+ScriptType	MapSetting
+
+CellScale	200
+HeightScale	0.500000
+
+ViewRadius	128
+
+MapSize	2	2
+BasePosition	1049600	2252800
+TextureSet	textureset\plechito_shark_dungeon.txt
+Environment	plechito_shark_dungeon.msenv
+

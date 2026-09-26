@@ -1,0 +1,7 @@
+Group	Skin-Aquarian-Pumnal
+{
+	vnum	40130
+	1	0	0	63	25	2500	// NR.BONUS, MONSTERVNUM-ETC,TYPE_EX:STACK_ATTRIBUTE_BY_MONSTER(is: 0)...etc
+	2	0	1	61	20	2000
+	3	591	2	63	15	1500
+}

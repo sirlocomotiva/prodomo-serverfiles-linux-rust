@@ -1,0 +1,55 @@
+ScriptType               MotionData
+
+MotionFileName           "D:\ymir work\monster\plechi_summer2018_crab6\attack01.GR2"
+MotionDuration           1.566667
+
+Group AttackingData
+{
+    AttackType           0
+    HittingType          2
+    StiffenTime          0.000000
+    InvisibleTime        0.300000
+    ExternalForce        0.000000
+    HitLimitCount        2
+    
+    MotionType           2
+    HitDataCount         1
+    Group HitData00
+    {
+        AttackingStartTime   0.730000
+        AttackingEndTime     0.900000
+        AttackingBone        "Bip01"
+        WeaponLength         80.000000
+        List HitPosition
+        {
+            0.740000 210.000000 -110.000000 170.000000 0.000000 -0.000000 50.000000
+            0.740001 -210.000000 -110.000000 170.000000 0.000000 -0.000000 50.000000
+            0.760000 200.000000 -160.000000 130.000000 0.000000 -0.000000 50.000000
+            0.760001 -200.000000 -160.000000 130.000000 0.000000 -0.000000 50.000000
+            0.780000 160.000000 -210.000000 70.000000 0.000000 -0.000000 50.000000
+            0.780001 -160.000000 -210.000000 70.000000 0.000000 -0.000000 50.000000
+            0.800000 120.000000 -280.000000 50.000000 0.000000 -0.000000 50.000000
+            0.800001 -120.000000 -280.000000 50.000000 0.000000 -0.000000 50.000000
+            0.820000 50.000000 -330.000000 50.000000 0.000000 -0.000000 50.000000
+            0.820001 -50.000000 -330.000000 50.000000 0.000000 -0.000000 50.000000
+            0.840000 0.000000 -330.000000 50.000000 0.000000 -0.000000 50.000000
+		}
+   }
+}
+
+Group MotionEventData
+{
+    MotionEventDataCount     1
+    Group Event00
+    {
+        MotionEventType      1
+        StartingTime         0.840000
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/summer2018_crab5_attack01.mse"
+        EffectPosition       0.000000 -330.000000 50.000000
+    }
+}

@@ -1,0 +1,112 @@
+ScriptType               MotionData
+
+MotionFileName           "D:\ymir work\monster2\plechi_elephant_boss\skill00.GR2"
+MotionDuration           5.600000
+
+Group MotionEventData
+{
+    MotionEventDataCount     8
+    Group Event00
+    {
+        MotionEventType      1
+        StartingTime         0.3857854
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/elephant_boss_skill00b.mse"
+        EffectPosition       0.000000 -200.000000 0.000000
+    }
+    Group Event01
+    {
+        MotionEventType      1
+        StartingTime         1.8757854
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/elephant_boss_skill00c.mse"
+        EffectPosition       0.000000 0.000000 0.000000
+    }
+    Group Event02
+    {
+        MotionEventType      1
+        StartingTime         3.2757854
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/elephant_boss_skill00d.mse"
+        EffectPosition       0.000000 -400.000000 0.000000
+    }
+    Group Event03
+    {
+        MotionEventType      1
+        StartingTime         3.2757854
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/elephant_boss_skill00d.mse"
+        EffectPosition       400.000000 .000000 0.000000
+    }
+    Group Event04
+    {
+        MotionEventType      1
+        StartingTime         3.2757854
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/elephant_boss_skill00d.mse"
+        EffectPosition       0.000000 400.000000 0.000000
+    }
+    Group Event05
+    {
+        MotionEventType      1
+        StartingTime         3.2757854
+        
+        IndependentFlag      0
+        AttachingEnable      0
+        AttachingBoneName    "Root"
+        FollowingEnable      0
+        EffectFileName       "d:/ymir work/effect/plechito/monster/elephant_boss_skill00d.mse"
+        EffectPosition       -400.000000 .000000 0.000000
+    }
+    Group Event06
+    {
+        MotionEventType      2
+        StartingTime         3.2757854
+        
+        DuringTime           0.5857452
+        Power                300
+        AffectingRange       1500
+    }
+    Group Event07
+    {
+        MotionEventType      4
+        StartingTime         3.2757854
+        DuringTime           1.9857452
+        EnableHitProcess     0
+        
+        AttackType           0
+        HittingType          2
+        StiffenTime          0.000000
+        InvisibleTime        0.300000
+        ExternalForce        0.000000
+        HitLimitCount        3
+        CollisionType        4
+        
+        SphereDataCount      1
+        Group SphereData00
+        {
+            Radius           900.000000
+            Position         0.000000 0.000000 0.000000
+        }
+    }
+}

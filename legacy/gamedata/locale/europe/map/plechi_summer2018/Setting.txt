@@ -1,0 +1,12 @@
+ScriptType	MapSetting
+
+CellScale	200
+HeightScale	0.500000
+
+ViewRadius	128
+
+MapSize	4	4
+BasePosition	1305600	0
+TextureSet	textureset\plechi_summer2018_map.txt
+Environment	summer2018.msenv
+

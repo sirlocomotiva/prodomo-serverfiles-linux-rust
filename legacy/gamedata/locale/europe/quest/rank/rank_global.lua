@@ -1,0 +1,25 @@
+quest napierdalator begin
+	state start begin
+		when kill begin
+			local bIsMetin = npc.is_metin()
+			local bIsBoss = npc.is_boss()
+			local bIsMonster = !npc.is_pc()
+			local bIsPlayer = npc.is_pc()
+			local IsInDungeon = pc.in_dungeon()
+			
+			if bIsMetin then
+				pc.global_rank_add_point(0, 1) -- Metin Stones
+			elseif bIsBoss then
+				if IsInDungeon then
+					pc.global_rank_add_point(4, 1) -- Dungeon Boss
+				else
+					pc.global_rank_add_point(1, 1) -- Normal Dungeon
+				end
+			elseif bIsMonster then
+				pc.global_rank_add_point(2, 1) -- Normal Monsters
+			elseif bIsPlayer then
+				pc.global_rank_add_point(3, 1) -- Players
+			end
+		end
+	end
+end
