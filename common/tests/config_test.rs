@@ -263,6 +263,18 @@ fn with_channels(channels: &str) -> String {
 }
 
 #[test]
+fn event_cycles_are_at_least_one_second() {
+    let channel = "[[channel]]\nnumber = 1\nports = [1]\nmaps = [1]\n";
+    for key in ["save_event_second_cycle", "ping_event_second_cycle"] {
+        let zero = with_channels(&format!("[game]\n{key} = 0\n{channel}"));
+        assert_eq!(invalid(&zero), TopologyError::ZeroCycle(key));
+        // Control: one second is accepted.
+        let one = with_channels(&format!("[game]\n{key} = 1\n{channel}"));
+        assert!(parse(&one).is_ok(), "{key} = 1 was refused");
+    }
+}
+
+#[test]
 fn channel_numbers_must_be_1_to_99_and_unique() {
     let zero = with_channels("[[channel]]\nnumber = 0\nports = [1]\nmaps = [1]\n");
     assert_eq!(invalid(&zero), TopologyError::ChannelNumber(0));

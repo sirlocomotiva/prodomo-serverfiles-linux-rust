@@ -406,6 +406,8 @@ pub enum TopologyError {
     },
     /// Two listeners share a nonzero port.
     DuplicatePort(u16),
+    /// A `[game]` event cycle is zero seconds, so its event would never wait.
+    ZeroCycle(&'static str),
     /// A Shared Channel map is also hosted by another Channel, so a Warp to it is ambiguous.
     SharedMapElsewhere {
         /// The map index.
@@ -434,6 +436,7 @@ impl fmt::Display for TopologyError {
                 write!(f, "channel {channel} lists map {map} twice")
             }
             Self::DuplicatePort(port) => write!(f, "port {port} is used by two listeners"),
+            Self::ZeroCycle(key) => write!(f, "game.{key} must be at least 1 second"),
             Self::SharedMapElsewhere { map, channel } => write!(
                 f,
                 "map {map} is on the shared channel and also on channel {channel}"
@@ -451,6 +454,12 @@ impl ServerConfig {
     ///
     /// Returns the first [`TopologyError`] found.
     pub fn validate(&self) -> Result<(), TopologyError> {
+        if self.game.save_event_second_cycle == 0 {
+            return Err(TopologyError::ZeroCycle("save_event_second_cycle"));
+        }
+        if self.game.ping_event_second_cycle == 0 {
+            return Err(TopologyError::ZeroCycle("ping_event_second_cycle"));
+        }
         let mut numbers = BTreeSet::new();
         let mut ports = BTreeSet::new();
         claim_port(&mut ports, self.auth.port)?;

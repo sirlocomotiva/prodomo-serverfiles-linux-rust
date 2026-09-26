@@ -15321,3 +15321,82 @@ Against 180.3 that is 10 more tests (7 `parity` unit tests and 3 in `prodomo/tes
 two more test binaries (`parity`'s unit tests and `prodomo/tests/parity.rs`). Five new Rust files
 (`parity/src/{lib,client,inventory,server}.rs`, `prodomo/tests/parity.rs`): 146 files, 86,723 lines.
 No scratch database was left behind, and no stray `*.core` file in the workspace root.
+
+## 182. The handshake, TEA, time sync, and the ping cycle on every connection
+
+Build step 3 begins. `handle_connection` in `prodomo/src/main.rs` now runs `client_live` on every
+admitted connection, so the Rewrite greets a client the way legacy `DESC::Setup` does
+(`G/desc.cpp:225-248`) and serves the handshake, auth, and login phases' control records.
+
+### 182.1 The wiring
+
+- `LiveClientSession::start` runs `ClientLifecycle::start` and writes its records: `GC_PHASE(HANDSHAKE)`
+  and then `GC_HANDSHAKE(token, time, 0)`, both plaintext. Auth listeners use the auth handshake kind
+  (phase `AUTH` after the handshake) and Channel listeners the game kind (phase `LOGIN`).
+- The connection loop drains every buffered record first, then waits on one of: a read (end of file
+  closes), the ping tick, or shutdown. `read_input` is one socket read, so it is cancel-safe inside
+  `select!`. A close effect sends nothing, as legacy `DESC::Packet` drops output in `PHASE_CLOSE`.
+- The ping tick fires every `game.ping_event_second_cycle` seconds (legacy `ping_event`): `GC_PING`
+  and a zero-delta handshake, closing a client that sent no pong since the previous tick.
+- `handshake_token` gives every descriptor a nonzero token from a randomly keyed hash of a counter,
+  like legacy `CreateHandshake` (a nonzero CRC32 of random and time). No new dependency.
+
+### 182.2 Defect fixed, and a new configuration rule
+
+- **The live clock counted seconds.** `SystemLiveClock` returned Unix seconds, but the handshake time
+  and the bias check are milliseconds since boot (`get_dword_time`, `libthecore/utils.cpp:467`), so
+  every client reply would have been judged 1000 times too coarse. It is replaced by `BootLiveClock`
+  (the low 32 bits of milliseconds since the process started).
+- **A zero event cycle is refused.** `ServerConfig::validate` refuses `game.save_event_second_cycle =
+  0` and `game.ping_event_second_cycle = 0` (`TopologyError::ZeroCycle`), which would otherwise panic
+  the tick interval. Test `event_cycles_are_at_least_one_second`, with 1 as the accepted control.
+
+### 182.3 Scenarios
+
+`parity::Server::start_configured` adds a `[game]` table to the generated `prodomo.toml` (unit test
+`game_keys_go_in_their_own_table_before_the_channels`). The five new scenarios in
+`prodomo/tests/parity.rs` check golden bytes taken from `G/packet.h` and `G/input.cpp:130-157`:
+
+| scenario | what it proves |
+| --- | --- |
+| `the_handshake_is_sent_on_accept_and_selects_the_phase` | Auth reaches phase 10 and Channels 1 and 99 reach phase 2; `PHASE` is plaintext and precedes TEA; a plaintext pong is accepted before the handshake. Controls: tokens differ per descriptor, and a wrong token closes with no bytes. |
+| `a_mistimed_handshake_is_retried_until_the_limit` | A negative delta is ignored; each of 32 retries carries `delta = (now - time) / 2`; the 33rd mistimed reply closes (`HANDSHAKE_RETRY_LIMIT`). |
+| `the_auth_phase_reads_tea_input` | A sealed pong is read (control: the ciphertext's first byte is not 0xfe); a sealed handshake is consumed silently; a sealed unregistered header closes. |
+| `the_login_phase_answers_time_sync` | 33 mistimed `TIME_SYNC` replies each get a sealed retry with no limit; an in-time reply gets the sealed `TIME_SYNC` (0xfc) acknowledgement. |
+| `the_ping_cycle_closes_a_silent_client` | With a 1-second cycle: sealed `PING` plus a zero-delta handshake each cycle, 900-1500 ms apart; a client that stops ponging is closed with no bytes. |
+
+`prodomo/tests/process.rs` assumed an admitted client is sent nothing. Its probe is now `first_byte`:
+a refused client is closed with no bytes, an admitted one is sent `GC_PHASE` (0xfd) first, and a
+port that does neither fails the test.
+
+Mutation sweep (each mutant applied to the pristine file, checked to change executable code, and
+restored by checksum): the seconds clock, a constant token, TEA enabled before the phase record, no
+ping tick, no start records, and a doubled ping cycle. All six were killed semantically, none by a
+compile error. The doubled cycle survived a first 900-3000 ms window, which was then tightened to
+900-1500 ms.
+
+### 182.4 Inventory
+
+Now `ported`: `cg.any.keep_alive`, `cg.handshake.handshake`, `cg.handshake.pong`, `cg.auth.pong`,
+`cg.auth.handshake`, `cg.login.pong`, `cg.login.time_sync`, `gc.phase`, `gc.handshake`, `gc.ping`,
+`gc.handshake_ok` (sent as `HEADER_GC_TIME_SYNC`), and `sys.net.heartbeat`. `sys.net.handshake` stays
+`partial` until the login's `SetSecurityKey` arrives with `sys.auth.login`, and `sys.net.framing`
+until variable records are framed.
+
+### 182.5 Receipt
+
+Run on 2026-09-26 with rustc 1.85.1, `--locked --offline`:
+
+| gate | result |
+| --- | --- |
+| `cargo fmt --all -- --check` | green |
+| `cargo clippy --workspace --all-targets -- -D warnings` | green |
+| `cargo build --workspace` | green, 0 warnings |
+| `cargo test --workspace --all-targets --no-fail-fast`, with `DATABASE_URL` (PostgreSQL 18) | **1,577 passed, 0 failed, 0 ignored**, across 30 test binaries |
+| the same, without `DATABASE_URL` | **1,577 passed, 0 failed** |
+| `cargo test --workspace --doc` | **1 passed** |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | green |
+
+Against 181.4 that is 7 more tests: `event_cycles_are_at_least_one_second`, one `parity` unit test,
+and the five scenarios. No new Rust file: 146 files, 87,273 lines. No scratch database was left
+behind, and no stray `*.core` file in the workspace root.

@@ -32,6 +32,8 @@ const UNREACHABLE_STORE: &str = "postgres://prodomo:secret-password@127.0.0.1:1/
 const LISTENING: &str = "Listening for ";
 const WAITING: &str = "Waiting for the store before accepting clients";
 const ACCEPTING: &str = "Accepting clients";
+/// `HEADER_GC_PHASE` (`G/packet.h`), the first byte legacy sends an accepted client.
+const GC_PHASE: u8 = 0xfd;
 
 struct ProcessGuard {
     child: Option<Child>,
@@ -285,18 +287,23 @@ fn bound_addresses(console: &[String]) -> Vec<SocketAddr> {
     addresses
 }
 
-/// Whether the server closes a new connection at once, before the client sends anything.
-fn closed_at_once(address: SocketAddr) -> bool {
+/// The first byte the server sends a new connection before the client sends anything, or `None`
+/// when it closes the connection instead. An admitted client is sent `GC_PHASE` (0xfd) first,
+/// because legacy `DESC::Setup` enters the handshake phase before it starts the handshake.
+fn first_byte(address: SocketAddr) -> Option<u8> {
     let mut stream = TcpStream::connect_timeout(&address, PROCESS_TIMEOUT)
         .unwrap_or_else(|error| panic!("{address} should accept: {error}"));
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
         .expect("a read timeout should be settable");
-    match stream.read(&mut [0; 1]) {
-        Ok(0) => true,
-        Ok(_) => panic!("{address} sent bytes to a client that sent none"),
-        Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => false,
-        Err(error) if error.kind() == ErrorKind::ConnectionReset => true,
+    let mut byte = [0; 1];
+    match stream.read(&mut byte) {
+        Ok(0) => None,
+        Ok(_) => Some(byte[0]),
+        Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+            panic!("{address} neither greeted nor closed a new client")
+        }
+        Err(error) if error.kind() == ErrorKind::ConnectionReset => None,
         Err(error) => panic!("{address} failed: {error}"),
     }
 }
@@ -331,7 +338,11 @@ fn serve_refuses_clients_until_the_store_is_reachable_and_shuts_down_cleanly_on_
     // Then: auth and every Channel port are bound, and each closes a client at once.
     let addresses = bound_addresses(&server.console);
     for &address in &addresses {
-        assert!(closed_at_once(address), "{address} should refuse a client");
+        assert_eq!(
+            first_byte(address),
+            None,
+            "{address} should refuse a client"
+        );
     }
     server.wait_for("Refusing client connection before startup has finished");
 
@@ -388,7 +399,11 @@ fn serve_admits_clients_once_the_store_is_migrated() {
 
     let addresses = bound_addresses(&server.console);
     for &address in &addresses {
-        assert!(!closed_at_once(address), "{address} should admit a client");
+        assert_eq!(
+            first_byte(address),
+            Some(GC_PHASE),
+            "{address} should admit a client"
+        );
     }
     server.wait_for("New client connection");
 

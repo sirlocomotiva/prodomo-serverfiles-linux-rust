@@ -77,11 +77,27 @@ impl Server {
     /// As [`Server::start`].
     #[must_use]
     pub fn start_with(binary: &Path, store_url: &str, channels: &[ChannelSpec]) -> Self {
+        Self::start_configured(binary, store_url, channels, "")
+    }
+
+    /// [`Server::start_with`] plus the lines of a `[game]` table, such as
+    /// `"ping_event_second_cycle = 1"`; empty for none.
+    ///
+    /// # Panics
+    ///
+    /// As [`Server::start`].
+    #[must_use]
+    pub fn start_configured(
+        binary: &Path,
+        store_url: &str,
+        channels: &[ChannelSpec],
+        game: &str,
+    ) -> Self {
         let root = unique_root();
         let log_dir = root.join("log");
         fs::create_dir_all(&log_dir).expect("the scenario directory should be creatable");
         let config = root.join("prodomo.toml");
-        fs::write(&config, config_text(store_url, channels))
+        fs::write(&config, config_text(store_url, channels, game))
             .expect("the scenario configuration should be writable");
         let mut child = Command::new(binary)
             .arg("--config")
@@ -231,9 +247,12 @@ fn unique_root() -> PathBuf {
 }
 
 /// The `prodomo.toml` for a scenario: every port 0, so the operating system picks free ones.
-fn config_text(store_url: &str, channels: &[ChannelSpec]) -> String {
+fn config_text(store_url: &str, channels: &[ChannelSpec], game: &str) -> String {
     let mut text =
         format!("bind_ip = \"127.0.0.1\"\n\n[store]\nurl = \"{store_url}\"\n\n[auth]\nport = 0\n");
+    if !game.is_empty() {
+        write!(text, "\n[game]\n{game}\n").expect("writing to a String cannot fail");
+    }
     for channel in channels {
         let ports = vec!["0"; channel.listeners].join(", ");
         let maps: Vec<String> = channel.maps.iter().map(u32::to_string).collect();
@@ -267,12 +286,22 @@ mod tests {
 
     #[test]
     fn the_configuration_names_every_channel_with_port_zero() {
-        let text = config_text("postgres://h/db", &default_channels());
+        let text = config_text("postgres://h/db", &default_channels(), "");
         assert_eq!(
             text,
             "bind_ip = \"127.0.0.1\"\n\n[store]\nurl = \"postgres://h/db\"\n\n[auth]\nport = 0\n\
              \n[[channel]]\nnumber = 1\nports = [0, 0]\nmaps = [1, 3]\n\
              \n[[channel]]\nnumber = 99\nports = [0]\nmaps = [72]\n"
+        );
+    }
+
+    #[test]
+    fn game_keys_go_in_their_own_table_before_the_channels() {
+        let text = config_text("postgres://h/db", &[], "ping_event_second_cycle = 1");
+        assert_eq!(
+            text,
+            "bind_ip = \"127.0.0.1\"\n\n[store]\nurl = \"postgres://h/db\"\n\n[auth]\nport = 0\n\
+             \n[game]\nping_event_second_cycle = 1\n"
         );
     }
 }

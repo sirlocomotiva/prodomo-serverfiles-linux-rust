@@ -31,10 +31,13 @@
 //! construction, and no gameplay. Reaching the `Game` phase needs the
 //! character-load path, which is a separate boundary.
 
+use std::collections::hash_map::RandomState;
 use std::error::Error;
 use std::fmt;
+use std::hash::{BuildHasher, Hasher};
 use std::io;
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use protocol::cg_inventory::{CG_KEEP_ALIVE, HEADER_CG_PONG};
 use protocol::cg_wire::{
@@ -44,6 +47,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::client_session::ClientPhase;
 use crate::descriptor_crypto::{DescriptorCrypto, DescriptorCryptoError, DescriptorCryptoMode};
+use crate::handshake::HandshakeServerKind;
 use crate::handshake_dispatch::{
     dispatch_handshake_frame_at_boundary, HandshakeDispatchError, HandshakeInputBoundary,
 };
@@ -68,22 +72,58 @@ pub trait LiveClock {
     fn now(&self) -> u32;
 }
 
-/// A clock reading the system time as a wrapping `u32`.
+/// The legacy descriptor clock: milliseconds since the server started, as a wrapping `u32`.
 ///
-/// `SystemTime::duration_since` fails before the Unix epoch on some platforms,
-/// so a pre-epoch time degrades to zero rather than panicking.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SystemLiveClock;
+/// Legacy `get_dword_time` (`libthecore/utils.cpp:467`) returns
+/// `(tv_sec - boot_sec) * 1000 + tv_usec / 1000`, so the handshake time and the 50 ms bias
+/// window in `DESC::HandshakeProcess` are in milliseconds. This clock counts from a monotonic
+/// start instead of the wall clock, so a clock step cannot fail a handshake.
+#[derive(Debug, Clone, Copy)]
+pub struct BootLiveClock {
+    boot: Instant,
+}
 
-impl LiveClock for SystemLiveClock {
+impl BootLiveClock {
+    /// Start the clock now.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            boot: Instant::now(),
+        }
+    }
+}
+
+impl Default for BootLiveClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LiveClock for BootLiveClock {
     fn now(&self) -> u32 {
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |elapsed| {
-                // Keep the low 32 bits: the legacy clock is a wrapping `u32`.
-                let [a, b, c, d, ..] = elapsed.as_secs().to_le_bytes();
-                u32::from_le_bytes([a, b, c, d])
-            })
+        // Keep the low 32 bits: the legacy clock is a wrapping `u32`.
+        let [a, b, c, d, ..] = self.boot.elapsed().as_millis().to_le_bytes();
+        u32::from_le_bytes([a, b, c, d])
+    }
+}
+
+/// A fresh handshake token: an opaque, nonzero 32-bit value the client echoes.
+///
+/// Legacy `DESC_MANAGER::CreateHandshake` takes a CRC32 of a random number and the time and
+/// retries on zero. The client treats the value as opaque, so any nonzero value that an
+/// observer cannot predict is equivalent. The standard library's randomly keyed hasher supplies
+/// it without a new dependency.
+#[must_use]
+pub fn handshake_token() -> u32 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u64(NEXT.fetch_add(1, Ordering::Relaxed));
+        let [a, b, c, d, ..] = hasher.finish().to_le_bytes();
+        let token = u32::from_le_bytes([a, b, c, d]);
+        if token != 0 {
+            return token;
+        }
     }
 }
 
@@ -394,6 +434,27 @@ where
         self.stream
     }
 
+    /// Accept a client: run `DESC::Setup` and write its records.
+    ///
+    /// Legacy sets the handshake phase and sends the first handshake as soon as the socket is
+    /// accepted (`desc.cpp:242-243`), so the client hears `GC_PHASE(PHASE_HANDSHAKE)` and then
+    /// `GC_HANDSHAKE(token, now, 0)`, both plaintext, before it sends anything.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiveError`] when the records cannot be written.
+    pub async fn start(
+        stream: S,
+        token: u32,
+        server_kind: HandshakeServerKind,
+        now: u32,
+    ) -> Result<(Self, Vec<Vec<u8>>), LiveError> {
+        let reduction = ClientLifecycle::start(token, server_kind, now);
+        let mut session = Self::new(stream, reduction.state)?;
+        let written = session.apply(reduction).await?;
+        Ok((session, written))
+    }
+
     /// Read one client frame and apply the matching source analyzer.
     ///
     /// The method accepts arbitrary fragmentation and coalesced frames. It
@@ -407,33 +468,73 @@ where
     /// decoder rejection, or a refused phase boundary. Every one of these ends
     /// the descriptor, exactly as the legacy close would.
     pub async fn step(&mut self, now: u32) -> Result<LiveStep, LiveError> {
-        if self.lifecycle.phase() == ClientPhase::Close {
-            return Err(LiveError::PhaseClosed);
-        }
-
         // Decode what is already buffered, so coalesced frames never wait on
         // the socket.
-        self.drain_cipher_into_decoder()?;
-        if let Some(frame) = self.decoder.try_decode()? {
-            return Ok(self.handle_frame(frame, now).await);
+        if let Some(step) = self.next_buffered(now).await? {
+            return Ok(step);
         }
-
         // Then perform exactly one read and decode again.
-        let mut chunk = [0_u8; READ_CHUNK_SIZE];
-        let bytes_read = self.stream.read(&mut chunk).await?;
-        if bytes_read == 0 {
+        if self.read_input().await? == 0 {
             return Ok(LiveStep::PeerClosed {
                 leftover: self.decoder.buffered_len(),
             });
         }
-        self.crypto.feed_input(&chunk[..bytes_read])?;
+        Ok(self.next_buffered(now).await?.unwrap_or(LiveStep::Pending {
+            buffered: self.decoder.buffered_len(),
+        }))
+    }
+
+    /// Handle the first complete frame already buffered, without reading the socket.
+    ///
+    /// Returns `None` when no complete frame is buffered.
+    ///
+    /// # Errors
+    ///
+    /// As [`LiveClientSession::step`].
+    pub async fn next_buffered(&mut self, now: u32) -> Result<Option<LiveStep>, LiveError> {
+        if self.lifecycle.phase() == ClientPhase::Close {
+            return Err(LiveError::PhaseClosed);
+        }
         self.drain_cipher_into_decoder()?;
         match self.decoder.try_decode()? {
-            Some(frame) => Ok(self.handle_frame(frame, now).await),
-            None => Ok(LiveStep::Pending {
-                buffered: self.decoder.buffered_len(),
-            }),
+            Some(frame) => Ok(Some(self.handle_frame(frame, now).await)),
+            None => Ok(None),
         }
+    }
+
+    /// Perform one socket read into the input buffer and return the byte count; zero is the
+    /// end of stream.
+    ///
+    /// This is cancel-safe: dropping the future before it completes loses no input, so a
+    /// caller may race it against a timer. [`LiveClientSession::next_buffered`] then handles
+    /// what arrived.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiveError`] for a socket or cipher failure.
+    pub async fn read_input(&mut self) -> Result<usize, LiveError> {
+        let mut chunk = [0_u8; READ_CHUNK_SIZE];
+        let bytes_read = self.stream.read(&mut chunk).await?;
+        if bytes_read > 0 {
+            self.crypto.feed_input(&chunk[..bytes_read])?;
+        }
+        Ok(bytes_read)
+    }
+
+    /// Run one `ping_event` and write its records.
+    ///
+    /// When the client never answered the previous ping, the descriptor closes and nothing is
+    /// written; the caller then drops the connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiveError`] when the records cannot be written.
+    pub async fn tick(&mut self, now: u32) -> Result<Vec<Vec<u8>>, LiveError> {
+        if self.lifecycle.phase() == ClientPhase::Close {
+            return Err(LiveError::PhaseClosed);
+        }
+        let reduction = self.lifecycle.on_tick(now);
+        self.apply(reduction).await
     }
 
     /// Move decrypted plaintext from the cipher into the frame decoder.
@@ -626,8 +727,6 @@ mod tests {
     use super::*;
     use protocol::cg_handshake::{CgHandshakeHeader, CgInboundHandshake};
     use protocol::gc::GcPhase;
-
-    use crate::handshake::HandshakeServerKind;
 
     const TOKEN: u32 = 0x0102_0304;
     const NOW: u32 = 1_700_000_000;

@@ -13,10 +13,10 @@ and the ledger disagree, the most recent ledger section wins; update this page i
 GC 96 of 134), TEA, and transport-free descriptor reducers. The two-process layout (a `game-server`
 and a `db-server` talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177;
 sections 1-175 record how it was built and stay as history. Since section 178 the one `prodomo`
-binary reads `prodomo.toml`, binds the auth listener and every Channel port, and answers only
-keepalive and pong on them. Since section 179 it migrates a PostgreSQL 18 store before admitting
+binary reads `prodomo.toml` and binds the auth listener and every Channel port. Since section 179 it migrates a PostgreSQL 18 store before admitting
 anyone, and `prodomo account` and `prodomo gm` create accounts, set passwords, change Coins and
-Cash, and grant GM authority.
+Cash, and grant GM authority. Since section 182 every connection gets the legacy handshake, TEA,
+time sync, and the ping cycle.
 
 The direction since then:
 
@@ -34,7 +34,7 @@ Each step lands as one or more ledger sections with a gate receipt.
 |---|---|---|
 | 1. Restructure | Retire the DB-peer and GG code and move the pure rule modules into `gamedata`. Rename `game-server` to the single `prodomo` binary with TOML configuration for the auth and Channel listeners, the Channel map sets, and PostgreSQL. First PostgreSQL schema and migrations. The Operator command that creates accounts and GMs. | **Done.** Retirement and `gamedata` (177). The rename, the TOML document, and the listeners (178). The account and GM schema, store readiness, and the Operator commands (179). |
 | 2. Parity inventory | Every legacy system and handler, listed from the source in `.scratch/parity/`, each with a porting status. The scripted-client test crate. | **Done** (181). 1,643 rows in nine tables; `.scratch/parity/spec.md` has the statuses, the regeneration command, and four findings for the owner. The scripted client is the `parity` crate; its scenarios are `prodomo/tests/parity.rs`. Two rows are `ported` (the keepalive and unknown-header framing rules). |
-| 3. Vertical slice | Handshake and TEA, auth (`LOGIN3`), login by key, character select, create, and delete, loading, entering the game, movement and chat, a Warp between maps, and logout with save. | **Next.** Codecs and reducers exist; see below. First: send the handshake on connect and run `client_live` in `handle_connection`. |
+| 3. Vertical slice | Handshake and TEA, auth (`LOGIN3`), login by key, character select, create, and delete, loading, entering the game, movement and chat, a Warp between maps, and logout with save. | **In progress.** The handshake, TEA, time sync, and the ping cycle are live (182). Next: the Channel status list (`STATE_CHECKER`, `sys.net.channel_status`), then auth (`LOGIN3`). |
 | 4. Game systems | In dependency order: items and inventory; NPCs, shops, and Transfers (trade, safebox); the quest runtime (`qc` port and Lua 5.1, with its API growing as each later system lands); monsters, combat, drops, and exp; skills and affects; party, guild, messenger, and the cross-Channel bus; dungeons, events, guild war, and OX; the Prodomo custom systems (sash, aura, pets, battle pass, switchbot, item shop, premium shop, and the rest); GM commands, the adminpage, and logs. | Not started. |
 | 5. Game data and play test | Finish the importers, fix what the full data set breaks, then the owner's play test with the Reference client. | Not started. |
 
@@ -101,7 +101,7 @@ owner should know about (178.5):
 | `gamedata` | Packed table record layouts and nine table rules (banword, event, item_attr, land, object_proto, refine, renewal_shop, shop, skill) as typed builders over caller-supplied rows. New in 177. | Readers and importers for `legacy/gamedata` are added with the system that first needs them. |
 | `world` | Spatial model, characters, events, and some combat rules. Never imported by a binary. | Kept; grows with step 4. |
 | `quest` | An 8-line scaffold. | Replaced by the `qc` port and the Lua 5.1 runtime. |
-| `prodomo` | Renamed from `game-server` in 178. `prodomo serve` reads `prodomo.toml`, creates a lazy store, binds the auth listener and every Channel port (`listeners`), starts the game loop, migrates the store (retrying while it is unreachable), and only then opens `ReadyGate` (179). Every admitted connection still reaches a handler that answers only keepalive and pong. `prodomo account` and `prodomo gm` are the Operator commands (`operator`, 179). Reducers: `ClientLifecycle`, handshake, heartbeat, `DescriptorCrypto`, `client_live`, `AccountPlayerSession` and its router (re-based on the typed `account_records` in 177), `sync_position`. | `ReadyGate` will also wait for the loaded Game data once step 3 loads it. |
+| `prodomo` | Renamed from `game-server` in 178. `prodomo serve` reads `prodomo.toml`, creates a lazy store, binds the auth listener and every Channel port (`listeners`), starts the game loop, migrates the store (retrying while it is unreachable), and only then opens `ReadyGate` (179). Every admitted connection runs `client_live` (182): the handshake on accept, TEA, time sync, keepalive, and the ping cycle. `prodomo account` and `prodomo gm` are the Operator commands (`operator`, 179). Reducers: `ClientLifecycle`, handshake, heartbeat, `DescriptorCrypto`, `client_live`, `AccountPlayerSession` and its router (re-based on the typed `account_records` in 177), `sync_position`. | `ReadyGate` will also wait for the loaded Game data once step 3 loads it. |
 | `db-server` | Deleted in 177. GM list rules moved to `common::gm`, item-ID ranges to `db::item_id_range`, and the nine table rules to `gamedata`. The `item_proto` and `mob_proto` SQL decoders did not move, because the protos are read from the text files; the `object`, `market_price`, `monarch`, `player`, `player_index`, `quest`, and `login` modules did not move, because that state lives in the fresh store. | Done. |
 | `tools/packet_compare` | Deleted in 177. | Done. |
 
@@ -109,7 +109,7 @@ owner should know about (178.5):
 
 | stage | present in Rust | missing |
 |---|---|---|
-| Handshake and TEA | `ClientLifecycle`, `handshake`, `handshake_dispatch`, `DescriptorCrypto`, `client_live`; the listeners (178) | Running them on each accepted connection; scripted-client coverage. |
+| Handshake and TEA | Live on every connection with scenarios (182). | `STATE_CHECKER`; the login's `SetSecurityKey` (with auth). |
 | Auth | `CgLogin3` (66 bytes), `GcLoginFailure`; the `account` table, `db::accounts::find_credentials`, and argon2id verification (179) | Calling them from `LOGIN3`; the status, availability, and `BLOCK_LOGIN` checks; the login-key registry; `0x96`. |
 | Login by key | `CgLoginByKey`, `AccountPlayerSession::on_login*`, `GcEmpire`, the 357-byte `GcLoginSuccess` | The login checks from `D/ClientManagerLogin.cpp:82-150`; the player summaries from the store. |
 | Select, create, delete | `on_select`; the create and delete CG codecs | Player and item tables; name rules; the create defaults. |

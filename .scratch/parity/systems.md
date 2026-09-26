@@ -12,9 +12,9 @@ in `G/main.cpp:345-404`, so none of them is dead code; a feature switch that tur
 
 | id | source | what | needs | status | scenario | note |
 |---|---|---|---|---|---|---|
-| `sys.net.framing` | `G/input.cpp:60-125`, `G/packet_info.cpp` | Fixed-width framing per phase table, keepalive byte, unknown header closes | | partial | | `net` framing and `protocol::cg_inventory` exist; `prodomo` answers keepalive and pong live. |
-| `sys.net.handshake` | `G/input.cpp:180-260`, `G/desc.cpp` | Handshake, time sync, phase switches, TEA key setup | `sys.net.framing` | partial | | `ClientLifecycle`, `handshake`, `DescriptorCrypto`, `client_live` exist; not wired into `handle_connection`. |
-| `sys.net.heartbeat` | `G/desc.cpp`, `G/desc_manager.cpp` | Ping cycle and idle close | `sys.net.handshake` | partial | | Reducer exists. |
+| `sys.net.framing` | `G/input.cpp:60-125`, `G/packet_info.cpp` | Fixed-width framing per phase table, keepalive byte, unknown header closes | | partial | | The fixed-width framing, keepalive, and unknown-header close run live (`client_live`); variable records are not framed yet. |
+| `sys.net.handshake` | `G/input.cpp:180-260`, `G/desc.cpp` | Handshake, time sync, phase switches, TEA key setup | `sys.net.framing` | partial | | Live since ledger 182: handshake on accept, retry and limit, time sync, the phase switch, and TEA under the setup key (scenarios in `prodomo/tests/parity.rs`). The login's `SetSecurityKey` arrives with `sys.auth.login`. |
+| `sys.net.heartbeat` | `G/desc.cpp`, `G/desc_manager.cpp` | Ping cycle and idle close | `sys.net.handshake` | ported | `the_ping_cycle_closes_a_silent_client` | Ping, zero-delta handshake, and close of a client that did not answer, every `ping_event_second_cycle`. |
 | `sys.net.channel_status` | `G/input.cpp:227-234`, `D/ClientManager.cpp` | `STATE_CHECKER` answers the Channel status list the login screen shows | `sys.net.handshake` | missing | | Served in the handshake phase, before auth. |
 | `sys.net.flood` | `G/char.h` (`ENABLE_ANTI_CMD_FLOOD`), `ENABLE_FLOOD_PRETECTION` | Command and packet flood limits | `sys.net.framing` | missing | | |
 | `sys.net.udp_block` | `G/input_udp.cpp`, `__UDP_BLOCK__` | The legacy UDP listener | | missing | | Decide Divergence: the client never sends UDP to the game. |

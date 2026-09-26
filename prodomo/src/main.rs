@@ -26,9 +26,13 @@ use clap::{Parser, Subcommand};
 use common::config::{load_server_config, ServerConfig, DEFAULT_CONFIG_PATH};
 use common::logging::{init_from_env, init_logging, LogConfig};
 use db::store::{schema_version, Store, StoreConfig};
-use prodomo::client_session::{ClientDispatchOutcome, ClientSession};
+use prodomo::client_live::{
+    handshake_token, BootLiveClock, LiveClientSession, LiveClock, LiveOutcome, LiveStep,
+};
+use prodomo::client_session::ClientPhase;
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
 use prodomo::game_loop_messages::GameLoopTerminal;
+use prodomo::handshake::HandshakeServerKind;
 use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::operator::{prepare, read_new_password, AccountCommand, GmCommand, OperatorCommand};
 use prodomo::ready_gate::ReadyGate;
@@ -109,46 +113,116 @@ fn initialize_server(config_path: &Path, verbose: bool) -> Result<ServerConfig, 
     Ok(config)
 }
 
-/// Serve one client connection.
+/// What a connection needs from the server: the descriptor clock and the ping cycle.
+#[derive(Debug, Clone, Copy)]
+struct ConnectionContext {
+    clock: BootLiveClock,
+    ping_cycle: Duration,
+}
+
+/// Serve one client connection as the legacy descriptor does.
 ///
-/// The loop records only the source-verified keepalive and pong boundaries.
-/// Variable packets, descriptor callbacks, and TEA remain explicit unsupported
-/// errors; this handler does not claim to implement gameplay or encryption.
+/// On accept the descriptor sends `GC_PHASE(PHASE_HANDSHAKE)` and `GC_HANDSHAKE`
+/// (`DESC::Setup`), then reads frames and applies the phase analyzers the Rewrite has, and every
+/// `ping_event_second_cycle` runs the ping event. A header no analyzer handles closes the
+/// connection.
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     addr: SocketAddr,
     role: ListenerRole,
+    context: ConnectionContext,
     shutdown_tx: &broadcast::Sender<()>,
 ) {
     info!(%addr, %role, "New client connection");
-
-    let mut session = ClientSession::new(stream);
     let mut shutdown_rx = shutdown_tx.subscribe();
+    let kind = match role {
+        ListenerRole::Auth => HandshakeServerKind::Auth,
+        ListenerRole::Channel(_) => HandshakeServerKind::Game,
+    };
+    let clock = context.clock;
+    let mut session =
+        match LiveClientSession::start(stream, handshake_token(), kind, clock.now()).await {
+            Ok((session, _)) => session,
+            Err(error) => {
+                warn!(%addr, %error, "Client setup failed");
+                return;
+            }
+        };
+    // `event_create(ping_event, ..., ping_event_second_cycle)`: the first ping is one full cycle
+    // after the accept.
+    let mut ping = tokio::time::interval_at(
+        tokio::time::Instant::now() + context.ping_cycle,
+        context.ping_cycle,
+    );
 
     loop {
+        match session.next_buffered(clock.now()).await {
+            Ok(Some(step)) => {
+                if !report_step(addr, step) || session.phase() == ClientPhase::Close {
+                    break;
+                }
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(%addr, %error, "Client session stopped");
+                break;
+            }
+        }
         tokio::select! {
-            packet = session.read_dispatch() => {
-                match packet {
-                    Ok(Some(ClientDispatchOutcome::KeepAlive { .. })) => {
-                        info!(%addr, "Received client keepalive");
-                    }
-                    Ok(Some(ClientDispatchOutcome::Pong { .. })) => {
-                        info!(%addr, "Received client pong");
-                    }
-                    Ok(None) => {
-                        info!(%addr, "Client connection closed cleanly");
-                        break;
-                    }
-                    Err(error) => {
-                        warn!(%addr, %error, "Client session stopped");
-                        break;
-                    }
+            read = session.read_input() => match read {
+                Ok(0) => {
+                    info!(%addr, leftover = session.buffered(), "Client connection closed");
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(%addr, %error, "Client session stopped");
+                    break;
+                }
+            },
+            _ = ping.tick() => {
+                if let Err(error) = session.tick(clock.now()).await {
+                    warn!(%addr, %error, "Client session stopped");
+                    break;
+                }
+                if session.phase() == ClientPhase::Close {
+                    info!(%addr, "Client did not answer the ping; closing");
+                    break;
                 }
             }
             _ = shutdown_rx.recv() => {
                 info!(%addr, "Client session stopping for shutdown");
                 break;
             }
+        }
+    }
+}
+
+/// Log one handled step; `false` when the connection must close.
+fn report_step(addr: SocketAddr, step: LiveStep) -> bool {
+    match step {
+        LiveStep::Handled(LiveOutcome::KeepAlive { .. }) => {
+            info!(%addr, "Received client keepalive");
+            true
+        }
+        LiveStep::Handled(LiveOutcome::Pong { .. }) => {
+            info!(%addr, "Received client pong");
+            true
+        }
+        LiveStep::Handled(LiveOutcome::Handshake { phase, .. }) => {
+            info!(%addr, ?phase, "Received client handshake");
+            true
+        }
+        LiveStep::Pending { .. } => true,
+        LiveStep::PeerClosed { .. } => false,
+        LiveStep::Unsupported(unsupported) => {
+            warn!(%addr, %unsupported, "Client sent a header no analyzer handles; closing");
+            false
+        }
+        LiveStep::Failed(error) => {
+            warn!(%addr, %error, "Client session stopped");
+            false
         }
     }
 }
@@ -234,6 +308,7 @@ impl ShutdownSignal {
 struct ServerContext {
     state: Arc<ServerState>,
     shutdown_tx: broadcast::Sender<()>,
+    connection: ConnectionContext,
 }
 
 enum AcceptLoopExit {
@@ -316,8 +391,10 @@ async fn run_accept_loop(
                 }
                 Ok((stream, addr)) => {
                     let connection_shutdown = context.shutdown_tx.clone();
+                    let connection = context.connection;
                     tokio::spawn(async move {
-                        handle_connection(stream, addr, role, &connection_shutdown).await;
+                        handle_connection(stream, addr, role, connection, &connection_shutdown)
+                            .await;
                     });
                 }
                 Err(error) => error!(%error, %role, "Failed to accept connection"),
@@ -412,7 +489,14 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     info!(thread_id = ?game_loop.thread_id(), "Dedicated game loop started");
     info!("Waiting for the store before accepting clients");
 
-    let context = ServerContext { state, shutdown_tx };
+    let context = ServerContext {
+        state,
+        shutdown_tx,
+        connection: ConnectionContext {
+            clock: BootLiveClock::new(),
+            ping_cycle: Duration::from_secs(u64::from(config.game.ping_event_second_cycle)),
+        },
+    };
     let exit = run_accept_loop(
         &mut listeners,
         &context,
