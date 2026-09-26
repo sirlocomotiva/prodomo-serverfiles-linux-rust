@@ -26,6 +26,7 @@ use clap::{Parser, Subcommand};
 use common::config::{load_server_config, ServerConfig, DEFAULT_CONFIG_PATH};
 use common::logging::{init_from_env, init_logging, LogConfig};
 use db::store::{schema_version, Store, StoreConfig};
+use prodomo::channel_status::ChannelStatusBoard;
 use prodomo::client_live::{
     handshake_token, BootLiveClock, LiveClientSession, LiveClock, LiveOutcome, LiveStep,
 };
@@ -37,6 +38,8 @@ use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::operator::{prepare, read_new_password, AccountCommand, GmCommand, OperatorCommand};
 use prodomo::ready_gate::ReadyGate;
 use prodomo::ServerState;
+use protocol::cg_inventory::HEADER_CG_STATE_CHECKER;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::signal;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
@@ -113,11 +116,14 @@ fn initialize_server(config_path: &Path, verbose: bool) -> Result<ServerConfig, 
     Ok(config)
 }
 
-/// What a connection needs from the server: the descriptor clock and the ping cycle.
-#[derive(Debug, Clone, Copy)]
+/// What a connection needs from the server: the descriptor clock, the ping cycle, the server
+/// state, and the Channel status list.
+#[derive(Clone)]
 struct ConnectionContext {
     clock: BootLiveClock,
     ping_cycle: Duration,
+    state: Arc<ServerState>,
+    channels: Arc<ChannelStatusBoard>,
 }
 
 /// Serve one client connection as the legacy descriptor does.
@@ -158,7 +164,17 @@ async fn handle_connection(
     loop {
         match session.next_buffered(clock.now()).await {
             Ok(Some(step)) => {
-                if !report_step(addr, step) || session.phase() == ClientPhase::Close {
+                let open = match step {
+                    // `CInputHandshake::Analyze` (`G/input.cpp:227-234`).
+                    LiveStep::Record { phase, frame }
+                        if phase == ClientPhase::Handshake
+                            && frame.header == HEADER_CG_STATE_CHECKER.value() =>
+                    {
+                        send_channel_status(&mut session, addr, &context).await
+                    }
+                    step => report_step(addr, step),
+                };
+                if !open || session.phase() == ClientPhase::Close {
                     break;
                 }
                 continue;
@@ -199,6 +215,31 @@ async fn handle_connection(
     }
 }
 
+/// Answer `STATE_CHECKER` with the Channel status list; `false` when the connection must close.
+///
+/// Legacy asks the DB server and ignores a second request while one is pending; the answer here
+/// is immediate, so none is ever pending.
+async fn send_channel_status<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = context.channels.respond(context.state.is_shutting_down());
+    match session.send(&record).await {
+        Ok(_) => {
+            info!(%addr, "Sent the Channel status list");
+            true
+        }
+        Err(error) => {
+            warn!(%addr, %error, "Client session stopped");
+            false
+        }
+    }
+}
+
 /// Log one handled step; `false` when the connection must close.
 fn report_step(addr: SocketAddr, step: LiveStep) -> bool {
     match step {
@@ -215,6 +256,15 @@ fn report_step(addr: SocketAddr, step: LiveStep) -> bool {
             true
         }
         LiveStep::Pending { .. } => true,
+        LiveStep::Record { phase, frame } => {
+            warn!(
+                %addr,
+                ?phase,
+                header = frame.header,
+                "Client sent a header no analyzer handles; closing"
+            );
+            false
+        }
         LiveStep::PeerClosed { .. } => false,
         LiveStep::Unsupported(unsupported) => {
             warn!(%addr, %unsupported, "Client sent a header no analyzer handles; closing");
@@ -391,7 +441,7 @@ async fn run_accept_loop(
                 }
                 Ok((stream, addr)) => {
                     let connection_shutdown = context.shutdown_tx.clone();
-                    let connection = context.connection;
+                    let connection = context.connection.clone();
                     tokio::spawn(async move {
                         handle_connection(stream, addr, role, connection, &connection_shutdown)
                             .await;
@@ -477,6 +527,13 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
             listener.local_addr()
         );
     }
+    // Every legacy game Core reported its own client port (`mother_port`) to the status list; the
+    // auth server reported nothing (`G/desc_client.cpp:286-290`).
+    let channel_ports: Vec<u16> = listeners
+        .iter()
+        .filter(|listener| matches!(listener.role(), ListenerRole::Channel(_)))
+        .map(|listener| listener.local_addr().port())
+        .collect();
 
     // The client ports open before the world is ready, as legacy's does
     // (`main.cpp:671`). The ready gate keeps that ordering from admitting
@@ -490,11 +547,13 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     info!("Waiting for the store before accepting clients");
 
     let context = ServerContext {
-        state,
+        state: Arc::clone(&state),
         shutdown_tx,
         connection: ConnectionContext {
             clock: BootLiveClock::new(),
             ping_cycle: Duration::from_secs(u64::from(config.game.ping_event_second_cycle)),
+            state: Arc::clone(&state),
+            channels: Arc::new(ChannelStatusBoard::new(channel_ports, &config.game)),
         },
     };
     let exit = run_accept_loop(

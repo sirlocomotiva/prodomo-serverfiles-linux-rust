@@ -111,6 +111,10 @@ mantie_permanent = true
 # The legacy CONFIG files never set TEST_SERVER, and legacy defaults it to on (config.cpp:72), so
 # the legacy deployment ran in test-server mode. It is written out here so the choice is visible.
 test_server = true
+# Characters in game above which the Channel status list shows busy (2) and full (3). Legacy read
+# them from the state_user_count file, which was empty, so the compiled-in values applied.
+busy_user_count = 650
+full_user_count = 1200
 # Empty disables the admin page. Legacy defaulted to a well-known password.
 adminpage_ips = []
 adminpage_password = ""

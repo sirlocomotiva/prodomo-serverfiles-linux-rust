@@ -15400,3 +15400,103 @@ Run on 2026-09-26 with rustc 1.85.1, `--locked --offline`:
 Against 181.4 that is 7 more tests: `event_cycles_are_at_least_one_second`, one `parity` unit test,
 and the five scenarios. No new Rust file: 146 files, 87,273 lines. No scratch database was left
 behind, and no stray `*.core` file in the workspace root.
+
+## 183. The Channel status list
+
+`HEADER_CG_STATE_CHECKER` (0xce) is answered in the handshake phase on the auth port and on every
+Channel port, as `CInputHandshake::Analyze` does (`G/input.cpp:227-234`). The client uses it to
+fill the Channel list on its login screen.
+
+### 183.1 Legacy behaviour
+
+- Every game Core reports `{ mother_port, status }` to the DB server when it boots (`main.cpp:699`,
+  forced) and then every five minutes (`CLIENT_DESC::UpdateChannelStatus`,
+  `G/desc_client.cpp:292-313`). The auth server reports nothing. The status is 0 when
+  `g_bNoMoreClient` is set (the `shutdowned` switch, or a shutdown in progress), otherwise 3 above
+  `g_iFullUserCount`, 2 above `g_iBusyUserCount`, and 1, with strict comparisons. The count is every
+  character in game on the whole server: the local count plus the P2P count, and the DB server
+  introduces every game Core to every other one whatever its Channel
+  (`D/ClientManager.cpp:1415-1433`).
+- The thresholds default to 1200 and 650 (`G/config.cpp:81-82`). `LoadStateUserCount` reads them
+  from `state_user_count`, which was empty in the owner's deployment (`legacy/README.md`), so the
+  defaults applied.
+- The DB server keeps the last report per port in an `unordered_map` and answers a request with all
+  of them (`D/ClientManager.cpp:4442-4466`). `CInputDB::RespondChannelStatus`
+  (`G/input_db.cpp:2412-2429`) writes one record: header 210, an `int` count, 3-byte packed
+  `TChannelStatus { short nPort; BYTE bStatus; }` entries (`common/tables.h:1677-1681`, inside the
+  `pack(1)` block from line 345), and `bSuccess = 1`. The three `BufferedPacket` calls and the
+  closing `Packet` are one output unit. A second request while one is pending is ignored.
+
+### 183.2 The Rewrite
+
+- `protocol::gc_channel_status` encodes the record, with golden-byte tests (distinct byte halves, and
+  a port above the `short` range). The record is read by the client's server-state checker, not by
+  `PythonNetworkStream`, so it has no row in `gc_inventory.rs`, and the coverage table is unchanged.
+- `prodomo::channel_status::ChannelStatusBoard` holds the bound Channel ports, the thresholds, and
+  the `shutdowned` switch, plus an online count for the game thread to publish (`set_online`) once
+  characters can enter the game. `respond(shutting_down)` builds the record.
+- `LiveStep::Record { phase, frame }` replaces `LiveUnsupported::UnimplementedAnalyzer`: the
+  descriptor hands every record other than the control records up to `handle_connection`, which
+  owns the world and the store. `LiveClientSession::send` writes one record through the current
+  output boundary (one TEA unit once TEA is on) and refuses a closed descriptor. The handler answers
+  `STATE_CHECKER` in the handshake phase and closes on every other header, as before. The unit test
+  whose comment called header 28 a variable `CG_MOVE` was wrong on both counts (28 is a fixed
+  record with a one-byte body); it is replaced by one that checks a handed-up record is consumed
+  once.
+- New `[game]` keys `busy_user_count = 650` and `full_user_count = 1200`, in the example document.
+
+### 183.3 Divergences
+
+- The status is computed when it is asked for. Legacy's can be up to five minutes old.
+- The entries are in ascending port order. Legacy's order is whatever the `unordered_map` gives.
+- Answered at once, so a request is never pending and none is ignored. Legacy answers after a DB
+  round trip, and ignores a request that arrives meanwhile.
+
+### 183.4 Scenario and mutation sweep
+
+`the_channel_status_list_is_served_in_the_handshake_phase` asks twice on the auth port and on
+Channels 1 and 99 and expects the golden record with all three Channel ports at status 1 each
+time, then completes the handshake. Control: after the phase change, a sealed 0xce closes the
+connection. A second server with `shutdowned = true` answers status 0.
+
+Eight mutants, each applied to the pristine file, confirmed to change executable code, and restored
+by checksum. All eight were killed by the scenario:
+
+- a normal status of 2;
+- `shutdowned` ignored;
+- ports in reverse order;
+- the auth port reported;
+- no success byte;
+- a 2-byte count;
+- the answer in every phase;
+- TEA forced on the answer.
+
+The first form of the TEA mutant did not compile. Its rewrite, enabling the default TEA pair
+before sending, was killed semantically.
+
+Rows now `ported`: `cg.handshake.state_checker` and `sys.net.channel_status`.
+
+### 183.5 Receipt
+
+Run on 2026-09-26 with rustc 1.85.1, `--locked --offline`:
+
+| gate | result |
+| --- | --- |
+| `cargo fmt --all -- --check` | green |
+| `cargo clippy --workspace --all-targets -- -D warnings` | green |
+| `cargo build --workspace` | green, 0 warnings |
+| `cargo test --workspace --all-targets --no-fail-fast`, with `DATABASE_URL` (PostgreSQL 18) | **1,585 passed, 0 failed, 0 ignored**, across 30 test binaries |
+| the same, without `DATABASE_URL` | **1,585 passed, 0 failed** |
+| `cargo test --workspace --doc` | **1 passed** |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | green |
+
+Against 182.5 that is 8 more tests:
+
+- three for the codec;
+- three for the board;
+- one for `client_live`, where one test was added and one replaced;
+- the scenario.
+
+There are two new Rust files (`protocol/src/gc_channel_status.rs` and
+`prodomo/src/channel_status.rs`), for 148 files and 87,706 lines. No scratch database was left
+behind, and there is no stray `*.core` file in the workspace root.

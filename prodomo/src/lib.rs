@@ -10,6 +10,8 @@ pub mod game_loop;
 /// Typed commands, effects, and terminal acknowledgements for the game loop.
 pub mod game_loop_messages;
 
+/// The Channel status list answered to `STATE_CHECKER`.
+pub mod channel_status;
 pub mod client_live;
 
 /// Isolated fixed-frame client session and dispatch boundary.

@@ -39,6 +39,7 @@ use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use protocol::cg_handshake::CgHandshakeHeader;
 use protocol::cg_inventory::{CG_KEEP_ALIVE, HEADER_CG_PONG};
 use protocol::cg_wire::{
     resolve_client_frame_size, ClientFrame, ClientFrameDecoder, ClientFrameError, ClientFrameSize,
@@ -172,13 +173,6 @@ pub enum LiveUnsupported {
         /// The one-byte client header.
         header: u8,
     },
-    /// A fixed header that belongs to a phase analyzer that is not modelled.
-    UnimplementedAnalyzer {
-        /// Descriptor phase the header reached.
-        phase: ClientPhase,
-        /// The one-byte client header.
-        header: u8,
-    },
     /// A header this boundary retains but whose record it does not decode.
     RetainedHeader {
         /// Descriptor phase the header reached.
@@ -197,10 +191,6 @@ impl fmt::Display for LiveUnsupported {
                     "variable client header {header:#04x} is not modelled"
                 )
             }
-            Self::UnimplementedAnalyzer { phase, header } => write!(
-                formatter,
-                "client header {header:#04x} reached the unimplemented {phase:?} analyzer"
-            ),
             Self::RetainedHeader { phase, header } => write!(
                 formatter,
                 "client header {header:#04x} is retained but not decoded in {phase:?}"
@@ -317,6 +307,18 @@ pub enum LiveStep {
     },
     /// A complete frame was consumed and handled.
     Handled(LiveOutcome),
+    /// A complete fixed record for a phase analyzer above this boundary.
+    ///
+    /// The descriptor handles only the control records (keepalive, pong, handshake, and time
+    /// sync). Every other record is handed to the caller, which owns the world and the store,
+    /// answers through [`LiveClientSession::send`], and closes on a header its analyzer does not
+    /// handle.
+    Record {
+        /// Descriptor phase the record arrived in.
+        phase: ClientPhase,
+        /// The complete frame, including its one-byte header.
+        frame: ClientFrame,
+    },
     /// The peer closed the stream.
     ///
     /// `leftover` is the number of plaintext bytes that were still buffered
@@ -537,6 +539,22 @@ where
         self.apply(reduction).await
     }
 
+    /// Write one record through the current output boundary, as legacy `DESC::Packet` does:
+    /// each record is its own TEA unit, zero-padded to 8 bytes once TEA is on.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiveError::PhaseClosed`] once the descriptor is closed, because legacy drops
+    /// output in `PHASE_CLOSE`, and [`LiveError`] when the record cannot be written.
+    pub async fn send(&mut self, record: &[u8]) -> Result<Vec<u8>, LiveError> {
+        if self.lifecycle.phase() == ClientPhase::Close {
+            return Err(LiveError::PhaseClosed);
+        }
+        let wire = self.crypto.encrypt_output(record)?;
+        self.stream.write_all(&wire).await?;
+        Ok(wire)
+    }
+
     /// Move decrypted plaintext from the cipher into the frame decoder.
     ///
     /// The cipher owns the input buffer because it is what enforces the TEA
@@ -586,11 +604,10 @@ where
             };
         }
 
-        if !phase.accepts_handshake_record() {
-            return LiveStep::Unsupported(LiveUnsupported::UnimplementedAnalyzer {
-                phase,
-                header: frame.header,
-            });
+        let handshake_record = frame.header == CgHandshakeHeader::Handshake.value()
+            || frame.header == CgHandshakeHeader::TimeSync.value();
+        if !phase.accepts_handshake_record() || !handshake_record {
+            return LiveStep::Record { phase, frame };
         }
 
         let boundary = if self.lifecycle.input_boundary() == LifecycleInputBoundary::LegacyTea {
@@ -613,9 +630,6 @@ where
                     }
                     Err(error) => LiveStep::Failed(error),
                 }
-            }
-            Err(HandshakeDispatchError::UnsupportedHeader { header, .. }) => {
-                LiveStep::Unsupported(LiveUnsupported::UnimplementedAnalyzer { phase, header })
             }
             Err(error) => LiveStep::Failed(LiveError::Handshake(error)),
         }
@@ -725,7 +739,7 @@ pub fn fixed_frame_size(frame: &ClientFrame) -> Result<usize, ClientFrameError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::cg_handshake::{CgHandshakeHeader, CgInboundHandshake};
+    use protocol::cg_handshake::CgInboundHandshake;
     use protocol::gc::GcPhase;
 
     const TOKEN: u32 = 0x0102_0304;
@@ -882,6 +896,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_record_above_the_descriptor_is_handed_up_and_answered_through_send() {
+        let (mut session, mut peer) = session();
+        peer.write_all(&[0xce]).await.unwrap();
+
+        let step = session.step(NOW).await.unwrap();
+        let LiveStep::Record { phase, frame } = step else {
+            panic!("expected a record for the caller, got {step:?}");
+        };
+        assert_eq!((phase, frame.header), (ClientPhase::Handshake, 0xce));
+
+        // Plaintext in the handshake phase: the bytes arrive as written.
+        let wire = session.send(&[0xd2, 0x01]).await.unwrap();
+        assert_eq!(wire, [0xd2, 0x01]);
+        let mut read = [0; 2];
+        peer.read_exact(&mut read).await.unwrap();
+        assert_eq!(read, [0xd2, 0x01]);
+
+        let closed = (*session.lifecycle()).close();
+        let mut closed_session = LiveClientSession::new(socket().0, closed.state)
+            .expect("a closed session still constructs");
+        assert!(matches!(
+            closed_session.send(&[0xd2]).await,
+            Err(LiveError::PhaseClosed)
+        ));
+    }
+
+    #[tokio::test]
     async fn a_pong_before_the_handshake_is_handled_without_a_phase_change() {
         let (mut session, mut peer) = session();
         peer.write_all(&[HEADER_CG_PONG.value()]).await.unwrap();
@@ -938,19 +979,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_retained_variable_header_is_unsupported_and_never_retried() {
+    async fn a_record_for_the_caller_is_consumed_and_never_retried() {
         let (mut session, mut peer) = session();
-        // A known variable client header. The base processor cannot frame it,
-        // so the boundary must name the gap rather than loop.
-        let header = 0x1C_u8; // CG_MOVE
-        let mut raw = vec![header, 0, 0, 0, 0, 0, 0, 0];
-        raw.extend_from_slice(&[0u8; 64]);
-        peer.write_all(&raw).await.unwrap();
+        // Header 28 is a fixed record with a one-byte body; the zero after it is a keepalive.
+        peer.write_all(&[28, 0x5a, 0]).await.unwrap();
 
         let step = session.step(NOW).await.unwrap();
+        let LiveStep::Record { frame, .. } = step else {
+            panic!("expected a record for the caller, got {step:?}");
+        };
+        assert_eq!((frame.header, frame.payload.as_slice()), (28, &[0x5a][..]));
+        let step = session.step(NOW).await.unwrap();
         assert!(
-            matches!(step, LiveStep::Unsupported(_)),
-            "a variable header must be reported as unsupported, got {step:?}"
+            matches!(step, LiveStep::Handled(LiveOutcome::KeepAlive { .. })),
+            "the record's bytes must not be read again, got {step:?}"
         );
     }
 

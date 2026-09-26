@@ -34,7 +34,7 @@ Each step lands as one or more ledger sections with a gate receipt.
 |---|---|---|
 | 1. Restructure | Retire the DB-peer and GG code and move the pure rule modules into `gamedata`. Rename `game-server` to the single `prodomo` binary with TOML configuration for the auth and Channel listeners, the Channel map sets, and PostgreSQL. First PostgreSQL schema and migrations. The Operator command that creates accounts and GMs. | **Done.** Retirement and `gamedata` (177). The rename, the TOML document, and the listeners (178). The account and GM schema, store readiness, and the Operator commands (179). |
 | 2. Parity inventory | Every legacy system and handler, listed from the source in `.scratch/parity/`, each with a porting status. The scripted-client test crate. | **Done** (181). 1,643 rows in nine tables; `.scratch/parity/spec.md` has the statuses, the regeneration command, and four findings for the owner. The scripted client is the `parity` crate; its scenarios are `prodomo/tests/parity.rs`. Two rows are `ported` (the keepalive and unknown-header framing rules). |
-| 3. Vertical slice | Handshake and TEA, auth (`LOGIN3`), login by key, character select, create, and delete, loading, entering the game, movement and chat, a Warp between maps, and logout with save. | **In progress.** The handshake, TEA, time sync, and the ping cycle are live (182). Next: the Channel status list (`STATE_CHECKER`, `sys.net.channel_status`), then auth (`LOGIN3`). |
+| 3. Vertical slice | Handshake and TEA, auth (`LOGIN3`), login by key, character select, create, and delete, loading, entering the game, movement and chat, a Warp between maps, and logout with save. | **In progress.** The handshake, TEA, time sync, and the ping cycle are live (182), and so is the Channel status list (183). Next: auth (`LOGIN3`). |
 | 4. Game systems | In dependency order: items and inventory; NPCs, shops, and Transfers (trade, safebox); the quest runtime (`qc` port and Lua 5.1, with its API growing as each later system lands); monsters, combat, drops, and exp; skills and affects; party, guild, messenger, and the cross-Channel bus; dungeons, events, guild war, and OX; the Prodomo custom systems (sash, aura, pets, battle pass, switchbot, item shop, premium shop, and the rest); GM commands, the adminpage, and logs. | Not started. |
 | 5. Game data and play test | Finish the importers, fix what the full data set breaks, then the owner's play test with the Reference client. | Not started. |
 
@@ -109,7 +109,7 @@ owner should know about (178.5):
 
 | stage | present in Rust | missing |
 |---|---|---|
-| Handshake and TEA | Live on every connection with scenarios (182). | `STATE_CHECKER`; the login's `SetSecurityKey` (with auth). |
+| Handshake and TEA | Live on every connection with scenarios (182). The Channel status list (183). | The login's `SetSecurityKey` (with auth). The status list counts characters in game once entering the game publishes the count (`ChannelStatusBoard::set_online`). |
 | Auth | `CgLogin3` (66 bytes), `GcLoginFailure`; the `account` table, `db::accounts::find_credentials`, and argon2id verification (179) | Calling them from `LOGIN3`; the status, availability, and `BLOCK_LOGIN` checks; the login-key registry; `0x96`. |
 | Login by key | `CgLoginByKey`, `AccountPlayerSession::on_login*`, `GcEmpire`, the 357-byte `GcLoginSuccess` | The login checks from `D/ClientManagerLogin.cpp:82-150`; the player summaries from the store. |
 | Select, create, delete | `on_select`; the create and delete CG codecs | Player and item tables; name rules; the create defaults. |
@@ -152,6 +152,7 @@ owner should know about (178.5):
 | A GM grant is one character Name of one account. Names are unique regardless of case, and a Name held by another account must be revoked before it is granted again. | `gmlist` rows are looked up by exact Name in a `std::map` (`G/gm.cpp:55`); nothing stops two rows whose Names differ only in case. |
 | The GM host check and its `gmhost`, `mContactIP`, and `mServerIP` columns are not ported. | Used only when `gm_host_check` is set (`G/gm.cpp:62-105`, `G/config.cpp:45` and `:1212`); none of the owner's `CONFIG` files sets it. |
 | An unknown or malformed client frame closes the descriptor. | Logged and consumed, or ignored (ledger 160.5). |
+| The Channel status list is computed when it is asked for, with the ports in ascending order (ledger 183). | Each Core reports to the DB server at boot and then every five minutes, so a status can be five minutes old; the list is in `unordered_map` order (`G/desc_client.cpp:292-313`, `D/ClientManager.cpp:4455-4466`). |
 
 ## Legacy defects not to reproduce
 

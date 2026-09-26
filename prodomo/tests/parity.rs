@@ -57,6 +57,10 @@ const HANDSHAKE_LEN: usize = 13;
 const SETUP_KEY: TeaKey = *b"1234abcd5678efgh";
 /// `HANDSHAKE_RETRY_LIMIT` (`game/desc.h`).
 const HANDSHAKE_RETRY_LIMIT: usize = 32;
+/// `HEADER_CG_STATE_CHECKER` (`game/packet.h:86`).
+const CG_STATE_CHECKER: u8 = 206;
+/// `HEADER_GC_RESPOND_CHANNELSTATUS` (`game/packet.h:224`).
+const GC_RESPOND_CHANNELSTATUS: u8 = 210;
 
 /// A `TPacketGCHandshake` as the client reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,4 +430,76 @@ fn the_ping_cycle_closes_a_silent_client() {
 
     // No pong after the second ping: the third cycle closes without writing.
     assert_eq!(client.expect_closed(), Vec::<u8>::new());
+}
+
+/// The `RespondChannelStatus` record (`game/input_db.cpp:2412-2429`) for `ports`, each with
+/// `status`: the header, an `int` count, a packed `{ short nPort; BYTE bStatus; }` per port, and
+/// `bSuccess = 1`.
+fn channel_status(ports: &[u16], status: u8) -> Vec<u8> {
+    let mut record = vec![GC_RESPOND_CHANNELSTATUS];
+    record.extend_from_slice(&i32::try_from(ports.len()).expect("few").to_le_bytes());
+    for port in ports {
+        record.extend_from_slice(&port.to_le_bytes());
+        record.push(status);
+    }
+    record.push(1);
+    record
+}
+
+/// Every Channel port the server bound, in ascending order.
+fn channel_ports(server: &Server) -> Vec<u16> {
+    let mut ports: Vec<u16> = server
+        .listeners()
+        .iter()
+        .filter(|(role, _)| role.starts_with("channel "))
+        .flat_map(|(_, addresses)| addresses.iter().map(SocketAddr::port))
+        .collect();
+    ports.sort_unstable();
+    ports
+}
+
+/// `cg.handshake.state_checker`, `sys.net.channel_status`: in the handshake phase, on the auth
+/// port and every Channel port, `STATE_CHECKER` is answered in plaintext with every Channel port
+/// and status 1 (`NORMAL`, nobody in game), as often as it is asked, and the handshake still
+/// completes afterwards. `shutdowned` turns every status to 0.
+#[test]
+fn the_channel_status_list_is_served_in_the_handshake_phase() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    let ports = channel_ports(&server);
+    // Channel 1 binds two listeners and the Shared Channel one; auth reports nothing.
+    assert_eq!(ports.len(), 3, "{ports:?}");
+    let expected = channel_status(&ports, 1);
+    for (address, phase) in [
+        (server.auth(), PHASE_AUTH),
+        (server.channel(1), PHASE_LOGIN),
+        (server.channel(99), PHASE_LOGIN),
+    ] {
+        let (mut client, first) = accepted(address);
+        for _ in 0..2 {
+            client.send(&[CG_STATE_CHECKER]);
+            assert_eq!(client.expect_bytes(expected.len()), expected, "{address}");
+        }
+        assert_eq!(shake(&mut client, first), [GC_PHASE, phase], "{address}");
+
+        // Control: only the handshake analyzer handles it. After the phase change the sealed
+        // header reaches the auth or login analyzer, which does not, and the connection closes.
+        client.send(&sealed(&[CG_STATE_CHECKER]));
+        assert_eq!(client.expect_closed(), Vec::<u8>::new(), "{address}");
+    }
+    drop(server);
+
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "shutdowned = true",
+    );
+    let ports = channel_ports(&server);
+    let (mut client, _) = accepted(server.auth());
+    client.send(&[CG_STATE_CHECKER]);
+    let closed = channel_status(&ports, 0);
+    assert_eq!(client.expect_bytes(closed.len()), closed);
 }

@@ -201,6 +201,13 @@ pub struct GameSettings {
     pub no_wander: bool,
     /// Player limit; `0` or less is unlimited.
     pub user_limit: i32,
+    /// Above this many characters in game, the Channel status list shows every Channel as busy
+    /// (status 2). Legacy `g_iBusyUserCount` (`config.cpp:82`), read from the `state_user_count`
+    /// file, which was empty in the owner's deployment.
+    pub busy_user_count: u32,
+    /// Above this many characters in game, the Channel status list shows every Channel as full
+    /// (status 3). Legacy `g_iFullUserCount` (`config.cpp:81`).
+    pub full_user_count: u32,
     /// Whispers between empires are allowed.
     pub empire_whisper: bool,
     /// Accounts created on or after this `YYYYMMDD` date are refused. Legacy `BLOCK_LOGIN`,
@@ -324,6 +331,8 @@ impl Default for GameSettings {
             guild_mark_min_level: 3,
             no_wander: false,
             user_limit: 32768,
+            busy_user_count: 650,
+            full_user_count: 1200,
             empire_whisper: true,
             block_login: "30000705".to_owned(),
             shutdowned: false,
