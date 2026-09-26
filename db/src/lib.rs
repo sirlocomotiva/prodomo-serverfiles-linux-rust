@@ -5,6 +5,8 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+pub mod accounts;
+pub mod credentials;
 pub mod item_id_range;
 pub mod store;
 

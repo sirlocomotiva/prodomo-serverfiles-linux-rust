@@ -108,3 +108,16 @@ _Avoid_: exchange (the trade window specifically), transaction
 The person who runs the Rewrite and manages accounts, GMs, and item-shop currency from outside the
 game.
 _Avoid_: admin, GM (an in-game role)
+
+**Coins**:
+The item-shop currency. An account holds it, not a character, and only the Operator adds it.
+_Avoid_: cash (a different currency), money, gold (a character's in-game money)
+
+**Cash**:
+The account-level currency the daily-gift window shows and spends. It is separate from Coins.
+_Avoid_: coins, item-shop currency
+
+**GM grant**:
+GM authority given to one character Name of one account. A character whose account does not hold
+the grant for its Name is an ordinary player.
+_Avoid_: GM flag, admin account

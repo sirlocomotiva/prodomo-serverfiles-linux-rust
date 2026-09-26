@@ -19,9 +19,9 @@ db = { path = "../db" }
 gamedata = { path = "../gamedata" }
 world = { path = "../world" }
 quest = { path = "../quest" }
+rustix = { workspace = true, features = ["termios"] }
 
 [dev-dependencies]
-rustix = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

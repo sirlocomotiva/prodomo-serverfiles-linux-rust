@@ -1,11 +1,26 @@
-//! The PostgreSQL connection pool.
+//! The PostgreSQL connection pool and the schema migrations.
 
 use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 
 use common::config::{redact_url, StoreSettings};
+use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
+
+/// The schema migrations in `db/migrations`, embedded when the crate is built.
+pub static MIGRATOR: Migrator = sqlx::migrate!();
+
+/// The version of the newest embedded migration.
+#[must_use]
+pub fn schema_version() -> i64 {
+    MIGRATOR
+        .iter()
+        .map(|migration| migration.version)
+        .max()
+        .unwrap_or_default()
+}
 
 /// Settings for the PostgreSQL connection pool.
 ///
@@ -21,6 +36,13 @@ pub struct StoreConfig {
 impl StoreConfig {
     /// Default upper bound on open connections.
     pub const DEFAULT_MAX_CONNECTIONS: u32 = 8;
+
+    /// How long a query waits for a connection before it fails with a pool timeout.
+    ///
+    /// sqlx keeps retrying a refused connection until this runs out, so it is also how long an
+    /// unreachable server takes to be reported. The sqlx default of 30 seconds would hide a
+    /// server that is down behind a long silence.
+    pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// A configuration for `url` with the default pool size.
     #[must_use]
@@ -43,7 +65,9 @@ impl StoreConfig {
         }
         let connect = PgConnectOptions::from_str(&self.url).map_err(StoreError::InvalidUrl)?;
         Ok((
-            PgPoolOptions::new().max_connections(self.max_connections),
+            PgPoolOptions::new()
+                .max_connections(self.max_connections)
+                .acquire_timeout(Self::ACQUIRE_TIMEOUT),
             connect,
         ))
     }
@@ -79,6 +103,38 @@ pub enum StoreError {
     ZeroConnections,
     /// The server refused or failed a connection or query.
     Database(sqlx::Error),
+    /// The schema could not be brought up to date.
+    Migrate(MigrateError),
+}
+
+impl StoreError {
+    /// Whether trying again later may succeed without the Operator changing anything.
+    ///
+    /// Only an unreachable or overloaded server is transient: an I/O or TLS failure, a pool
+    /// timeout, or a server error in SQLSTATE class `08` (connection exception), `53`
+    /// (insufficient resources), or `57P` (the server is shutting down or starting up). A refused
+    /// password, a missing database, or a migration that was edited after it was applied needs
+    /// the Operator.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Database(error)
+            | Self::Migrate(
+                MigrateError::Execute(error) | MigrateError::ExecuteMigration(error, _),
+            ) => is_transient(error),
+            _ => false,
+        }
+    }
+}
+
+fn is_transient(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Io(_) | sqlx::Error::Tls(_) | sqlx::Error::PoolTimedOut => true,
+        sqlx::Error::Database(error) => error.code().is_some_and(|code| {
+            code.starts_with("08") || code.starts_with("53") || code.starts_with("57P")
+        }),
+        _ => false,
+    }
 }
 
 impl fmt::Display for StoreError {
@@ -90,6 +146,7 @@ impl fmt::Display for StoreError {
             }
             Self::ZeroConnections => f.write_str("max_connections must be at least one"),
             Self::Database(error) => write!(f, "PostgreSQL error: {error}"),
+            Self::Migrate(error) => write!(f, "schema migration failed: {error}"),
         }
     }
 }
@@ -98,6 +155,7 @@ impl Error for StoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidUrl(error) | Self::Database(error) => Some(error),
+            Self::Migrate(error) => Some(error),
             Self::UnsupportedScheme(_) | Self::ZeroConnections => None,
         }
     }
@@ -106,6 +164,12 @@ impl Error for StoreError {
 impl From<sqlx::Error> for StoreError {
     fn from(error: sqlx::Error) -> Self {
         Self::Database(error)
+    }
+}
+
+impl From<MigrateError> for StoreError {
+    fn from(error: MigrateError) -> Self {
+        Self::Migrate(error)
     }
 }
 
@@ -152,6 +216,20 @@ impl Store {
         &self.pool
     }
 
+    /// Apply every embedded migration the database does not have yet.
+    ///
+    /// Each migration runs in its own transaction, and sqlx holds an advisory lock for the whole
+    /// run, so two processes migrating at once do not interfere.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Migrate`]. [`StoreError::is_transient`] says whether a retry can
+    /// help.
+    pub async fn migrate(&self) -> Result<(), StoreError> {
+        MIGRATOR.run(&self.pool).await?;
+        Ok(())
+    }
+
     /// Close every connection and refuse new ones.
     pub async fn close(&self) {
         self.pool.close().await;
@@ -195,6 +273,28 @@ mod tests {
         let shown = format!("{config:?}");
         assert!(!shown.contains("hunter2"), "got {shown}");
         assert!(shown.contains("prodomo:***@db.local:5432/prodomo"), "got {shown}");
+    }
+
+    #[test]
+    fn only_an_unreachable_server_is_worth_retrying() {
+        let refused = || sqlx::Error::Io(std::io::ErrorKind::ConnectionRefused.into());
+        assert!(StoreError::Database(refused()).is_transient());
+        assert!(StoreError::Database(sqlx::Error::PoolTimedOut).is_transient());
+        assert!(StoreError::Migrate(MigrateError::Execute(refused())).is_transient());
+        assert!(StoreError::Migrate(MigrateError::ExecuteMigration(refused(), 1)).is_transient());
+
+        assert!(!StoreError::Database(sqlx::Error::RowNotFound).is_transient());
+        assert!(!StoreError::Migrate(MigrateError::VersionMismatch(1)).is_transient());
+        assert!(!StoreError::Migrate(MigrateError::VersionMissing(2)).is_transient());
+        assert!(!StoreError::Migrate(MigrateError::Dirty(1)).is_transient());
+        assert!(!StoreError::ZeroConnections.is_transient());
+    }
+
+    #[test]
+    fn the_embedded_migrations_start_at_one_and_have_no_gaps() {
+        let versions: Vec<i64> = MIGRATOR.iter().map(|migration| migration.version).collect();
+        let expected: Vec<i64> = (1..=schema_version()).collect();
+        assert_eq!(versions, expected);
     }
 
     #[tokio::test]

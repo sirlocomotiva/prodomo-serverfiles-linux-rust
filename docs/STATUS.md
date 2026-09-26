@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-09-26, after ledger section 178 (step 1, part two: the `prodomo` binary, one
-TOML document, and a listener per role).
+Last reviewed: 2026-09-26, after ledger section 179 (step 1, part three: the first schema, store
+readiness, and the Operator commands). Step 1 is done.
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -14,7 +14,9 @@ GC 96 of 134), TEA, and transport-free descriptor reducers. The two-process layo
 and a `db-server` talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177;
 sections 1-175 record how it was built and stay as history. Since section 178 the one `prodomo`
 binary reads `prodomo.toml`, binds the auth listener and every Channel port, and answers only
-keepalive and pong on them.
+keepalive and pong on them. Since section 179 it migrates a PostgreSQL 18 store before admitting
+anyone, and `prodomo account` and `prodomo gm` create accounts, set passwords, change Coins and
+Cash, and grant GM authority.
 
 The direction since then:
 
@@ -30,8 +32,8 @@ Each step lands as one or more ledger sections with a gate receipt.
 
 | step | scope | state |
 |---|---|---|
-| 1. Restructure | Retire the DB-peer and GG code and move the pure rule modules into `gamedata`. Rename `game-server` to the single `prodomo` binary with TOML configuration for the auth and Channel listeners, the Channel map sets, and PostgreSQL. First PostgreSQL schema and migrations. The Operator command that creates accounts and GMs. | **In progress.** Retirement and `gamedata` done (177). The rename, the TOML document, and the listeners done (178). The schema and Operator command (179) are next. |
-| 2. Parity inventory | Every legacy system and handler, listed from the source in `.scratch/parity/`, each with a porting status. The scripted-client test crate. | Not started. |
+| 1. Restructure | Retire the DB-peer and GG code and move the pure rule modules into `gamedata`. Rename `game-server` to the single `prodomo` binary with TOML configuration for the auth and Channel listeners, the Channel map sets, and PostgreSQL. First PostgreSQL schema and migrations. The Operator command that creates accounts and GMs. | **Done.** Retirement and `gamedata` (177). The rename, the TOML document, and the listeners (178). The account and GM schema, store readiness, and the Operator commands (179). |
+| 2. Parity inventory | Every legacy system and handler, listed from the source in `.scratch/parity/`, each with a porting status. The scripted-client test crate. | **Next.** |
 | 3. Vertical slice | Handshake and TEA, auth (`LOGIN3`), login by key, character select, create, and delete, loading, entering the game, movement and chat, a Warp between maps, and logout with save. | Not started. Codecs and reducers exist; see below. |
 | 4. Game systems | In dependency order: items and inventory; NPCs, shops, and Transfers (trade, safebox); the quest runtime (`qc` port and Lua 5.1, with its API growing as each later system lands); monsters, combat, drops, and exp; skills and affects; party, guild, messenger, and the cross-Channel bus; dungeons, events, guild war, and OX; the Prodomo custom systems (sash, aura, pets, battle pass, switchbot, item shop, premium shop, and the rest); GM commands, the adminpage, and logs. | Not started. |
 | 5. Game data and play test | Finish the importers, fix what the full data set breaks, then the owner's play test with the Reference client. | Not started. |
@@ -54,9 +56,9 @@ several clients.
 ### Play test setup
 
 The owner runs the play test on a Linux machine or VM with a `compose.yaml` (Podman or Docker) that
-starts PostgreSQL 18 and `prodomo`. The README will cover creating an account, making it a GM, and
-matching the auth and Channel ports to the Reference client's `serverinfo`. Ports default to the
-legacy ones.
+starts PostgreSQL 18 and `prodomo`. The README covers creating an account and making it a GM
+(179); it will also cover matching the auth and Channel ports to the Reference client's
+`serverinfo`. Ports default to the legacy ones.
 
 ## Topology
 
@@ -78,7 +80,10 @@ refuses a topology it cannot run before binding anything (ledger 178.3). Two leg
 owner should know about (178.5):
 
 - `test_server` defaults to on in legacy and none of the owner's `CONFIG` files turns it off, so the
-  deployment ran in test-server mode. The example keeps it on for Parity.
+  deployment ran in test-server mode. The example keeps it on for Parity. One of its effects: legacy
+  gives **every** character IMPLEMENTOR authority while it is on (`G/gm.cpp:53`), so on the owner's
+  deployment every player was a GM. The GM grants of section 179 do not reproduce that yet; the
+  owner decides when `test_server` is audited.
 - `BLOCK_LOGIN` refuses accounts created on or after its date. Its legacy default is `30000705`; an
   empty value would refuse every account.
 
@@ -89,11 +94,11 @@ owner should know about (178.5):
 | `protocol` CG and GC codecs, TEA, inventories | 91 of 92 CG and 96 of 134 GC records, golden-byte tested. Most CG codecs have no caller. | Kept. |
 | `protocol` `db_*` and `gg*` modules | Deleted in 177. `TSimplePlayer` moved to `protocol::simple_player`. | Done. |
 | `net` | Client framing. `buffer.rs` and the DB-peer transport were deleted in 177. | Kept. |
-| `db` | `store` (a PostgreSQL pool, never run against a real server; its `Debug` output hides the password) and `item_id_range`. The MySQL pool was deleted in 177. | Grows with the schema in 179. |
+| `db` | `store` (the PostgreSQL pool, the embedded migrations, and the transient-error rule), `credentials` (logins, argon2id passwords, delete codes), `accounts` (accounts, Coins and Cash, GM grants), and `item_id_range`. Tested against PostgreSQL 18.6 when `DATABASE_URL` is set. | Grows with each system's tables. |
 | `gamedata` | Packed table record layouts and nine table rules (banword, event, item_attr, land, object_proto, refine, renewal_shop, shop, skill) as typed builders over caller-supplied rows. New in 177. | Readers and importers for `legacy/gamedata` are added with the system that first needs them. |
 | `world` | Spatial model, characters, events, and some combat rules. Never imported by a binary. | Kept; grows with step 4. |
 | `quest` | An 8-line scaffold. | Replaced by the `qc` port and the Lua 5.1 runtime. |
-| `prodomo` | Renamed from `game-server` in 178. `prodomo serve` reads `prodomo.toml`, creates a lazy store, binds the auth listener and every Channel port (`listeners`), starts the game loop, and opens `ReadyGate`. Every connection still reaches a handler that answers only keepalive and pong. Reducers: `ClientLifecycle`, handshake, heartbeat, `DescriptorCrypto`, `client_live`, `AccountPlayerSession` and its router (re-based on the typed `account_records` in 177), `sync_position`. | The Operator commands arrive in 179. `ReadyGate` will wait for the loaded Game data once step 3 loads it. |
+| `prodomo` | Renamed from `game-server` in 178. `prodomo serve` reads `prodomo.toml`, creates a lazy store, binds the auth listener and every Channel port (`listeners`), starts the game loop, migrates the store (retrying while it is unreachable), and only then opens `ReadyGate` (179). Every admitted connection still reaches a handler that answers only keepalive and pong. `prodomo account` and `prodomo gm` are the Operator commands (`operator`, 179). Reducers: `ClientLifecycle`, handshake, heartbeat, `DescriptorCrypto`, `client_live`, `AccountPlayerSession` and its router (re-based on the typed `account_records` in 177), `sync_position`. | `ReadyGate` will also wait for the loaded Game data once step 3 loads it. |
 | `db-server` | Deleted in 177. GM list rules moved to `common::gm`, item-ID ranges to `db::item_id_range`, and the nine table rules to `gamedata`. The `item_proto` and `mob_proto` SQL decoders did not move, because the protos are read from the text files; the `object`, `market_price`, `monarch`, `player`, `player_index`, `quest`, and `login` modules did not move, because that state lives in the fresh store. | Done. |
 | `tools/packet_compare` | Deleted in 177. | Done. |
 
@@ -102,7 +107,7 @@ owner should know about (178.5):
 | stage | present in Rust | missing |
 |---|---|---|
 | Handshake and TEA | `ClientLifecycle`, `handshake`, `handshake_dispatch`, `DescriptorCrypto`, `client_live`; the listeners (178) | Running them on each accepted connection; scripted-client coverage. |
-| Auth | `CgLogin3` (66 bytes), `GcLoginFailure` | Account lookup in PostgreSQL with argon2id; the login-key registry; `0x96`. |
+| Auth | `CgLogin3` (66 bytes), `GcLoginFailure`; the `account` table, `db::accounts::find_credentials`, and argon2id verification (179) | Calling them from `LOGIN3`; the status, availability, and `BLOCK_LOGIN` checks; the login-key registry; `0x96`. |
 | Login by key | `CgLoginByKey`, `AccountPlayerSession::on_login*`, `GcEmpire`, the 357-byte `GcLoginSuccess` | The login checks from `D/ClientManagerLogin.cpp:82-150`; the player summaries from the store. |
 | Select, create, delete | `on_select`; the create and delete CG codecs | Player and item tables; name rules; the create defaults. |
 | Loading | Loading-phase GC records 15, 16, 76, and 28-30; `gc_actors` | `ITEM_SET2` (21), `ENTITY` (249), map data from `legacy/gamedata`. |
@@ -139,7 +144,10 @@ owner should know about (178.5):
 | Every Transfer commits in one transaction when it happens. | The DB cache flushes on a timer; a crash can lose or duplicate items. |
 | Passwords are argon2id. | MySQL `PASSWORD()` (`G/input_auth.cpp:125-127`). |
 | The adminpage has no default password. | `SHOWMETHEMONEY` (`G/config.cpp:110`). |
-| Clients are refused until the world has loaded its Game data. | Clients are accepted before the DB boot completes (`G/main.cpp:691-695`). |
+| Clients are refused until the store's schema is migrated (179) and, from step 3, until the world has loaded its Game data. While the store is unreachable the ports stay bound and each connection is closed at once. | Clients are accepted before the DB boot completes (`G/main.cpp:691-695`). |
+| Logins are 2 to 30 ASCII letters and digits, stored in lowercase. | `account.login` is `varchar(16)` (`legacy/sql/schema/account.sql`), although its column comment says `LOGIN_MAX_LEN=30`. |
+| A GM grant is one character Name of one account. Names are unique regardless of case, and a Name held by another account must be revoked before it is granted again. | `gmlist` rows are looked up by exact Name in a `std::map` (`G/gm.cpp:55`); nothing stops two rows whose Names differ only in case. |
+| The GM host check and its `gmhost`, `mContactIP`, and `mServerIP` columns are not ported. | Used only when `gm_host_check` is set (`G/gm.cpp:62-105`, `G/config.cpp:45` and `:1212`); none of the owner's `CONFIG` files sets it. |
 | An unknown or malformed client frame closes the descriptor. | Logged and consumed, or ignored (ledger 160.5). |
 
 ## Legacy defects not to reproduce
@@ -158,12 +166,13 @@ owner should know about (178.5):
 
 ## Environment
 
-- PostgreSQL 18 runs in Podman (`postgres:18`), reached through `host.docker.internal`. The image is
-  not pulled yet; the owner approved one pull (planning Q23).
+- PostgreSQL 18 runs in Podman (`postgres:18`, PostgreSQL 18.6), pulled once in section 179 under
+  the owner's approval (planning Q23). On the current machine `host.docker.internal` does not
+  resolve, so the container publishes its port on `127.0.0.1`; `AGENTS.md` has the commands.
 - The one online `cargo fetch` the owner approved (planning Q23) ran in section 177. The offline
   gates build from the local cache.
 - `rustfmt` and `cargo-clippy` are not installed on the current machine, so the format and Clippy
-  gates have not run since section 175. Installing them needs owner approval:
+  gates have not run since section 175; formatting has been checked by hand since. Installing them needs owner approval:
   `sudo apt-get install rustfmt rust-clippy`.
 - `i686-linux-gnu-g++-12`, used by the width probe, is not installed on the current machine.
 

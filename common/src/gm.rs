@@ -10,6 +10,11 @@
 //! copied into its fixed-width field, and how `mAuthority` maps onto the
 //! legacy `EGMLevels` order. It does not query a database; the store supplies
 //! the rows.
+//!
+//! The Rewrite keeps GM grants in the store's `gm_grant` table (ledger 179)
+//! and uses only [`GmAuthority`](crate::gm::GmAuthority) from here. The host
+//! and administrator list builders describe the legacy boot stream and have no
+//! caller.
 
 use std::error::Error;
 use std::fmt;
@@ -77,6 +82,27 @@ impl GmAuthority {
             b"LOW_WIZARD" => Some(Self::LowWizard),
             b"WIZARD" => Some(Self::Wizard),
             _ => None,
+        }
+    }
+
+    /// Every authority, lowest first.
+    pub const ALL: [Self; 5] = [
+        Self::LowWizard,
+        Self::Wizard,
+        Self::HighWizard,
+        Self::God,
+        Self::Implementor,
+    ];
+
+    /// The legacy `mAuthority` spelling, which the store also keeps.
+    #[must_use]
+    pub const fn column(self) -> &'static str {
+        match self {
+            Self::LowWizard => "LOW_WIZARD",
+            Self::Wizard => "WIZARD",
+            Self::HighWizard => "HIGH_WIZARD",
+            Self::God => "GOD",
+            Self::Implementor => "IMPLEMENTOR",
         }
     }
 
@@ -442,6 +468,17 @@ mod tests {
             GmAuthority::from_column(b"GOD").map(GmAuthority::as_i32),
             Some(4)
         );
+    }
+
+    #[test]
+    fn every_authority_spells_its_column_back_in_order() {
+        for (index, authority) in GmAuthority::ALL.into_iter().enumerate() {
+            assert_eq!(
+                GmAuthority::from_column(authority.column().as_bytes()),
+                Some(authority)
+            );
+            assert_eq!(usize::try_from(authority.as_i32()), Ok(index + 1));
+        }
     }
 
     #[test]

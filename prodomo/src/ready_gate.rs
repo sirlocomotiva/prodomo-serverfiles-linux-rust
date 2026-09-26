@@ -8,10 +8,12 @@
 //! `AcceptDesc()` unconditionally. So legacy accepts, handshakes, and logs in
 //! players while its tables are still missing. That is a Defect, not a Quirk.
 //!
-//! The Rewrite has no DB server to wait for (ADR-0002). What a client must not
-//! reach is a world whose Game data is not loaded yet, so the gate opens once
-//! startup has finished and closes again when shutdown begins. This is a
-//! Divergence, and it is isolated here so a reviewer can find it in one place.
+//! The Rewrite has no DB server to wait for (ADR-0002), but it has a store. What
+//! a client must not reach is a world whose store is unreachable or whose Game
+//! data is not loaded yet, so the gate opens once startup has finished (today:
+//! once the store's schema is migrated) and closes again when shutdown begins.
+//! This is a Divergence, and it is isolated here so a reviewer can find it in
+//! one place.
 //!
 //! It is a counting gate rather than a plain flag because a refused connection
 //! is closed immediately, and the counters make that visible in the logs.

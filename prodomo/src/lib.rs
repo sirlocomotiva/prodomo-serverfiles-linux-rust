@@ -48,6 +48,8 @@ pub mod ready_gate;
 
 pub mod listeners;
 
+pub mod operator;
+
 /// Pure, injected policy for the legacy sync-position gameplay action.
 pub mod sync_position;
 

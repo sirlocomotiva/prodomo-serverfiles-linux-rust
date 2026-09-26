@@ -14910,3 +14910,258 @@ in `common/src/config.rs` moved with `GameSettings`; the count in 177.13 is
 unchanged.
 
 Protocol coverage is unchanged: CG 91 of 92, GC 96 of 134.
+
+## 179. Step 1, part three: the first schema, store readiness, and the Operator commands
+
+This section gives the store its first tables, makes `prodomo serve` wait for them before it admits
+anyone, and adds the Operator commands of planning Q22: `prodomo account ...` creates accounts,
+changes passwords, and changes Coins and Cash, and `prodomo gm ...` grants, lists, and revokes GM
+authority. No client path reads the tables yet; `LOGIN3` is wired in the vertical slice. Step 1
+(Restructure) is done.
+
+### 179.1 The schema
+
+`db/migrations/0001_accounts.sql` is the first migration. `db::store::MIGRATOR` embeds the folder
+with `sqlx::migrate!`, and `db/build.rs` makes Cargo rebuild the crate when a migration changes.
+
+**`account`**, one row per account:
+
+| column | rule | legacy |
+| --- | --- | --- |
+| `id` | `integer` identity, from 1 | `int unsigned`. It reaches the client as a 32-bit value, so it is not a UUID (ADR-0003). |
+| `login` | unique, `^[a-z0-9]{2,30}$` | Legacy lowercases the login it receives and accepts 2 to 30 letters and digits (`LOGIN_MAX_LEN`, `common/length.h:11`), but its column is `varchar(16)` (`legacy/sql/schema/account.sql`). Storing only the lowercase form makes the unique constraint case-insensitive. |
+| `password_hash` | an argon2id PHC string (`LIKE '$argon2id$%'`) | MySQL `PASSWORD()`, a Divergence already recorded. |
+| `delete_code` | 7 ASCII letters and digits | The last seven bytes of `social_id`, compared at `D/ClientManagerPlayer.cpp:1363`. |
+| `status` | 1 to 8 printable ASCII bytes, default `OK` | `status char[9]`, sent to the client as the login failure. |
+| `language` | 1 to 11, default 1 | `language`, default 1. |
+| `available_at`, `created_at`, `last_play_at` | `timestamptz`; the first two default to `now()` | `availDt`, `create_time`, `last_play`. |
+| `coins` | `bigint`, 0 or more | Read and written as `long long` (`D/ClientManager.cpp:4780` and `:4803`), although the dump declares `varchar(10)`. |
+| `cash` | `bigint`, 0 to 4,294,967,295 | Read into a `DWORD` and changed by a signed delta (`G/char_daily_gifts.cpp:333` and `:364`). |
+
+**`gm_grant`**, one row per GM grant: `id uuid DEFAULT uuidv7()`, `account_id` (cascading delete),
+`name` (`^[A-Za-z0-9]{2,24}$`), `authority` (one of the five legacy spellings, `PLAYER` excluded),
+and `granted_at`. A unique index on `lower(name)` makes Names unique regardless of case.
+
+Every rule the Rust types enforce is also a `CHECK` constraint, so a row written by hand in `psql`
+cannot break an invariant the game relies on. A test writes twelve rows or updates that each break
+one rule (login case and length, the hash prefix, the delete code, Cash, Coins, the language, two
+statuses, the authority, and two GM Names) and expects each to be refused, then writes the same
+columns with valid values as a positive control.
+
+The account columns that legacy used for premium timers (`gold_expire` and the rest), the website
+(`email`, the tokens, the security questions), and `mileage` are not ported. They return with the
+system that reads them.
+
+### 179.2 Credentials: `db::credentials`
+
+- `Login`: 2 to 30 ASCII letters and digits, lowercased. The error names the rule, never the
+  input.
+- `NewPassword`: 1 to 16 printable ASCII bytes (`0x20..=0x7E`), the width `LOGIN3` carries. Its
+  `Debug` is redacted. `hash` produces an argon2id PHC string with the `argon2` crate's default
+  parameters (argon2id v19, m = 19,456 KiB, t = 2, p = 1) and a fresh `OsRng` salt.
+- `PasswordDigest`: a stored hash, checked with `verify`. A digest that does not parse is an error,
+  not a mismatch.
+- `DeleteCode`: 7 ASCII letters and digits, or `random()`, which draws 7 uniform decimal digits by
+  rejection sampling (no `% 10` bias; a test feeds the rejected boundary value).
+
+### 179.3 Accounts, currency, and GM grants: `db::accounts`
+
+Every value is a bound parameter. The two currency column names are fixed strings chosen by the
+`Currency` enum, never formatted from input.
+
+- `create_account` inserts with `ON CONFLICT (login) DO NOTHING RETURNING id`, so a taken login is
+  `LoginTaken` and never a raw constraint error.
+- `set_password` and `find_credentials` (the lookup `LOGIN3` will use).
+- `adjust_balance(login, currency, delta)` runs in one transaction: `SELECT ... FOR UPDATE`, a
+  `checked_add`, a range check against the currency's limit (`i64::MAX` for Coins, `u32::MAX` for
+  Cash), then `UPDATE`. A result outside the range is refused with the balance and the change, and
+  nothing is written; nothing is clamped. A test runs 32 concurrent `+1` changes and expects
+  exactly 32.
+- `grant_gm(login, name, authority)` upserts on `lower(name)` with
+  `DO UPDATE ... WHERE gm_grant.account_id = EXCLUDED.account_id`. Regranting a Name on the same
+  account changes its spelling and authority. A Name held by another account affects no row, and
+  the command reports `NameGrantedElsewhere` with the holder's login ("revoke that grant first").
+- `revoke_gm(name)` matches regardless of case. `list_gm_grants` orders by `lower(name)`.
+- `gm_authority(account, name)` is the lookup the game will make at login. It matches the Name
+  regardless of case **and** the account. An authority string the schema should have refused is
+  reported as `Corrupt`, never mapped to a default.
+
+`common::gm::GmAuthority` gains `ALL` and `column()`, the inverse of `from_column`, with a
+round-trip test over all five values.
+
+### 179.4 What legacy does with GM authority, and what is kept
+
+`gm_new_get_level` (`G/gm.cpp:51-107`) decides a character's authority:
+
+1. If `test_server` is on, it returns `GM_IMPLEMENTOR` for **every** character (`:53`).
+2. It looks the character name up in a `std::map` keyed by the exact name (`:55`); no row means
+   `GM_PLAYER`.
+3. `ENABLE_NEWSTUFF` is defined (`common/prodomodefines.h:11`), so the branch at `:62` depends on
+   `g_bGMHostCheck`, which defaults to `false` (`G/config.cpp:45`) and is set only by the
+   `gm_host_check` key (`:1212`). With it off, legacy compares the row's account with the
+   character's account using `strcmp` and returns `GM_PLAYER` on a mismatch (`:68-77`).
+4. Only with the host check on are `gmhost`, `mContactIP`, and the host set consulted (`:80-105`).
+
+The owner's `legacy/config` never sets `gm_host_check`: a case-insensitive search for it over the
+directory matched no file, while the positive control `^hostname` matched 10 files with the same
+command. So the kept rule is step 3: a grant is (account, Name, authority).
+
+Recorded as Divergences in `docs/STATUS.md`:
+
+- Names in `gm_grant` are unique regardless of case, and a Name held by another account must be
+  revoked before it is granted again. Legacy allowed two `gmlist` rows whose names differ only in
+  case, each matched exactly.
+- The host check, `gmhost`, `mContactIP`, and `mServerIP` are not ported.
+
+Not reproduced **yet**, and left to the `test_server` audit the owner has been told about (178.5):
+the everyone-is-IMPLEMENTOR rule of step 1. `docs/STATUS.md` now names it, since it means every
+player on the owner's deployment was a GM.
+
+Planning Q22 asked for "a GM flag". A flag on the account cannot express legacy's per-character
+rule, so it became `prodomo gm grant/revoke/list`.
+
+### 179.5 A login check that cannot fire on the owner's deployment
+
+`G/db.cpp:392` refuses a login with `BADSCLID` when `CheckCorrectSocialID` fails and `test_server`
+is off. `CheckCorrectSocialID` (`G/shutdown_manager.cpp:137-173`) returns `true` at once unless
+`gShutdownEnable` is set (`CheckLocale`, `shutdown_manager.h:28`), and `gShutdownEnable` defaults
+to 0 (`G/config.cpp:148`) and is set only by `shutdown_enable` (`:1440-1444`). The owner's
+`legacy/config` never sets it (no match; positive control `^hostname`, 10 files). The check is a
+Korean resident-number validator and needs 13 characters, which a 7-character delete code could
+never pass. It is not ported, and the delete code needs no other shape than its 7 characters.
+
+### 179.6 Store readiness at startup (Divergence)
+
+Section 178 opened `ReadyGate` as soon as the listeners were bound, with a lazy pool that had never
+connected. Now:
+
+1. `serve` binds every listener and starts the game loop as before, then logs
+   `Waiting for the store before accepting clients`. The gate stays closed, so each connection is
+   closed at once with `Refusing client connection before startup has finished`.
+2. Inside the accept loop, one pinned `prepare_store` future runs `Store::migrate`. It is pinned
+   once so that a refused client does not restart its retry pause.
+3. A transient error (`StoreError::is_transient`: I/O, TLS, a pool timeout, or SQLSTATE class `08`,
+   `53`, or `57P`) logs `Store unreachable; retrying` and waits 1 second, doubling up to 30.
+4. Any other error, such as a wrong password or a missing database (`3D000`), ends the accept
+   loop: the listeners close, the game loop stops, the store closes (`Store closed`), and the
+   process prints `error: Store unusable: ...` on stderr and exits 1.
+5. Success logs `Store ready at schema version N`, opens the gate, and logs `Accepting clients`.
+
+SIGTERM and SIGINT are handled throughout, including during a retry pause.
+
+`StoreConfig::ACQUIRE_TIMEOUT` is 5 seconds. sqlx retries a refused TCP connection until the
+acquire timeout runs out, so this bounds one attempt; its default of 30 seconds would have hidden
+the backoff behind one long wait.
+
+Legacy accepts clients while its DB link is still retrying (`G/main.cpp:691-695`); refusing them
+is the Divergence already listed in `docs/STATUS.md`, now extended to the store.
+
+### 179.7 The Operator commands: `prodomo::operator`
+
+```
+prodomo [--config prodomo.toml] account create <login> [--delete-code <code>]
+prodomo [--config prodomo.toml] account password <login>
+prodomo [--config prodomo.toml] account coins <login> <amount>
+prodomo [--config prodomo.toml] account cash <login> <amount>
+prodomo [--config prodomo.toml] gm grant <login> <name> <authority>
+prodomo [--config prodomo.toml] gm revoke <name>
+prodomo [--config prodomo.toml] gm list
+```
+
+- `prepare` checks every argument, then reads and hashes the password, all **before** connecting,
+  so a typo never waits for the store and a bad login is refused before the password is typed.
+- The password comes only from standard input. On a terminal, `prompt_hidden` asks twice on stderr
+  with echo off (a `rustix` `termios` RAII guard that restores the terminal on drop, even on an
+  error) and refuses a mismatch. Otherwise the first line is used, with a trailing `\n` and then
+  `\r` stripped; empty input is `no password on standard input`. A password argument would be
+  visible in `ps` and shell history, so there is none.
+- The authority is parsed in any case, with `-` accepted for `_`. `player` is refused with the list
+  of accepted spellings.
+- `execute` connects, migrates once without retrying (an Operator is present to read the error),
+  runs the command, and prints one result on stdout. A generated delete code is printed once; a
+  chosen one is not echoed.
+- `main` returns an `ExitCode`: on failure it prints `error: ...` on stderr, prints nothing on
+  stdout, and exits 1. `Store unavailable: ...` and `Store unusable: ...` carry the PostgreSQL
+  error, never the URL, and a test checks that the password is absent.
+
+`rustix` moved from dev-dependencies to dependencies with the `termios` feature, which adds no
+crate. `Cargo.lock` is unchanged; nothing was fetched.
+
+### 179.8 Tests
+
+Database tests run only when `DATABASE_URL` is set and print `skipped: DATABASE_URL is not set`
+otherwise. Each creates its own database (`prodomo_test_*` for `db`, `prodomo_proc_*` for the
+process tests) and drops it `WITH (FORCE)` on `Drop`, so tests run in parallel against one server
+and a panic leaves nothing behind. After every run, no `prodomo_%` database was left.
+
+| file | tests | what they pin |
+| --- | --- | --- |
+| `db/src/credentials.rs` | 9 | Login rules and lowercasing, password bounds and redaction, argon2id round trip, delete-code shape and unbiased digits. |
+| `db/src/accounts.rs` | 4 | Name rules, currency limits, the balance error text, the account-ID column conversion. |
+| `db/src/store.rs` | +2 | Which errors are transient; migrations start at 1 with no gap. |
+| `common/src/gm.rs` | +1 | `column()` inverts `from_column` for all five values. |
+| `db/tests/accounts.rs` | 9 | The URL rewrite, migrating twice, create and duplicate, legacy defaults, password change, both currency ranges and overflow, 32 concurrent changes, GM grant ownership and case, and the `CHECK` constraints (179.1). |
+| `prodomo/src/operator.rs` | 7 | The authority spellings, line-ending stripping, the lowercase login and generated code, validation before the password is read, the password rules, the sign of a balance change, the Name kept as typed. |
+| `prodomo/tests/operator.rs` | 4 | The real binary: create, password, Coins, Cash, grant, list, revoke, an unusable store; the password never reaches stdout or stderr. |
+| `prodomo/tests/process.rs` | 6, up from 4 | Unreachable store: every port closes a client at once, the retry is logged, `Accepting clients` never is, SIGTERM exits cleanly, no password leaks. Reachable store: migrated, then admitted. Missing database: non-zero exit, `Store unusable`, `Store closed`. |
+
+The process test's unreachable store is `127.0.0.1:1`, which refuses at once, so the test needs no
+database.
+
+### 179.9 Mutation check
+
+Nine mutants, each applied to the pristine file, checked to have changed it, run against the
+targeted tests with `DATABASE_URL` set, and restored by SHA-256. All nine were semantic kills;
+none failed to compile.
+
+| mutant | file | killed by |
+| --- | --- | --- |
+| M1 drop `FOR UPDATE` from the balance read | `db/src/accounts.rs` | the 32 concurrent changes |
+| M2 drop the range check before `UPDATE` | `db/src/accounts.rs` | the currency range test |
+| M3 drop the account condition from the grant upsert | `db/src/accounts.rs` | the grant ownership test |
+| M4 `gm_authority` ignores the account | `db/src/accounts.rs` | the grant ownership test |
+| M5 retry every store error, not only transient ones | `prodomo/src/main.rs` | the missing-database process test |
+| M6 open the gate before the store is ready | `prodomo/src/main.rs` | the unreachable-store process test |
+| M7 keep `\r` in the password | `prodomo/src/operator.rs` | the CRLF case of the create operator test |
+| M8 read the password before checking the login (`account password`) | `prodomo/src/operator.rs` | the `operator::tests` unit tests |
+| M9 print a chosen delete code too | `prodomo/src/operator.rs` | the create operator test |
+
+### 179.10 Environment
+
+- `postgres:18` was pulled once under the owner's approval (planning Q23). The test server is
+  PostgreSQL 18.6 in the Podman container `prodomo-pg18`.
+- `host.docker.internal` does not resolve on this machine (`getent hosts` fails for it and succeeds
+  for `localhost`), contrary to what `AGENTS.md` said. The container publishes on `127.0.0.1:55432`.
+  It was first created bound to every interface and was recreated bound to loopback only, holding
+  no data but the empty `prodomo` database; the three database test binaries were run again
+  against it and passed.
+- `AGENTS.md` now gives the container and test commands, a store and Operator rule block, and the
+  store condition on client admission. `README.md` shows how to run the store and every Operator
+  command. `docs/STATUS.md` marks step 1 done and step 2 next, and records the new Divergences, the
+  `test_server` GM effect, and the Auth row of the vertical slice. `CONTEXT.md` gains **Coins**,
+  **Cash**, and **GM grant**.
+
+### 179.11 Receipt
+
+Run on 2026-09-26 with rustc 1.85.1, `--locked --offline`:
+
+| gate | result |
+| --- | --- |
+| `cargo build --workspace` | green, 0 warnings |
+| `cargo test --workspace --all-targets --no-fail-fast`, no `DATABASE_URL` | **1,560 passed, 0 failed, 0 ignored**, across 28 test binaries |
+| the same, with `DATABASE_URL` (PostgreSQL 18.6) | **1,560 passed, 0 failed, 0 ignored**; no test printed the skip notice |
+| `cargo test --workspace --doc` | **1 passed** |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | green |
+| `cargo fmt --all -- --check` | **not run**: `rustfmt` is not installed |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **not run**: `cargo-clippy` is not installed |
+
+In total, **1,561 tests** over **141 workspace Rust files** and **85,572 lines**. Against 178.12
+that is 38 more tests (9 + 4 + 2 + 1 + 9 + 7 + 4 + 2, as in 179.8), two more test binaries, and
+seven more files (`db/build.rs`, `db/src/accounts.rs`, `db/src/credentials.rs`,
+`db/tests/accounts.rs`, `prodomo/src/operator.rs`, `prodomo/tests/operator.rs`,
+`prodomo/tests/support/mod.rs`). No stray `*.core` file was left in the workspace root.
+
+Formatting was checked by hand: rustfmt style, no line of the new or changed Rust files over 100
+columns. No `#[allow]` was added.
+
+Protocol coverage is unchanged: CG 91 of 92, GC 96 of 134.

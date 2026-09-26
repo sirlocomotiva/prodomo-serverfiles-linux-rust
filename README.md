@@ -58,25 +58,65 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline
 ```
 
 These gates need no database. Tests that do need one run only when `DATABASE_URL` points at a
-PostgreSQL 18 server.
+PostgreSQL 18 server whose role may create databases; each test creates and drops its own:
+
+```bash
+DATABASE_URL=postgres://prodomo:change-me@127.0.0.1:55432/prodomo \
+  cargo test --workspace --all-targets --locked --offline --no-fail-fast
+```
 
 ## Running it
 
-The binary starts, binds its ports, and shuts down cleanly, but no client can log in yet.
+The binary starts, binds its ports, prepares the store, and shuts down cleanly, but no client can
+log in yet.
+
+Start PostgreSQL 18 (pick your own password; this one is only an example):
 
 ```bash
-cp config/prodomo.toml.example prodomo.toml   # then set [store].url
+podman run -d --name prodomo-pg18 -e POSTGRES_USER=prodomo -e POSTGRES_PASSWORD=change-me \
+  -e POSTGRES_DB=prodomo -p 127.0.0.1:55432:5432 postgres:18
+cp config/prodomo.toml.example prodomo.toml
+# set [store].url to postgres://prodomo:change-me@127.0.0.1:55432/prodomo
 cargo run -p prodomo -- --config prodomo.toml serve
 ```
 
 `--config` defaults to `prodomo.toml` in the working directory. Logs go to stdout and to a file in
 `./log`, filtered by `RUST_LOG` when it is set; `serve --verbose` also reads `LOG_DIR` and `LOG_ANSI`.
-The store URL must be `postgres://` or `postgresql://`; no connection is opened yet, and its
-password is never logged. A root `prodomo.toml` is ignored by Git, so a real password stays local.
-SIGTERM or Ctrl+C stops the server.
+The store URL must be `postgres://` or `postgresql://`, and its password is never logged. A root
+`prodomo.toml` is ignored by Git, so a real password stays local. SIGTERM or Ctrl+C stops the
+server.
 
-The Operator command that creates accounts and GMs comes next. The play test will use a
-`compose.yaml` that starts PostgreSQL 18 and `prodomo` together.
+On start the server binds every port, then creates or updates the schema. Until that has finished
+it closes each client connection at once. While PostgreSQL cannot be reached it keeps retrying,
+waiting 1 second at first and up to 30 seconds between attempts; a permanent error, such as a wrong
+password or a missing database, stops it with a non-zero exit.
+
+### Accounts, GMs, and currency
+
+The Operator commands use the same configuration file and create the schema if it is missing.
+
+```bash
+prodomo account create alice                  # asks for the password twice
+printf '%s\n' "$PASSWORD" | prodomo account create alice --delete-code 1234567
+prodomo account password alice                # replaces the password
+prodomo account coins alice 500               # item-shop Coins; a negative amount removes them
+prodomo account cash alice 20                 # daily-gift Cash
+prodomo gm grant alice Admin god              # low_wizard, wizard, high_wizard, god, implementor
+prodomo gm list
+prodomo gm revoke Admin
+```
+
+- A login is 2 to 30 ASCII letters and digits and is stored in lowercase. A password is 1 to 16
+  printable characters, read from standard input, never from the command line. On a terminal it
+  is asked for twice without echo; otherwise the first line is used.
+- The delete code is the 7 letters and digits a player types to delete a character. Without
+  `--delete-code`, a random 7-digit code is generated and printed once.
+- A GM grant names one character of one account; the character need not exist yet. Names are
+  unique regardless of case, so a Name granted to another account must be revoked first.
+- A balance never goes below zero or above its limit; a change that would is refused and nothing
+  is written.
+
+The play test will use a `compose.yaml` that starts PostgreSQL 18 and `prodomo` together.
 
 ## Contributing
 

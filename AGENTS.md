@@ -56,7 +56,7 @@ Further owner decisions, recorded in `CONTEXT.md` and `docs/STATUS.md`:
   read in place from the legacy layout; the Game data SQL tables are imported from
   `legacy/sql/gamedata`.
 - Accounts, GMs, and item-shop currency are created by an Operator command in the `prodomo`
-  binary. There is no website.
+  binary (`prodomo account ...` and `prodomo gm ...`, ledger 179). There is no website.
 - The adminpage has no default password and stays off until one is configured (legacy defaults to
   `SHOWMETHEMONEY`, a Defect).
 - Listener ports are configurable and default to the legacy ones: auth 30001, and the Channel ports
@@ -66,12 +66,26 @@ Further owner decisions, recorded in `CONTEXT.md` and `docs/STATUS.md`:
 
 ## AGENT RUNTIME ENVIRONMENT
 
-The agent and repository tools run inside a container. The agent may launch other containers with
-Podman. Ports those containers expose are reachable from the agent container through
-`host.docker.internal`; do not assume another container listens on the agent container's localhost.
+The agent and repository tools may run inside a container, and the agent may launch other
+containers with Podman. Where a published port is reachable depends on the machine: on some,
+`host.docker.internal` reaches the host; on the machine used for ledger 179 that name does not
+resolve (`getent hosts` fails while `localhost` resolves) and a published port is reached on
+`127.0.0.1`. Check with `getent hosts host.docker.internal` before choosing the address.
 
 PostgreSQL 18 runs in Podman (`postgres:18`), never inside the agent container. Database tests run
-only when `DATABASE_URL` is set, so every gate stays green without a database.
+only when `DATABASE_URL` is set, so every gate stays green without a database. To run them:
+
+```bash
+podman run -d --name prodomo-pg18 -e POSTGRES_USER=prodomo -e POSTGRES_PASSWORD=prodomo-test \
+  -e POSTGRES_DB=prodomo -p 127.0.0.1:55432:5432 postgres:18
+DATABASE_URL=postgres://prodomo:prodomo-test@127.0.0.1:55432/prodomo \
+  cargo test --workspace --all-targets --locked --offline --no-fail-fast
+```
+
+Each database test creates its own scratch database (`prodomo_test_*` or `prodomo_proc_*`), so the
+role needs `CREATEDB`, and drops it when the test ends, even on a panic. Tests may run in parallel
+against one server. After a run, `SELECT datname FROM pg_database WHERE datname LIKE 'prodomo\_%'`
+should return nothing.
 
 The i686 cross compiler used by the width probe (`i686-linux-gnu-g++-12`) is not installed on every
 machine. Check before relying on it, and say so in the receipt when a width could not be measured.
@@ -222,6 +236,30 @@ These rules exist because each one was broken at least once in this repository. 
 - Never log or print a secret. The store URL goes through `redact_url`; a password-like setting is a
   `Secret`. A test that feeds a known password must assert it never reaches the console.
 
+## STORE AND OPERATOR COMMANDS
+
+- A schema change is a new file in `db/migrations/` (`NNNN_name.sql`); never edit a migration that
+  has been applied, because sqlx refuses a changed checksum. `db::store::MIGRATOR` embeds the
+  folder, `db/build.rs` rebuilds when it changes, and a test pins that versions start at 1 with no
+  gap.
+- Keep a `CHECK` constraint behind every rule the Rust types enforce (login and Name shape, the
+  argon2id prefix, currency ranges), so a row written by hand cannot break an invariant the game
+  relies on.
+- `prodomo serve` binds its ports with `ReadyGate` closed and then migrates. Only a transient error
+  is retried (I/O, TLS, a pool timeout, SQLSTATE class `08`, `53`, or `57P`), with a pause that
+  starts at 1 second and doubles up to 30; any other error exits non-zero. Do not widen
+  `StoreError::is_transient`: a wrong password or a missing database never heals by waiting.
+- Operator commands validate every argument and read the password **before** connecting, migrate
+  once without retrying, print their result on stdout, print `error: ...` on stderr, and exit 1 on
+  failure. A password is read from standard input (on a terminal, twice with echo off) and is never
+  a command-line argument, which `ps` and shell history would expose.
+- A currency change is a signed delta applied under `SELECT ... FOR UPDATE` in one transaction. A
+  result outside the column's range is refused, never clamped.
+- A GM grant belongs to one account. Ask `db::accounts::gm_authority` with the account **and** the
+  character Name; never grant authority by Name alone.
+- A database test is gated on `DATABASE_URL`, creates its own scratch database, and drops it on
+  `Drop`, so tests never share rows and a panic leaves nothing behind.
+
 ## DESCRIPTOR CONTRACTS
 
 These transport-free reducers live in `prodomo`.
@@ -252,8 +290,9 @@ These transport-free reducers live in `prodomo`.
   and `TABLE_POSTFIX` has no equivalent in the Rewrite.
 - Passwords are verified with argon2id only. Never store, log, or compare a plaintext password, and
   never reproduce MySQL `PASSWORD()`.
-- A client is not accepted until the world it would enter has finished loading its Game data.
-  Legacy accepts clients before its DB boot completes; that is a Defect.
+- A client is not accepted until the store's schema is migrated and the world it would enter has
+  finished loading its Game data. Legacy accepts clients before its DB boot completes; that is a
+  Defect.
 - The adminpage and every Operator path fail closed: no default password, no default allowlist.
 - Credentials never enter the repository. `legacy/config` has every credential replaced by
   `REDACTED`; keep it that way, and use environment variables or an untracked local config for real
