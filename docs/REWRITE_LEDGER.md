@@ -15500,3 +15500,118 @@ Against 182.5 that is 8 more tests:
 There are two new Rust files (`protocol/src/gc_channel_status.rs` and
 `prodomo/src/channel_status.rs`), for 148 files and 87,706 lines. No scratch database was left
 behind, and there is no stray `*.core` file in the workspace root.
+
+## 184. Auth login (LOGIN3)
+
+`HEADER_CG_LOGIN3` (111) is answered in the auth phase on the auth port. A client with a valid
+account receives `HEADER_GC_AUTH_SUCCESS` (150) and a login key; any other client receives
+`HEADER_GC_LOGIN_FAILURE` (7) naming the first check that failed, and may try again on the same
+connection.
+
+### 184.1 Legacy behaviour
+
+- `CInputAuth::Login` (`G/input_auth.cpp`) trims and lower-cases the login (`trim_and_lower`,
+  `libthecore/utils.cpp:121-165`), answers `NOID` for an empty one and `SHUTDOWN` while the server
+  refuses clients, answers `ALREADY` when `DESC_MANAGER` already holds the login, and then queries
+  the account.
+- The `QID_AUTH_LOGIN` result (`G/db.cpp:246-460`) is judged in this order: `NOID` for no row,
+  `WRONGPWD` (`:372-377`), `NOTAVAIL` while `availDt` is in the future (`:381`), `ALREADY` again
+  (`:386`, with the raw, unnormalised `pinfo->login`), `BADSCLID` and `AGELIMIT` (not ported: the
+  switches are off in the owner's build), the account status (`:404`), `INVLANG` at a language of
+  `LOCALE_MAX_NUM` (12, `length.h:1214`) or more (`:411`), `NOLANG` for language 0 (`:417`), and
+  `BLKLOGIN` when the account was created on or after `g_stBlockDate` (`:428`, `strncmp` over eight
+  characters; the default is `"30000705"`, `config.cpp:112`).
+- On success legacy stores the time and the language (`UPDATE account SET last_play=NOW(),
+  language=%u`, `:438`), marks the login connected (`ConnectAccount`, `:454`), and sends the login
+  key.
+- The client's `bLanguage` is a `DWORD` on the client side and a `BYTE` in the server's record, so
+  three surplus bytes follow every LOGIN3. For a language below 256 they are zero, and header 0 is a
+  one-byte no-op frame (`G/input.cpp:81-82`), so legacy consumes them as three empty records.
+
+### 184.2 The Rewrite
+
+- `db::accounts` gains `AccountId::new`, `AuthAccount`, `find_auth_account` (one bound-parameter
+  query returning the digest, the status, whether the account is unavailable, and the creation date
+  as `YYYYMMDD`), and `record_login` (the time and the language, `NoSuchAccountId` when no row
+  changes). The language `CHECK` refuses 12 and above.
+- `prodomo::auth_login` holds the pure rules: `login_from_field` (the `trim_and_lower` port, bounded
+  to 30 bytes), `password_candidate` (up to the first NUL of the 17-byte field),
+  `judge_credentials` (`WRONGPWD`, then `NOTAVAIL`), and `judge_account` (status, `INVLANG`,
+  `NOLANG`, `BLKLOGIN`). `AuthRegistry` holds every logged-in login under one mutex: `claim` returns
+  an `AuthClaim` that releases the login when dropped, and `grant` issues a nonzero 31-bit login key
+  and drops the login's previous key. `grant_for` is what `LOGIN2` will consume.
+- `handle_connection` routes `LOGIN3` in `ClientPhase::Auth` to `auth_login`, which runs the checks
+  in legacy order. The argon2id verification runs on the blocking pool. The claim lives as long as
+  the connection, so a second `LOGIN3` on one connection releases the first login.
+- The existing `[game]` keys `shutdowned` and `block_login` (default `"30000705"`) now take effect.
+- `cg_login3.rs` and `docs/PROTOCOL_NOTES.md` are corrected: the surplus bytes are zero headers,
+  not a session kill, and `bLanguage` is read.
+- `parity::Server::operate` runs an Operator command against the scenario's store;
+  `support::execute` is shared by the scratch-database create and drop.
+
+### 184.3 Divergences and Defects
+
+Divergences:
+
+- A store or hashing error closes the connection. Legacy's query failure leaves the client waiting.
+- The login key is drawn only on success, and no Panama or crypt records are sent (151).
+- Premium times are not sent: the item-shop premium columns are not part of the new store.
+- The block date is compared with the creation date in the database's time zone.
+- The `ALREADY` re-check uses the normalised login.
+- A language that puts a nonzero byte in the surplus (256 and above) closes the connection, since
+  that byte is read as a real header. The client sends only languages 1 to 11.
+
+Defects not reproduced (recorded in `docs/STATUS.md`):
+
+- `ConnectAccount` overwrites the descriptor's login, so a second login on one descriptor leaves
+  the first marked connected forever.
+- `G/db.cpp:456-457` logs `pinfo->login` after `M2_DELETE(pinfo)`, a use-after-free on every
+  successful auth.
+
+### 184.4 Scenario and mutation sweep
+
+`the_auth_login_grants_a_key_or_names_the_first_failed_check` runs with `block_login = "29991231"`
+and walks: `NOID` for an empty, all-space, and unknown login; `WRONGPWD`; `NOLANG`; `INVLANG`;
+success for `"  ALICE "` with a 17-byte password (the 17th byte is ignored), and a check that the
+language was stored; `ALREADY` on the same and on another connection, then a new key after the
+holder closes; `WRONGPWD` before `NOTAVAIL`; `NOTAVAIL`; the status; `BLKLOGIN` for an account
+created on 2999-12-31 and success for 2999-12-30. A second server with `shutdowned = true` answers
+`NOID` for an unknown login and `SHUTDOWN` otherwise. Control:
+`a_login3_outside_the_auth_phase_closes_the_connection`.
+
+Twenty-one mutants, each applied to the pristine file, confirmed to change executable code, and
+restored by checksum. Twenty were killed, all semantically:
+
+- by the scenario: the `ALREADY` pre-check removed, `shutdowned` ignored, the claim not kept, the
+  login not recorded, a result byte of 0, the language ignored, the block date left at its default,
+  and a refusal closing the connection;
+- by the unit tests: the password not cut at NUL, no leading trim, no 30-byte cut, the
+  availability check off, the status check off, `INVLANG` off by one, `NOLANG` off, a strict
+  block-date comparison, a claim never released, a grant keeping the old key, an unmasked key, and
+  `WRONGPWD` after `NOTAVAIL`.
+
+One survived: taking the claim after `judge_account` instead of before it. It is equivalent
+outside a race, because the `is_held` pre-check already refuses a sequential duplicate; the claim
+only decides between two logins racing through the store.
+
+Rows now `ported`: `cg.auth.login3`, `gc.auth_success`, and `sys.auth.login`. `gc.login_failure`
+stays `partial` (the lobby failures arrive with `LOGIN2`).
+
+### 184.5 Receipt
+
+Run on 2026-09-26 with rustc 1.85.1, `--locked --offline`:
+
+| gate | result |
+| --- | --- |
+| `cargo fmt --all -- --check` | green |
+| `cargo clippy --workspace --all-targets -- -D warnings` | green |
+| `cargo build --workspace` | green, 0 warnings |
+| `cargo test --workspace --all-targets --no-fail-fast`, with `DATABASE_URL` (PostgreSQL 18) | **1,598 passed, 0 failed, 0 ignored**, across 30 test binaries |
+| the same, without `DATABASE_URL` | **1,598 passed, 0 failed** |
+| `cargo test --workspace --doc` | **1 passed** |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | green |
+
+Against 183.5 that is 13 more tests: two in `db/tests/accounts.rs`, nine for `auth_login`, and two
+scenarios. There is one new Rust file (`prodomo/src/auth_login.rs`), for 149 files and 88,698
+lines. No scratch database was left behind, and there is no stray `*.core` file in the workspace
+root.

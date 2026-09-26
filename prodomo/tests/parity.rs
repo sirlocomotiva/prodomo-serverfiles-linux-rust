@@ -19,7 +19,7 @@ use parity::server::default_channels;
 use parity::{Client, Server};
 use protocol::cg_inventory::{resolve_cg_base_size, CG_KEEP_ALIVE, HEADER_CG_PONG};
 use protocol::tea::{decrypt_padded, encrypt_padded, TeaKey};
-use support::ScratchDatabase;
+use support::{execute, ScratchDatabase};
 
 /// This file, so the inventory check can find every scenario by name.
 const SCENARIOS: &str = include_str!("parity.rs");
@@ -36,6 +36,21 @@ fn inventory_dir() -> PathBuf {
 }
 
 // Golden values, spelled out from the legacy source rather than taken from the codecs under test.
+
+/// `HEADER_CG_LOGIN3` (`game/packet.h:77`).
+const CG_LOGIN3: u8 = 111;
+/// `HEADER_GC_LOGIN_FAILURE` (`game/packet.h:107`).
+const GC_LOGIN_FAILURE: u8 = 7;
+/// `HEADER_GC_AUTH_SUCCESS` (`game/packet.h:211`).
+const GC_AUTH_SUCCESS: u8 = 150;
+/// The client's `TPacketCGLogin3`: `BYTE header`, `char login[31]`, `char passwd[17]`,
+/// `DWORD adwClientKey[4]`, and a `DWORD` language (the client's `Packet.h`, under
+/// `ENABLE_MULTI_LANGUAGE_SYSTEM`).
+const CLIENT_LOGIN3_LEN: usize = 69;
+/// `TPacketGCLoginFailure`: `BYTE header`, `char szStatus[9]`.
+const LOGIN_FAILURE_LEN: usize = 10;
+/// `TPacketGCAuthSuccess`: `BYTE header`, `DWORD dwLoginKey`, `BYTE bResult`.
+const AUTH_SUCCESS_LEN: usize = 6;
 
 /// `HEADER_GC_PHASE` (`game/packet.h:98`).
 const GC_PHASE: u8 = 0xfd;
@@ -502,4 +517,212 @@ fn the_channel_status_list_is_served_in_the_handshake_phase() {
     client.send(&[CG_STATE_CHECKER]);
     let closed = channel_status(&ports, 0);
     assert_eq!(client.expect_bytes(closed.len()), closed);
+}
+
+/// Run one statement in the scenario's database.
+fn sql(database: &ScratchDatabase, statement: &str) {
+    execute(database.url(), statement).expect("the statement should succeed");
+}
+
+/// The password every auth scenario account has: the full 16 bytes legacy keeps.
+const ACCOUNT_PASSWORD: &[u8; 16] = b"0123456789abcdef";
+
+/// Create `login` with [`ACCOUNT_PASSWORD`] through the Operator command.
+fn create_account(server: &Server, login: &str) {
+    let password = std::str::from_utf8(ACCOUNT_PASSWORD).expect("ASCII");
+    let output = server.operate(&["account", "create", login], &format!("{password}\n"));
+    assert!(
+        output.status.success(),
+        "account create failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The 69 bytes the client sends: the fields laid out by hand, the language as a little-endian
+/// `DWORD`. `login` and `password` are copied into their fields as given, so a scenario can fill a
+/// field to the last byte.
+fn client_login3(login: &[u8], password: &[u8], language: u32) -> Vec<u8> {
+    let mut record = vec![CG_LOGIN3];
+    let mut field = [0u8; 31];
+    field[..login.len()].copy_from_slice(login);
+    record.extend_from_slice(&field);
+    let mut field = [0u8; 17];
+    field[..password.len()].copy_from_slice(password);
+    record.extend_from_slice(&field);
+    for word in [0x1122_3344u32, 0x5566_7788, 0x99aa_bbcc, 0xddee_ff01] {
+        record.extend_from_slice(&word.to_le_bytes());
+    }
+    record.extend_from_slice(&language.to_le_bytes());
+    assert_eq!(record.len(), CLIENT_LOGIN3_LEN);
+    record
+}
+
+/// A connection in the auth phase.
+fn auth_client(server: &Server) -> Client {
+    let (mut client, first) = accepted(server.auth());
+    assert_eq!(shake(&mut client, first), [GC_PHASE, PHASE_AUTH]);
+    client
+}
+
+/// What the server answers a `LOGIN3`: `Ok(key)` for `AUTH_SUCCESS`, or the failure status.
+///
+/// TEA works on independent 8-byte units, so the first unit names the record and says how many
+/// more to read.
+fn log_in(
+    client: &mut Client,
+    login: &[u8],
+    password: &[u8],
+    language: u32,
+) -> Result<u32, String> {
+    client.send(&sealed(&client_login3(login, password, language)));
+    let mut wire = client.expect_bytes(8);
+    let first = decrypt_padded(&wire, &SETUP_KEY).expect("aligned");
+    let len = match first.first().copied().expect("a whole unit") {
+        GC_AUTH_SUCCESS => AUTH_SUCCESS_LEN,
+        GC_LOGIN_FAILURE => LOGIN_FAILURE_LEN,
+        other => panic!("unexpected answer header {other}"),
+    };
+    wire.extend(client.expect_bytes(len.div_ceil(8) * 8 - 8));
+    let mut record = decrypt_padded(&wire, &SETUP_KEY).expect("aligned");
+    assert!(record[len..].iter().all(|&byte| byte == 0), "{record:02x?}");
+    record.truncate(len);
+    if record[0] == GC_AUTH_SUCCESS {
+        assert_eq!(record[5], 1, "bResult");
+        return Ok(u32::from_le_bytes([
+            record[1], record[2], record[3], record[4],
+        ]));
+    }
+    let status = &record[1..];
+    let end = status.iter().position(|&byte| byte == 0).expect("a NUL");
+    assert!(status[end..].iter().all(|&byte| byte == 0), "{status:02x?}");
+    Err(String::from_utf8(status[..end].to_vec()).expect("ASCII"))
+}
+
+/// `cg.auth.login3`, `sys.auth.login`, `gc.auth_success`, `gc.login_failure`: the client's 69-byte
+/// `LOGIN3` is answered with a sealed `AUTH_SUCCESS` carrying a login key, or a sealed
+/// `LOGIN_FAILURE` in the legacy check order, and a refusal leaves the connection open. The three
+/// surplus bytes of the client's `DWORD` language are skipped as zero headers.
+#[test]
+fn the_auth_login_grants_a_key_or_names_the_first_failed_check() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    // A block date the scenario can reach, so the configured value is what is compared.
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "block_login = \"29991231\"",
+    );
+    create_account(&server, "alice");
+    let pw = &ACCOUNT_PASSWORD[..];
+
+    let mut client = auth_client(&server);
+    // `CInputAuth::Login`: the login shape first, before anything is looked up.
+    assert_eq!(log_in(&mut client, b"a", pw, 1), Err("NOID".into()));
+    assert_eq!(log_in(&mut client, b"al_ice", pw, 1), Err("NOID".into()));
+    assert_eq!(log_in(&mut client, b"bob", pw, 1), Err("NOID".into()));
+    // The `QID_AUTH_LOGIN` result: password, then the language, then success.
+    assert_eq!(
+        log_in(&mut client, b"alice", b"wrong", 0),
+        Err("WRONGPWD".into())
+    );
+    assert_eq!(
+        log_in(&mut client, b"alice", &pw[..15], 1),
+        Err("WRONGPWD".into())
+    );
+    assert_eq!(log_in(&mut client, b"alice", pw, 0), Err("NOLANG".into()));
+    assert_eq!(log_in(&mut client, b"alice", pw, 12), Err("INVLANG".into()));
+    // `trim_and_lower` and `strlcpy(passwd, ..., 17)`: case and surrounding spaces are dropped,
+    // and a 17th password byte is never read.
+    let mut full = pw.to_vec();
+    full.push(b'X');
+    let key = log_in(&mut client, b"  ALICE ", &full, 5).expect("alice logs in");
+    assert!((1..=0x7fff_ffff).contains(&key), "{key}");
+    sql(
+        &database,
+        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM account WHERE login = 'alice' \
+         AND language = 5 AND last_play_at IS NOT NULL) THEN RAISE 'not recorded'; END IF; END $$",
+    );
+
+    // `FindByLoginName`: the descriptor now holds the login, so it and every other auth
+    // descriptor are refused, before the password is checked.
+    assert_eq!(log_in(&mut client, b"alice", pw, 1), Err("ALREADY".into()));
+    let mut other = auth_client(&server);
+    assert_eq!(
+        log_in(&mut other, b"alice", b"wrong", 1),
+        Err("ALREADY".into())
+    );
+    // Control: the refusals left both connections open.
+    assert_eq!(other.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    drop(client);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let again = loop {
+        match log_in(&mut other, b"alice", pw, 1) {
+            Err(status) if status == "ALREADY" && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            answer => break answer,
+        }
+    };
+    let again = again.expect("the login is free once its descriptor closes");
+    assert_ne!(again, key);
+    drop(other);
+
+    // The account checks, in order: availability after the password, then the status, then the
+    // block date, which refuses an account created on it or later.
+    let mut client = auth_client(&server);
+    sql(
+        &database,
+        "UPDATE account SET status = 'BLOCK', available_at = now() + interval '1 day', \
+         created_at = '2999-12-31' WHERE login = 'alice'",
+    );
+    assert_eq!(
+        log_in(&mut client, b"alice", b"wrong", 1),
+        Err("WRONGPWD".into())
+    );
+    assert_eq!(log_in(&mut client, b"alice", pw, 1), Err("NOTAVAIL".into()));
+    sql(
+        &database,
+        "UPDATE account SET available_at = now() WHERE login = 'alice'",
+    );
+    assert_eq!(log_in(&mut client, b"alice", pw, 0), Err("BLOCK".into()));
+    sql(
+        &database,
+        "UPDATE account SET status = 'OK' WHERE login = 'alice'",
+    );
+    assert_eq!(log_in(&mut client, b"alice", pw, 0), Err("NOLANG".into()));
+    assert_eq!(log_in(&mut client, b"alice", pw, 1), Err("BLKLOGIN".into()));
+    sql(
+        &database,
+        "UPDATE account SET created_at = '2999-12-30' WHERE login = 'alice'",
+    );
+    assert!(log_in(&mut client, b"alice", pw, 1).is_ok());
+    drop(client);
+    drop(server);
+
+    // `g_bNoMoreClient`: after the login shape, before the lookup.
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "shutdowned = true",
+    );
+    let mut client = auth_client(&server);
+    assert_eq!(log_in(&mut client, b"a", pw, 1), Err("NOID".into()));
+    assert_eq!(log_in(&mut client, b"alice", pw, 1), Err("SHUTDOWN".into()));
+}
+
+/// `cg.auth.login3`: a `LOGIN3` whose frame is not the server's 66 bytes cannot be told apart
+/// from the next frame, so only the exact record is read. A `LOGIN3` in the handshake phase is
+/// not handled there and closes the connection.
+#[test]
+fn a_login3_outside_the_auth_phase_closes_the_connection() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    let (mut client, _) = accepted(server.auth());
+    client.send(&client_login3(b"alice", ACCOUNT_PASSWORD, 1));
+    assert_eq!(client.expect_closed(), Vec::<u8>::new());
 }

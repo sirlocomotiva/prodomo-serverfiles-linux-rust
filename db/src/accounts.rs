@@ -23,6 +23,13 @@ pub const NAME_MAX_LEN: usize = 24;
 pub struct AccountId(u32);
 
 impl AccountId {
+    /// An account ID as the client and the game carry it. It names an account only if the store
+    /// returned it.
+    #[must_use]
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+
     /// The ID.
     #[must_use]
     pub const fn get(self) -> u32 {
@@ -298,6 +305,73 @@ pub async fn find_credentials(
         Ok((id, PasswordDigest::from_stored(hash)))
     })
     .transpose()
+}
+
+/// What the auth path reads about an account: the columns of legacy's `QID_AUTH_LOGIN` query
+/// (`input_auth.cpp:133-178`) that the Rewrite keeps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthAccount {
+    /// The account ID.
+    pub id: AccountId,
+    /// The stored password.
+    pub password: PasswordDigest,
+    /// `OK`, or the status sent to the client as the login failure.
+    pub status: String,
+    /// Legacy `availDt - NOW() > 0`: the account may not log in yet.
+    pub unavailable: bool,
+    /// The creation date as `YYYYMMDD` in the database server's time zone. Legacy formats
+    /// `create_time` with `localtime` on its own host.
+    pub created_on: String,
+}
+
+/// The account a login names, for the auth path.
+///
+/// # Errors
+///
+/// Returns [`AccountError::Corrupt`] for a negative ID, or [`AccountError::Database`].
+pub async fn find_auth_account(
+    store: &Store,
+    login: &Login,
+) -> Result<Option<AuthAccount>, AccountError> {
+    let row = sqlx::query(
+        "SELECT id, password_hash, status, available_at > now() AS unavailable, \
+         to_char(created_at, 'YYYYMMDD') AS created_on FROM account WHERE login = $1",
+    )
+    .bind(login.as_str())
+    .fetch_optional(store.pool())
+    .await?;
+    row.map(|row| {
+        Ok(AuthAccount {
+            id: AccountId::from_column(row.try_get("id")?)?,
+            password: PasswordDigest::from_stored(row.try_get("password_hash")?),
+            status: row.try_get("status")?,
+            unavailable: row.try_get("unavailable")?,
+            created_on: row.try_get("created_on")?,
+        })
+    })
+    .transpose()
+}
+
+/// Record a successful auth login: the time, and the language the client chose.
+///
+/// Legacy runs `UPDATE account SET last_play=NOW(), language=%u WHERE id=%u` (`G/db.cpp:438`).
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchAccountId`], or [`AccountError::Database`], which includes a
+/// language outside 1 to 11.
+pub async fn record_login(store: &Store, id: AccountId, language: u8) -> Result<(), AccountError> {
+    let updated =
+        sqlx::query("UPDATE account SET last_play_at = now(), language = $2 WHERE id = $1")
+            .bind(id.to_column()?)
+            .bind(i16::from(language))
+            .execute(store.pool())
+            .await?
+            .rows_affected();
+    if updated == 0 {
+        return Err(AccountError::NoSuchAccountId(id));
+    }
+    Ok(())
 }
 
 /// Add `delta` to a balance, which may be negative, and return the new balance.

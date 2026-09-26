@@ -3,10 +3,10 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write as _};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -52,6 +52,7 @@ pub fn default_channels() -> Vec<ChannelSpec> {
 /// A running server. Dropping it kills the process and removes its temporary directory.
 pub struct Server {
     child: Child,
+    binary: PathBuf,
     root: PathBuf,
     lines: Receiver<String>,
     console: Vec<String>,
@@ -115,12 +116,39 @@ impl Server {
         let stdout = child.stdout.take().expect("stdout is piped");
         let mut server = Self {
             child,
+            binary: binary.to_owned(),
             root,
             lines: forward_lines(stdout),
             console: Vec::new(),
         };
         server.wait_for(ACCEPTING);
         server
+    }
+
+    /// Run an Operator command, `prodomo --config <this server's config> <args>`, with `stdin`
+    /// piped in, and wait for it to finish.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the command cannot start.
+    #[must_use]
+    pub fn operate(&self, args: &[&str], stdin: &str) -> Output {
+        let mut child = Command::new(&self.binary)
+            .arg("--config")
+            .arg(self.root.join("prodomo.toml"))
+            .args(args)
+            .current_dir(&self.root)
+            .env("LOG_ANSI", "false")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("prodomo should start");
+        let mut input = child.stdin.take().expect("stdin is piped");
+        // A command that fails before reading stdin closes it early.
+        drop(input.write_all(stdin.as_bytes()));
+        drop(input);
+        child.wait_with_output().expect("prodomo should finish")
     }
 
     /// Collect the console until a line contains `needle`.

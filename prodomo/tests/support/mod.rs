@@ -31,7 +31,7 @@ impl ScratchDatabase {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
-        run(&admin_url, &format!("CREATE DATABASE {name}"))
+        execute(&admin_url, &format!("CREATE DATABASE {name}"))
             .expect("the test role should be allowed to create databases");
         let url = with_database(&admin_url, &name);
         Some(Self {
@@ -50,7 +50,7 @@ impl ScratchDatabase {
 impl Drop for ScratchDatabase {
     fn drop(&mut self) {
         let statement = format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name);
-        if run(&self.admin_url, &statement).is_err() {
+        if execute(&self.admin_url, &statement).is_err() {
             eprintln!("could not drop scratch database {}", self.name);
         }
     }
@@ -65,8 +65,8 @@ pub fn database_url() -> Option<String> {
     url
 }
 
-/// Run one statement on its own connection and runtime.
-fn run(url: &str, statement: &str) -> Result<(), sqlx::Error> {
+/// Run one statement on its own connection and runtime, such as an `UPDATE` a scenario needs.
+pub fn execute(url: &str, statement: &str) -> Result<(), sqlx::Error> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

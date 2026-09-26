@@ -25,7 +25,12 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use common::config::{load_server_config, ServerConfig, DEFAULT_CONFIG_PATH};
 use common::logging::{init_from_env, init_logging, LogConfig};
+use db::accounts::{find_auth_account, record_login};
 use db::store::{schema_version, Store, StoreConfig};
+use prodomo::auth_login::{
+    judge_account, judge_credentials, login_from_field, password_candidate, AuthClaim, AuthRefusal,
+    AuthRegistry, LoginGrant,
+};
 use prodomo::channel_status::ChannelStatusBoard;
 use prodomo::client_live::{
     handshake_token, BootLiveClock, LiveClientSession, LiveClock, LiveOutcome, LiveStep,
@@ -38,7 +43,10 @@ use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::operator::{prepare, read_new_password, AccountCommand, GmCommand, OperatorCommand};
 use prodomo::ready_gate::ReadyGate;
 use prodomo::ServerState;
-use protocol::cg_inventory::HEADER_CG_STATE_CHECKER;
+use protocol::cg_inventory::{HEADER_CG_LOGIN3, HEADER_CG_STATE_CHECKER};
+use protocol::cg_login3::CgLogin3;
+use protocol::cg_wire::ClientFrame;
+use protocol::gc::{GcAuthSuccess, GcLoginFailure};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::signal;
 use tokio::sync::broadcast;
@@ -117,13 +125,19 @@ fn initialize_server(config_path: &Path, verbose: bool) -> Result<ServerConfig, 
 }
 
 /// What a connection needs from the server: the descriptor clock, the ping cycle, the server
-/// state, and the Channel status list.
+/// state, the Channel status list, the store, and the auth registry.
 #[derive(Clone)]
 struct ConnectionContext {
     clock: BootLiveClock,
     ping_cycle: Duration,
     state: Arc<ServerState>,
     channels: Arc<ChannelStatusBoard>,
+    store: Store,
+    auth: Arc<AuthRegistry>,
+    /// `[game] shutdowned`: new logins are refused.
+    shutdowned: bool,
+    /// `[game] block_login`.
+    block_login: Arc<str>,
 }
 
 /// Serve one client connection as the legacy descriptor does.
@@ -160,6 +174,8 @@ async fn handle_connection(
         tokio::time::Instant::now() + context.ping_cycle,
         context.ping_cycle,
     );
+    // The login this descriptor holds after a successful auth (legacy `ConnectAccount`).
+    let mut claim: Option<AuthClaim> = None;
 
     loop {
         match session.next_buffered(clock.now()).await {
@@ -171,6 +187,13 @@ async fn handle_connection(
                             && frame.header == HEADER_CG_STATE_CHECKER.value() =>
                     {
                         send_channel_status(&mut session, addr, &context).await
+                    }
+                    // `CInputAuth::Analyze` (`G/input_auth.cpp:209-217`).
+                    LiveStep::Record { phase, frame }
+                        if phase == ClientPhase::Auth
+                            && frame.header == HEADER_CG_LOGIN3.value() =>
+                    {
+                        auth_login(&mut session, addr, &context, &frame, &mut claim).await
                     }
                     step => report_step(addr, step),
                 };
@@ -238,6 +261,90 @@ where
             false
         }
     }
+}
+
+/// Answer `LOGIN3` with `AUTH_SUCCESS` or `LOGIN_FAILURE`; `false` when the connection must
+/// close. A refusal keeps the connection open, as in legacy.
+async fn auth_login<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    frame: &ClientFrame,
+    claim: &mut Option<AuthClaim>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgLogin3::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed LOGIN3; closing");
+            return false;
+        }
+    };
+    let reply = match authenticate(context, &record).await {
+        Ok(Ok((key, new_claim))) => {
+            info!(%addr, login = %new_claim.login().as_str(), "Auth login accepted");
+            *claim = Some(new_claim);
+            GcAuthSuccess::new(key, 1).encode()
+        }
+        Ok(Err(refusal)) => {
+            info!(%addr, ?refusal, "Auth login refused");
+            GcLoginFailure::new(refusal.status()).encode()
+        }
+        Err(error) => {
+            error!(%addr, %error, "Auth login failed; closing");
+            return false;
+        }
+    };
+    match session.send(&reply).await {
+        Ok(_) => true,
+        Err(error) => {
+            warn!(%addr, %error, "Client session stopped");
+            false
+        }
+    }
+}
+
+/// The legacy auth checks in their legacy order: `CInputAuth::Login`, then the
+/// `QID_AUTH_LOGIN` result (`G/db.cpp:246-460`). The outer error is a store or hashing failure.
+async fn authenticate(
+    context: &ConnectionContext,
+    record: &CgLogin3,
+) -> Result<Result<(u32, AuthClaim), AuthRefusal>, Box<dyn Error + Send + Sync>> {
+    let Some(login) = login_from_field(&record.login) else {
+        return Ok(Err(AuthRefusal::NoId));
+    };
+    if context.shutdowned || context.state.is_shutting_down() {
+        return Ok(Err(AuthRefusal::Shutdown));
+    }
+    if context.auth.is_held(&login) {
+        return Ok(Err(AuthRefusal::Already));
+    }
+    let Some(account) = find_auth_account(&context.store, &login).await? else {
+        return Ok(Err(AuthRefusal::NoId));
+    };
+    let digest = account.password.clone();
+    let candidate = password_candidate(&record.passwd).to_vec();
+    let matches = tokio::task::spawn_blocking(move || digest.verify(&candidate)).await??;
+    if let Err(refusal) = judge_credentials(&account, matches) {
+        return Ok(Err(refusal));
+    }
+    let new_claim = match context.auth.claim(&login) {
+        Ok(new_claim) => new_claim,
+        Err(refusal) => return Ok(Err(refusal)),
+    };
+    if let Err(refusal) = judge_account(&account, record.b_language, &context.block_login) {
+        return Ok(Err(refusal));
+    }
+    record_login(&context.store, account.id, record.b_language).await?;
+    let key = context.auth.grant(LoginGrant {
+        account: account.id,
+        login,
+        client_key: record.adw_client_key,
+        language: record.b_language,
+    });
+    Ok(Ok((key, new_claim)))
 }
 
 /// Log one handled step; `false` when the connection must close.
@@ -554,6 +661,10 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
             ping_cycle: Duration::from_secs(u64::from(config.game.ping_event_second_cycle)),
             state: Arc::clone(&state),
             channels: Arc::new(ChannelStatusBoard::new(channel_ports, &config.game)),
+            store: store.clone(),
+            auth: AuthRegistry::new(),
+            shutdowned: config.game.shutdowned,
+            block_login: Arc::from(config.game.block_login.as_str()),
         },
     };
     let exit = run_accept_loop(

@@ -47,45 +47,33 @@
 //! The language value lands in the low byte, which the server's `BYTE` reads
 //! correctly, and **the 3 surplus bytes stay in the stream**. `input.cpp:92-93`
 //! only requires `m_iBufferLeft >= iPacketLen` (66) and `input.cpp:112-113`
-//! advances exactly 66, so the 3 leftover bytes are re-parsed as the next CG
-//! frame, read as a bogus header at `input.cpp:78` and :83-90, and take
-//! `SetPhase(PHASE_CLOSE)`.
+//! advances exactly 66, so the 3 leftover bytes are parsed as the next frames.
+//! They are the upper bytes of a language below 256, so each is a zero, and
+//! `CInputProcessor::Process` takes header 0 as a one-byte frame it consumes
+//! without analysing (`input.cpp:81-82`). The Rewrite's framing does the same
+//! ([`crate::cg_wire::resolve_client_frame_size`]), so the client's record
+//! costs nothing but three skipped bytes.
 //!
-//! **So the checked-in trees do not interoperate on this record.** That is a
-//! different class of finding from `CG_CHANGE_LANGUAGE`, where the server sends
-//! 238 and the client expects 245 -- a wrong value in a field both trees agree
-//! is one byte. Here the server's *record length* is three bytes shorter than
-//! the bytes the client actually puts on the wire, and the consequence is a
-//! session kill.
+//! An earlier note here said the surplus bytes closed the session. That was
+//! wrong: it missed the header-0 arm, which is checked before the packet-info
+//! lookup (ledger 184).
 //!
 //! ## What this codec does about it
 //!
-//! It models the **server's active 66-byte profile** and nothing else.
-//! Accepting 69 bytes as if the server understood them would be inventing a wire
-//! format no server source declares, and would silently hide a defect that kills
-//! the session one frame later. [`CG_LOGIN3_CLIENT_WIDTH`] records the 69-byte
-//! client width as a named constant so the divergence is a visible fact in code,
-//! not only in prose, and [`CG_LOGIN3_PROFILE_DIVERGENCE`] records the
-//! difference.
+//! It models the **server's active 66-byte profile** and nothing else, because
+//! that is what the server consumes: 66 bytes, then three zero headers. A
+//! 69-byte record never reaches the decoder as one frame. [`CG_LOGIN3_CLIENT_WIDTH`]
+//! records the 69-byte client width as a named constant so the difference is a
+//! visible fact in code, and [`CG_LOGIN3_PROFILE_DIVERGENCE`] records it.
 //!
-//! The two widths are **not** modelled as a selectable feature profile, even
-//! though both widths exist in source. Neither macro is run-time selectable, the
-//! server's registration is 66, and a "profile" parameter would invite a caller
-//! to accept 69 on a live socket -- which is precisely the bug. The status of
-//! the 69-byte shape is documentation.
+//! # The language field is read
 //!
-//! # The language field is transmitted but never read
-//!
-//! `CInputAuth::Login` at `input_auth.cpp:67-122` casts the raw data pointer with
-//! **no length parameter**, reads `pinfo->login` and `pinfo->passwd` through
-//! `trim_and_lower`/`strlcpy`, reads `adwClientKey[0..3]`, and then heap-copies
-//! the whole 66-byte record as an opaque `ReturnQuery` `pvData`. `db.cpp:248`
-//! re-casts it and uses only `pinfo->login`. **`pinfo->bLanguage` is never
-//! read**: the language the server actually uses comes from the SQL row at
-//! `db.cpp:279`.
-//!
-//! That is exactly why the 3-byte divergence was never noticed. The field is
-//! declared, transmitted, and ignored.
+//! `CInputAuth::Login` copies the whole record into the `ReturnQuery` data, and
+//! the `QID_AUTH_LOGIN` result reads `pinfo->bLanguage` twice under
+//! `__MULTI_LANGUAGE_SYSTEM__`: a value at or above `LOCALE_MAX_NUM` (12) is
+//! refused with `INVLANG` and zero with `NOLANG`, and an accepted value is
+//! written to `account.language` (`db.cpp`, `QID_AUTH_LOGIN`). An earlier note
+//! here said the field was never read (ledger 184 corrects it).
 //!
 //! # `login` and `passwd` are raw storage
 //!
@@ -216,11 +204,9 @@ pub struct CgLogin3 {
     pub passwd: [u8; CG_PASSWORD_FIELD_BYTES],
     /// The legacy `DWORD adwClientKey[4]`, four little-endian words in order.
     pub adw_client_key: [u32; CG_CLIENT_KEY_WORDS],
-    /// The legacy `BYTE bLanguage`.
-    ///
-    /// Transmitted and then **never read by the server**: the effective language
-    /// comes from the SQL row. The byte is still preserved, because the record
-    /// has it.
+    /// The legacy `BYTE bLanguage`: the low byte of the client's `DWORD`. The
+    /// auth result refuses 0 and anything from 12 up, and stores the rest as the
+    /// account's language.
     pub b_language: u8,
 }
 

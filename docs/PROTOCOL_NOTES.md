@@ -145,6 +145,14 @@ reads 6. Header 111 is also `HEADER_CG_LOGIN3` inbound and the live 6-byte `HEAD
 outbound; the two directions use separate tables, so this is not a collision, but a
 direction-blind header audit will report it as one.
 
+> **Corrected in ledger 184.** The three surplus `LOGIN3` bytes do not break the session. They are
+  the upper bytes of the client's `DWORD` language, which is below 256, so each is a zero, and
+  `CInputProcessor::Process` takes header 0 as a one-byte frame before it consults the packet-info
+  table (`input.cpp:81-82`). The server consumes 66 bytes and then skips three. The Rewrite's
+  framing has the same arm, and the auth scenario sends the client's 69 bytes. Section 162 also
+  said `bLanguage` was never read; the `QID_AUTH_LOGIN` result refuses 0 (`NOLANG`) and 12 and up
+  (`INVLANG`), and stores the rest as the account's language.
+
 > **Superseded by section 168.** The table and the "82 of 134" bullet below are the
 > section 163-167 baseline. After section 168 added `gc_actors` (14 fixed-size records),
 > game-to-client coverage is **96 of 134**, the 38 missing rows split into 19 fixed-size and 19

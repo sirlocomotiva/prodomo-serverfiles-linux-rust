@@ -8,8 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::gm::GmAuthority;
 use db::accounts::{
-    adjust_balance, create_account, find_credentials, gm_authority, grant_gm, list_gm_grants,
-    revoke_gm, set_password, AccountError, Currency, GmGrant, Name, NewAccount,
+    adjust_balance, create_account, find_auth_account, find_credentials, gm_authority, grant_gm,
+    list_gm_grants, record_login, revoke_gm, set_password, AccountError, Currency, GmGrant, Name,
+    NewAccount,
 };
 use db::credentials::{DeleteCode, Login, NewPassword};
 use db::sqlx::{self, Connection, PgConnection};
@@ -224,6 +225,65 @@ async fn a_new_account_starts_with_the_legacy_defaults() {
         ),
         ("OK", 1, "1234567", 0, 0, None)
     );
+}
+
+#[tokio::test]
+async fn the_auth_read_reports_status_availability_and_creation_date() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let id = create(store, "alice", b"pw").await;
+    assert_eq!(find_auth_account(store, &login("bob")).await.unwrap(), None);
+    let account = find_auth_account(store, &login("alice"))
+        .await
+        .unwrap()
+        .expect("alice exists");
+    assert_eq!(account.id, id);
+    assert!(account.password.verify(b"pw").unwrap());
+    assert_eq!(account.status, "OK");
+    assert!(!account.unavailable);
+    let today: String = sqlx::query_scalar("SELECT to_char(now(), 'YYYYMMDD')")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(account.created_on, today);
+
+    sqlx::query(
+        "UPDATE account SET status = 'BLOCK', available_at = now() + interval '1 day', \
+         created_at = '2031-02-03 12:00:00' WHERE login = 'alice'",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let account = find_auth_account(store, &login("alice"))
+        .await
+        .unwrap()
+        .expect("alice exists");
+    assert_eq!(account.status, "BLOCK");
+    assert!(account.unavailable);
+    assert_eq!(account.created_on, "20310203");
+}
+
+#[tokio::test]
+async fn a_recorded_login_stores_the_time_and_the_language() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let id = create(store, "alice", b"pw").await;
+    record_login(store, id, 7).await.unwrap();
+    let (language, played): (i16, bool) = sqlx::query_as(
+        "SELECT language, last_play_at IS NOT NULL FROM account WHERE login = 'alice'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!((language, played), (7, true));
+    assert!(matches!(
+        record_login(store, id, 12).await,
+        Err(AccountError::Database(_))
+    ));
 }
 
 #[tokio::test]

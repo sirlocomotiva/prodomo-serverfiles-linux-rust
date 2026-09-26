@@ -10,6 +10,9 @@ pub mod game_loop;
 /// Typed commands, effects, and terminal acknowledgements for the game loop.
 pub mod game_loop_messages;
 
+/// The auth login rules and the login-key registry.
+pub mod auth_login;
+
 /// The Channel status list answered to `STATE_CHECKER`.
 pub mod channel_status;
 pub mod client_live;
