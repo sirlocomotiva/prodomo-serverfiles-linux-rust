@@ -1,6 +1,6 @@
 //! Characterizes process-level connection acceptance during shutdown.
 
-use game_server::ServerState;
+use prodomo::ServerState;
 
 #[test]
 fn server_state_stops_accepting_when_shutdown_is_initiated() {

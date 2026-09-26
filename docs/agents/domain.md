@@ -18,15 +18,15 @@ Single-context: one glossary and one ADR directory cover the whole Cargo workspa
 ├── CONTEXT.md
 ├── docs/adr/
 │   └── 0001-<decision>.md
-├── protocol/  common/  net/  db/  world/  quest/
-└── game-server/  db-server/
+├── protocol/  common/  net/  db/  gamedata/  world/  quest/
+└── prodomo/
 ```
 
 ## Existing project docs
 
 These predate `CONTEXT.md` and `docs/adr/` and stay authoritative:
 
-- `docs/STATUS.md`: where the rewrite stands, the M1-M11 milestones, and the **Owner decisions**. Treat each owner decision as an accepted ADR: never contradict one silently, and never reopen one without the owner.
+- `docs/STATUS.md`: where the rewrite stands, the build order, and the owner decisions not already in an ADR. Treat each owner decision as an accepted ADR: never contradict one silently, and never reopen one without the owner.
 - `docs/PROTOCOL_NOTES.md`: per-record wire findings and legacy defects. Read the relevant section before touching a codec.
 - `docs/REWRITE_LEDGER.md`: the append-only change record. It is history, not a glossary.
 

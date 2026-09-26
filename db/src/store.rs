@@ -4,10 +4,13 @@ use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
 
+use common::config::{redact_url, StoreSettings};
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 
 /// Settings for the PostgreSQL connection pool.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` prints the URL without its password.
+#[derive(Clone, PartialEq, Eq)]
 pub struct StoreConfig {
     /// A `postgres://` connection URL.
     pub url: String,
@@ -43,6 +46,24 @@ impl StoreConfig {
             PgPoolOptions::new().max_connections(self.max_connections),
             connect,
         ))
+    }
+}
+
+impl fmt::Debug for StoreConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoreConfig")
+            .field("url", &redact_url(&self.url))
+            .field("max_connections", &self.max_connections)
+            .finish()
+    }
+}
+
+impl From<&StoreSettings> for StoreConfig {
+    fn from(settings: &StoreSettings) -> Self {
+        Self {
+            url: settings.url.clone(),
+            max_connections: settings.max_connections,
+        }
     }
 }
 
@@ -166,6 +187,14 @@ mod tests {
             Store::lazy(&config),
             Err(StoreError::InvalidUrl(_))
         ));
+    }
+
+    #[test]
+    fn debug_output_never_shows_the_password() {
+        let config = StoreConfig::new("postgres://prodomo:hunter2@db.local:5432/prodomo");
+        let shown = format!("{config:?}");
+        assert!(!shown.contains("hunter2"), "got {shown}");
+        assert!(shown.contains("prodomo:***@db.local:5432/prodomo"), "got {shown}");
     }
 
     #[tokio::test]

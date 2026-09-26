@@ -11,6 +11,11 @@
 > compatibility contract and retires the DB-peer and game-to-game protocols. The sections on DB
 > records, the boot stream, `db-server`, M3, and the boot loader audit, and every GG note, are kept as
 > history of how that code was built. The client-side notes and the verification lessons still apply.
+>
+> **Renamed (2026-09-26, ledger section 178).** `game-server` is now the `prodomo` crate, and its
+> files moved from `game-server/src/` to `prodomo/src/` unchanged. The module map and module index
+> below are snapshots from before sections 177 and 178, so they still name `game-server`,
+> `db-server`, and modules that were deleted.
 
 ## Contents
 

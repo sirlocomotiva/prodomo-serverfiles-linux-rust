@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-09-26, after ledger section 177 (step 1, part one: the DB-peer and GG code is
-retired and the rule modules are in `gamedata`).
+Last reviewed: 2026-09-26, after ledger section 178 (step 1, part two: the `prodomo` binary, one
+TOML document, and a listener per role).
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -12,7 +12,9 @@ and the ledger disagree, the most recent ledger section wins; update this page i
 **No client can log in yet.** The workspace has broad, well-tested client wire codecs (CG 91 of 92,
 GC 96 of 134), TEA, and transport-free descriptor reducers. The two-process layout (a `game-server`
 and a `db-server` talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177;
-sections 1-175 record how it was built and stay as history.
+sections 1-175 record how it was built and stay as history. Since section 178 the one `prodomo`
+binary reads `prodomo.toml`, binds the auth listener and every Channel port, and answers only
+keepalive and pong on them.
 
 The direction since then:
 
@@ -28,7 +30,7 @@ Each step lands as one or more ledger sections with a gate receipt.
 
 | step | scope | state |
 |---|---|---|
-| 1. Restructure | Retire the DB-peer and GG code and move the pure rule modules into `gamedata`. Rename `game-server` to the single `prodomo` binary with TOML configuration for the auth and Channel listeners, the Channel map sets, and PostgreSQL. First PostgreSQL schema and migrations. The Operator command that creates accounts and GMs. | **In progress.** Retirement and `gamedata` done (177). The rename and TOML topology (178) and the schema and Operator command (179) are next. |
+| 1. Restructure | Retire the DB-peer and GG code and move the pure rule modules into `gamedata`. Rename `game-server` to the single `prodomo` binary with TOML configuration for the auth and Channel listeners, the Channel map sets, and PostgreSQL. First PostgreSQL schema and migrations. The Operator command that creates accounts and GMs. | **In progress.** Retirement and `gamedata` done (177). The rename, the TOML document, and the listeners done (178). The schema and Operator command (179) are next. |
 | 2. Parity inventory | Every legacy system and handler, listed from the source in `.scratch/parity/`, each with a porting status. The scripted-client test crate. | Not started. |
 | 3. Vertical slice | Handshake and TEA, auth (`LOGIN3`), login by key, character select, create, and delete, loading, entering the game, movement and chat, a Warp between maps, and logout with save. | Not started. Codecs and reducers exist; see below. |
 | 4. Game systems | In dependency order: items and inventory; NPCs, shops, and Transfers (trade, safebox); the quest runtime (`qc` port and Lua 5.1, with its API growing as each later system lands); monsters, combat, drops, and exp; skills and affects; party, guild, messenger, and the cross-Channel bus; dungeons, events, guild war, and OX; the Prodomo custom systems (sash, aura, pets, battle pass, switchbot, item shop, premium shop, and the rest); GM commands, the adminpage, and logs. | Not started. |
@@ -71,6 +73,15 @@ In legacy each port belongs to one Core, and a Warp to a map on the other Core o
 reconnects the client to that Core's port. The Rewrite has no Cores: each Channel listens on all of
 its ports, and any of them admits the Channel's players.
 
+`config/prodomo.toml.example` holds this topology with each Channel's legacy map set. The binary
+refuses a topology it cannot run before binding anything (ledger 178.3). Two legacy settings the
+owner should know about (178.5):
+
+- `test_server` defaults to on in legacy and none of the owner's `CONFIG` files turns it off, so the
+  deployment ran in test-server mode. The example keeps it on for Parity.
+- `BLOCK_LOGIN` refuses accounts created on or after its date. Its legacy default is `30000705`; an
+  empty value would refuse every account.
+
 ## What exists and what happens to it
 
 | code | today | in the Rewrite |
@@ -78,11 +89,11 @@ its ports, and any of them admits the Channel's players.
 | `protocol` CG and GC codecs, TEA, inventories | 91 of 92 CG and 96 of 134 GC records, golden-byte tested. Most CG codecs have no caller. | Kept. |
 | `protocol` `db_*` and `gg*` modules | Deleted in 177. `TSimplePlayer` moved to `protocol::simple_player`. | Done. |
 | `net` | Client framing. `buffer.rs` and the DB-peer transport were deleted in 177. | Kept. |
-| `db` | `store` (a PostgreSQL pool, never run against a real server) and `item_id_range`. The MySQL pool was deleted in 177. | Grows with the schema in 179. |
+| `db` | `store` (a PostgreSQL pool, never run against a real server; its `Debug` output hides the password) and `item_id_range`. The MySQL pool was deleted in 177. | Grows with the schema in 179. |
 | `gamedata` | Packed table record layouts and nine table rules (banword, event, item_attr, land, object_proto, refine, renewal_shop, shop, skill) as typed builders over caller-supplied rows. New in 177. | Readers and importers for `legacy/gamedata` are added with the system that first needs them. |
 | `world` | Spatial model, characters, events, and some combat rules. Never imported by a binary. | Kept; grows with step 4. |
 | `quest` | An 8-line scaffold. | Replaced by the `qc` port and the Lua 5.1 runtime. |
-| `game-server` | Binary that accepts clients but answers only keepalive and pong. Reducers: `ClientLifecycle`, handshake, heartbeat, `DescriptorCrypto`, `client_live`, `AccountPlayerSession` and its router (re-based on the typed `account_records` in 177), `sync_position`. `ReadyGate` refuses clients until startup has finished. The DB client and `DbLink` were deleted in 177. | Renamed `prodomo` in 178. `ReadyGate` will wait for the loaded Game data once step 3 loads it. |
+| `prodomo` | Renamed from `game-server` in 178. `prodomo serve` reads `prodomo.toml`, creates a lazy store, binds the auth listener and every Channel port (`listeners`), starts the game loop, and opens `ReadyGate`. Every connection still reaches a handler that answers only keepalive and pong. Reducers: `ClientLifecycle`, handshake, heartbeat, `DescriptorCrypto`, `client_live`, `AccountPlayerSession` and its router (re-based on the typed `account_records` in 177), `sync_position`. | The Operator commands arrive in 179. `ReadyGate` will wait for the loaded Game data once step 3 loads it. |
 | `db-server` | Deleted in 177. GM list rules moved to `common::gm`, item-ID ranges to `db::item_id_range`, and the nine table rules to `gamedata`. The `item_proto` and `mob_proto` SQL decoders did not move, because the protos are read from the text files; the `object`, `market_price`, `monarch`, `player`, `player_index`, `quest`, and `login` modules did not move, because that state lives in the fresh store. | Done. |
 | `tools/packet_compare` | Deleted in 177. | Done. |
 
@@ -90,7 +101,7 @@ its ports, and any of them admits the Channel's players.
 
 | stage | present in Rust | missing |
 |---|---|---|
-| Handshake and TEA | `ClientLifecycle`, `handshake`, `handshake_dispatch`, `DescriptorCrypto`, `client_live` | A listener that runs them; scripted-client coverage. |
+| Handshake and TEA | `ClientLifecycle`, `handshake`, `handshake_dispatch`, `DescriptorCrypto`, `client_live`; the listeners (178) | Running them on each accepted connection; scripted-client coverage. |
 | Auth | `CgLogin3` (66 bytes), `GcLoginFailure` | Account lookup in PostgreSQL with argon2id; the login-key registry; `0x96`. |
 | Login by key | `CgLoginByKey`, `AccountPlayerSession::on_login*`, `GcEmpire`, the 357-byte `GcLoginSuccess` | The login checks from `D/ClientManagerLogin.cpp:82-150`; the player summaries from the store. |
 | Select, create, delete | `on_select`; the create and delete CG codecs | Player and item tables; name rules; the create defaults. |
@@ -149,9 +160,11 @@ its ports, and any of them admits the Channel's players.
 
 - PostgreSQL 18 runs in Podman (`postgres:18`), reached through `host.docker.internal`. The image is
   not pulled yet; the owner approved one pull (planning Q23).
-- The owner approved one online `cargo fetch` for the PostgreSQL, `uuid`, `argon2`, and Lua 5.1
-  dependencies (planning Q23). On the current machine the offline cache also lacks
-  `tracing-appender`, so the offline gates cannot build until that fetch runs.
+- The one online `cargo fetch` the owner approved (planning Q23) ran in section 177. The offline
+  gates build from the local cache.
+- `rustfmt` and `cargo-clippy` are not installed on the current machine, so the format and Clippy
+  gates have not run since section 175. Installing them needs owner approval:
+  `sudo apt-get install rustfmt rust-clippy`.
 - `i686-linux-gnu-g++-12`, used by the width probe, is not installed on the current machine.
 
 ## Code-quality backlog
@@ -165,11 +178,10 @@ Take these on when a step touches the code.
   DB-peer code removes some of these counts.
 - **`common/src/tables.rs`** declares 72 `repr(C, packed)` structs. Do not size wire records from
   them.
-- **Unused dependencies:** `bytemuck` and `ring`.
-- **Silent data loss:** `bytes_to_str` (`protocol/src/lib.rs:629`) returns `""` on invalid UTF-8.
+- **Silent data loss:** `bytes_to_str` (`protocol/src/lib.rs:624`) returns `""` on invalid UTF-8.
   Legacy names are raw bytes, so this hides data rather than rejecting it.
-- **Panic points in non-test code.** `common/src/logging.rs:59` panics if the log directory cannot be
+- **Panic points in non-test code.** `common/src/logging.rs:64` panics if the log directory cannot be
   created. The rest are invariant panics that cannot fire today: 8 `.expect` calls in
   `protocol/src/cg_account.rs`, and one each at `protocol/src/cg_attack.rs:134` and
-  `game-server/src/sync_position.rs:177`.
+  `prodomo/src/sync_position.rs:177`.
 - **Toolchain:** Rust is not pinned. Consider a `rust-toolchain.toml` for 1.85.1.

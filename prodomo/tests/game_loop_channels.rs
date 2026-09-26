@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use game_server::game_loop::{spawn_game_loop, GameLoopConfig};
-use game_server::game_loop_messages::{
+use prodomo::game_loop::{spawn_game_loop, GameLoopConfig};
+use prodomo::game_loop_messages::{
     AsyncCompletionStatus, CompletionId, GameCommand, GameEffect, GameLoopTerminal,
 };
 

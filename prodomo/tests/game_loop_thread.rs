@@ -3,8 +3,8 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-use game_server::game_loop::{spawn_game_loop, GameLoopConfig, PULSE_PERIOD};
-use game_server::game_loop_messages::{
+use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, PULSE_PERIOD};
+use prodomo::game_loop_messages::{
     AsyncCompletionStatus, CompletionId, GameCommand, GameLoopFailure, GameLoopTerminal,
 };
 

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use game_server::game_loop::{PulsePlanner, MAX_CATCH_UP_PULSES};
+use prodomo::game_loop::{PulsePlanner, MAX_CATCH_UP_PULSES};
 
 #[test]
 fn first_pulse_is_due_only_after_40_milliseconds() {

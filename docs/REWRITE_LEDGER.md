@@ -14674,3 +14674,239 @@ columns. Installing the two tools needs an online fetch that the owner has
 not approved yet: `sudo apt-get install rustfmt rust-clippy`.
 
 Protocol coverage is unchanged: CG 91 of 92, GC 96 of 134.
+
+## 178. Step 1, part two: the `prodomo` binary, one TOML document, and a listener per role
+
+This section renames `game-server` to `prodomo`, replaces the two legacy-shaped
+configuration structs with one `prodomo.toml` document that describes the whole
+process (ADR-0002), and makes the binary bind the auth listener and every
+Channel port. It opens no database connection and loads no Game data; the
+first schema and the Operator command follow in section 179.
+
+### 178.1 The rename
+
+- `game-server/` is now `prodomo/`, moved with `git mv` so the history follows
+  each file. The package, library, and binary are all `prodomo`; the workspace
+  member list names it.
+- `tests/game_server_process.rs` is now `tests/process.rs`. The other four
+  integration tests import `prodomo::` instead of `game_server::`.
+- `common::logging` builds its default filter from the list of workspace crate
+  names (`common`, `db`, `gamedata`, `net`, `prodomo`, `protocol`, `quest`,
+  `world`), replacing the hard-coded `game_server` and `db_server` targets.
+- `Cargo.lock` changed only in the renamed package entry. The update ran
+  offline (`cargo metadata --offline`); no crate was fetched.
+
+### 178.2 One configuration document
+
+`common::config` now has one entry point, `load_server_config(path)`, and one
+document type, `ServerConfig`. `GameConfig`, `DbConfig`, `SqlConfig`,
+`parse_game_config`, and `parse_db_config` are deleted, together with
+`config/game.toml.example` and `config/db.toml.example`. The new
+`config/prodomo.toml.example` reproduces the owner's topology from
+`legacy/config`.
+
+| key | meaning |
+| --- | --- |
+| `bind_ip` | Address every listener binds. Default `0.0.0.0`. |
+| `public_ip` | IPv4 address the client is told to reconnect to. Default `127.0.0.1`. IPv6 is refused, because the client field is four bytes. |
+| `[store]` | `url` (required) and `max_connections` (default 8). |
+| `[auth]` | `port` (required). |
+| `[[channel]]` | `number`, `ports`, `maps`, one table per Channel. |
+| `[game]` | Every gameplay key kept from section 169.5, with its legacy default. |
+
+Unknown keys are refused at every level, as in section 169. A document that
+parses is then checked by `ServerConfig::validate`, and a failure is reported
+as `ConfigError::Invalid`, naming the file.
+
+### 178.3 Topology rules
+
+`validate` refuses a topology the process cannot run:
+
+| rule | why |
+| --- | --- |
+| A Channel number is `1..=99`. | 99 is the Shared Channel, legacy `GUILD_WARP_WAR_CHANNEL` (`db/GuildManager.h:13`), the highest number the owner's `legacy/config` uses; the others are 1-4. |
+| Each number appears once. | Two worlds with one number could not be told apart. |
+| Each Channel has at least one port and one map, and no map index 0. | A Channel with no port cannot be reached, and one with no map has nowhere to place a player. |
+| A Channel lists a map once. | A repeated map is a typo in the map set. |
+| A nonzero port is used once, counting the auth port. | Two listeners on one port would fail to bind; this names the port before binding. Port 0 may repeat, because the operating system picks a distinct port for each. |
+| At least one Channel is not the Shared Channel. | The Shared Channel is never picked at login, so without another Channel nobody could enter the game. |
+| A Shared Channel map is hosted by no other Channel. | A Warp to it would have two destinations. |
+
+`SHARED_CHANNEL = 99` is the one constant for that number.
+
+### 178.4 Legacy keys that are gone
+
+| legacy key | why it is gone |
+| --- | --- |
+| `hostname`, `channel`, `mother_port`, `p2p_port`, `map_allow`, `auth_server`, `auth_master_ip`, `auth_master_port` | They described one Core process. The `[[channel]]` tables and `[auth]` replace them. |
+| `db_addr`, `db_port`, `player_sql`, `common_sql`, `log_sql`, and the whole DB `conf.txt` | There is no DB server or MySQL (ADR-0003). `[store]` replaces them. |
+| `table_postfix` | It was interpolated into SQL, a Defect, and has no meaning in the fresh store. |
+| `passes_per_sec` | Fixed at 25 by ADR-0002. |
+| `proxy_ip` | Legacy wrote it over the address sent to the client (`game/char.cpp:6770`, `game/desc.cpp:889`, `game/input_db.cpp:88-96` and `:265`). `public_ip` is that one address. |
+| `log_keep_days`, `sys_log_level`, `traffic_profile` | Logging is configured through `RUST_LOG`, `LOG_DIR`, and `LOG_ANSI`. |
+| `quest_dir`, `quest_object_dirs` | Game data paths return with the Game data loader in step 3. |
+
+The DB `conf.txt` keys `PLAYER_ID_START` (100), `PLAYER_DELETE_LEVEL_LIMIT`
+(120), and `ITEM_ID_RANGE` are not dropped for good. They return with the
+schema and the item-ID range pool as `[store]` or `[game]` keys once the code
+that reads them exists.
+
+### 178.5 Keys whose meaning changed
+
+- **`save_event_second_cycle` and `ping_event_second_cycle` stay in seconds.**
+  Legacy multiplied them by `passes_per_sec` while parsing
+  (`game/config.cpp:930-942`), so its variables held Pulses. The Rewrite keeps
+  seconds in the configuration; the code that schedules the events converts
+  them. Defaults are 120 and 60 seconds, as legacy computes them.
+- **`adminpage_password` defaults to empty,** which disables the adminpage
+  (owner decision; legacy `SHOWMETHEMONEY` is a Defect). It is a `Secret`, whose
+  `Debug` prints `"***"`.
+- **`block_login` defaults to `"30000705"`**, the legacy default. The old Rust
+  default was the empty string. Legacy compares the account's creation date
+  with `strncmp(..., 8) >= 0` and refuses the login when it holds
+  (`game/db.cpp:428`), and every date compares at or above an empty string. The
+  old default would therefore have refused every account once login was wired.
+  This was a latent bug in the Rewrite, not a legacy Defect.
+
+**For the owner.** `test_server` defaults to on in legacy (`game/config.cpp:72`),
+and none of the owner's nine game `CONFIG` files turns it off. The deployment
+therefore ran in test-server mode. The flag is consulted on 244 lines across
+56 files of `game/*.cpp`, so its effect is broad and has not been audited yet.
+The example keeps `test_server = true` for Parity
+and says so in a comment. Turning it off is a one-line change, but it would be
+a behaviour change against the deployment the play test compares with.
+
+No `[game]` key is read by gameplay code yet. They parse, validate their type,
+and wait for the systems that use them.
+
+### 178.6 Secrets in logs
+
+- `redact_url` keeps the scheme, user, host, and path of a URL and replaces the
+  password with `***`. It splits the user information at the **last** `@`, so a
+  password containing `@` is still hidden, and it replaces any query or
+  fragment with `?***`, because a libpq URL can carry `?password=`. A value
+  without `://` becomes `***` entirely.
+- `StoreSettings` and `db::StoreConfig` implement `Debug` by hand through
+  `redact_url`. `StoreConfig` no longer derives `Debug`; a new test checks that
+  its output never contains the password.
+- The process test starts the server with the password `secret-password` and
+  asserts it never appears on stdout or stderr. A second process test checks
+  that the refused `mysql://` URL's password never appears either.
+
+### 178.7 Listeners
+
+`prodomo::listeners` is new.
+
+- `listener_plan` lists every address to bind: auth first, then each Channel's
+  ports in configuration order, each tagged with a `ListenerRole` (`Auth` or
+  `Channel(n)`).
+- `Listeners::bind` binds them in order and stops at the first failure with a
+  `BindError` naming the role and address. Listeners already bound close when
+  the partial set is dropped.
+- `Listeners::accept` waits on every listener in one `poll_fn` loop. It starts
+  polling at the listener after the one that accepted last, so a port with a
+  constant stream of connections cannot starve the others. A test with two
+  waiting connections on each of two listeners pins the alternating order. The
+  future holds no state across polls, so it is cancel-safe inside `select!`.
+- Each listener logs its real address after binding. Port 0 therefore works in
+  tests and logs the port the operating system chose.
+
+Every Channel listens on all of its ports, as `docs/STATUS.md` ("Topology")
+decided: there are no Cores, so any of a Channel's legacy ports admits its
+players. The accepted connection still reaches the same keepalive-and-pong
+handler as before; routing by role arrives with the vertical slice.
+
+### 178.8 Startup and shutdown order
+
+`prodomo --config <path> serve [--verbose]` is the only command so far
+(`clap` derive; the config path defaults to `prodomo.toml`). The `--port`
+override is gone, since ports come from the document.
+
+1. Load and validate the configuration. A failure prints
+   `Failed to load config: ...` and exits non-zero before logging starts.
+2. Start logging, then log the addresses and one line per Channel.
+3. Arm SIGTERM and SIGINT, before anything is bound, as before.
+4. Create the store with `Store::lazy`. A bad URL, including any scheme other
+   than PostgreSQL (177.10), exits here with `Invalid store configuration`. The
+   pool opens no connection, and the log says so.
+5. Bind every listener.
+6. Start the game loop, open `ReadyGate`, and log `Accepting clients`.
+7. On a signal, close the gate, drop the listeners, stop and join the game
+   loop, and close the store. The error path closes the store too.
+
+A process test checks both rejections happen before anything is bound: a
+topology with only the Shared Channel, and a `mysql://` store.
+
+### 178.9 The intermittent process test (177.12) is fixed
+
+The old test reserved a free port, released it, and started the server on it,
+so another process could take the port in between. The new test configures
+every listener with port 0 and reads the bound addresses from the
+`Listening for <role> clients on <addr>` lines, so no port is ever released
+and re-bound. It checks the listener roles (`auth` once, `channel 1` twice,
+`channel 99` once), connects to every address, sends SIGTERM, checks the exit
+status, that every port is closed afterwards, and the eight lifecycle log
+lines.
+
+A mutation check applied three mutants to `prodomo/src/main.rs`, one at a time,
+confirming each changed the file and restoring it by checksum. Each was a
+semantic kill in `serve_binds_every_listener_and_shuts_down_cleanly_on_sigterm`:
+
+| mutant | failed at |
+| --- | --- |
+| remove the `Store closed` log line | the lifecycle observables |
+| log the store URL unredacted | the password assertion |
+| remove the `Accepting clients` log line | the startup wait (after its 10-second timeout) |
+
+### 178.10 Documentation link fix
+
+`cargo doc -D warnings` failed on the link to `ServerConfig::validate` in the
+`config` module's inner doc. As in 177.11, an outer `///` on `pub mod config`
+in `common/src/lib.rs` combined with the inner `//!` doc, and rustdoc resolved
+the link in the crate root. The outer line is removed; the module's own doc
+covers it. The crate doc no longer mentions a game server and a DB server.
+
+### 178.11 Documents and ignore rules
+
+- `.gitignore` ignores a root `/prodomo.toml`, the default config path, so a
+  local config holding a real store password is not committed by accident.
+  `config/prodomo.toml.example` stays tracked; `git check-ignore` confirms
+  both.
+- `README.md` describes how to run the binary. `docs/STATUS.md` records step 1
+  part two, the `test_server` and `BLOCK_LOGIN` notes for the owner, the
+  missing `rustfmt` and `cargo-clippy`, and corrects three stale line
+  references and a stale dependency note in the backlog. `AGENTS.md` gains a
+  configuration rule block, and its descriptor contract no longer says
+  `AccountPlayerSession` consumes DB-peer frames (untrue since 177).
+  `docs/PROTOCOL_NOTES.md` notes that its module map predates the rename, and
+  `docs/agents/domain.md` shows the current crate list.
+
+### 178.12 Receipt
+
+Run on 2026-09-26 with rustc 1.85.1, `--locked --offline`:
+
+| gate | result |
+| --- | --- |
+| `cargo build --workspace` | green, 0 warnings |
+| `cargo test --workspace --all-targets --no-fail-fast` | **1,522 passed, 0 failed, 0 ignored**, across 26 test binaries |
+| `cargo test --workspace --doc` | **1 passed** |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | green |
+| `cargo fmt --all -- --check` | **not run**: `rustfmt` is not installed |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **not run**: `cargo-clippy` is not installed |
+
+In total, **1,523 tests** over **134 workspace Rust files** and **83,024
+lines**. No stray `*.core` file was left in the workspace root. Against
+177.14, the net gain of two tests comes from:
+
+- `common/tests/config_test.rs`: 25 tests of the two old structs replaced by
+  18 of the new document (-7);
+- `prodomo/src/listeners.rs`: 6 new;
+- `prodomo/tests/process.rs`: 4, up from 2 (+2);
+- `db/src/store.rs`: the redaction test (+1).
+
+Formatting was checked by hand: rustfmt style, no line of the changed Rust
+files over 100 columns. The single `#[allow(clippy::struct_excessive_bools)]`
+in `common/src/config.rs` moved with `GameSettings`; the count in 177.13 is
+unchanged.
+
+Protocol coverage is unchanged: CG 91 of 92, GC 96 of 134.

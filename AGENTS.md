@@ -75,6 +75,8 @@ only when `DATABASE_URL` is set, so every gate stays green without a database.
 
 The i686 cross compiler used by the width probe (`i686-linux-gnu-g++-12`) is not installed on every
 machine. Check before relying on it, and say so in the receipt when a width could not be measured.
+The same goes for `rustfmt` and `cargo-clippy`: when one is missing, say in the receipt that its gate
+did not run, and check formatting by hand (rustfmt style, 100 columns).
 
 ## WORKSPACE
 
@@ -205,9 +207,24 @@ These rules exist because each one was broken at least once in this repository. 
 - Timers, cooldowns, and regeneration are counted in Pulses at 25 per second, as legacy counts them.
   Do not convert a legacy Pulse count to wall-clock time.
 
-## GAME-SERVER ADAPTER CONTRACTS
+## CONFIGURATION
 
-These transport-free reducers are kept and carried into `prodomo`.
+- One `prodomo.toml` configures the whole process (`common::config::ServerConfig`); the commented
+  example is `config/prodomo.toml.example`. The legacy `CONFIG` and `conf.txt` files are never read.
+  Ledger 178.4 lists the legacy keys that were dropped and why.
+- Every table refuses unknown keys, so a misspelling fails at startup. Keep `deny_unknown_fields` on
+  every new table.
+- `ServerConfig::validate` refuses an impossible topology before anything is bound. A new rule about
+  Channels, ports, or maps belongs there, not in the listener code.
+- A `[game]` key keeps the unit the legacy file was written in: the save and ping cycles are
+  seconds, although legacy multiplied them into Pulses while parsing. Its default is the legacy
+  compiled-in value unless that value is a Defect, which the ledger then records.
+- Never log or print a secret. The store URL goes through `redact_url`; a password-like setting is a
+  `Secret`. A test that feeds a known password must assert it never reaches the console.
+
+## DESCRIPTOR CONTRACTS
+
+These transport-free reducers live in `prodomo`.
 
 - `ClientLifecycle` preserves the setup, heartbeat, handshake, and post-handshake phase-transition
   effect order and treats close as control-only. A descriptor must keep the recorded output
@@ -220,10 +237,10 @@ These transport-free reducers are kept and carried into `prodomo`.
   output unit. It owns no socket and no improved DH2 path.
 - `AccountPlayerSession` sits beside `ClientLifecycle`, not inside it. Its local `Login` phase does
   not prove the lifecycle is in `ClientPhase::Login`; the descriptor must check the actual phase,
-  then run blocked-IP, shutdown, and user-limit admission before `on_login`. It still consumes
-  DB-peer frames; the vertical slice re-bases it on in-process store results while keeping its
-  generation correlation, which is what stops a late database answer from reaching a closed or
-  reused descriptor.
+  then run blocked-IP, shutdown, and user-limit admission before `on_login`. Its DB-peer frame
+  entry points were removed in ledger 177; the store calls `on_login_result` and `on_player_result`
+  directly. Keep its generation correlation, which is what stops a late database answer from
+  reaching a closed or reused descriptor.
 
 ## SECURITY AND TRUST BOUNDARIES
 

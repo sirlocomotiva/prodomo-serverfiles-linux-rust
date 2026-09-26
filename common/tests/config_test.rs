@@ -1,12 +1,15 @@
-//! Integration coverage for the TOML configuration loaders.
+//! Integration coverage for the `prodomo.toml` loader.
 //!
-//! These tests pin the new file format. The legacy `CONFIG` and `conf.txt` `key=value` files are
-//! not read any more, and the legacy-key to TOML-key mapping is recorded in the ledger.
+//! These tests pin the document format and the topology rules. The legacy `CONFIG` and
+//! `conf.txt` files are not read; ledger sections 169 and 178 map their keys to this document.
+
+use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr};
 
 use common::config::{
-    parse_db_config, parse_game_config, ConfigError, DbConfig, GameConfig, SqlConfig,
+    load_server_config, parse_server_config, redact_url, ConfigError, GameSettings, Secret,
+    TopologyError, SHARED_CHANNEL,
 };
-use std::io::Write;
 use tempfile::NamedTempFile;
 
 fn temp_toml(content: &str) -> NamedTempFile {
@@ -16,436 +19,298 @@ fn temp_toml(content: &str) -> NamedTempFile {
     file
 }
 
-const FULL_GAME: &str = r#"
-hostname = "game1"
-channel = 1
-mother_port = 50080
-p2p_port = 50900
-db_port = 3306
-db_addr = "192.168.1.100"
-bind_ip = "0.0.0.0"
+/// The smallest valid document: a store, auth, and one Channel.
+const MINIMAL: &str = r#"
+[store]
+url = "postgres://prodomo@127.0.0.1/prodomo"
 
-map_allow = [1, 21, 41, 43]
+[auth]
+port = 30001
 
-auth_server = true
-auth_master_ip = "10.0.0.1"
-auth_master_port = 51000
+[[channel]]
+number = 1
+ports = [30003]
+maps = [1]
+"#;
 
-adminpage_ips = ["127.0.0.1", "192.168.1.1"]
+const FULL: &str = r#"
+bind_ip = "10.0.0.2"
+public_ip = "203.0.113.7"
+
+[store]
+url = "postgres://prodomo:pw@db.local:5432/prodomo"
+max_connections = 16
+
+[auth]
+port = 30001
+
+[[channel]]
+number = 1
+ports = [30003, 30005]
+maps = [1, 21, 41, 56]
+
+[[channel]]
+number = 2
+ports = [30007]
+maps = [1, 21, 41]
+
+[[channel]]
+number = 99
+ports = [30019]
+maps = [72, 73]
+
+[game]
+adminpage_ips = ["127.0.0.1"]
 adminpage_password = "SECRET123"
-
-passes_per_sec = 25
-test_server = true
-guild_mark_server = true
-guild_mark_min_level = 5
-user_limit = 10000
-empire_whisper = true
-table_postfix = "_test"
-
-item_count_limit = 8000
+save_event_second_cycle = 180
+ping_event_second_cycle = 180
+max_level = 120
+item_count_limit = 2000
 enable_global_shout = true
-disable_prism_need = true
-gm_host_check = true
-guild_invite_limit = true
-status_point_get_level_limit = 99
-shout_limit_level = 20
-db_log_level = 3
-sys_log_level = 4
-
-check_version_server = true
-check_version_value = "20240101"
-
-quest_dir = "./custom_quest"
-quest_object_dirs = ["./quest/obj1", "./quest/obj"]
-
-[player_sql]
-host = "192.168.1.100"
-port = 3306
-user = "root"
-password = "password"
-database = "player_db"
-
-[common_sql]
-host = "192.168.1.100"
-port = 3306
-user = "root"
-password = "password"
-database = "common_db"
-
-[log_sql]
-host = "192.168.1.100"
-port = 3306
-user = "root"
-password = "password"
-database = "log_db"
+disable_emotion_mask = true
+mantie_permanent = true
 "#;
 
-const FULL_DB: &str = r#"
-test_server = true
-log = true
-client_heart_fps = 30
-log_keep_days = 7
-locale = "utf8"
-table_postfix = "_test"
-player_cache_flush_seconds = 420
-item_cache_flush_seconds = 300
-item_pricelist_cache_flush_seconds = 540
-cache_flush_limit_per_second = 12
-player_id_start = 100
-name_column = "name"
-bind_port = 5300
-bind_ip = "127.0.0.1"
+fn parse(content: &str) -> Result<common::config::ServerConfig, ConfigError> {
+    parse_server_config(content, "test.toml")
+}
 
-trusted_game_peers = ["127.0.0.1", "10.0.0.5"]
-trusted_auth_peers = ["10.0.0.9"]
-
-[sql_player]
-host = "db.internal"
-port = 3306
-user = "metin2"
-password = "pw"
-database = "player_db"
-
-[sql_account]
-host = "db.internal"
-port = 3306
-user = "metin2"
-password = "pw"
-database = "account_db"
-
-[sql_common]
-host = "db.internal"
-port = 3306
-user = "metin2"
-password = "pw"
-database = "common_db"
-"#;
-
-#[test]
-fn game_config_reads_every_group() {
-    let config = parse_game_config(temp_toml(FULL_GAME).path()).unwrap();
-    assert_eq!(config.hostname, "game1");
-    assert_eq!(config.channel, 1);
-    assert_eq!(config.mother_port, 50080);
-    assert_eq!(config.p2p_port, 50900);
-    assert_eq!(config.db_port, 3306);
-    assert_eq!(config.db_addr, "192.168.1.100");
-    assert_eq!(config.bind_ip, "0.0.0.0");
-    assert_eq!(config.map_allow, vec![1, 21, 41, 43]);
-    assert!(config.auth_server);
-    assert_eq!(config.auth_master_ip, "10.0.0.1");
-    assert_eq!(config.auth_master_port, 51000);
-    assert_eq!(config.adminpage_ips, vec!["127.0.0.1", "192.168.1.1"]);
-    assert_eq!(config.adminpage_password, "SECRET123");
-    assert_eq!(config.passes_per_sec, 25);
-    assert!(config.test_server);
-    assert!(config.guild_mark_server);
-    assert_eq!(config.guild_mark_min_level, 5);
-    assert_eq!(config.user_limit, 10000);
-    assert!(config.empire_whisper);
-    assert_eq!(config.table_postfix, "_test");
-    assert_eq!(config.item_count_limit, 8000);
-    assert!(config.enable_global_shout);
-    assert!(config.disable_prism_need);
-    assert!(config.gm_host_check);
-    assert!(config.guild_invite_limit);
-    assert_eq!(config.status_point_get_level_limit, 99);
-    assert_eq!(config.shout_limit_level, 20);
-    assert_eq!(config.db_log_level, 3);
-    assert_eq!(config.sys_log_level, 4);
-    assert!(config.check_version_server);
-    assert_eq!(config.check_version_value, "20240101");
-    assert_eq!(config.quest_dir, "./custom_quest");
-    assert_eq!(
-        config.quest_object_dirs,
-        vec!["./quest/obj1", "./quest/obj"]
-    );
+fn invalid(content: &str) -> TopologyError {
+    match parse(content) {
+        Err(ConfigError::Invalid { error, .. }) => error,
+        other => panic!("expected a topology error, got {other:?}"),
+    }
 }
 
 #[test]
-fn game_config_reads_the_three_sql_sub_tables() {
-    let config = parse_game_config(temp_toml(FULL_GAME).path()).unwrap();
-    assert_eq!(
-        config.player_sql,
-        SqlConfig {
-            host: "192.168.1.100".into(),
-            user: "root".into(),
-            password: "password".into(),
-            database: "player_db".into(),
-            port: 3306,
-        }
-    );
-    assert_eq!(config.common_sql.database, "common_db");
-    assert_eq!(config.log_sql.database, "log_db");
-}
+fn a_full_document_reads_every_table() {
+    let file = temp_toml(FULL);
+    let config = load_server_config(file.path()).unwrap();
 
-#[test]
-fn db_config_reads_every_group() {
-    let config = parse_db_config(temp_toml(FULL_DB).path()).unwrap();
-    assert!(config.test_server);
-    assert!(config.log);
-    assert_eq!(config.client_heart_fps, 30);
-    assert_eq!(config.log_keep_days, 7);
-    assert_eq!(config.locale, "utf8");
-    assert_eq!(config.table_postfix, "_test");
-    assert_eq!(config.player_cache_flush_seconds, 420);
-    assert_eq!(config.item_cache_flush_seconds, 300);
-    assert_eq!(config.item_pricelist_cache_flush_seconds, 540);
-    assert_eq!(config.cache_flush_limit_per_second, 12);
-    assert_eq!(config.player_id_start, 100);
-    assert_eq!(config.name_column, "name");
-    assert_eq!(config.bind_port, 5300);
-    assert_eq!(config.bind_ip, "127.0.0.1");
-    assert_eq!(config.trusted_game_peers, vec!["127.0.0.1", "10.0.0.5"]);
-    assert_eq!(config.trusted_auth_peers, vec!["10.0.0.9"]);
-    assert_eq!(config.sql_player.database, "player_db");
-    assert_eq!(config.sql_account.database, "account_db");
-    assert_eq!(config.sql_common.database, "common_db");
+    assert_eq!(config.bind_ip, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+    assert_eq!(config.public_ip, Ipv4Addr::new(203, 0, 113, 7));
+    assert_eq!(config.store.url, "postgres://prodomo:pw@db.local:5432/prodomo");
+    assert_eq!(config.store.max_connections, 16);
+    assert_eq!(config.auth.port, 30001);
+    let summary: Vec<(u8, Vec<u16>, usize, bool)> = config
+        .channels
+        .iter()
+        .map(|c| (c.number, c.ports.clone(), c.maps.len(), c.is_shared()))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (1, vec![30003, 30005], 4, false),
+            (2, vec![30007], 3, false),
+            (99, vec![30019], 2, true),
+        ]
+    );
+    assert_eq!(config.game.adminpage_ips, vec!["127.0.0.1"]);
+    assert_eq!(config.game.adminpage_password.expose(), "SECRET123");
+    assert_eq!(config.game.save_event_second_cycle, 180);
+    assert_eq!(config.game.ping_event_second_cycle, 180);
+    assert_eq!(config.game.max_level, 120);
+    assert_eq!(config.game.item_count_limit, 2000);
+    assert!(config.game.enable_global_shout);
+    assert!(config.game.disable_emotion_mask);
+    assert!(config.game.mantie_permanent);
 }
 
 #[test]
 fn omitted_keys_keep_their_documented_defaults() {
-    let config = parse_game_config(temp_toml("mother_port = 51000\n").path()).unwrap();
-    let d = GameConfig::default();
-    assert_eq!(config.mother_port, 51000);
-    assert_eq!(config.p2p_port, d.p2p_port);
-    assert_eq!(config.passes_per_sec, d.passes_per_sec);
-    assert_eq!(config.user_limit, d.user_limit);
-    assert_eq!(config.adminpage_password, d.adminpage_password);
-    assert_eq!(config.max_level, d.max_level);
-    assert_eq!(config.view_range, d.view_range);
-    assert_eq!(config.quest_dir, d.quest_dir);
+    let config = parse(MINIMAL).unwrap();
+    assert_eq!(config.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    assert_eq!(config.public_ip, Ipv4Addr::LOCALHOST);
+    assert_eq!(config.store.max_connections, 8);
+    assert_eq!(config.game, GameSettings::default());
 }
 
 #[test]
-fn an_empty_document_is_all_defaults() {
+fn game_defaults_are_the_legacy_compiled_in_values() {
+    // `game/config.cpp:20-135`, except `adminpage_password` and the two cycles (see the ledger).
+    let game = GameSettings::default();
+    assert!(game.test_server, "config.cpp:72 defaults test_server to 1");
+    assert_eq!(game.block_login, "30000705", "an empty value would refuse every account");
+    assert_eq!(game.save_event_second_cycle, 120);
+    assert_eq!(game.ping_event_second_cycle, 60);
+    assert_eq!(game.item_count_limit, 5000);
+    assert_eq!(game.item_bonus_change_time, 60);
+    assert_eq!(game.status_point_get_level_limit, 90);
+    assert_eq!(game.view_range, 5000);
+    assert_eq!(game.max_level, 99);
+    assert_eq!(game.user_limit, 32768);
+    assert_eq!(game.check_version_value, "1215955205");
+    assert!(game.adminpage_password.is_empty(), "the admin page has no default password");
+}
+
+#[test]
+fn the_shipped_example_is_a_valid_document() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../config/prodomo.toml.example");
+    let config = load_server_config(path).unwrap();
+    let numbers: Vec<u8> = config.channels.iter().map(|c| c.number).collect();
+    assert_eq!(numbers, vec![1, 2, 3, 4, SHARED_CHANNEL]);
+    assert_eq!(config.auth.port, 30001);
+    assert_eq!(config.channels[0].maps.len(), 57);
+    assert!(config.channels[1..4].iter().all(|c| c.maps.len() == 49));
+    assert_eq!(config.channels[4].maps.len(), 29);
+}
+
+#[test]
+fn secrets_never_reach_debug_output() {
+    let config = parse(FULL).unwrap();
+    let shown = format!("{config:?}");
+    assert!(!shown.contains("SECRET123"), "admin page password leaked: {shown}");
+    assert!(!shown.contains(":pw@"), "store password leaked: {shown}");
+    assert!(shown.contains("prodomo:***@db.local:5432/prodomo"), "got {shown}");
+    assert_eq!(format!("{:?}", Secret::default()), "\"\"");
+}
+
+#[test]
+fn redaction_keeps_the_host_and_drops_the_password_and_query() {
     assert_eq!(
-        parse_game_config(temp_toml("").path()).unwrap(),
-        GameConfig::default()
+        redact_url("postgres://u:p@h:5432/d?password=q&sslmode=require"),
+        "postgres://u:***@h:5432/d?***"
     );
-    assert_eq!(
-        parse_db_config(temp_toml("").path()).unwrap(),
-        common::config::DbConfig::default()
-    );
+    assert_eq!(redact_url("postgres://u@h/d"), "postgres://u@h/d");
+    assert_eq!(redact_url("postgres://h/d"), "postgres://h/d");
+    // `@` may appear in an unencoded password; the last one ends the userinfo.
+    assert_eq!(redact_url("postgres://u:a@b@h/d"), "postgres://u:***@h/d");
+    assert_eq!(redact_url("u:p@h/d"), "***", "not a URL, so nothing survives");
 }
 
 #[test]
 fn malformed_toml_is_a_syntax_error() {
-    let err = parse_game_config(temp_toml("mother_port = \n").path()).unwrap_err();
-    assert!(matches!(err, ConfigError::Syntax { .. }), "got {err:?}");
+    let error = parse("[store\nurl = 1").unwrap_err();
+    assert!(matches!(error, ConfigError::Syntax { .. }), "got {error:?}");
+}
 
-    let err = parse_game_config(temp_toml("[unclosed\n").path()).unwrap_err();
-    assert!(matches!(err, ConfigError::Syntax { .. }), "got {err:?}");
+#[test]
+fn a_missing_required_table_is_a_value_error() {
+    for table in ["[store]", "[auth]"] {
+        let without: String = MINIMAL
+            .split("\n\n")
+            .filter(|block| !block.trim_start().starts_with(table))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let error = parse(&without).unwrap_err();
+        assert!(matches!(error, ConfigError::Value { .. }), "{table}: got {error:?}");
+    }
 }
 
 #[test]
 fn a_wrong_type_is_a_value_error() {
-    let err = parse_game_config(temp_toml("mother_port = \"not a port\"\n").path()).unwrap_err();
-    assert!(matches!(err, ConfigError::Value { .. }), "got {err:?}");
-
-    let err = parse_db_config(temp_toml("client_heart_fps = 1.5\n").path()).unwrap_err();
-    assert!(matches!(err, ConfigError::Value { .. }), "got {err:?}");
+    let error = parse(&MINIMAL.replace("port = 30001", "port = \"30001\"")).unwrap_err();
+    assert!(matches!(error, ConfigError::Value { .. }), "got {error:?}");
+    let error = parse(&format!("{MINIMAL}\n[game]\ntest_server = 1\n")).unwrap_err();
+    assert!(matches!(error, ConfigError::Value { .. }), "booleans are not 1/0: {error:?}");
 }
 
 #[test]
-fn an_unknown_key_is_rejected_rather_than_silently_defaulted() {
-    // A misspelled key must fail at startup, not keep its default.
-    let err = parse_game_config(temp_toml("mother_prot = 1\n").path()).unwrap_err();
-    assert!(matches!(err, ConfigError::Value { .. }), "got {err:?}");
-    assert!(err.to_string().contains("mother_prot"), "got {err}");
-
-    let err = parse_db_config(temp_toml("bind_prot = 1\n").path()).unwrap_err();
-    assert!(matches!(err, ConfigError::Value { .. }), "got {err:?}");
+fn an_ipv6_public_ip_is_refused_because_the_client_field_is_four_bytes() {
+    let error = parse(&format!("public_ip = \"::1\"\n{MINIMAL}")).unwrap_err();
+    assert!(matches!(error, ConfigError::Value { .. }), "got {error:?}");
 }
 
 #[test]
-fn an_unknown_sql_sub_table_key_is_rejected() {
-    let err = parse_game_config(temp_toml("[player_sql]\nhosts = \"x\"\n").path()).unwrap_err();
-    assert!(matches!(err, ConfigError::Value { .. }), "got {err:?}");
+fn unknown_keys_are_rejected_at_every_level() {
+    let cases = [
+        format!("mother_port = 1\n{MINIMAL}"),
+        MINIMAL.replace("[store]", "[store]\npool = 1"),
+        MINIMAL.replace("port = 30001", "port = 30001\nmaster = true"),
+        MINIMAL.replace("maps = [1]", "maps = [1]\nmap_allow = [1]"),
+        format!("{MINIMAL}\n[game]\npasses_per_sec = 25\n"),
+        format!("{MINIMAL}\n[game]\nplayer_sql = 1\n"),
+    ];
+    for case in cases {
+        let error = parse(&case).unwrap_err();
+        assert!(matches!(error, ConfigError::Value { .. }), "{case}\ngot {error:?}");
+    }
+}
+
+fn with_channels(channels: &str) -> String {
+    format!("[store]\nurl = \"postgres://h/d\"\n[auth]\nport = 30001\n{channels}")
 }
 
 #[test]
-fn a_missing_file_is_a_read_error() {
-    let err = parse_game_config("/nonexistent/path/game.toml").unwrap_err();
-    assert!(matches!(err, ConfigError::Read { .. }), "got {err:?}");
-
-    let err = parse_db_config("/nonexistent/path/db.toml").unwrap_err();
-    assert!(matches!(err, ConfigError::Read { .. }), "got {err:?}");
-}
-
-#[test]
-fn a_realistic_legacy_config_file_is_rejected() {
-    // Note that a single legacy scalar line such as `mother_port=50080` also happens to be
-    // valid TOML, and is accepted. A whole legacy `CONFIG` is not accepted, because the
-    // space-separated list and SQL lines are not TOML values. Operators must convert.
-    let legacy = "\
-mother_port = 50080
-map_allow=1 21 41
-player_sql=192.168.1.100 root password player_db 3306
-";
-    let err = parse_game_config(temp_toml(legacy).path()).unwrap_err();
-    assert!(matches!(err, ConfigError::Syntax { .. }), "got {err:?}");
-}
-
-#[test]
-fn a_legacy_sql_line_cannot_silently_become_a_toml_string() {
-    // The legacy SQL value was one space-separated string. It must not be accepted as the
-    // `[player_sql]` table, or a credential would be silently mis-parsed.
-    let err =
-        parse_game_config(temp_toml("player_sql = \"h user pw db 3306\"\n").path()).unwrap_err();
-    assert!(matches!(err, ConfigError::Value { .. }), "got {err:?}");
-}
-
-#[test]
-fn comments_and_blank_lines_are_ignored() {
-    let config = parse_game_config(
-        temp_toml(
-            "# a leading comment\n\
-             mother_port = 52000\n\
-             \n\
-             # another comment\n\
-             channel = 3\n",
-        )
-        .path(),
-    )
-    .unwrap();
-    assert_eq!(config.mother_port, 52000);
-    assert_eq!(config.channel, 3);
-}
-
-#[test]
-fn booleans_must_be_real_toml_booleans() {
-    assert!(
-        parse_game_config(temp_toml("test_server = true\n").path())
-            .unwrap()
-            .test_server
+fn channel_numbers_must_be_1_to_99_and_unique() {
+    let zero = with_channels("[[channel]]\nnumber = 0\nports = [1]\nmaps = [1]\n");
+    assert_eq!(invalid(&zero), TopologyError::ChannelNumber(0));
+    let hundred = with_channels("[[channel]]\nnumber = 100\nports = [1]\nmaps = [1]\n");
+    assert_eq!(invalid(&hundred), TopologyError::ChannelNumber(100));
+    let twice = with_channels(
+        "[[channel]]\nnumber = 2\nports = [1]\nmaps = [1]\n\
+         [[channel]]\nnumber = 2\nports = [2]\nmaps = [1]\n",
     );
-    assert!(
-        !parse_game_config(temp_toml("test_server = false\n").path())
-            .unwrap()
-            .test_server
+    assert_eq!(invalid(&twice), TopologyError::DuplicateChannel(2));
+}
+
+#[test]
+fn a_shared_channel_alone_cannot_be_picked_at_login() {
+    assert_eq!(invalid(&with_channels("")), TopologyError::NoLoginChannel);
+    let shared_only = with_channels("[[channel]]\nnumber = 99\nports = [1]\nmaps = [72]\n");
+    assert_eq!(invalid(&shared_only), TopologyError::NoLoginChannel);
+}
+
+#[test]
+fn every_channel_needs_a_port_and_a_map() {
+    let no_ports = with_channels("[[channel]]\nnumber = 1\nports = []\nmaps = [1]\n");
+    assert_eq!(invalid(&no_ports), TopologyError::NoPorts(1));
+    let no_maps = with_channels("[[channel]]\nnumber = 1\nports = [1]\nmaps = []\n");
+    assert_eq!(invalid(&no_maps), TopologyError::NoMaps(1));
+}
+
+#[test]
+fn maps_are_nonzero_and_listed_once_per_channel() {
+    let zero = with_channels("[[channel]]\nnumber = 3\nports = [1]\nmaps = [1, 0]\n");
+    assert_eq!(invalid(&zero), TopologyError::ZeroMap(3));
+    let twice = with_channels("[[channel]]\nnumber = 3\nports = [1]\nmaps = [5, 7, 5]\n");
+    assert_eq!(invalid(&twice), TopologyError::DuplicateMap { channel: 3, map: 5 });
+    let negative = with_channels("[[channel]]\nnumber = 3\nports = [1]\nmaps = [-1]\n");
+    assert!(matches!(parse(&negative), Err(ConfigError::Value { .. })));
+}
+
+#[test]
+fn nonzero_ports_are_unique_across_every_listener_and_zero_may_repeat() {
+    let with_auth = with_channels("[[channel]]\nnumber = 1\nports = [30001]\nmaps = [1]\n");
+    assert_eq!(invalid(&with_auth), TopologyError::DuplicatePort(30001));
+    let across = with_channels(
+        "[[channel]]\nnumber = 1\nports = [30003]\nmaps = [1]\n\
+         [[channel]]\nnumber = 2\nports = [30003]\nmaps = [1]\n",
     );
-    // Legacy "1" was a boolean; in TOML it is an integer and must be rejected.
-    let err = parse_game_config(temp_toml("test_server = 1\n").path()).unwrap_err();
-    assert!(matches!(err, ConfigError::Value { .. }), "got {err:?}");
+    assert_eq!(invalid(&across), TopologyError::DuplicatePort(30003));
+    let within = with_channels("[[channel]]\nnumber = 1\nports = [7, 7]\nmaps = [1]\n");
+    assert_eq!(invalid(&within), TopologyError::DuplicatePort(7));
+    let zeros = "[store]\nurl = \"postgres://h/d\"\n[auth]\nport = 0\n\
+                 [[channel]]\nnumber = 1\nports = [0, 0]\nmaps = [1]\n";
+    assert!(parse(zeros).is_ok(), "port 0 is chosen by the operating system");
 }
 
 #[test]
-fn a_round_trip_through_toml_is_stable() {
-    // Serializing the default config and reading it back must reproduce the defaults, so an
-    // operator can start from a generated file.
-    let rendered = toml::to_string(&GameConfig::default()).unwrap();
-    let config = parse_game_config(temp_toml(&rendered).path()).unwrap();
-    assert_eq!(config, GameConfig::default());
-}
-
-#[test]
-fn connection_url_uses_mysql_scheme_and_includes_the_port() {
-    let sql = SqlConfig {
-        host: "db.internal".into(),
-        user: "metin2".into(),
-        password: "pw".into(),
-        database: "player".into(),
-        port: 3306,
-    };
+fn a_shared_channel_map_is_hosted_nowhere_else() {
+    let clash = with_channels(
+        "[[channel]]\nnumber = 1\nports = [1]\nmaps = [1, 72]\n\
+         [[channel]]\nnumber = 99\nports = [2]\nmaps = [72]\n",
+    );
     assert_eq!(
-        sql.connection_url(),
-        "mysql://metin2:pw@db.internal:3306/player"
+        invalid(&clash),
+        TopologyError::SharedMapElsewhere { map: 72, channel: 1 }
     );
+    let shared_by_login_channels = with_channels(
+        "[[channel]]\nnumber = 1\nports = [1]\nmaps = [1]\n\
+         [[channel]]\nnumber = 2\nports = [2]\nmaps = [1]\n",
+    );
+    assert!(parse(&shared_by_login_channels).is_ok(), "Channels repeat maps by design");
 }
 
 #[test]
-fn connection_url_omits_a_zero_port() {
-    let sql = SqlConfig {
-        host: "localhost".into(),
-        user: "u".into(),
-        password: "p".into(),
-        database: "d".into(),
-        port: 0,
-    };
-    assert_eq!(sql.connection_url(), "mysql://u:p@localhost/d");
-}
-
-#[test]
-fn connection_url_percent_encodes_credentials() {
-    // A password containing URL syntax must not be able to redirect the connection.
-    let sql = SqlConfig {
-        host: "h".into(),
-        user: "us@er".into(),
-        password: "p@ss:w/d?#".into(),
-        database: "d".into(),
-        port: 0,
-    };
+fn errors_name_the_file() {
+    let error = load_server_config("/nonexistent/prodomo.toml").unwrap_err();
+    assert!(matches!(error, ConfigError::Read { .. }), "got {error:?}");
+    assert!(error.to_string().contains("/nonexistent/prodomo.toml"), "got {error}");
+    let error = parse(&with_channels("")).unwrap_err();
     assert_eq!(
-        sql.connection_url(),
-        "mysql://us%40er:p%40ss%3Aw%2Fd%3F%23@h/d"
+        error.to_string(),
+        "invalid topology in test.toml: no channel other than the shared channel 99, so none \
+         can be picked at login"
     );
-}
-
-#[test]
-fn is_configured_requires_a_host_and_a_database() {
-    assert!(!SqlConfig::default().is_configured());
-    let with_host = SqlConfig {
-        host: "h".into(),
-        ..SqlConfig::default()
-    };
-    assert!(!with_host.is_configured());
-    let with_db = SqlConfig {
-        host: "h".into(),
-        database: "d".into(),
-        ..SqlConfig::default()
-    };
-    assert!(with_db.is_configured());
-}
-
-/// The trusted-peer lists are part of the DB configuration surface.
-mod trusted_peers {
-    use super::*;
-
-    /// Parse a DB document that must be valid.
-    fn db_config(text: &str) -> DbConfig {
-        parse_db_config(temp_toml(text).path()).expect("the document should parse")
-    }
-
-    #[test]
-    fn both_lists_default_to_empty_which_denies_every_peer() {
-        let config = db_config("");
-        assert!(config.trusted_game_peers.is_empty());
-        assert!(config.trusted_auth_peers.is_empty());
-    }
-
-    #[test]
-    fn a_complete_document_can_list_trusted_peers() {
-        let config = db_config(
-            "trusted_game_peers = [\"127.0.0.1\", \"10.0.0.5\"]\ntrusted_auth_peers = [\"10.0.0.9\"]\n",
-        );
-        assert_eq!(config.trusted_game_peers, vec!["127.0.0.1", "10.0.0.5"]);
-        assert_eq!(config.trusted_auth_peers, vec!["10.0.0.9"]);
-    }
-
-    #[test]
-    fn a_single_empty_list_still_parses() {
-        let config = db_config("trusted_game_peers = []\n");
-        assert!(config.trusted_game_peers.is_empty());
-        assert!(config.trusted_auth_peers.is_empty());
-    }
-
-    #[test]
-    fn a_bare_string_is_not_a_peer_list() {
-        let error = parse_db_config(temp_toml("trusted_game_peers = \"127.0.0.1\"\n").path());
-        assert!(matches!(error, Err(ConfigError::Value { .. })));
-    }
-
-    #[test]
-    fn a_non_string_entry_is_rejected() {
-        let error = parse_db_config(temp_toml("trusted_auth_peers = [7]\n").path());
-        assert!(matches!(error, Err(ConfigError::Value { .. })));
-    }
-
-    #[test]
-    fn the_lists_are_game_only_keys() {
-        // A game config has no trusted-peer keys, and a typo is still caught.
-        let error = parse_game_config(temp_toml("trusted_game_peers = [\"127.0.0.1\"]\n").path());
-        assert!(matches!(error, Err(ConfigError::Value { .. })));
-    }
 }

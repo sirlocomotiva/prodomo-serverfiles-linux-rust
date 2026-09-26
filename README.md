@@ -25,7 +25,8 @@ The reasons are in [`docs/adr/`](docs/adr/).
 
 | path | contents |
 |---|---|
-| `protocol/`, `common/`, `net/`, `db/`, `gamedata/`, `world/`, `quest/`, `game-server/` | The Rust workspace. It is being restructured into the single `prodomo` binary; see `AGENTS.md`. |
+| `protocol/`, `common/`, `net/`, `db/`, `gamedata/`, `world/`, `quest/`, `prodomo/` | The Rust workspace. `prodomo/` is the one server binary; see `AGENTS.md` for what each crate holds. |
+| `config/prodomo.toml.example` | The commented configuration, with the legacy topology and ports. |
 | `legacy/` | The owner's legacy Game data (protos, maps, quests, locale strings, drop and shop tables), configuration, and SQL schema and table rows. See [`legacy/README.md`](legacy/README.md). |
 | `server/` | The frozen legacy C++ server source. It is the behavioural reference and is never modified or built. |
 
@@ -61,9 +62,21 @@ PostgreSQL 18 server.
 
 ## Running it
 
-Not yet. Build step 1 produces the `prodomo` binary, its configuration file, and the Operator
-command that creates accounts and GMs; this section will then describe them. The play test will use
-a `compose.yaml` that starts PostgreSQL 18 and `prodomo` together.
+The binary starts, binds its ports, and shuts down cleanly, but no client can log in yet.
+
+```bash
+cp config/prodomo.toml.example prodomo.toml   # then set [store].url
+cargo run -p prodomo -- --config prodomo.toml serve
+```
+
+`--config` defaults to `prodomo.toml` in the working directory. Logs go to stdout and to a file in
+`./log`, filtered by `RUST_LOG` when it is set; `serve --verbose` also reads `LOG_DIR` and `LOG_ANSI`.
+The store URL must be `postgres://` or `postgresql://`; no connection is opened yet, and its
+password is never logged. A root `prodomo.toml` is ignored by Git, so a real password stays local.
+SIGTERM or Ctrl+C stops the server.
+
+The Operator command that creates accounts and GMs comes next. The play test will use a
+`compose.yaml` that starts PostgreSQL 18 and `prodomo` together.
 
 ## Contributing
 

@@ -8,6 +8,11 @@ use tracing_subscriber::{
     EnvFilter,
 };
 
+/// The workspace crates whose events the default filter lets through.
+const WORKSPACE_TARGETS: [&str; 8] = [
+    "common", "db", "gamedata", "net", "prodomo", "protocol", "quest", "world",
+];
+
 /// Log configuration for the server
 pub struct LogConfig {
     /// Minimum log level for console output
@@ -61,16 +66,11 @@ pub fn init_logging(config: &LogConfig) {
     let file_appender = RollingFileAppender::new(Rotation::DAILY, log_dir, "syslog");
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(format!(
-            "common={},game_server={},db_server={},world={},quest={},net={},protocol={}",
-            config.file_level,
-            config.file_level,
-            config.file_level,
-            config.file_level,
-            config.file_level,
-            config.file_level,
-            config.file_level,
-        ))
+        let directives: Vec<String> = WORKSPACE_TARGETS
+            .iter()
+            .map(|target| format!("{target}={}", config.file_level))
+            .collect();
+        EnvFilter::new(directives.join(","))
     });
 
     let console_layer = fmt::layer()

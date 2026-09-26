@@ -1,162 +1,99 @@
-//! Metin2 game server binary
+//! The Prodomo server binary.
 //!
-//! Main entry point for the game server. Handles:
-//! - TOML configuration parsing
-//! - Logging initialization
-//! - TCP listener setup
-//! - Signal handling (SIGTERM, SIGINT)
-//! - Graceful shutdown sequence
+//! `prodomo serve` runs auth and every Channel in one process (ADR-0002):
+//! - loads and validates `prodomo.toml`
+//! - arms SIGTERM and SIGINT before any port opens
+//! - prepares the PostgreSQL store without connecting
+//! - binds the auth listener and every Channel port
+//! - runs the game loop and shuts everything down in order on a signal
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use std::error::Error;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use common::config::{parse_game_config, GameConfig};
+use clap::{Parser, Subcommand};
+use common::config::{load_server_config, ServerConfig, DEFAULT_CONFIG_PATH};
 use common::logging::{init_from_env, init_logging, LogConfig};
-use game_server::client_session::{ClientDispatchOutcome, ClientSession};
-use game_server::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
-use game_server::game_loop_messages::GameLoopTerminal;
-use game_server::ready_gate::ReadyGate;
-use game_server::ServerState;
-use tokio::net::TcpListener;
+use db::store::{Store, StoreConfig};
+use prodomo::client_session::{ClientDispatchOutcome, ClientSession};
+use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
+use prodomo::game_loop_messages::GameLoopTerminal;
+use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
+use prodomo::ready_gate::ReadyGate;
+use prodomo::ServerState;
 use tokio::signal;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
-/// Default configuration file path (TOML)
-const DEFAULT_CONFIG_PATH: &str = "game.toml";
-
-/// Parse command line arguments
-struct CliArgs {
-    /// Path to configuration file
-    config_path: PathBuf,
-    /// Override port from command line
-    port: Option<u16>,
-    /// Verbose logging to stdout
-    verbose: bool,
+/// The command line.
+#[derive(Debug, Parser)]
+#[command(
+    name = "prodomo",
+    version,
+    about = "Prodomo server: auth, every Channel, and the Operator commands"
+)]
+struct Cli {
+    /// Path to the TOML configuration.
+    #[arg(short, long, global = true, default_value = DEFAULT_CONFIG_PATH)]
+    config: PathBuf,
+    /// What to do.
+    #[command(subcommand)]
+    command: Command,
 }
 
-impl Default for CliArgs {
-    fn default() -> Self {
-        Self {
-            config_path: PathBuf::from(DEFAULT_CONFIG_PATH),
-            port: None,
-            verbose: false,
-        }
-    }
+/// The subcommands.
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Run the server until SIGTERM or SIGINT.
+    Serve {
+        /// Log to stdout at the level in `RUST_LOG`, into the directory in `LOG_DIR`, with colour
+        /// unless `LOG_ANSI` is `false`.
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
-impl CliArgs {
-    fn parse() -> Self {
-        let mut args = Self::default();
-        let mut iter = std::env::args().skip(1);
+/// Load the configuration and start logging.
+fn initialize_server(config_path: &Path, verbose: bool) -> Result<ServerConfig, Box<dyn Error>> {
+    let config = load_server_config(config_path)
+        .map_err(|error| format!("Failed to load config: {error}"))?;
 
-        while let Some(arg) = iter.next() {
-            match arg.as_str() {
-                "-c" | "--config" => {
-                    if let Some(path) = iter.next() {
-                        args.config_path = PathBuf::from(path);
-                    }
-                }
-                "-p" | "--port" => {
-                    if let Some(port_str) = iter.next() {
-                        if let Ok(port) = port_str.parse::<u16>() {
-                            if port > 1024 {
-                                args.port = Some(port);
-                            } else {
-                                eprintln!("Port must be greater than 1024");
-                            }
-                        }
-                    }
-                }
-                "-v" | "--verbose" => {
-                    args.verbose = true;
-                }
-                "-h" | "--help" => {
-                    Self::print_usage();
-                    std::process::exit(0);
-                }
-                _ => {
-                    eprintln!("Unknown argument: {arg}");
-                    Self::print_usage();
-                }
-            }
-        }
-
-        args
-    }
-
-    fn print_usage() {
-        println!(
-            "Metin2 Game Server\n\
-             \n\
-             Usage: game-server [OPTIONS]\n\
-             \n\
-             Options:\n\
-             -c, --config <path>  Path to TOML configuration file (default: game.toml)\n\
-             -p, --port <port>    Override listen port (must be > 1024)\n\
-             -v, --verbose        Enable verbose logging to stdout\n\
-             -h, --help           Show this help message"
-        );
-    }
-}
-
-/// Initialize the server with configuration
-fn initialize_server(args: &CliArgs) -> Result<GameConfig, Box<dyn std::error::Error>> {
-    // Parse configuration file
-    info!("Loading configuration from: {}", args.config_path.display());
-    let mut config = parse_game_config(&args.config_path)
-        .map_err(|error| format!("Failed to parse config: {error}"))?;
-
-    // Override port from command line if specified
-    if let Some(port) = args.port {
-        info!("Overriding port from command line: {}", port);
-        config.mother_port = port;
-    }
-
-    // Initialize logging
-    if args.verbose {
+    if verbose {
         init_from_env();
     } else {
-        let log_config = LogConfig::default();
-        init_logging(&log_config);
+        init_logging(&LogConfig::default());
     }
 
-    info!("Configuration loaded successfully");
-    info!("  Hostname: {}", config.hostname);
-    info!("  Channel: {}", config.channel);
-    info!("  Port: {}", config.mother_port);
-    info!("  P2P Port: {}", config.p2p_port);
-
+    info!("Configuration loaded from {}", config_path.display());
+    info!(bind_ip = %config.bind_ip, public_ip = %config.public_ip, "Addresses");
+    for channel in &config.channels {
+        info!(
+            channel = channel.number,
+            shared = channel.is_shared(),
+            ports = ?channel.ports,
+            maps = channel.maps.len(),
+            "Channel configured"
+        );
+    }
     Ok(config)
 }
 
-/// Set up TCP listener on the configured port
-async fn setup_tcp_listener(port: u16) -> Result<TcpListener, Box<dyn std::error::Error>> {
-    let bind_addr = format!("0.0.0.0:{port}");
-    info!("Binding TCP listener to: {}", bind_addr);
-
-    let listener = TcpListener::bind(&bind_addr)
-        .await
-        .map_err(|error| format!("Failed to bind TCP listener to {bind_addr}: {error}"))?;
-
-    info!("TCP listener bound successfully");
-    Ok(listener)
-}
-
-/// Handle incoming fixed-frame client connections.
+/// Serve one client connection.
 ///
 /// The loop records only the source-verified keepalive and pong boundaries.
 /// Variable packets, descriptor callbacks, and TEA remain explicit unsupported
 /// errors; this handler does not claim to implement gameplay or encryption.
 async fn handle_connection(
     stream: tokio::net::TcpStream,
-    addr: std::net::SocketAddr,
+    addr: SocketAddr,
+    role: ListenerRole,
     shutdown_tx: &broadcast::Sender<()>,
 ) {
-    info!(%addr, "New client connection");
+    info!(%addr, %role, "New client connection");
 
     let mut session = ClientSession::new(stream);
     let mut shutdown_rx = shutdown_tx.subscribe();
@@ -219,7 +156,7 @@ struct ShutdownSignal {
 ///
 /// Returns an error if the runtime refuses to register a handler. This is fatal
 /// on purpose: a process that cannot handle SIGTERM cannot shut down cleanly.
-fn arm_shutdown_signal() -> Result<ShutdownSignal, Box<dyn std::error::Error>> {
+fn arm_shutdown_signal() -> Result<ShutdownSignal, Box<dyn Error>> {
     #[cfg(unix)]
     {
         let terminate = signal::unix::signal(signal::unix::SignalKind::terminate())
@@ -244,7 +181,7 @@ impl ShutdownSignal {
     /// # Errors
     ///
     /// Returns an error if the signal stream fails.
-    async fn wait(self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn wait(self) -> Result<(), Box<dyn Error>> {
         #[cfg(unix)]
         {
             let mut terminate = self.terminate;
@@ -278,12 +215,12 @@ enum AcceptLoopExit {
 }
 
 async fn run_accept_loop(
-    listener: &TcpListener,
+    listeners: &mut Listeners,
     context: &ServerContext,
     game_loop: &mut GameLoopHandle,
     shutdown_signal: ShutdownSignal,
     ready_gate: &ReadyGate,
-) -> Result<AcceptLoopExit, Box<dyn std::error::Error>> {
+) -> Result<AcceptLoopExit, Box<dyn Error>> {
     // Boxed and pinned once, not per `select!` iteration: the wait future owns
     // the signal streams, so recreating it each pass would drop them and lose a
     // signal that arrived between accepts.
@@ -298,9 +235,9 @@ async fn run_accept_loop(
             terminal = game_loop.wait_for_terminal() => {
                 return Ok(AcceptLoopExit::GameLoop(terminal?));
             }
-            result = listener.accept() => match result {
+            (role, result) = listeners.accept() => match result {
                 Ok((stream, addr)) if !context.state.should_accept_connections() => {
-                    warn!(%addr, "Rejecting new connection while shutting down");
+                    warn!(%addr, %role, "Rejecting new connection while shutting down");
                     drop(stream);
                 }
                 // The ready gate is checked before the handler is spawned, not
@@ -309,6 +246,7 @@ async fn run_accept_loop(
                 Ok((stream, addr)) if !ready_gate.admit() => {
                     warn!(
                         %addr,
+                        %role,
                         refused = ready_gate.refused(),
                         "Refusing client connection before startup has finished"
                     );
@@ -317,26 +255,33 @@ async fn run_accept_loop(
                 Ok((stream, addr)) => {
                     let connection_shutdown = context.shutdown_tx.clone();
                     tokio::spawn(async move {
-                        handle_connection(stream, addr, &connection_shutdown).await;
+                        handle_connection(stream, addr, role, &connection_shutdown).await;
                     });
                 }
-                Err(error) => error!(%error, "Failed to accept connection"),
+                Err(error) => error!(%error, %role, "Failed to accept connection"),
             }
         }
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = CliArgs::parse();
-    let config = initialize_server(&args)?;
+async fn main() -> Result<(), Box<dyn Error>> {
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Serve { verbose } => serve(&cli.config, verbose).await,
+    }
+}
+
+/// `prodomo serve`.
+async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> {
+    let config = initialize_server(config_path, verbose)?;
     let state = Arc::new(ServerState::new());
     let (shutdown_tx, _) = broadcast::channel::<()>(16);
 
-    // Arm the shutdown signal BEFORE the listener exists.
+    // Arm the shutdown signal BEFORE any listener exists.
     //
     // `tokio::signal::unix::signal` installs its handler when the stream is
-    // created, and the kernel keeps the default disposition until then. If the
+    // created, and the kernel keeps the default disposition until then. If a
     // listener were bound first, a process could accept a connection (and a
     // test could observe readiness) in the window before the handler exists, and
     // a SIGTERM in that window would kill the process outright instead of
@@ -344,11 +289,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // "SIGTERM is handled".
     let shutdown_signal = arm_shutdown_signal()?;
 
-    let listener = setup_tcp_listener(config.mother_port).await?;
-    info!("Server initialized successfully");
-    info!("Listening for connections on port {}", config.mother_port);
+    // The pool is built without connecting, so a malformed URL fails here,
+    // before any port opens, and a database that is down does not stop the
+    // listeners from coming up.
+    let store = Store::lazy(&StoreConfig::from(&config.store))
+        .map_err(|error| format!("Invalid store configuration: {error}"))?;
+    info!(store = ?config.store, "Store configured; no connection opened yet");
 
-    // The client port opens before the world is ready, as legacy's does
+    let mut listeners = Listeners::bind(&listener_plan(&config)).await?;
+    for listener in listeners.iter() {
+        info!(
+            "Listening for {} clients on {}",
+            listener.role(),
+            listener.local_addr()
+        );
+    }
+
+    // The client ports open before the world is ready, as legacy's does
     // (`main.cpp:671`). The ready gate keeps that ordering from admitting
     // clients onto a world whose Game data is not loaded, which legacy does not
     // do. Nothing is loaded yet, so the gate opens once the game loop runs.
@@ -358,10 +315,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let controller = game_loop.controller();
     info!(thread_id = ?game_loop.thread_id(), "Dedicated game loop started");
     ready_gate.open();
+    info!("Accepting clients");
 
     let context = ServerContext { state, shutdown_tx };
     let exit = run_accept_loop(
-        &listener,
+        &mut listeners,
         &context,
         &mut game_loop,
         shutdown_signal,
@@ -369,6 +327,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await;
     ready_gate.close();
+    drop(listeners);
     begin_shutdown(&context.state, &context.shutdown_tx);
     let exit = match exit {
         Ok(exit) => exit,
@@ -383,6 +342,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Err(error) => error!(%error, "Game loop error cleanup failed"),
             }
+            store.close().await;
             return Err(run_error);
         }
     };
@@ -398,7 +358,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(?terminal, "Game loop stop acknowledged");
     let terminal = game_loop.join().await?;
     info!("Game loop thread joined");
-    info!("<shutdown> Shutdown complete");
+    store.close().await;
+    info!("Store closed");
     info!("Server shutdown complete");
 
     match terminal {

@@ -8,7 +8,7 @@ members = [
     "gamedata",
     "world",
     "quest",
-    "game-server",
+    "prodomo",
 ]
 
 [workspace.package]

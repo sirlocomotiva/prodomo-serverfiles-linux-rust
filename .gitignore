@@ -9,6 +9,9 @@
 # Rust/Cargo build output
 /target/
 
+# Local server configuration; it holds the real store password
+/prodomo.toml
+
 # OS metadata
 .DS_Store
 Thumbs.db

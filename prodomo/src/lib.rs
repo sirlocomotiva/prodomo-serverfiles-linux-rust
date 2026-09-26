@@ -1,4 +1,4 @@
-//! Game-server scheduling and asynchronous boundary modules.
+//! The Prodomo server: auth, every Channel, and the Operator commands in one process (ADR-0002).
 
 #![forbid(unsafe_code)]
 
@@ -45,6 +45,8 @@ pub mod account_player_router;
 pub mod account_records;
 
 pub mod ready_gate;
+
+pub mod listeners;
 
 /// Pure, injected policy for the legacy sync-position gameplay action.
 pub mod sync_position;

@@ -1,12 +1,11 @@
 //! Metin2 shared types and utilities
 //!
 //! Common data structures and helper functions used across
-//! the game server, db server, and related services.
+//! the `prodomo` server and its libraries.
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
-/// Configuration file parser
 pub mod config;
 
 /// Logging infrastructure using tracing
