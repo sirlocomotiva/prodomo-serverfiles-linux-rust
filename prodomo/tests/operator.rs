@@ -54,7 +54,10 @@ impl Operator {
     fn ok(&self, args: &[&str], stdin: &str) -> String {
         let output = self.run(args, stdin);
         let (stdout, stderr) = text(&output);
-        assert!(output.status.success(), "{args:?} failed:\n{stdout}{stderr}");
+        assert!(
+            output.status.success(),
+            "{args:?} failed:\n{stdout}{stderr}"
+        );
         assert!(!stdout.contains(PASSWORD) && !stderr.contains(PASSWORD));
         stdout
     }
@@ -63,8 +66,14 @@ impl Operator {
     fn refused(&self, args: &[&str], stdin: &str) -> String {
         let output = self.run(args, stdin);
         let (stdout, stderr) = text(&output);
-        assert!(!output.status.success(), "{args:?} should fail:\n{stdout}{stderr}");
-        assert!(stdout.is_empty(), "a failed command reports nothing on stdout:\n{stdout}");
+        assert!(
+            !output.status.success(),
+            "{args:?} should fail:\n{stdout}{stderr}"
+        );
+        assert!(
+            stdout.is_empty(),
+            "a failed command reports nothing on stdout:\n{stdout}"
+        );
         stderr
     }
 }
@@ -122,29 +131,55 @@ fn an_operator_creates_an_account_and_changes_its_password() {
         .next()
         .and_then(|line| line.strip_prefix("Delete code: "))
         .expect("a generated delete code is printed");
-    assert!(code.len() == 7 && code.bytes().all(|byte| byte.is_ascii_digit()), "{code:?}");
+    assert!(
+        code.len() == 7 && code.bytes().all(|byte| byte.is_ascii_digit()),
+        "{code:?}"
+    );
 
-    let chosen = operator.ok(&["account", "create", "bob", "--delete-code", "AbC1234"], "pw\r\n");
-    assert_eq!(chosen, "Created account bob with id 2\n", "a chosen code is not printed");
+    let chosen = operator.ok(
+        &["account", "create", "bob", "--delete-code", "AbC1234"],
+        "pw\r\n",
+    );
+    assert_eq!(
+        chosen, "Created account bob with id 2\n",
+        "a chosen code is not printed"
+    );
 
     let (alice, bob) = inspect(&database, async |store| {
-        let alice = find_credentials(store, &Login::new("alice").unwrap()).await.unwrap();
-        let bob = find_credentials(store, &Login::new("bob").unwrap()).await.unwrap();
+        let alice = find_credentials(store, &Login::new("alice").unwrap())
+            .await
+            .unwrap();
+        let bob = find_credentials(store, &Login::new("bob").unwrap())
+            .await
+            .unwrap();
         (alice.unwrap().1, bob.unwrap().1)
     });
     assert!(alice.verify(PASSWORD.as_bytes()).unwrap());
-    assert!(bob.verify(b"pw").unwrap(), "a CRLF line ending is not part of the password");
+    assert!(
+        bob.verify(b"pw").unwrap(),
+        "a CRLF line ending is not part of the password"
+    );
 
     let stderr = operator.refused(&["account", "create", "ALICE"], "other\n");
-    assert!(stderr.contains("an account with login alice already exists"), "{stderr}");
+    assert!(
+        stderr.contains("an account with login alice already exists"),
+        "{stderr}"
+    );
     let stderr = operator.refused(&["account", "create", "x"], "");
-    assert!(stderr.contains("a login is 2 to 30 ASCII letters and digits"), "{stderr}");
+    assert!(
+        stderr.contains("a login is 2 to 30 ASCII letters and digits"),
+        "{stderr}"
+    );
     let stderr = operator.refused(&["account", "create", "carol"], "");
     assert!(stderr.contains("no password on standard input"), "{stderr}");
 
     operator.ok(&["account", "password", "alice"], "n3w\n");
     let alice = inspect(&database, async |store| {
-        find_credentials(store, &Login::new("alice").unwrap()).await.unwrap().unwrap().1
+        find_credentials(store, &Login::new("alice").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .1
     });
     assert!(alice.verify(b"n3w").unwrap());
     assert!(!alice.verify(PASSWORD.as_bytes()).unwrap());
@@ -160,15 +195,30 @@ fn an_operator_adds_and_removes_coins_and_cash() {
     let operator = Operator::new(&database);
     operator.ok(&["account", "create", "alice"], "pw\n");
 
-    assert_eq!(operator.ok(&["account", "coins", "alice", "250"], ""), "alice now has 250 coins\n");
-    assert_eq!(operator.ok(&["account", "coins", "Alice", "-50"], ""), "alice now has 200 coins\n");
+    assert_eq!(
+        operator.ok(&["account", "coins", "alice", "250"], ""),
+        "alice now has 250 coins\n"
+    );
+    assert_eq!(
+        operator.ok(&["account", "coins", "Alice", "-50"], ""),
+        "alice now has 200 coins\n"
+    );
     let stderr = operator.refused(&["account", "coins", "alice", "-201"], "");
     assert!(stderr.contains("balance 200, change -201"), "{stderr}");
-    assert_eq!(operator.ok(&["account", "coins", "alice", "0"], ""), "alice now has 200 coins\n");
+    assert_eq!(
+        operator.ok(&["account", "coins", "alice", "0"], ""),
+        "alice now has 200 coins\n"
+    );
 
-    assert_eq!(operator.ok(&["account", "cash", "alice", "7"], ""), "alice now has 7 cash\n");
+    assert_eq!(
+        operator.ok(&["account", "cash", "alice", "7"], ""),
+        "alice now has 7 cash\n"
+    );
     let stderr = operator.refused(&["account", "cash", "alice", "4294967289"], "");
-    assert!(stderr.contains("cash would leave 0..=4294967295"), "{stderr}");
+    assert!(
+        stderr.contains("cash would leave 0..=4294967295"),
+        "{stderr}"
+    );
     let stderr = operator.refused(&["account", "cash", "carol", "1"], "");
     assert!(stderr.contains("no account has login carol"), "{stderr}");
 }
@@ -193,10 +243,16 @@ fn an_operator_grants_lists_and_revokes_gm_authority() {
         .lines()
         .map(|line| line.split_whitespace().collect())
         .collect();
-    assert_eq!(rows, [["Admin", "alice", "GOD"], ["Builder", "bob", "LOW_WIZARD"]]);
+    assert_eq!(
+        rows,
+        [["Admin", "alice", "GOD"], ["Builder", "bob", "LOW_WIZARD"]]
+    );
 
     let stderr = operator.refused(&["gm", "grant", "bob", "admin", "wizard"], "");
-    assert!(stderr.contains("already granted to account alice"), "{stderr}");
+    assert!(
+        stderr.contains("already granted to account alice"),
+        "{stderr}"
+    );
     let stderr = operator.refused(&["gm", "grant", "alice", "Admin", "player"], "");
     assert!(stderr.contains("expected one of low_wizard"), "{stderr}");
 
@@ -207,7 +263,10 @@ fn an_operator_grants_lists_and_revokes_gm_authority() {
     });
     assert_eq!(authority, Some(GmAuthority::God), "the game sees the grant");
 
-    assert_eq!(operator.ok(&["gm", "revoke", "ADMIN"], ""), "Revoked the grant of ADMIN\n");
+    assert_eq!(
+        operator.ok(&["gm", "revoke", "ADMIN"], ""),
+        "Revoked the grant of ADMIN\n"
+    );
     let stderr = operator.refused(&["gm", "revoke", "Admin"], "");
     assert!(stderr.contains("Admin has no GM grant"), "{stderr}");
 }
@@ -241,6 +300,9 @@ fn an_operator_command_names_the_store_it_cannot_use() {
         .and_then(|(user_info, _)| user_info.split_once(':'))
         .map(|(_, password)| password);
     if let Some(password) = password {
-        assert!(!stderr.contains(password), "the password is never printed: {stderr}");
+        assert!(
+            !stderr.contains(password),
+            "the password is never printed: {stderr}"
+        );
     }
 }

@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-09-26, after ledger section 179 (step 1, part three: the first schema, store
-readiness, and the Operator commands). Step 1 is done.
+Last reviewed: 2026-09-26, after ledger section 180 (the format and Clippy gates run again). Step 1
+is done.
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -171,9 +171,9 @@ owner should know about (178.5):
   resolve, so the container publishes its port on `127.0.0.1`; `AGENTS.md` has the commands.
 - The one online `cargo fetch` the owner approved (planning Q23) ran in section 177. The offline
   gates build from the local cache.
-- `rustfmt` and `cargo-clippy` are not installed on the current machine, so the format and Clippy
-  gates have not run since section 175; formatting has been checked by hand since. Installing them needs owner approval:
-  `sudo apt-get install rustfmt rust-clippy`.
+- `rustfmt` 1.8.0 and Clippy 0.1.85 were installed by the owner after section 179; section 180
+  applied `cargo fmt` to the drift that built up while they were missing and cleared every Clippy
+  finding. Both gates run again.
 - `i686-linux-gnu-g++-12`, used by the width probe, is not installed on the current machine.
 
 ## Code-quality backlog

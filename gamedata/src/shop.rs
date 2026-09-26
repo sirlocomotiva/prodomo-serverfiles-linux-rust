@@ -407,7 +407,6 @@ impl DecodedShopQueryRow {
     }
 }
 
-
 /// The caps checked while a shop table is built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShopLimits {
@@ -900,13 +899,12 @@ fn build_records(
         }
         record.vnum = u32::from_le_bytes(shop_vnum.to_le_bytes());
         record.npc_vnum = group.npc_vnum;
-        record.item_count = u8::try_from(group.items.len()).map_err(|_| {
-            ShopTableError::ItemCapacityOverflow {
+        record.item_count =
+            u8::try_from(group.items.len()).map_err(|_| ShopTableError::ItemCapacityOverflow {
                 shop_vnum,
                 count: group.items.len(),
                 maximum: SHOP_ITEM_MAX_NUM,
-            }
-        })?;
+            })?;
         for (slot, item) in record.items.iter_mut().zip(group.items) {
             *slot = item;
         }
@@ -1195,7 +1193,10 @@ mod tests {
     #[test]
     fn source_row_bound_allows_joined_items_but_rejects_excess_null_rows() {
         let joined = vec![item_row(1, 2, 10, 1), item_row(1, 2, 11, 1)];
-        assert_eq!(build_shop_table(&joined, ShopLimits::new(1)).unwrap().len(), 1);
+        assert_eq!(
+            build_shop_table(&joined, ShopLimits::new(1)).unwrap().len(),
+            1
+        );
 
         let null_rows = (0..41).map(|_| {
             ShopTableQueryRow::new([

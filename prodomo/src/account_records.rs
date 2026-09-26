@@ -352,4 +352,3 @@ impl Default for PlayerResultRecord {
         }
     }
 }
-

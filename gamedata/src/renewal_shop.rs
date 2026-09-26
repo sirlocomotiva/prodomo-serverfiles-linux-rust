@@ -1403,11 +1403,11 @@ fn build_records(
     }
 
     let mut records = Vec::new();
-    records
-        .try_reserve_exact(groups.len())
-        .map_err(|_| RenewalShopTableError::AllocationFailed {
+    records.try_reserve_exact(groups.len()).map_err(|_| {
+        RenewalShopTableError::AllocationFailed {
             requested: groups.len(),
-        })?;
+        }
+    })?;
 
     for (shop_vnum, group) in groups {
         let mut record = ShopTableRecord::zeroed_renewal_shop();

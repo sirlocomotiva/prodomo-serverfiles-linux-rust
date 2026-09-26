@@ -80,7 +80,9 @@ fn run(url: &str, statement: &str) -> Result<(), sqlx::Error> {
 
 /// `url` with its database path replaced by `name`, keeping any query string.
 pub fn with_database(url: &str, name: &str) -> String {
-    let (scheme, rest) = url.split_once("://").expect("DATABASE_URL should have a scheme");
+    let (scheme, rest) = url
+        .split_once("://")
+        .expect("DATABASE_URL should have a scheme");
     let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(authority_end);
     let query = tail.find('?').map_or("", |start| &tail[start..]);

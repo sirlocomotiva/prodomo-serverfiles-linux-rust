@@ -89,7 +89,10 @@ fn a_full_document_reads_every_table() {
 
     assert_eq!(config.bind_ip, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
     assert_eq!(config.public_ip, Ipv4Addr::new(203, 0, 113, 7));
-    assert_eq!(config.store.url, "postgres://prodomo:pw@db.local:5432/prodomo");
+    assert_eq!(
+        config.store.url,
+        "postgres://prodomo:pw@db.local:5432/prodomo"
+    );
     assert_eq!(config.store.max_connections, 16);
     assert_eq!(config.auth.port, 30001);
     let summary: Vec<(u8, Vec<u16>, usize, bool)> = config
@@ -130,7 +133,10 @@ fn game_defaults_are_the_legacy_compiled_in_values() {
     // `game/config.cpp:20-135`, except `adminpage_password` and the two cycles (see the ledger).
     let game = GameSettings::default();
     assert!(game.test_server, "config.cpp:72 defaults test_server to 1");
-    assert_eq!(game.block_login, "30000705", "an empty value would refuse every account");
+    assert_eq!(
+        game.block_login, "30000705",
+        "an empty value would refuse every account"
+    );
     assert_eq!(game.save_event_second_cycle, 120);
     assert_eq!(game.ping_event_second_cycle, 60);
     assert_eq!(game.item_count_limit, 5000);
@@ -140,12 +146,18 @@ fn game_defaults_are_the_legacy_compiled_in_values() {
     assert_eq!(game.max_level, 99);
     assert_eq!(game.user_limit, 32768);
     assert_eq!(game.check_version_value, "1215955205");
-    assert!(game.adminpage_password.is_empty(), "the admin page has no default password");
+    assert!(
+        game.adminpage_password.is_empty(),
+        "the admin page has no default password"
+    );
 }
 
 #[test]
 fn the_shipped_example_is_a_valid_document() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../config/prodomo.toml.example");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../config/prodomo.toml.example"
+    );
     let config = load_server_config(path).unwrap();
     let numbers: Vec<u8> = config.channels.iter().map(|c| c.number).collect();
     assert_eq!(numbers, vec![1, 2, 3, 4, SHARED_CHANNEL]);
@@ -159,9 +171,15 @@ fn the_shipped_example_is_a_valid_document() {
 fn secrets_never_reach_debug_output() {
     let config = parse(FULL).unwrap();
     let shown = format!("{config:?}");
-    assert!(!shown.contains("SECRET123"), "admin page password leaked: {shown}");
+    assert!(
+        !shown.contains("SECRET123"),
+        "admin page password leaked: {shown}"
+    );
     assert!(!shown.contains(":pw@"), "store password leaked: {shown}");
-    assert!(shown.contains("prodomo:***@db.local:5432/prodomo"), "got {shown}");
+    assert!(
+        shown.contains("prodomo:***@db.local:5432/prodomo"),
+        "got {shown}"
+    );
     assert_eq!(format!("{:?}", Secret::default()), "\"\"");
 }
 
@@ -175,7 +193,11 @@ fn redaction_keeps_the_host_and_drops_the_password_and_query() {
     assert_eq!(redact_url("postgres://h/d"), "postgres://h/d");
     // `@` may appear in an unencoded password; the last one ends the userinfo.
     assert_eq!(redact_url("postgres://u:a@b@h/d"), "postgres://u:***@h/d");
-    assert_eq!(redact_url("u:p@h/d"), "***", "not a URL, so nothing survives");
+    assert_eq!(
+        redact_url("u:p@h/d"),
+        "***",
+        "not a URL, so nothing survives"
+    );
 }
 
 #[test]
@@ -193,7 +215,10 @@ fn a_missing_required_table_is_a_value_error() {
             .collect::<Vec<_>>()
             .join("\n\n");
         let error = parse(&without).unwrap_err();
-        assert!(matches!(error, ConfigError::Value { .. }), "{table}: got {error:?}");
+        assert!(
+            matches!(error, ConfigError::Value { .. }),
+            "{table}: got {error:?}"
+        );
     }
 }
 
@@ -202,7 +227,10 @@ fn a_wrong_type_is_a_value_error() {
     let error = parse(&MINIMAL.replace("port = 30001", "port = \"30001\"")).unwrap_err();
     assert!(matches!(error, ConfigError::Value { .. }), "got {error:?}");
     let error = parse(&format!("{MINIMAL}\n[game]\ntest_server = 1\n")).unwrap_err();
-    assert!(matches!(error, ConfigError::Value { .. }), "booleans are not 1/0: {error:?}");
+    assert!(
+        matches!(error, ConfigError::Value { .. }),
+        "booleans are not 1/0: {error:?}"
+    );
 }
 
 #[test]
@@ -223,7 +251,10 @@ fn unknown_keys_are_rejected_at_every_level() {
     ];
     for case in cases {
         let error = parse(&case).unwrap_err();
-        assert!(matches!(error, ConfigError::Value { .. }), "{case}\ngot {error:?}");
+        assert!(
+            matches!(error, ConfigError::Value { .. }),
+            "{case}\ngot {error:?}"
+        );
     }
 }
 
@@ -264,7 +295,10 @@ fn maps_are_nonzero_and_listed_once_per_channel() {
     let zero = with_channels("[[channel]]\nnumber = 3\nports = [1]\nmaps = [1, 0]\n");
     assert_eq!(invalid(&zero), TopologyError::ZeroMap(3));
     let twice = with_channels("[[channel]]\nnumber = 3\nports = [1]\nmaps = [5, 7, 5]\n");
-    assert_eq!(invalid(&twice), TopologyError::DuplicateMap { channel: 3, map: 5 });
+    assert_eq!(
+        invalid(&twice),
+        TopologyError::DuplicateMap { channel: 3, map: 5 }
+    );
     let negative = with_channels("[[channel]]\nnumber = 3\nports = [1]\nmaps = [-1]\n");
     assert!(matches!(parse(&negative), Err(ConfigError::Value { .. })));
 }
@@ -282,7 +316,10 @@ fn nonzero_ports_are_unique_across_every_listener_and_zero_may_repeat() {
     assert_eq!(invalid(&within), TopologyError::DuplicatePort(7));
     let zeros = "[store]\nurl = \"postgres://h/d\"\n[auth]\nport = 0\n\
                  [[channel]]\nnumber = 1\nports = [0, 0]\nmaps = [1]\n";
-    assert!(parse(zeros).is_ok(), "port 0 is chosen by the operating system");
+    assert!(
+        parse(zeros).is_ok(),
+        "port 0 is chosen by the operating system"
+    );
 }
 
 #[test]
@@ -293,20 +330,29 @@ fn a_shared_channel_map_is_hosted_nowhere_else() {
     );
     assert_eq!(
         invalid(&clash),
-        TopologyError::SharedMapElsewhere { map: 72, channel: 1 }
+        TopologyError::SharedMapElsewhere {
+            map: 72,
+            channel: 1
+        }
     );
     let shared_by_login_channels = with_channels(
         "[[channel]]\nnumber = 1\nports = [1]\nmaps = [1]\n\
          [[channel]]\nnumber = 2\nports = [2]\nmaps = [1]\n",
     );
-    assert!(parse(&shared_by_login_channels).is_ok(), "Channels repeat maps by design");
+    assert!(
+        parse(&shared_by_login_channels).is_ok(),
+        "Channels repeat maps by design"
+    );
 }
 
 #[test]
 fn errors_name_the_file() {
     let error = load_server_config("/nonexistent/prodomo.toml").unwrap_err();
     assert!(matches!(error, ConfigError::Read { .. }), "got {error:?}");
-    assert!(error.to_string().contains("/nonexistent/prodomo.toml"), "got {error}");
+    assert!(
+        error.to_string().contains("/nonexistent/prodomo.toml"),
+        "got {error}"
+    );
     let error = parse(&with_channels("")).unwrap_err();
     assert_eq!(
         error.to_string(),

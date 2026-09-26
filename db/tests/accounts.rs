@@ -47,7 +47,10 @@ impl ScratchDatabase {
             .execute(&mut admin)
             .await
             .expect("the test role should be allowed to create databases");
-        admin.close().await.expect("the admin connection should close");
+        admin
+            .close()
+            .await
+            .expect("the admin connection should close");
         let store = Store::connect(&StoreConfig::new(with_database(&admin_url, &name)))
             .await
             .expect("the scratch database should accept a connection");
@@ -86,7 +89,9 @@ impl Drop for ScratchDatabase {
 
 /// `url` with its database path replaced by `name`, keeping any query string.
 fn with_database(url: &str, name: &str) -> String {
-    let (scheme, rest) = url.split_once("://").expect("DATABASE_URL should have a scheme");
+    let (scheme, rest) = url
+        .split_once("://")
+        .expect("DATABASE_URL should have a scheme");
     let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(authority_end);
     let query = tail.find('?').map_or("", |start| &tail[start..]);
@@ -124,11 +129,17 @@ async fn balance(store: &Store, raw_login: &str, currency: Currency) -> i64 {
 #[test]
 fn a_database_url_keeps_its_credentials_host_and_options() {
     assert_eq!(
-        with_database("postgres://u:p@127.0.0.1:55432/prodomo?sslmode=disable", "t1"),
+        with_database(
+            "postgres://u:p@127.0.0.1:55432/prodomo?sslmode=disable",
+            "t1"
+        ),
         "postgres://u:p@127.0.0.1:55432/t1?sslmode=disable"
     );
     assert_eq!(with_database("postgres://u@db", "t2"), "postgres://u@db/t2");
-    assert_eq!(with_database("postgresql://db/?x=1", "t3"), "postgresql://db/t3?x=1");
+    assert_eq!(
+        with_database("postgresql://db/?x=1", "t3"),
+        "postgresql://db/t3?x=1"
+    );
 }
 
 #[tokio::test]
@@ -136,7 +147,11 @@ async fn migrating_twice_changes_nothing_and_records_the_newest_version() {
     let Some(scratch) = ScratchDatabase::create().await else {
         return;
     };
-    scratch.store.migrate().await.expect("a second run should be a no-op");
+    scratch
+        .store
+        .migrate()
+        .await
+        .expect("a second run should be a no-op");
     let applied: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
         .fetch_one(scratch.store.pool())
         .await
@@ -171,7 +186,10 @@ async fn an_account_is_created_once_and_checks_only_its_own_password() {
     assert_eq!(id, first);
     assert!(digest.verify(b"s3cret pass").unwrap());
     assert!(!digest.verify(b"other").unwrap());
-    assert!(find_credentials(store, &login("carol")).await.unwrap().is_none());
+    assert!(find_credentials(store, &login("carol"))
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -196,7 +214,14 @@ async fn a_new_account_starts_with_the_legacy_defaults() {
     .await
     .unwrap();
     assert_eq!(
-        (status.as_str(), language, delete_code.as_str(), coins, cash, played),
+        (
+            status.as_str(),
+            language,
+            delete_code.as_str(),
+            coins,
+            cash,
+            played
+        ),
         ("OK", 1, "1234567", 0, 0, None)
     );
 }
@@ -210,7 +235,10 @@ async fn a_password_change_replaces_the_old_password() {
     create(store, "alice", b"old").await;
     let new = NewPassword::new(b"new").unwrap().hash().unwrap();
     set_password(store, &login("alice"), &new).await.unwrap();
-    let (_, digest) = find_credentials(store, &login("alice")).await.unwrap().unwrap();
+    let (_, digest) = find_credentials(store, &login("alice"))
+        .await
+        .unwrap()
+        .unwrap();
     assert!(digest.verify(b"new").unwrap());
     assert!(!digest.verify(b"old").unwrap());
     assert!(matches!(
@@ -228,8 +256,18 @@ async fn a_balance_moves_by_the_delta_and_never_leaves_its_range() {
     create(store, "alice", b"pw").await;
     let alice = login("alice");
 
-    assert_eq!(adjust_balance(store, &alice, Currency::Coins, 500).await.unwrap(), 500);
-    assert_eq!(adjust_balance(store, &alice, Currency::Coins, -120).await.unwrap(), 380);
+    assert_eq!(
+        adjust_balance(store, &alice, Currency::Coins, 500)
+            .await
+            .unwrap(),
+        500
+    );
+    assert_eq!(
+        adjust_balance(store, &alice, Currency::Coins, -120)
+            .await
+            .unwrap(),
+        380
+    );
     assert!(matches!(
         adjust_balance(store, &alice, Currency::Coins, -381).await,
         Err(AccountError::BalanceOutOfRange {
@@ -239,11 +277,17 @@ async fn a_balance_moves_by_the_delta_and_never_leaves_its_range() {
         })
     ));
     assert_eq!(balance(store, "alice", Currency::Coins).await, 380);
-    assert_eq!(balance(store, "alice", Currency::Cash).await, 0, "cash is separate");
+    assert_eq!(
+        balance(store, "alice", Currency::Cash).await,
+        0,
+        "cash is separate"
+    );
 
     let to_max = i64::MAX - 380;
     assert_eq!(
-        adjust_balance(store, &alice, Currency::Coins, to_max).await.unwrap(),
+        adjust_balance(store, &alice, Currency::Coins, to_max)
+            .await
+            .unwrap(),
         i64::MAX
     );
     assert!(matches!(
@@ -253,12 +297,17 @@ async fn a_balance_moves_by_the_delta_and_never_leaves_its_range() {
 
     let dword_max = i64::from(u32::MAX);
     assert_eq!(
-        adjust_balance(store, &alice, Currency::Cash, dword_max).await.unwrap(),
+        adjust_balance(store, &alice, Currency::Cash, dword_max)
+            .await
+            .unwrap(),
         dword_max
     );
     assert!(matches!(
         adjust_balance(store, &alice, Currency::Cash, 1).await,
-        Err(AccountError::BalanceOutOfRange { currency: Currency::Cash, .. })
+        Err(AccountError::BalanceOutOfRange {
+            currency: Currency::Cash,
+            ..
+        })
     ));
     assert_eq!(balance(store, "alice", Currency::Cash).await, dword_max);
 
@@ -303,15 +352,30 @@ async fn a_gm_grant_belongs_to_one_account_and_matches_names_in_any_case() {
     grant_gm(store, &login("alice"), &name("Admin"), GmAuthority::God)
         .await
         .unwrap();
-    assert_eq!(gm_authority(store, alice, "Admin").await.unwrap(), Some(GmAuthority::God));
-    assert_eq!(gm_authority(store, alice, "ADMIN").await.unwrap(), Some(GmAuthority::God));
-    assert_eq!(gm_authority(store, bob, "Admin").await.unwrap(), None, "wrong account");
+    assert_eq!(
+        gm_authority(store, alice, "Admin").await.unwrap(),
+        Some(GmAuthority::God)
+    );
+    assert_eq!(
+        gm_authority(store, alice, "ADMIN").await.unwrap(),
+        Some(GmAuthority::God)
+    );
+    assert_eq!(
+        gm_authority(store, bob, "Admin").await.unwrap(),
+        None,
+        "wrong account"
+    );
     assert_eq!(gm_authority(store, alice, "Other").await.unwrap(), None);
 
     // Regranting on the same account changes the authority and the spelling.
-    grant_gm(store, &login("alice"), &name("ADMIN"), GmAuthority::Implementor)
-        .await
-        .unwrap();
+    grant_gm(
+        store,
+        &login("alice"),
+        &name("ADMIN"),
+        GmAuthority::Implementor,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         list_gm_grants(store).await.unwrap(),
         vec![GmGrant {
@@ -364,7 +428,11 @@ async fn the_schema_refuses_what_the_rust_types_refuse() {
     for (login, password_hash, delete_code) in [
         ("Alice", hash.as_str(), "1234567"),
         ("a", hash.as_str(), "1234567"),
-        ("alice", "$argon2i$v=19$m=16,t=2,p=1$c2FsdHNhbHQ$aGFzaA", "1234567"),
+        (
+            "alice",
+            "$argon2i$v=19$m=16,t=2,p=1$c2FsdHNhbHQ$aGFzaA",
+            "1234567",
+        ),
         ("alice", hash.as_str(), "123456"),
     ] {
         let inserted = sqlx::query(
@@ -375,7 +443,10 @@ async fn the_schema_refuses_what_the_rust_types_refuse() {
         .bind(delete_code)
         .execute(pool)
         .await;
-        assert!(inserted.is_err(), "{login:?} {delete_code:?} should be refused");
+        assert!(
+            inserted.is_err(),
+            "{login:?} {delete_code:?} should be refused"
+        );
     }
 
     create(&scratch.store, "alice", b"pw").await;

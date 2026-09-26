@@ -705,7 +705,9 @@ mod tests {
 
     #[test]
     fn an_empty_result_is_an_empty_table() {
-        assert!(build_land_table(&[], LandLimits::default()).unwrap().is_empty());
+        assert!(build_land_table(&[], LandLimits::default())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

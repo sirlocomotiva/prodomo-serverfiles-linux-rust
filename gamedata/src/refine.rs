@@ -469,8 +469,8 @@ pub fn build_refine_table(
             requested: rows.len(),
         })?;
     for (index, row) in rows.iter().enumerate() {
-        let record =
-            decode_refine_query_row(row).map_err(|source| RefineTableError::Row { index, source })?;
+        let record = decode_refine_query_row(row)
+            .map_err(|source| RefineTableError::Row { index, source })?;
         records.push(record);
     }
     Ok(records)

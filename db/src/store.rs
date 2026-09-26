@@ -142,7 +142,10 @@ impl fmt::Display for StoreError {
         match self {
             Self::InvalidUrl(error) => write!(f, "invalid PostgreSQL URL: {error}"),
             Self::UnsupportedScheme(scheme) => {
-                write!(f, "unsupported database URL scheme {scheme:?}; expected postgres://")
+                write!(
+                    f,
+                    "unsupported database URL scheme {scheme:?}; expected postgres://"
+                )
             }
             Self::ZeroConnections => f.write_str("max_connections must be at least one"),
             Self::Database(error) => write!(f, "PostgreSQL error: {error}"),
@@ -255,7 +258,10 @@ mod tests {
             matches!(&error, StoreError::UnsupportedScheme(scheme) if scheme == "mysql"),
             "got {error:?}"
         );
-        assert!(!error.to_string().contains("secret"), "the password never leaks");
+        assert!(
+            !error.to_string().contains("secret"),
+            "the password never leaks"
+        );
     }
 
     #[tokio::test]
@@ -272,7 +278,10 @@ mod tests {
         let config = StoreConfig::new("postgres://prodomo:hunter2@db.local:5432/prodomo");
         let shown = format!("{config:?}");
         assert!(!shown.contains("hunter2"), "got {shown}");
-        assert!(shown.contains("prodomo:***@db.local:5432/prodomo"), "got {shown}");
+        assert!(
+            shown.contains("prodomo:***@db.local:5432/prodomo"),
+            "got {shown}"
+        );
     }
 
     #[test]

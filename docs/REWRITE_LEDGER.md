@@ -15165,3 +15165,46 @@ Formatting was checked by hand: rustfmt style, no line of the new or changed Rus
 columns. No `#[allow]` was added.
 
 Protocol coverage is unchanged: CG 91 of 92, GC 96 of 134.
+
+## 180. The format and Clippy gates run again
+
+The owner installed `rustfmt` 1.8.0 and Clippy 0.1.85 after section 179. Neither gate had run since
+section 175, so this section brings the workspace back to both. No behaviour changes.
+
+### 180.1 Formatting
+
+`cargo fmt --all -- --check` reported 95 hunks across 23 files, the drift that built up while
+formatting was checked by hand (mostly the files of sections 177-179: line breaks in long calls,
+chains, and `assert!` arguments). `cargo fmt --all` applied them; no hand edits were made.
+
+### 180.2 Clippy
+
+`cargo clippy --workspace --all-targets -- -D warnings` found:
+
+- `doc_markdown` on the words `PostgreSQL` and `MySQL` in doc comments. They are product names, not
+  identifiers, so a new root `clippy.toml` adds them to `doc-valid-idents` (keeping the defaults
+  with `".."`). No `#[allow]` was added.
+- `clone_on_copy` in a `gamedata/src/skill.rs` test and a `prodomo/src/client_live.rs` test.
+- `cast_possible_truncation` in `SystemLiveClock::now`: the seconds since the epoch are now cut to
+  their low 32 bits through `to_le_bytes`, which is what the `as u32` did, stated without a cast.
+- `cast_sign_loss` in `ManualLiveClock::advance`: the signed delta is reinterpreted through
+  `to_ne_bytes`/`from_ne_bytes`, bit-for-bit what the `as u32` did.
+- `uninlined_format_args` twice in `LiveClientError`'s `Display`.
+- `unused_async` on the `client_live` test helper `session()`, which is now a plain function; its 11
+  callers dropped `.await`.
+
+### 180.3 Receipt
+
+Run on 2026-09-26 with rustc 1.85.1, `--locked --offline`:
+
+| gate | result |
+| --- | --- |
+| `cargo fmt --all -- --check` | green |
+| `cargo clippy --workspace --all-targets -- -D warnings` | green |
+| `cargo build --workspace` | green, 0 warnings |
+| `cargo test --workspace --all-targets --no-fail-fast`, with `DATABASE_URL` (PostgreSQL 18.6) | **1,560 passed, 0 failed, 0 ignored**, across 28 test binaries |
+| `cargo test --workspace --doc` | **1 passed** |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | green |
+
+Test counts are unchanged from 179.11. No stray `*.core` file was left in the workspace root.
+`docs/STATUS.md` drops the note that the two tools are missing.

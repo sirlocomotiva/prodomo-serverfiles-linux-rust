@@ -478,10 +478,10 @@ impl Error for AccountRouterError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handshake::HandshakeServerKind;
-    use protocol::cg_handshake::{CgHandshakeHeader, CgInboundHandshake};
     use crate::account_player::{AccountLoginOutcome, AccountPlayerOutcome};
     use crate::account_records::{LoginAccountRecord, PlayerResultRecord};
+    use crate::handshake::HandshakeServerKind;
+    use protocol::cg_handshake::{CgHandshakeHeader, CgInboundHandshake};
     use protocol::simple_player::SimplePlayerRecord;
 
     const HANDLE: u32 = 0x1234_5678;

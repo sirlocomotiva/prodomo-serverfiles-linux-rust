@@ -1265,7 +1265,7 @@ mod tests {
         columns[1] = text("N");
         let source = row_with(columns);
         let record = decode_skill_query_row(&source).unwrap();
-        assert_eq!(strict(&[source]).unwrap(), [record.clone()]);
+        assert_eq!(strict(&[source]).unwrap(), [record]);
 
         let wire = record.encode();
         assert_eq!(wire.len(), 1_475);

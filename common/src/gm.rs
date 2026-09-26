@@ -434,7 +434,10 @@ mod tests {
         let for_server = |server: Option<&[u8]>| row(1, None, None, None, server, Some(b"GOD"));
         let here = Some(&b"10.0.0.7"[..]);
         assert!(for_server(Some(b"ALL")).serves(here));
-        assert!(for_server(Some(b"all  ")).serves(here), "the collation is _ci and pads");
+        assert!(
+            for_server(Some(b"all  ")).serves(here),
+            "the collation is _ci and pads"
+        );
         assert!(for_server(Some(b"10.0.0.7")).serves(here));
         assert!(!for_server(Some(b"10.0.0.8")).serves(here));
         assert!(!for_server(None).serves(here), "NULL never equals anything");

@@ -89,8 +89,9 @@ should return nothing.
 
 The i686 cross compiler used by the width probe (`i686-linux-gnu-g++-12`) is not installed on every
 machine. Check before relying on it, and say so in the receipt when a width could not be measured.
-The same goes for `rustfmt` and `cargo-clippy`: when one is missing, say in the receipt that its gate
-did not run, and check formatting by hand (rustfmt style, 100 columns).
+The same goes for `rustfmt` and `cargo-clippy` (installed on the owner's machine since ledger 180):
+when one is missing, say in the receipt that its gate did not run, and check formatting by hand
+(rustfmt style, 100 columns). `clippy.toml` lists product names that `doc_markdown` must accept.
 
 ## WORKSPACE
 

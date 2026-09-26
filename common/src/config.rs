@@ -597,12 +597,13 @@ pub fn parse_server_config(content: &str, path: &str) -> Result<ServerConfig, Co
         path: path.to_owned(),
         message: e.to_string(),
     })?;
-    let config: ServerConfig = table
-        .try_into()
-        .map_err(|e: toml::de::Error| ConfigError::Value {
-            path: path.to_owned(),
-            message: e.to_string(),
-        })?;
+    let config: ServerConfig =
+        table
+            .try_into()
+            .map_err(|e: toml::de::Error| ConfigError::Value {
+                path: path.to_owned(),
+                message: e.to_string(),
+            })?;
     config.validate().map_err(|error| ConfigError::Invalid {
         path: path.to_owned(),
         error,

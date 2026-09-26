@@ -438,10 +438,16 @@ impl fmt::Display for ObjectProtoTableError {
                 "object prototype table has {count} rows; configured limit is {maximum}"
             ),
             Self::AllocationFailed { requested } => {
-                write!(formatter, "object prototype allocation of {requested} records failed")
+                write!(
+                    formatter,
+                    "object prototype allocation of {requested} records failed"
+                )
             }
             Self::Row { index, source } => {
-                write!(formatter, "object prototype row {index} is invalid: {source}")
+                write!(
+                    formatter,
+                    "object prototype row {index} is invalid: {source}"
+                )
             }
         }
     }

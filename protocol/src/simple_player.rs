@@ -67,7 +67,6 @@ pub struct SimplePlayerRecord {
     pub sungma_immune: u8,
 }
 
-
 impl SimplePlayerRecord {
     /// Exact packed x86 wire size (`sizeof(TSimplePlayer)`).
     pub const WIRE_SIZE: usize = SIMPLE_PLAYER_WIRE_SIZE;
@@ -75,7 +74,7 @@ impl SimplePlayerRecord {
     /// Encode the 70 packed x86 bytes in legacy field order.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-            let mut out = Vec::with_capacity(SIMPLE_PLAYER_WIRE_SIZE);
+        let mut out = Vec::with_capacity(SIMPLE_PLAYER_WIRE_SIZE);
         out.extend_from_slice(&self.id.to_le_bytes());
         out.extend_from_slice(&self.name);
         out.push(self.job);
@@ -103,7 +102,6 @@ impl SimplePlayerRecord {
         debug_assert_eq!(out.len(), SIMPLE_PLAYER_WIRE_SIZE);
         out
     }
-
 }
 
 #[cfg(test)]

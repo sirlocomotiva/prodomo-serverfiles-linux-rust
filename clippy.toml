@@ -1,0 +1,2 @@
+# Words the doc_markdown lint would otherwise want in backticks. ".." keeps the defaults.
+doc-valid-idents = ["PostgreSQL", "MySQL", ".."]

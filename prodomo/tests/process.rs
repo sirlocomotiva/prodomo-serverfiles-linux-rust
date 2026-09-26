@@ -178,13 +178,20 @@ impl Server {
             .id()
             .try_into()
             .expect("child process ID should fit in pid_t");
-        let child_pid = rustix::process::Pid::from_raw(child_pid)
-            .expect("child process ID should be non-zero");
+        let child_pid =
+            rustix::process::Pid::from_raw(child_pid).expect("child process ID should be non-zero");
         rustix::process::kill_process(child_pid, rustix::process::Signal::TERM)
             .expect("SIGTERM should be delivered");
-        wait_until_exited(self.process.child_mut(), "prodomo did not exit after SIGTERM");
+        wait_until_exited(
+            self.process.child_mut(),
+            "prodomo did not exit after SIGTERM",
+        );
 
-        let mut child = self.process.child.take().expect("child process should exist");
+        let mut child = self
+            .process
+            .child
+            .take()
+            .expect("child process should exist");
         let status = child.wait().expect("status should be readable");
         self.reader.join().expect("the stdout reader should finish");
         self.console.extend(self.lines.try_iter());
@@ -234,7 +241,10 @@ fn listeners(lines: &[String]) -> BTreeMap<String, Vec<SocketAddr>> {
         let (role, addr) = rest
             .split_once(" clients on ")
             .unwrap_or_else(|| panic!("unexpected listener line {line:?}"));
-        let addr = addr.trim().parse().expect("the logged address should parse");
+        let addr = addr
+            .trim()
+            .parse()
+            .expect("the logged address should parse");
         found.entry(role.to_owned()).or_default().push(addr);
     }
     found
@@ -333,7 +343,10 @@ fn serve_refuses_clients_until_the_store_is_reachable_and_shuts_down_cleanly_on_
     let (status, console) = server.terminate();
 
     // Then: shutdown succeeds, lifecycle observables are emitted, and every port closes.
-    assert!(status.success(), "prodomo should exit successfully, got {status} with:\n{console}");
+    assert!(
+        status.success(),
+        "prodomo should exit successfully, got {status} with:\n{console}"
+    );
     assert_ports_closed(&addresses);
     assert_logged(
         &console,
@@ -348,7 +361,10 @@ fn serve_refuses_clients_until_the_store_is_reachable_and_shuts_down_cleanly_on_
             "Server shutdown complete",
         ],
     );
-    assert!(!console.contains(ACCEPTING), "the gate never opened:\n{console}");
+    assert!(
+        !console.contains(ACCEPTING),
+        "the gate never opened:\n{console}"
+    );
     assert!(
         !console.contains("secret-password"),
         "the store password must never be logged:\n{console}"
@@ -377,7 +393,10 @@ fn serve_admits_clients_once_the_store_is_migrated() {
     server.wait_for("New client connection");
 
     let (status, console) = server.terminate();
-    assert!(status.success(), "prodomo should exit successfully, got {status} with:\n{console}");
+    assert!(
+        status.success(),
+        "prodomo should exit successfully, got {status} with:\n{console}"
+    );
     assert_ports_closed(&addresses);
     assert!(
         !console.contains("Refusing client connection"),
@@ -397,13 +416,22 @@ fn serve_exits_when_the_store_refuses_it_for_good() {
          [[channel]]\nnumber = 1\nports = [0]\nmaps = [1]\n"
     );
     let (status, console) = run_to_exit(Some(&config));
-    assert!(!status.success(), "a store that refuses the server should stop it");
+    assert!(
+        !status.success(),
+        "a store that refuses the server should stop it"
+    );
     assert!(
         console.contains(WAITING) && console.contains("Store unusable"),
         "the refusal should be observable in:\n{console}"
     );
-    assert!(!console.contains(ACCEPTING), "the gate never opened:\n{console}");
-    assert!(console.contains("Store closed"), "the store is closed on the way out:\n{console}");
+    assert!(
+        !console.contains(ACCEPTING),
+        "the gate never opened:\n{console}"
+    );
+    assert!(
+        console.contains("Store closed"),
+        "the store is closed on the way out:\n{console}"
+    );
 }
 
 /// Run `prodomo --config <path> serve` against `config` and return its exit status and console.
@@ -453,7 +481,10 @@ fn serve_rejects_an_impossible_topology_before_binding_anything() {
          [[channel]]\nnumber = 99\nports = [0]\nmaps = [72]\n"
     );
     let (status, console) = run_to_exit(Some(&config));
-    assert!(!status.success(), "a config with no login channel should fail startup");
+    assert!(
+        !status.success(),
+        "a config with no login channel should fail startup"
+    );
     assert!(
         console.contains("Failed to load config") && console.contains("no channel other than"),
         "topology error should be observable in:\n{console}"
@@ -471,6 +502,9 @@ fn serve_rejects_a_non_postgres_store_before_binding_anything() {
         console.contains("Invalid store configuration"),
         "store error should be observable in:\n{console}"
     );
-    assert!(!console.contains("hunter2"), "the password must never be printed:\n{console}");
+    assert!(
+        !console.contains("hunter2"),
+        "the password must never be printed:\n{console}"
+    );
     assert!(!console.contains(LISTENING), "nothing is bound:\n{console}");
 }

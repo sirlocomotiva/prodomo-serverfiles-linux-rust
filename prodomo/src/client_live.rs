@@ -79,7 +79,11 @@ impl LiveClock for SystemLiveClock {
     fn now(&self) -> u32 {
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs() as u32)
+            .map_or(0, |elapsed| {
+                // Keep the low 32 bits: the legacy clock is a wrapping `u32`.
+                let [a, b, c, d, ..] = elapsed.as_secs().to_le_bytes();
+                u32::from_le_bytes([a, b, c, d])
+            })
     }
 }
 
@@ -105,7 +109,7 @@ impl ManualLiveClock {
 
     /// Advance the clock by a signed delta, reproducing the legacy wrap.
     pub const fn advance(&mut self, delta: i32) {
-        self.0 = self.0.wrapping_add(delta as u32);
+        self.0 = self.0.wrapping_add(u32::from_ne_bytes(delta.to_ne_bytes()));
     }
 }
 
@@ -148,17 +152,18 @@ impl fmt::Display for LiveUnsupported {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::VariableAnalyze { header } => {
-                write!(formatter, "variable client header {header:#04x} is not modelled")
+                write!(
+                    formatter,
+                    "variable client header {header:#04x} is not modelled"
+                )
             }
             Self::UnimplementedAnalyzer { phase, header } => write!(
                 formatter,
-                "client header {header:#04x} reached the unimplemented {:?} analyzer",
-                phase
+                "client header {header:#04x} reached the unimplemented {phase:?} analyzer"
             ),
             Self::RetainedHeader { phase, header } => write!(
                 formatter,
-                "client header {header:#04x} is retained but not decoded in {:?}",
-                phase
+                "client header {header:#04x} is retained but not decoded in {phase:?}"
             ),
         }
     }
@@ -464,15 +469,16 @@ where
         // pong in any other phase is a retained header, not a no-op.
         if frame.header == HEADER_CG_PONG.value() {
             if !phase.accepts_pong() {
-                return LiveStep::Unsupported(LiveUnsupported::RetainedHeader { phase, header: frame.header });
+                return LiveStep::Unsupported(LiveUnsupported::RetainedHeader {
+                    phase,
+                    header: frame.header,
+                });
             }
             return match self.lifecycle.on_pong() {
-                Ok(reduction) => {
-                    match self.apply(reduction).await {
-                        Ok(written) => LiveStep::Handled(LiveOutcome::Pong { frame, written }),
-                        Err(error) => LiveStep::Failed(error),
-                    }
-                }
+                Ok(reduction) => match self.apply(reduction).await {
+                    Ok(written) => LiveStep::Handled(LiveOutcome::Pong { frame, written }),
+                    Err(error) => LiveStep::Failed(error),
+                },
                 Err(error) => LiveStep::Failed(LiveError::Handshake(
                     HandshakeDispatchError::Lifecycle(error),
                 )),
@@ -565,12 +571,12 @@ where
                 source: DescriptorCryptoError::KeyAlreadyInstalled,
             });
         }
-        self.crypto
-            .enable_default_legacy_tea()
-            .map_err(|source| LiveError::BoundaryNotInstallable {
+        self.crypto.enable_default_legacy_tea().map_err(|source| {
+            LiveError::BoundaryNotInstallable {
                 requested: boundary,
                 source,
-            })
+            }
+        })
     }
 
     /// Install the client-specific key pair for `SetSecurityKey`.
@@ -586,7 +592,10 @@ where
     /// Returns the concrete [`DescriptorCryptoError`] when the phase has not
     /// enabled TEA, a client key is already installed, or a ciphertext tail
     /// remains.
-    pub fn install_client_keys(&mut self, client_key: protocol::tea::TeaKey) -> Result<(), LiveError> {
+    pub fn install_client_keys(
+        &mut self,
+        client_key: protocol::tea::TeaKey,
+    ) -> Result<(), LiveError> {
         self.crypto.install_legacy_key(client_key)?;
         Ok(())
     }
@@ -632,12 +641,13 @@ mod tests {
         tokio::io::duplex(4096)
     }
 
-    async fn session() -> (
+    fn session() -> (
         LiveClientSession<tokio::io::DuplexStream>,
         tokio::io::DuplexStream,
     ) {
         let (ours, theirs) = socket();
-        let session = LiveClientSession::new(ours, started()).expect("a plaintext handshake session");
+        let session =
+            LiveClientSession::new(ours, started()).expect("a plaintext handshake session");
         (session, theirs)
     }
 
@@ -656,7 +666,7 @@ mod tests {
     /// takes that branch, so its acknowledgement is the first TEA record.
     #[tokio::test]
     async fn the_phase_record_is_written_before_tea_is_enabled() {
-        let (mut session, mut peer) = session().await;
+        let (mut session, mut peer) = session();
 
         peer.write_all(&handshake_frame()).await.unwrap();
         let step = session.step(NOW).await.unwrap();
@@ -704,7 +714,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_handshake_record_is_read_from_a_fragmented_stream() {
-        let (mut session, mut peer) = session().await;
+        let (mut session, mut peer) = session();
         let frame = handshake_frame();
 
         // Feed the 13-byte record one byte at a time. Every intermediate step
@@ -729,7 +739,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_coalesced_handshake_records_are_both_consumed() {
-        let (mut session, mut peer) = session().await;
+        let (mut session, mut peer) = session();
         let mut both = handshake_frame();
         both.extend_from_slice(&handshake_frame());
         peer.write_all(&both).await.unwrap();
@@ -737,7 +747,10 @@ mod tests {
         let first = session.step(NOW).await.unwrap();
         assert!(matches!(
             first,
-            LiveStep::Handled(LiveOutcome::Handshake { phase: ClientPhase::Login, .. })
+            LiveStep::Handled(LiveOutcome::Handshake {
+                phase: ClientPhase::Login,
+                ..
+            })
         ));
         // Both records arrived in one read, before TEA was enabled, so the
         // second one is already plaintext. Legacy decrypts only bytes read
@@ -757,7 +770,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_keepalive_needs_no_output_and_no_phase_change() {
-        let (mut session, mut peer) = session().await;
+        let (mut session, mut peer) = session();
         peer.write_all(&[CG_KEEP_ALIVE.value()]).await.unwrap();
 
         let step = session.step(NOW).await.unwrap();
@@ -771,7 +784,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pong_before_the_handshake_is_handled_without_a_phase_change() {
-        let (mut session, mut peer) = session().await;
+        let (mut session, mut peer) = session();
         peer.write_all(&[HEADER_CG_PONG.value()]).await.unwrap();
 
         let step = session.step(NOW).await.unwrap();
@@ -787,7 +800,8 @@ mod tests {
         // A pong only writes when the heartbeat actually owes a ping.
         for record in &written {
             assert_eq!(
-                record, &vec![crate::handshake::HEADER_GC_TIME_SYNC],
+                record,
+                &vec![crate::handshake::HEADER_GC_TIME_SYNC],
                 "the handshake-phase pong is answered with the one-byte ack"
             );
         }
@@ -795,7 +809,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_clean_eof_between_frames_reports_no_leftover_bytes() {
-        let (mut session, peer) = session().await;
+        let (mut session, peer) = session();
         drop(peer);
         let step = session.step(NOW).await.unwrap();
         assert!(
@@ -806,7 +820,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_truncated_record_is_reported_as_leftover_at_eof() {
-        let (mut session, mut peer) = session().await;
+        let (mut session, mut peer) = session();
         peer.write_all(&handshake_frame()[..6]).await.unwrap();
         peer.flush().await.unwrap();
 
@@ -826,7 +840,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_retained_variable_header_is_unsupported_and_never_retried() {
-        let (mut session, mut peer) = session().await;
+        let (mut session, mut peer) = session();
         // A known variable client header. The base processor cannot frame it,
         // so the boundary must name the gap rather than loop.
         let header = 0x1C_u8; // CG_MOVE
@@ -843,18 +857,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_closed_descriptor_refuses_another_step() {
-        let (session, _peer) = session().await;
-        let closed = session
-            .lifecycle()
-            .clone()
-            .close();
+        let (session, _peer) = session();
+        let closed = (*session.lifecycle()).close();
         // Install the closed state through a real reduction so the test does
         // not depend on a private field.
-        let mut closed_session = LiveClientSession::new(
-            socket().0,
-            closed.state,
-        )
-        .expect("a closed session still constructs");
+        let mut closed_session = LiveClientSession::new(socket().0, closed.state)
+            .expect("a closed session still constructs");
         assert_eq!(
             closed_session.cipher_mode(),
             DescriptorCryptoMode::Plaintext
@@ -877,7 +885,10 @@ mod tests {
             )
             .unwrap();
         lifecycle = reduction.state;
-        assert_eq!(lifecycle.input_boundary(), LifecycleInputBoundary::LegacyTea);
+        assert_eq!(
+            lifecycle.input_boundary(),
+            LifecycleInputBoundary::LegacyTea
+        );
 
         let error = match LiveClientSession::new(socket().0, lifecycle) {
             Ok(_) => panic!("a TEA lifecycle must not accept a plaintext cipher"),
@@ -897,22 +908,23 @@ mod tests {
 
     #[tokio::test]
     async fn an_encrypted_handshake_record_is_decrypted_before_it_is_read() {
-        let (mut session, mut peer) = session().await;
+        let (mut session, mut peer) = session();
         let frame = handshake_frame();
         peer.write_all(&frame).await.unwrap();
         let step = session.step(NOW).await.unwrap();
         assert!(matches!(
             step,
-            LiveStep::Handled(LiveOutcome::Handshake { phase: ClientPhase::Login, .. })
+            LiveStep::Handled(LiveOutcome::Handshake {
+                phase: ClientPhase::Login,
+                ..
+            })
         ));
 
         // The second record must arrive encrypted. Feed the same record back
         // through the descriptor's own output cipher and it must be accepted.
         let cipher = DescriptorCrypto::with_default_limit().unwrap();
         let _ = cipher;
-        let encrypted = session
-            .lifecycle()
-            .phase();
+        let encrypted = session.lifecycle().phase();
         assert_eq!(encrypted, ClientPhase::Login);
 
         // Build the ciphertext with a fresh cipher that has the same default
@@ -933,7 +945,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_short_ciphertext_fragment_is_retained_across_reads() {
-        let (mut session, mut peer) = session().await;
+        let (mut session, mut peer) = session();
         let frame = handshake_frame();
         peer.write_all(&frame).await.unwrap();
         session.step(NOW).await.unwrap();
@@ -955,5 +967,4 @@ mod tests {
             "the retained tail completes the record, got {step:?}"
         );
     }
-
 }

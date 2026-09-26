@@ -595,14 +595,21 @@ impl fmt::Display for ItemAttrTableError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptySource { kind } => {
-                write!(formatter, "item attribute {} table has no rows", kind.as_str())
+                write!(
+                    formatter,
+                    "item attribute {} table has no rows",
+                    kind.as_str()
+                )
             }
             Self::TooManyRecords { count, maximum } => write!(
                 formatter,
                 "item attribute table has {count} rows; configured limit is {maximum}"
             ),
             Self::AllocationFailed { requested } => {
-                write!(formatter, "item attribute allocation of {requested} records failed")
+                write!(
+                    formatter,
+                    "item attribute allocation of {requested} records failed"
+                )
             }
             Self::Row { index, source } => {
                 write!(formatter, "item attribute row {index} is invalid: {source}")
@@ -1042,7 +1049,8 @@ fn build_records(
             requested: rows.len(),
         })?;
     for (index, row) in rows.iter().enumerate() {
-        let record = decode(kind, row).map_err(|source| ItemAttrTableError::Row { index, source })?;
+        let record =
+            decode(kind, row).map_err(|source| ItemAttrTableError::Row { index, source })?;
         records.push(record);
     }
     Ok(records)

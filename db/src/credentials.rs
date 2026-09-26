@@ -205,7 +205,9 @@ impl DeleteCode {
     /// Seven random decimal digits from the operating system's generator.
     #[must_use]
     pub fn random() -> Self {
-        let digits = (0..DELETE_CODE_LEN).map(|_| random_digit(&mut OsRng)).collect();
+        let digits = (0..DELETE_CODE_LEN)
+            .map(|_| random_digit(&mut OsRng))
+            .collect();
         Self(digits)
     }
 
@@ -241,8 +243,20 @@ mod tests {
     fn a_login_is_two_to_thirty_letters_and_digits() {
         assert!(Login::new("ab").is_ok());
         assert!(Login::new(&"a".repeat(30)).is_ok());
-        for bad in ["", "a", &"a".repeat(31), "al ice", "al_ice", "alicé", "alice\0"] {
-            assert_eq!(Login::new(bad), Err(CredentialError::InvalidLogin), "{bad:?}");
+        for bad in [
+            "",
+            "a",
+            &"a".repeat(31),
+            "al ice",
+            "al_ice",
+            "alicé",
+            "alice\0",
+        ] {
+            assert_eq!(
+                Login::new(bad),
+                Err(CredentialError::InvalidLogin),
+                "{bad:?}"
+            );
         }
     }
 
@@ -258,7 +272,12 @@ mod tests {
             NewPassword::new(&[b'a'; 17]),
             Err(CredentialError::PasswordLength(17))
         );
-        for bad in [&b"tab\there"[..], b"nul\0", "p\u{e4}ss".as_bytes(), b"del\x7f"] {
+        for bad in [
+            &b"tab\there"[..],
+            b"nul\0",
+            "p\u{e4}ss".as_bytes(),
+            b"del\x7f",
+        ] {
             assert_eq!(
                 NewPassword::new(bad),
                 Err(CredentialError::PasswordNotPrintable),
@@ -278,7 +297,11 @@ mod tests {
         let password = NewPassword::new(b"Secret 1").unwrap();
         let first = password.hash().unwrap();
         let second = password.hash().unwrap();
-        assert!(first.as_str().starts_with("$argon2id$v=19$"), "got {}", first.as_str());
+        assert!(
+            first.as_str().starts_with("$argon2id$v=19$"),
+            "got {}",
+            first.as_str()
+        );
         assert_ne!(first, second, "every hash has its own salt");
         assert!(!first.as_str().contains("Secret"));
 

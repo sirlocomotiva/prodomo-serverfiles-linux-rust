@@ -699,7 +699,6 @@ macro_rules! impl_fixed_codec {
                 $size
             }
         }
-
     };
 }
 

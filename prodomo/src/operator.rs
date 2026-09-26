@@ -262,7 +262,11 @@ impl Prepared {
                 authority,
             } => {
                 grant_gm(store, login, name, *authority).await?;
-                writeln!(out, "Granted {} to {name} on account {login}", authority.column())?;
+                writeln!(
+                    out,
+                    "Granted {} to {name} on account {login}",
+                    authority.column()
+                )?;
             }
             Self::RevokeGm { name } => {
                 revoke_gm(store, name).await?;
@@ -523,7 +527,10 @@ mod tests {
         else {
             panic!("a balance changes");
         };
-        assert_eq!((login.as_str(), currency, delta), ("bob", Currency::Cash, -5));
+        assert_eq!(
+            (login.as_str(), currency, delta),
+            ("bob", Currency::Cash, -5)
+        );
     }
 
     #[test]

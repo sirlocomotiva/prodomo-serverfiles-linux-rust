@@ -40,7 +40,10 @@ impl BanwordRecord {
         let mut word = [0_u8; BANWORD_BYTES];
         // `strlcpy` stops at the first NUL, so bytes after an embedded NUL
         // are never copied.
-        let source_len = value.iter().position(|&byte| byte == 0).unwrap_or(value.len());
+        let source_len = value
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(value.len());
         let copy_len = source_len.min(BANWORD_MAX_LEN);
         word[..copy_len].copy_from_slice(&value[..copy_len]);
         Self { word }
@@ -112,13 +115,22 @@ impl fmt::Display for BanwordTableError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooManySourceRows { count, maximum } => {
-                write!(formatter, "banword source has {count} rows; maximum is {maximum}")
+                write!(
+                    formatter,
+                    "banword source has {count} rows; maximum is {maximum}"
+                )
             }
             Self::TooManyRecords { count, maximum } => {
-                write!(formatter, "banword table has {count} records; maximum is {maximum}")
+                write!(
+                    formatter,
+                    "banword table has {count} records; maximum is {maximum}"
+                )
             }
             Self::AllocationFailed { requested } => {
-                write!(formatter, "banword allocation of {requested} records failed")
+                write!(
+                    formatter,
+                    "banword allocation of {requested} records failed"
+                )
             }
         }
     }
@@ -158,7 +170,11 @@ pub fn build_banword_table(
         .map_err(|_| BanwordTableError::AllocationFailed {
             requested: record_count,
         })?;
-    records.extend(rows.iter().flatten().map(|row| BanwordRecord::from_value(row)));
+    records.extend(
+        rows.iter()
+            .flatten()
+            .map(|row| BanwordRecord::from_value(row)),
+    );
     Ok(records)
 }
 
