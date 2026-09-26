@@ -17,6 +17,7 @@ use parity::client::Quiet;
 use parity::inventory::{self, Status};
 use parity::server::default_channels;
 use parity::{Client, Server};
+use prodomo::descriptor_crypto::derive_legacy_descriptor_keys;
 use protocol::cg_inventory::{resolve_cg_base_size, CG_KEEP_ALIVE, HEADER_CG_PONG};
 use protocol::tea::{decrypt_padded, encrypt_padded, TeaKey};
 use support::{execute, ScratchDatabase};
@@ -724,5 +725,462 @@ fn a_login3_outside_the_auth_phase_closes_the_connection() {
     let server = Server::start(binary(), database.url());
     let (mut client, _) = accepted(server.auth());
     client.send(&client_login3(b"alice", ACCOUNT_PASSWORD, 1));
+    assert_eq!(client.expect_closed(), Vec::<u8>::new());
+}
+
+/// `HEADER_CG_LOGIN2` (`game/packet.h:75`).
+const CG_LOGIN2: u8 = 109;
+/// `TPacketCGLogin2`: `BYTE header`, `char login[31]`, `DWORD dwLoginKey`, `DWORD adwClientKey[4]`
+/// (`game/packet.h:472`).
+const LOGIN2_LEN: usize = 52;
+/// `HEADER_GC_EMPIRE` (`game/packet.h:176`) and its `BYTE bEmpire`.
+const GC_EMPIRE: u8 = 90;
+const EMPIRE_LEN: usize = 2;
+/// `HEADER_GC_LOGIN_SUCCESS_NEWSLOT` (`game/packet.h:132`): four 70-byte `TSimplePlayer`, four
+/// `DWORD` guild IDs, four `char[13]` guild names, `DWORD handle`, `DWORD random_key`
+/// (`game/packet.h:830`).
+const GC_LOGIN_SUCCESS: u8 = 32;
+const LOGIN_SUCCESS_LEN: usize = 1 + 4 * 70 + 4 * 4 + 4 * 13 + 4 + 4;
+/// `PHASE_SELECT` (`game/packet.h:795`).
+const PHASE_SELECT: u8 = 3;
+/// The `adwClientKey` [`client_login3`] sends, which `LOGIN2` must repeat.
+const CLIENT_KEY: [u32; 4] = [0x1122_3344, 0x5566_7788, 0x99aa_bbcc, 0xddee_ff01];
+
+/// The 52 bytes of a client `LOGIN2`, laid out by hand.
+fn client_login2(login: &[u8], key: u32, client_key: [u32; 4]) -> Vec<u8> {
+    let mut record = vec![CG_LOGIN2];
+    let mut field = [0u8; 31];
+    field[..login.len()].copy_from_slice(login);
+    record.extend_from_slice(&field);
+    record.extend_from_slice(&key.to_le_bytes());
+    for word in client_key {
+        record.extend_from_slice(&word.to_le_bytes());
+    }
+    assert_eq!(record.len(), LOGIN2_LEN);
+    record
+}
+
+/// The key bytes of an `adwClientKey`, in memory order.
+fn key_bytes(client_key: [u32; 4]) -> TeaKey {
+    let mut key = [0; 16];
+    for (bytes, word) in key.chunks_exact_mut(4).zip(client_key) {
+        bytes.copy_from_slice(&word.to_le_bytes());
+    }
+    key
+}
+
+/// A Channel connection as the client sees it: the key it seals input with and the key the
+/// server seals output with. `SetSecurityKey` keeps the client key for input and TEA-encrypts it
+/// under the Myevan key for output; `descriptor_crypto`'s own tests pin that derivation.
+struct Keyed {
+    client: Client,
+    input: TeaKey,
+    output: TeaKey,
+}
+
+impl Keyed {
+    /// A connection on `address`, through the handshake, still on the setup key.
+    fn channel(address: SocketAddr) -> Self {
+        let (mut client, first) = accepted(address);
+        assert_eq!(shake(&mut client, first), [GC_PHASE, PHASE_LOGIN]);
+        Self {
+            client,
+            input: SETUP_KEY,
+            output: SETUP_KEY,
+        }
+    }
+
+    /// Send `LOGIN2`. The record goes out on the current key; the client then switches to the
+    /// key pair of `client_key`, as the server does after its shutdown and user-limit checks.
+    fn send_login2(&mut self, login: &[u8], key: u32, client_key: [u32; 4]) {
+        let record = client_login2(login, key, client_key);
+        let sealed = encrypt_padded(&record, &self.input)
+            .expect("short")
+            .into_bytes();
+        self.client.send(&sealed);
+        let keys = derive_legacy_descriptor_keys(key_bytes(client_key)).expect("derivable");
+        self.input = keys.decryption_key();
+        self.output = keys.encryption_key();
+    }
+
+    /// Read one record sealed on `key`, sized by its first TEA unit.
+    fn read_on(&mut self, key: &TeaKey, len_of: impl Fn(u8) -> usize) -> Vec<u8> {
+        let mut wire = self.client.expect_bytes(8);
+        let first = decrypt_padded(&wire, key).expect("aligned");
+        let len = len_of(first[0]);
+        wire.extend(self.client.expect_bytes(len.div_ceil(8) * 8 - 8));
+        let mut record = decrypt_padded(&wire, key).expect("aligned");
+        assert!(record[len..].iter().all(|&byte| byte == 0), "{record:02x?}");
+        record.truncate(len);
+        record
+    }
+
+    fn read(&mut self, len_of: impl Fn(u8) -> usize) -> Vec<u8> {
+        let key = self.output;
+        self.read_on(&key, len_of)
+    }
+}
+
+/// The `szStatus` of a `LOGIN_FAILURE` record.
+fn failure_status(record: &[u8]) -> String {
+    assert_eq!(record[0], GC_LOGIN_FAILURE, "{record:02x?}");
+    let status = &record[1..];
+    let end = status.iter().position(|&byte| byte == 0).expect("a NUL");
+    assert!(status[end..].iter().all(|&byte| byte == 0), "{status:02x?}");
+    String::from_utf8(status[..end].to_vec()).expect("ASCII")
+}
+
+/// What the server answers a `LOGIN2`: the empire byte and the character list, or the failure
+/// status. The list is followed by the select phase.
+fn login_by_key(
+    keyed: &mut Keyed,
+    login: &[u8],
+    key: u32,
+    client_key: [u32; 4],
+) -> Result<(u8, Vec<u8>), String> {
+    keyed.send_login2(login, key, client_key);
+    let first = keyed.read(|header| match header {
+        GC_EMPIRE => EMPIRE_LEN,
+        GC_LOGIN_FAILURE => LOGIN_FAILURE_LEN,
+        other => panic!("unexpected answer header {other}"),
+    });
+    if first[0] == GC_LOGIN_FAILURE {
+        return Err(failure_status(&first));
+    }
+    let list = keyed.read(|header| {
+        assert_eq!(header, GC_LOGIN_SUCCESS);
+        LOGIN_SUCCESS_LEN
+    });
+    let phase = keyed.read(|header| {
+        assert_eq!(header, GC_PHASE);
+        2
+    });
+    assert_eq!(phase, [GC_PHASE, PHASE_SELECT]);
+    Ok((first[1], list))
+}
+
+/// One `TSimplePlayer` of a character list, in source field order.
+#[derive(Debug, PartialEq, Eq)]
+struct Listed {
+    id: u32,
+    name: Vec<u8>,
+    job: u8,
+    level: u8,
+    play_minutes: u32,
+    stats: [u8; 4],
+    main_part: u16,
+    change_name: u8,
+    hair_part: u16,
+    sash_part: u16,
+    x: i32,
+    y: i32,
+    addr: [u8; 4],
+    port: u16,
+    skill_group: u8,
+    conqueror_and_sungma: [u8; 5],
+}
+
+/// Slot `slot` of a `LOGIN_SUCCESS` record. The offsets are the packed `TSimplePlayer`
+/// (`common/tables.h`): `dwID` 0, `szName[25]` 4, `byJob` 29, `byLevel` 30, `dwPlayMinutes` 31,
+/// `byST`..`byIQ` 35, `wMainPart` 39, `bChangeName` 41, `wHairPart` 42, `wSashPart` 44,
+/// `bDummy[4]` 46, `x` 50, `y` 54, `lAddr` 58, `wPort` 62, `skill_group` 64,
+/// `byConquerorLevel` and the four sungma bytes 65..70.
+fn listed(list: &[u8], slot: usize) -> Listed {
+    let at = 1 + slot * 70;
+    let bytes = &list[at..at + 70];
+    let u16_at = |i: usize| u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+    let word = |i: usize| [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]];
+    let name = &bytes[4..29];
+    let end = name
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(name.len());
+    assert!(name[end..].iter().all(|&byte| byte == 0), "{name:02x?}");
+    assert_eq!(&bytes[46..50], [0; 4], "bDummy");
+    Listed {
+        id: u32::from_le_bytes(word(0)),
+        name: name[..end].to_vec(),
+        job: bytes[29],
+        level: bytes[30],
+        play_minutes: u32::from_le_bytes(word(31)),
+        stats: [bytes[35], bytes[36], bytes[37], bytes[38]],
+        main_part: u16_at(39),
+        change_name: bytes[41],
+        hair_part: u16_at(42),
+        sash_part: u16_at(44),
+        x: i32::from_le_bytes(word(50)),
+        y: i32::from_le_bytes(word(54)),
+        addr: word(58),
+        port: u16_at(62),
+        skill_group: bytes[64],
+        conqueror_and_sungma: [bytes[65], bytes[66], bytes[67], bytes[68], bytes[69]],
+    }
+}
+
+/// Log `login` in on the auth port and return its login key.
+fn login_key(server: &Server, login: &[u8]) -> (Client, u32) {
+    let mut auth = auth_client(server);
+    let key = log_in(&mut auth, login, ACCOUNT_PASSWORD, 1).expect("the auth login succeeds");
+    (auth, key)
+}
+
+/// `LOGIN2` until the login is no longer held by a closing descriptor.
+fn login_by_key_when_free(
+    keyed: &mut Keyed,
+    login: &[u8],
+    key: u32,
+) -> Result<(u8, Vec<u8>), String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match login_by_key(keyed, login, key, CLIENT_KEY) {
+            Err(status) if status == "ALREADY" && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            answer => return answer,
+        }
+    }
+}
+
+/// The public address the default configuration names: `127.0.0.1`.
+const PUBLIC_ADDR: [u8; 4] = [127, 0, 0, 1];
+
+/// Whether character slot `slot` of a `GC_LOGIN_SUCCESS` record is all zero.
+fn slot_is_empty(list: &[u8], slot: usize) -> bool {
+    list[1 + slot * 70..][..70].iter().all(|&byte| byte == 0)
+}
+
+/// `QUERY_LOGIN_BY_KEY`: every refusal is `NOID`, answered on the key pair the `LOGIN2`
+/// carried, and leaves the connection open. `key` is alice's login key and `bob_key` bob's.
+fn every_refusal_is_noid(keyed: &mut Keyed, key: u32, bob_key: u32) {
+    // Login keys are 1 to `i32::MAX`, so 0 is never granted.
+    assert_eq!(
+        login_by_key(keyed, b"alice", 0, CLIENT_KEY),
+        Err("NOID".into())
+    );
+    assert_eq!(
+        login_by_key(keyed, b"alice", bob_key, CLIENT_KEY),
+        Err("NOID".into())
+    );
+    assert_eq!(
+        login_by_key(keyed, b"bob", key, CLIENT_KEY),
+        Err("NOID".into())
+    );
+    assert_eq!(
+        login_by_key(keyed, b"", key, CLIENT_KEY),
+        Err("NOID".into())
+    );
+    for word in 0..4 {
+        let mut wrong = CLIENT_KEY;
+        wrong[word] ^= 0x0100;
+        assert_eq!(
+            login_by_key(keyed, b"alice", key, wrong),
+            Err("NOID".into())
+        );
+    }
+}
+
+/// Three characters for alice in empire 1: one on a map Channel 1 hosts, one on the Shared
+/// Channel's map, and one on a map no Channel hosts, which moves to the empire 1 start (map 1).
+fn add_characters(database: &ScratchDatabase) {
+    sql(
+        database,
+        "UPDATE account SET empire = 1 WHERE login = 'alice'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, level, playtime_minutes, st, ht, dx, \
+         iq, conqueror_level, sungma_str, sungma_hp, sungma_move, sungma_immune, part_main, \
+         part_hair, part_sash, x, y, skill_group, change_name) SELECT id, 0, 'Alpha', 3, 154, \
+         16909060, 17, 18, 19, 20, 33, 34, 35, 36, 37, 41394, 50132, 58870, 470000, 950000, 49, \
+         true FROM account WHERE login = 'alice'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 1, 'Beta', 1, 10000, \
+         1210000 FROM account WHERE login = 'alice'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 3, 'Delta', 2, 60000, \
+         150000 FROM account WHERE login = 'alice'",
+    );
+}
+
+/// Slot 0 of alice's list after [`add_characters`]: every field as stored, on a map Channel 1
+/// hosts through `port`.
+fn assert_alpha(list: &[u8], port: u16) {
+    let alpha = listed(list, 0);
+    assert_eq!(
+        alpha,
+        Listed {
+            id: alpha.id,
+            name: b"Alpha".to_vec(),
+            job: 3,
+            level: 154,
+            play_minutes: 0x0102_0304,
+            stats: [17, 18, 19, 20],
+            main_part: 0xa1b2,
+            change_name: 1,
+            hair_part: 0xc3d4,
+            sash_part: 0xe5f6,
+            x: 470_000,
+            y: 950_000,
+            addr: PUBLIC_ADDR,
+            port,
+            skill_group: 49,
+            conqueror_and_sungma: [33, 34, 35, 36, 37],
+        }
+    );
+    assert_ne!(alpha.id, 0);
+}
+
+/// `cg.login.login2`, `sys.login.by_key`, `gc.empire`, `gc.login_success`: a Channel `LOGIN2`
+/// carrying the login key, the login, and the client key of the auth login is answered on the
+/// client key pair with `GC_EMPIRE`, the 357-byte character list, and the select phase. Each
+/// character's position is kept when a Channel hosts its map and moved to its empire's start
+/// otherwise, with the address and port of the Channel serving it. A wrong key, login, or client
+/// key is `NOID`; a second holder is `ALREADY` and closes the first.
+#[test]
+fn the_channel_login_lists_the_characters_or_names_the_first_failed_check() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    let (_alice_auth, key) = login_key(&server, b"alice");
+    let (_bob_auth, bob_key) = login_key(&server, b"bob");
+    let ports: Vec<u16> = server.listeners()["channel 1"]
+        .iter()
+        .map(SocketAddr::port)
+        .collect();
+    let shared_port = server.channel(99).port();
+
+    let mut first = Keyed::channel(server.channel(1));
+    every_refusal_is_noid(&mut first, key, bob_key);
+    // `trim_and_lower`, then `strcasecmp`. An account without characters shows empire 0 and
+    // four empty slots.
+    let (empire, list) =
+        login_by_key(&mut first, b" ALICE ", key, CLIENT_KEY).expect("alice logs in");
+    assert_eq!(empire, 0);
+    assert!((0..4).all(|slot| slot_is_empty(&list, slot)), "empty slots");
+    assert!(list[281..349].iter().all(|&byte| byte == 0), "no guilds");
+    let handle = u32::from_le_bytes([list[349], list[350], list[351], list[352]]);
+    let random_key = u32::from_le_bytes([list[353], list[354], list[355], list[356]]);
+    assert_ne!(handle, 0);
+    // `MakeRandomKey`: zero only once in 2^32 logins.
+    assert_ne!(random_key, 0);
+
+    // A second holder on another Channel port is refused, and the first descriptor is kicked
+    // without a word; the refused one stays open.
+    let mut second = Keyed::channel(SocketAddr::new(server.channel(1).ip(), ports[1]));
+    assert_eq!(
+        login_by_key(&mut second, b"alice", key, CLIENT_KEY),
+        Err("ALREADY".into())
+    );
+    assert_eq!(first.client.expect_closed(), Vec::<u8>::new());
+    assert_eq!(second.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+
+    add_characters(&database);
+    let (empire, list) =
+        login_by_key_when_free(&mut second, b"alice", key).expect("the login is free again");
+    assert_eq!(empire, 1);
+    assert_alpha(&list, ports[1]);
+    let beta = listed(&list, 1);
+    assert_eq!(
+        (
+            beta.name.as_slice(),
+            beta.x,
+            beta.y,
+            beta.addr,
+            beta.port,
+            beta.level
+        ),
+        (&b"Beta"[..], 10_000, 1_210_000, PUBLIC_ADDR, shared_port, 1)
+    );
+    assert!(slot_is_empty(&list, 2), "slot 2 is empty");
+    let delta = listed(&list, 3);
+    assert_eq!(
+        (
+            delta.name.as_slice(),
+            delta.x,
+            delta.y,
+            delta.addr,
+            delta.port
+        ),
+        (&b"Delta"[..], 469_300, 964_200, PUBLIC_ADDR, ports[1])
+    );
+
+    // The descriptor logs in again with the login it holds: it kicks itself, and legacy drops
+    // the `ALREADY` it would send in `PHASE_CLOSE`.
+    second.send_login2(b"alice", key, CLIENT_KEY);
+    assert_eq!(second.client.expect_closed(), Vec::<u8>::new());
+
+    // Empire 2's start is on map 21, which no Channel hosts: the character moves there with no
+    // address and no port.
+    sql(
+        &database,
+        "UPDATE account SET empire = 2 WHERE login = 'alice'",
+    );
+    let mut third = Keyed::channel(server.channel(1));
+    let (empire, list) =
+        login_by_key_when_free(&mut third, b"alice", key).expect("the login is free again");
+    assert_eq!(empire, 2);
+    let delta = listed(&list, 3);
+    assert_eq!(
+        (delta.x, delta.y, delta.addr, delta.port),
+        (55_700, 157_900, [0; 4], 0)
+    );
+
+    // `LOGIN2` is read in the select phase too: another account's key logs this descriptor in
+    // as that account.
+    let (empire, list) = login_by_key(&mut third, b"bob", bob_key, CLIENT_KEY).expect("bob");
+    assert_eq!(empire, 0);
+    assert!(
+        (0..4).all(|slot| slot_is_empty(&list, slot)),
+        "bob has no characters"
+    );
+}
+
+/// `cg.login.login2`: a closing server refuses `LOGIN2` with `SHUTDOWN` before it installs the
+/// client key, so the answer and the next record stay on the setup key.
+#[test]
+fn a_closing_server_refuses_login2_on_the_setup_key() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "shutdowned = true",
+    );
+    let mut keyed = Keyed::channel(server.channel(1));
+    for _ in 0..2 {
+        keyed
+            .client
+            .send(&sealed(&client_login2(b"alice", 1, CLIENT_KEY)));
+        let answer = keyed.read_on(&SETUP_KEY, |header| {
+            assert_eq!(header, GC_LOGIN_FAILURE);
+            LOGIN_FAILURE_LEN
+        });
+        assert_eq!(failure_status(&answer), "SHUTDOWN");
+    }
+    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+}
+
+/// `cg.login.login2`: only the login, select, and loading phases read `LOGIN2`. In the auth
+/// phase and in the handshake phase it closes the connection.
+#[test]
+fn a_login2_outside_the_login_phases_closes_the_connection() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    let mut auth = auth_client(&server);
+    auth.send(&sealed(&client_login2(b"alice", 1, CLIENT_KEY)));
+    assert_eq!(auth.expect_closed(), Vec::<u8>::new());
+    let (mut client, _) = accepted(server.channel(1));
+    client.send(&client_login2(b"alice", 1, CLIENT_KEY));
     assert_eq!(client.expect_closed(), Vec::<u8>::new());
 }

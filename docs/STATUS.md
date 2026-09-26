@@ -34,7 +34,7 @@ Each step lands as one or more ledger sections with a gate receipt.
 |---|---|---|
 | 1. Restructure | Retire the DB-peer and GG code and move the pure rule modules into `gamedata`. Rename `game-server` to the single `prodomo` binary with TOML configuration for the auth and Channel listeners, the Channel map sets, and PostgreSQL. First PostgreSQL schema and migrations. The Operator command that creates accounts and GMs. | **Done.** Retirement and `gamedata` (177). The rename, the TOML document, and the listeners (178). The account and GM schema, store readiness, and the Operator commands (179). |
 | 2. Parity inventory | Every legacy system and handler, listed from the source in `.scratch/parity/`, each with a porting status. The scripted-client test crate. | **Done** (181). 1,643 rows in nine tables; `.scratch/parity/spec.md` has the statuses, the regeneration command, and four findings for the owner. The scripted client is the `parity` crate; its scenarios are `prodomo/tests/parity.rs`. Two rows are `ported` (the keepalive and unknown-header framing rules). |
-| 3. Vertical slice | Handshake and TEA, auth (`LOGIN3`), login by key, character select, create, and delete, loading, entering the game, movement and chat, a Warp between maps, and logout with save. | **In progress.** The handshake, TEA, time sync, and the ping cycle are live (182), and so are the Channel status list (183) and auth `LOGIN3` with its login keys (184). Next: login by key (`LOGIN2`). |
+| 3. Vertical slice | Handshake and TEA, auth (`LOGIN3`), login by key, character select, create, and delete, loading, entering the game, movement and chat, a Warp between maps, and logout with save. | **In progress.** The handshake, TEA, time sync, and the ping cycle are live (182), and so are the Channel status list (183) auth `LOGIN3` with its login keys (184), and the Channel login by key (`LOGIN2`) with the character list (185). Next: character select, create, and delete. |
 | 4. Game systems | In dependency order: items and inventory; NPCs, shops, and Transfers (trade, safebox); the quest runtime (`qc` port and Lua 5.1, with its API growing as each later system lands); monsters, combat, drops, and exp; skills and affects; party, guild, messenger, and the cross-Channel bus; dungeons, events, guild war, and OX; the Prodomo custom systems (sash, aura, pets, battle pass, switchbot, item shop, premium shop, and the rest); GM commands, the adminpage, and logs. | Not started. |
 | 5. Game data and play test | Finish the importers, fix what the full data set breaks, then the owner's play test with the Reference client. | Not started. |
 
@@ -109,9 +109,9 @@ owner should know about (178.5):
 
 | stage | present in Rust | missing |
 |---|---|---|
-| Handshake and TEA | Live on every connection with scenarios (182). The Channel status list (183). | The login's `SetSecurityKey` (with `LOGIN2`, `G/input_login.cpp:208`). The status list counts characters in game once entering the game publishes the count (`ChannelStatusBoard::set_online`). |
+| Handshake and TEA | Live on every connection with scenarios (182). The Channel status list (183). The login's `SetSecurityKey` (185). | The status list counts characters in game once entering the game publishes the count (`ChannelStatusBoard::set_online`). |
 | Auth | Live with a scenario (184): every legacy check in order, `AUTH_SUCCESS` (0x96) with a login key, and `LOGIN_FAILURE`. `prodomo::auth_login` holds the rules and the login-key registry. | Premium times on the login data (no columns yet). |
-| Login by key | `CgLoginByKey`, `AccountPlayerSession::on_login*`, `GcEmpire`, the 357-byte `GcLoginSuccess`, and the login-key grants from auth (`AuthRegistry::grant_for`, 184) | The login checks from `D/ClientManagerLogin.cpp:82-150`; the player summaries from the store. |
+| Login by key | Live with scenarios (185): `SHUTDOWN` under the handshake key, then the client key pair, the login-key judgement (`NOID`), the logon registry (`ALREADY` and the kick of a holder without a character), `GC_EMPIRE`, the 357-byte character list with each map's Channel address from the map atlas (`gamedata::map_atlas`), and `PHASE(SELECT)`. `prodomo::channel_login` holds the rules; `db::players` reads the characters. | `FULL` (unit-tested; the online count arrives with entering the game). The delayed kick of a holder in game. The blocked-country IP list (`is_blocked_country_ip`, `G/block_country.cpp`; empty tables behave as today). The mark-login table keyed by handle and random key (guild marks). Guild ids and names (zeros until guilds exist). |
 | Select, create, delete | `on_select`; the create and delete CG codecs | Player and item tables; name rules; the create defaults. |
 | Loading | Loading-phase GC records 15, 16, 76, and 28-30; `gc_actors` | `ITEM_SET2` (21), `ENTITY` (249), map data from `legacy/gamedata`. |
 | Enter game, movement, chat | `CgEnterGame`, `on_enter_game`, `CharacterAdd`, `GcTime`, `GcChannel`, `sync_position`, the move codecs | Game-phase dispatch; world placement; view range; `CHAT` (4). |
@@ -154,6 +154,7 @@ owner should know about (178.5):
 | An unknown or malformed client frame closes the descriptor. | Logged and consumed, or ignored (ledger 160.5). |
 | A store or hashing error during auth closes the connection (ledger 184). | The query failure is logged and the client waits with no answer. |
 | An auth login key is drawn only once the login succeeds, and the panama and hybrid-crypt records are not sent (ledger 184). | The key is drawn before the query (`G/input_auth.cpp:113`); `SendPanamaList` and the crypt keys follow the success, from data absent from `legacy/`. |
+| An `index` line in the map folder with a map index but no name stops the server at start-up (ledger 185). | `sscanf` leaves the name buffer as it was: the previous line's name, or uninitialised bytes on the first line (`G/sectree_manager.cpp:691-775`). |
 | The Channel status list is computed when it is asked for, with the ports in ascending order (ledger 183). | Each Core reports to the DB server at boot and then every five minutes, so a status can be five minutes old; the list is in `unordered_map` order (`G/desc_client.cpp:292-313`, `D/ClientManager.cpp:4455-4466`). |
 
 ## Legacy defects not to reproduce
@@ -171,6 +172,13 @@ owner should know about (178.5):
   connected (`ConnectAccount` overwrites the descriptor's login without releasing the first).
 - A use-after-free on every successful auth: `G/db.cpp:456-457` logs `pinfo->login` after
   `M2_DELETE(pinfo)`.
+- `QUERY_LOGIN_BY_KEY` checks for a logged-on account (`ALREADY`) before it compares the login and the
+  client key, and the game then kicks the descriptor holding the login the client *typed*
+  (`D/ClientManagerLogin.cpp:82-149`, `G/input_db.cpp` `LoginAlready`). Any live login key could
+  disconnect any logged-on account by name. The Rewrite judges the key first (ledger 185).
+- The DB server's player-cache branch of `CreateAccountPlayerDataFromRes` forces `bChangeName = 0`,
+  so a pending forced rename disappears from the list once the character is cached. The Rewrite
+  always sends the stored flag (ledger 185).
 - Three client Python wrappers send uninitialized stack data; the server must not trust those
   bytes.
 

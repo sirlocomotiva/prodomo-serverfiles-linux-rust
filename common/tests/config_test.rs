@@ -5,6 +5,7 @@
 
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::Path;
 
 use common::config::{
     load_server_config, parse_server_config, redact_url, ConfigError, GameSettings, Secret,
@@ -36,6 +37,7 @@ maps = [1]
 const FULL: &str = r#"
 bind_ip = "10.0.0.2"
 public_ip = "203.0.113.7"
+game_data = "/srv/share"
 
 [store]
 url = "postgres://prodomo:pw@db.local:5432/prodomo"
@@ -89,6 +91,8 @@ fn a_full_document_reads_every_table() {
 
     assert_eq!(config.bind_ip, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
     assert_eq!(config.public_ip, Ipv4Addr::new(203, 0, 113, 7));
+    assert_eq!(config.game_data, Path::new("/srv/share"));
+    assert_eq!(config.map_dir(), Path::new("/srv/share/locale/europe/map"));
     assert_eq!(
         config.store.url,
         "postgres://prodomo:pw@db.local:5432/prodomo"
@@ -124,6 +128,11 @@ fn omitted_keys_keep_their_documented_defaults() {
     let config = parse(MINIMAL).unwrap();
     assert_eq!(config.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     assert_eq!(config.public_ip, Ipv4Addr::LOCALHOST);
+    assert_eq!(config.game_data, Path::new("legacy/gamedata"));
+    assert_eq!(
+        config.map_dir(),
+        Path::new("legacy/gamedata/locale/europe/map")
+    );
     assert_eq!(config.store.max_connections, 8);
     assert_eq!(config.game, GameSettings::default());
 }

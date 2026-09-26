@@ -367,18 +367,17 @@ impl DescriptorCrypto {
     /// the next ciphertext fragment. A pending incomplete ciphertext tail is
     /// rejected because it cannot be safely assigned to two key epochs.
     ///
+    /// A client key replaces an earlier one, as legacy `SetSecurityKey`
+    /// (`desc.cpp:951-963`) overwrites both keys on every `LOGIN2`.
+    ///
     /// # Errors
     ///
     /// Returns [`DescriptorCryptoError::KeyInstallBeforeTea`] before the phase
-    /// transition, [`DescriptorCryptoError::KeyAlreadyInstalled`] after a
-    /// client key is already installed, or [`DescriptorCryptoError::PendingCiphertext`]
-    /// when a 1..7-byte tail remains.
+    /// transition, or [`DescriptorCryptoError::PendingCiphertext`] when a
+    /// 1..7-byte tail remains.
     pub fn install_legacy_key(&mut self, client_key: TeaKey) -> Result<(), DescriptorCryptoError> {
         if self.mode == DescriptorCryptoMode::Plaintext {
             return Err(DescriptorCryptoError::KeyInstallBeforeTea);
-        }
-        if self.mode == DescriptorCryptoMode::LegacyTea {
-            return Err(DescriptorCryptoError::KeyAlreadyInstalled);
         }
         if self.pending_ciphertext_len() != 0 {
             return Err(DescriptorCryptoError::PendingCiphertext {
@@ -658,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_key_change_before_tea_and_with_a_pending_tail() {
+    fn rejects_a_key_before_tea_and_with_a_pending_tail() {
         let client = client_key();
         let mut crypto = DescriptorCrypto::with_default_limit().unwrap();
         assert_eq!(
@@ -675,10 +674,25 @@ mod tests {
         crypto.feed_input(&[0]).unwrap();
         assert_eq!(crypto.pending_ciphertext_len(), 0);
         crypto.install_legacy_key(client).unwrap();
-        assert_eq!(
-            crypto.install_legacy_key(client),
-            Err(DescriptorCryptoError::KeyAlreadyInstalled)
-        );
+        assert_eq!(crypto.mode(), DescriptorCryptoMode::LegacyTea);
+    }
+
+    #[test]
+    fn a_second_client_key_replaces_the_first() {
+        let first = client_key();
+        let mut second = first;
+        second[0] ^= 0x5a;
+        let mut replaced = DescriptorCrypto::with_default_limit().unwrap();
+        replaced.enable_default_legacy_tea().unwrap();
+        replaced.install_legacy_key(first).unwrap();
+        let under_first = replaced.encrypt_output(b"record!!").unwrap();
+        replaced.install_legacy_key(second).unwrap();
+        let mut fresh = DescriptorCrypto::with_default_limit().unwrap();
+        fresh.enable_default_legacy_tea().unwrap();
+        fresh.install_legacy_key(second).unwrap();
+        let under_second = fresh.encrypt_output(b"record!!").unwrap();
+        assert_ne!(under_first, under_second);
+        assert_eq!(replaced.encrypt_output(b"record!!").unwrap(), under_second);
     }
 
     #[test]

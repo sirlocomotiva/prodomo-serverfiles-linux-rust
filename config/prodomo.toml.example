@@ -18,6 +18,11 @@ bind_ip = "0.0.0.0"
 # otherwise.
 public_ip = "127.0.0.1"
 
+# The legacy Game data folder, read in place and never written: the maps under
+# `locale/europe/map`, the protos, and the quests. A relative path is taken from the working
+# directory.
+game_data = "legacy/gamedata"
+
 [store]
 # PostgreSQL 18. The password in this URL is never logged. No connection is opened until the
 # first query.

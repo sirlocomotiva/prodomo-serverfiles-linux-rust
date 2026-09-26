@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The Shared Channel's number: legacy `GUILD_WARP_WAR_CHANNEL` (`db/GuildManager.h:13`).
 pub const SHARED_CHANNEL: u8 = 99;
@@ -96,6 +96,11 @@ pub struct ServerConfig {
     /// replaces both. The client field is four bytes, so IPv6 is not accepted.
     #[serde(default = "default_public_ip")]
     pub public_ip: Ipv4Addr,
+    /// The legacy Game data folder (the `share` tree: `locale/europe/map`, the protos, the
+    /// quests), read in place and never written. A relative path is taken from the working
+    /// directory. Default `legacy/gamedata`.
+    #[serde(default = "default_game_data")]
+    pub game_data: PathBuf,
     /// The PostgreSQL store.
     pub store: StoreSettings,
     /// The auth listener.
@@ -115,6 +120,25 @@ const fn default_bind_ip() -> IpAddr {
 
 const fn default_public_ip() -> Ipv4Addr {
     Ipv4Addr::LOCALHOST
+}
+
+fn default_game_data() -> PathBuf {
+    PathBuf::from(DEFAULT_GAME_DATA)
+}
+
+/// The default [`ServerConfig::game_data`].
+pub const DEFAULT_GAME_DATA: &str = "legacy/gamedata";
+
+/// The Locale folder under [`ServerConfig::game_data`]; only `europe` is ported.
+pub const LOCALE_DIR: &str = "locale/europe";
+
+impl ServerConfig {
+    /// The map folder: `<game_data>/locale/europe/map`, holding the `index` file and one folder
+    /// per map.
+    #[must_use]
+    pub fn map_dir(&self) -> PathBuf {
+        self.game_data.join(LOCALE_DIR).join("map")
+    }
 }
 
 /// The `[store]` table.

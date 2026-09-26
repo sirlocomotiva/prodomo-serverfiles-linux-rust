@@ -53,8 +53,8 @@ use crate::handshake_dispatch::{
     dispatch_handshake_frame_at_boundary, HandshakeDispatchError, HandshakeInputBoundary,
 };
 use crate::lifecycle::{
-    encode_lifecycle_effect, ClientLifecycle, LifecycleEffect, LifecycleInputBoundary,
-    LifecycleReduction,
+    encode_lifecycle_effect, ClientLifecycle, LifecycleEffect, LifecycleError,
+    LifecycleInputBoundary, LifecycleReduction, PostHandshakePhase,
 };
 
 /// Socket read size for one descriptor input step.
@@ -214,6 +214,8 @@ pub enum LiveError {
     Frame(ClientFrameError),
     /// The socket failed.
     Io(io::Error),
+    /// The lifecycle refused a phase transition.
+    Phase(LifecycleError),
     /// A phase transition would have reinterpreted buffered input.
     BoundaryNotInstallable {
         /// The boundary the reduction selected.
@@ -233,6 +235,7 @@ impl fmt::Display for LiveError {
             Self::Crypto(error) => write!(formatter, "descriptor cipher failed: {error}"),
             Self::Frame(error) => write!(formatter, "client frame decode failed: {error}"),
             Self::Io(error) => write!(formatter, "client socket failed: {error}"),
+            Self::Phase(error) => write!(formatter, "phase transition refused: {error}"),
             Self::BoundaryNotInstallable { requested, source } => write!(
                 formatter,
                 "the {requested:?} input boundary was refused: {source}"
@@ -248,6 +251,7 @@ impl Error for LiveError {
             Self::Crypto(error) | Self::BoundaryNotInstallable { source: error, .. } => Some(error),
             Self::Frame(error) => Some(error),
             Self::Io(error) => Some(error),
+            Self::Phase(error) => Some(error),
             Self::PhaseClosed => None,
         }
     }
@@ -694,6 +698,24 @@ where
         })
     }
 
+    /// Move to a post-handshake phase as `DESC::SetPhase` does: `GC_PHASE` is written through
+    /// the current output boundary, and then the new phase's input boundary is installed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiveError::Phase`] when the lifecycle refuses the transition, and
+    /// [`LiveError`] when the record cannot be written.
+    pub async fn set_phase(
+        &mut self,
+        target: PostHandshakePhase,
+    ) -> Result<Vec<Vec<u8>>, LiveError> {
+        let reduction = self
+            .lifecycle
+            .transition_to(target)
+            .map_err(LiveError::Phase)?;
+        self.apply(reduction).await
+    }
+
     /// Install the client-specific key pair for `SetSecurityKey`.
     ///
     /// Legacy performs this after the phase has already selected TEA, so the
@@ -705,8 +727,8 @@ where
     /// # Errors
     ///
     /// Returns the concrete [`DescriptorCryptoError`] when the phase has not
-    /// enabled TEA, a client key is already installed, or a ciphertext tail
-    /// remains.
+    /// enabled TEA or a ciphertext tail remains. A later key replaces an
+    /// earlier one, as legacy `SetSecurityKey` does.
     pub fn install_client_keys(
         &mut self,
         client_key: protocol::tea::TeaKey,

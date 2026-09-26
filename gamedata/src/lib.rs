@@ -7,6 +7,7 @@ pub mod banword;
 pub mod event;
 pub mod item_attr;
 pub mod land;
+pub mod map_atlas;
 pub mod object_proto;
 pub mod records;
 pub mod refine;

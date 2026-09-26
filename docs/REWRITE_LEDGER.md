@@ -15615,3 +15615,133 @@ Against 183.5 that is 13 more tests: two in `db/tests/accounts.rs`, nine for `au
 scenarios. There is one new Rust file (`prodomo/src/auth_login.rs`), for 149 files and 88,698
 lines. No scratch database was left behind, and there is no stray `*.core` file in the workspace
 root.
+
+## 185. Channel login by key (LOGIN2)
+
+`HEADER_CG_LOGIN2` (109) is answered on every Channel port in the login, select, and loading
+phases. A client repeating the login key, the login, and the client key of its auth login is
+switched to its client key pair and receives `HEADER_GC_EMPIRE` (90), the 357-byte character list
+(`HEADER_GC_LOGIN_SUCCESS_NEWSLOT`, 32), and `PHASE(SELECT)`. Any other client receives
+`HEADER_GC_LOGIN_FAILURE` (7) and may try again.
+
+### 185.1 Legacy behaviour
+
+- `CInputLogin::LoginByKey` (`G/input_login.cpp:153-219`) answers `SHUTDOWN` while the server
+  refuses clients and `FULL` when `g_iUserLimit` is positive and reached, both under the handshake
+  key. It then installs the client key (`SetSecurityKey`, `G/desc.cpp:951-963`, which overwrites
+  both keys on every `LOGIN2`) and asks the DB server.
+- `QUERY_LOGIN_BY_KEY` (`D/ClientManagerLogin.cpp:82-149`) answers `ALREADY` when the login is
+  logged on, `NOID` when the key is not granted, when the login differs (`strcasecmp` after
+  `trim_and_lower`), or when the client key differs. It then reads the account's characters
+  (`CreateAccountPlayerDataFromRes`).
+- `CInputDB::LoginSuccess` (`G/input_db.cpp:107-200`) places each character (`GetServerLocation`,
+  `:54-103`): the first map region holding the position (`SECTREE_MANAGER::GetMapIndex`), and the
+  address and port of the Channel serving that map (`CMapLocation::Get`, which refuses index 0);
+  when no Channel serves it, the character moves to its empire's start (`g_start_position`). With
+  `FIX_SELECT_EMPIRE_PHASE` it sends `GC_EMPIRE` (0 for an account without characters), then the
+  list with the descriptor handle and a random key, then `PHASE(SELECT)`.
+- `CInputDB::LoginAlready` kicks the holder (`DisconnectOfSameLogin`): a descriptor without a
+  character is set to `PHASE_CLOSE`, where `DESC::Packet` drops every output (`G/desc.cpp:400`).
+  A descriptor that logs in again with the login it holds kicks itself and never sees `ALREADY`.
+
+### 185.2 The Rewrite
+
+- Migration `0002_players.sql` adds `account.empire` (0 to 3) and the `player` table: one row per
+  slot 0 to 3, Names unique regardless of case, and a `CHECK` behind every column the list sends.
+  `db::players::lobby` reads the empire and the characters in one transaction (`NoSuchAccountId`
+  for a missing account). The scratch-database helpers moved to `db/tests/support/`.
+- `gamedata::map_atlas` reads the map folder's `index`, `Setting.txt`, and `Town.txt` as
+  `SECTREE_MANAGER::Build` does (the `fgets` line cut, `sscanf` number reads, file order, and the
+  first-match lookup). `serve` loads it before any port opens; a missing or malformed file stops the
+  server. The new `game_data` setting (default `legacy/gamedata`) names the Game data root.
+- `prodomo::channel_login` holds the rules: `admit` (`SHUTDOWN`, then `FULL`), `judge_key`,
+  `LogonRegistry` (a claim per held login that kicks its holder when another descriptor asks for
+  it and releases itself when dropped), `MapLocations` (the Channel's own maps first, then the
+  Shared Channel's), `locate`, `empire_shown`, and `login_success`.
+- `DescriptorCrypto` lets a later client key replace an earlier one, and `LiveClientSession`
+  gains `set_phase`. `handle_connection` hands each step to a new `analyze`, which routes `LOGIN2`
+  to `channel_login`; a kicked descriptor closes. `ChannelStatusBoard::online` feeds `admit`.
+
+### 185.3 Divergences and Defects
+
+Divergences:
+
+- An `index` line with a map index and no name stops the server at start-up. Legacy reuses the
+  previous line's name, or reads an uninitialised buffer on the first line.
+- A store error during the login closes the connection.
+- Guild ids and names are zero until guilds exist, and the mark-login table (handle and random
+  key) is not kept yet.
+
+Defects not reproduced (recorded in `docs/STATUS.md`):
+
+- The DB server checks `ALREADY` before it judges the key, and the game kicks the holder of the
+  login the client typed, so any live login key could disconnect any logged-on account by name.
+  The Rewrite judges the key first, so only the key's own login can be kicked.
+- The player-cache branch forces `bChangeName = 0` (`D/ClientManagerLogin.cpp:368`, `:399`). The
+  Rewrite sends the stored flag.
+
+Not yet ported, recorded in `docs/STATUS.md`: `FULL` in a scenario (the online count arrives with
+entering the game), the delayed kick of a holder in game, and the blocked-country IP list (empty
+tables behave as the Rewrite does today).
+
+### 185.4 Scenario and mutation sweep
+
+`the_channel_login_lists_the_characters_or_names_the_first_failed_check` creates alice and bob and
+logs both in on the auth port. On Channel 1 it walks: `NOID` for key 0, bob's key, bob's login, an
+empty login, and each client-key word changed, every answer under the client key the `LOGIN2`
+carried; success for `" ALICE "` with empire 0, four empty slots, zero guilds, and a nonzero handle
+and random key; `ALREADY` for a second descriptor on Channel 1's second port, which closes the
+first without a byte; three characters (golden values for every field of slot 0, the Shared
+Channel's port for a character on map 72, and a character on unhosted map 21 moved to the empire 1
+start); a descriptor logging in again with its own login closing silently; empire 2, whose start
+no Channel hosts, giving address and port 0; and bob logging in from the select phase.
+`a_closing_server_refuses_login2_on_the_setup_key` covers `SHUTDOWN`, and
+`a_login2_outside_the_login_phases_closes_the_connection` is the control.
+
+Thirty-one mutants, each applied to the pristine file, confirmed to change executable code, and
+restored by checksum. Nothing was killed by a compile error. The first pass ran while an
+inventory row was malformed, so the mutants that reached the parity binary were run again after
+the fix and after `handle_connection` was split for Clippy; the counts below are from those runs.
+Thirty were killed semantically:
+
+- by the unit tests: `SHUTDOWN` off, `FULL` strict, `FULL` with a zero limit, the login unchecked,
+  the client key unchecked, no kick, a claim never released, a stale claim releasing a newer one,
+  a big-endian address, index 0 hosted, the Shared Channel ignored, every character moved to the
+  empire start, empire 0's start used for all, the empire always shown, a 23-byte Name cut,
+  `change_name` dropped, the hair part from the main part, two sungma fields swapped, a shifted
+  slot, and a zero handle;
+- by the scenarios: a zero random key, the client key not installed, `shutdowned` ignored, a
+  self-kick answering `ALREADY`, the logon not kept, the kick ignored, no `GC_EMPIRE`, no select
+  phase, `LOGIN2` not read in the select phase, and the Shared Channel's maps dropped.
+
+One survived: answering `true` instead of closing when `LOGIN2` reaches the login phases on the
+auth port. It is equivalent, because an auth descriptor never leaves the auth phase; the class of
+defect it hides (`LOGIN2` served on the auth port) is covered by
+`a_login2_outside_the_login_phases_closes_the_connection`.
+
+Rows now `ported`: `cg.login.login2`, `gc.empire`, and `gc.login_success4`. `sys.login.by_key`,
+`sys.world.map`, and `gc.login_failure` are `partial`.
+
+### 185.5 Receipt
+
+Run on 2026-09-26 with rustc 1.85.1, `--locked --offline`:
+
+| gate | result |
+| --- | --- |
+| `cargo fmt --all -- --check` | green |
+| `cargo clippy --workspace --all-targets -- -D warnings` | green |
+| `cargo build --workspace` | green, 0 warnings |
+| `cargo test --workspace --all-targets --no-fail-fast`, with `DATABASE_URL` (PostgreSQL 18) | **1,626 passed, 0 failed, 0 ignored**, across 31 test binaries |
+| the same, without `DATABASE_URL` | **1,626 passed, 0 failed** |
+| `cargo test --workspace --doc` | **1 passed** |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | green |
+
+Against 184.5 that is 28 more tests, and one more test binary (`db/tests/players.rs`). The first
+full run failed three `prodomo/tests/process.rs` tests. Their configs had no `game_data` key, so
+the server looked for the relative default from the test's directory and refused to start. One test
+also still expected schema version 1, but migration `0002_players.sql` makes it 2. Both configs now
+name the legacy Game data folder, as the scripted client already did, and the test expects version 2.
+There are five new Rust files (`gamedata/src/map_atlas.rs`, `db/src/players.rs`,
+`db/tests/players.rs`, `db/tests/support/mod.rs`, and `prodomo/src/channel_login.rs`), for 154 files
+and 91,115 lines. No scratch database was left behind, and there is no stray `*.core` file in the
+workspace root.

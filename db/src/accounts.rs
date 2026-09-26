@@ -42,7 +42,7 @@ impl AccountId {
             .map_err(|_| AccountError::Corrupt(format!("account id {id} is negative")))
     }
 
-    fn to_column(self) -> Result<i32, AccountError> {
+    pub(crate) fn to_column(self) -> Result<i32, AccountError> {
         i32::try_from(self.0).map_err(|_| AccountError::NoSuchAccountId(self))
     }
 }

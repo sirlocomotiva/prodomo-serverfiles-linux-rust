@@ -14,22 +14,30 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use common::config::{load_server_config, ServerConfig, DEFAULT_CONFIG_PATH};
 use common::logging::{init_from_env, init_logging, LogConfig};
-use db::accounts::{find_auth_account, record_login};
+use db::accounts::{find_auth_account, record_login, AccountError};
+use db::players::lobby;
 use db::store::{schema_version, Store, StoreConfig};
+use gamedata::map_atlas::MapAtlas;
 use prodomo::auth_login::{
     judge_account, judge_credentials, login_from_field, password_candidate, AuthClaim, AuthRefusal,
     AuthRegistry, LoginGrant,
+};
+use prodomo::channel_login::{
+    admit, empire_shown, judge_key, login_success, random_key, ChannelRefusal, LogonClaim,
+    LogonRegistry, MapLocations,
 };
 use prodomo::channel_status::ChannelStatusBoard;
 use prodomo::client_live::{
@@ -39,14 +47,18 @@ use prodomo::client_session::ClientPhase;
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
 use prodomo::game_loop_messages::GameLoopTerminal;
 use prodomo::handshake::HandshakeServerKind;
+use prodomo::lifecycle::PostHandshakePhase;
 use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::operator::{prepare, read_new_password, AccountCommand, GmCommand, OperatorCommand};
 use prodomo::ready_gate::ReadyGate;
 use prodomo::ServerState;
-use protocol::cg_inventory::{HEADER_CG_LOGIN3, HEADER_CG_STATE_CHECKER};
+use protocol::cg_account::CgLoginByKey;
+use protocol::cg_inventory::{HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_STATE_CHECKER};
 use protocol::cg_login3::CgLogin3;
 use protocol::cg_wire::ClientFrame;
 use protocol::gc::{GcAuthSuccess, GcLoginFailure};
+use protocol::gc_inventory::HEADER_GC_EMPIRE;
+use protocol::gc_small::GcHeaderAndByte;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::signal;
 use tokio::sync::broadcast;
@@ -125,7 +137,8 @@ fn initialize_server(config_path: &Path, verbose: bool) -> Result<ServerConfig, 
 }
 
 /// What a connection needs from the server: the descriptor clock, the ping cycle, the server
-/// state, the Channel status list, the store, and the auth registry.
+/// state, the Channel status list, the store, the auth and logon registries, and where each map
+/// is served.
 #[derive(Clone)]
 struct ConnectionContext {
     clock: BootLiveClock,
@@ -138,6 +151,40 @@ struct ConnectionContext {
     shutdowned: bool,
     /// `[game] block_login`.
     block_login: Arc<str>,
+    /// `[game] user_limit`.
+    user_limit: i32,
+    /// The logins held by Channel descriptors.
+    logons: Arc<LogonRegistry>,
+    /// The map regions of the legacy Game data.
+    atlas: Arc<MapAtlas>,
+    /// The address clients are told to reconnect to.
+    public_ip: Ipv4Addr,
+    /// The maps each Channel hosts, and the Shared Channel's.
+    routes: Arc<MapRoutes>,
+    /// The last descriptor handle given out (legacy `DESC_MANAGER` handle count).
+    handles: Arc<AtomicU32>,
+}
+
+impl ConnectionContext {
+    /// Where a client connected to `port` of Channel `number` is told each map is served.
+    fn locations(&self, number: u8, port: u16) -> MapLocations {
+        let maps = self
+            .routes
+            .channel_maps
+            .get(&number)
+            .cloned()
+            .unwrap_or_default();
+        MapLocations::new(self.public_ip, port, maps, self.routes.shared.clone())
+    }
+}
+
+/// Resolves when another descriptor has logged in with the login this one holds; never without
+/// a held login.
+async fn logon_kicked(logon: Option<&LogonClaim>) {
+    match logon {
+        Some(claim) => claim.kicked().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Serve one client connection as the legacy descriptor does.
@@ -159,6 +206,18 @@ async fn handle_connection(
         ListenerRole::Auth => HandshakeServerKind::Auth,
         ListenerRole::Channel(_) => HandshakeServerKind::Game,
     };
+    let locations = match (role, stream.local_addr()) {
+        (ListenerRole::Channel(number), Ok(local)) => Some(context.locations(number, local.port())),
+        (ListenerRole::Channel(_), Err(error)) => {
+            warn!(%addr, %error, "Client socket has no local address");
+            return;
+        }
+        (ListenerRole::Auth, _) => None,
+    };
+    let handle = context
+        .handles
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1);
     let clock = context.clock;
     let mut session =
         match LiveClientSession::start(stream, handshake_token(), kind, clock.now()).await {
@@ -176,27 +235,25 @@ async fn handle_connection(
     );
     // The login this descriptor holds after a successful auth (legacy `ConnectAccount`).
     let mut claim: Option<AuthClaim> = None;
+    // The login this descriptor holds after a successful Channel login (legacy
+    // `InsertLogonAccount`).
+    let mut logon: Option<LogonClaim> = None;
 
     loop {
         match session.next_buffered(clock.now()).await {
             Ok(Some(step)) => {
-                let open = match step {
-                    // `CInputHandshake::Analyze` (`G/input.cpp:227-234`).
-                    LiveStep::Record { phase, frame }
-                        if phase == ClientPhase::Handshake
-                            && frame.header == HEADER_CG_STATE_CHECKER.value() =>
-                    {
-                        send_channel_status(&mut session, addr, &context).await
-                    }
-                    // `CInputAuth::Analyze` (`G/input_auth.cpp:209-217`).
-                    LiveStep::Record { phase, frame }
-                        if phase == ClientPhase::Auth
-                            && frame.header == HEADER_CG_LOGIN3.value() =>
-                    {
-                        auth_login(&mut session, addr, &context, &frame, &mut claim).await
-                    }
-                    step => report_step(addr, step),
-                };
+                let open = analyze(
+                    &mut session,
+                    addr,
+                    &context,
+                    locations
+                        .as_ref()
+                        .map(|locations| ChannelSeat { locations, handle }),
+                    step,
+                    &mut claim,
+                    &mut logon,
+                )
+                .await;
                 if !open || session.phase() == ClientPhase::Close {
                     break;
                 }
@@ -234,6 +291,192 @@ async fn handle_connection(
                 info!(%addr, "Client session stopping for shutdown");
                 break;
             }
+            () = logon_kicked(logon.as_ref()) => {
+                // `DESC::DisconnectOfSameLogin` without a character: `SetPhase(PHASE_CLOSE)`.
+                info!(%addr, "Another client logged in with this login; closing");
+                break;
+            }
+        }
+    }
+}
+
+/// Apply the analyzer of the descriptor's phase to one step; `false` when the connection must
+/// close. `seat` is `None` on the auth port.
+async fn analyze<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    seat: Option<ChannelSeat<'_>>,
+    step: LiveStep,
+    claim: &mut Option<AuthClaim>,
+    logon: &mut Option<LogonClaim>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match step {
+        // `CInputHandshake::Analyze` (`G/input.cpp:227-234`).
+        LiveStep::Record { phase, frame }
+            if phase == ClientPhase::Handshake
+                && frame.header == HEADER_CG_STATE_CHECKER.value() =>
+        {
+            send_channel_status(session, addr, context).await
+        }
+        // `CInputAuth::Analyze` (`G/input_auth.cpp:209-217`).
+        LiveStep::Record { phase, frame }
+            if phase == ClientPhase::Auth && frame.header == HEADER_CG_LOGIN3.value() =>
+        {
+            auth_login(session, addr, context, &frame, claim).await
+        }
+        // `CInputLogin::Analyze` (`G/input_login.cpp:1181-1182`), which serves the
+        // login, select, and loading phases (`G/desc.cpp:515-519`).
+        LiveStep::Record { phase, frame }
+            if matches!(
+                phase,
+                ClientPhase::Login | ClientPhase::Select | ClientPhase::Loading
+            ) && frame.header == HEADER_CG_LOGIN2.value() =>
+        {
+            match seat {
+                Some(seat) => channel_login(session, addr, context, &seat, &frame, logon).await,
+                None => report_step(addr, LiveStep::Record { phase, frame }),
+            }
+        }
+        step => report_step(addr, step),
+    }
+}
+
+/// What a Channel descriptor knows about its seat: where each map is served from its port, and
+/// its handle.
+struct ChannelSeat<'a> {
+    locations: &'a MapLocations,
+    handle: u32,
+}
+
+/// Answer `LOGIN2` with the character list or `LOGIN_FAILURE`; `false` when the connection must
+/// close. A refusal keeps the connection open, as in legacy.
+///
+/// The order is legacy's: the shutdown and user-limit checks answer under the handshake key; then
+/// the client key is installed (`SetSecurityKey`) and the login key is judged
+/// (`QUERY_LOGIN_BY_KEY`); on success `GC_EMPIRE`, `GC_LOGIN_SUCCESS`, and the select phase follow
+/// (`CInputDB::LoginSuccess`).
+async fn channel_login<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    seat: &ChannelSeat<'_>,
+    frame: &ClientFrame,
+    logon: &mut Option<LogonClaim>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgLoginByKey::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed LOGIN2; closing");
+            return false;
+        }
+    };
+    let no_more_clients = context.shutdowned || context.state.is_shutting_down();
+    if let Err(refusal) = admit(
+        no_more_clients,
+        context.user_limit,
+        context.channels.online(),
+    ) {
+        return refuse_channel_login(session, addr, refusal).await;
+    }
+    let mut client_key = [0; 16];
+    for (bytes, word) in client_key.chunks_exact_mut(4).zip(record.client_key) {
+        bytes.copy_from_slice(&word.to_le_bytes());
+    }
+    if let Err(error) = session.install_client_keys(client_key) {
+        warn!(%addr, %error, "Client key could not be installed; closing");
+        return false;
+    }
+    let typed_login = login_from_field(&record.login);
+    let grant = match judge_key(
+        context.auth.grant_for(record.login_key),
+        typed_login.as_ref(),
+        record.client_key,
+    ) {
+        Ok(grant) => grant,
+        Err(refusal) => return refuse_channel_login(session, addr, refusal).await,
+    };
+    let claim = match context.logons.claim(&grant.login) {
+        Ok(claim) => claim,
+        // `CInputDB::LoginAlready` kicks the holder before it answers. When the holder is this
+        // descriptor it is already in `PHASE_CLOSE`, where legacy drops every output.
+        Err(_)
+            if logon
+                .as_ref()
+                .is_some_and(|held| held.login() == &grant.login) =>
+        {
+            info!(%addr, "Client logged in again with the login it holds; closing");
+            return false;
+        }
+        Err(refusal) => return refuse_channel_login(session, addr, refusal).await,
+    };
+    let account_lobby = match lobby(&context.store, grant.account).await {
+        Ok(account_lobby) => account_lobby,
+        // `RESULT_LOGIN_BY_KEY` finds no account row: `LOGIN_NOT_EXIST`.
+        Err(AccountError::NoSuchAccountId(_)) => {
+            return refuse_channel_login(session, addr, ChannelRefusal::NoId).await;
+        }
+        Err(error) => {
+            error!(%addr, %error, "Channel login failed; closing");
+            return false;
+        }
+    };
+    let mut empire = Vec::with_capacity(GcHeaderAndByte::WIRE_SIZE);
+    GcHeaderAndByte::new(HEADER_GC_EMPIRE.value(), empire_shown(&account_lobby))
+        .encode_into(&mut empire);
+    let success = login_success(
+        &account_lobby,
+        &context.atlas,
+        seat.locations,
+        seat.handle,
+        random_key(),
+    )
+    .encode();
+    info!(
+        %addr,
+        login = %claim.login().as_str(),
+        characters = account_lobby.players.len(),
+        "Channel login accepted"
+    );
+    *logon = Some(claim);
+    let delivery = async {
+        session.send(&empire).await?;
+        session.send(&success).await?;
+        session.set_phase(PostHandshakePhase::Select).await
+    };
+    match delivery.await {
+        Ok(_) => true,
+        Err(error) => {
+            warn!(%addr, %error, "Client session stopped");
+            false
+        }
+    }
+}
+
+/// Send a Channel login refusal; `false` when the connection must close.
+async fn refuse_channel_login<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    refusal: ChannelRefusal,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    info!(%addr, ?refusal, "Channel login refused");
+    match session
+        .send(&GcLoginFailure::new(refusal.status()).encode())
+        .await
+    {
+        Ok(_) => true,
+        Err(error) => {
+            warn!(%addr, %error, "Client session stopped");
+            false
         }
     }
 }
@@ -602,6 +845,47 @@ async fn operate(config_path: &Path, command: &OperatorCommand) -> Result<(), Bo
     outcome
 }
 
+/// Each Channel's maps, and the Shared Channel's port and maps.
+struct MapRoutes {
+    channel_maps: HashMap<u8, Vec<u32>>,
+    shared: Option<(u16, Vec<u32>)>,
+}
+
+/// Load the map regions the Channel login places characters with.
+fn load_atlas(config: &ServerConfig) -> Result<MapAtlas, String> {
+    let map_dir = config.map_dir();
+    let atlas = MapAtlas::load(&map_dir)
+        .map_err(|error| format!("Failed to load the maps in {}: {error}", map_dir.display()))?;
+    info!(regions = atlas.regions().len(), dir = %map_dir.display(), "Map regions loaded");
+    Ok(atlas)
+}
+
+/// Read the map routes from the configuration and the bound listeners.
+fn map_routes(config: &ServerConfig, listeners: &Listeners) -> MapRoutes {
+    let channel_maps = config
+        .channels
+        .iter()
+        .map(|channel| (channel.number, channel.maps.clone()))
+        .collect();
+    // The Shared Channel's maps are reached through its first port.
+    let shared = config
+        .channels
+        .iter()
+        .find(|channel| channel.is_shared())
+        .and_then(|channel| {
+            let port = listeners
+                .iter()
+                .find(|listener| listener.role() == ListenerRole::Channel(channel.number))?
+                .local_addr()
+                .port();
+            Some((port, channel.maps.clone()))
+        });
+    MapRoutes {
+        channel_maps,
+        shared,
+    }
+}
+
 /// `prodomo serve`.
 async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> {
     let config = initialize_server(config_path, verbose)?;
@@ -625,6 +909,10 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     let store = Store::lazy(&StoreConfig::from(&config.store))
         .map_err(|error| format!("Invalid store configuration: {error}"))?;
     info!(store = ?config.store, "Store configured; no connection opened yet");
+
+    // The map regions are Game data the Channel login needs; a client is not accepted before
+    // they are loaded, so a missing or malformed file stops the server before any port opens.
+    let atlas = load_atlas(&config)?;
 
     let mut listeners = Listeners::bind(&listener_plan(&config)).await?;
     for listener in listeners.iter() {
@@ -665,6 +953,12 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
             auth: AuthRegistry::new(),
             shutdowned: config.game.shutdowned,
             block_login: Arc::from(config.game.block_login.as_str()),
+            user_limit: config.game.user_limit,
+            logons: LogonRegistry::new(),
+            atlas: Arc::new(atlas),
+            public_ip: config.public_ip,
+            routes: Arc::new(map_routes(&config, &listeners)),
+            handles: Arc::new(AtomicU32::new(0)),
         },
     };
     let exit = run_accept_loop(

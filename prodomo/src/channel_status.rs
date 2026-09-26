@@ -75,6 +75,12 @@ impl ChannelStatusBoard {
         self.online.store(online, Ordering::Relaxed);
     }
 
+    /// How many characters are in game on the whole server.
+    #[must_use]
+    pub fn online(&self) -> u32 {
+        self.online.load(Ordering::Relaxed)
+    }
+
     /// The `HEADER_GC_RESPOND_CHANNELSTATUS` record. Every port shares one status, as in legacy,
     /// where every Core computes it from the same server-wide count.
     #[must_use]

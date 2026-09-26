@@ -13,6 +13,9 @@ pub mod game_loop_messages;
 /// The auth login rules and the login-key registry.
 pub mod auth_login;
 
+/// The Channel login rules, the logon registry, and the character list.
+pub mod channel_login;
+
 /// The Channel status list answered to `STATE_CHECKER`.
 pub mod channel_status;
 pub mod client_live;

@@ -8,6 +8,7 @@
 pub mod accounts;
 pub mod credentials;
 pub mod item_id_range;
+pub mod players;
 pub mod store;
 
 pub use store::{Store, StoreConfig, StoreError};
