@@ -64,18 +64,21 @@ fn unique_test_root() -> PathBuf {
     std::env::temp_dir().join(format!("prodomo-process-{}-{nonce}", std::process::id()))
 }
 
-/// The owner's legacy Game data folder, read in place.
-fn game_data() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata")
+/// The keys naming the owner's legacy Game data folder and table dumps, read in place.
+fn data_keys() -> String {
+    let legacy = Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy");
+    format!(
+        "game_data = \"{}\"\ngame_tables = \"{}\"\n",
+        legacy.join("gamedata").display(),
+        legacy.join("sql/gamedata").display()
+    )
 }
 
 fn write_config(path: &Path, store_url: &str) {
-    let game_data = game_data();
-    let game_data = game_data.display();
+    let data_keys = data_keys();
     let config = format!(
         r#"bind_ip = "127.0.0.1"
-game_data = "{game_data}"
-
+{data_keys}
 [store]
 url = "{store_url}"
 
@@ -400,7 +403,7 @@ fn serve_admits_clients_once_the_store_is_migrated() {
     server.wait_for(ACCEPTING);
     assert!(server.logged(WAITING), "the gate waited for the store");
     assert!(
-        server.logged("Store ready at schema version 2"),
+        server.logged("Store ready at schema version 3"),
         "the schema was migrated:\n{}",
         server.console.join("\n")
     );
@@ -435,9 +438,9 @@ fn serve_exits_when_the_store_refuses_it_for_good() {
     // The server exists, but the database does not: PostgreSQL answers, and the answer is final.
     let missing = support::with_database(&admin_url, "prodomo_no_such_database");
     let config = format!(
-        "game_data = \"{}\"\n[store]\nurl = \"{missing}\"\n[auth]\nport = 0\n\
+        "{}[store]\nurl = \"{missing}\"\n[auth]\nport = 0\n\
          [[channel]]\nnumber = 1\nports = [0]\nmaps = [1]\n",
-        game_data().display()
+        data_keys()
     );
     let (status, console) = run_to_exit(Some(&config));
     assert!(

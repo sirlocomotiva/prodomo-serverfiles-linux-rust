@@ -23,6 +23,10 @@ public_ip = "127.0.0.1"
 # directory.
 game_data = "legacy/gamedata"
 
+# The owner's `mysqldump` files of the Game data tables (`player.sql` holds `banword`), read in
+# place and never written. A relative path is taken from the working directory.
+game_tables = "legacy/sql/gamedata"
+
 [store]
 # PostgreSQL 18. The password in this URL is never logged. No connection is opened until the
 # first query.
@@ -113,6 +117,9 @@ disable_empire_language_check = true
 vrajeste_permanent = false
 intarire_permanent = false
 mantie_permanent = true
+# From the legacy DB conf.txt: characters at level 120 or above cannot be deleted. The compiled-in
+# default is 251.
+player_delete_level_limit = 120
 # The legacy CONFIG files never set TEST_SERVER, and legacy defaults it to on (config.cpp:72), so
 # the legacy deployment ran in test-server mode. It is written out here so the choice is visible.
 test_server = true

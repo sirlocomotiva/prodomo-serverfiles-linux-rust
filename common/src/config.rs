@@ -101,6 +101,11 @@ pub struct ServerConfig {
     /// directory. Default `legacy/gamedata`.
     #[serde(default = "default_game_data")]
     pub game_data: PathBuf,
+    /// The owner's `mysqldump` files of the Game data tables (`player.sql` with `banword`,
+    /// `common.sql`), read in place and never written. A relative path is taken from the working
+    /// directory. Default `legacy/sql/gamedata`.
+    #[serde(default = "default_game_tables")]
+    pub game_tables: PathBuf,
     /// The PostgreSQL store.
     pub store: StoreSettings,
     /// The auth listener.
@@ -129,6 +134,13 @@ fn default_game_data() -> PathBuf {
 /// The default [`ServerConfig::game_data`].
 pub const DEFAULT_GAME_DATA: &str = "legacy/gamedata";
 
+fn default_game_tables() -> PathBuf {
+    PathBuf::from(DEFAULT_GAME_TABLES)
+}
+
+/// The default [`ServerConfig::game_tables`].
+pub const DEFAULT_GAME_TABLES: &str = "legacy/sql/gamedata";
+
 /// The Locale folder under [`ServerConfig::game_data`]; only `europe` is ported.
 pub const LOCALE_DIR: &str = "locale/europe";
 
@@ -138,6 +150,12 @@ impl ServerConfig {
     #[must_use]
     pub fn map_dir(&self) -> PathBuf {
         self.game_data.join(LOCALE_DIR).join("map")
+    }
+
+    /// The text proto folder: `<game_data>/proto` (`PROTO_FROM_DB = 0`).
+    #[must_use]
+    pub fn proto_dir(&self) -> PathBuf {
+        self.game_data.join("proto")
     }
 }
 
@@ -339,6 +357,11 @@ pub struct GameSettings {
     pub max_conqueror_level: i32,
     /// Character creation is blocked.
     pub block_char_creation: bool,
+    /// A character at this level or above cannot be deleted (legacy DB `conf.txt`
+    /// `PLAYER_DELETE_LEVEL_LIMIT`).
+    pub player_delete_level_limit: i32,
+    /// A character below this level cannot be deleted (`PLAYER_DELETE_LEVEL_LIMIT_LOWER`).
+    pub player_delete_level_limit_lower: i32,
     /// Skills are disabled.
     pub skill_disable: bool,
 }
@@ -410,6 +433,9 @@ impl Default for GameSettings {
             max_level: 99,
             max_conqueror_level: 30,
             block_char_creation: false,
+            // `PLAYER_MAX_LEVEL_CONST + 1` (`D/ClientManager.cpp:297`).
+            player_delete_level_limit: 251,
+            player_delete_level_limit_lower: 0,
             skill_disable: false,
         }
     }

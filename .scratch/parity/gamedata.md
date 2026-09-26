@@ -8,7 +8,7 @@ byte-exact and a scenario exercises the system that uses it.
 | id | path or table | read by (legacy) | used by | status | scenario | note |
 |---|---|---|---|---|---|---|
 | `data.proto.item` | `proto/item_proto.txt`, `proto/item_names.txt` | `D/ClientManagerBoot.cpp` (sent to the game at boot) | `sys.item.proto` | missing | | `PROTO_FROM_DB = 0`; name column in a legacy code page. |
-| `data.proto.mob` | `proto/mob_proto.txt`, `proto/mob_names.txt` | `D/ClientManagerBoot.cpp` (sent to the game at boot) | `sys.mob.proto` | missing | | |
+| `data.proto.mob` | `proto/mob_proto.txt`, `proto/mob_names.txt` | `D/ClientManagerBoot.cpp` (sent to the game at boot) | `sys.mob.proto` | partial |  | Only the locale names the Name rules refuse are read (`gamedata::mob_names`, ledger 186). |
 | `data.map.setting` | `locale/europe/map/*/Setting.txt` | `G/sectree_manager.cpp` | `sys.world.map` | missing | | 69 map directories. |
 | `data.map.attr` | `locale/europe/map/*/server_attr` | `G/sectree_manager.cpp` | `sys.world.map` | missing | | Binary. |
 | `data.map.town` | `locale/europe/map/*/Town.txt` | `G/sectree_manager.cpp` | `sys.world.map` | missing | | |
@@ -44,7 +44,7 @@ byte-exact and a scenario exercises the system that uses it.
 | `data.locale.charset` | `locale/europe/charset.txt` | none | | unused | | No legacy source opens it; every `charset` hit is the SQL connection charset. |
 | `table.exp_table` | `common.exp_table` | `D/ClientManagerBoot.cpp` | `sys.char.points` | missing | | |
 | `table.locale` | `common.locale` | `G/locale_service.cpp` | `sys.char.multi_language` | missing | | |
-| `table.banword` | `player.banword` | `D/ClientManagerBoot.cpp` | `sys.char.chat` | partial | | `gamedata::banword` rule. |
+| `table.banword` | `player.banword` | `D/ClientManagerBoot.cpp` | `sys.char.chat` | partial |  | `gamedata::banword` rule; read from `player.sql` for the Name rules since ledger 186. Chat filtering waits for `sys.char.chat`. |
 | `table.item_attr` | `player.item_attr`, `player.item_attr_rare` | `D/ClientManagerBoot.cpp` | `sys.item.attr` | partial | | `gamedata::item_attr` rule. |
 | `table.land` | `player.land` | `D/ClientManagerBoot.cpp` | `sys.world.objects` | partial | | `gamedata::land` rule. |
 | `table.object_proto` | `player.object_proto` | `D/ClientManagerBoot.cpp` | `sys.world.objects` | partial | | `gamedata::object_proto` rule. |

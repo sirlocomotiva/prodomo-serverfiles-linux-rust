@@ -274,16 +274,23 @@ fn unique_root() -> PathBuf {
     ))
 }
 
-/// The owner's legacy Game data folder, read in place.
-fn game_data() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata")
+/// The keys naming the owner's legacy Game data folder and table dumps, read in place.
+fn data_keys() -> String {
+    let legacy = Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy");
+    format!(
+        "game_data = \"{}\"\ngame_tables = \"{}\"\n",
+        legacy.join("gamedata").display(),
+        legacy.join("sql/gamedata").display()
+    )
 }
 
 /// The `prodomo.toml` for a scenario: every port 0, so the operating system picks free ones, and
 /// the legacy Game data.
 fn config_text(store_url: &str, channels: &[ChannelSpec], game: &str) -> String {
-    let mut text =
-        format!("bind_ip = \"127.0.0.1\"\ngame_data = \"{}\"\n\n[store]\nurl = \"{store_url}\"\n\n[auth]\nport = 0\n", game_data().display());
+    let mut text = format!(
+        "bind_ip = \"127.0.0.1\"\n{}\n[store]\nurl = \"{store_url}\"\n\n[auth]\nport = 0\n",
+        data_keys()
+    );
     if !game.is_empty() {
         write!(text, "\n[game]\n{game}\n").expect("writing to a String cannot fail");
     }
@@ -324,11 +331,11 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "bind_ip = \"127.0.0.1\"\ngame_data = \"{}\"\n\n[store]\nurl = \"postgres://h/db\"\n\
+                "bind_ip = \"127.0.0.1\"\n{}\n[store]\nurl = \"postgres://h/db\"\n\
                  \n[auth]\nport = 0\n\
                  \n[[channel]]\nnumber = 1\nports = [0, 0]\nmaps = [1, 3]\n\
                  \n[[channel]]\nnumber = 99\nports = [0]\nmaps = [72]\n",
-                game_data().display()
+                data_keys()
             )
         );
     }
@@ -339,10 +346,10 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "bind_ip = \"127.0.0.1\"\ngame_data = \"{}\"\n\n[store]\nurl = \"postgres://h/db\"\n\
+                "bind_ip = \"127.0.0.1\"\n{}\n[store]\nurl = \"postgres://h/db\"\n\
                  \n[auth]\nport = 0\n\
                  \n[game]\nping_event_second_cycle = 1\n",
-                game_data().display()
+                data_keys()
             )
         );
     }

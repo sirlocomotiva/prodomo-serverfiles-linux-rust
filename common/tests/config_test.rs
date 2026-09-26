@@ -38,6 +38,7 @@ const FULL: &str = r#"
 bind_ip = "10.0.0.2"
 public_ip = "203.0.113.7"
 game_data = "/srv/share"
+game_tables = "/srv/tables"
 
 [store]
 url = "postgres://prodomo:pw@db.local:5432/prodomo"
@@ -93,6 +94,8 @@ fn a_full_document_reads_every_table() {
     assert_eq!(config.public_ip, Ipv4Addr::new(203, 0, 113, 7));
     assert_eq!(config.game_data, Path::new("/srv/share"));
     assert_eq!(config.map_dir(), Path::new("/srv/share/locale/europe/map"));
+    assert_eq!(config.proto_dir(), Path::new("/srv/share/proto"));
+    assert_eq!(config.game_tables, Path::new("/srv/tables"));
     assert_eq!(
         config.store.url,
         "postgres://prodomo:pw@db.local:5432/prodomo"
@@ -129,6 +132,7 @@ fn omitted_keys_keep_their_documented_defaults() {
     assert_eq!(config.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     assert_eq!(config.public_ip, Ipv4Addr::LOCALHOST);
     assert_eq!(config.game_data, Path::new("legacy/gamedata"));
+    assert_eq!(config.game_tables, Path::new("legacy/sql/gamedata"));
     assert_eq!(
         config.map_dir(),
         Path::new("legacy/gamedata/locale/europe/map")
@@ -153,6 +157,11 @@ fn game_defaults_are_the_legacy_compiled_in_values() {
     assert_eq!(game.status_point_get_level_limit, 90);
     assert_eq!(game.view_range, 5000);
     assert_eq!(game.max_level, 99);
+    assert_eq!(
+        game.player_delete_level_limit, 251,
+        "D/ClientManager.cpp:297"
+    );
+    assert_eq!(game.player_delete_level_limit_lower, 0);
     assert_eq!(game.user_limit, 32768);
     assert_eq!(game.check_version_value, "1215955205");
     assert!(

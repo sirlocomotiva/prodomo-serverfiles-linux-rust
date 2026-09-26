@@ -4,13 +4,16 @@
 //! from the owner's MySQL dump, into the typed record the legacy loader built.
 
 pub mod banword;
+pub mod csv_table;
 pub mod event;
 pub mod item_attr;
 pub mod land;
 pub mod map_atlas;
+pub mod mob_names;
 pub mod object_proto;
 pub mod records;
 pub mod refine;
 pub mod renewal_shop;
 pub mod shop;
 pub mod skill;
+pub mod sql_dump;

@@ -16,6 +16,8 @@ use std::fmt;
 
 use common::tables::BANWORD_MAX_LEN;
 
+use crate::sql_dump::{read_table, SqlDumpError, SqlValue};
+
 /// The legacy statement, kept to document the single selected column.
 pub const BANWORD_LEGACY_QUERY: &str = "SELECT word FROM banword";
 
@@ -178,6 +180,73 @@ pub fn build_banword_table(
     Ok(records)
 }
 
+/// A banword table that could not be read from the owner's dump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BanwordDumpError {
+    /// The dump could not be read.
+    Dump(SqlDumpError),
+    /// The `banword` statements have no `word` column.
+    NoWordColumn,
+    /// A `word` value is a bare token, not a string or `NULL`.
+    NotText {
+        /// The 0-based row.
+        row: usize,
+    },
+    /// The rows break a table cap.
+    Table(BanwordTableError),
+}
+
+impl fmt::Display for BanwordDumpError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dump(error) => write!(formatter, "banword dump: {error}"),
+            Self::NoWordColumn => formatter.write_str("banword dump has no `word` column"),
+            Self::NotText { row } => write!(formatter, "banword row {row} is not a string"),
+            Self::Table(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for BanwordDumpError {}
+
+/// Build the banword table from the `banword` rows of the owner's `player.sql` dump.
+///
+/// # Errors
+///
+/// Returns [`BanwordDumpError`] when the dump cannot be read, a value is not a string, or a
+/// cap is exceeded.
+pub fn banwords_from_dump(dump: &[u8]) -> Result<Vec<BanwordRecord>, BanwordDumpError> {
+    let table = read_table(dump, "banword").map_err(BanwordDumpError::Dump)?;
+    let word = match table.column("word") {
+        Some(word) => word,
+        None if table.rows.is_empty() => return Ok(Vec::new()),
+        None => return Err(BanwordDumpError::NoWordColumn),
+    };
+    let rows = table
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(row, values)| match &values[word] {
+            SqlValue::Null => Ok(None),
+            SqlValue::Text(text) => Ok(Some(text.clone())),
+            SqlValue::Bare(_) => Err(BanwordDumpError::NotText { row }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    build_banword_table(&rows, BanwordLimits::default()).map_err(BanwordDumpError::Table)
+}
+
+/// Whether a Name holds a banned word: legacy `CBanwordManager::CheckString`
+/// (`G/banword.cpp:34-73`), which compares each word with `strncmp` at every position of the
+/// Name. The match is case-sensitive, and an empty word matches every Name that is not empty.
+/// Only single-byte positions are ported, because a Name reaching this check is ASCII.
+#[must_use]
+pub fn holds_banword(words: &[BanwordRecord], name: &[u8]) -> bool {
+    words.iter().any(|record| {
+        let word = record.as_bytes();
+        (0..name.len()).any(|start| name[start..].starts_with(word))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +332,53 @@ mod tests {
     fn the_legacy_query_selects_one_column() {
         assert_eq!(BANWORD_LEGACY_QUERY, "SELECT word FROM banword");
         assert_eq!(BANWORD_BYTES, 25);
+    }
+
+    #[test]
+    fn a_banned_word_anywhere_in_the_name_refuses_it_by_case() {
+        let words = build_banword_table(
+            &rows(&[Some(b"ass"), Some(b"Bad")]),
+            BanwordLimits::default(),
+        )
+        .unwrap();
+        for name in [&b"ass"[..], b"xassx", b"glass", b"myBad"] {
+            assert!(holds_banword(&words, name), "{name:?}");
+        }
+        for name in [&b"as"[..], b"ASS", b"bad", b"Ba", b""] {
+            assert!(!holds_banword(&words, name), "{name:?}");
+        }
+        let empty = build_banword_table(&rows(&[Some(b"")]), BanwordLimits::default()).unwrap();
+        assert!(holds_banword(&empty, b"x"));
+        assert!(!holds_banword(&empty, b""));
+    }
+
+    #[test]
+    fn the_dump_rows_become_the_table() {
+        let dump = b"INSERT INTO `banword` (`word`) VALUES ('ab'),(NULL),('c\\0');";
+        let words = banwords_from_dump(dump).unwrap();
+        let words: Vec<&[u8]> = words.iter().map(BanwordRecord::as_bytes).collect();
+        assert_eq!(
+            words,
+            [&b"ab"[..], b"c"],
+            "an escaped NUL ends the word, as strlcpy stops there"
+        );
+        assert_eq!(
+            banwords_from_dump(b"INSERT INTO `banword` (`word`) VALUES (7);"),
+            Err(BanwordDumpError::NotText { row: 0 })
+        );
+        assert_eq!(
+            banwords_from_dump(b"INSERT INTO `banword` (`w`) VALUES ('a');"),
+            Err(BanwordDumpError::NoWordColumn)
+        );
+        assert_eq!(banwords_from_dump(b"-- nothing\n"), Ok(Vec::new()));
+
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../legacy/sql/gamedata/player.sql"
+        );
+        let owner = banwords_from_dump(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(owner.len(), 115);
+        assert!(holds_banword(&owner, b"Xbitchy"));
+        assert!(!holds_banword(&owner, b"Hero"));
     }
 }

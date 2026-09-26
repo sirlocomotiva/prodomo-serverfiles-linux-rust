@@ -277,6 +277,18 @@ pub fn locate(atlas: &MapAtlas, locations: &MapLocations, empire: u8, x: i32, y:
     Located { x, y, addr, port }
 }
 
+/// `CMapLocation::Get(x, y, ...)` alone, as a new character is placed
+/// (`CInputDB::PlayerCreateSuccess`, `G/input_db.cpp:241-253`): no empire-start fallback, and no
+/// location when no Channel hosts the map.
+#[must_use]
+pub fn locate_here(atlas: &MapAtlas, locations: &MapLocations, x: i32, y: i32) -> Located {
+    let (addr, port) = atlas
+        .index_at(x, y)
+        .and_then(|index| locations.get(index))
+        .unwrap_or_default();
+    Located { x, y, addr, port }
+}
+
 /// The `GC_EMPIRE` value: the account's empire once it has a character, else 0
 /// (`FIX_SELECT_EMPIRE_PHASE`, `G/input_db.cpp:163-177`).
 #[must_use]
@@ -288,7 +300,8 @@ pub fn empire_shown(lobby: &Lobby) -> u8 {
     }
 }
 
-fn player_record(player: &LobbyPlayer, located: Located) -> GcLoginPlayer {
+/// A character's `TSimplePlayer`, located.
+pub(crate) fn player_record(player: &LobbyPlayer, located: Located) -> GcLoginPlayer {
     let mut name = [0; protocol::simple_player::CHARACTER_NAME_BYTES];
     let bytes = player.name.as_bytes();
     let kept = bytes.len().min(name.len() - 1);

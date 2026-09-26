@@ -1184,3 +1184,438 @@ fn a_login2_outside_the_login_phases_closes_the_connection() {
     client.send(&client_login2(b"alice", 1, CLIENT_KEY));
     assert_eq!(client.expect_closed(), Vec::<u8>::new());
 }
+
+const CG_CHARACTER_CREATE: u8 = 0x04;
+const CG_CHARACTER_DELETE: u8 = 0x05;
+const CG_EMPIRE: u8 = 0x5a;
+const CG_CHANGE_NAME: u8 = 0x6a;
+const GC_PLAYER_CREATE_SUCCESS: u8 = 8;
+const GC_CREATE_FAILURE: u8 = 9;
+const GC_PLAYER_DELETE_SUCCESS: u8 = 10;
+const GC_PLAYER_DELETE_WRONG_SOCIAL_ID: u8 = 11;
+const GC_CHANGE_NAME: u8 = 0x6b;
+/// `TPacketGCPlayerCreateSuccess`: header, `bAccountCharacterIndex`, and a `TSimplePlayer`.
+const PLAYER_CREATE_SUCCESS_LEN: usize = 2 + 70;
+/// `TPacketGCChangeName`: header, `pid`, and `name[25]`.
+const CHANGE_NAME_LEN: usize = 1 + 4 + 25;
+
+/// The length of each select-screen answer, by header.
+fn select_answer_len(header: u8) -> usize {
+    match header {
+        GC_PLAYER_CREATE_SUCCESS => PLAYER_CREATE_SUCCESS_LEN,
+        GC_CREATE_FAILURE | GC_PLAYER_DELETE_SUCCESS | GC_EMPIRE => 2,
+        GC_PLAYER_DELETE_WRONG_SOCIAL_ID => 1,
+        GC_CHANGE_NAME => CHANGE_NAME_LEN,
+        GC_LOGIN_SUCCESS => LOGIN_SUCCESS_LEN,
+        other => panic!("unexpected select-screen header {other}"),
+    }
+}
+
+/// A 25-byte Name field holding `name`, NUL-padded.
+fn name_field(name: &[u8]) -> [u8; 25] {
+    let mut field = [0; 25];
+    field[..name.len()].copy_from_slice(name);
+    field
+}
+
+/// The 34 bytes of a client `CHARACTER_CREATE`, in `TPacketCGPlayerCreate` field order. The four
+/// stat bytes are not read by the server.
+fn client_create(index: u8, name: &[u8], job: u16, shape: u8) -> Vec<u8> {
+    let mut record = vec![CG_CHARACTER_CREATE, index];
+    record.extend_from_slice(&name_field(name));
+    record.extend_from_slice(&job.to_le_bytes());
+    record.extend_from_slice(&[shape, 0xa1, 0xb2, 0xc3, 0xd4]);
+    assert_eq!(record.len(), 34);
+    record
+}
+
+/// The 10 bytes of a client `CHARACTER_DELETE`: header, index, and `private_code[8]`.
+fn client_delete(index: u8, code: [u8; 8]) -> Vec<u8> {
+    let mut record = vec![CG_CHARACTER_DELETE, index];
+    record.extend_from_slice(&code);
+    record
+}
+
+/// The 27 bytes of a client `CHANGE_NAME`: header, index, and `name[25]`.
+fn client_rename(index: u8, name: &[u8]) -> Vec<u8> {
+    let mut record = vec![CG_CHANGE_NAME, index];
+    record.extend_from_slice(&name_field(name));
+    record
+}
+
+impl Keyed {
+    /// Send one record sealed on the current input key.
+    fn send_record(&mut self, record: &[u8]) {
+        let sealed = encrypt_padded(record, &self.input)
+            .expect("short")
+            .into_bytes();
+        self.client.send(&sealed);
+    }
+
+    /// Send one select-screen record and read the answer.
+    fn answer(&mut self, record: &[u8]) -> Vec<u8> {
+        self.send_record(record);
+        self.read(select_answer_len)
+    }
+
+    /// Send one select-screen record that the server answers with nothing, leaving the
+    /// connection open.
+    fn unanswered(&mut self, record: &[u8]) {
+        self.send_record(record);
+        assert_eq!(self.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    }
+
+    /// Send one select-screen record that closes the connection without an answer.
+    fn closed_by(&mut self, record: &[u8]) {
+        self.send_record(record);
+        assert_eq!(self.client.expect_closed(), Vec::<u8>::new());
+    }
+}
+
+/// Assert a condition on the scenario's database.
+fn check(database: &ScratchDatabase, condition: &str) {
+    execute(
+        database.url(),
+        &format!("DO $$ BEGIN IF NOT ({condition}) THEN RAISE EXCEPTION 'failed'; END IF; END $$"),
+    )
+    .unwrap_or_else(|error| panic!("{condition}: {error}"));
+}
+
+/// Log `login` in on Channel 1, once no closing descriptor holds it, and return the connection,
+/// the empire it shows, and the character list.
+fn select_screen(server: &Server, login: &[u8]) -> (Keyed, u8, Vec<u8>) {
+    let (_auth, key) = login_key(server, login);
+    let mut keyed = Keyed::channel(server.channel(1));
+    let (empire, list) = login_by_key_when_free(&mut keyed, login, key).expect("logs in");
+    (keyed, empire, list)
+}
+
+/// `cg.login.empire`, `sys.login.empire`: an account without an empire, or without characters,
+/// chooses one; the answer is `GC_EMPIRE` and the character list again, every character moved
+/// to the empire's start. An account with an empire and a character is ignored. Empire 0 and
+/// empires past 3 close the connection, as does the record on the auth port.
+#[test]
+fn an_empire_is_chosen_until_the_account_has_one_and_a_character() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    let port = server.channel(1).port();
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+
+    let (mut alice, empire, _) = select_screen(&server, b"alice");
+    assert_eq!(empire, 0);
+    // A Divergence: legacy creates a character near (0, 0) for an account without an empire.
+    assert_eq!(
+        alice.answer(&client_create(0, b"Alpha", 0, 0)),
+        [GC_CREATE_FAILURE, 0]
+    );
+    assert_eq!(alice.answer(&[CG_EMPIRE, 1]), [GC_EMPIRE, 1]);
+    let list = alice.read(select_answer_len);
+    assert_eq!(list[0], GC_LOGIN_SUCCESS);
+    assert!(
+        (0..4).all(|slot| slot_is_empty(&list, slot)),
+        "no characters"
+    );
+    check(
+        &database,
+        "(SELECT empire FROM account WHERE login = 'alice') = 1",
+    );
+    let created = alice.answer(&client_create(0, b"Alpha", 0, 0));
+    assert_eq!(created[..2], [GC_PLAYER_CREATE_SUCCESS, 0]);
+    let alpha = listed(&created[1..], 0);
+    assert!((459_500..=460_100).contains(&alpha.x), "{}", alpha.x);
+    assert!((953_600..=954_200).contains(&alpha.y), "{}", alpha.y);
+    assert_eq!((alpha.addr, alpha.port), (PUBLIC_ADDR, port));
+    // With an empire and a character, the choice is made.
+    alice.unanswered(&[CG_EMPIRE, 3]);
+    check(
+        &database,
+        "(SELECT empire FROM account WHERE login = 'alice') = 1",
+    );
+
+    // An account with a character but no empire chooses one, and every character moves to its
+    // start: map 21 for empire 2, which no Channel hosts.
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 3, 'Zulu', 1, 470000, \
+         950000 FROM account WHERE login = 'bob'",
+    );
+    let (mut bob, empire, list) = select_screen(&server, b"bob");
+    assert_eq!(empire, 0);
+    assert_eq!(listed(&list, 3).port, port);
+    assert_eq!(bob.answer(&[CG_EMPIRE, 2]), [GC_EMPIRE, 2]);
+    let list = bob.read(select_answer_len);
+    let zulu = listed(&list, 3);
+    assert_eq!(
+        (zulu.name.as_slice(), zulu.x, zulu.y, zulu.addr, zulu.port),
+        (&b"Zulu"[..], 55_700, 157_900, [0; 4], 0)
+    );
+    check(
+        &database,
+        "(SELECT x = 55700 AND y = 157900 FROM player WHERE name = 'Zulu')",
+    );
+
+    // Before a Channel login the record is ignored; empire 0 and 4 close the connection.
+    let mut stranger = Keyed::channel(server.channel(1));
+    stranger.unanswered(&[CG_EMPIRE, 1]);
+    stranger.closed_by(&[CG_EMPIRE, 0]);
+    Keyed::channel(server.channel(1)).closed_by(&[CG_EMPIRE, 4]);
+    let mut auth = auth_client(&server);
+    auth.send(&sealed(&[CG_EMPIRE, 1]));
+    assert_eq!(auth.expect_closed(), Vec::<u8>::new());
+}
+
+/// `cg.login.character_create`, `sys.login.character`, `gc.player_create_success`,
+/// `gc.player_create_failure`: a character is created with its job's points near its empire's
+/// create start, or refused with the legacy failure type: 0 for a Name the rules refuse (length,
+/// letters and digits, banned words, mob names), a shape past 1, a slot past 3, a race past 7,
+/// the 30-second cooldown, and a creation before the Channel login; 1 for the login, a taken
+/// slot, or a taken Name.
+#[test]
+fn a_character_is_created_with_its_job_points_or_refused_with_the_legacy_type() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, 470000, \
+         950000 FROM account WHERE login = 'bob'",
+    );
+
+    let mut anonymous = Keyed::channel(server.channel(1));
+    assert_eq!(
+        anonymous.answer(&client_create(0, b"Alpha", 0, 0)),
+        [GC_CREATE_FAILURE, 0]
+    );
+
+    let (mut alice, _, _) = select_screen(&server, b"alice");
+    let refused = [
+        (client_create(1, b"A", 0, 0), 0),
+        (client_create(1, b"Al_x", 0, 0), 0),
+        (client_create(1, b"Al\xe9x", 0, 0), 0),
+        (client_create(1, b"aryan", 0, 0), 0),
+        (client_create(1, b"Xaryanx", 0, 0), 0),
+        (client_create(1, b"blackpony", 0, 0), 0),
+        (client_create(1, b"BlackPony", 0, 0), 0),
+        (client_create(1, b"Alpha", 0, 2), 0),
+        (client_create(4, b"Alpha", 0, 0), 0),
+        (client_create(1, b"Alpha", 8, 0), 0),
+        (client_create(1, b"Alpha", 256, 0), 0),
+        (client_create(9, b"alice", 0, 0), 1),
+        (client_create(1, b"Zulu", 0, 0), 1),
+        (client_create(1, b"zULU", 0, 0), 1),
+    ];
+    for (record, failure) in refused {
+        assert_eq!(
+            alice.answer(&record),
+            [GC_CREATE_FAILURE, failure],
+            "{record:02x?}"
+        );
+    }
+    let mut unterminated = client_create(1, b"", 0, 0);
+    unterminated[2..27].fill(b'a');
+    assert_eq!(alice.answer(&unterminated), [GC_CREATE_FAILURE, 0]);
+
+    // Race 7 is a shaman: ST 3, HT 4, DX 3, IQ 6.
+    let created = alice.answer(&client_create(2, b"Alpha", 7, 1));
+    assert_eq!(created[..2], [GC_PLAYER_CREATE_SUCCESS, 2]);
+    let alpha = listed(&created[1..], 0);
+    assert_ne!(alpha.id, 0);
+    assert_eq!(
+        (
+            alpha.name.as_slice(),
+            alpha.job,
+            alpha.level,
+            alpha.play_minutes,
+            alpha.stats,
+            alpha.main_part,
+            alpha.change_name,
+            alpha.hair_part,
+        ),
+        (&b"Alpha"[..], 7, 1, 0, [3, 4, 3, 6], 1, 0, 0)
+    );
+    check(
+        &database,
+        &format!(
+            "(SELECT hp = 860 AND sp = 320 AND stamina = 800 AND part_base = 1 AND slot = 2 \
+             FROM player WHERE id = {})",
+            alpha.id
+        ),
+    );
+    // Up to 300 from empire 1's create start on each axis. The offset is random; it is (0, 0)
+    // once in 361,201 creations.
+    check(
+        &database,
+        &format!(
+            "(SELECT abs(x - 459800) <= 300 AND abs(y - 953900) <= 300 \
+             AND (x, y) <> (459800, 953900) FROM player WHERE id = {})",
+            alpha.id
+        ),
+    );
+    // `s_createTimeByAccountID`: the next creation within 30 seconds is refused.
+    assert_eq!(
+        alice.answer(&client_create(3, b"Bravo", 0, 0)),
+        [GC_CREATE_FAILURE, 0]
+    );
+
+    // A refusal does not start the cooldown: bob's taken slot and taken Name, then a creation.
+    let (mut bob, _, _) = select_screen(&server, b"bob");
+    assert_eq!(
+        bob.answer(&client_create(0, b"Yankee", 0, 0)),
+        [GC_CREATE_FAILURE, 1]
+    );
+    assert_eq!(
+        bob.answer(&client_create(1, b"ALPHA", 0, 0)),
+        [GC_CREATE_FAILURE, 1]
+    );
+    let created = bob.answer(&client_create(1, b"Yankee", 4, 0));
+    assert_eq!(created[..2], [GC_PLAYER_CREATE_SUCCESS, 1]);
+    assert_eq!(listed(&created[1..], 0).stats, [6, 4, 3, 3]);
+}
+
+/// `cg.login.character_create`: with `block_char_creation` every creation is refused with
+/// type 0.
+#[test]
+fn blocked_character_creation_is_refused() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "block_char_creation = true",
+    );
+    create_account(&server, "alice");
+    sql(&database, "UPDATE account SET empire = 1");
+    let (mut alice, _, _) = select_screen(&server, b"alice");
+    assert_eq!(
+        alice.answer(&client_create(0, b"Alpha", 0, 0)),
+        [GC_CREATE_FAILURE, 0]
+    );
+    check(&database, "NOT EXISTS (SELECT 1 FROM player)");
+}
+
+/// `cg.login.character_delete`, `gc.player_delete_success`, `gc.player_delete_wrong_social_id`:
+/// a character is deleted when the first seven bytes of the code match the account's delete
+/// code and its level is under `player_delete_level_limit` (251 by default), and its row is
+/// kept in `player_deleted`. An empty slot, a wrong code, or a level at the limit is refused; a
+/// slot past 3 and a delete before a Channel login are ignored.
+#[test]
+fn a_character_is_deleted_with_the_delete_code() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    sql(
+        &database,
+        "UPDATE account SET empire = 1, delete_code = 'Ab12345'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, s, n, 0, l, \
+         470000, 950000 FROM account, (VALUES (0, 'Alpha', 250), (1, 'Beta', 251)) AS c(s, n, l) \
+         WHERE login = 'alice'",
+    );
+
+    let mut stranger = Keyed::channel(server.channel(1));
+    stranger.unanswered(&client_delete(0, *b"Ab12345\0"));
+
+    let (mut alice, _, list) = select_screen(&server, b"alice");
+    assert_eq!(listed(&list, 0).name, b"Alpha");
+    alice.unanswered(&client_delete(4, *b"Ab12345\0"));
+    for record in [
+        client_delete(3, *b"Ab12345\0"),
+        client_delete(0, *b"ab12345\0"),
+        client_delete(0, *b"Ab1234\0\0"),
+        client_delete(1, *b"Ab12345\0"),
+    ] {
+        assert_eq!(
+            alice.answer(&record),
+            [GC_PLAYER_DELETE_WRONG_SOCIAL_ID],
+            "{record:02x?}"
+        );
+    }
+    // `strncmp(..., 7)`: the eighth byte is not compared.
+    assert_eq!(
+        alice.answer(&client_delete(0, *b"Ab12345X")),
+        [GC_PLAYER_DELETE_SUCCESS, 0]
+    );
+    assert_eq!(
+        alice.answer(&client_delete(0, *b"Ab12345\0")),
+        [GC_PLAYER_DELETE_WRONG_SOCIAL_ID]
+    );
+    check(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM player WHERE name = 'Alpha') \
+         AND (SELECT count(*) FROM player_deleted WHERE name = 'Alpha' \
+         AND player ->> 'level' = '250') = 1 \
+         AND EXISTS (SELECT 1 FROM player WHERE name = 'Beta')",
+    );
+}
+
+/// `cg.login.change_name`, `sys.login.change_name`, `gc.change_name`: a character asked to
+/// choose a new Name takes one the rules allow and no other character has, and the request is
+/// cleared. A Name the rules refuse is create failure type 0; a taken Name is type 1; a
+/// character not asked is ignored; an empty slot or a slot past 3 closes the connection.
+#[test]
+fn a_character_asked_to_rename_takes_a_free_name() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y, change_name) SELECT id, s, n, 0, \
+         470000, 950000, r FROM account, (VALUES (0, 'Alpha', true), (1, 'Beta', false)) AS \
+         c(s, n, r) WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, 470000, \
+         950000 FROM account WHERE login = 'bob'",
+    );
+
+    let (mut alice, _, list) = select_screen(&server, b"alice");
+    let alpha = listed(&list, 0);
+    assert_eq!(alpha.change_name, 1);
+    alice.unanswered(&client_rename(1, b"Gamma"));
+    assert_eq!(
+        alice.answer(&client_rename(0, b"blackpony")),
+        [GC_CREATE_FAILURE, 0]
+    );
+    assert_eq!(
+        alice.answer(&client_rename(0, b"G")),
+        [GC_CREATE_FAILURE, 0]
+    );
+    assert_eq!(
+        alice.answer(&client_rename(0, b"zulu")),
+        [GC_CREATE_FAILURE, 1]
+    );
+    let mut expected = vec![GC_CHANGE_NAME];
+    expected.extend_from_slice(&alpha.id.to_le_bytes());
+    expected.extend_from_slice(&name_field(b"Gamma"));
+    assert_eq!(alice.answer(&client_rename(0, b"Gamma")), expected);
+    alice.unanswered(&client_rename(0, b"Delta"));
+    check(
+        &database,
+        &format!(
+            "(SELECT name = 'Gamma' AND NOT change_name FROM player WHERE id = {})",
+            alpha.id
+        ),
+    );
+    alice.closed_by(&client_rename(2, b"Delta"));
+
+    let (mut alice, _, _) = select_screen(&server, b"alice");
+    alice.closed_by(&client_rename(4, b"Delta"));
+}

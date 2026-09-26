@@ -15745,3 +15745,135 @@ There are five new Rust files (`gamedata/src/map_atlas.rs`, `db/src/players.rs`,
 `db/tests/players.rs`, `db/tests/support/mod.rs`, and `prodomo/src/channel_login.rs`), for 154 files
 and 91,115 lines. No scratch database was left behind, and there is no stray `*.core` file in the
 workspace root.
+
+## 186. Empire choice, character create, delete, and forced rename
+
+The select screen answers `HEADER_CG_EMPIRE` (0x5a), `HEADER_CG_CHARACTER_CREATE` (0x04),
+`HEADER_CG_CHARACTER_DELETE` (0x05), and `HEADER_CG_CHANGE_NAME` (0x6a) on every Channel port in
+the login, select, and loading phases, as `CInputLogin::Analyze` does
+(`G/input_login.cpp:1185-1244`). The answers are `GC_EMPIRE` (90) with the character list again,
+`PLAYER_CREATE_SUCCESS` (8, 72 bytes) or `CREATE_FAILURE` (9, 2 bytes), `PLAYER_DELETE_SUCCESS`
+(10, 2 bytes) or `PLAYER_DELETE_WRONG_SOCIAL_ID` (11, 1 byte), and `CHANGE_NAME` (0x6b, 30 bytes).
+
+### 186.1 Legacy behaviour
+
+- **Empire.** `CInputLogin::Empire` (`G/input_login.cpp:961-985`) ignores an account that has an
+  empire and a character, and closes the connection for an empire past 3. The DB server stores the
+  empire and moves the characters to the empire's start (`D/ClientManager.cpp:1217-1281`); with
+  `FIX_SELECT_EMPIRE_PHASE` the game sends `GC_EMPIRE` and the list again.
+- **Create.** `CInputLogin::CharacterCreate` (`G/input_login.cpp:454-515`) refuses, in order, when
+  `block_char_creation` is set, for a Name that `check_name` refuses (length, letters and digits,
+  `banword` anywhere in the Name, a mob's `szLocaleName`: `locale_service.cpp:86-99`), for a Name
+  equal to the login (type 1), for a shape past 1, and when `NewPlayerTable2` refuses the race. The
+  DB server refuses within 30 seconds of the account's previous creation
+  (`s_createTimeByAccountID`, `D/ClientManagerPlayer.cpp:1067-1078`), then a taken slot or Name
+  (type 1). A new character gets its job's `JobInitialPoints` (`G/constants.cpp:17-22`), HP and SP
+  from HT and IQ, full stamina, and a place `number(-300, 300)` from `g_create_position` on each
+  axis.
+- **Delete.** `CInputLogin::CharacterDelete` ignores an empty slot or a slot past 3 on the game side
+  and forwards the rest. The DB server compares the first seven bytes of the code with the
+  account's delete code (`strncmp`), keeps a character at `PLAYER_DELETE_LEVEL_LIMIT` or above or
+  below `PLAYER_DELETE_LEVEL_LIMIT_LOWER`, and copies the row into `player_deleted` before deleting
+  it (`D/ClientManagerPlayer.cpp:1343-1470`).
+- **Rename.** `CInputLogin::ChangeName` serves only a character whose `bChangeName` is set, runs
+  the Name rules, and the DB server refuses a taken Name with type 1
+  (`D/ClientManagerLogin.cpp:618-660`).
+
+### 186.2 The Rewrite
+
+- Migration `0003_character_select.sql` adds `hp`, `sp`, `stamina`, and `part_base` to `player`,
+  and the `player_deleted` table, which keeps a deleted row as one `jsonb` document so later
+  columns need no twin. `db::players` gains `create_player` (one insert decides both the slot and
+  the Name, so racing creates cannot both win), `delete_player` (code, level limits, and slot
+  checked in the one `DELETE ... RETURNING` that archives the row), `select_empire` (the check and
+  the move in one transaction), and `change_name`.
+- `gamedata::csv_table` ports `cCsvFile::Load`, `gamedata::mob_names` builds the lowercase mob
+  locale names from `mob_proto.txt` and `mob_names.txt` with C `atoi` and `strtoul` on i686, and
+  `gamedata::sql_dump` reads the `INSERT` rows of the owner's `mysqldump` files byte-exact.
+  `gamedata::banword::banwords_from_dump` reads `banword` from `player.sql`.
+- `prodomo::select_phase` holds the pure rules (`NameRules`, `CreateCooldown`, `judge_create`,
+  `judge_delete`, `judge_empire`, `judge_rename`, and the record builders); `main.rs` routes the
+  four records to it once a Channel login has left a `SelectAccount` on the connection.
+  `serve` loads the Name rules before any port opens; a missing or malformed file stops it.
+- New settings: `game_tables` (default `legacy/sql/gamedata`), and `[game]`
+  `player_delete_level_limit` (251, `PLAYER_MAX_LEVEL_CONST + 1`) and
+  `player_delete_level_limit_lower` (0). The example sets the owner's `120` from the legacy DB
+  `conf.txt`. `block_char_creation` is now read.
+
+### 186.3 Divergences and Defects
+
+Divergences (recorded in `docs/STATUS.md`):
+
+- A Name must end with a NUL inside its 25-byte field.
+- The race is checked as the whole 16-bit `job` word; legacy truncates it, so job 256 was a
+  warrior.
+- A character is created only for an account with an empire, and empire 0 closes the connection.
+- A rename naming a slot past 3 closes the connection at once instead of 5 seconds later.
+- A text proto line of 2,048 bytes or more, a quoted field open at the end of the file, and a
+  mob-name data row with one column stop the server at start-up.
+- A store error on the select screen closes the connection.
+
+Defects not reproduced (recorded in `docs/STATUS.md`):
+
+- A refused creation is answered with a zeroed 10-byte `TPacketGCLoginFailure` under the 2-byte
+  `CREATE_FAILURE` header. The Rewrite sends the 2-byte record, type 0.
+- Choosing an empire moves only the first three of the four slots. The Rewrite moves every slot.
+
+Not yet ported: the `CREATE PLAYER` character log row (`G/input_db.cpp:274`), and choosing a
+character (`CHARACTER_SELECT`).
+
+### 186.4 Scenarios and mutation sweep
+
+Five scenarios in `prodomo/tests/parity.rs`:
+
+- `an_empire_is_chosen_until_the_account_has_one_and_a_character`
+- `a_character_is_created_with_its_job_points_or_refused_with_the_legacy_type`: every refusal
+  and its type, a creation before the Channel login, the shaman's points and position inside the
+  create spread, the cooldown, and a refusal not starting it.
+- `blocked_character_creation_is_refused`
+- `a_character_is_deleted_with_the_delete_code`
+- `a_character_asked_to_rename_takes_a_free_name`
+
+Fifty-seven mutants over `select_phase.rs`, `main.rs`, `db/src/players.rs`,
+`gamedata/src/mob_names.rs`, and `gamedata/src/banword.rs`, each applied to the pristine file,
+confirmed to change executable code, and restored by checksum. A mutant in `db/` also ran
+`db/tests/players.rs`, and one in `gamedata/` the gamedata unit tests. One was killed by a compile
+error (a header dropped from `SELECT_HEADERS`) and fifty by tests. Six survived the first pass:
+
+- `offset-zero` (the random create offset never applied) and `create-no-account-silent` (no answer
+  to a creation before the Channel login) were real gaps. The create scenario now checks both, and
+  both mutants are killed.
+- `min-len-1` and `any-byte` weakened a length and letters-and-digits check in
+  `NameRules::check` that `Name::new` repeats. The duplicate check was removed.
+- `nul-optional` is equivalent: without a NUL, a 25-byte field is a 25-byte Name, which `Name::new`
+  refuses.
+- `rename-slot-4` is equivalent: `in_slot` finds nothing past slot 3 and also closes the
+  connection. The explicit bound check stays, because every client index is checked before use.
+
+Rows now `ported`: `cg.login.character_create`, `cg.login.character_delete`, `cg.login.empire`,
+`cg.login.change_name`, `gc.player_create_success`, `gc.player_create_failure`,
+`gc.player_delete_success`, `gc.player_delete_wrong_social_id`, `gc.change_name`,
+`sys.login.empire`, and `sys.login.change_name`. `sys.login.character`, `data.proto.mob`, and
+`table.banword` are `partial`.
+
+### 186.5 Receipt
+
+Run on 2026-09-26 with rustc 1.85.1, `--locked --offline`:
+
+| gate | result |
+| --- | --- |
+| `cargo fmt --all -- --check` | green |
+| `cargo clippy --workspace --all-targets -- -D warnings` | green |
+| `cargo build --workspace` | green, 0 warnings |
+| `cargo test --workspace --all-targets --no-fail-fast`, with `DATABASE_URL` (PostgreSQL 18) | **1,669 passed, 0 failed, 0 ignored**, across 31 test binaries |
+| the same, without `DATABASE_URL` | **1,669 passed, 0 failed** |
+| `cargo test --workspace --doc` | **1 passed** |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | green |
+
+Against 185.5 that is 43 more tests and no new test binary. The first gate run failed Clippy
+(`trivially_copy_pass_by_ref` on a parity helper) and rustdoc (an outer doc line on
+`pub mod select_phase` merged with the module doc, so an intra-doc link resolved in the crate root);
+both were fixed and every gate was run again. `prodomo/tests/process.rs` expects schema version 3.
+There are four new Rust files (`gamedata/src/csv_table.rs`, `gamedata/src/mob_names.rs`,
+`gamedata/src/sql_dump.rs`, and `prodomo/src/select_phase.rs`), for 158 files and 94,250 lines. No
+scratch database was left behind, and there is no stray `*.core` file in the workspace root.

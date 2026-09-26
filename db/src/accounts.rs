@@ -165,6 +165,8 @@ pub enum AccountError {
     NoSuchAccount(Login),
     /// No account has the ID.
     NoSuchAccountId(AccountId),
+    /// The account holds no character with the ID.
+    NoSuchPlayer(u32),
     /// The Name is granted to a different account. Revoke it first.
     NameGrantedElsewhere {
         /// The Name.
@@ -200,6 +202,7 @@ impl fmt::Display for AccountError {
             Self::LoginTaken(login) => write!(f, "an account with login {login} already exists"),
             Self::NoSuchAccount(login) => write!(f, "no account has login {login}"),
             Self::NoSuchAccountId(id) => write!(f, "no account has id {id}"),
+            Self::NoSuchPlayer(id) => write!(f, "the account holds no character with id {id}"),
             Self::NameGrantedElsewhere { name, login } => write!(
                 f,
                 "{name} is already granted to account {login}; revoke that grant first"

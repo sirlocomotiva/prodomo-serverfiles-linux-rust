@@ -22,15 +22,19 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use common::config::{load_server_config, ServerConfig, DEFAULT_CONFIG_PATH};
 use common::logging::{init_from_env, init_logging, LogConfig};
 use db::accounts::{find_auth_account, record_login, AccountError};
-use db::players::lobby;
+use db::players::{
+    change_name, create_player, delete_player, lobby, select_empire, Created, PlayerDelete,
+};
 use db::store::{schema_version, Store, StoreConfig};
+use gamedata::banword::banwords_from_dump;
 use gamedata::map_atlas::MapAtlas;
+use gamedata::mob_names::MobNames;
 use prodomo::auth_login::{
     judge_account, judge_credentials, login_from_field, password_candidate, AuthClaim, AuthRefusal,
     AuthRegistry, LoginGrant,
@@ -51,10 +55,20 @@ use prodomo::lifecycle::PostHandshakePhase;
 use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::operator::{prepare, read_new_password, AccountCommand, GmCommand, OperatorCommand};
 use prodomo::ready_gate::ReadyGate;
+use prodomo::select_phase::{
+    create_failure, create_offset, created, deleted, empire_selected, judge_create, judge_delete,
+    judge_empire, judge_rename, renamed, CreateCooldown, DeleteVerdict, EmpireVerdict, NameRules,
+    RenameVerdict, SelectAccount, CREATE_REFUSED, CREATE_TAKEN,
+};
 use prodomo::ServerState;
-use protocol::cg_account::CgLoginByKey;
-use protocol::cg_inventory::{HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_STATE_CHECKER};
+use protocol::cg_account::{CgLoginByKey, CgPlayerCreate, CgPlayerDelete};
+use protocol::cg_inventory::{
+    HEADER_CG_CHANGE_NAME, HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE,
+    HEADER_CG_EMPIRE, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_STATE_CHECKER,
+};
+use protocol::cg_login::CgEmpire;
 use protocol::cg_login3::CgLogin3;
+use protocol::cg_name::CgChangeName;
 use protocol::cg_wire::ClientFrame;
 use protocol::gc::{GcAuthSuccess, GcLoginFailure};
 use protocol::gc_inventory::HEADER_GC_EMPIRE;
@@ -163,6 +177,14 @@ struct ConnectionContext {
     routes: Arc<MapRoutes>,
     /// The last descriptor handle given out (legacy `DESC_MANAGER` handle count).
     handles: Arc<AtomicU32>,
+    /// The Names a character may not take.
+    names: Arc<NameRules>,
+    /// When each account last created a character.
+    creates: Arc<CreateCooldown>,
+    /// `[game] block_char_creation`.
+    block_char_creation: bool,
+    /// `[game] player_delete_level_limit` and `player_delete_level_limit_lower`.
+    delete_levels: (i32, i32),
 }
 
 impl ConnectionContext {
@@ -176,6 +198,17 @@ impl ConnectionContext {
             .unwrap_or_default();
         MapLocations::new(self.public_ip, port, maps, self.routes.shared.clone())
     }
+}
+
+/// What a descriptor holds between frames.
+#[derive(Default)]
+struct Held {
+    /// The login held after a successful auth (legacy `ConnectAccount`).
+    claim: Option<AuthClaim>,
+    /// The login held after a successful Channel login (legacy `InsertLogonAccount`).
+    logon: Option<LogonClaim>,
+    /// The account table a Channel login filled (legacy `DESC::m_accountTable`).
+    account: Option<SelectAccount>,
 }
 
 /// Resolves when another descriptor has logged in with the login this one holds; never without
@@ -233,11 +266,7 @@ async fn handle_connection(
         tokio::time::Instant::now() + context.ping_cycle,
         context.ping_cycle,
     );
-    // The login this descriptor holds after a successful auth (legacy `ConnectAccount`).
-    let mut claim: Option<AuthClaim> = None;
-    // The login this descriptor holds after a successful Channel login (legacy
-    // `InsertLogonAccount`).
-    let mut logon: Option<LogonClaim> = None;
+    let mut held = Held::default();
 
     loop {
         match session.next_buffered(clock.now()).await {
@@ -250,8 +279,7 @@ async fn handle_connection(
                         .as_ref()
                         .map(|locations| ChannelSeat { locations, handle }),
                     step,
-                    &mut claim,
-                    &mut logon,
+                    &mut held,
                 )
                 .await;
                 if !open || session.phase() == ClientPhase::Close {
@@ -291,7 +319,7 @@ async fn handle_connection(
                 info!(%addr, "Client session stopping for shutdown");
                 break;
             }
-            () = logon_kicked(logon.as_ref()) => {
+            () = logon_kicked(held.logon.as_ref()) => {
                 // `DESC::DisconnectOfSameLogin` without a character: `SetPhase(PHASE_CLOSE)`.
                 info!(%addr, "Another client logged in with this login; closing");
                 break;
@@ -308,8 +336,7 @@ async fn analyze<S>(
     context: &ConnectionContext,
     seat: Option<ChannelSeat<'_>>,
     step: LiveStep,
-    claim: &mut Option<AuthClaim>,
-    logon: &mut Option<LogonClaim>,
+    held: &mut Held,
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -326,7 +353,7 @@ where
         LiveStep::Record { phase, frame }
             if phase == ClientPhase::Auth && frame.header == HEADER_CG_LOGIN3.value() =>
         {
-            auth_login(session, addr, context, &frame, claim).await
+            auth_login(session, addr, context, &frame, &mut held.claim).await
         }
         // `CInputLogin::Analyze` (`G/input_login.cpp:1181-1182`), which serves the
         // login, select, and loading phases (`G/desc.cpp:515-519`).
@@ -337,7 +364,21 @@ where
             ) && frame.header == HEADER_CG_LOGIN2.value() =>
         {
             match seat {
-                Some(seat) => channel_login(session, addr, context, &seat, &frame, logon).await,
+                Some(seat) => channel_login(session, addr, context, &seat, &frame, held).await,
+                None => report_step(addr, LiveStep::Record { phase, frame }),
+            }
+        }
+        // The select-screen records of `CInputLogin::Analyze` (`G/input_login.cpp:1185-1244`).
+        LiveStep::Record { phase, frame }
+            if matches!(
+                phase,
+                ClientPhase::Login | ClientPhase::Select | ClientPhase::Loading
+            ) && SELECT_HEADERS.contains(&frame.header) =>
+        {
+            match seat {
+                Some(seat) => {
+                    select_screen(session, addr, context, &seat, &frame, &mut held.account).await
+                }
                 None => report_step(addr, LiveStep::Record { phase, frame }),
             }
         }
@@ -365,7 +406,7 @@ async fn channel_login<S>(
     context: &ConnectionContext,
     seat: &ChannelSeat<'_>,
     frame: &ClientFrame,
-    logon: &mut Option<LogonClaim>,
+    held: &mut Held,
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -407,7 +448,8 @@ where
         // `CInputDB::LoginAlready` kicks the holder before it answers. When the holder is this
         // descriptor it is already in `PHASE_CLOSE`, where legacy drops every output.
         Err(_)
-            if logon
+            if held
+                .logon
                 .as_ref()
                 .is_some_and(|held| held.login() == &grant.login) =>
         {
@@ -444,7 +486,12 @@ where
         characters = account_lobby.players.len(),
         "Channel login accepted"
     );
-    *logon = Some(claim);
+    held.logon = Some(claim);
+    held.account = Some(SelectAccount {
+        id: grant.account,
+        login: grant.login,
+        lobby: account_lobby,
+    });
     let delivery = async {
         session.send(&empire).await?;
         session.send(&success).await?;
@@ -457,6 +504,210 @@ where
             false
         }
     }
+}
+
+/// The select-screen headers.
+const SELECT_HEADERS: [u8; 4] = [
+    HEADER_CG_EMPIRE.value(),
+    HEADER_CG_CHARACTER_CREATE.value(),
+    HEADER_CG_CHARACTER_DELETE.value(),
+    HEADER_CG_CHANGE_NAME.value(),
+];
+
+/// Serve one select-screen record; `false` when the connection must close. A malformed record
+/// closes the connection.
+async fn select_screen<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    seat: &ChannelSeat<'_>,
+    frame: &ClientFrame,
+    account: &mut Option<SelectAccount>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let header = frame.header;
+    let replies = if header == HEADER_CG_EMPIRE.value() {
+        choose_empire(context, seat, frame, account).await
+    } else if header == HEADER_CG_CHARACTER_CREATE.value() {
+        create_character(context, seat, frame, account).await
+    } else if header == HEADER_CG_CHARACTER_DELETE.value() {
+        delete_character(context, frame, account).await
+    } else {
+        rename_character(context, frame, account).await
+    };
+    let replies = match replies {
+        Ok(replies) => replies,
+        Err(reason) => {
+            warn!(%addr, header, %reason, "Select-screen record closes the connection");
+            return false;
+        }
+    };
+    for reply in &replies {
+        if let Err(error) = session.send(reply).await {
+            warn!(%addr, %error, "Client session stopped");
+            return false;
+        }
+    }
+    true
+}
+
+/// The records a select-screen handler sends, or why the connection closes.
+type SelectReplies = Result<Vec<Vec<u8>>, String>;
+
+/// `EMPIRE`: choose the account's empire and send `GC_EMPIRE` and the character list again
+/// (`CInputLogin::Empire` and `CInputDB::EmpireSelect`).
+async fn choose_empire(
+    context: &ConnectionContext,
+    seat: &ChannelSeat<'_>,
+    frame: &ClientFrame,
+    account: &mut Option<SelectAccount>,
+) -> SelectReplies {
+    let record = CgEmpire::decode_frame(frame).map_err(|error| error.to_string())?;
+    let (empire, start) = match judge_empire(account.as_ref(), record.empire) {
+        EmpireVerdict::Close => return Err(format!("empire {} does not exist", record.empire)),
+        EmpireVerdict::Ignore => return Ok(Vec::new()),
+        EmpireVerdict::Select { empire, start } => (empire, start),
+    };
+    let Some(account) = account.as_mut() else {
+        return Ok(Vec::new());
+    };
+    // The store refuses when another descriptor already settled the account.
+    if !select_empire(&context.store, account.id, empire, start)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(Vec::new());
+    }
+    empire_selected(&mut account.lobby, empire, start);
+    let mut shown = Vec::with_capacity(GcHeaderAndByte::WIRE_SIZE);
+    GcHeaderAndByte::new(HEADER_GC_EMPIRE.value(), empire).encode_into(&mut shown);
+    let success = login_success(
+        &account.lobby,
+        &context.atlas,
+        seat.locations,
+        seat.handle,
+        random_key(),
+    )
+    .encode();
+    info!(account = account.id.get(), empire, "Empire chosen");
+    Ok(vec![shown, success])
+}
+
+/// `CHARACTER_CREATE`: create a character in the store and list it
+/// (`CInputLogin::CharacterCreate`, `CClientManager::__QUERY_PLAYER_CREATE`, and
+/// `CInputDB::PlayerCreateSuccess`).
+async fn create_character(
+    context: &ConnectionContext,
+    seat: &ChannelSeat<'_>,
+    frame: &ClientFrame,
+    account: &mut Option<SelectAccount>,
+) -> SelectReplies {
+    let record = CgPlayerCreate::decode_frame(frame).map_err(|error| error.to_string())?;
+    let Some(account) = account.as_mut() else {
+        return Ok(vec![create_failure(CREATE_REFUSED)]);
+    };
+    let offset = (create_offset(random_key()), create_offset(random_key()));
+    let player = match judge_create(
+        &context.names,
+        context.block_char_creation,
+        account,
+        &record,
+        offset,
+    ) {
+        Ok(player) => player,
+        Err(failure) => return Ok(vec![create_failure(failure)]),
+    };
+    // The DB server checks the per-account cooldown before anything else.
+    let now = Instant::now();
+    if context.creates.cooling(account.id, now) {
+        return Ok(vec![create_failure(CREATE_REFUSED)]);
+    }
+    let id = match create_player(&context.store, account.id, &player).await {
+        Ok(Created::Player(id)) => id,
+        Ok(Created::Taken) => return Ok(vec![create_failure(CREATE_TAKEN)]),
+        Err(AccountError::NoSuchAccountId(_)) => return Ok(vec![create_failure(CREATE_REFUSED)]),
+        Err(error) => return Err(error.to_string()),
+    };
+    context.creates.created(account.id, now);
+    info!(
+        account = account.id.get(),
+        player = id,
+        slot = player.slot,
+        "Character created"
+    );
+    Ok(vec![created(
+        &mut account.lobby,
+        &player,
+        id,
+        &context.atlas,
+        seat.locations,
+    )])
+}
+
+/// `CHARACTER_DELETE`: delete a character from the store (`CInputLogin::CharacterDelete`,
+/// `CClientManager::__QUERY_PLAYER_DELETE`, and `CInputDB::PlayerDeleteSuccess`).
+async fn delete_character(
+    context: &ConnectionContext,
+    frame: &ClientFrame,
+    account: &mut Option<SelectAccount>,
+) -> SelectReplies {
+    let record = CgPlayerDelete::decode_frame(frame).map_err(|error| error.to_string())?;
+    let verdict = judge_delete(account.as_ref(), record.index);
+    let Some(account) = account.as_mut() else {
+        return Ok(Vec::new());
+    };
+    let player = match verdict {
+        DeleteVerdict::Ignore => return Ok(Vec::new()),
+        DeleteVerdict::Refuse => return Ok(vec![deleted(&mut account.lobby, record.index, false)]),
+        DeleteVerdict::Ask { player } => player,
+    };
+    let (level_limit, level_limit_lower) = context.delete_levels;
+    let delete = PlayerDelete {
+        slot: record.index,
+        player,
+        code: &record.private_code,
+        level_limit,
+        level_limit_lower,
+    };
+    let done = delete_player(&context.store, account.id, &delete)
+        .await
+        .map_err(|error| error.to_string())?;
+    info!(
+        account = account.id.get(),
+        player, done, "Character delete answered"
+    );
+    Ok(vec![deleted(&mut account.lobby, record.index, done)])
+}
+
+/// `CHANGE_NAME`: give a character the new Name it was asked to choose
+/// (`CInputLogin::ChangeName` and `CInputDB::ChangeName`).
+async fn rename_character(
+    context: &ConnectionContext,
+    frame: &ClientFrame,
+    account: &mut Option<SelectAccount>,
+) -> SelectReplies {
+    let record = CgChangeName::decode_frame(frame).map_err(|error| error.to_string())?;
+    let (player, name) = match judge_rename(&context.names, account.as_ref(), &record) {
+        RenameVerdict::Ignore => return Ok(Vec::new()),
+        RenameVerdict::Close => return Err(format!("slot {} holds no character", record.index)),
+        RenameVerdict::Refuse => return Ok(vec![create_failure(CREATE_REFUSED)]),
+        RenameVerdict::Ask { player, name } => (player, name),
+    };
+    let Some(account) = account.as_mut() else {
+        return Ok(Vec::new());
+    };
+    if !change_name(&context.store, account.id, player, &name)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(vec![create_failure(CREATE_TAKEN)]);
+    }
+    info!(account = account.id.get(), player, "Character renamed");
+    Ok(renamed(&mut account.lobby, player, &name)
+        .into_iter()
+        .collect())
 }
 
 /// Send a Channel login refusal; `false` when the connection must close.
@@ -860,6 +1111,24 @@ fn load_atlas(config: &ServerConfig) -> Result<MapAtlas, String> {
     Ok(atlas)
 }
 
+/// Load the Name rules: the banned words of the Game data tables and the mob names of the protos.
+fn load_name_rules(config: &ServerConfig) -> Result<NameRules, String> {
+    let dump_path = config.game_tables.join("player.sql");
+    let dump = std::fs::read(&dump_path)
+        .map_err(|error| format!("Failed to read {}: {error}", dump_path.display()))?;
+    let banwords = banwords_from_dump(&dump).map_err(|error| {
+        format!(
+            "Failed to read the banwords in {}: {error}",
+            dump_path.display()
+        )
+    })?;
+    let proto_dir = config.proto_dir();
+    let mobs = MobNames::load(&proto_dir)
+        .map_err(|error| format!("Failed to load the mob names: {error}"))?;
+    info!(banwords = banwords.len(), "Name rules loaded");
+    Ok(NameRules::new(banwords, mobs))
+}
+
 /// Read the map routes from the configuration and the bound listeners.
 fn map_routes(config: &ServerConfig, listeners: &Listeners) -> MapRoutes {
     let channel_maps = config
@@ -883,6 +1152,47 @@ fn map_routes(config: &ServerConfig, listeners: &Listeners) -> MapRoutes {
     MapRoutes {
         channel_maps,
         shared,
+    }
+}
+
+/// What every connection shares, built once the listeners are bound and the Game data loaded.
+fn connection_context(
+    config: &ServerConfig,
+    state: &Arc<ServerState>,
+    store: &Store,
+    listeners: &Listeners,
+    atlas: MapAtlas,
+    names: NameRules,
+) -> ConnectionContext {
+    // Every legacy game Core reported its own client port (`mother_port`) to the status list; the
+    // auth server reported nothing (`G/desc_client.cpp:286-290`).
+    let channel_ports: Vec<u16> = listeners
+        .iter()
+        .filter(|listener| matches!(listener.role(), ListenerRole::Channel(_)))
+        .map(|listener| listener.local_addr().port())
+        .collect();
+    ConnectionContext {
+        clock: BootLiveClock::new(),
+        ping_cycle: Duration::from_secs(u64::from(config.game.ping_event_second_cycle)),
+        state: Arc::clone(state),
+        channels: Arc::new(ChannelStatusBoard::new(channel_ports, &config.game)),
+        store: store.clone(),
+        auth: AuthRegistry::new(),
+        shutdowned: config.game.shutdowned,
+        block_login: Arc::from(config.game.block_login.as_str()),
+        user_limit: config.game.user_limit,
+        logons: LogonRegistry::new(),
+        atlas: Arc::new(atlas),
+        public_ip: config.public_ip,
+        routes: Arc::new(map_routes(config, listeners)),
+        handles: Arc::new(AtomicU32::new(0)),
+        names: Arc::new(names),
+        creates: Arc::new(CreateCooldown::default()),
+        block_char_creation: config.game.block_char_creation,
+        delete_levels: (
+            config.game.player_delete_level_limit,
+            config.game.player_delete_level_limit_lower,
+        ),
     }
 }
 
@@ -913,6 +1223,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     // The map regions are Game data the Channel login needs; a client is not accepted before
     // they are loaded, so a missing or malformed file stops the server before any port opens.
     let atlas = load_atlas(&config)?;
+    let names = load_name_rules(&config)?;
 
     let mut listeners = Listeners::bind(&listener_plan(&config)).await?;
     for listener in listeners.iter() {
@@ -922,14 +1233,6 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
             listener.local_addr()
         );
     }
-    // Every legacy game Core reported its own client port (`mother_port`) to the status list; the
-    // auth server reported nothing (`G/desc_client.cpp:286-290`).
-    let channel_ports: Vec<u16> = listeners
-        .iter()
-        .filter(|listener| matches!(listener.role(), ListenerRole::Channel(_)))
-        .map(|listener| listener.local_addr().port())
-        .collect();
-
     // The client ports open before the world is ready, as legacy's does
     // (`main.cpp:671`). The ready gate keeps that ordering from admitting
     // clients onto a world whose store is not ready, which legacy does not do.
@@ -944,22 +1247,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     let context = ServerContext {
         state: Arc::clone(&state),
         shutdown_tx,
-        connection: ConnectionContext {
-            clock: BootLiveClock::new(),
-            ping_cycle: Duration::from_secs(u64::from(config.game.ping_event_second_cycle)),
-            state: Arc::clone(&state),
-            channels: Arc::new(ChannelStatusBoard::new(channel_ports, &config.game)),
-            store: store.clone(),
-            auth: AuthRegistry::new(),
-            shutdowned: config.game.shutdowned,
-            block_login: Arc::from(config.game.block_login.as_str()),
-            user_limit: config.game.user_limit,
-            logons: LogonRegistry::new(),
-            atlas: Arc::new(atlas),
-            public_ip: config.public_ip,
-            routes: Arc::new(map_routes(&config, &listeners)),
-            handles: Arc::new(AtomicU32::new(0)),
-        },
+        connection: connection_context(&config, &state, &store, &listeners, atlas, names),
     };
     let exit = run_accept_loop(
         &mut listeners,
