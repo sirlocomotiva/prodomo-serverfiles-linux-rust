@@ -1,18 +1,19 @@
 [package]
 name = "db"
 version = "0.1.0"
-edition = "2021"
-description = "Metin2 database layer"
+edition.workspace = true
+rust-version.workspace = true
+description = "PostgreSQL 18 store for the Prodomo server"
 
 [dependencies]
 tokio = { workspace = true }
 futures-util = { workspace = true }
 sqlx = { workspace = true }
+uuid = { workspace = true }
+argon2 = { workspace = true }
+password-hash = { workspace = true }
 tracing = { workspace = true }
-serde = { workspace = true }
 common = { path = "../common" }
-chrono = { version = "0.4", features = ["serde"] }
-thiserror = "1"
 
 [lints]
 workspace = true

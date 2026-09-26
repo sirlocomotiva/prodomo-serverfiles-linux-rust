@@ -25,7 +25,7 @@ The reasons are in [`docs/adr/`](docs/adr/).
 
 | path | contents |
 |---|---|
-| `protocol/`, `common/`, `net/`, `db/`, `world/`, `quest/`, `game-server/`, `db-server/` | The Rust workspace. It is being restructured into the single `prodomo` binary; see `AGENTS.md`. |
+| `protocol/`, `common/`, `net/`, `db/`, `gamedata/`, `world/`, `quest/`, `game-server/` | The Rust workspace. It is being restructured into the single `prodomo` binary; see `AGENTS.md`. |
 | `legacy/` | The owner's legacy Game data (protos, maps, quests, locale strings, drop and shop tables), configuration, and SQL schema and table rows. See [`legacy/README.md`](legacy/README.md). |
 | `server/` | The frozen legacy C++ server source. It is the behavioural reference and is never modified or built. |
 

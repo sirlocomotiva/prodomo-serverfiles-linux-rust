@@ -148,14 +148,14 @@ pub const GC_PLAYER_CREATE_SUCCESS_INDEX_OFFSET: usize = 1;
 pub const GC_PLAYER_CREATE_SUCCESS_PLAYER_OFFSET: usize = 2;
 /// Packed size of the nested active-profile player summary.
 pub const GC_PLAYER_CREATE_SUCCESS_PLAYER_WIRE_SIZE: usize =
-    crate::db_records::SIMPLE_PLAYER_WIRE_SIZE;
+    crate::simple_player::SIMPLE_PLAYER_WIRE_SIZE;
 /// Packed size of the active-profile `TPacketGCPlayerCreateSuccess` record.
 pub const GC_PLAYER_CREATE_SUCCESS_WIRE_SIZE: usize =
     1 + GC_PLAYER_CREATE_SUCCESS_INDEX_OFFSET + GC_PLAYER_CREATE_SUCCESS_PLAYER_WIRE_SIZE;
 /// Number of player slots in the active `TPacketGCLoginSuccess` profile.
 pub const GC_LOGIN_SUCCESS_PLAYER_COUNT: usize = 4;
 /// Packed size of one active-profile `TSimplePlayer` summary.
-pub const GC_LOGIN_SUCCESS_PLAYER_WIRE_SIZE: usize = crate::db_records::SIMPLE_PLAYER_WIRE_SIZE;
+pub const GC_LOGIN_SUCCESS_PLAYER_WIRE_SIZE: usize = crate::simple_player::SIMPLE_PLAYER_WIRE_SIZE;
 /// Raw storage width of one guild-name field, including its NUL capacity.
 pub const GC_LOGIN_SUCCESS_GUILD_NAME_BYTES: usize = crate::GUILD_NAME_MAX_LEN + 1;
 /// Packed size of the active header-32 `TPacketGCLoginSuccess` record.
@@ -403,9 +403,9 @@ impl GcLoginKey {
 /// Active-profile player summary embedded in [`GcLoginSuccess`].
 ///
 /// This is the same packed 70-byte `TSimplePlayer` representation already
-/// used by the audited DB account-record codec. It is a type alias so the GC
-/// and DB views cannot silently acquire different wire layouts.
-pub type GcLoginPlayer = crate::db_records::SimplePlayerRecord;
+/// used by [`GcPlayerCreateSuccess`]. It is a type alias so the two records
+/// cannot silently acquire different wire layouts.
+pub type GcLoginPlayer = crate::simple_player::SimplePlayerRecord;
 
 /// A complete active-profile game-to-client login-success roster record.
 ///
@@ -524,7 +524,7 @@ fn read_i32(data: &[u8], offset: usize) -> i32 {
 fn decode_gc_simple_player(data: &[u8], offset: usize) -> GcLoginPlayer {
     GcLoginPlayer {
         id: read_u32(data, offset),
-        name: read_array::<{ crate::db_records::LEGACY_CHARACTER_NAME_BYTES }>(data, offset + 4),
+        name: read_array::<{ crate::simple_player::CHARACTER_NAME_BYTES }>(data, offset + 4),
         job: data[offset + 29],
         level: data[offset + 30],
         play_minutes: read_u32(data, offset + 31),
@@ -633,7 +633,7 @@ pub struct GcPlayerCreateSuccess {
     /// Opaque account-character index from the legacy record.
     pub account_character_index: u8,
     /// Raw active-profile player summary copied into the success record.
-    pub player: crate::db_records::SimplePlayerRecord,
+    pub player: crate::simple_player::SimplePlayerRecord,
 }
 
 impl GcPlayerCreateSuccess {
@@ -641,7 +641,7 @@ impl GcPlayerCreateSuccess {
     #[must_use]
     pub const fn new(
         account_character_index: u8,
-        player: crate::db_records::SimplePlayerRecord,
+        player: crate::simple_player::SimplePlayerRecord,
     ) -> Self {
         Self {
             account_character_index,

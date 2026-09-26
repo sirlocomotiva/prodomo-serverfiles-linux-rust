@@ -16,10 +16,9 @@ use std::sync::Arc;
 use common::config::{parse_game_config, GameConfig};
 use common::logging::{init_from_env, init_logging, LogConfig};
 use game_server::client_session::{ClientDispatchOutcome, ClientSession};
-use game_server::db_client::{public_ip_field, BootReadyGate, DbClientConfig};
-use game_server::db_client_live::{DbLink, DbLinkConfig, DbLinkExit};
 use game_server::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
 use game_server::game_loop_messages::GameLoopTerminal;
+use game_server::ready_gate::ReadyGate;
 use game_server::ServerState;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -28,51 +27,6 @@ use tracing::{error, info, warn};
 
 /// Default configuration file path (TOML)
 const DEFAULT_CONFIG_PATH: &str = "game.toml";
-
-/// Build the game-to-DB link configuration from the game configuration.
-///
-/// `bind_ip` is the right source for `szPublicIP`, not a guess. The legacy
-/// `bind_ip` token writes `g_szPublicIP` directly (`config.cpp:1347-1350`), and
-/// `g_szPublicIP` is both the client bind address (`main.cpp:671`) and the
-/// string the setup record carries (`desc_client.cpp:150`). The field holds a
-/// NUL-terminated ASCII address, not four packed octets, so it is packed with
-/// [`public_ip_field`] rather than by copying `Ipv4Addr::octets`.
-///
-/// # Errors
-///
-/// Returns an error only if `bind_ip` does not fit the 16-byte `szPublicIP`
-/// field. That is a genuine misconfiguration with no safe default, because the
-/// value is about to go on the wire.
-///
-/// An unusable `db_addr` is deliberately *not* an error. The compiled-in default
-/// is the empty string with port 0, and legacy never gives up on a bad DB
-/// address: `socket_connect` returns -1 and `CLIENT_DESC::Connect` retries every
-/// three seconds forever (`desc_client.cpp:73-103`). Aborting here would make a
-/// default configuration unable to start at all.
-fn db_link_config(config: &GameConfig) -> Result<DbLinkConfig, Box<dyn std::error::Error>> {
-    if config.db_addr.is_empty() || config.db_port == 0 {
-        warn!(
-            db_addr = %config.db_addr,
-            db_port = config.db_port,
-            "No usable DB address is configured; the DB link will keep retrying and no client \
-             will be served"
-        );
-    }
-    let client = DbClientConfig {
-        listen_port: config.mother_port,
-        p2p_port: config.p2p_port,
-        channel: config.channel,
-        public_ip: public_ip_field(&config.bind_ip).map_err(|error| error.to_string())?,
-        map_allow: config.map_allow.clone(),
-        auth_server: config.auth_server,
-        item_id_range: [0, 0],
-    };
-    Ok(DbLinkConfig::new(
-        config.db_addr.clone(),
-        config.db_port,
-        client,
-    ))
-}
 
 /// Parse command line arguments
 struct CliArgs {
@@ -175,7 +129,6 @@ fn initialize_server(args: &CliArgs) -> Result<GameConfig, Box<dyn std::error::E
     info!("  Channel: {}", config.channel);
     info!("  Port: {}", config.mother_port);
     info!("  P2P Port: {}", config.p2p_port);
-    info!("  DB Address: {}:{}", config.db_addr, config.db_port);
 
     Ok(config)
 }
@@ -329,7 +282,7 @@ async fn run_accept_loop(
     context: &ServerContext,
     game_loop: &mut GameLoopHandle,
     shutdown_signal: ShutdownSignal,
-    boot_gate: &BootReadyGate,
+    ready_gate: &ReadyGate,
 ) -> Result<AcceptLoopExit, Box<dyn std::error::Error>> {
     // Boxed and pinned once, not per `select!` iteration: the wait future owns
     // the signal streams, so recreating it each pass would drop them and lose a
@@ -350,14 +303,14 @@ async fn run_accept_loop(
                     warn!(%addr, "Rejecting new connection while shutting down");
                     drop(stream);
                 }
-                // The boot-ready gate is checked before the handler is spawned,
-                // not inside it, so an unready server does not allocate a
+                // The ready gate is checked before the handler is spawned, not
+                // inside it, so an unready server does not allocate a
                 // per-connection task for every client that arrives.
-                Ok((stream, addr)) if !boot_gate.admit() => {
+                Ok((stream, addr)) if !ready_gate.admit() => {
                     warn!(
                         %addr,
-                        refused = boot_gate.refused(),
-                        "Refusing client connection before the DB boot reply"
+                        refused = ready_gate.refused(),
+                        "Refusing client connection before startup has finished"
                     );
                     drop(stream);
                 }
@@ -395,22 +348,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Server initialized successfully");
     info!("Listening for connections on port {}", config.mother_port);
 
-    // The client port opens before the DB link, exactly as legacy does
-    // (`main.cpp:671` binds, `main.cpp:697` creates the connector). The
-    // boot-ready gate below is what keeps that ordering from admitting clients
-    // onto an unbooted world, which legacy does not do.
-    let boot_gate = Arc::new(BootReadyGate::closed());
-    let db_handle = {
-        let link_config = db_link_config(&config)?;
-        let link = DbLink::new(link_config, Arc::clone(&boot_gate));
-        let link_shutdown = shutdown_tx.subscribe();
-        info!("Starting the game-to-DB link");
-        tokio::spawn(async move { link.run(link_shutdown).await })
-    };
+    // The client port opens before the world is ready, as legacy's does
+    // (`main.cpp:671`). The ready gate keeps that ordering from admitting
+    // clients onto a world whose Game data is not loaded, which legacy does not
+    // do. Nothing is loaded yet, so the gate opens once the game loop runs.
+    let ready_gate = ReadyGate::closed();
 
     let mut game_loop = spawn_game_loop(GameLoopConfig::default(), |_| {})?;
     let controller = game_loop.controller();
     info!(thread_id = ?game_loop.thread_id(), "Dedicated game loop started");
+    ready_gate.open();
 
     let context = ServerContext { state, shutdown_tx };
     let exit = run_accept_loop(
@@ -418,18 +365,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &context,
         &mut game_loop,
         shutdown_signal,
-        &boot_gate,
+        &ready_gate,
     )
     .await;
+    ready_gate.close();
     begin_shutdown(&context.state, &context.shutdown_tx);
-    // A shutdown broadcast reaches the DB link, but it is only observed between
-    // attempts, so the task is signalled and then awaited rather than detached.
-    // Detaching it would let the process exit mid-write to the DB peer.
-    match db_handle.await {
-        Ok(DbLinkExit::Shutdown) => info!("DB link stopped"),
-        Err(error) => warn!(%error, "DB link task did not join cleanly"),
-    }
-    boot_gate.close();
     let exit = match exit {
         Ok(exit) => exit,
         Err(run_error) => {

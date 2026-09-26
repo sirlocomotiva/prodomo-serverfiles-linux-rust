@@ -21,8 +21,8 @@
 //! phase record goes out as **plaintext** even though every later record on the
 //! same descriptor is encrypted. Getting this backwards produces a client that
 //! desynchronizes on the very first phase switch and is very hard to diagnose,
-//! so the ordering is explicit in [`LiveClientSession::apply`] and pinned by
-//! [`tests::the_phase_record_is_written_before_tea_is_enabled`].
+//! so the ordering is explicit in `LiveClientSession::apply` and pinned by the
+//! test `the_phase_record_is_written_before_tea_is_enabled`.
 //!
 //! # What this module still does not own
 //!
@@ -406,23 +406,28 @@ where
             return Err(LiveError::PhaseClosed);
         }
 
-        // Decoding, then reading, then decoding again. The loop is bounded
-        // because every iteration either returns or completes one `read`.
-        loop {
-            self.drain_cipher_into_decoder()?;
+        // Decode what is already buffered, so coalesced frames never wait on
+        // the socket.
+        self.drain_cipher_into_decoder()?;
+        if let Some(frame) = self.decoder.try_decode()? {
+            return Ok(self.handle_frame(frame, now).await);
+        }
 
-            if let Some(frame) = self.decoder.try_decode()? {
-                return Ok(self.handle_frame(frame, now).await);
-            }
-
-            let mut chunk = [0_u8; READ_CHUNK_SIZE];
-            let bytes_read = self.stream.read(&mut chunk).await?;
-            if bytes_read == 0 {
-                return Ok(LiveStep::PeerClosed {
-                    leftover: self.decoder.buffered_len(),
-                });
-            }
-            self.crypto.feed_input(&chunk[..bytes_read])?;
+        // Then perform exactly one read and decode again.
+        let mut chunk = [0_u8; READ_CHUNK_SIZE];
+        let bytes_read = self.stream.read(&mut chunk).await?;
+        if bytes_read == 0 {
+            return Ok(LiveStep::PeerClosed {
+                leftover: self.decoder.buffered_len(),
+            });
+        }
+        self.crypto.feed_input(&chunk[..bytes_read])?;
+        self.drain_cipher_into_decoder()?;
+        match self.decoder.try_decode()? {
+            Some(frame) => Ok(self.handle_frame(frame, now).await),
+            None => Ok(LiveStep::Pending {
+                buffered: self.decoder.buffered_len(),
+            }),
         }
     }
 
@@ -538,9 +543,15 @@ where
 
     /// Apply the input boundary a `SetPhase` effect selected.
     fn install_boundary(&mut self, boundary: LifecycleInputBoundary) -> Result<(), LiveError> {
-        let desired = match boundary {
-            LifecycleInputBoundary::Plaintext => DescriptorCryptoMode::Plaintext,
-            LifecycleInputBoundary::LegacyTea => self.crypto.mode(),
+        // `SetPhase` enables TEA with the default pair; `SetSecurityKey` later
+        // replaces it through `install_client_keys`. A TEA boundary that is
+        // already active, with either pair, is left as it is.
+        let desired = match (boundary, self.crypto.mode()) {
+            (LifecycleInputBoundary::Plaintext, _) => DescriptorCryptoMode::Plaintext,
+            (LifecycleInputBoundary::LegacyTea, DescriptorCryptoMode::Plaintext) => {
+                DescriptorCryptoMode::LegacyTeaDefault
+            }
+            (LifecycleInputBoundary::LegacyTea, active) => active,
         };
         if desired == self.crypto.mode() {
             return Ok(());
@@ -634,10 +645,15 @@ mod tests {
         CgInboundHandshake::new(CgHandshakeHeader::Handshake, TOKEN, NOW, 0).encode()
     }
 
-    /// The headline rule: `GC_PHASE` is written in **plaintext** even though the
-    /// very next effect on the same descriptor is encrypted. If the ordering in
-    /// `apply` is ever reversed, the client desynchronizes on its first phase
-    /// switch and never recovers.
+    /// The headline rule: `GC_PHASE` is written in **plaintext** and TEA is
+    /// enabled only after it. If the ordering in `apply` is ever reversed, the
+    /// client desynchronizes on its first phase switch and never recovers.
+    ///
+    /// The initial handshake writes nothing else: `CInputProcessor::Handshake`
+    /// calls `HandshakeProcess(..., false)` in `PHASE_HANDSHAKE`, and only the
+    /// `bInfiniteRetry` branch writes `HEADER_GC_TIME_SYNC`
+    /// (`input.cpp:142-157`, `desc.cpp:628-634`). The later resync handshake
+    /// takes that branch, so its acknowledgement is the first TEA record.
     #[tokio::test]
     async fn the_phase_record_is_written_before_tea_is_enabled() {
         let (mut session, mut peer) = session().await;
@@ -654,44 +670,35 @@ mod tests {
             DescriptorCryptoMode::LegacyTeaDefault,
             "TEA is installed after the phase record"
         );
-
-        // The phase record is the first record the reducer emits for a phase
-        // switch, and it must be readable as plaintext GC.
-        let phase_record = written.first().expect("a phase record is written");
         let expected = GcPhase::new(ClientPhase::Login.legacy_value()).encode();
         assert_eq!(
-            phase_record, &expected,
-            "the phase record must not be encrypted"
+            written,
+            vec![expected.clone()],
+            "the initial handshake writes exactly one plaintext phase record"
         );
 
-        // Everything after it goes through the TEA boundary, so it must not
-        // appear verbatim.
-        let tail = &written[1..];
-        assert!(
-            !tail.is_empty(),
-            "a completed handshake also writes the resync acknowledgement"
-        );
-        for record in tail {
-            assert_ne!(
-                record, &expected,
-                "no later record may be a second plaintext phase record"
-            );
-            assert_eq!(
-                record.len() % 8,
-                0,
-                "every TEA output unit is a whole number of 8-byte blocks"
-            );
-        }
-
-        // Nothing else in this step leaked plaintext.
-        let mut all = Vec::new();
-        for record in &written {
-            all.extend_from_slice(record);
-        }
+        // The resync arrives encrypted under `HEADER_CG_TIME_SYNC`, the only
+        // header `CInputLogin::Analyze` routes to `Handshake`
+        // (`input_login.cpp:1173`), and is answered through TEA.
+        let resync = CgInboundHandshake::new(CgHandshakeHeader::TimeSync, TOKEN, NOW, 0).encode();
+        let mut client = DescriptorCrypto::with_default_limit().unwrap();
+        client.enable_default_legacy_tea().unwrap();
+        peer.write_all(&client.encrypt_output(&resync).unwrap())
+            .await
+            .unwrap();
+        let step = session.step(NOW).await.unwrap();
+        let LiveStep::Handled(LiveOutcome::Handshake { written, phase, .. }) = step else {
+            panic!("expected a handled resync handshake, got {step:?}");
+        };
+        assert_eq!(phase, ClientPhase::Login, "a resync keeps the phase");
+        let ack = client
+            .encrypt_output(&[crate::handshake::HEADER_GC_TIME_SYNC])
+            .unwrap();
+        assert_eq!(ack.len() % 8, 0, "a TEA output unit is whole 8-byte blocks");
         assert_eq!(
-            all.windows(expected.len()).filter(|w| *w == expected).count(),
-            1,
-            "exactly one plaintext phase record, not one per effect"
+            written,
+            vec![ack],
+            "the resync acknowledgement is the one-byte time sync under TEA"
         );
     }
 
@@ -732,7 +739,14 @@ mod tests {
             first,
             LiveStep::Handled(LiveOutcome::Handshake { phase: ClientPhase::Login, .. })
         ));
-        assert_eq!(session.buffered(), 0, "the first record is fully drained");
+        // Both records arrived in one read, before TEA was enabled, so the
+        // second one is already plaintext. Legacy decrypts only bytes read
+        // after `m_bEncrypted` is set (`desc.cpp:290-319`).
+        assert_eq!(
+            session.buffered(),
+            handshake_frame().len(),
+            "only the first record is consumed"
+        );
 
         let second = session.step(NOW).await.unwrap();
         assert!(

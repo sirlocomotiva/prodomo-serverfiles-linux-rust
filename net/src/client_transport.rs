@@ -2,8 +2,7 @@
 //!
 //! This module owns stream I/O and fragmentation only. Header lookup, frame
 //! sizing, variable-header rejection, and EOF validation stay in
-//! [`protocol::cg_wire`]. The transport does not use the generic two-byte
-//! [`crate::buffer::ReadBuffer`] framing.
+//! [`protocol::cg_wire`].
 
 use std::error::Error;
 use std::fmt;

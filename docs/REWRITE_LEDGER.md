@@ -14419,3 +14419,258 @@ at resolution with `no matching package named 'tracing-appender' found`,
 because this machine's offline registry cache lacks that crate. The owner
 already approved one online `cargo fetch` (planning Q23); it will run with
 the step 1 dependency changes. The last green receipt is still 175.5.
+
+## 177. Step 1, part one: the DB-peer and GG code is retired and the rule modules move to `gamedata`
+
+This is the first code section of build step 1 (ADR-0002, ADR-0003). It
+deletes the second process and the legacy DB-peer and GG protocols, keeps
+every table rule that still applies as a typed builder in a new `gamedata`
+crate, and moves the workspace dependencies to PostgreSQL and Lua 5.1. The
+`game-server` rename, the TOML topology, and the first schema follow in
+sections 178 and 179.
+
+### 177.1 Dependencies
+
+- The workspace now uses `resolver = "3"` and a `[workspace.package]` with
+  `edition = "2021"` and `rust-version = "1.85"`; every crate inherits both.
+- **Added** as workspace dependencies: `sqlx` 0.8 (default features off;
+  `postgres`, `runtime-tokio`, `macros`, `migrate`, `uuid`), `uuid` 1,
+  `argon2` 0.5, `password-hash` 0.5 with `getrandom`, `mlua` 0.10 with
+  `lua51` and `vendored`, `clap` 4 with `derive`, `tracing-appender` 0.2,
+  `tempfile` 3, and `rustix` 1 with `process`. Crate-local copies of
+  `tracing-appender`, `tempfile`, and `rustix` now point at the workspace.
+- **Removed**: `bytes`, `bytemuck`, `ring`, `chrono`, `thiserror`, and the
+  MySQL `sqlx` 0.7 and `mlua` 0.9 `lua54` entries. `bytes` was declared by
+  `protocol`, `common`, `net`, and `world` but imported by none of them;
+  removing it changed only four dependency edges in `Cargo.lock`.
+- The one online `cargo fetch` the owner approved (planning Q23) ran for
+  these changes. Resolved versions: sqlx 0.8.6, mlua 0.10.5, argon2 0.5.3,
+  clap 4.6.7, uuid 1.26.1.
+- `home` is pinned to **0.5.11** in `Cargo.lock`. It arrives through
+  `sqlx` → `etcetera`, and 0.5.12 requires rustc 1.88, above the 1.85.1
+  toolchain on this machine. A `cargo update` without `--precise` would undo
+  the pin.
+- `Cargo.lock` is tracked by Git (added in `231d0831`), so this lockfile
+  change, including the pin, is part of the commit.
+
+### 177.2 Removed
+
+| where | what |
+| --- | --- |
+| `db-server/` | The whole crate: binary, peer framing, peer policy and transport identity, boot composition, caches, `DbRequestService`, `BootTableLoader`, every SQLx adapter, and its three integration tests. Removed with `git rm`. |
+| `tools/packet_compare/` | Did not build (missing `clap`, deleted `protocol::cg`). Removed with `git rm`. |
+| `protocol` | `db_boot`, `db_map_locations`, `db_market_price`, `db_records`, `db_setup`, `db_wire`, `gg`, `gg_inventory`, and `tests/db_wire_integration.rs`. |
+| `net` | `buffer` (the generic length-prefixed `ReadBuffer`, never the client framing) and `db_transport`. |
+| `db` | `pool` (the MySQL pool and query streaming). |
+| `game-server` | `db_client` (`GameDbClient`, `BootReadyGate`) and `db_client_live` (`DbLink`). `main.rs` no longer opens a DB socket. |
+
+The deleted sources stay in Git history at `231d0831`. GG coverage (4 of
+36) is no longer measured: ADR-0002 replaces GG with an in-process bus.
+
+### 177.3 Added
+
+| where | what |
+| --- | --- |
+| `gamedata` (new crate) | `records` (the packed x86 table record layouts moved out of `protocol::db_records`) and nine row-rule modules: `banword`, `event`, `item_attr`, `land`, `object_proto`, `refine`, `renewal_shop`, `shop`, `skill`. |
+| `common::gm` | GM host and administrator rules from the legacy boot tail. |
+| `db::item_id_range` | The item-ID range pool. |
+| `db::store` | The PostgreSQL pool (`Store`, `StoreConfig`, `StoreError`). |
+| `protocol::simple_player` | The 70-byte `TSimplePlayer` record, which `GC_LOGIN_SUCCESS` embeds; `gc.rs` now imports it from here. |
+| `game-server::account_records` | `TAccountTable`, `TPlayerTable`, and their request records as plain values. They crossed the DB-peer socket in legacy; in one process they have no wire layout. Client-visible byte-array widths keep their legacy limits. |
+| `game-server::ready_gate` | `ReadyGate`, replacing `BootReadyGate` (177.8). |
+
+`AccountPlayerSession` and `AccountPlayerRouter` are re-based on
+`account_records` instead of the deleted DB-peer records. The DB-frame entry
+points `on_login_frame` and `on_player_frame` are removed, together with
+their header decoders and the malformed-frame and unsupported-header errors.
+The typed entry points `on_login_result` and `on_player_result` remain, and
+the store will call them directly.
+
+### 177.4 Rule modules become typed builders (planning Q21, option b)
+
+Each rule module now turns caller-supplied rows into a `Vec` of typed
+records. What was dropped and what was kept:
+
+- **Dropped**: the `u16` section count, the record-size and section-byte
+  limits, `BootSection` framing, the query objects, the row-source traits,
+  the loaders, and the table-postfix and SQL-name code. They existed only to
+  build the DB-peer boot stream.
+- **Kept**: the legacy statement text as a constant, because it documents
+  the column order the decoders expect; the row types; both the strict and
+  the legacy-compatible decoders; and a row cap. The default cap is
+  `u16::MAX`, documented as "the legacy boot stream counted records in a
+  `WORD`, so no legacy table held more".
+
+A zero-row source follows the legacy loader, table by table
+(`server/server/db/ClientManagerBoot.cpp`):
+
+| refused | accepted |
+| --- | --- |
+| `shop` (`:319`), `skill_proto` (`:671`), `item_attr` (`:783`), `item_attr_rare` (`:857`) | `refine_proto`, `shopex` (renewal shop), `banword`, `land`, `object_proto`, `event` |
+
+**Finding.** The deleted `db-server` `item_attr` loader accepted an empty
+source and served an empty table. Legacy refuses it at `:783` and `:857`.
+The `gamedata` builder refuses it, and a test pins the refusal.
+
+### 177.5 Modules that did not move
+
+`docs/STATUS.md` said the "object and proto row rules" would move to
+`gamedata`. Only `object_proto` did. The rest are not needed:
+
+| module | why it did not move |
+| --- | --- |
+| `item_proto`, `mob_proto` | SQL row decoders. The authoritative protos are the text files in `legacy/gamedata/proto` (`PROTO_FROM_DB = 0`), which need a text reader, not a SQL one. |
+| `object` | Placed building objects are runtime state, served from the fresh store. |
+| `market_price`, `monarch`, `monarch_state` | Runtime tables, served from the fresh store. |
+| `player`, `player_index`, `quest`, `login` | Account and character state, served from the fresh store (section 179 onward). |
+
+All of them remain in Git history at `231d0831`.
+
+### 177.6 GM list rules
+
+`common::gm` keeps `GmAuthority` (the five exact legacy names; anything else
+drops the row), the `trim_and_lower` account rule, the plain-copy name rule,
+and the host and administrator builders, now returning `Vec<GmHost>` and
+`Vec<AdminInfo>` under `GmListLimits` (default `u16::MAX` rows each).
+
+- `AdminQuery` is dropped. It existed to validate the peer's `szIP` before
+  interpolating it into SQL, and there is no DB peer anymore.
+- **New `AdminRow::serves(server_ip)`** replaces the SQL filter
+  `mServerIP='ALL' or mServerIP='<szIP>'`. It compares under the legacy
+  `latin1_swedish_ci` collation's rules for these values: trailing spaces
+  ignored (PAD SPACE) and ASCII case ignored. A row with a NULL `mServerIP`
+  never matches, as in SQL. A missing server address matches only the `ALL`
+  rows, as legacy's NULL-to-`ALL` substitution did. Two tests pin both cases.
+
+### 177.7 Item-ID ranges
+
+`db::item_id_range` keeps the legacy constants (`MAX_ITEM_ID =
+4_290_000_000`, `MINIMUM_RANGE = 10_000_000`, `MINIMUM_REMAIN_COUNT =
+10_000`, checked against `ItemIDRangeManager.h:8-10`) and the usability rule.
+Two changes:
+
+- An exhausted pool returns `None` instead of the legacy all-zero range. That
+  is a representation change, not a behavior change: legacy game code shut
+  down on a zero range (`game/item_manager_idrange.cpp:55-61`), and the
+  caller now has to handle `None` explicitly.
+- `take_active_and_spare()` takes two ranges or none, so a pool holding one
+  range is not split. The collision counter is dropped: with one process
+  there is one consumer.
+
+### 177.8 Divergence: `ReadyGate`
+
+Legacy has no readiness flag. It binds the client port (`main.cpp:671`),
+creates the DB connector afterwards (`main.cpp:697`), and calls
+`AcceptDesc()` whether or not `TryConnect()` succeeded (`main.cpp:840-856`).
+It therefore accepts and logs in players before its tables exist, which is a
+Defect. `ReadyGate` refuses clients until startup has finished and again once
+shutdown begins, and counts both admissions and refusals. `main.rs` arms the
+signal handlers, binds, starts the game loop, opens the gate, and closes it
+when the accept loop exits. With no Game data loaded yet, "startup has
+finished" means only that the game loop is running. The gate will wait for
+the loaded world when step 3 loads maps and protos.
+
+### 177.9 `client_live` fixes
+
+- **`step()` no longer loops until a record arrives.** It decodes whatever
+  is already buffered, performs exactly one read, decodes again, and returns
+  `LiveStep::Pending { buffered }`. The old loop kept reading until a whole
+  record had arrived, so a partial record held the caller inside `step()`
+  with no way to see progress or apply its own timeout.
+- **A TEA boundary now enables TEA.** The old mapping from
+  `LifecycleInputBoundary::LegacyTea` kept the current mode, so a plaintext
+  descriptor stayed plaintext after the handshake. `(LegacyTea, Plaintext)`
+  now becomes `LegacyTeaDefault`, as `SetPhase` does in legacy, and a
+  descriptor that already has a TEA pair (default or installed by
+  `SetSecurityKey`) keeps it.
+- **The phase record comes before TEA.** The test
+  `the_phase_record_is_written_before_tea_is_enabled` now pins the legacy
+  order. The first handshake writes exactly one plaintext `GC_PHASE`:
+  `HEADER_GC_TIME_SYNC` is written only on the `bInfiniteRetry` branch
+  (`input.cpp:142-157`, `desc.cpp:628-634`). A resync handshake arrives
+  encrypted under `HEADER_CG_TIME_SYNC` (`input_login.cpp:1173`) and is
+  answered with a TEA-encrypted one-byte time sync.
+- **Coalesced records stay plaintext.** When the phase record and the next
+  record arrive in one read, the second stays buffered as plaintext, because
+  legacy decrypts only the bytes read after `m_bEncrypted` is set
+  (`desc.cpp:290-319`).
+
+### 177.10 The PostgreSQL store refuses other schemes
+
+`Store::lazy` and `Store::connect` accept only `postgres://` and
+`postgresql://`. `PgConnectOptions` ignores the scheme, so without this check
+a `mysql://` URL left over from a legacy configuration would have been
+parsed and tried as PostgreSQL. `StoreError::UnsupportedScheme` carries only
+the scheme, never the URL, so the error cannot leak a password; a test pins
+that. A malformed URL and a zero-sized pool are refused before any
+connection. `Store::lazy` performs no network I/O, so it is not a readiness
+signal.
+
+### 177.11 Documentation link fixes
+
+`cargo doc` with `-D warnings` failed on unresolved links in
+`game-server/src/lib.rs`. An outer doc on `pub mod client_live` combined
+with the module's inner doc, so rustdoc resolved `ClientLifecycle`,
+`DescriptorCrypto`, `ClientFrameDecoder`, and `LiveClientSession::apply` in
+the crate root. The outer doc now sits on `client_session`, where it
+belonged. The links to the private `apply` and to a test function are now
+plain code spans. Two stale doc lines for the deleted DB modules were
+removed.
+
+### 177.12 An intermittent process test
+
+In the first full run of this section,
+`game_server_process_starts_and_shuts_down_cleanly_on_sigterm` failed once:
+the server exited non-zero about 10 ms after starting. It did not reproduce
+in 12 isolated runs, 3 full runs, or a manual SIGTERM run. The suspected
+cause is a port race. `reserve_free_port` binds `127.0.0.1:0`, reads the
+port, and drops the listener, so another process can take the port before
+the server binds it. The readiness probe then reaches the other process and
+the server exits with a bind error. The assertion now prints the exit
+status and the server's console output. Section 178 fixes the race by
+binding port 0 in the server and logging the chosen port.
+
+### 177.13 Follow-ups
+
+- **`#[allow]` attributes remain**: 27 in the crates this section created or
+  moved code into (14 in `gamedata/src/records.rs`, including
+  `trivially_copy_pass_by_ref`, `similar_names`, and `too_many_lines`; 12 in
+  `gamedata/src/renewal_shop.rs`, including `cast_possible_truncation`; 1 in
+  `common/src/config.rs`), plus 32 elsewhere (`protocol` 21, `game-server` 8,
+  `world` 3). All of them came over from earlier code. `AGENTS.md` forbids
+  `#[allow]` for Clippy findings, but removing them safely needs Clippy on
+  this machine (177.14).
+- **Dependencies staged but not yet imported**, kept on purpose:
+  - `db`: `argon2`, `password-hash`, `uuid`, `futures-util`, `tracing`,
+    `common` (section 179);
+  - `game-server`: `clap`, `toml`, `serde`, `tracing-subscriber`, `db`,
+    `gamedata`, `world`, `quest`, and the dev-dependency `tempfile`
+    (section 178);
+  - `quest`: `mlua` (ADR-0004);
+  - older: `world`'s `tokio`, `tracing`, and `serde`; `protocol`'s `serde`;
+    `net`'s `tracing`.
+
+### 177.14 Receipt
+
+Run on 2026-09-26 with rustc 1.85.1, `--locked --offline`:
+
+| gate | result |
+| --- | --- |
+| `cargo build --workspace` | green, 0 warnings |
+| `cargo test --workspace --all-targets --no-fail-fast` | **1,520 passed, 0 failed, 0 ignored**, across 26 test binaries |
+| `cargo test --workspace --doc` | **1 passed**, across 8 doc binaries |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | green |
+| `cargo fmt --all -- --check` | **not run**: `rustfmt` is not installed |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **not run**: `cargo-clippy` is not installed |
+
+In total, **1,521 tests** over **133 workspace Rust files** and **82,727
+lines**. No stray `*.core` file was left in the workspace root. The drop
+from 2,117 tests (175.5) comes from deleting `db-server`, the DB-peer and GG
+codecs, and the boot-framing and loader tests. The moved modules kept their
+row-rule tests; tests of the dropped section framing went with it.
+
+Formatting was checked by hand: rustfmt style, no code line over 100
+columns. Installing the two tools needs an online fetch that the owner has
+not approved yet: `sudo apt-get install rustfmt rust-clippy`.
+
+Protocol coverage is unchanged: CG 91 of 92, GC 96 of 134.

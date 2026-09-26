@@ -152,18 +152,19 @@ fn game_server_process_starts_and_shuts_down_cleanly_on_sigterm() {
     let output = process.wait_with_output();
 
     // Then: shutdown succeeds, lifecycle observables are emitted, and resources close.
-    assert!(
-        output.status.success(),
-        "game server should exit successfully"
-    );
-    assert!(
-        TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_err(),
-        "listener port should be closed after process exit"
-    );
     let console = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "game server should exit successfully, got {} with:\n{console}",
+        output.status
+    );
+    assert!(
+        TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_err(),
+        "listener port should be closed after process exit"
     );
     for observable in [
         format!("Listening for connections on port {port}"),

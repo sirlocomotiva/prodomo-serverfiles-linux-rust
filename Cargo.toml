@@ -1,28 +1,42 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "protocol",
     "common",
     "net",
     "db",
+    "gamedata",
     "world",
     "quest",
     "game-server",
-    "db-server",
 ]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-bytemuck = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 serde = { version = "1", features = ["derive"] }
-sqlx = { version = "0.7", features = ["mysql", "runtime-tokio"] }
-mlua = { version = "0.9", features = ["lua54", "send"] }
-ring = "0.17"
 toml = "0.8"
+sqlx = { version = "0.8", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "macros",
+    "migrate",
+    "uuid",
+] }
+uuid = "1"
+argon2 = "0.5"
+password-hash = { version = "0.5", features = ["getrandom"] }
+mlua = { version = "0.10", features = ["lua51", "vendored"] }
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+rustix = { version = "1", features = ["process"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

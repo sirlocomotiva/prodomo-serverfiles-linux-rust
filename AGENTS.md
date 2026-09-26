@@ -84,9 +84,9 @@ parts exist today.
 | crate | contents |
 |---|---|
 | `protocol/` | Transport-free client wire codecs: CG and GC records, framing helpers, TEA, and the machine-readable CG and GC inventories. Nothing server-to-server. |
-| `common/` | Configuration, logging, legacy enums and constants. `src/tables.rs` uses `repr(C, packed)` structs; never size a wire record from them. |
+| `common/` | Configuration, logging, legacy enums and constants, and the GM list rules. `src/tables.rs` uses `repr(C, packed)` structs; never size a wire record from them. |
 | `net/` | Tokio transport helpers for the fixed-size client framing. |
-| `db/` | The PostgreSQL store: pool, migrations, and the queries each system needs. |
+| `db/` | The PostgreSQL store: pool, migrations, the item-ID range pool, and the queries each system needs. |
 | `gamedata/` | Readers for the legacy Game data formats, the importer for `legacy/sql/gamedata`, and the pure rule modules kept from the retired DB server. |
 | `world/` | Maps, sectors, characters, events, and the gameplay rules that act on them. |
 | `quest/` | The `qc` port and the Lua 5.1 quest runtime. |

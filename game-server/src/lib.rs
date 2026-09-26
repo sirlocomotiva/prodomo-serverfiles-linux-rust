@@ -10,8 +10,9 @@ pub mod game_loop;
 /// Typed commands, effects, and terminal acknowledgements for the game loop.
 pub mod game_loop_messages;
 
-/// Isolated fixed-frame client session and dispatch boundary.
 pub mod client_live;
+
+/// Isolated fixed-frame client session and dispatch boundary.
 pub mod client_session;
 
 /// Pure handshake state reduction and ordered descriptor effects.
@@ -29,12 +30,6 @@ pub mod heartbeat;
 /// Transport-free descriptor lifecycle adapter.
 pub mod lifecycle;
 
-/// Transport-free game-to-DB client state machine and boot-ready gate.
-pub mod db_client;
-
-/// Live Tokio socket adapter for the game-to-DB link.
-pub mod db_client_live;
-
 /// Source-derived legacy descriptor TEA key and buffering boundary.
 pub mod descriptor_crypto;
 
@@ -46,6 +41,10 @@ pub mod account_player;
 
 /// Transport-free account/player and lifecycle routing seam.
 pub mod account_player_router;
+
+pub mod account_records;
+
+pub mod ready_gate;
 
 /// Pure, injected policy for the legacy sync-position gameplay action.
 pub mod sync_position;

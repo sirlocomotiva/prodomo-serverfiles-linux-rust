@@ -27,6 +27,9 @@ pub mod vid;
 /// Data structures ported from C++ tables.h
 pub mod tables;
 
+/// GM host and administrator rules ported from the legacy boot tail
+pub mod gm;
+
 pub use tracing::{debug, error, info, trace, warn};
 
 /// Entity identifier type used throughout the server

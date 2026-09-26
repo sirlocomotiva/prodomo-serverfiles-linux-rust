@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-09-26, after the planning decisions recorded in `docs/adr/` (ADR-0001 to
-ADR-0004) and ledger section 176.
+Last reviewed: 2026-09-26, after ledger section 177 (step 1, part one: the DB-peer and GG code is
+retired and the rule modules are in `gamedata`).
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -10,10 +10,9 @@ and the ledger disagree, the most recent ledger section wins; update this page i
 ## Summary
 
 **No client can log in yet.** The workspace has broad, well-tested client wire codecs (CG 91 of 92,
-GC 96 of 134), TEA, and transport-free descriptor reducers. It also has a two-process layout, a
-`game-server` and a `db-server` talking the legacy DB-peer protocol over MySQL adapters, which the
-owner's decisions of 2026-09-26 retire. Ledger sections 1-175 record how that code was built; they
-stay as history.
+GC 96 of 134), TEA, and transport-free descriptor reducers. The two-process layout (a `game-server`
+and a `db-server` talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177;
+sections 1-175 record how it was built and stay as history.
 
 The direction since then:
 
@@ -29,7 +28,7 @@ Each step lands as one or more ledger sections with a gate receipt.
 
 | step | scope | state |
 |---|---|---|
-| 1. Restructure | Retire the DB-peer and GG code and move the pure rule modules into `gamedata`. Rename `game-server` to the single `prodomo` binary with TOML configuration for the auth and Channel listeners, the Channel map sets, and PostgreSQL. First PostgreSQL schema and migrations. The Operator command that creates accounts and GMs. | **Next.** |
+| 1. Restructure | Retire the DB-peer and GG code and move the pure rule modules into `gamedata`. Rename `game-server` to the single `prodomo` binary with TOML configuration for the auth and Channel listeners, the Channel map sets, and PostgreSQL. First PostgreSQL schema and migrations. The Operator command that creates accounts and GMs. | **In progress.** Retirement and `gamedata` done (177). The rename and TOML topology (178) and the schema and Operator command (179) are next. |
 | 2. Parity inventory | Every legacy system and handler, listed from the source in `.scratch/parity/`, each with a porting status. The scripted-client test crate. | Not started. |
 | 3. Vertical slice | Handshake and TEA, auth (`LOGIN3`), login by key, character select, create, and delete, loading, entering the game, movement and chat, a Warp between maps, and logout with save. | Not started. Codecs and reducers exist; see below. |
 | 4. Game systems | In dependency order: items and inventory; NPCs, shops, and Transfers (trade, safebox); the quest runtime (`qc` port and Lua 5.1, with its API growing as each later system lands); monsters, combat, drops, and exp; skills and affects; party, guild, messenger, and the cross-Channel bus; dungeons, events, guild war, and OX; the Prodomo custom systems (sash, aura, pets, battle pass, switchbot, item shop, premium shop, and the rest); GM commands, the adminpage, and logs. | Not started. |
@@ -77,14 +76,15 @@ its ports, and any of them admits the Channel's players.
 | code | today | in the Rewrite |
 |---|---|---|
 | `protocol` CG and GC codecs, TEA, inventories | 91 of 92 CG and 96 of 134 GC records, golden-byte tested. Most CG codecs have no caller. | Kept. |
-| `protocol` `db_*` and `gg*` modules | DB-peer records, the boot stream, setup, map locations, and 4 of 36 GG records. | Retired in step 1. |
-| `net` | Client framing and DB-peer transport, plus the unused `buffer.rs`. | Client framing kept; the rest retired. |
-| `db` | SQLx over MySQL, never run against a real server. | Replaced by the PostgreSQL store. |
+| `protocol` `db_*` and `gg*` modules | Deleted in 177. `TSimplePlayer` moved to `protocol::simple_player`. | Done. |
+| `net` | Client framing. `buffer.rs` and the DB-peer transport were deleted in 177. | Kept. |
+| `db` | `store` (a PostgreSQL pool, never run against a real server) and `item_id_range`. The MySQL pool was deleted in 177. | Grows with the schema in 179. |
+| `gamedata` | Packed table record layouts and nine table rules (banword, event, item_attr, land, object_proto, refine, renewal_shop, shop, skill) as typed builders over caller-supplied rows. New in 177. | Readers and importers for `legacy/gamedata` are added with the system that first needs them. |
 | `world` | Spatial model, characters, events, and some combat rules. Never imported by a binary. | Kept; grows with step 4. |
 | `quest` | An 8-line scaffold. | Replaced by the `qc` port and the Lua 5.1 runtime. |
-| `game-server` | Binary that accepts clients but answers only keepalive and pong. Reducers: `ClientLifecycle`, handshake, heartbeat, `DescriptorCrypto`, `client_live`, `AccountPlayerSession` and its router, `sync_position`. A game-side DB client (`GameDbClient`, `DbLink`) with a boot gate. | Renamed `prodomo`. The reducers are kept; `AccountPlayerSession` is re-based on store results. The DB client and its gate are retired; the new gate is "the world has loaded its Game data". |
-| `db-server` | Binary that answers the DB-peer `BOOT` and `SETUP` requests from MySQL. Peer policy, peer trust, boot composition, caches, and one SQLx adapter per boot table. | Retired. The pure rule modules (GM list rules, item-ID ranges, and the event, shop, item_attr, banword, refine, skill, land, object, and proto row rules) move to `gamedata` where they still apply. |
-| `tools/packet_compare` | Does not build: `clap` is missing and it imports the deleted `protocol::cg`. | Deleted. |
+| `game-server` | Binary that accepts clients but answers only keepalive and pong. Reducers: `ClientLifecycle`, handshake, heartbeat, `DescriptorCrypto`, `client_live`, `AccountPlayerSession` and its router (re-based on the typed `account_records` in 177), `sync_position`. `ReadyGate` refuses clients until startup has finished. The DB client and `DbLink` were deleted in 177. | Renamed `prodomo` in 178. `ReadyGate` will wait for the loaded Game data once step 3 loads it. |
+| `db-server` | Deleted in 177. GM list rules moved to `common::gm`, item-ID ranges to `db::item_id_range`, and the nine table rules to `gamedata`. The `item_proto` and `mob_proto` SQL decoders did not move, because the protos are read from the text files; the `object`, `market_price`, `monarch`, `player`, `player_index`, `quest`, and `login` modules did not move, because that state lives in the fresh store. | Done. |
+| `tools/packet_compare` | Deleted in 177. | Done. |
 
 ## Vertical slice: what exists
 

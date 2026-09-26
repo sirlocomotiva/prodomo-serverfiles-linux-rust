@@ -1,12 +1,11 @@
 [package]
 name = "protocol"
 version = "0.1.0"
-edition = "2021"
-description = "Metin2 packet protocol definitions"
+edition.workspace = true
+rust-version.workspace = true
+description = "Metin2 client protocol: CG and GC record codecs, framing, and TEA"
 
 [dependencies]
-bytes = { workspace = true }
-bytemuck = { workspace = true }
 serde = { workspace = true }
 
 [lints]

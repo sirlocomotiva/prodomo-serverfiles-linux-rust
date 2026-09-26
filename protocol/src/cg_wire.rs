@@ -1,7 +1,7 @@
 //! Safe framing for the legacy client-to-game stream.
 //!
-//! The legacy client stream is *not* the private Rust two-byte length-prefixed
-//! format in `net::buffer`.  `CInputProcessor::Process` reads one header byte,
+//! The legacy client stream is *not* a generic length-prefixed format.
+//! `CInputProcessor::Process` reads one header byte,
 //! asks `CPacketInfoCG` for the packet's `sizeof`, and then consumes exactly
 //! that many bytes (or waits for more input).  A zero header is a one-byte
 //! keepalive special case handled before the packet-info lookup.

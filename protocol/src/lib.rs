@@ -64,18 +64,11 @@ pub mod gc_inventory;
 pub mod gc_nested;
 pub mod gc_small;
 pub mod gc_vid;
-pub mod gg;
-pub mod gg_inventory;
 pub mod item_pos;
+pub mod simple_player;
 pub mod tea;
 /// Compatibility module name for the legacy client-to-game wire codec.
 pub use cg_wire as client_wire;
-pub mod db_boot;
-pub mod db_map_locations;
-pub mod db_market_price;
-pub mod db_records;
-pub mod db_setup;
-pub mod db_wire;
 
 // ============================================================================
 // Size constants from length.h

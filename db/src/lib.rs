@@ -1,16 +1,14 @@
-//! Metin2 database layer
+//! The PostgreSQL 18 store for the Prodomo server (ADR-0003).
 //!
-//! Database access and caching utilities using `SQLx` with `MySQL` driver.
-//! Provides connection pool management for player, account, and common databases.
+//! Tests that need a server run only when `DATABASE_URL` is set.
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
-pub use common;
+pub mod item_id_range;
+pub mod store;
 
-pub mod pool;
+pub use store::{Store, StoreConfig, StoreError};
 
-pub use pool::{ConnectionPool, DatabaseConfig, DatabaseManager, DbError, DbResult};
-
-/// Re-export sqlx types for convenience.
+/// Re-export of `sqlx` so callers use the same version.
 pub use sqlx;

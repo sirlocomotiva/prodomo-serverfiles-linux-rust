@@ -31,13 +31,11 @@
 use std::error::Error;
 use std::fmt;
 
-use protocol::db_records::{
-    DbRecordError, LoginAccountRecord, LoginAlreadyRecord, LoginByKeyRequest, PlayerLoadRequest,
+use crate::account_records::{
+    LoginAccountRecord, LoginAlreadyRecord, LoginByKeyRequest, PlayerLoadRequest,
     PlayerResultRecord, LEGACY_ACCOUNT_STATUS_BYTES, LEGACY_IP_BYTES, LEGACY_LOGIN_BYTES,
     LEGACY_PLAYER_PER_ACCOUNT,
 };
-use protocol::db_wire::DbFrame;
-
 use crate::lifecycle::PostHandshakePhase;
 
 /// A session-seeded correlation for one account/player DB request.
@@ -891,58 +889,6 @@ impl AccountPlayerSession {
         }
     }
 
-    /// Apply a decoded login DB frame without dispatching it.
-    ///
-    /// The caller supplies the generation retained when the request was sent.
-    /// Malformed and unsupported frames are errors; they are never converted
-    /// into a positive missing result.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an unsupported header, malformed exact-length
-    /// payload, or a mismatched pending correlation. A closed session is
-    /// ignored with an empty reduction.
-    pub fn on_login_frame(
-        &mut self,
-        frame: &DbFrame,
-        correlation: AccountCorrelationId,
-    ) -> Result<AccountPlayerReduction, AccountPlayerError> {
-        if self.phase == AccountPlayerPhase::Closed {
-            return Ok(self.reduction(Vec::new()));
-        }
-        self.require_pending_frame(AccountDbOperation::Login, frame.handle, correlation)?;
-        let outcome = decode_login_frame(frame)?;
-        self.on_login_result(AccountLoginCompletion {
-            handle: frame.handle,
-            correlation,
-            outcome,
-        })
-    }
-
-    /// Apply a decoded player DB frame without dispatching it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an unsupported header, malformed exact-length
-    /// payload, or a mismatched pending correlation. A closed session is
-    /// ignored with an empty reduction.
-    pub fn on_player_frame(
-        &mut self,
-        frame: &DbFrame,
-        correlation: AccountCorrelationId,
-    ) -> Result<AccountPlayerReduction, AccountPlayerError> {
-        if self.phase == AccountPlayerPhase::Closed {
-            return Ok(self.reduction(Vec::new()));
-        }
-        self.require_pending_frame(AccountDbOperation::PlayerLoad, frame.handle, correlation)?;
-        let outcome = decode_player_frame(frame)?;
-        self.on_player_result(AccountPlayerCompletion {
-            handle: frame.handle,
-            correlation,
-            outcome,
-        })
-    }
-
     /// Record a transport/DB error for a login request without treating it as
     /// a source-resolved missing response.
     ///
@@ -1101,36 +1047,6 @@ impl AccountPlayerSession {
         }
     }
 
-    fn require_pending_frame(
-        &self,
-        operation: AccountDbOperation,
-        handle: u32,
-        correlation: AccountCorrelationId,
-    ) -> Result<(), AccountPlayerError> {
-        let expected = match operation {
-            AccountDbOperation::Login => {
-                self.pending_login
-                    .as_ref()
-                    .ok_or(AccountPlayerError::LoginNotPending)?
-                    .correlation
-            }
-            AccountDbOperation::PlayerLoad => {
-                self.pending_player
-                    .as_ref()
-                    .ok_or(AccountPlayerError::PlayerNotPending)?
-                    .correlation
-            }
-            AccountDbOperation::EnterGame => {
-                return Err(AccountPlayerError::InvalidPhase {
-                    operation,
-                    phase: self.phase,
-                    expected: AccountPlayerPhase::Loading,
-                });
-            }
-        };
-        self.require_completion(operation, handle, correlation, expected)
-    }
-
     fn require_completion(
         &self,
         operation: AccountDbOperation,
@@ -1169,53 +1085,6 @@ impl AccountPlayerSession {
 impl Default for AccountPlayerSession {
     fn default() -> Self {
         Self::new(0)
-    }
-}
-
-/// Decode a primary login DB frame without applying it.
-fn decode_login_frame(frame: &DbFrame) -> Result<AccountLoginOutcome, AccountPlayerError> {
-    match frame.header {
-        protocol::db_records::HEADER_DG_LOGIN_SUCCESS => LoginAccountRecord::decode(&frame.payload)
-            .map(AccountLoginOutcome::Success)
-            .map_err(|source| AccountPlayerError::MalformedLoginSuccess { source }),
-        protocol::db_records::HEADER_DG_LOGIN_NOT_EXIST if frame.payload.is_empty() => {
-            Ok(AccountLoginOutcome::Missing)
-        }
-        protocol::db_records::HEADER_DG_LOGIN_NOT_EXIST => {
-            Err(AccountPlayerError::MalformedLoginMissing {
-                actual_len: frame.payload.len(),
-            })
-        }
-        protocol::db_records::HEADER_DG_LOGIN_ALREADY => LoginAlreadyRecord::decode(&frame.payload)
-            .map(AccountLoginOutcome::AlreadyLoggedIn)
-            .map_err(|source| AccountPlayerError::MalformedLoginAlready { source }),
-        header => Err(AccountPlayerError::UnsupportedResponseHeader {
-            operation: AccountDbOperation::Login,
-            header,
-        }),
-    }
-}
-
-/// Decode a primary player DB frame without applying it.
-fn decode_player_frame(frame: &DbFrame) -> Result<AccountPlayerOutcome, AccountPlayerError> {
-    match frame.header {
-        protocol::db_records::HEADER_DG_PLAYER_LOAD_SUCCESS => {
-            PlayerResultRecord::decode(&frame.payload)
-                .map(AccountPlayerOutcome::Success)
-                .map_err(|source| AccountPlayerError::MalformedPlayerSuccess { source })
-        }
-        protocol::db_records::HEADER_DG_PLAYER_LOAD_FAILED if frame.payload.is_empty() => {
-            Ok(AccountPlayerOutcome::Missing)
-        }
-        protocol::db_records::HEADER_DG_PLAYER_LOAD_FAILED => {
-            Err(AccountPlayerError::MalformedPlayerMissing {
-                actual_len: frame.payload.len(),
-            })
-        }
-        header => Err(AccountPlayerError::UnsupportedResponseHeader {
-            operation: AccountDbOperation::PlayerLoad,
-            header,
-        }),
     }
 }
 
@@ -1372,38 +1241,6 @@ pub enum AccountPlayerError {
         /// Player ID in the response.
         actual: u32,
     },
-    /// A login response header is not a supported primary key-login outcome.
-    UnsupportedResponseHeader {
-        /// Operation whose response was decoded.
-        operation: AccountDbOperation,
-        /// Unsupported one-byte header.
-        header: u8,
-    },
-    /// A login success payload was not an exact account record.
-    MalformedLoginSuccess {
-        /// Exact record codec failure.
-        source: DbRecordError,
-    },
-    /// A login already payload was not exactly 31 bytes.
-    MalformedLoginAlready {
-        /// Exact record codec failure.
-        source: DbRecordError,
-    },
-    /// A login missing payload was not empty.
-    MalformedLoginMissing {
-        /// Unexpected payload length.
-        actual_len: usize,
-    },
-    /// A player success payload was not an exact player record.
-    MalformedPlayerSuccess {
-        /// Exact record codec failure.
-        source: DbRecordError,
-    },
-    /// A player failure payload was not empty.
-    MalformedPlayerMissing {
-        /// Unexpected payload length.
-        actual_len: usize,
-    },
     /// A DB/transport error is distinct from a source-resolved missing row.
     /// In practice `operation` is `Login` or `PlayerLoad`; `EnterGame` is a
     /// phase operation and is not emitted by the DB error methods.
@@ -1540,32 +1377,6 @@ fn fmt_response_error(
             formatter,
             "successful player response ID {actual} does not match requested {expected}"
         ),
-        AccountPlayerError::UnsupportedResponseHeader { operation, header } => {
-            write!(
-                formatter,
-                "unsupported {operation:?} response header {header}"
-            )
-        }
-        AccountPlayerError::MalformedLoginSuccess { source } => {
-            write!(
-                formatter,
-                "malformed login success account payload: {source}"
-            )
-        }
-        AccountPlayerError::MalformedLoginAlready { source } => {
-            write!(formatter, "malformed login already payload: {source}")
-        }
-        AccountPlayerError::MalformedLoginMissing { actual_len } => write!(
-            formatter,
-            "login missing response has {actual_len} bytes; expected 0"
-        ),
-        AccountPlayerError::MalformedPlayerSuccess { source } => {
-            write!(formatter, "malformed player success payload: {source}")
-        }
-        AccountPlayerError::MalformedPlayerMissing { actual_len } => write!(
-            formatter,
-            "player failure response has {actual_len} bytes; expected 0"
-        ),
         AccountPlayerError::Database {
             operation,
             handle,
@@ -1582,24 +1393,12 @@ fn fmt_response_error(
     }
 }
 
-impl Error for AccountPlayerError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::MalformedLoginSuccess { source }
-            | Self::MalformedLoginAlready { source }
-            | Self::MalformedPlayerSuccess { source } => Some(source),
-            _ => None,
-        }
-    }
-}
+impl Error for AccountPlayerError {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::db_records::{
-        SimplePlayerRecord, HEADER_DG_LOGIN_NOT_EXIST, HEADER_DG_LOGIN_SUCCESS,
-        HEADER_DG_PLAYER_LOAD_FAILED, HEADER_DG_PLAYER_LOAD_SUCCESS, HEADER_GD_LOGIN_BY_KEY,
-    };
+    use protocol::simple_player::SimplePlayerRecord;
 
     const HANDLE: u32 = 0x1234_5678;
 
@@ -1871,12 +1670,12 @@ mod tests {
             session.login_key_material(),
             Some(&normalized.key_material())
         );
-        assert_eq!(request.encode().len(), 67);
-        let frame = DbFrame::new(HEADER_GD_LOGIN_BY_KEY, HANDLE, request.encode());
-        let bytes = frame.encode().unwrap();
-        assert_eq!(&bytes[..5], &[101, 0x78, 0x56, 0x34, 0x12]);
-        assert_eq!(&bytes[5..9], &67_u32.to_le_bytes());
-        assert_eq!(&bytes[9..], &request.encode()[..]);
+        assert_eq!(request.login_key, 0x1020_3040);
+        assert_eq!(
+            request.client_key,
+            [1, 0x0102_0304, 0x0506_0708, 0x090a_0b0c]
+        );
+        assert_eq!(&request.ip[..10], b"127.0.0.1\0");
     }
 
     #[test]
@@ -1896,7 +1695,7 @@ mod tests {
         ));
 
         let (player_id, request) = select_player(&mut session);
-        assert_eq!(request.encode().len(), 9);
+        assert_eq!(request.account_index, 0);
         let player_result = session
             .on_player_result(AccountPlayerCompletion {
                 handle: HANDLE,
@@ -1934,8 +1733,12 @@ mod tests {
         expected.players[0].id = 0x1112_1314;
         let (_correlation, request) = select_player(&mut session);
         assert_eq!(
-            request.encode(),
-            vec![4, 3, 2, 1, 0x14, 0x13, 0x12, 0x11, 0]
+            request,
+            PlayerLoadRequest {
+                account_id: 0x0102_0304,
+                player_id: 0x1112_1314,
+                account_index: 0,
+            }
         );
     }
 
@@ -2217,34 +2020,6 @@ mod tests {
     }
 
     #[test]
-    fn raw_frame_checks_handle_before_decoding_malformed_payload() {
-        let mut session = AccountPlayerSession::new(HANDLE);
-        let (correlation, _) = start_login(&mut session);
-        let malformed = DbFrame::new(HEADER_DG_LOGIN_SUCCESS, HANDLE + 1, vec![1]);
-        assert!(matches!(
-            session.on_login_frame(&malformed, correlation),
-            Err(AccountPlayerError::HandleMismatch { .. })
-        ));
-        assert!(session.pending_login().is_some());
-    }
-
-    #[test]
-    fn wrong_password_header_is_not_a_positive_missing_result() {
-        let mut session = AccountPlayerSession::new(HANDLE);
-        let (correlation, _) = start_login(&mut session);
-        let frame = DbFrame::new(
-            protocol::db_records::HEADER_DG_LOGIN_WRONG_PASSWD,
-            HANDLE,
-            vec![],
-        );
-        assert!(matches!(
-            session.on_login_frame(&frame, correlation),
-            Err(AccountPlayerError::UnsupportedResponseHeader { .. })
-        ));
-        assert!(session.pending_login().is_some());
-    }
-
-    #[test]
     fn selection_rejects_wrong_phase_index_empty_slot_and_name_change() {
         let mut no_account = AccountPlayerSession::new(HANDLE);
         assert!(matches!(
@@ -2356,50 +2131,6 @@ mod tests {
             AccountPlayerError::PlayerNotPending
         );
         assert_eq!(session.phase(), AccountPlayerPhase::Loading);
-    }
-
-    #[test]
-    fn raw_frames_decode_exact_records_and_reject_wrong_or_malformed_payloads() {
-        let mut session = AccountPlayerSession::new(HANDLE);
-        let (login_id, _) = start_login(&mut session);
-        let success = DbFrame::new(HEADER_DG_LOGIN_SUCCESS, HANDLE, account().encode());
-        let reduction = session.on_login_frame(&success, login_id).unwrap();
-        assert_eq!(reduction.state.phase(), AccountPlayerPhase::Select);
-
-        let (player_id, _) = select_player(&mut session);
-        let player_frame = DbFrame::new(HEADER_DG_PLAYER_LOAD_SUCCESS, HANDLE, player().encode());
-        assert_eq!(
-            session
-                .on_player_frame(&player_frame, player_id)
-                .unwrap()
-                .state
-                .phase(),
-            AccountPlayerPhase::Loading
-        );
-
-        let mut new_session = AccountPlayerSession::new(HANDLE);
-        let (login_id, _) = start_login(&mut new_session);
-        let malformed = DbFrame::new(HEADER_DG_LOGIN_SUCCESS, HANDLE, vec![1]);
-        assert!(matches!(
-            new_session.on_login_frame(&malformed, login_id),
-            Err(AccountPlayerError::MalformedLoginSuccess { .. })
-        ));
-        assert!(new_session.pending_login().is_some());
-        let unsupported = DbFrame::new(HEADER_DG_LOGIN_NOT_EXIST + 100, HANDLE, vec![]);
-        assert!(matches!(
-            new_session.on_login_frame(&unsupported, login_id),
-            Err(AccountPlayerError::UnsupportedResponseHeader { .. })
-        ));
-        let mut player_session = AccountPlayerSession::new(HANDLE);
-        let (login_id, _) = start_login(&mut player_session);
-        complete_login(&mut player_session, login_id, account());
-        let (player_id, _) = select_player(&mut player_session);
-        let missing_with_bytes = DbFrame::new(HEADER_DG_PLAYER_LOAD_FAILED, HANDLE, vec![7]);
-        assert!(matches!(
-            player_session.on_player_frame(&missing_with_bytes, player_id),
-            Err(AccountPlayerError::MalformedPlayerMissing { .. })
-        ));
-        assert!(player_session.pending_player().is_some());
     }
 
     #[test]

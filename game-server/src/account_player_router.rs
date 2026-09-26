@@ -24,13 +24,13 @@ use protocol::cg_inventory::{
     HEADER_CG_CHARACTER_SELECT, HEADER_CG_ENTERGAME, HEADER_CG_LOGIN, HEADER_CG_LOGIN2,
 };
 use protocol::cg_wire::ClientFrame;
-use protocol::db_records::{LEGACY_IP_BYTES, LEGACY_LOGIN_BYTES};
-use protocol::db_wire::DbFrame;
 
 use crate::account_player::{
-    AccountCorrelationId, AccountKeyInstallation, AccountLoginInput, AccountPlayerEffect,
-    AccountPlayerError, AccountPlayerPhase, AccountPlayerReduction, AccountPlayerSession,
+    AccountCorrelationId, AccountKeyInstallation, AccountLoginCompletion, AccountLoginInput,
+    AccountPlayerCompletion, AccountPlayerEffect, AccountPlayerError, AccountPlayerPhase,
+    AccountPlayerReduction, AccountPlayerSession,
 };
+use crate::account_records::{LEGACY_IP_BYTES, LEGACY_LOGIN_BYTES};
 use crate::client_session::ClientPhase;
 use crate::lifecycle::{ClientLifecycle, LifecycleEffect, LifecycleError};
 
@@ -254,22 +254,20 @@ impl AccountPlayerRouter {
         self.finish_account_reduction(reduction)
     }
 
-    /// Route a login DB completion after the caller resolves the full
-    /// correlation from its handle registry.
+    /// Route a login completion from the account store.
     ///
-    /// The legacy DB frame carries only the descriptor handle. The supplied
-    /// [`AccountCorrelationId`] therefore remains a caller-owned routing
-    /// value; this method never infers a generation from a `u32` handle.
+    /// The completion carries the full [`AccountCorrelationId`] retained when
+    /// the request was issued; this method never infers a generation from a
+    /// `u32` handle.
     ///
     /// # Errors
     ///
-    /// Returns a handle/correlation, malformed-response, account identity, or
-    /// lifecycle phase error. A successful response is returned as a
-    /// candidate with `BindAccount` before `SetPhase(Select)`.
-    pub fn on_login_frame(
+    /// Returns a handle/correlation, account identity, or lifecycle phase
+    /// error. A successful response is returned as a candidate with
+    /// `BindAccount` before `SetPhase(Select)`.
+    pub fn on_login_result(
         &self,
-        frame: &DbFrame,
-        correlation: AccountCorrelationId,
+        completion: AccountLoginCompletion,
     ) -> Result<AccountRouterReduction, AccountRouterError> {
         self.require_phase(
             AccountRouterOperation::LoginCompletion,
@@ -278,23 +276,21 @@ impl AccountPlayerRouter {
         )?;
         let mut account = self.account.clone();
         let reduction = account
-            .on_login_frame(frame, correlation)
+            .on_login_result(completion)
             .map_err(AccountRouterError::Account)?;
         self.finish_account_reduction(reduction)
     }
 
-    /// Route a player-load DB completion after the caller resolves the full
-    /// correlation from its handle registry.
+    /// Route a character-load completion from the account store.
     ///
     /// # Errors
     ///
-    /// Returns a handle/correlation, malformed-response, player identity, or
-    /// lifecycle phase error. A successful response is returned as a
-    /// candidate with `BindPlayer` before `SetPhase(Loading)`.
-    pub fn on_player_frame(
+    /// Returns a handle/correlation, player identity, or lifecycle phase
+    /// error. A successful response is returned as a candidate with
+    /// `BindPlayer` before `SetPhase(Loading)`.
+    pub fn on_player_result(
         &self,
-        frame: &DbFrame,
-        correlation: AccountCorrelationId,
+        completion: AccountPlayerCompletion,
     ) -> Result<AccountRouterReduction, AccountRouterError> {
         self.require_phase(
             AccountRouterOperation::PlayerCompletion,
@@ -303,7 +299,7 @@ impl AccountPlayerRouter {
         )?;
         let mut account = self.account.clone();
         let reduction = account
-            .on_player_frame(frame, correlation)
+            .on_player_result(completion)
             .map_err(AccountRouterError::Account)?;
         self.finish_account_reduction(reduction)
     }
@@ -484,10 +480,9 @@ mod tests {
     use super::*;
     use crate::handshake::HandshakeServerKind;
     use protocol::cg_handshake::{CgHandshakeHeader, CgInboundHandshake};
-    use protocol::db_records::{
-        LoginAccountRecord, PlayerResultRecord, SimplePlayerRecord, HEADER_DG_LOGIN_SUCCESS,
-        HEADER_DG_PLAYER_LOAD_SUCCESS,
-    };
+    use crate::account_player::{AccountLoginOutcome, AccountPlayerOutcome};
+    use crate::account_records::{LoginAccountRecord, PlayerResultRecord};
+    use protocol::simple_player::SimplePlayerRecord;
 
     const HANDLE: u32 = 0x1234_5678;
     const SEED: u32 = 0x1000_0001;
@@ -550,6 +545,22 @@ mod tests {
         }
     }
 
+    fn login_success(correlation: AccountCorrelationId) -> AccountLoginCompletion {
+        AccountLoginCompletion {
+            handle: HANDLE,
+            correlation,
+            outcome: AccountLoginOutcome::Success(account()),
+        }
+    }
+
+    fn player_success(correlation: AccountCorrelationId) -> AccountPlayerCompletion {
+        AccountPlayerCompletion {
+            handle: HANDLE,
+            correlation,
+            outcome: AccountPlayerOutcome::Success(player()),
+        }
+    }
+
     fn login_frame() -> ClientFrame {
         CgLoginByKey::new(
             c_bytes("ALICE"),
@@ -601,10 +612,9 @@ mod tests {
             .on_client_frame(&login_frame(), Some(context()))
             .unwrap();
         let pending = login.state.account().pending_login().unwrap().clone();
-        let db = DbFrame::new(HEADER_DG_LOGIN_SUCCESS, HANDLE, account().encode());
         let result = login
             .state
-            .on_login_frame(&db, pending.correlation)
+            .on_login_result(login_success(pending.correlation))
             .unwrap();
         assert_eq!(result.state.lifecycle().phase(), ClientPhase::Select);
         assert_eq!(result.state.account().phase(), AccountPlayerPhase::Select);
@@ -628,10 +638,7 @@ mod tests {
         let pending_login = login.state.account().pending_login().unwrap().correlation;
         let selected = login
             .state
-            .on_login_frame(
-                &DbFrame::new(HEADER_DG_LOGIN_SUCCESS, HANDLE, account().encode()),
-                pending_login,
-            )
+            .on_login_result(login_success(pending_login))
             .unwrap();
         let select = selected
             .state
@@ -646,10 +653,7 @@ mod tests {
         let pending_player = select.state.account().pending_player().unwrap().clone();
         let loaded = select
             .state
-            .on_player_frame(
-                &DbFrame::new(HEADER_DG_PLAYER_LOAD_SUCCESS, HANDLE, player().encode()),
-                pending_player.correlation,
-            )
+            .on_player_result(player_success(pending_player.correlation))
             .unwrap();
         assert_eq!(loaded.state.lifecycle().phase(), ClientPhase::Loading);
         assert_eq!(loaded.state.account().phase(), AccountPlayerPhase::Loading);
@@ -673,10 +677,7 @@ mod tests {
         let pending_login = login.state.account().pending_login().unwrap().correlation;
         let selected = login
             .state
-            .on_login_frame(
-                &DbFrame::new(HEADER_DG_LOGIN_SUCCESS, HANDLE, account().encode()),
-                pending_login,
-            )
+            .on_login_result(login_success(pending_login))
             .unwrap();
         let select = selected
             .state
@@ -685,10 +686,7 @@ mod tests {
         let pending_player = select.state.account().pending_player().unwrap().correlation;
         let loaded = select
             .state
-            .on_player_frame(
-                &DbFrame::new(HEADER_DG_PLAYER_LOAD_SUCCESS, HANDLE, player().encode()),
-                pending_player,
-            )
+            .on_player_result(player_success(pending_player))
             .unwrap();
         let before = loaded.state.clone();
         assert_eq!(
