@@ -18,6 +18,9 @@ This file is the source of truth for rewrite status. The former `.sisyphus` plan
 > lookup and `db-server` only registers login data. Configuration moves to TOML, and the legacy
 > `CONFIG` and `conf.txt` files will not be read. See `docs/STATUS.md`, "Owner decisions".
 >
+> **Superseded (2026-09-26, section 176).** ADR-0001 and ADR-0002 replace the auth split and the
+> two-process layout. Read section 176 before any section that describes DB-peer or GG behaviour.
+>
 > **Known errata not yet corrected in place.** They are listed here so that no one cites them as
 > fact. Correct them in a new section rather than editing history.
 >
@@ -14344,3 +14347,75 @@ New in this section: 1 consolidated boot-statement parity test.
 - `GD_SETUP` reports only the requesting peer, because there is no
   connected-peer registry.
 - Protocol coverage is unchanged: CG 91/92, GC 96/134, GG 4/36.
+
+## 176. Direction change: the client protocol is the only contract, and one process replaces the two
+
+A planning session with the owner on 2026-09-26 settled the whole design tree
+for the rest of the rewrite. This section records the outcome. Sections 1-175
+are not edited; where they describe DB-peer or GG behaviour they are now
+history.
+
+### 176.1 What was decided
+
+The four hard-to-reverse decisions are ADRs in `docs/adr/`:
+
+| ADR | decision |
+| --- | --- |
+| 0001 | Only the client wire protocol and the Game data file formats are a contract. The SQL schema, process layout, configuration, DB-peer protocol, and GG protocol are ours to redesign. |
+| 0002 | One process hosts auth and every Channel, including the Shared Channel (legacy channel 99), on one game thread at 25 Pulses per second, with an in-process bus between Channels. |
+| 0003 | PostgreSQL 18 with a fresh store: 32-bit IDs where the client sees them, `uuidv7()` elsewhere, argon2id passwords, `bytea` free text, atomic Transfers, database tests gated on `DATABASE_URL`. |
+| 0004 | Quests on Lua 5.1 through `mlua`, with `qc` ported to Rust, because Lua 5.0.3 would need `unsafe` FFI. |
+
+The other owner decisions are in `AGENTS.md` and `docs/STATUS.md`: the
+`europe` Locale only; ASCII Names unique regardless of case; no adminpage
+default password; the Operator command for accounts and GMs; the scripted
+client as the acceptance test; a `compose.yaml` play test on legacy ports;
+leaving a Shared Channel map returns the player to their own Channel (a
+Divergence); the legacy per-Channel map sets kept as configuration; the loaded
+text protos as the authoritative set; and all 51 quest scripts live.
+
+`CONTEXT.md` is the glossary for these terms (commit `01ccbca0`).
+
+### 176.2 What this supersedes
+
+- **Owner decision 1** (auth keeps the legacy split between the game server's
+  `account` lookup and `db-server`'s login registry). Its stated reason was
+  keeping a Rust `db-server` usable by an unmodified C++ game server; with no
+  C++ peer, the account lookup, login-key registry, and character loading all
+  live in the one process.
+- **Every `AGENTS.md` rule that required DB-peer or GG wire compatibility**,
+  MySQL, or the `client/` tree, which is no longer in the repository.
+- **Milestones M1-M11** in `docs/STATUS.md`. The TOML half of M1 (section 169)
+  stays useful. M2 and M3 built the DB-peer boot and setup exchange, which is
+  retired. M4-M11 are folded into build step 3, the vertical slice.
+
+Owner decision 2 (TOML configuration) stands.
+
+### 176.3 The legacy Game data snapshot
+
+Commit `fa0f50a3` adds `legacy/` (about 84 MB): the owner's per-process
+configuration with every credential replaced by `REDACTED`, the text protos the
+legacy DB loaded (`PROTO_FROM_DB = 0`), the `data/` and `locale/europe/` trees,
+the `mysqldump --no-data` schema of the `account`, `common`, and `player`
+databases, and byte-exact row dumps of the thirteen Game data tables.
+`legacy/README.md` lists what was removed and why: the raw MySQL datadir, the
+FreeBSD process scripts, client-only models and textures, runtime state, and a
+second proto set no legacy process opened. `fa0f50a3` replaced an earlier push
+(`80e9e510`) that carried the raw datadir and plaintext credentials.
+
+### 176.4 Documentation changed
+
+- `AGENTS.md`, `docs/STATUS.md`, and `README.md` rewritten for the new
+  direction and the five-step build order (restructure, Parity inventory,
+  vertical slice, game systems, Game data and play test).
+- `docs/PROTOCOL_NOTES.md` gains a header note marking its DB-peer and GG
+  sections as history.
+
+### 176.5 Receipt
+
+Documentation only; no code changed. The gates were **not** re-run green on
+this machine: `cargo test --workspace --all-targets --locked --offline` stops
+at resolution with `no matching package named 'tracing-appender' found`,
+because this machine's offline registry cache lacks that crate. The owner
+already approved one online `cargo fetch` (planning Q23); it will run with
+the step 1 dependency changes. The last green receipt is still 175.5.

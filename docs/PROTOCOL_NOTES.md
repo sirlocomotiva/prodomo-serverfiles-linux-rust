@@ -6,6 +6,11 @@
 > Paragraphs taken from `README.md` are marked *(From README.md.)*. The authoritative status is
 > `docs/REWRITE_LEDGER.md`; the current gaps and the plan are in `docs/STATUS.md`; the rules an
 > agent must follow are in `AGENTS.md`.
+>
+> **Superseded in part (2026-09-26, ledger section 176).** ADR-0001 makes the client protocol the only
+> compatibility contract and retires the DB-peer and game-to-game protocols. The sections on DB
+> records, the boot stream, `db-server`, M3, and the boot loader audit, and every GG note, are kept as
+> history of how that code was built. The client-side notes and the verification lessons still apply.
 
 ## Contents
 
