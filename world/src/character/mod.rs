@@ -1,6 +1,7 @@
 //! Bounded runtime character state and lifecycle management.
 
 mod combat;
+mod grant;
 mod inventory;
 mod items;
 mod manager;
@@ -12,6 +13,7 @@ pub use combat::{
     DamageOutcome, HitOutcome, MeleeDamageInput, NormalHitInput, PkActor, PkDenial, PkEligibility,
     PkMode, Vitality,
 };
+pub use grant::{grant, GrantRefused, Granted, GRANT_WINDOW};
 pub use inventory::{
     character_cell_bound, custom_inventory_category_of, custom_inventory_position,
     inventory_page_by_pos, inventory_type_by_pos, inventory_type_of_cell,

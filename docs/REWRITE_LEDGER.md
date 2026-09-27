@@ -19113,3 +19113,140 @@ emits real i386 objects; its controls (an unpacked two-field struct at 8, the sa
 `pack(1)` at 5) passed in the same probe. `protocol::gc_item_window` already encodes
 those 72 bytes, so no codec work is needed for the next unit and the width is already
 pinned by golden bytes.
+
+
+## 199. Give an item to a character, and send the client its cell (ledger 199)
+
+Parent: `29696c51` (ledger 198). This is the unit that makes an item exist in a
+world and produce a client record. It is not yet reachable from an Operator or from a
+descriptor, and 199.4 says why that is the next unit rather than a forgotten one.
+
+### 199.0 What was missing, and how it was found
+
+Ledger 197 ended with `db::items` able to read and write rows, and nothing able to
+**create** one. The obvious next question -- "where does an item go?" -- turned out to
+hide a second, larger gap behind it. Three greps, and the answer was not what the
+issue record expected:
+
+* `command grep -rn 'CharacterItems' --include=*.rs prodomo/ world/` returns hits in
+  `world/src/character/items.rs` and its own doc links, and **nowhere else**. The
+  type that ledger 195 built and ledger 198 extended was owned by nothing.
+* `world/src/character/model.rs` held nine fields -- `vid`, `player_id`, `name`,
+  `kind`, state, posture, activity, vitality, the pulse clock and the destruction flag
+  -- and no item window. Legacy has `pItems`, `pDSItems`, `pAttr67AddItem` and
+  `pSwitchbotItems` as `CHARACTER` members (`char.h:458-478`), not a side table.
+* `prodomo/src/main.rs:639` handles `ChatEffect::Command` by logging
+  `"Command line received; no interpreter yet"`. So the slash-command door is open and
+  leads to a log line.
+
+So a grant was impossible for a structural reason that no amount of store work would
+have fixed: **there was no character to give anything to.** That is what this unit
+closes.
+
+### 199.1 `Character` owns its item windows
+
+`Character` gained an `items: CharacterItems` field, initialised in both `new` and
+`player`, behind `items()` and `items_mut()`. This is a one-field change with a large
+consequence, and the consequence is the point: the store keeps item **ids** and the
+items belong to whoever owns the id, so a character with no table could not be given
+anything, and a table owned by nobody could not be filled.
+
+### 199.2 `world::character::grant`
+
+The placement half of `ACMD(do_item)` (`cmd_gm.cpp:467-519`), split out of the command
+so it can be tested with no socket, no store and no world. What it ports:
+
+* the search order -- every matching custom bank in ascending order, then the base
+  inventory (`char_item.cpp:1209-1233`);
+* the **latch**: the first bank with a free cell wins, *not* the first bank the item
+  matches. The two are different rules and the difference is observable on 5 of the
+  owner's 7,305 items, so a test pins it both ways: a two-bank item lands in the
+  lower bank when it has room, and in the upper one when only it has room.
+
+Three things it deliberately does not do, each recorded rather than assumed:
+
+* **No stacking.** `do_item` never merges (`cmd_gm.cpp:494-503`), so neither does this,
+  even where `PickupItem` does. A test pins that a same-vnum item already at cell 0
+  does not absorb the grant, which lands at cell 1 with its own count and its own id.
+* **No magic.** Legacy passes `bTryMagic = true` (`cmd_gm.cpp:499`), so a GM grant can
+  hand out a randomly enchanted or socketed item. That needs the proto percentage
+  columns and an RNG. An Operator command that silently rolls item stats is worse than
+  one that does not, so a grant is a plain item. A Divergence, recorded here.
+* **A locked page is never offered** (the ledger 198.3 Defect). `inven_point` bounds
+  the base search, and `usable_inventory_cells(1) = 95` is pinned by a test that a
+  raised unlock opens the next page.
+
+**The matching banks are an argument, not a lookup.** Category membership is
+`CItem::IsCustomCategory`, which lives in `gamedata`; `world` does not depend on
+`gamedata` and should not, because a gameplay crate that reaches into a data crate for
+a placement rule cannot be tested with a synthetic item. So the caller answers "which
+banks does this item match" and `grant` answers "which of those has room". The test
+module passes literal bank lists, so every placement test runs without a Game data
+file.
+
+**The search and the placement share `footprint_is_clear`.** If they could disagree the
+search would return a cell that `set` then refuses and a caller looping over search
+results would never finish. The two come from the same private function on purpose, and
+`GrantRefused::SearchDisagreedWithPlacement` is a named variant rather than a silent
+drop, so if the sharing ever breaks it is a bug with a name.
+
+### 199.3 `Item::gc_item_set`: the first client record
+
+Nine of `GC_ITEM_SET`'s fields are the item's own. `Item::gc_item_set(pos, highlight)`
+projects the world instance onto the record, field by field, in the record's order. Two
+tests pin it:
+
+* one sets a vnum, a count, socket 0 to -1 and attribute 3 to `(200, -300)`, and
+  asserts every field of the record individually, so a field that moved in one of the
+  two structs and not the other fails;
+* one asserts the encoding is **72 bytes with header 21** -- the measured
+  `TPacketGCItemSet` width from ledger 198.6. No new codec was needed; ledger 193 had
+  already written the bytes, and this is the first call site.
+
+`highlight` is passed in rather than derived, because `char_item.cpp:585-589` has two
+candidates and `__BL_ENABLE_PICKUP_ITEM_EFFECT__` is defined, so the live value is the
+caller's `bHighlight` and the cell is not consulted. A fresh grant passes 1.
+
+A third test decodes socket 2 back out of the encoded bytes and asserts `-2`, which
+answers the sign question on the wire without the i686 compiler: both sockets and
+attribute values are 32-bit on the legacy target, and a codec that truncated them to
+16 bits would pass every other test here.
+
+### 199.4 Not reachable yet, and named so it is not dropped
+
+`grant` takes a `&mut CharacterItems`, so nothing in `prodomo` calls it yet. Three
+pieces remain and each is one unit's work: the game-thread command that carries a
+grant from an async task, the `GC_ITEM_SET` write to a descriptor, and the Operator
+interface in front of both. **Nothing in this unit is client-reachable**, so
+`sys.item.core` stays `codec` and no Parity row moves. The record has bytes and a
+width, which is not the same as a client having seen it.
+
+### 199.5 Corrections this unit made to its own claims
+
+Seven of the fifteen tests failed on the first run. **All seven were test bugs, not
+implementation bugs**, and they cluster on one mistake: bank arithmetic written out by
+hand. `find_free_custom_cell(2, ..)` starts at `650`, not `470`, because the six banks
+are contiguous and bank `n` starts `n * CUSTOM_INVENTORY_MAX_NUM` after
+`CUSTOM_INVENTORY_SLOT_START`. Three tests had bank 2's start wrong and one had bank 1's.
+The module now has one `bank_start(bank)` helper, computed from the two constants, and
+its doc says why. The other three: one asserted two items of one vnum had *different*
+vnums, one asserted a freshly set socket 0 of -1 was zero, and one expected a refusal
+where the fixture had in fact left a whole free page.
+
+### 199.6 Gates
+
+`cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean;
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` 0 diagnostics
+(three test findings, fixed by handling the fallible setters with `expect`, never by
+`#[allow]`); `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+--offline` 0 diagnostics.
+
+**Test counts.** 33 targets, 2246 passed, 0 failed, both without a database and with
+PostgreSQL 18. 198.6 had 33 and 2,227, so this unit adds 19 tests and no targets:
+15 in `world::character::grant` and 4 in `world::character::model`. `cargo test
+--workspace --doc` is 9 targets, 1 passed, 0 failed. Leftover `prodomo\_%` databases
+after the run: 0.
+
+**Not measured.** `i686-linux-gnu-g++-12` is still not installed, so the 72-byte width
+is the host `-m32` probe from 198.6 plus the encoded-length assertion here, not a fresh
+i686 compile.

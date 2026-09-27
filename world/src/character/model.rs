@@ -1,6 +1,7 @@
 use common::{vid::Vid, CharacterId};
 
 use super::combat::{Damage, DamageOutcome, Vitality};
+use super::items::CharacterItems;
 use super::state::{Activity, CharacterState, CoreState, Posture};
 
 /// Runtime category used to distinguish players from non-player characters.
@@ -25,6 +26,7 @@ pub struct Character {
     vitality: Vitality,
     next_state_pulse: u64,
     destruction_requested: bool,
+    items: CharacterItems,
 }
 
 impl Character {
@@ -41,6 +43,7 @@ impl Character {
             vitality: Vitality::new(0, 0),
             next_state_pulse: 0,
             destruction_requested: false,
+            items: CharacterItems::new(),
         }
     }
 
@@ -56,6 +59,7 @@ impl Character {
             vitality: Vitality::new(0, 0),
             next_state_pulse: 0,
             destruction_requested: false,
+            items: CharacterItems::new(),
         }
     }
 
@@ -175,5 +179,98 @@ impl Character {
 
     pub(crate) const fn destruction_requested(&self) -> bool {
         self.destruction_requested
+    }
+
+    /// This character's four item windows.
+    ///
+    /// `pItems`, `pDSItems`, `pAttr67AddItem` and `pSwitchbotItems` (`char.h:458-478`)
+    /// are members of `CHARACTER`, not of a side table, so they live here too. The
+    /// store holds item **ids**; the items themselves belong to whoever owns the
+    /// id, which is the character, so a character with no item table could not be
+    /// given anything.
+    pub const fn items(&self) -> &CharacterItems {
+        &self.items
+    }
+
+    /// This character's item windows, mutably.
+    pub fn items_mut(&mut self) -> &mut CharacterItems {
+        &mut self.items
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::grant::{grant, GrantRefused};
+    use crate::item::Item;
+    use common::vid::Vid;
+
+    /// A one-cell item, which is the smallest footprint a grant will place.
+    fn one_cell(id: u32) -> Item {
+        let mut item = Item::new(id, 30_000);
+        item.set_size(1).expect("a size of at least one");
+        item
+    }
+
+    #[test]
+    fn a_new_character_holds_an_empty_item_table() {
+        let character = Character::new(Vid::new(1));
+        assert!(
+            character.items().is_empty(),
+            "a fresh character owns no items"
+        );
+    }
+
+    #[test]
+    fn a_live_character_can_be_given_an_item_and_keeps_it() {
+        // This is the seam the grant unit was missing: `CharacterItems` existed, but
+        // nothing owned one, so nothing could be given to anything.
+        let mut character = Character::new(Vid::new(1));
+        let mut item = one_cell(1);
+        let placed =
+            grant(character.items_mut(), &mut item, &[], 0).expect("an empty inventory has room");
+        assert_eq!(placed.pos.cell, 0);
+        assert_eq!(
+            character.items().len(),
+            1,
+            "the character keeps what it was given"
+        );
+    }
+
+    #[test]
+    fn two_grants_to_one_character_take_two_cells() {
+        let mut character = Character::new(Vid::new(1));
+        let mut first = one_cell(1);
+        let mut second = one_cell(2);
+        let a = grant(character.items_mut(), &mut first, &[], 0).expect("cell 0 is free");
+        let b = grant(character.items_mut(), &mut second, &[], 0).expect("cell 1 is free");
+        assert_eq!((a.pos.cell, b.pos.cell), (0, 1));
+        assert_eq!(character.items().len(), 2);
+    }
+
+    #[test]
+    fn a_refused_grant_leaves_the_character_as_it_was() {
+        let mut character = Character::new(Vid::new(1));
+        for cell in 0..180 {
+            character
+                .items_mut()
+                .set(
+                    protocol::item_pos::ItemPos {
+                        window_type: common::item_slots::EWindows::Inventory as u8,
+                        cell,
+                    },
+                    &one_cell(1_000 + u32::from(cell)),
+                )
+                .expect("a free base cell takes an item");
+        }
+        let mut item = one_cell(9_999);
+        let refused = grant(character.items_mut(), &mut item, &[], 0)
+            .expect_err("180 one-cell items fill the base inventory");
+        assert_eq!(refused, GrantRefused::NoRoom { size: 1 });
+        assert_eq!(
+            character.items().len(),
+            180,
+            "a refused grant does not add a phantom item"
+        );
     }
 }

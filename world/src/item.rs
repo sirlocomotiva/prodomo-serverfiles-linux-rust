@@ -56,7 +56,7 @@
 //!    exhaustible rather than pretending the ids are free.
 
 use common::item_slots::ITEM_COUNT_LIMIT;
-use protocol::gc_item_window::ItemAttribute;
+use protocol::gc_item_window::{GcItemSet, ItemAttribute};
 use protocol::item_pos::ItemPos;
 
 use crate::character::NPOS;
@@ -240,6 +240,34 @@ impl Item {
     #[must_use]
     pub const fn window(&self) -> u8 {
         self.pos.window_type
+    }
+
+    /// The `GC_ITEM_SET` record that tells a client this item is at this cell.
+    ///
+    /// `char_item.cpp:585-615` is `SetItem` filling a `TPacketGCItemSet` field by
+    /// field. Nine of the record's fields are the item's own, and this is where
+    /// that correspondence is asserted rather than restated: the field order in
+    /// the constructor is the field order in `GC_ITEM_SET`, so a field that moved
+    /// in one and not the other fails the test below.
+    ///
+    /// `highlight` is passed in rather than derived. `char_item.cpp:585-589` has
+    /// two candidates and `__BL_ENABLE_PICKUP_ITEM_EFFECT__` is defined, so the
+    /// live value is the caller's `bHighlight` argument and the cell is not
+    /// consulted. A fresh grant passes 1.
+    #[must_use]
+    pub fn gc_item_set(&self, pos: ItemPos, highlight: u8) -> GcItemSet {
+        GcItemSet {
+            cell: pos,
+            vnum: self.vnum,
+            count: self.count,
+            refine_element: self.refine_element,
+            transmutation: self.transmutation,
+            flags: self.flags,
+            anti_flags: self.anti_flags,
+            highlight,
+            sockets: self.sockets,
+            attributes: self.attributes,
+        }
     }
 
     /// Set the stack size, or report why it was refused.
