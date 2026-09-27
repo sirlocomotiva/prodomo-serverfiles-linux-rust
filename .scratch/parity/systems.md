@@ -48,7 +48,7 @@ in `G/main.cpp:345-404`, so none of them is dead code; a feature switch that tur
 | `sys.char.empire_change` | `G/char_change_empire.cpp` | Empire change | `sys.login.enter` | missing | | |
 | `sys.char.top_players` | `ENABLE_TOP_PLAYERS_EFFECT`, `G/RankGlobal.cpp`, `ENABLE_GLOBAL_RANK` | Global rank and top-player effect | `sys.char.points` | missing | | |
 | `sys.item.core` | `G/item.cpp`, `G/item_manager.cpp`, `G/char_item.cpp` | Item instances, inventory windows, move, stack, use, drop, pick up, destroy | `sys.login.enter`, `sys.item.proto` | missing | | |
-| `sys.item.proto` | `G/item_manager_read_tables.cpp` | `item_proto`, `item_names`, special item groups | | missing | | |
+| `sys.item.proto` | `G/item_manager_read_tables.cpp` (`ReadSpecialDropItemFile`), `D/ClientManagerBoot.cpp` (`InitializeItemTable`), `D/ProtoReader.cpp` | `item_proto`, `item_names`, special item groups | | partial | | `item_proto.txt` and `item_names.txt` are read whole and byte-exact (`gamedata::item_proto`, ledger 191), and `special_item_group.txt` is read by `gamedata::special_item_group` over the ported `CTextFileLoader` (`gamedata::text_file`, ledger 192). Not `ported`: the bag is never drawn and the `attr` applies are never applied, so no client reaches any of it. `ori_to_new_table.txt` still has no reader. |
 | `sys.item.attr` | `G/item_attribute.cpp`, `__ATTR_6TH_7TH__`, `ENABLE_GLOVE_ITEM_ATTR` | Bonuses, bonus change and add, rare bonuses | `sys.item.core` | missing | | |
 | `sys.item.refine` | `G/refine.cpp`, `ENABLE_REFINE_ELEMENT` | Upgrade, refine element | `sys.item.core` | missing | | |
 | `sys.item.sockets` | `ENABLE_EXTENDED_SOCKETS` | Stones in sockets | `sys.item.core` | missing | | |

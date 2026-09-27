@@ -1,6 +1,6 @@
 //! The name-to-value tables the legacy DB server uses to read an item proto column.
 //!
-//! Legacy `Set_Proto_Item_Table` (`server/server/db/ProtoReader.cpp:861-1010`) reads 33 columns
+//! Legacy `Set_Proto_Item_Table` (`server/server/db/ProtoReader.cpp:861-1009`) reads 33 columns
 //! and, for nine of them, does not use `str_to_number`: it hands the field to one of the eight
 //! functions in this module, each of which is a linear scan over a C string array whose **array
 //! index is the value**. A value of `-1` means "not found", and `Set_Proto_Item_Table` reacts to
@@ -451,8 +451,8 @@ pub const APPLY_TYPE: &[&str] = &[
     "APPLY_RESIST_DARK",
     "APPLY_ANTI_CRITICAL_PCT",
     "APPLY_ANTI_PENETRATE_PCT",
-    "APPLY_ATTBONUS_METIN",
     "APPLY_ATTBONUS_BOSS",
+    "APPLY_ATTBONUS_METIN",
     "APPLY_ENCHANT_ELECT",
     "APPLY_ENCHANT_FIRE",
     "APPLY_ENCHANT_ICE",
@@ -492,6 +492,175 @@ pub const APPLY_TYPE: &[&str] = &[
     "APPLY_RESIST_FALL",
     "APPLY_RESIST_COMBAT",
 ];
+
+/// `MAX_APPLY_NUM` (`server/server/common/length.h:639`): the `EApplyTypes` member after the
+/// last real apply type, and the one the attribute-group range check compares against.
+///
+/// The value is 130, which is the number of members before it. The comments beside two of those
+/// members are stale: `length.h:591-592` writes `//92` and `//93` for `APPLY_ATTBONUS_BOSS` and
+/// `APPLY_ATTBONUS_METIN`, which are really 90 and 91. The value here was measured by compiling
+/// the enum, not by counting or by reading the comments.
+pub const MAX_APPLY_NUM: u32 = 130;
+
+/// The sentinel `c_aApplyTypeNames` carries for a duration that never runs out
+/// (`server/server/game/constants.cpp:1269`).
+///
+/// It is a literal in the table rather than a member of `EApplyTypes`, so it is not an apply type
+/// and is not in [`APPLY_TYPE`].
+pub const INFINITE_AFFECT_DURATION: u32 = 0x1FFF_FFFF;
+
+/// `c_aApplyTypeNames` (`server/server/game/constants.cpp:1186-1321`), as `(name, value)`.
+///
+/// This is **not** [`APPLY_TYPE`], and the two must not be merged:
+///
+/// - The names here have the `APPLY_` prefix stripped, so `FN_get_apply_type` answers 0 for
+///   `APPLY_MAX_HP` and 1 for `MAX_HP`.
+/// - The order is the table's own, which is not the enum's, and the first match wins.
+/// - Five values are named twice. Four are deliberate aliases, because the source's own value
+///   column points the short name at the `_PCT` member: `POISON`, `STUN`, `CRITICAL`, and
+///   `PENETRATE` each resolve to their `_PCT` value. The fifth is `ATT_BONUS_TO_MONSTER` and
+///   `ATT_BONUS_TO_MOB`, which both name `APPLY_ATTBONUS_MONSTER` in the source.
+/// - One row, [`INFINITE_AFFECT_DURATION`], is not an apply type at all.
+pub const APPLY_TYPE_NAMES: &[(&str, u32)] = &[
+    ("STR", 5),
+    ("DEX", 6),
+    ("CON", 3),
+    ("INT", 4),
+    ("MAX_HP", 1),
+    ("MAX_SP", 2),
+    ("MAX_STAMINA", 58),
+    ("POISON_REDUCE", 41),
+    ("EXP_DOUBLE_BONUS", 43),
+    ("GOLD_DOUBLE_BONUS", 44),
+    ("ITEM_DROP_BONUS", 45),
+    ("HP_REGEN", 10),
+    ("SP_REGEN", 11),
+    ("ATTACK_SPEED", 7),
+    ("MOVE_SPEED", 8),
+    ("CAST_SPEED", 9),
+    ("ATT_BONUS", 53),
+    ("DEF_BONUS", 54),
+    ("MAGIC_ATT_GRADE", 55),
+    ("MAGIC_DEF_GRADE", 56),
+    ("SKILL", 51),
+    ("ATTBONUS_ANIMAL", 18),
+    ("ATTBONUS_UNDEAD", 21),
+    ("ATTBONUS_DEVIL", 22),
+    ("ATTBONUS_HUMAN", 17),
+    ("ADD_BOW_DISTANCE", 52),
+    ("DODGE", 28),
+    ("BLOCK", 27),
+    ("RESIST_SWORD", 29),
+    ("RESIST_TWOHAND", 30),
+    ("RESIST_DAGGER", 31),
+    ("RESIST_BELL", 32),
+    ("RESIST_FAN", 33),
+    ("RESIST_BOW", 34),
+    ("RESIST_FIRE", 35),
+    ("RESIST_ELEC", 36),
+    ("RESIST_MAGIC", 37),
+    ("RESIST_WIND", 38),
+    ("REFLECT_MELEE", 39),
+    ("REFLECT_CURSE", 40),
+    ("RESIST_ICE", 85),
+    ("RESIST_EARTH", 86),
+    ("RESIST_DARK", 87),
+    ("RESIST_CRITICAL", 88),
+    ("RESIST_PENETRATE", 89),
+    ("POISON", 12),
+    ("SLOW", 14),
+    ("STUN", 13),
+    ("STEAL_HP", 23),
+    ("STEAL_SP", 24),
+    ("MANA_BURN_PCT", 25),
+    ("CRITICAL", 15),
+    ("PENETRATE", 16),
+    ("KILL_SP_RECOVER", 42),
+    ("KILL_HP_RECOVER", 47),
+    ("PENETRATE_PCT", 16),
+    ("CRITICAL_PCT", 15),
+    ("POISON_PCT", 12),
+    ("STUN_PCT", 13),
+    ("ATT_BONUS_TO_WARRIOR", 59),
+    ("ATT_BONUS_TO_ASSASSIN", 60),
+    ("ATT_BONUS_TO_SURA", 61),
+    ("ATT_BONUS_TO_SHAMAN", 62),
+    ("ATT_BONUS_TO_MONSTER", 63),
+    ("ATT_BONUS_TO_MOB", 63),
+    ("MALL_ATTBONUS", 64),
+    ("MALL_EXPBONUS", 66),
+    ("MALL_DEFBONUS", 65),
+    ("MALL_ITEMBONUS", 67),
+    ("MALL_GOLDBONUS", 68),
+    ("MAX_HP_PCT", 69),
+    ("MAX_SP_PCT", 70),
+    ("SKILL_DAMAGE_BONUS", 71),
+    ("NORMAL_HIT_DAMAGE_BONUS", 72),
+    ("SKILL_DEFEND_BONUS", 73),
+    ("NORMAL_HIT_DEFEND_BONUS", 74),
+    ("RESIST_WARRIOR", 76),
+    ("RESIST_ASSASSIN", 77),
+    ("RESIST_SURA", 78),
+    ("RESIST_SHAMAN", 79),
+    ("INFINITE_AFFECT_DURATION", 0x1FFF_FFFF),
+    ("ENERGY", 80),
+    ("COSTUME_ATTR_BONUS", 82),
+    ("MAGIC_ATTBONUS_PER", 83),
+    ("MELEE_MAGIC_ATTBONUS_PER", 84),
+    ("ATTBONUS_METIN", 91),
+    ("ATTBONUS_BOSS", 90),
+    ("ENCHANT_ELECT", 92),
+    ("ENCHANT_FIRE", 93),
+    ("ENCHANT_ICE", 94),
+    ("ENCHANT_WIND", 95),
+    ("ENCHANT_EARTH", 96),
+    ("ENCHANT_DARK", 97),
+    ("SUNGMA_STR", 98),
+    ("SUNGMA_HP", 99),
+    ("SUNGMA_MOVE", 100),
+    ("SUNGMA_IMMUNE", 101),
+    ("ATTBONUS_ANIMAL_PCT", 102),
+    ("ATTBONUS_UNDEAD_PCT", 103),
+    ("ATTBONUS_DEVIL_PCT", 104),
+    ("ATTBONUS_ORC_PCT", 105),
+    ("ATTBONUS_MILGYO_PCT", 106),
+    ("ATTBONUS_DESERT_PCT", 107),
+    ("ATTBONUS_INSECT_PCT", 108),
+    ("ATTBONUS_TREE_PCT", 109),
+    ("ATTBONUS_BOSS_PCT", 110),
+    ("ATTBONUS_METIN_PCT", 111),
+    ("ATTBONUS_CZ_PCT", 112),
+    ("ATTBONUS_HUMAN_PCT", 113),
+    ("ATTBONUS_MONSTER_PCT", 114),
+    ("ENCHANT_ELECT_PCT", 115),
+    ("ENCHANT_FIRE_PCT", 116),
+    ("ENCHANT_ICE_PCT", 117),
+    ("ENCHANT_WIND_PCT", 118),
+    ("ENCHANT_EARTH_PCT", 119),
+    ("ENCHANT_DARK_PCT", 120),
+    ("RESIST_ELECT_PCT", 121),
+    ("RESIST_FIRE_PCT", 122),
+    ("RESIST_ICE_PCT", 123),
+    ("RESIST_WIND_PCT", 124),
+    ("RESIST_EARTH_PCT", 125),
+    ("RESIST_DARK_PCT", 126),
+    ("RESIST_HUMAN_PCT", 127),
+    ("RESIST_FALL", 128),
+    ("RESIST_COMBAT", 129),
+];
+
+/// `FN_get_apply_type` (`server/server/game/constants.cpp:1324-1333`): an apply type by name.
+///
+/// The comparison is `strcasecmp`, so it is ASCII case-insensitive, and the walk returns on the
+/// first match, so [`APPLY_TYPE_NAMES`]'s order decides a name that appears twice. A name that is
+/// in neither the table nor is a number answers 0, which the callers read as invalid.
+pub fn fn_get_apply_type(name: &[u8]) -> u32 {
+    APPLY_TYPE_NAMES
+        .iter()
+        .find(|(candidate, _)| candidate.as_bytes().eq_ignore_ascii_case(name))
+        .map_or(0, |(_, value)| *value)
+}
+
 const TYPE_1: &[&str] = &[
     "WEAPON_SWORD",
     "WEAPON_DAGGER",
@@ -919,5 +1088,138 @@ mod tests {
         for table in [ANTI_FLAG, FLAG, WEAR_FLAG, IMMUNE] {
             assert!(table.len() <= 32, "a flag table of {} names", table.len());
         }
+    }
+
+    /// The two attack-bonus entries, which are the pair most likely to be read wrong.
+    ///
+    /// `length.h:591-592` writes them in the order `APPLY_ATTBONUS_BOSS` then
+    /// `APPLY_ATTBONUS_METIN` and comments them `//92` and `//93`. Both comments are **stale**: the
+    /// enum auto-increments, and compiling it puts `APPLY_ATTBONUS_BOSS` at 90 and
+    /// `APPLY_ATTBONUS_METIN` at 91. The shipped data is right and the comments are wrong, so this
+    /// pins the compiled values and the enum order together; reading the comments gives 90 as 92
+    /// and shifts every apply type above them by two.
+    #[test]
+    fn the_attack_bonus_entries_are_boss_then_metin() {
+        assert_eq!(APPLY_TYPE[90], "APPLY_ATTBONUS_BOSS");
+        assert_eq!(APPLY_TYPE[91], "APPLY_ATTBONUS_METIN");
+        assert_eq!(apply_type_value(b"APPLY_ATTBONUS_BOSS"), Some(90));
+        assert_eq!(apply_type_value(b"APPLY_ATTBONUS_METIN"), Some(91));
+    }
+
+    /// The last few entries, read from the compiled initialiser, so a table that lost its tail
+    /// cannot pass on length alone.
+    #[test]
+    fn the_tail_of_the_apply_table_is_in_compiled_order() {
+        assert_eq!(APPLY_TYPE[124], "APPLY_RESIST_WIND_PCT");
+        assert_eq!(APPLY_TYPE[125], "APPLY_RESIST_EARTH_PCT");
+        assert_eq!(APPLY_TYPE[126], "APPLY_RESIST_DARK_PCT");
+        assert_eq!(APPLY_TYPE[127], "APPLY_RESIST_HUMAN_PCT");
+        assert_eq!(APPLY_TYPE[128], "APPLY_RESIST_FALL");
+        assert_eq!(APPLY_TYPE[129], "APPLY_RESIST_COMBAT");
+    }
+
+    /// `c_aApplyTypeNames` has one name per apply value, and the loader's `FN_get_apply_type`
+    /// looks names up in it. The two are different tables: this one holds stripped names like
+    /// `MAX_HP`, not the `APPLY_`-prefixed enum names.
+    #[test]
+    fn the_apply_name_table_is_125_rows_in_the_sources_own_order() {
+        // 124 rows name an apply value and one row is the duration sentinel, so the table is
+        // neither the enum nor the indexes. Its first row is `STR`, not `NONE`.
+        assert_eq!(APPLY_TYPE_NAMES.len(), 125);
+        assert_eq!(APPLY_TYPE_NAMES[0], ("STR", 5));
+        assert_eq!(APPLY_TYPE_NAMES[4], ("MAX_HP", 1));
+        assert_eq!(APPLY_TYPE_NAMES[124], ("RESIST_COMBAT", 129));
+        // Every name is distinct, so the answer for a name never depends on which row comes first.
+        let mut names: Vec<&str> = APPLY_TYPE_NAMES.iter().map(|(n, _)| *n).collect();
+        names.sort_unstable();
+        let count = names.len();
+        names.dedup();
+        assert_eq!(names.len(), count, "no name is in the table twice");
+    }
+
+    /// The table does not cover every apply value, and the gaps are how a caller reads those
+    /// names. A port needs to know this, because a value with no name answers 0.
+    #[test]
+    fn the_apply_name_table_leaves_eleven_values_nameless() {
+        let named: std::collections::BTreeSet<u32> =
+            APPLY_TYPE_NAMES.iter().map(|(_, v)| *v).collect();
+        assert_eq!(
+            named.iter().filter(|v| **v < MAX_APPLY_NUM).count(),
+            119,
+            "119 of the 130 values are named at least once"
+        );
+        let unnamed: Vec<u32> = (0..MAX_APPLY_NUM).filter(|v| !named.contains(v)).collect();
+        assert_eq!(unnamed, [0, 19, 20, 26, 46, 48, 49, 50, 57, 75, 81]);
+        // The one row outside the range is the duration sentinel.
+        assert_eq!(
+            named
+                .iter()
+                .filter(|v| **v >= MAX_APPLY_NUM)
+                .copied()
+                .collect::<Vec<_>>(),
+            [INFINITE_AFFECT_DURATION]
+        );
+    }
+
+    #[test]
+    fn fn_get_apply_type_matches_names_case_insensitively() {
+        assert_eq!(fn_get_apply_type(b"MAX_HP"), 1);
+        assert_eq!(
+            fn_get_apply_type(b"max_hp"),
+            1,
+            "strcasecmp, so the case does not matter"
+        );
+        assert_eq!(
+            fn_get_apply_type(b" Max_Hp "),
+            0,
+            "and it does not trim either"
+        );
+        assert_eq!(
+            fn_get_apply_type(b"nope"),
+            0,
+            "0 is how a caller reads invalid"
+        );
+        assert_eq!(fn_get_apply_type(b""), 0);
+        assert_eq!(
+            fn_get_apply_type(b"APPLY_MAX_HP"),
+            0,
+            "the enum name is not the name here"
+        );
+    }
+
+    /// The four aliases the legacy resolver holds that no enum member is named after, plus the
+    /// duration sentinel. Each was read out of the compiled `FN_get_apply_type` body.
+    #[test]
+    fn the_apply_name_aliases_answer_their_own_values() {
+        assert_eq!(
+            fn_get_apply_type(b"POISON"),
+            fn_get_apply_type(b"POISON_PCT")
+        );
+        assert_eq!(fn_get_apply_type(b"STUN"), fn_get_apply_type(b"STUN_PCT"));
+        assert_eq!(
+            fn_get_apply_type(b"CRITICAL"),
+            fn_get_apply_type(b"CRITICAL_PCT")
+        );
+        assert_eq!(
+            fn_get_apply_type(b"PENETRATE"),
+            fn_get_apply_type(b"PENETRATE_PCT")
+        );
+        assert_eq!(
+            fn_get_apply_type(b"ATT_BONUS_TO_MONSTER"),
+            fn_get_apply_type(b"ATT_BONUS_TO_MOB")
+        );
+        assert_eq!(
+            fn_get_apply_type(b"INFINITE_AFFECT_DURATION"),
+            INFINITE_AFFECT_DURATION
+        );
+        assert_eq!(INFINITE_AFFECT_DURATION, 0x1FFF_FFFF);
+    }
+
+    /// The two numbers the legacy attribute loader range-checks against. Both came out of a
+    /// compiled probe, not out of a header comment.
+    #[test]
+    fn the_apply_range_numbers_come_from_the_compiler() {
+        assert_eq!(MAX_APPLY_NUM, 130);
+        assert_eq!(APPLY_TYPE.len(), MAX_APPLY_NUM as usize);
     }
 }

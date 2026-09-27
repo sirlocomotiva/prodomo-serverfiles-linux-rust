@@ -98,7 +98,7 @@ owner should know about (178.5):
 | `protocol` `db_*` and `gg*` modules | Deleted in 177. `TSimplePlayer` moved to `protocol::simple_player`. | Done. |
 | `net` | Client framing. `buffer.rs` and the DB-peer transport were deleted in 177. | Kept. |
 | `db` | `store` (the PostgreSQL pool, the embedded migrations, and the transient-error rule), `credentials` (logins, argon2id passwords, delete codes), `accounts` (accounts, Coins and Cash, GM grants), and `item_id_range`. Tested against PostgreSQL 18.6 when `DATABASE_URL` is set. | Grows with each system's tables. |
-| `gamedata` | Packed table record layouts and nine table rules (banword, event, item_attr, land, object_proto, refine, renewal_shop, shop, skill) as typed builders over caller-supplied rows. New in 177. | Readers and importers for `legacy/gamedata` are added with the system that first needs them. |
+| `gamedata` | Packed table record layouts and nine table rules (banword, event, item_attr, land, object_proto, refine, renewal_shop, shop, skill) as typed builders over caller-supplied rows. New in 177. File readers added with the system that needs them: `mob_names` (186), `item_proto` for `item_proto.txt` and `item_names.txt` (191), the `CTextFileLoader` port `text_file` and the `special_item_group.txt` bag reader (192), and the `ProtoReader.cpp` value tables `item_proto_value`, including the compiled apply-type range. | Readers and importers for `legacy/gamedata` are added with the system that first needs them. |
 | `world` | Spatial model, characters, events, and some combat rules. Never imported by a binary. | Kept; grows with step 4. |
 | `quest` | An 8-line scaffold. | Replaced by the `qc` port and the Lua 5.1 runtime. |
 | `prodomo` | Renamed from `game-server` in 178. `prodomo serve` reads `prodomo.toml`, creates a lazy store, binds the auth listener and every Channel port (`listeners`), starts the game loop, migrates the store (retrying while it is unreachable), and only then opens `ReadyGate` (179). Every admitted connection runs `client_live` (182): the handshake on accept, TEA, time sync, keepalive, and the ping cycle. `prodomo account` and `prodomo gm` are the Operator commands (`operator`, 179). Reducers: `ClientLifecycle`, handshake, heartbeat, `DescriptorCrypto`, `client_live`, `AccountPlayerSession` and its router (re-based on the typed `account_records` in 177), `sync_position`. | `ReadyGate` will also wait for the loaded Game data once step 3 loads it. |
@@ -161,6 +161,9 @@ owner should know about (178.5):
 | A rename naming a slot past 3 closes the connection at once (ledger 186). | Closed 5 seconds later (`DelayedDisconnect(5)`). |
 | A text proto line of 2,048 bytes or more, a quoted field still open at the end of the file, and a `mob_names.txt` or `mob_proto.txt` data row with one column stop the server at start-up (ledger 186). | `getline` fails and the rest of the file is silently skipped; the unfinished row is dropped; `std::vector::at` throws. |
 | The Channel status list is computed when it is asked for, with the ports in ascending order (ledger 183). | Each Core reports to the DB server at boot and then every five minutes, so a status can be five minutes old; the list is in `unordered_map` order (`G/desc_client.cpp:292-313`, `D/ClientManager.cpp:4455-4466`). |
+| An apply type named by an `attr` group row is resolved with the short names of `c_aApplyTypeNames`, which have no `APPLY_` prefix (ledger 192). | Kept, so a row writing `APPLY_MAX_HP` is refused exactly as legacy refuses it. |
+| A special-item-group row vnum is read unsigned and a group vnum signed, and every `str_to_number` keeps the low 32 bits of the saturated `strtol` (ledger 192). | Kept, because the C++ types are `DWORD` and `int` and the cast is what legacy does. |
+| `MAX_APPLY_NUM` is 130, measured by compiling `EApplyTypes`, and the `// NN` comments in the enum are two too high for 14 members from `APPLY_COSTUME_ATTR_BONUS` up (ledger 192). | The comments are the only place a reader can find these numbers, and they are wrong; the shipped values are right and are not changed. |
 
 ## Legacy defects not to reproduce
 
@@ -202,6 +205,23 @@ owner should know about (178.5):
 - The position fallback after a failed `GetPosition` logs and keeps the old `z`
   (`G/input_login.cpp:572-585`). The Rewrite does the same fallback and has no `z`: the world owns
   height (ledger 187).
+- A `group` line whose name holds a space calls `exit(1)` (`G/text_file_loader.cpp:75-81`), and a
+  `Bind` on a file ending in a high byte appends one byte past the buffer
+  (`G/file_loader.cpp:99-102`). The Rewrite reports the group name and stops at the buffer
+  (ledger 192).
+- A text-file key with no value ends its group with a `sys_err` and a `break`, so the rest of the
+  group is silently dropped (`G/text_file_loader.cpp:133-140`). The Rewrite returns an error
+  (ledger 192).
+- A special-item-group row with fewer than three fields reads `pTok->at(1)` and `pTok->at(2)` past
+  the end of the vector, and an `attr` row with one field reads `pTok->at(1)`
+  (`G/item_manager_read_tables.cpp:264`, `:266`, `:190`). The Rewrite refuses the file (ledger 192).
+- `char buf[4]` truncates the decimal row key to three characters, and the row loops run to
+  `k < 1024`, so the last 24 iterations read the rows written for keys 100, 101 and 102 again and
+  add their items a second time (`G/item_manager_read_tables.cpp:171-174`, `:214-217`). The Rewrite
+  builds the key as a decimal string, so key `1000` means `1000` (ledger 192).
+- `GetAttrVnum` returns a `DWORD` from the row's signed `int count`, so a negative count becomes a
+  huge attribute vnum rather than 0 (`G/item_manager.h:206-218`). The Rewrite keeps the bits, as
+  the type demands, and says so (ledger 192).
 
 ## Environment
 

@@ -7,7 +7,7 @@ byte-exact and a scenario exercises the system that uses it.
 
 | id | path or table | read by (legacy) | used by | status | scenario | note |
 |---|---|---|---|---|---|---|
-| `data.proto.item` | `proto/item_proto.txt`, `proto/item_names.txt` | `D/ClientManagerBoot.cpp` (sent to the game at boot) | `sys.item.proto` | missing | | `PROTO_FROM_DB = 0`; name column in a legacy code page. |
+| `data.proto.item` | `proto/item_proto.txt`, `proto/item_names.txt` | `D/ClientManagerBoot.cpp` (sent to the game at boot) | `sys.item.proto` | partial | | `gamedata::item_proto` reads both files whole and byte-exact (ledger 191), with the six name resolvers, the vnum-range rows, and the 33 read columns pinned against the owner's data. Not `ported`: a reader has no client-reachable scenario. `PROTO_FROM_DB = 0`; name column in a legacy code page. |
 | `data.proto.mob` | `proto/mob_proto.txt`, `proto/mob_names.txt` | `D/ClientManagerBoot.cpp` (sent to the game at boot) | `sys.mob.proto` | partial |  | Only the locale names the Name rules refuse are read (`gamedata::mob_names`, ledger 186). |
 | `data.map.setting` | `locale/europe/map/*/Setting.txt` | `G/sectree_manager.cpp` | `sys.world.map` | missing | | 69 map directories. |
 | `data.map.attr` | `locale/europe/map/*/server_attr` | `G/sectree_manager.cpp` | `sys.world.map` | missing | | Binary. |
@@ -22,7 +22,7 @@ byte-exact and a scenario exercises the system that uses it.
 | `data.drop.common` | `locale/europe/common_drop_item.txt` | `G/input_db.cpp` | `sys.combat.drop` | missing | | |
 | `data.drop.etc` | `locale/europe/etc_drop_item.txt` | `G/input_db.cpp` | `sys.combat.drop` | missing | | Read by vnum (`ENABLE_FIX_READ_ETC_DROP_ITEM_FILE_BY_VNUM`). |
 | `data.drop.group` | `locale/europe/drop_item_group.txt` | `G/input_db.cpp` | `sys.combat.drop` | missing | | |
-| `data.item.special_group` | `locale/europe/special_item_group.txt` | `G/item_manager_read_tables.cpp` | `sys.item.proto` | missing | | |
+| `data.item.special_group` | `locale/europe/special_item_group.txt` | `G/item_manager_read_tables.cpp` | `sys.item.proto` | partial | | `gamedata::text_file` is the `CTextFileLoader` port and `gamedata::special_item_group` the `ReadSpecialDropItemFile` port (ledger 192), both byte-exact on the owner's CRLF file, with the `Bind` two-byte and CR/LF quirks, the four-field row reads, and the prefix-sum draw pinned. Not `ported`: nothing creates an item or draws a bag yet, so no client reaches it. Legacy `exit(1)`s on a group name with a space and over-reads `pTok`; both are Defects and are not reproduced. |
 | `data.item.ori_to_new` | `locale/europe/ori_to_new_table.txt` | `G/input_db.cpp` | `sys.item.proto` | missing | | |
 | `data.item.stack_attribute` | `locale/europe/item_stack_attribute.txt` | `G/item_stack_attribute.cpp` | `sys.item.stack_attribute` | missing | | |
 | `data.item.blend` | `locale/europe/blend.json` | `G/blend_item.cpp` | `sys.item.blend` | missing | | |

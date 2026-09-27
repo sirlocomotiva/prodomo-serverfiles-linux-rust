@@ -17114,3 +17114,351 @@ row is ported when a scripted-client scenario passes and no scenario can reach a
 a client. And no codec was added: `AGENTS.md` says a round trip is not an independent witness,
 and a text reader has no round trip to mistake for one, so the evidence here is the legacy source,
 the owner's file, and the values pinned in 191.7.
+
+## 192. `special_item_group.txt` and the text reader it needs
+
+Step 4 is items and inventory. The bags that drop items, and the item attributes that costume and
+mount systems read, both come out of `special_item_group.txt`, and that file is read through the
+hand-written text loader every legacy Game data file uses. This entry ports that loader
+(`gamedata::text_file`) and its first user (`gamedata::special_item_group`), and it records what
+compiling the legacy source changed about the apply-type range. No Parity inventory row becomes
+`ported` and no scenario is named, because nothing a client can observe runs yet: no item is
+created, no bag is ever drawn, and no attribute is ever applied. Two rows move to `partial`, which
+is the status for a table rule that exists with no scenario behind it.
+
+### 192.1 The reader: `gamedata::text_file`
+
+`CTextFileLoader` (`server/server/game/text_file_loader.cpp`) is the whole of the format, over
+`CMemoryTextFileLoader` (`server/server/game/file_loader.h` and `file_loader.cpp`). It is a
+recursive-descent scan over **one cursor shared by every level**: `m_dwcurLineIndex` is a single
+`DWORD` member (`text_file_loader.h:68`) that the group loop (`:59`), the `group` arm (`:90`), the
+`list` arm (`:109-110`) and the diagnostics all advance, and it is the index `SplitLine` is handed.
+That is why the two functions in `file_loader.cpp` matter so much.
+
+**`Bind` (`file_loader.cpp:78-111`) is not a line splitter and must not become one.** It walks the
+buffer one byte at a time and cuts it on `\n` or `\r` (`:90`), on a byte that is
+**negative as a signed `char`** (`:99`), and nowhere else. The signedness is the legacy target's
+(`server/server/premake5.lua:12` is 32-bit x86), not a portable fact. Three behaviours follow and
+all three are pinned:
+
+- A byte with the high bit set takes the byte after it with it, whatever that byte is, because
+  `stLine.append(c_pcBuf + (pos-1), 2)` appends two bytes (`:99-102`). The owner's
+  `special_item_group.txt` is UTF-8, so this is not theoretical.
+- **Two consecutive break bytes count as one break** (`:92-94` looks ahead and swallows the
+  second), so a file with `\r\n\r\n` between groups loses a
+  group separator, and a `\r`-only file yields **one** line.
+- The final `push_back` at `:110` is **unconditional**, so `Bind` always ends with one more line
+  than it has break bytes: the last real line is kept when the file does not end in a break byte,
+  and the last line is **empty** when it does.
+
+A last byte with the high bit set appends **two** bytes out of a buffer that has only one left
+(`:101`). That reads past the end of the allocation and is a Defect; the reader stops at the
+buffer instead, and the difference is recorded here. Legacy also opens the file `"rb"` and never
+checks the result of `fread` (`text_file_loader.cpp:36`, `:46`), so a short read leaves the tail
+of the buffer uninitialised. The reader takes the bytes it was given.
+
+**The field delimiter is space and tab, and nothing else.** `file_loader.h:15` declares
+`const char * c_szDelimeter = " \t"` and `CTextFileLoader` never overrides the default.
+`\r` and `\n` never reach `SplitLine`, because `Bind` already cut on them, so a
+field can hold **any** byte from `0x20` up except space and tab, including `#` and `"`. A port
+that adds `\r\n` to the set is not more faithful; it is differently wrong.
+
+**`SplitLine` (`file_loader.cpp:12-57`) has three exits and one break.**
+
+- `find_first_not_of(c_szDelimeter, basePos)` returns `npos` and the line is dropped (`:23-25`).
+  That is how a blank line is skipped, and it is why a line is never *empty* but *absent*.
+- A line is dropped when the first non-delimiter byte is `#` and the four characters from there
+  are not `#--#` (`:29-32`). The test is on the byte **after** the leading spaces and tabs, so a
+  line whose `#` is not its first non-space byte is a token, not a comment.
+- A quoted field starts **after** its opening quote and runs to the next `"` (`:33-42`). A quoted
+  field therefore cannot contain a `"`, neither quote is in the token, and an unterminated quote
+  drops the whole line, which makes it look blank.
+- The tail test at `:52-53` is what ends the loop. It is also why the `do ... while` never runs a
+  second pass on an exhausted scan, so the exhausted check at `:23-25` is reached once only.
+
+**`LoadGroup` (`text_file_loader.cpp:56-145`) lower-cases the first token of every line** at `:64`,
+before any arm runs, so every arm compares against a lower-cased token. Then:
+
+- `{` and `}` are tested on the **first character of the first token** (`:66-70`). A `{` line
+  contributes nothing and a `}` line ends the group.
+- `group` (`:73-93`): anything but exactly two tokens is a `sys_err` and then `exit(1)`
+  (`:75-81`). The name is lower-cased at `:87`, so two groups differing only in case are one
+  group and the second is lost.
+- `list` (`:95-128`): a list with no name hits `assert` and `continue` (`:97-101`), the key is
+  lower-cased (`:105-106`), and every following non-brace line is **appended to one flat token
+  vector** (`:121-124`) — including the lines of a nested `{ }` block that is not itself a
+  `list`, because the `{` and `}` arms only `continue` and `break` (`:115-119`). A second `list`
+  under a name the group already has inserts the same key again (`:127`) into a `std::map`
+  (`text_file_loader.h:8`), which **drops** it, so the tokens it collected are lost.
+- A key (`:129-144`): the key is the first token and is erased from the vector (`:142`); a key with
+  **no** value is `sys_err`'d and ends the group with `break` (`:133-140`). So an empty value is
+  not an empty vector here, it is a `break` that abandons the rest of the group.
+
+Two reader behaviours are **not** reproduced, and both are Defects:
+
+- A `group` line whose name holds a space kills the process with `exit(1)`. The reader reports
+  `TextFileError::GroupNameHasSpace` and lets the caller decide.
+- A key with no value ends the group with a `sys_err` and a `break`, and the rest of the group is
+  dropped without a word. The reader returns an error, because a group that stops half-read is
+  not a state the Rewrite will hand to a caller.
+
+The error at `:135-138` prints `m_dwcurLineIndex`, which is 0 from the constructor
+(`text_file_loader.cpp:13`) and is reset to 0 by every `Load` (`:34`), so **a reported line number
+is zero-based** and the first line of the file is 0. The reader reports the same zero-based number.
+
+### 192.2 The bag reader: `gamedata::special_item_group`
+
+`ITEM_MANAGER::ReadSpecialDropItemFile` (`item_manager_read_tables.cpp:119-302`) is the only
+reader of `special_item_group.txt` that runs at boot (`input_db.cpp:924`). A GM command reloads
+it behind `ENABLE_EXTENDED_RELOAD` (`cmd_gm.cpp:2686`), and the consumers are the quest function
+`_get_special_item_group` (`questlua_global.cpp:1496`, reading the group at `:1504`),
+`GiveItemFromSpecialItemGroup` (`questlua_pc.cpp:458`), the two attribute-application sites in
+`item.cpp:1342` and `:1361`, `char_item.cpp:8594` and `:9578`, `char.cpp:10868` for the box, and
+the GM `DropItemGroup`-style command at `cmd_general.cpp:4149`. Every one of those is step 4 or
+step 5 work and none is part of this entry. `ConvSpecialDropItemFile`
+(`item_manager_read_tables.cpp:305`) opens a `special_item_group_vnum.txt` debug dump beside the
+process (`:311`); the Rewrite writes no file under the owner's data tree.
+
+Four maps come out of the reader and all four are `std::map` (`item_manager.h:492-494` and `:498`),
+so the Rewrite uses `BTreeMap` and the iteration order agrees. A vnum written twice keeps the
+**first** group, because `std::map::insert` and `BTreeMap::insert` both refuse a duplicate key.
+
+**The maps are keyed by `DWORD` and the group vnum is a signed `int`**, so the key is a narrowing:
+group vnum -1 is stored under 4294967295. Legacy does the same and never notices. The Rewrite keeps
+`i32` in the reader and narrows on the way into the map, so a row can be read and drawn, which is
+what legacy can do too; the conversion is pinned so it cannot drift into a silent drop.
+
+`m_ItemToSpecialGroup` (`:498`) is filled from inside the row loop and only
+`if (iVnum < 30000)` (`item_manager_read_tables.cpp:278-281`), so a group vnum of 30000 or more is
+absent from it. The write is `m_ItemToSpecialGroup[dwVnum] = iVnum` with `operator[]`, so looking a
+vnum up that was never stored **inserts a 0** as a side effect, and the last row to mention a vnum
+wins. Nothing in the Rewrite consults that map yet, so nothing is reproduced beyond the fact.
+
+**Three numbers mean three different things and each has its own signedness.** This is the part a
+port gets wrong most easily, because the reader is full of `str_to_number` calls and the two
+overloads differ only in the return of `strtol` versus `strtoul` (`utils.h:44-58`).
+
+| field | C++ type and line | read at | scanner |
+|---|---|---|---|
+| group `vnum` | `int iVnum` (`item_manager_read_tables.cpp:134`) | `:136` | `strtol`, signed |
+| row `count` | `int iCount` (`:263`) | `:264` | `strtol`, signed |
+| row `weight` | `int iProb` (`:265`) | `:266` | `strtol`, signed |
+| row `rare` | `int iRarePct` (`:268`) | `:271`, only when the row has a 4th field | `strtol`, signed |
+| row item `dwVnum` | `DWORD` (`:222`) | `:224` by original name, else `:252` | **unsigned** |
+| `apply_type` | `DWORD` (`:178`) | `:180` | **unsigned** |
+| `apply_value` | `int` (`:179`) | `:190` | `strtol`, signed |
+
+`GetTokenInteger` writes a local `int out = 0` (`text_file_loader.cpp:344-346`), so a value that
+is not a number leaves 0 rather than failing. `strtol` also **saturates** instead of wrapping,
+and the `(int)` or `(unsigned int)` cast is applied to the saturated value, so `2147483648` reads
+as `-2147483648` and `9999999999` reads as `1410065407`. `str_to_i32` and `str_to_u32` reproduce
+this through the low four bytes rather than by casting, which is what the ledger means by not
+"fixing" the casts. `the_two_numeric_reads_differ_only_in_a_negative_value`,
+`str_to_i32_matches_the_compiled_strtol_narrowing` and
+`str_to_u32_matches_the_compiled_strtoul_narrowing` are the pins.
+
+The row item vnum is read by the **unsigned** scanner because that is the one field legacy types
+as a `DWORD`, and `GetTokenDoubleWord` (`text_file_loader.cpp:351-354`) even reaches the same
+`strtol` by reinterpreting the pointer. The resolution order is `GetVnumByOriginalName` first
+(`:224`), then the six keywords (`:226-249`), then the vnum read. The keywords are `exp`, `mob`,
+`slow`, `drain_hp`, `poison` and `group`, compared with `==` on the **raw** token, so nothing is
+lower-cased and a row writing `EXP` is not an experience row. The first keyword is
+`"\xb0\xe6\xc7\xe8\xc4\xa1"`, the Korean word for experience in the source's own code page, and
+the reader keeps those exact bytes rather than re-encoding them into something that looks right and
+is not the same bytes.
+
+An `attr` row is resolved the other way round: the **number is tried first** and the name is only
+consulted when the number reads 0 (`:181-189`), so a token of `"0"` and a token of a name both land
+in `FN_get_apply_type`, and a name that resolves to 0 is an error that refuses the file (`:184-188`).
+The range check runs after the resolve and is `apply_type > MAX_APPLY_NUM` (`:191`), so it accepts
+`MAX_APPLY_NUM` itself. An `attr` group also reads one more token, `effect`, as the effect file
+name (`:204-207`).
+
+**A bag row is a prefix sum, and a zero-weight row is not in the bag at all.** `AddItem`
+(`item_manager.h:133-141`) returns immediately when the weight is 0 (`:135-136`), so a 0-weight
+row contributes neither an item nor a total, yet it still consumed its row key and the group
+still counts it. The totals are the running sum, and `GetOneIndex` (`:175-180`) draws
+`number(1, m_vecProbs.back())` and takes `lower_bound`, so a roll equal to a total lands on the
+row **after** it. A `PCT` bag instead rolls every row once (`GetMultiIndex`, `:147-173`) and keeps
+a row when `number(1,100) <=` that row's weight, which for the first row is the weight itself
+(`:153`) and for the rest is the **difference** from the previous row (`:160`). A negative weight
+therefore makes the vector non-monotonic, which `lower_bound` does not tolerate; the reader
+refuses to build such a bag and says why. An empty bag has no draw at all, and legacy reads
+`m_vecProbs[0]` and `m_vecProbs.back()` on it, which is an out-of-range read; the reader answers
+`None` instead.
+
+`GetVnum`, `GetCount` and `GetRarePct` (`:182-195`) all return `int` out of a struct whose `vnum`
+is a `DWORD`, so legacy's own accessors narrow. The Rewrite returns `u32` for the vnum. That is a
+**Divergence**: the legacy sign is a narrowing nobody wants, and no row of the owner's file comes
+near `i32::MAX`, so nothing in the owner's data can tell the two apart.
+
+`GetAttrVnum` (`:206-218`) does the same narrowing for real, and it matters, because the result is
+handed straight to `GetSpecialAttrGroup` as a group vnum (`item.cpp:1345-1346`,
+`char_item.cpp:8597`). It returns a `DWORD` from the row's **signed** `int count` (`:214`), so a
+**negative count becomes a huge attribute vnum** and the lookup then fails, where `0` would have
+failed too but quietly. The Rewrite keeps the bits, because that is what the C++ type does, and
+`get_attr_vnum_answers_only_for_a_special_bag` pins it rather than hiding it.
+
+**Three reader Defects are not reproduced.**
+
+- `char buf[4]` with `snprintf(buf, sizeof(buf), "%d", k)` (`:173-174` for an `attr` row and
+  `:216-217` for an item row) keeps three characters plus a NUL, and the loops run
+  `for (int k = 1; k < 1024; ++k)` (`:171` and `:214`). For `k` of 1000 or more the key is
+  therefore **`"100"`, `"101"`, or `"102"`**, so the last 24 iterations of each loop read a row that
+  was written for a much earlier key, and every row above 1023 is unreachable because the loop
+  stops. A row written under key `100` is read **twice**, at `k = 100` and at `k = 1000`, and both
+  readings `AddItem`, so the bag holds the item twice with its weight twice. Rows 1..1023 are all
+  reachable; the damage is to the tail. The Rewrite builds the key as a decimal string, so key
+  `1000` means `1000`, and
+  `a_bag_over_a_thousand_rows_reports_the_key_truncation_defect` names the defect and pins the
+  reading that avoids it.
+- `pTok->at(0)`, `at(1)` and `at(2)` (`:221`, `:264`, `:266`) and `pTok->at(1)` for an `attr` row
+  (`:190`) are **unchecked**, so a two-field row reads off the end of the vector. The Rewrite
+  refuses the file (`a_row_of_two_fields_is_refused_rather_than_read_past_the_end` and
+  `an_attr_row_of_one_field_is_refused`).
+- A group name holding a space, handled above, plus the `exit(1)` in the reader itself.
+
+One quirk is **kept** because it is observable and the honest check would be a silent change:
+the range test is `apply_type > MAX_APPLY_NUM` (`:191`), which is off by one and accepts the
+out-of-range value `MAX_APPLY_NUM` itself. `an_attr_row_above_max_apply_num_is_refused_and_the_limit_itself_is_not`
+pins that apply 130 is accepted and 131 is refused.
+
+**A group with no `vnum` value refuses the file in legacy too** (`:136-141`, `return false`), so
+that one is Parity, not a Defect. What legacy does with the `false` is what makes the contract
+interesting, and both call sites refuse: at boot the process is **shut down**
+(`input_db.cpp:924-929` logs, calls `thecore_shutdown()` and returns), and a GM reload just tells
+the GM it failed and leaves the previous bags in place (`cmd_gm.cpp:2690-2698`). Neither path
+carries on with a half-built table, and that is exactly the rule the Rewrite keeps: a reader that
+cannot finish a group returns the error and builds no table, so a caller is never handed a
+partial one. The mechanism differs (a `bool` plus a shutdown against a `Result` plus a decision)
+but the outcome does not, and no `GroupError` variant is a behaviour a client can reach.
+
+`SetParentNode` at `:139`, `:208` and `:289` is not decoration. `SetChildNode(i)` at `:130` moves
+the loader's current node **into** child `i`, and each of those three calls moves back out, so the
+three arms stay balanced and `GetTokenVector` always reads the group it was told to. The Rewrite
+has no current-node state to balance, because the parse returns a whole `TextFile` and the bag
+reader walks it.
+
+### 192.3 The apply-type name table, and what compiling `EApplyTypes` changed
+
+An `attr` row may name its apply type instead of numbering it (`:180-189`), and the only way that
+name becomes a number is `FN_get_apply_type` (`constants.cpp:1324-1333`). It walks
+`c_aApplyTypeNames` (`:1186-1321`) with `strcasecmp` and returns the **first** match, or 0, so
+the table's order is its semantics.
+
+`c_aApplyTypeNames` holds **125 named rows** and one `{ NULL, 0 }` terminator (`:1320`) that ends
+the resolver's loop. Of the 125, **124 point at an `EApplyTypes` member by name**, so their values
+are the enum's and not a hand-written column. The exception is the duration sentinel
+`INFINITE_AFFECT_DURATION` (`:1269`), written as the literal `0x1FFFFFFF` — a duration that never
+runs out, not an apply type, and the only row outside the range.
+
+**The names carry no `APPLY_` prefix.** The row is `{ "MAX_HP", APPLY_MAX_HP }`, so
+`FN_get_apply_type("APPLY_MAX_HP")` answers **0** and `FN_get_apply_type("max_hp")` answers 1.
+This table is therefore not `APPLY_TYPE`, the two must not be merged, and a port that builds a
+name resolver off the enum gets every name wrong.
+
+**Both `#ifdef`s around the tail are on.** `prodomodefines.h:53` defines `__CONQUEROR_LEVEL__`
+and `:36` defines `BONUS_PCT`, so the four `SUNGMA` members and the 28 `_PCT` members are in
+both the enum and the table. The switch is not cosmetic: with `__CONQUEROR_LEVEL__` off, every
+apply type from `APPLY_ATTBONUS_ANIMAL_PCT` up sits four lower and `MAX_APPLY_NUM` is 126
+instead of 130. `the_conqueror_level_gate_shifts_the_apply_table` pins the on-state.
+
+**`MAX_APPLY_NUM` is 130, and the `// NN` comments in the enum are stale by two for 14 members.**
+`EApplyTypes` (`server/server/common/length.h:495-640`) is a plain auto-incrementing list with no
+initialisers, so the values were **measured by compiling it** rather than counted or read off the
+comments. `MAX_APPLY_NUM` (`:639`) is 130. Fourteen members carry a comment two higher than the
+compiled value, and the drift starts at `:581`:
+
+| member | comment | compiled |
+|---|---|---|
+| `APPLY_COSTUME_ATTR_BONUS` | 84 | **82** |
+| `APPLY_MAGIC_ATTBONUS_PER` | 85 | **83** |
+| `APPLY_MELEE_MAGIC_ATTBONUS_PER` | 86 | **84** |
+| `APPLY_RESIST_ICE` | 87 | **85** |
+| `APPLY_RESIST_EARTH` | 88 | **86** |
+| `APPLY_RESIST_DARK` | 89 | **87** |
+| `APPLY_ANTI_CRITICAL_PCT` | 90 | **88** |
+| `APPLY_ANTI_PENETRATE_PCT` | 91 | **89** |
+| `APPLY_ATTBONUS_BOSS` | 92 | **90** |
+| `APPLY_ATTBONUS_METIN` | 93 | **91** |
+| `APPLY_SUNGMA_STR .. APPLY_SUNGMA_IMMUNE` | 100..103 | **98..101** |
+
+Only 96 of the 130 members carry a `// NN` comment at all, so the comments are a partial and
+unreliable index: 34 members have to be counted to be numbered. The comments are wrong, the
+shipped values are right, and the Rewrite changes neither, because
+`length.h` is under `server/` and is never modified. What matters is that a reader who trusts the
+comments shifts every apply type from `:581` up by two and would tell a client its costume bonus
+is a magic-attack bonus. `the_apply_range_numbers_come_from_the_compiler` pins the compiled
+numbers, and `the_attack_bonus_entries_are_boss_then_metin` pins the pair most likely to be read
+wrong.
+
+**Coverage, counted rather than estimated.** Of the 130 values `1..=MAX_APPLY_NUM`, **119** are
+named at least once, so **11** are not and a row naming one of them is refused: `19`
+(`APPLY_ATTBONUS_ORC`), `20` (`APPLY_ATTBONUS_MILGYO`), `26` (`APPLY_DAMAGE_SP_RECOVER`), `46`
+(`APPLY_POTION_BONUS`), `48`, `49` and `50` (`APPLY_IMMUNE_STUN`, `APPLY_IMMUNE_SLOW`,
+`APPLY_IMMUNE_FALL`), `57` (`APPLY_CURSE_PCT`), `75` (`APPLY_EXTRACT_HP_PCT`), `81`
+(`APPLY_DEF_GRADE`), and `130` itself, which is `MAX_APPLY_NUM` and has no member of its own. That
+last one is the off-by-one made visible: the value the loose range check lets through is the one
+value in the range that nothing can name.
+
+**Five values are named twice, and all ten names are decided by the table's own value column**, not
+by the enum:
+
+| value | names | the member both name |
+|---|---|---|
+| 12 | `POISON`, `POISON_PCT` | `APPLY_POISON_PCT` |
+| 13 | `STUN`, `STUN_PCT` | `APPLY_STUN_PCT` |
+| 15 | `CRITICAL`, `CRITICAL_PCT` | `APPLY_CRITICAL_PCT` |
+| 16 | `PENETRATE`, `PENETRATE_PCT` | `APPLY_PENETRATE_PCT` |
+| 63 | `ATT_BONUS_TO_MONSTER`, `ATT_BONUS_TO_MOB` | `APPLY_ATTBONUS_MONSTER` |
+
+The first four are deliberate, because the source points the short name at the `_PCT` member
+(`constants.cpp:1243-1246`); the fifth is two spellings of the same thing (`:1251-1252`). Both
+resolve the same either way, which is why the Rewrite can pin them without changing a value.
+`the_apply_name_aliases_answer_their_own_values` pins each pair and
+`the_apply_name_table_leaves_eleven_values_nameless` pins the count.
+
+Because the names are read as the file writes them, a row that says `APPLY_MAX_HP` is refused
+exactly as legacy refuses it. That is a Divergence with no way to close it, and the Rewrite's job
+was to get the refusal right; `an_attr_row_resolves_a_name_case_insensitively_and_answers_zero_for_none`
+pins it.
+
+### 192.4 Receipt
+
+Every gate passes on the final tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | pass |
+| `cargo build --workspace --locked --offline` | pass |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | pass, no findings |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | **2,071 tests across 31 targets, 0 failed** (up from 1,999) |
+| `cargo test --workspace --doc --locked --offline` | pass, 1 test and 9 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | pass |
+
+The 72 new tests are 33 in `gamedata::special_item_group`, 32 in `gamedata::text_file` and 7 in
+`gamedata::item_proto_value`, which takes `gamedata` from 194 to 266. Every one of them is a pin on
+a specific legacy behaviour, a specific owner's-file fact, or a compiled number, not a round
+trip: `AGENTS.md` is explicit that a round trip only proves the encoder and the decoder agree.
+
+The database-backed tests were also run against
+`postgres://prodomo:prodomo-test@127.0.0.1:55432/prodomo` (PostgreSQL 18.6 in Podman, the
+container a previous gate left running): the same **2,071 tests pass**, and
+`SELECT datname FROM pg_database WHERE datname LIKE 'prodomo\_%'` returns nothing afterwards, so
+no scratch database was left behind. The two runs are told apart by the `skipped: DATABASE_URL is
+not set` notice, which appears without the variable and does not with it.
+
+**What could not be measured.** The i686 cross compiler is not installed on this machine, so no
+packed width was measured. None was needed: nothing in this entry is a wire record. What did need
+the compiler — the `EApplyTypes` values — was measured with the host `g++ -std=c++17` on the enum
+text extracted verbatim from `length.h:495-640` with both feature switches defined. That is sound
+for an auto-incrementing `int` enum, whose values do not depend on the pointer width, and the
+probe is not a substitute for the i686 probe in general. The probe was run from a scratch
+directory and removed; the source of every value it produced is `AGENTS.md`'s "resolve a constant
+across every definition form" rule, and the pins are the durable form of the answer. `rustfmt` and
+`cargo-clippy` are both installed and their gates ran.
+
+**Two things this entry does not claim.** No Parity inventory row is `ported`, because a row is
+ported when a scripted-client scenario passes and no scenario can reach a data reader from a
+client; `data.item.special_group` and `sys.item.proto` move to `partial` and say so. And no codec
+was added, because a text reader has no wire bytes to get wrong.
