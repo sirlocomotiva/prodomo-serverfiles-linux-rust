@@ -19439,3 +19439,96 @@ already ran at, not a measurement taken here.
 
 The count moved from 2259 to 2270. Leftover `prodomo\_%` databases after the run: 0.
 
+## 202. A grant crosses into the thread that owns the world
+
+**What changed.** `GameCommand` gains a `GrantItem { request, reply }` variant and loses
+both `Copy` and `Clone`. `PulseProcessor` gains `apply_command`, and the loop's
+`drain_commands` now delegates every command that is not `Stop` to the processor.
+`GameState::apply` runs the grant and answers. `GameLoopController::request_grant`
+sends one and awaits the answer. `Character` gains `envanter` and
+`inven_point()`/`set_inven_point()`, and `common::item_slots` gains the derived
+`INVENTORY_MAX_EXTENDED`.
+
+**`Copy` and `Clone` went, and that is the design.** A `oneshot::Sender` is neither:
+it is the only handle to its answer, which is exactly what lets the answer be
+correlated without a table of pending waiters. The alternative was to box the
+payload and keep the derives, which would have put a `Box<dyn Any>` on the command
+path to preserve an ergonomic accident. `GameCommand` keeps only `Debug`. The
+controller, which used to rebuild `ApplyAsyncCompletion` from its own fields so it
+could inspect a command and then send the same value, now matches by reference and
+sends what it was given.
+
+**The answer is a `oneshot`, not a `GameEffect`.** Two reasons, and the second decided
+it. An effect is fire-and-forget: the bounded queue may drop one, and
+`GameLoopSummary::dropped_effects` counts those. A caller that acts on a dropped
+effect has acted on nothing. Per-request reply channels also need no correlation id,
+which is what `CompletionId` is for on the other path. The two failure modes are kept
+apart: a dropped reply closes the channel, which the caller reports as
+`GrantError::NoAnswer`, never as a `GrantRefusal`. "The world said no" and "there
+was no answer" are different facts and are different types.
+
+**`Stop` stays with the loop.** The loop is the only thing that can end it, and
+`GameState::apply` treats a `Stop` that reaches it as a bug rather than ignoring it,
+because the loop and the state disagreeing about who owns shutdown is exactly the
+kind of thing that should be loud.
+
+**A refused request is a refusal, and it is not the same as an unsent one.**
+`CommandSendError` replaces `tokio`'s `SendError<GameCommand>` and
+`TrySendError<GameCommand>`, which used to hand the whole command back. That stopped
+being the right shape when a command owned a reply channel: the caller got back a
+`oneshot::Sender` it had no use for, and a caller that only wanted "was this
+delivered" had to know Tokio's error tree to ask. `QueueFull` and `Closed` are now
+separate, because one is back-pressure and the other is a loop that will never
+deliver again.
+
+**`envanter` on `Character`, and Divergence 202.1.** A grant has to be placed against
+the target's own `Inven_Point` (`m_points.envanter`, `char.h:1284`), not against a
+number the caller supplies, or an operator could hand out a cell the character cannot
+draw. The stat was in the player record but not on the runtime `Character`, so the
+command had nothing to read. `set_inven_point` clamps at `INVENTORY_MAX_EXTENDED`,
+which is written as `(INVENTORY_MAX_NUM - INVENTORY_OPEN_PAGE_SIZE) / INVENTORY_WIDTH`
+so it cannot drift from the three constants it comes from. Legacy copies the stat out
+of the stored blob and never clamps, and `usable_inventory_cells` is a bare sum, so a
+hand-edited row can name a cell in the equipment window. Clamping on write is
+Divergence 202.1.
+
+**A dropped reply does not undo the grant.** The caller is allowed to vanish: a
+descriptor can close while the world is being changed. Rolling the item back would
+make a lost connection a way to lose an item an operator was told was granted. The
+grant stands and the drop is logged.
+
+**`apply` is public so a grant can be tested without a thread.** A test that spawned
+one would be testing the scheduler, and a scheduler bug would be reported as a grant
+bug. The thread test exists too, and it is the one that matters:
+`a_grant_sent_from_a_tokio_task_is_applied_on_the_thread_that_owns_the_world` sends a
+real request over the real channel, asks for `"SHAMAN"` when the character is
+`"Shaman"`, and checks the cell. It also sends a second, refused request, because a
+`request_grant` that silently did nothing on the second call would otherwise pass.
+
+**Mutation.** Replacing the `GrantItem` arm with `drop(reply)` is killed by that test
+with a semantic failure, not a compile error. The other five tests in the file are
+unaffected, which is the point: only one of them was written to see the crossing.
+
+**One test corrected a wrong number.** The first version of the thread test asserted
+`window_type == 5` from memory. It failed: `5` is `EWindows::DragonSoulInventory`, and
+the base inventory is `1`. `EWindows` is a measured table because three members sit
+behind feature switches and a reader's memory of it is wrong. The test now names the
+window and the ordinals stay pinned in `common`.
+
+**Receipt.** 8 new tests and no new targets: 7 in `prodomo::game_state` and 1 in
+`prodomo/tests/game_loop_thread.rs`.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 33 targets, 2278 passed, 0 failed |
+| the same with `DATABASE_URL` set | 33 targets, 2278 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 9 targets, 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+The count moved from 2270 to 2278. Leftover `prodomo\_%` databases after the run: 0.
+
+**Not measured.** `i686-linux-gnu-g++-12` is still not installed. This unit adds no
+width claim; it moves an existing 72-byte record across a thread.
+

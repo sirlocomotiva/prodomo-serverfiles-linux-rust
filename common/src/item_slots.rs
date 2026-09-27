@@ -275,6 +275,22 @@ pub const fn usable_inventory_cells(inven_point: u16) -> u16 {
     INVENTORY_OPEN_PAGE_SIZE + INVENTORY_WIDTH * inven_point
 }
 
+/// The largest `Inven_Point` the base inventory can express: 18.
+///
+/// Written as an expression rather than the number so it cannot drift from the
+/// three constants it is derived from: `(180 - 90) / 5` is 18, and
+/// [`usable_inventory_cells(18)`](usable_inventory_cells) is 180, the whole
+/// array. One more point and the sum names cell 185, which is the first cell of
+/// the equipment window.
+///
+/// Legacy never clamps. `CHARACTER::Load` copies `m_points.envanter` straight
+/// from the stored blob (`char.cpp`, the `TPlayer` decode) and
+/// [`usable_inventory_cells`] is a bare sum, so a hand-edited or corrupted row
+/// can address a cell outside the base inventory. Clamping on write is Divergence
+/// 202.1.
+pub const INVENTORY_MAX_EXTENDED: u16 =
+    (INVENTORY_MAX_NUM - INVENTORY_OPEN_PAGE_SIZE) / INVENTORY_WIDTH;
+
 /// `WEAR_MAX_NUM` = 64 (`length.h:89`). The equipment window. The comment at
 /// `length.h:917` says 32 and is stale.
 pub const WEAR_MAX_NUM: u16 = 64;

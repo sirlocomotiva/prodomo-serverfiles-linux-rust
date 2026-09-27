@@ -56,6 +56,17 @@ channel. One test in `prodomo/tests/game_loop_thread.rs` was renamed in the proc
 it claimed to prove a game state ran on the thread while spawning an empty closure, and
 it now asserts what it checks.
 
+A grant can now cross into the thread that owns the world (202). `GameCommand` carries
+`GrantItem { request, reply }` and is neither `Copy` nor `Clone`, which is what a
+per-request `oneshot` answer costs and what it buys: a caller that acts on a dropped
+effect has acted on nothing, so a grant answers through a channel that either delivers
+the outcome or closes, and the caller reports "no answer" as a different type from "the
+world said no". The loop delegates everything that is not `Stop` to the processor, and
+`GameState::apply` runs the grant against the target's own `Inven_Point`, which needed
+a new `envanter` field on `Character` and gives Divergence 202.1 when it is clamped.
+`serve` still spawns the loop with `|_| {}`; the item-id range install is the last
+reason, and it is the next unit.
+
 The Game data arrived before step 1 (`legacy/`), so each system's reader or importer is built with
 the system that first needs it, starting with the maps and protos in the vertical slice. Step 5 is
 what is left over.

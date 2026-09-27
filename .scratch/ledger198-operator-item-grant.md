@@ -89,10 +89,15 @@ Three of the decisions above are now answered by the code rather than by argumen
 
 Still to do, in the order the gates imply:
 
-1. A game-thread command that carries a `GrantRequest` from an async task to the thread that owns
-   the world, since a descriptor and a store handle are not `Send` into the game thread. This is
-   also where the store's item-id range gets installed, because that is the one input `serve`
-   cannot have at the moment the loop is spawned (ledger 201 explains the ordering).
+1. ~~A game-thread command that carries a `GrantRequest` from an async task to the thread that
+   owns the world.~~ **Done at ledger 202.** `GameCommand::GrantItem` carries the request and a
+   `oneshot` answer, the loop delegates it to `GameState::apply`, and
+   `GameLoopController::request_grant` is the one call a caller makes. `GameCommand` is no longer
+   `Copy` or `Clone`, which is the cost of a per-request reply and is recorded at 202.1.
+   **Still to do in this step:** install the store's item-id range through the same channel,
+   because that is the one input `serve` cannot have when the loop is spawned (ledger 201
+   explains the ordering). The state is built with a range today, so the startup path still
+   passes `|_| {}` and nothing reaches it.
 2. The `GC_ITEM_SET` write to the descriptor, and the refusal replies (legacy answers with the
    plain sentence, so a refusal is a chat line the operator sees).
 3. The Operator interface itself. The survey settled that this is **new**, not a port: legacy has

@@ -93,6 +93,101 @@ async fn a_game_state_is_the_value_the_thread_steps() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_grant_sent_from_tokio_is_applied_on_the_thread_that_owns_the_world() {
+    // Given: a real `GameState` on the dedicated game thread, holding a player.
+    //
+    // Everything else about this file spawns an empty closure. This is the one that
+    // proves the command path end to end: a Tokio task sends a command, the thread
+    // that owns the world is the only thing that can answer, and the answer comes
+    // back with the cell the world actually used.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
+    let protos =
+        gamedata::item_proto::ItemProtos::load(&dir).expect("the owner's item protos load");
+    let vnum = protos
+        .rows()
+        .iter()
+        .find(|proto| {
+            proto.size == 1
+                && (0..6).all(|category| {
+                    !gamedata::item_custom_category::is_custom_category(proto, category)
+                })
+        })
+        .expect("a one-cell item outside every custom bank")
+        .vnum;
+
+    let mut state = GameState::new(
+        protos,
+        world::item::ItemIdRange::new(1, 1_000_000, 1).expect("a range that can issue an id"),
+    );
+    state
+        .characters_mut()
+        .create_player(11, "Shaman")
+        .expect("the name is free");
+    let metrics = state.metrics();
+    let mut game_loop = spawn_game_loop(GameLoopConfig::default(), state).unwrap();
+    let controller = game_loop.controller();
+
+    // When: a Tokio task asks for an item.
+    let answer = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.request_grant(prodomo::item_grant::GrantRequest {
+            // Deliberately the wrong case. Name matching is the manager's job, and
+            // this is the one place a test can prove the request crossed as a
+            // `String` and was not normalised or dropped on the way.
+            target: "SHAMAN".to_owned(),
+            vnum,
+            count: None,
+        }),
+    )
+    .await
+    .expect("the game thread answered within five seconds")
+    .expect("the answer crossed back");
+
+    // Then: the grant happened, and the thread that owned the world is the one that
+    // stepped to make it so.
+    let outcome = answer.expect("a refusal is not expected here");
+    // The window byte is a *measured* `EWindows` value, not a number to recall:
+    // three members sit behind feature switches, so a reader who remembers
+    // "INVENTORY is 1" from a build with fewer switches live will be wrong. The
+    // name is asserted here and the eleven ordinals are pinned in `common`.
+    assert_eq!(
+        outcome.record.cell.window_type,
+        common::item_slots::EWindows::Inventory as u8
+    );
+    assert_eq!(outcome.record.cell.cell, 0, "the first free cell");
+    assert_eq!(outcome.count, 1);
+
+    assert!(
+        metrics.pulses() >= 1,
+        "the command was drained between pulses, so the thread ran to apply it"
+    );
+
+    // A second, refused request proves the channel is still live and that a refusal
+    // comes back as a refusal rather than as a transport error. Without this, a
+    // `request_grant` that silently did nothing on the second call would pass.
+    let refused = controller
+        .request_grant(prodomo::item_grant::GrantRequest {
+            target: "Nobody".to_owned(),
+            vnum,
+            count: None,
+        })
+        .await
+        .expect("the answer crossed back");
+    assert!(matches!(
+        refused,
+        Err(prodomo::item_grant::GrantRefusal::NoSuchCharacter { .. })
+    ));
+
+    controller.request_stop().await.unwrap();
+    let terminal = tokio::time::timeout(Duration::from_secs(1), game_loop.wait_for_terminal())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(terminal, GameLoopTerminal::Stopped(_)));
+    game_loop.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pulse_panic_is_acknowledged_as_a_typed_terminal_failure() {
     // Given: a pulse processor that panics on its first pulse.
     let mut game_loop = spawn_game_loop(GameLoopConfig::default(), |_| {
@@ -182,7 +277,7 @@ async fn priority_stop_discards_queued_data_without_starvation() {
             id: CompletionId::new(2),
             status: AsyncCompletionStatus::Succeeded,
         }),
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_))
+        Err(prodomo::game_loop_messages::CommandSendError::Closed)
     ));
     assert_eq!(game_loop.join().await.unwrap(), terminal);
 }

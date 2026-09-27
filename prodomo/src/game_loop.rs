@@ -27,6 +27,23 @@ pub use pulse_planner::{PulseBatch, PulsePlanner, MAX_CATCH_UP_PULSES, PULSE_PER
 pub trait PulseProcessor: Send + 'static {
     /// Processes one pulse without awaiting or performing asynchronous I/O.
     fn process_pulse(&mut self, pulse: u64);
+
+    /// Applies one command on the thread that owns the world.
+    ///
+    /// The loop calls this between pulses and never inside one, so a command that
+    /// mutates a world is applied at a point where no other world access is
+    /// possible. That is the whole of the threading story: there is no lock, and
+    /// the invariant is that only this method and [`Self::process_pulse`] can
+    /// reach game state.
+    ///
+    /// The default drops the command, which closes any reply channel it carried.
+    /// That is the honest default for a processor that has no world to act on, and
+    /// it is why the error a caller sees is
+    /// [`GrantError::NoAnswer`](crate::game_loop_messages::GrantError::NoAnswer) and
+    /// not a refusal. A processor that *can* act must override this.
+    fn apply_command(&mut self, command: GameCommand) {
+        drop(command);
+    }
 }
 
 impl<F> PulseProcessor for F
@@ -225,7 +242,7 @@ impl LoopRuntime {
                 if self.stop_requested.load(Ordering::SeqCst) {
                     return GameLoopTerminal::Stopped(self.state.summary());
                 }
-                match self.drain_commands() {
+                match self.drain_commands::<P>(processor) {
                     LoopControl::Continue => {}
                     LoopControl::Stop => return GameLoopTerminal::Stopped(self.state.summary()),
                     LoopControl::Fail(reason) => return self.failed(reason),
@@ -236,7 +253,13 @@ impl LoopRuntime {
         }
     }
 
-    fn drain_commands(&mut self) -> LoopControl {
+    /// Applies up to `max_commands_per_pulse` queued commands.
+    ///
+    /// `Stop` is the only command the loop answers itself. Everything else goes to
+    /// the processor, because only the processor can see the world: the loop holds
+    /// channels and counters, and giving it a case per command variant is how the
+    /// world would end up in the scheduler instead of in the thread.
+    fn drain_commands<P: PulseProcessor>(&mut self, processor: &mut P) -> LoopControl {
         for _ in 0..self.max_commands_per_pulse.get() {
             match self.command_rx.try_recv() {
                 Ok(GameCommand::Stop) => return LoopControl::Stop,
@@ -253,6 +276,7 @@ impl LoopRuntime {
                         }
                     }
                 }
+                Ok(command) => processor.apply_command(command),
                 Err(mpsc::error::TryRecvError::Empty) => return LoopControl::Continue,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     return LoopControl::Fail(GameLoopFailure::CommandChannelClosed);

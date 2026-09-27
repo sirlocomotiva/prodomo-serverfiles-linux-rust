@@ -1,3 +1,4 @@
+use common::item_slots::INVENTORY_MAX_EXTENDED;
 use common::{vid::Vid, CharacterId};
 
 use super::combat::{Damage, DamageOutcome, Vitality};
@@ -27,6 +28,7 @@ pub struct Character {
     next_state_pulse: u64,
     destruction_requested: bool,
     items: CharacterItems,
+    envanter: u16,
 }
 
 impl Character {
@@ -44,6 +46,7 @@ impl Character {
             next_state_pulse: 0,
             destruction_requested: false,
             items: CharacterItems::new(),
+            envanter: 0,
         }
     }
 
@@ -60,6 +63,7 @@ impl Character {
             next_state_pulse: 0,
             destruction_requested: false,
             items: CharacterItems::new(),
+            envanter: 0,
         }
     }
 
@@ -195,6 +199,33 @@ impl Character {
     /// This character's item windows, mutably.
     pub fn items_mut(&mut self) -> &mut CharacterItems {
         &mut self.items
+    }
+
+    /// Returns the character's `Inven_Point`, the `m_points.envanter` that
+    /// `char.h:1284` exposes as `Inven_Point()`.
+    ///
+    /// This is not the inventory size. The base inventory is always
+    /// [`common::item_slots::INVENTORY_MAX_NUM`] cells in the array, and this stat decides how many
+    /// of them are usable, through
+    /// [`common::item_slots::usable_inventory_cells`]. A fresh character
+    /// has 0, which buys the legacy default 90 cells, so a character that has
+    /// never spent the stat is not locked out of its own first page.
+    pub const fn inven_point(&self) -> u16 {
+        self.envanter
+    }
+
+    /// Sets the character's `Inven_Point`.
+    ///
+    /// The value is clamped at [`INVENTORY_MAX_EXTENDED`], the largest stat the
+    /// base inventory can express. Legacy copies `m_points.envanter` straight out
+    /// of the stored blob and never clamps, and
+    /// [`common::item_slots::usable_inventory_cells`] is a
+    /// bare sum, so a hand-edited row can name a cell past the end of the base
+    /// inventory and into the equipment window. Clamping on write is Divergence
+    /// 202.1: the alternative is reproducing a cell index the client cannot
+    /// draw.
+    pub fn set_inven_point(&mut self, value: u16) {
+        self.envanter = value.min(INVENTORY_MAX_EXTENDED);
     }
 }
 

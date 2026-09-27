@@ -51,7 +51,7 @@ async fn commands_produce_effects_in_fifo_order_at_a_pulse_boundary() {
     assert!(game_loop.recv_effect().await.is_none());
     assert!(matches!(
         controller.try_send_command(completion(13)),
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_))
+        Err(prodomo::game_loop_messages::CommandSendError::Closed)
     ));
     assert_eq!(game_loop.join().await.unwrap(), terminal);
 }

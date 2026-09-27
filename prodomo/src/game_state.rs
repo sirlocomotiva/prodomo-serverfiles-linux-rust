@@ -30,7 +30,11 @@ use gamedata::item_proto::ItemProtos;
 use world::character::CharacterManager;
 use world::item::{ItemIdRange, ItemIds};
 
+use tracing::warn;
+
 use crate::game_loop::PulseProcessor;
+use crate::game_loop_messages::GameCommand;
+use crate::item_grant::{grant_item, GrantOutcome, GrantRefusal, GrantRequest};
 
 /// Counters the owning side can read while the game thread is running.
 ///
@@ -119,7 +123,69 @@ impl GameState {
     }
 }
 
+impl GameState {
+    /// Apply one command to the world this thread owns.
+    ///
+    /// Split out from the trait impl so it can be called directly, which is what
+    /// the tests do: a test that had to spawn a thread to learn whether a grant
+    /// worked would be testing the scheduler, not the grant.
+    pub fn apply(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::ApplyAsyncCompletion { .. } => {
+                // There is nothing to apply it to yet. A completion answers work
+                // that game state asked for, and nothing has asked. Dropping it
+                // here keeps the variant from being handled twice, in the loop and
+                // here, which is how the two drift apart.
+                debug_assert!(
+                    false,
+                    "a completion arrived for work this game state never started"
+                );
+            }
+            GameCommand::GrantItem { request, reply } => {
+                let answer = self.grant(&request);
+                // A closed reply means the caller gave up, which it may legitimately
+                // do when the descriptor it was writing to closed. The grant still
+                // happened, and that is not a reason to undo it: the item is in the
+                // world and the caller is the one that went away.
+                if reply.send(answer).is_err() {
+                    warn!(
+                        target = ?request.target,
+                        vnum = request.vnum,
+                        "the item was granted but nobody was left to hear about it"
+                    );
+                }
+            }
+            GameCommand::Stop => {
+                // The loop handles `Stop` itself, before a command ever reaches a
+                // processor. Reaching here would mean the loop and the state
+                // disagree about who owns shutdown, and quietly ignoring it would
+                // hide exactly that.
+                debug_assert!(false, "the game loop must handle Stop itself");
+            }
+        }
+    }
+
+    /// Run one grant against the world, taking the target's own `Inven_Point`.
+    fn grant(&mut self, request: &GrantRequest) -> Result<GrantOutcome, GrantRefusal> {
+        let inven_point = self
+            .characters
+            .find_player_mut(&request.target)
+            .map_or(0, |character| character.inven_point());
+        grant_item(
+            &mut self.characters,
+            &self.protos,
+            &mut self.item_ids,
+            request,
+            inven_point,
+        )
+    }
+}
+
 impl PulseProcessor for GameState {
+    fn apply_command(&mut self, command: GameCommand) {
+        self.apply(command);
+    }
+
     /// Step one pulse.
     ///
     /// Counts, and nothing else. An empty body that only counts is the honest state
@@ -138,6 +204,9 @@ impl PulseProcessor for GameState {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    use common::item_slots::{usable_inventory_cells, INVENTORY_MAX_EXTENDED, INVENTORY_MAX_NUM};
+    use world::character::Lookup;
 
     fn owners() -> ItemProtos {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
@@ -243,6 +312,291 @@ mod tests {
         // runs at. This test exists so the state cannot be built against a different
         // rate later without this failing to be noticed.
         assert_eq!(crate::game_loop::PULSE_PERIOD, Duration::from_millis(40));
+    }
+
+    // ---- the crossing ----------------------------------------------------
+    //
+    // The tests below are the ones that matter for ledger 202. Each is written as
+    // if the claim were false, so that a change that breaks the crossing has to
+    // break a test rather than pass a weaker one.
+
+    fn grant_for(target: &str, vnum: u32) -> GrantRequest {
+        GrantRequest {
+            target: target.to_owned(),
+            vnum,
+            count: None,
+        }
+    }
+
+    /// A one-cell, non-custom vnum from the owner's table, so the grant lands in the
+    /// base inventory and nothing else decides the cell.
+    fn a_plain_vnum() -> u32 {
+        let protos = owners();
+        protos
+            .rows()
+            .iter()
+            .find(|proto| {
+                proto.size == 1
+                    && (0..6).all(|category| {
+                        !gamedata::item_custom_category::is_custom_category(proto, category)
+                    })
+            })
+            .expect("the owner's table has a one-cell item outside every custom bank")
+            .vnum
+    }
+
+    #[test]
+    fn a_grant_command_reaches_the_world_and_answers_with_the_outcome() {
+        let mut state = a_state();
+        state
+            .characters_mut()
+            .create_player(11, "Shaman")
+            .expect("the name is free");
+        let vnum = a_plain_vnum();
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let command = GameCommand::GrantItem {
+            request: grant_for("Shaman", vnum),
+            reply,
+        };
+
+        state.apply(command);
+
+        // The answer crossed, and it names the cell the world actually used.
+        let outcome = answer
+            .blocking_recv()
+            .expect("the game thread answered")
+            .expect("the grant happened");
+        assert_eq!(
+            outcome.record.cell.cell, 0,
+            "the first free base cell is cell 0"
+        );
+        assert_eq!(outcome.record.vnum, vnum);
+        assert_eq!(outcome.count, 1, "None means one");
+        assert_eq!(outcome.bank, None, "and it went to the base inventory");
+    }
+
+    #[test]
+    fn the_item_exists_in_the_world_and_not_only_in_the_answer() {
+        // The answer is a copy. If the world were unchanged and only the answer
+        // were right, a client would be told about an item that is not there. This
+        // reads the world back through the same path the reducer used.
+        let mut state = a_state();
+        state
+            .characters_mut()
+            .create_player(11, "Shaman")
+            .expect("the name is free");
+        let vnum = a_plain_vnum();
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        state.apply(GameCommand::GrantItem {
+            request: grant_for("Shaman", vnum),
+            reply,
+        });
+        let outcome = answer.blocking_recv().unwrap().unwrap();
+
+        let character = state
+            .characters_mut()
+            .find_player_mut("SHAMAN")
+            .expect("name matching is case-insensitive");
+        let items = character.items();
+        assert_eq!(items.len(), 1, "the world holds the item");
+        assert_eq!(
+            items.get(outcome.record.cell),
+            Lookup::Occupied(outcome.row.id),
+            "the answer's id is the one sitting in the answer's cell"
+        );
+        assert_eq!(
+            items.cell_of(outcome.row.id),
+            Some(outcome.record.cell),
+            "and the same id answers to the same cell from the other direction"
+        );
+        assert_eq!(outcome.row.vnum, vnum, "the same prototype");
+        assert_eq!(
+            outcome.row.owner_id,
+            Some(character.player_id()),
+            "owned by the target, and not on the ground"
+        );
+        assert_eq!(
+            outcome.row.pos,
+            u32::from(outcome.record.cell.cell),
+            "one row, one cell"
+        );
+    }
+
+    #[test]
+    fn a_refusal_comes_back_as_a_refusal_and_leaves_the_world_alone() {
+        let mut state = a_state();
+        state
+            .characters_mut()
+            .create_player(11, "Shaman")
+            .expect("the name is free");
+        let (reply, answer) = tokio::sync::oneshot::channel();
+
+        state.apply(GameCommand::GrantItem {
+            request: grant_for("Nobody", a_plain_vnum()),
+            reply,
+        });
+
+        assert_eq!(
+            answer.blocking_recv().unwrap(),
+            Err(GrantRefusal::NoSuchCharacter {
+                name: "Nobody".to_owned()
+            }),
+            "an unknown name is a refusal, not a missing answer"
+        );
+        assert_eq!(
+            state
+                .characters_mut()
+                .find_player_mut("Shaman")
+                .unwrap()
+                .items()
+                .len(),
+            0,
+            "and nothing was placed anywhere"
+        );
+    }
+
+    #[test]
+    fn the_target_characters_own_inven_point_bounds_the_search() {
+        // This is the reason `envanter` was added to `Character`. A grant has to be
+        // placed against the target's own stat rather than against a number the
+        // caller supplied, or an operator could hand out a cell the character
+        // cannot draw. The test goes through the command, which is the only path
+        // that has an `inven_point` to read at all.
+        let mut state = a_state();
+        state
+            .characters_mut()
+            .create_player(11, "Shaman")
+            .expect("the name is free");
+        let vnum = a_plain_vnum();
+
+        {
+            let character = state.characters_mut().find_player_mut("Shaman").unwrap();
+            assert_eq!(
+                character.inven_point(),
+                0,
+                "a new character has the stat at 0, which buys the legacy 90 cells"
+            );
+        }
+
+        // Fill those 90 cells through the command. The cell numbers are what make
+        // this a test rather than a smoke test.
+        for cell in 0..90u16 {
+            let outcome = ask(&mut state, &grant_for("Shaman", vnum))
+                .expect("a one-cell item fits while the stat is 0");
+            assert_eq!(outcome.record.cell.cell, cell, "cells fill in order from 0");
+        }
+        assert_eq!(
+            ask(&mut state, &grant_for("Shaman", vnum)),
+            Err(GrantRefusal::NoRoom { size: 1 }),
+            "the 91st cell is out of reach at stat 0"
+        );
+
+        // Raising the stat opens the rest of the base inventory, and the command
+        // picks that up without the caller passing anything.
+        state
+            .characters_mut()
+            .find_player_mut("Shaman")
+            .unwrap()
+            .set_inven_point(18);
+        let outcome =
+            ask(&mut state, &grant_for("Shaman", vnum)).expect("cell 90 is free at stat 18");
+        assert_eq!(
+            outcome.record.cell.cell, 90,
+            "the raised stat opened the 91st cell"
+        );
+    }
+
+    #[test]
+    fn an_inven_point_above_the_base_inventory_is_clamped_on_write() {
+        // Divergence 202.1. Legacy copies the stat out of the stored blob and never
+        // clamps, and `usable_inventory_cells` is a bare sum, so a hand-edited row
+        // can name a cell in the equipment window. The Rewrite refuses to store a
+        // stat that would do that.
+        let mut state = a_state();
+        state
+            .characters_mut()
+            .create_player(11, "Shaman")
+            .expect("the name is free");
+        let character = state.characters_mut().find_player_mut("Shaman").unwrap();
+        character.set_inven_point(u16::MAX);
+
+        assert_eq!(
+            character.inven_point(),
+            INVENTORY_MAX_EXTENDED,
+            "18 is the largest stat that still lands inside the base inventory"
+        );
+        assert_eq!(
+            usable_inventory_cells(character.inven_point()),
+            INVENTORY_MAX_NUM,
+            "and at that stat the usable count is exactly the array length"
+        );
+        assert_eq!(INVENTORY_MAX_EXTENDED, 18, "the derived constant, pinned");
+    }
+
+    /// Sends one grant command to `state` on the calling thread and waits for it.
+    ///
+    /// Every crossing test goes through here so a change to the command shape breaks
+    /// one place rather than six.
+    fn ask(state: &mut GameState, request: &GrantRequest) -> Result<GrantOutcome, GrantRefusal> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        state.apply(GameCommand::GrantItem {
+            request: request.clone(),
+            reply,
+        });
+        answer.blocking_recv().expect("the game thread answered")
+    }
+
+    #[test]
+    fn a_dropped_reply_does_not_undo_the_grant() {
+        // The caller is allowed to vanish: a descriptor can close while the world
+        // is being changed. If that rolled the item back, a lost connection would
+        // be a way to lose an item the operator was told was granted.
+        let mut state = a_state();
+        state
+            .characters_mut()
+            .create_player(11, "Shaman")
+            .expect("the name is free");
+        let vnum = a_plain_vnum();
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        drop(answer);
+
+        state.apply(GameCommand::GrantItem {
+            request: grant_for("Shaman", vnum),
+            reply,
+        });
+
+        assert_eq!(
+            state
+                .characters_mut()
+                .find_player_mut("Shaman")
+                .unwrap()
+                .items()
+                .len(),
+            1,
+            "the item is still in the world; the listener went, not the item"
+        );
+    }
+
+    #[test]
+    fn apply_is_reachable_without_a_thread_so_a_grant_can_be_tested_directly() {
+        // The method exists so the tests above do not have to spawn a thread. A
+        // test that spawned one would be testing the scheduler, and a scheduler
+        // bug would then be reported as a grant bug.
+        let mut state = a_state();
+        state
+            .characters_mut()
+            .create_player(11, "Shaman")
+            .expect("the name is free");
+        let vnum = a_plain_vnum();
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        GameState::apply(
+            &mut state,
+            GameCommand::GrantItem {
+                request: grant_for("Shaman", vnum),
+                reply,
+            },
+        );
+        assert!(answer.blocking_recv().unwrap().is_ok());
     }
 
     #[test]
