@@ -28,7 +28,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use gamedata::item_proto::ItemProtos;
-use protocol::item_pos::ItemPos;
 use world::character::{CharacterManager, CharacterManagerError, Rejected};
 use world::item::{ItemIdRange, ItemIds};
 
@@ -278,6 +277,22 @@ pub struct GameState {
     /// and cannot leave a stale sender behind in the other.
     outboxes: HashMap<common::vid::Vid, ClientOutbox>,
 }
+/// An item the world has taken back, together with whose it was.
+///
+/// Both halves are needed together and neither can be recovered from the other. The
+/// cell is the only way to find the row, and the owner is half of that row's key; a
+/// caller that looked either one up again could get a different answer than the world
+/// acted on, and would then delete a row for an item that is still somewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Released {
+    /// The cell the item was in, which the world has just freed.
+    pub pos: protocol::item_pos::ItemPos,
+    /// The store `player.id` of the character it belonged to.
+    ///
+    /// The world admitted this character under that id, so it is the same number the
+    /// grant's row carried and the same number the descriptor publishes as the VID.
+    pub owner_id: u32,
+}
 
 impl GameState {
     /// Build a state from the Game data alone.
@@ -447,6 +462,23 @@ impl GameState {
                     );
                 }
             }
+            GameCommand::ReleaseItem { target, id, reply } => {
+                let answer = self.revoke_grant(&target, id);
+                // The same answer as the revoke, and for the same reason, but the
+                // consequence is different: a refused release here means a row that is
+                // about to be deleted is still held by the world, so it is logged with
+                // both names rather than folded into a boolean the caller cannot act on.
+                if let Err(error) = &answer {
+                    warn!(target = ?target, id, %error, "an item could not be released from the world");
+                }
+                if reply.send(answer).is_err() {
+                    warn!(
+                        target = ?target,
+                        id,
+                        "an item was released but nobody was left to hear about it"
+                    );
+                }
+            }
             GameCommand::EnterWorld {
                 vid,
                 player_id,
@@ -516,16 +548,20 @@ impl GameState {
     /// [`RevokeRefused::NotThere`] when the world does not hold the id, or
     /// [`RevokeRefused::Rejected`] when the storage named a cell it then would not
     /// release. None of the three changes anything.
-    pub fn revoke_grant(&mut self, target: &str, id: u32) -> Result<ItemPos, RevokeRefused> {
+    pub fn revoke_grant(&mut self, target: &str, id: u32) -> Result<Released, RevokeRefused> {
         let character = self.characters.find_player_mut(target).ok_or_else(|| {
             RevokeRefused::NoSuchCharacter {
                 name: target.to_owned(),
             }
         })?;
-        character
+        // Read before the release, not after: `release` takes `&mut self` on the
+        // storage, and the owner is a property of the character, not of the item.
+        let owner_id = character.player_id();
+        let pos = character
             .items_mut()
             .release(id)
-            .map_err(|error| RevokeRefused::Rejected { id, error })
+            .map_err(|error| RevokeRefused::Rejected { id, error })?;
+        Ok(Released { pos, owner_id })
     }
 
     /// Puts a live client's character into the world under the VID it already uses.

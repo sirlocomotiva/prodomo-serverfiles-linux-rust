@@ -1525,6 +1525,55 @@ impl Keyed {
         })
     }
 
+    /// Every complete record that arrives within `window`, decrypted.
+    ///
+    /// [`Keyed::read_game`] has to know a record's width before it can read it, which does
+    /// not work for a record nobody predicted: an Operator's grant is not part of any
+    /// scripted exchange. So this reads a quiet window, decrypts it, and walks the
+    /// plaintext: each record declares its own width from its header byte, and legacy
+    /// zero-pads every record to a multiple of eight before encrypting it, so the walk
+    /// stays aligned.
+    ///
+    /// A record whose bytes are still arriving is **not** returned and the walk stops
+    /// there: a partial record is a record in flight, and a scenario that made claims
+    /// about half of one would be making them about nothing. The scenario asks for a
+    /// longer window rather than reading a half-record.
+    ///
+    /// `width_of` sizes a record from its header byte. It is the caller's, not
+    /// [`game_len`]'s, because the loading and enter-game bursts are a known set of
+    /// records and a grant is not, and a total function over "everything the client might
+    /// receive at any time" is exactly the kind of table that rots. A header `width_of`
+    /// does not know panics, because a record nobody accounted for arriving in the window
+    /// is a finding rather than noise, and a silent skip would read as "nothing arrived".
+    fn drain_game(
+        &mut self,
+        window: Duration,
+        width_of: impl Fn(u8) -> usize,
+    ) -> (Vec<Vec<u8>>, Quiet) {
+        let (bytes, quiet) = self.client.drain(window);
+        let key = self.output;
+        let plain: Vec<u8> = bytes
+            .chunks(8)
+            .filter(|unit| unit.len() == 8)
+            .filter_map(|unit| decrypt_padded(unit, &key).ok())
+            .flatten()
+            .collect();
+        let mut records = Vec::new();
+        let mut at = 0;
+        while at < plain.len() {
+            let header = plain[at];
+            let width = width_of(header);
+            let padded = width.div_ceil(8) * 8;
+            if at + width > plain.len() {
+                // In flight, or the last unit of a record whose padding has not landed.
+                break;
+            }
+            records.push(plain[at..at + width].to_vec());
+            at += padded;
+        }
+        (records, quiet)
+    }
+
     /// Read the next loading or enter-game record, or `None` when the descriptor closed the
     /// connection without one, which is how a refused load looks from the client side.
     fn read_game_or_close(&mut self) -> Option<Vec<u8>> {
@@ -2608,5 +2657,284 @@ fn a_live_client_joins_and_leaves_the_game_threads_world() {
         server.logged("Character entered the world on the game thread"),
         "the relogged character must reach the world too:\n{}",
         server.console(),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `sys.item.core`: the create-and-destroy round trip, end to end, against the
+// real binary with a real Operator.
+// ---------------------------------------------------------------------------
+
+/// A 72-byte `GC_ITEM_SET` and its header byte, as the client sees them.
+///
+/// Byte 21 is the 72-byte record. Byte 20 is the byte legacy calls `GC_ITEM_DEL` and
+/// the client calls `HEADER_GC_ITEM_SET`, which is why a destroy cannot clear a window
+/// slot and does not try. `protocol::gc_item_window` has the full rename and the widths.
+const ITEM_SET_LEN: usize = 72;
+const ITEM_SET: u8 = 21;
+
+/// The width of a record an Operator's item work puts in a client's window.
+///
+/// Only the item window records are here, because only those are what an Operator's grant
+/// and destroy produce. A header outside this set panics, on the grounds that a record
+/// nobody accounted for in the window is a finding.
+fn an_item_window_record(header: u8) -> usize {
+    match header {
+        ITEM_SET => ITEM_SET_LEN,
+        other => panic!(
+            "a record nobody accounted for arrived in the window: header {other}. A grant \
+             sends exactly one GC_ITEM_SET, so this is not a burst a scenario can ignore."
+        ),
+    }
+}
+
+/// The first `GC_ITEM_SET` in `records`, or `None`.
+///
+/// `records` is what [`Keyed::drain_game`] decrypted, so this is a search over records
+/// rather than over bytes: a `chunks(72)` sweep over a ciphertext stream would find
+/// nothing at all, and finding nothing is what a missing grant looks like too.
+fn the_item_set(records: &[Vec<u8>]) -> Option<&[u8]> {
+    records
+        .iter()
+        .find(|record| record.len() == ITEM_SET_LEN && record[0] == ITEM_SET)
+        .map(Vec::as_slice)
+}
+
+/// The vnum this section grants, read out of the owner's prototypes before anything
+/// is asserted about it.
+///
+/// Without this, a scenario that granted nothing would satisfy every assertion about the
+/// store and the client's bytes by having nothing to look at, and the round trip would be
+/// recorded as ported on the strength of an empty run. The negative control is in the
+/// same sweep: the walk stops as soon as it sees a first column it cannot account for, so
+/// a sweep that matched everything would fail rather than pass.
+const GRANTED_VNUM: u32 = 19;
+
+#[test]
+fn the_vnum_this_section_grants_is_in_the_owners_prototypes() {
+    // Read through the same reader the server uses, not through the file. The proto name
+    // column is Korean in a legacy code page, so a `read_to_string` here fails outright,
+    // and a test that only worked for UTF-8 Game data would be a test that stops working
+    // the day this file is checked properly. `ItemProtos::load` is what the server asks,
+    // so this asserts the server can grant this vnum rather than that a file parses.
+    let directory =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
+    let protos = gamedata::item_proto::ItemProtos::load(&directory)
+        .expect("the owner's item prototypes should load");
+    assert!(
+        protos.get(a_plain_vnum()).is_some(),
+        "vnum {GRANTED_VNUM} should be in the owner's item prototypes, or this section \
+         grants nothing and proves nothing"
+    );
+    // The negative control, in the same table: a vnum nothing carries is not a vnum the
+    // reader invented, so `contains` is a lookup and not a tautology.
+    assert!(
+        protos.get(0).is_none(),
+        "vnum 0 is not a prototype, so a reader that answered `true` for everything would \
+         be caught here"
+    );
+}
+
+/// An item vnum the owner's protos really carry, so the grant is not refused for the wrong
+/// reason. [`the_vnum_this_section_grants_is_in_the_owners_prototypes`] checks it.
+fn a_plain_vnum() -> u32 {
+    GRANTED_VNUM
+}
+
+/// The rows one character's items, as `vnum:count` text, or `"none"` for no rows.
+///
+/// Read through the store rather than through the world, because the row is the fact a
+/// relog depends on and the world is only where the item lives until the descriptor goes.
+/// The rendering is `id:vnum` so a scenario compares one thing at a time.
+fn items_of(database: &ScratchDatabase, name: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for (id, vnum) in rows_of(
+        database,
+        &format!(
+            "SELECT id, vnum FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+             '{name}') ORDER BY id"
+        ),
+    ) {
+        out.push(format!("{id}:{vnum}"));
+    }
+    if out.is_empty() {
+        "none".to_owned()
+    } else {
+        out.join(" ")
+    }
+}
+
+/// The `(int, int)` columns of a `SELECT`, one pair per row.
+///
+/// Two columns is the most a scenario needs to identify a row and check it, and a fixed
+/// shape keeps the helper honest: a scenario that wants a third column says so.
+fn rows_of(database: &ScratchDatabase, statement: &str) -> Vec<(i64, i64)> {
+    support::rows(database.url(), statement, 2)
+        .into_iter()
+        .map(|mut cells| (cells.remove(0), cells.remove(0)))
+        .collect()
+}
+
+/// The Operator gives an online character an item, and the character's client is told.
+///
+/// This is the create half of the round trip, and it is the first scenario in which an
+/// item crosses the whole path at once: an Operator writes to a pipe, the console asks the
+/// game thread, the game thread places the item and chooses a cell, the store writes the
+/// row, and only then does the record reach the client's socket. The client's own
+/// decrypted bytes and the store are the evidence, because the claim under test is that
+/// the crossing happens and in that order.
+#[test]
+fn an_operator_gives_an_online_character_an_item_and_the_client_is_told() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+
+    // A live client, so the world has a character to grant to.
+    let (mut alpha, _character) = enter_world(&server, b"alice", 0);
+
+    // When: an Operator writes one command into the console's pipe.
+    Server::write_console(&console, &format!("item give Alpha {}", a_plain_vnum()));
+    server.wait_for("the client has it");
+
+    // Then: the row is in the store, which is the fact a relog depends on.
+    assert_eq!(
+        items_of(&database, "Alpha"),
+        format!("100000000:{}", a_plain_vnum()),
+        "the granted item's row must be in the store, under the item that was granted"
+    );
+
+    // And: the client was told, over its own socket. Read off the wire rather than taken
+    // from the console's answer, because a record that reached the log and not the socket
+    // would satisfy every line above.
+    let (records, state) = alpha.drain_game(Duration::from_millis(500), an_item_window_record);
+    let record = the_item_set(&records)
+        .unwrap_or_else(|| panic!("the client must receive a GC_ITEM_SET, got {records:02x?}"));
+    // The vnum the Operator asked for is the vnum on the wire. The offsets are counted
+    // from the struct: the 1-byte header, the 3-byte `TItemPos` cell, then the
+    // little-endian `DWORD` vnum. `protocol::gc_item_window` transcribes the C.
+    assert_eq!(
+        &record[4..8],
+        &a_plain_vnum().to_le_bytes(),
+        "the vnum on the wire must be the one the Operator typed"
+    );
+    assert_eq!(
+        &record[8..10],
+        &1_u16.to_le_bytes(),
+        "a grant with no count puts exactly one item in the cell"
+    );
+    assert_eq!(
+        record[1],
+        common::item_slots::EWindows::Inventory as u8,
+        "a grant goes into the base inventory"
+    );
+    assert_eq!(
+        state,
+        Quiet::Open,
+        "the client is still connected after the grant"
+    );
+}
+
+/// An item an Operator created is still in the store after the client disconnects.
+///
+/// This is the persistence half of the round trip. Legacy saves an item in the background
+/// and so does the Rewrite (ADR-0003), so the claim is not that the row is written at the
+/// moment of the grant but that it is still there once the descriptor that received the
+/// record is gone, which is the only version of the claim a player would experience as
+/// durability.
+#[test]
+fn a_granted_item_is_still_in_the_store_after_the_client_disconnects() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+
+    let (mut alpha, _character) = enter_world(&server, b"alice", 0);
+    Server::write_console(&console, &format!("item give Alpha {}", a_plain_vnum()));
+    server.wait_for("the client has it");
+    let _ = alpha.drain_game(Duration::from_millis(500), an_item_window_record);
+
+    // When: the client goes away. `drop` closes the socket, the server reads the EOF, and
+    // the character leaves the world before the final save.
+    drop(alpha);
+    server.wait_for("Character left the world");
+
+    // Then: the row is still there, which is what a relog would load.
+    assert_eq!(
+        items_of(&database, "Alpha"),
+        format!("100000000:{}", a_plain_vnum()),
+        "a granted item must outlive the connection that received it"
+    );
+}
+
+/// An Operator destroys an item, and the row goes with the world holding nothing.
+///
+/// The destroy half. The order is the claim: the world is asked first, because only the
+/// world knows which cell an id occupies, and the row is deleted only after it has
+/// answered. A destroy that deleted first would remove the row of an item a live character
+/// still holds, and that item would vanish at the next login with nothing anywhere
+/// recording that it had existed.
+#[test]
+fn an_operator_destroy_takes_the_item_out_of_the_world_and_deletes_its_row() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+
+    let (mut alpha, _character) = enter_world(&server, b"alice", 0);
+    Server::write_console(&console, &format!("item give Alpha {}", a_plain_vnum()));
+    server.wait_for("the client has it");
+    let _ = alpha.drain_game(Duration::from_millis(500), an_item_window_record);
+    let (id, _) = rows_of(
+        &database,
+        "SELECT id, vnum FROM item WHERE owner_id = (SELECT id FROM player WHERE name = 'Alpha')",
+    )[0];
+
+    // When: the Operator destroys that exact id.
+    Server::write_console(&console, &format!("item destroy Alpha {id}"));
+    server.wait_for("deleted its row");
+
+    // Then: the row is gone.
+    assert_eq!(
+        items_of(&database, "Alpha"),
+        "none",
+        "a destroyed item must not come back at the next login"
+    );
+
+    // And: a second destroy of the same id is refused by the world and never reaches the
+    // store, which is what "the world was asked first" looks like from outside. The row
+    // count is checked again, because a refusal that still deleted a row would be the
+    // failure this ordering exists to prevent.
+    Server::write_console(&console, &format!("item destroy Alpha {id}"));
+    server.wait_for("The destroy did not happen");
+    let console_text = server.console();
+    assert!(
+        console_text.contains("the row was left alone"),
+        "the refusal should say the row was not touched:\n{console_text}"
+    );
+    assert_eq!(items_of(&database, "Alpha"), "none", "still no row");
+
+    // And the client is still connected and still holding a drawn cell, because the only
+    // record that clears a window slot is byte 20 and the stock client drops a 62-byte
+    // frame there. The console's answer says so rather than leaving an Operator to think
+    // the character is looking at an up-to-date window.
+    let (records, state) = alpha.drain_game(Duration::from_millis(300), an_item_window_record);
+    assert!(
+        the_item_set(&records).is_none(),
+        "a destroy must not send a GC_ITEM_SET: {records:02x?}"
+    );
+    assert_eq!(
+        state,
+        Quiet::Open,
+        "the client is still connected after the destroy"
     );
 }

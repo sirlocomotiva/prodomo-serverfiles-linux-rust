@@ -72,6 +72,17 @@ pub enum OperatorCommand {
         /// would be a second number that can drift from the first.
         count: Option<u32>,
     },
+    /// `item destroy <name> <id>`
+    ItemDestroy {
+        /// The character's Name, matched case-insensitively by the world.
+        target: String,
+        /// The **item id**, not a vnum: a destroy names one instance.
+        ///
+        /// Spelled out because `item give` takes a vnum and an Operator who typed the
+        /// wrong one would be destroying something by prototype, which is not a thing
+        /// this command can do.
+        id: u32,
+    },
 }
 
 /// A line the console could not turn into a command.
@@ -95,6 +106,7 @@ impl fmt::Display for OperatorCommand {
                 Some(count) => write!(formatter, "item give {target} {vnum} {count}"),
                 None => write!(formatter, "item give {target} {vnum}"),
             },
+            Self::ItemDestroy { target, id } => write!(formatter, "item destroy {target} {id}"),
         }
     }
 }
@@ -142,13 +154,19 @@ pub fn parse(line: &str) -> Result<Option<OperatorCommand>, ConsoleError> {
                 count,
             }))
         }
+        [verb, sub, target, id] if *verb == "item" && *sub == "destroy" => {
+            Ok(Some(OperatorCommand::ItemDestroy {
+                target: (*target).to_owned(),
+                id: parse_number(id, "item id")?,
+            }))
+        }
         [verb, ..] if *verb == "item" => Err(ConsoleError(format!(
-            "unknown item command; this console has one: `item give <name> <vnum> [count]`, \
-             got `{trimmed}`"
+            "unknown item command; this console has `item give <name> <vnum> [count]` and \
+             `item destroy <name> <id>`, got `{trimmed}`"
         ))),
         [verb, ..] => Err(ConsoleError(format!(
-            "unknown command `{verb}`; this console has one: \
-             `item give <name> <vnum> [count]`. Got `{trimmed}`"
+            "unknown command `{verb}`; this console has `item give <name> <vnum> [count]` \
+             and `item destroy <name> <id>`. Got `{trimmed}`"
         ))),
         [] => Ok(None),
     }
@@ -173,17 +191,26 @@ pub fn to_request(command: &OperatorCommand) -> Option<GrantRequest> {
             target,
             vnum,
             count,
-        } => Some(GrantRequest {
-            target: target.clone(),
-            vnum: *vnum,
-            // The console parses a `u32` because that is what fits the words an
-            // Operator types, and the request holds a `u16`. A number that does not
-            // fit is clamped here rather than refused: `do_item` clamps too, and a
-            // refusal would make the ceiling a different number on the way in than on
-            // the way through. The clamp is the same constant the reducer uses.
-            count: count.map(|count| {
-                u16::try_from(count.clamp(1, u32::from(LIMIT))).expect("a clamped count fits a u16")
-            }),
+        } => Some(give_request(target, *vnum, *count)),
+        // A destroy names an item id that already exists, so there is nothing to build:
+        // the request type is a *grant* request, and borrowing it for a destroy would
+        // mean a field that means "a prototype to create" carrying "an id to remove".
+        OperatorCommand::ItemDestroy { .. } => None,
+    }
+}
+
+/// The grant request a `give` line becomes.
+fn give_request(target: &str, vnum: u32, count: Option<u32>) -> GrantRequest {
+    GrantRequest {
+        target: target.to_owned(),
+        vnum,
+        // The console parses a `u32` because that is what fits the words an Operator
+        // types, and the request holds a `u16`. A number that does not fit is clamped
+        // here rather than refused: `do_item` clamps too, and a refusal would make the
+        // ceiling a different number on the way in than on the way through. The clamp is
+        // the same constant the reducer uses.
+        count: count.map(|count| {
+            u16::try_from(count.clamp(1, u32::from(LIMIT))).expect("a clamped count fits a u16")
         }),
     }
 }
@@ -413,10 +440,17 @@ pub async fn answer(line: &str, context: &ConsoleContext) -> Option<String> {
     match parse(line) {
         Ok(None) => None,
         Err(error) => Some(error.to_string()),
-        Ok(Some(command)) => {
-            let request = to_request(&command)?;
-            Some(run_grant(&request, context).await)
-        }
+        Ok(Some(command)) => Some(match command {
+            OperatorCommand::ItemGive {
+                target,
+                vnum,
+                count,
+            } => {
+                let request = give_request(&target, vnum, count);
+                run_grant(&request, context).await
+            }
+            OperatorCommand::ItemDestroy { target, id } => run_destroy(&target, id, context).await,
+        }),
     }
 }
 
@@ -456,9 +490,44 @@ async fn run_grant(request: &GrantRequest, context: &ConsoleContext) -> String {
     }
 }
 
+/// Destroy, and describe what happened in one sentence an Operator can act on.
+///
+/// The answer says whether the **row** is gone, because that is the fact an Operator
+/// needs and the one the store is authoritative about. It does not claim the client was
+/// told, because nothing was: see the note on
+/// [`destroy_and_delete`](crate::item_persist::destroy_and_delete) for why, which is an
+/// open question for the owner and not a choice this console made.
+async fn run_destroy(target: &str, id: u32, context: &ConsoleContext) -> String {
+    match crate::item_persist::destroy_and_delete(&context.store, &context.controller, target, id)
+        .await
+    {
+        crate::item_persist::Destroyed::Gone { id, cell } => {
+            let (window_type, pos) = cell;
+            format!(
+                "Destroyed item {id} from {target}, freed window {window_type} cell {pos}, and \
+                 deleted its row. The client was not told, so the cell stays drawn until the \
+                 next login."
+            )
+        }
+        crate::item_persist::Destroyed::StillStored { id, error } => {
+            format!(
+                "The world freed item {id} from {target} but its row is still in the store \
+                 ({error}). Do not destroy it again: the world no longer holds it, so a \
+                 second attempt would delete the row with nothing to release."
+            )
+        }
+        crate::item_persist::Destroyed::Refused { id, error } => {
+            format!(
+                "The destroy did not happen: {id} could not be released ({error}), and \
+                     the row was left alone."
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse, ConsoleError, OperatorCommand};
+    use super::{parse, to_request, ConsoleError, OperatorCommand};
 
     fn given(line: &str) -> OperatorCommand {
         match parse(line) {
@@ -474,6 +543,10 @@ mod tests {
     fn count_of(command: &OperatorCommand) -> Option<u32> {
         match command {
             OperatorCommand::ItemGive { count, .. } => *count,
+            // A destroy has no count, and saying so beats a panic in a test helper.
+            OperatorCommand::ItemDestroy { .. } => {
+                panic!("a destroy has no count")
+            }
         }
     }
 
@@ -700,6 +773,73 @@ mod tests {
 
     fn read(path: &std::path::Path) -> String {
         std::fs::read_to_string(path).unwrap_or_default()
+    }
+    #[test]
+    fn a_destroy_names_an_item_id_and_not_a_vnum() {
+        // The two commands take numbers of different meanings, and mixing them up would
+        // destroy an arbitrary instance. The error text says "item id" for that reason,
+        // so it is pinned here: an Operator who typed a vnum gets told which number is
+        // wanted instead of getting a silent wrong-item destroy.
+        match parse("item destroy Shaman 19") {
+            Ok(Some(OperatorCommand::ItemDestroy { target, id })) => {
+                assert_eq!(target, "Shaman");
+                assert_eq!(id, 19);
+            }
+            other => panic!("`item destroy Shaman 19` should be a destroy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_destroy_takes_exactly_a_name_and_an_id() {
+        for line in [
+            "item destroy Shaman",
+            "item destroy Shaman 19 2",
+            "item destroy 19",
+        ] {
+            assert!(
+                parse(line).is_err(),
+                "`{line}` is not a complete destroy and must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_destroy_has_no_grant_request_because_it_creates_nothing() {
+        // A `GrantRequest` is "make this prototype"; a destroy is "remove this id".
+        // Borrowing the type would mean a field meaning one thing carrying the other, so
+        // the conversion is `None` and the console dispatches on the variant instead.
+        let command = given("item destroy Shaman 19");
+        assert!(
+            to_request(&command).is_none(),
+            "a destroy must not be convertible into a grant request"
+        );
+        assert!(
+            to_request(&given("item give Shaman 19")).is_some(),
+            "a give must still be convertible, or the positive control is not testing the sweep"
+        );
+    }
+
+    #[test]
+    fn a_wrong_item_subcommand_says_what_the_console_has() {
+        let error = parse("item takes Shaman 19")
+            .expect_err("takes is not a verb this console has")
+            .to_string();
+        assert!(
+            error.contains("item give <name> <vnum> [count]")
+                && error.contains("item destroy <name> <id>"),
+            "the refusal should list both commands, got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_destroy_id_that_is_not_a_number_is_refused_by_name() {
+        let error = parse("item destroy Shaman sword")
+            .expect_err("sword is not an id")
+            .to_string();
+        assert!(
+            error.contains("item id"),
+            "the refusal should say which field it wanted, got: {error}"
+        );
     }
 }
 

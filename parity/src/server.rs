@@ -95,6 +95,36 @@ impl Server {
         game: &str,
     ) -> Self {
         let root = unique_root();
+        Self::start_in(root, binary, store_url, channels, game)
+    }
+
+    /// A server whose Operator console reads a named pipe, and the path of that pipe.
+    ///
+    /// The pipe path is chosen here rather than by the caller because the server's own
+    /// directory does not exist until this runs, and a caller that picked a path would be
+    /// writing outside the directory `Drop` cleans up. It is returned so a scenario can
+    /// write a command, and it is a FIFO the server creates, not a file the scenario makes.
+    #[must_use]
+    pub fn start_with_console(
+        binary: &Path,
+        store_url: &str,
+        channels: &[ChannelSpec],
+    ) -> (Self, PathBuf) {
+        let root = unique_root();
+        let console = root.join("operator-console");
+        let game = format!("operator_console = \"{}\"", console.display());
+        let server = Self::start_in(root, binary, store_url, channels, &game);
+        (server, console)
+    }
+
+    /// The rest of [`Server::start_configured`], for a root this method chose itself.
+    fn start_in(
+        root: PathBuf,
+        binary: &Path,
+        store_url: &str,
+        channels: &[ChannelSpec],
+        game: &str,
+    ) -> Self {
         let log_dir = root.join("log");
         fs::create_dir_all(&log_dir).expect("the scenario directory should be creatable");
         let config = root.join("prodomo.toml");
@@ -123,6 +153,26 @@ impl Server {
         };
         server.wait_for(ACCEPTING);
         server
+    }
+
+    /// Write one Operator command into a console pipe, the way a shell would.
+    ///
+    /// Opening a FIFO for writing blocks until a reader opens it, so this is the one
+    /// operation a scenario cannot make non-blocking and should not try: the server's
+    /// reader is already open by the time a scenario can observe the pipe, so the open
+    /// returns. Writing and closing is what makes the reader see one whole command.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the pipe cannot be opened or written, which means the console is not
+    /// configured on this server.
+    pub fn write_console(console: &Path, line: &str) {
+        use std::io::Write as _;
+        let mut pipe = fs::OpenOptions::new()
+            .write(true)
+            .open(console)
+            .expect("the console pipe should be open");
+        writeln!(pipe, "{line}").expect("the console pipe should accept a line");
     }
 
     /// Run an Operator command, `prodomo --config <this server's config> <args>`, with `stdin`

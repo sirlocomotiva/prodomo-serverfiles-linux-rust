@@ -12,7 +12,8 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use db::sqlx::{self, Connection, PgConnection};
+use db::sqlx::postgres::{PgColumn, PgRow};
+use db::sqlx::{self, Column as _, Connection, PgConnection, Row as _};
 
 /// A database created for one test and dropped when the test ends, even on a panic.
 pub struct ScratchDatabase {
@@ -155,6 +156,78 @@ pub fn execute(url: &str, statement: &str) -> Result<(), sqlx::Error> {
             sqlx::query(statement).execute(&mut connection).await?;
             connection.close().await
         })
+}
+
+/// The integer columns of a `SELECT`, `width` per row.
+///
+/// The scenarios call this to read a fact back out of the store that only the store knows,
+/// so the number is compared as a number. A scenario that rendered the row to text and
+/// compared strings would pass on a `count(*)` that came back as `"1"` and on an `INT8`
+/// that came back as `"0000000001"`, and the point of reading the column is not to re-parse
+/// it.
+///
+/// This is **not** the shape a production query takes. `db` binds every value as a
+/// parameter and a formatted value into SQL is a Defect; here the statement is written by
+/// the scenario, in the scenario, out of literals the scenario owns, because the thing
+/// under test is the server's answer rather than the query.
+///
+/// # Panics
+///
+/// Panics when the store cannot be reached or the statement does not run. A scenario that
+/// gets that far has a scratch database it is the only user of, so a failure is a bug in
+/// the scenario or the server, not a condition to skip past.
+pub fn rows(url: &str, statement: &str, width: usize) -> Vec<Vec<i64>> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime should start")
+        .block_on(async {
+            let mut connection = PgConnection::connect(url)
+                .await
+                .expect("the scenario's store should accept a connection");
+            let result = sqlx::query(statement)
+                .fetch_all(&mut connection)
+                .await
+                .expect("the query should run");
+            let _ = connection.close().await;
+            let mut out = Vec::with_capacity(result.len());
+            for row in &result {
+                let mut cells = Vec::with_capacity(width);
+                for index in 0..width {
+                    cells.push(scalar(row, index));
+                }
+                out.push(cells);
+            }
+            out
+        })
+}
+
+/// One cell of one row, as an `i64`.
+///
+/// PostgreSQL's `INT2`, `INT4` and `INT8` are all read as one Rust integer, because the
+/// only thing a scenario does with a number it read back is compare it, and a `count(*)`
+/// arriving as `INT8` is a fact about PostgreSQL rather than about the store. `INT4` is
+/// the only column a scenario can currently store (`item.id`, `item.vnum`,
+/// `item.count`, `item.pos`, `player.id`), so the cast is right for every row a scenario
+/// can produce today and a wider column would be caught by the panic below rather than
+/// silently read as a smaller number.
+///
+/// # Panics
+///
+/// Panics when the column is not an integer, which is a mistake in the statement rather
+/// than a missing value: a scenario reading text wants [`rows`] and a `::text` column.
+fn scalar(row: &PgRow, index: usize) -> i64 {
+    let column: &PgColumn = &row.columns()[index];
+    // `PgTypeInfo::name` is crate-private, but its `Display` is the same string.
+    match column.type_info().to_string().as_str() {
+        "INT2" => i64::from(row.get::<i16, _>(index)),
+        "INT4" => i64::from(row.get::<i32, _>(index)),
+        "INT8" => row.get::<i64, _>(index),
+        other => panic!(
+            "a scenario should read a number back, and {other} is not an integer this \
+             helper knows how to read"
+        ),
+    }
 }
 
 /// `url` with its database path replaced by `name`, keeping any query string.

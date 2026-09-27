@@ -127,10 +127,46 @@ Still to do, in the order the gates imply:
    port. The survey settled that legacy has no adminpage item-give path; ledger 207.1
    establishes with controls that legacy has no console either, and the ADRs pick the
    in-process reader.
-5. **The only thing left.** The create-and-destroy round trip as a scripted-client scenario: an Operator grants an
-   item, the client receives `GC_ITEM_SET`, the item survives a relog, and destroying it
-   removes the row. That scenario is what moves `sys.item.core` off `codec`, and nothing
-   short of it counts.
+5. ~~**The only thing left.** The create-and-destroy round trip as a scripted-client
+   scenario.~~ **Done at ledger 208, in four scenarios** (see below).
+
+## Ledger 208: the round trip, and what it proved and did not
+
+Four scenarios in `prodomo/tests/parity.rs`, all against a real `prodomo serve` and a real
+FIFO. The status is now `partial`, not `ported` — see the two gaps at the end.
+
+| scenario | what it proves |
+|---|---|
+| `an_operator_gives_an_online_character_an_item_and_the_client_is_told` | `item give` over the pipe reaches the client's own socket as a 72-byte `GC_ITEM_SET`, with the vnum at bytes 4..=8 and the `ItemPos` at 1..=3, and that vnum is in the owner's `item_proto.txt` |
+| `a_granted_item_is_still_in_the_store_after_the_client_disconnects` | the row outlives the descriptor — a disconnect is not a rollback |
+| `an_operator_destroy_takes_the_item_out_of_the_world_and_deletes_its_row` | the world releases the cell, the row is deleted, and a *refused* second destroy does not touch the row or another character |
+| `a_destroy_sends_nothing_to_the_client_and_says_so` | the console's answer tells the Operator the cell stays drawn, instead of implying a clean window |
+
+**Two gaps, both recorded rather than closed:**
+
+1. **A relog does not put the item back in the client's window.** `CG_ITEM_LOAD` is not
+   handled. The scenario proves the *row* survives; it does not prove the item is drawn
+   again, and it should not be read that way. Legacy does not send items on enter-game
+   either — `CInputDB::PlayerLoad` (`input_db.cpp:328`) sends no items, and the client asks
+   with `CG_ITEM_LOAD`, which `CInputDB::ItemLoad` (`input_db.cpp:1451`) answers.
+   `db::items::load_owner_items` has no caller, exactly as `grant_and_deliver` had none at
+   206. **This is the next step-4 item**, and it is the half of the round trip this unit
+   did not do.
+2. **A destroy sends no client record, and cannot.** The only record legacy has that clears
+   a window cell is `GC_ITEM_DEL`, and the two trees disagree about it: legacy writes 62
+   bytes into wire byte 20 while the client reads byte 20 as `HEADER_GC_ITEM_SET` and sizes
+   it at 72, so the stock client drops it. The Rewrite does not reproduce a Defect and does
+   not invent a record. Ledger 208.2 lays out the two options for the owner; the choice is
+   the play test's, not a code guess.
+
+**What the round trip found that no test could have.** The first `drain_game` decrypted
+per 8-byte unit and looked for a 72-byte record, which can never match; it was dropping the
+unit that began with the header byte and reporting a *missing* record for one that had in
+fact arrived. The failure message was right and the diagnosis was wrong. The harness now
+decrypts the window and walks records, each declaring its own width. Separately, a
+`read_to_string` on `item_proto.txt` failed outright — the proto name column is Korean in a
+legacy code page — so the existence check now goes through `ItemProtos::load`, the same
+reader the server uses, with a negative control in the same table.
 
 **Open question for the owner, recorded rather than assumed. ANSWERED at ledger 207.1.**
 The text as it stood, kept because the answer is easier to check against it:**

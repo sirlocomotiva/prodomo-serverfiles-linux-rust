@@ -29,7 +29,7 @@ use crate::item_grant::GrantRequest;
 use db::items::{insert_item, ItemError, ItemRow};
 use db::store::Store;
 
-use crate::game_loop_messages::RevokeError;
+use crate::game_loop_messages::{ReleaseError, RevokeError};
 use crate::item_grant::GrantOutcome;
 
 /// What happened to a granted item's row.
@@ -311,6 +311,119 @@ pub async fn grant_and_deliver(
         refused => Granted::Failed {
             why: refused.to_string(),
         },
+    }
+}
+
+/// What happened to a destroyed item.
+#[derive(Debug)]
+pub enum Destroyed {
+    /// The world no longer holds it and the row is gone.
+    Gone {
+        /// The id that was destroyed.
+        id: u32,
+        /// The cell the world freed, as `(window_type, cell)`.
+        ///
+        /// Kept so the caller can log or answer with the same numbers the world used,
+        /// rather than with a cell it guessed.
+        cell: (u8, u32),
+    },
+    /// The world released the item but the row is still there.
+    ///
+    /// This is a bug, and it is its own variant because the caller must do something about
+    /// it rather than report a clean destroy. The item is in no world and still in the
+    /// store, so a player who logs in sees an item that no longer exists, and a second
+    /// destroy of the same id would release nothing and delete the row. The store
+    /// failed to do exactly what it was asked, so this is logged at `error` and reported
+    /// as a failure: the id is not burned, because the row it names is still real.
+    StillStored {
+        /// The id that was asked for.
+        id: u32,
+        /// The store's own reason.
+        error: ItemError,
+    },
+    /// The world would not release it, so the store was not asked.
+    ///
+    /// The refusal is kept whole rather than collapsed into a message, because a caller
+    /// answers an Operator differently for "that character is not online" than for "that
+    /// id is not an item this character holds", and the second one is the ordinary answer
+    /// to an Operator who typed an id from memory.
+    Refused {
+        /// The id that was asked for.
+        id: u32,
+        /// What the world said.
+        error: ReleaseError,
+    },
+}
+
+/// Take an item out of the world, delete its row, and report what happened.
+///
+/// This is the mirror of [`grant_and_deliver`], and it is a separate function rather than
+/// a flag on it because the two orders are opposites and neither can be derived from the
+/// other. The world goes first, for the same reason it does on a grant and not the
+/// opposite: the world is the only thing that knows which cell an id occupies, and the
+/// store's key needs that cell. So the row is deleted **second**, and a store that refuses
+/// the delete leaves an item with no row -- the exact state `grant_and_deliver` exists to
+/// prevent, which is why [`Destroyed::StillStored`] is a separate variant and not a
+/// successful destroy with a note.
+///
+/// **Nothing is sent to the client, and that is the open question, not an oversight.**
+/// The legacy record for clearing a window slot is `HEADER_GC_ITEM_DEL` (byte 20, 62
+/// bytes). The stock client has no such record: its byte 20 is `HEADER_GC_ITEM_SET`,
+/// registered at `PythonNetworkStream.cpp:71` and dispatched to the item-**set** handler
+/// at `PythonNetworkStreamPhaseGame.cpp:342`, and its registered width is 72 at six
+/// sockets or 60 at three. 62 matches neither, so `CheckPacket` drops the frame
+/// (`PythonNetworkStream.cpp:537-543`). Sending it would reproduce a Defect the ledger
+/// recorded at section 193.8 and explicitly does not reproduce.
+///
+/// What the Rewrite should send instead is a design question for the owner and the play
+/// test. The candidates and the cost of guessing are written down in
+/// `docs/PROTOCOL_NOTES.md` under the byte-20 section; this function deliberately does not
+/// choose between them. Until it is answered, an Operator destroy removes the item
+/// from the world and the store, and the client keeps drawing the item until its next
+/// login, at which point the cell is empty. That is recorded as a Divergence rather than
+/// passed off as parity.
+///
+/// # Errors
+///
+/// Never. Every failure is an outcome, for the same reason as [`grant_and_deliver`].
+pub async fn destroy_and_delete(
+    store: &Store,
+    controller: &GameLoopController,
+    target: &str,
+    id: u32,
+) -> Destroyed {
+    // Step 1: the world. A refusal here means the store is not touched, so there is no
+    // window in which a row describes an item the world has already lost.
+    let released = match controller.release_item(target, id).await {
+        Ok(released) => released,
+        Err(error) => {
+            return Destroyed::Refused { id, error };
+        }
+    };
+    let cell = (released.pos.window_type, u32::from(released.pos.cell));
+    // The owner comes from the same release rather than from a second lookup. The world
+    // admitted the character under its store `player.id` (ledger 205), so asking the
+    // world is the only way to get an owner that cannot disagree with the cell the world
+    // just freed. Looking it up again could answer with a different character if a name
+    // had been reused in between, and the delete would then remove somebody else's row.
+    let owner = released.owner_id;
+
+    match db::items::destroy_item(store, id, owner).await {
+        Ok(true) => Destroyed::Gone { id, cell },
+        // `destroy_item` answers `false` only when the id does not exist at all, which
+        // cannot be true here: the world held it and the world is the only thing that
+        // grants ids. It is reported rather than assumed away.
+        Ok(false) => Destroyed::StillStored {
+            id,
+            error: ItemError::NotOwned {
+                id,
+                owner_id: Some(owner),
+            },
+        },
+        Err(error) => {
+            tracing::error!(target = ?target, id, %error, "an item left the world but its row is still in the store");
+            Destroyed::StillStored { id, error }
+        }
     }
 }
 

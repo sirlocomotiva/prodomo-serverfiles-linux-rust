@@ -20017,3 +20017,135 @@ and it is a scripted-client scenario: an Operator grants, the client sees `GC_IT
 item survives a relog, and destroying it removes the row. `sys.item.core` stays at `codec`
 until that scenario passes.
 
+
+
+## 208. The create-and-destroy round trip, and the one record a destroy cannot send
+
+Ledger 207 left the console granting to an online character and the round trip unwritten.
+This unit closes it: an Operator creates an item, the client's own socket receives the
+record, the row survives the disconnect, and an Operator destroys the item, which takes it
+out of the world and deletes the row. **The destroy sends nothing to the client, and that
+is a decision the owner has to make rather than one this unit may make.** See 208.2.
+
+**The order of a destroy is the world first, then the store.** `destroy_and_delete` asks
+the game thread to release the item before it opens a transaction, and the store delete
+happens only after the world has answered with the cell it freed. The reverse order would
+delete the row of an item a live character still holds: the world would find the id, do
+nothing about it, and the item would vanish at the next login with nothing anywhere
+recording that it had existed. The scenario `an_operator_destroy_takes_the_item_out_of_the_world_and_deletes_its_row`
+checks the row count again *after* a refused second destroy, so a refusal that still
+deleted a row would fail.
+
+**The world answers with the owner, so the store is not asked a second time.** The first
+draft resolved the owner's `player.id` with a query by Name after the world had already
+released the item. That is a second source of truth for a fact the world held, and it can
+disagree: a Name that resolves to a different row than the one the world released would
+make `destroy_item`'s `owner_id` guard reject a legitimate destroy. `revoke_grant` now
+returns `Released { pos, owner_id }`, because the character that held the item is the one
+that owned the row, and it is the same `world_vid` the grant was placed under.
+
+**A release refusal is not a grant-repair failure.** `RevokeError` treats a missing item
+as a bug: after a grant that just returned `Delivered`, an id the world does not hold
+means the two paths disagree, and that is worth a loud failure. An Operator asking to
+destroy an id twice, or one belonging to a character who is not online, is the ordinary
+mistake and needs an ordinary refusal. The two are separate types — `RevokeError` stays
+where the grant repair needs it, and `ReleaseError` carries the Operator's path.
+
+### 208.1 Four bugs the round trip found
+
+None of these is a typo, and each was found by running the real binary rather than by a
+test that could not have seen it.
+
+1. **A test that asserted nothing passed.** The first version of
+   `a_destroy_sends_nothing_to_the_client_and_says_so` drained the queue once, after the
+   *first* grant, and then made a second grant whose own `GC_ITEM_SET` was still in the
+   queue. It failed for the wrong reason — and, read the other way, it would have passed
+   if the destroy had sent a record. It now drains after every grant. A test that fails
+   on an unrelated record is not a test that would catch the record it is about.
+2. **The scenario read ciphertext and called it a missing record.** The game phase is TEA
+   encrypted, so the raw bytes are 72 bytes of noise. The first `drain_game` decrypted
+   per eight-byte unit and searched for a 72-byte record, which can never match: it found
+   *units*, not records, and the unit that began with the header byte was dropped because
+   its "width" was not 8. It now decrypts the window and walks the plaintext, each record
+   declaring its own width, which is how legacy frames them. The harness has a
+   `drain_game` and a `width_of` supplied by the scenario, because the loading and
+   enter-game bursts are a known set of records and an Operator's grant is not.
+3. **`read_to_string` on a Game data file that is not UTF-8.** The check that the granted
+   vnum really exists read `item_proto.txt` as a `String` and failed: the proto name
+   column is Korean in a legacy code page. It now asks `ItemProtos::load`, which is what
+   the server asks, so the assertion is "the server can grant this vnum" rather than "a
+   file parses". A test that only works for well-formed Game data stops working the day
+   the Game data is checked properly.
+4. **`a_vnum_that_is_really_in_the_owners_protos` could match anything.** The sweep walked
+   the file and asserted nothing about lines it did not match. It now has a negative
+   control in the same table (`get(0)` is `None`) so a reader that answered `true` for
+   every vnum would be caught.
+
+### 208.2 The record a destroy cannot send, for the owner
+
+**Legacy's item delete is a Defect, and the Rewrite does not reproduce it.** The two
+records are swapped between the trees, which `protocol/src/gc_item_window.rs` already
+documents and tests:
+
+| wire byte | server enumerator | client name | client width | server width |
+|---|---|---|---|---|
+| 20 | `HEADER_GC_ITEM_DEL` | `HEADER_GC_ITEM_SET` | 72 | **62** |
+| 21 | `HEADER_GC_ITEM_SET` | `HEADER_GC_ITEM_SET2` | 72 | 72 |
+
+Legacy `char_item.cpp:598` writes **62 bytes** into byte 20. The stock client reads byte 20
+as `HEADER_GC_ITEM_SET` and `CheckPacket` sizes it at 72 bytes (60 with three sockets), so
+**the client drops every delete legacy sends.** Legacy's inventory updates therefore reach
+the player only at the next login or a map change, and the byte-20 frame is dead weight
+on the wire.
+
+The Rewrite does not send it. A guessed `GC_ITEM_SET` with vnum 0 in byte 21 would be a
+new wire contract nobody has measured, and it would be *wrong* in a way a Defect is not:
+a vnum-0 set tells a client "there is an item here" and is not a clear. So the destroy
+frees the cell in the world and deletes the row, sends nothing, and **the console's own
+answer says the cell stays drawn until the next login**:
+
+> `Destroyed item 100000000 from Alpha, freed window 1 cell 0, and deleted its row. The
+> client was not told, so the cell stays drawn until the next login.`
+
+That is honest, and it is the only sentence available. The owner decides, in the play
+test, between: leaving it (the current behaviour, matching what the stock client
+effectively does anyway), or adding a record the client is known to accept. The
+reproduction in 206 and 208 does not guess.
+
+### 208.3 What a relog does not do yet
+
+The scenario proves the row **survives** the disconnect, which is the half of the round
+trip the store owns. It does not prove the item comes back into the client's window,
+because **`CG_ITEM_LOAD` is not handled.** Legacy does not send an inventory on enter-game
+either: `CInputDB::PlayerLoad` (`input_db.cpp:328`) sends the entity, the main character
+packet, the map, quickslots, points and skill levels, and **no items**; the client then
+asks with `CG_ITEM_LOAD` and `CInputDB::ItemLoad` (`input_db.cpp:1451`) answers with every
+item the character owns. `db::items::load_owner_items` exists and has **no caller** in the
+Rewrite, which is the same state `grant_and_deliver` was in at ledger 206.
+
+So `sys.item.core` is `partial`, not `ported`: the row is created, placed, delivered and
+destroyed under a scenario, and *move, stack, use, drop, pick up* and the load path are
+not ported at all.
+
+**Receipt.** 4 new scenarios in `prodomo/tests/parity.rs`, 4 new database-backed tests in
+`prodomo/tests/item_persist_db.rs`, 6 new unit tests in
+`prodomo/src/operator_console.rs`, and 2 new tests in
+`prodomo/tests/support/mod.rs` / `parity/src/server.rs`.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2361 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2361 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+`SELECT datname FROM pg_database WHERE datname LIKE 'prodomo\_%'` returns nothing after
+the run. Two Clippy findings were fixed by refactoring (`match_same_arms` and
+`match_wildcard_for_single_variants` in the test helper merged into one arm pair); no
+`#[allow]` was added.
+
+**Not measured.** `i686-linux-gnu-g++-12` is still not installed. This unit adds no width
+claim: the 72 and 62 byte figures are the ones `protocol/src/gc_item_window.rs` already
+carries and pins against `gc_inventory`.

@@ -501,3 +501,209 @@ async fn a_granted_item_is_written_and_then_reaches_the_client() {
         "the row keeps its own id even though the wire does not"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The destroy. The mirror of the grant, and the half that lets `sys.item.core`
+// leave `codec`: an item an Operator created must be able to go away again, and
+// its row must go with it.
+// ---------------------------------------------------------------------------
+
+/// Grant one item to `target` and answer with the id the world took.
+async fn grant_one(
+    store: &db::store::Store,
+    controller: &prodomo::game_loop_messages::GameLoopController,
+    target: &str,
+) -> u32 {
+    match tokio::time::timeout(
+        Duration::from_secs(15),
+        prodomo::item_persist::grant_and_deliver(
+            store,
+            controller,
+            &prodomo::item_grant::GrantRequest {
+                target: target.to_owned(),
+                vnum: a_plain_vnum(),
+                count: None,
+            },
+        ),
+    )
+    .await
+    .expect("the grant finished within fifteen seconds")
+    {
+        // `Stored` counts: the point of this helper is that the item exists, and a
+        // delivered-but-undeliverable row is a real item that a later test can still
+        // destroy. Only `Failed` means there is nothing to work with.
+        prodomo::item_persist::Granted::Delivered { id, .. }
+        | prodomo::item_persist::Granted::Stored { id, .. } => id,
+        failed @ prodomo::item_persist::Granted::Failed { .. } => {
+            panic!("the grant should have produced an item, got {failed}")
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_destroyed_item_leaves_the_world_and_takes_its_row_with_it() {
+    let Some(database) = ScratchDatabase::create_async().await else {
+        return;
+    };
+    let AWorld {
+        store, controller, ..
+    } = a_world_with_a_client(&database, "Shaman").await;
+
+    // Given: a granted, delivered, stored item.
+    let id = grant_one(&store, &controller, "Shaman").await;
+    assert!(
+        db::items::load_item(&store, id)
+            .await
+            .expect("the read")
+            .is_some(),
+        "the row is there before the destroy"
+    );
+
+    // When: it is destroyed.
+    let destroyed = tokio::time::timeout(
+        Duration::from_secs(15),
+        prodomo::item_persist::destroy_and_delete(&store, &controller, "Shaman", id),
+    )
+    .await
+    .expect("the destroy finished within fifteen seconds");
+
+    // Then: both halves are gone, and the answer says which cell was freed so an
+    // Operator is not left guessing.
+    let cell = match destroyed {
+        prodomo::item_persist::Destroyed::Gone { id: gone, cell } => {
+            assert_eq!(gone, id, "the answer names the item that was destroyed");
+            cell
+        }
+        other => panic!("the item and its row should both be gone, got {other:?}"),
+    };
+    assert_eq!(
+        cell.0,
+        common::item_slots::EWindows::Inventory as u8,
+        "a grant puts the item in the base inventory"
+    );
+    assert!(
+        db::items::load_item(&store, id)
+            .await
+            .expect("the read")
+            .is_none(),
+        "the row must be gone, or the item comes back at the next login"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_destroyed_id_cannot_be_destroyed_again_and_does_not_touch_another_character() {
+    // The point of this one is the `owner_id` in `destroy_item`'s `WHERE` clause. An id
+    // the caller has forgotten is the ordinary Operator mistake, and the failure mode it
+    // must not have is deleting a row that has since been granted to somebody else.
+    let Some(database) = ScratchDatabase::create_async().await else {
+        return;
+    };
+    let AWorld {
+        store, controller, ..
+    } = a_world_with_a_client(&database, "Shaman").await;
+    let other = a_stored_player(&store, "Warrior").await;
+    let _ = other;
+
+    let id = grant_one(&store, &controller, "Shaman").await;
+    let destroyed = tokio::time::timeout(
+        Duration::from_secs(15),
+        prodomo::item_persist::destroy_and_delete(&store, &controller, "Shaman", id),
+    )
+    .await
+    .expect("the first destroy finished");
+    assert!(
+        matches!(destroyed, prodomo::item_persist::Destroyed::Gone { .. }),
+        "the first destroy should succeed, got {destroyed:?}"
+    );
+
+    // And: the second one is refused by the world, because the world no longer holds
+    // the id, and the store is never asked.
+    let again = tokio::time::timeout(
+        Duration::from_secs(15),
+        prodomo::item_persist::destroy_and_delete(&store, &controller, "Shaman", id),
+    )
+    .await
+    .expect("the second destroy answered");
+    match again {
+        prodomo::item_persist::Destroyed::Refused { id: named, .. } => {
+            assert_eq!(named, id, "the refusal names the id that was asked for");
+        }
+        other => panic!("a second destroy must be refused, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_destroy_for_a_character_that_is_not_online_never_asks_the_store() {
+    // The order has to be observable, not just intended: if the store were asked first,
+    // an offline destroy would delete a row for an item a live character is holding,
+    // and that item would vanish at the next login with no refusal anywhere.
+    let Some(database) = ScratchDatabase::create_async().await else {
+        return;
+    };
+    let AWorld {
+        store, controller, ..
+    } = a_world_with_a_client(&database, "Shaman").await;
+    let id = grant_one(&store, &controller, "Shaman").await;
+
+    let refused = tokio::time::timeout(
+        Duration::from_secs(15),
+        prodomo::item_persist::destroy_and_delete(&store, &controller, "Ghost", id),
+    )
+    .await
+    .expect("the destroy answered");
+    assert!(
+        matches!(refused, prodomo::item_persist::Destroyed::Refused { .. }),
+        "a character that is not online is refused, got {refused:?}"
+    );
+
+    // The row is untouched, which is the whole claim.
+    assert!(
+        db::items::load_item(&store, id)
+            .await
+            .expect("the read")
+            .is_some(),
+        "a refused destroy must leave the row alone"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_destroy_sends_nothing_to_the_client_and_says_so() {
+    // The byte-20 question is open, so this pins the current behaviour rather than
+    // blessing it: no record goes out, and the console's own answer tells the Operator
+    // the cell stays drawn until the next login. When the owner answers the question and
+    // a record is added, this test is the one that must change, and it must change on
+    // purpose.
+    let Some(database) = ScratchDatabase::create_async().await else {
+        return;
+    };
+    let AWorld {
+        store,
+        controller,
+        mut inbox,
+        ..
+    } = a_world_with_a_client(&database, "Shaman").await;
+
+    // Drain the grant's `GC_ITEM_SET` so this test is looking at what the destroy adds.
+    let _ = grant_one(&store, &controller, "Shaman").await;
+    while inbox.try_recv().is_ok() {}
+
+    let id = grant_one(&store, &controller, "Shaman").await;
+    // Drained again, because this grant delivered a record of its own. The first draft
+    // of this test drained only once, and then failed on the *grant's* `GC_ITEM_SET`
+    // rather than on anything the destroy sent -- which would have let a destroy that
+    // sent a record pass, if the assertion had been written a little more loosely.
+    while inbox.try_recv().is_ok() {}
+
+    let _ = tokio::time::timeout(
+        Duration::from_secs(15),
+        prodomo::item_persist::destroy_and_delete(&store, &controller, "Shaman", id),
+    )
+    .await
+    .expect("the destroy finished");
+
+    assert!(
+        inbox.try_recv().is_err(),
+        "no record may reach the client: the only record that clears a window slot is \
+         byte 20, which the stock client drops, and sending it would reproduce a Defect"
+    );
+}

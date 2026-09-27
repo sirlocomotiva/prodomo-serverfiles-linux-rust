@@ -8,7 +8,7 @@ use std::thread::Thread;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::client_registry::ClientOutbox;
-use crate::game_state::EnterWorldRefused;
+use crate::game_state::{EnterWorldRefused, Released, RevokeRefused};
 use crate::item_grant::{GrantOutcome, GrantRefusal, GrantRequest};
 
 /// Default capacity of the Tokio-to-game command queue.
@@ -190,6 +190,28 @@ pub enum GameCommand {
         /// Where the game thread reports whether it removed the item.
         reply: oneshot::Sender<bool>,
     },
+    /// Takes an item out of the world for good, and says which cell it was in.
+    ///
+    /// This is not [`GameCommand::RevokeGrant`] renamed. Revoke is the *undo* for a write
+    /// that failed: the row never existed, so the caller must not touch the store. This one
+    /// is the front half of a real removal, where the row does exist and the caller deletes
+    /// it next. Keeping them apart is what stops a failed write from being turned into a
+    /// deletion, and a deletion from being run twice.
+    ///
+    /// The answer is the position rather than a `bool`, because the caller needs the cell
+    /// to find the row it is about to remove: the store keys an item by
+    /// `(owner_id, window_type, pos)`, so the cell is half the key. Asking the world is
+    /// the only way to learn which cell a given id occupies without trusting a caller's
+    /// memory of it.
+    ReleaseItem {
+        /// The character the item was granted to.
+        target: String,
+        /// The id to take out of the world.
+        id: u32,
+        /// Where the game thread reports the cell it freed and whose it was, or why it
+        /// did not.
+        reply: oneshot::Sender<Result<Released, RevokeRefused>>,
+    },
     /// Puts a live client's character into the world.
     ///
     /// `DESC::SetPlayer` is the legacy step that makes a character visible to the
@@ -335,6 +357,43 @@ pub enum RevokeError {
         /// The id the revoke named.
         id: u32,
     },
+}
+
+impl std::fmt::Display for ReleaseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Each names what the caller must now believe about the world, because the
+            // three are not the same and a caller that treated them as one would either
+            // retry a removal that already happened or give up on one that did not.
+            Self::NotSent => formatter.write_str(
+                "the game thread could not be reached, so the world is not known to have moved",
+            ),
+            Self::NoAnswer => formatter.write_str(
+                "the game thread did not answer, so the world may or may not have moved",
+            ),
+            Self::Refused(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for ReleaseError {}
+
+/// Why a request to take an item out of the world did not produce a cell.
+///
+/// This is deliberately not [`RevokeError`]. A revoke undoes a grant that just happened,
+/// so the id came from the caller moments earlier and the world *not* holding it is a
+/// bug. An Operator asks to destroy an id that may be any id at all, so "that character
+/// does not hold it" is an ordinary answer, and folding it into the bug-shaped type would
+/// make every honest refusal look like an invariant violation.
+#[derive(Debug)]
+pub enum ReleaseError {
+    /// The command never reached the game thread, so the world is not known to have moved.
+    NotSent,
+    /// The command was sent and the thread dropped it without answering, so the world may
+    /// or may not have moved.
+    NoAnswer,
+    /// The world refused and changed nothing.
+    Refused(RevokeRefused),
 }
 
 impl std::fmt::Display for RevokeError {
@@ -580,6 +639,36 @@ impl GameLoopController {
         } else {
             Err(RevokeError::NotThere { id })
         }
+    }
+
+    /// Takes an item out of the world for good, and reports the cell it was in.
+    ///
+    /// The caller deletes the row next, so a refused release must leave the store alone.
+    /// That is why the answer is split three ways rather than being a `bool`: a `false`
+    /// could mean "the character does not hold that id" or "the game thread is gone",
+    /// and only the first says the row is stale, while the second says the world may hold
+    /// something the caller cannot see. Collapsing them is how a destroy ends up deleting
+    /// a row for an item that is still in the world.
+    ///
+    /// # Errors
+    ///
+    /// [`ReleaseError::NotSent`] when the game thread has closed its receiver,
+    /// [`ReleaseError::NoAnswer`] when it closed the reply without sending, and
+    /// [`ReleaseError::Refused`] carrying the world's own answer: the target is not
+    /// online, or the character does not hold the id.
+    pub async fn release_item(&self, target: &str, id: u32) -> Result<Released, ReleaseError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::ReleaseItem {
+            target: target.to_owned(),
+            id,
+            reply,
+        })
+        .await
+        .map_err(|_| ReleaseError::NotSent)?;
+        answer
+            .await
+            .map_err(|_| ReleaseError::NoAnswer)?
+            .map_err(ReleaseError::Refused)
     }
 
     /// Puts a live client's character into the world, and waits for the answer.
