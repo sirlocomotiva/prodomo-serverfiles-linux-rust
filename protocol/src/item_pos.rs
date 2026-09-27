@@ -1,9 +1,24 @@
 //! The legacy `TItemPos`, shared by every record that embeds one.
 //!
 //! This type started life inside [`crate::cg_sash`], which at the time held the
-//! only audited `TItemPos` consumer. `SPacketCGDragonSoulRefine` is the second,
-//! so the type has its own module now. A type with one consumer belongs beside
-//! that consumer; a type with two belongs on its own.
+//! only audited `TItemPos` consumer. `SPacketCGDragonSoulRefine` was the second,
+//! so the type moved to its own module. **Ledger 193** found the same duplication
+//! again on the other side of the tree: [`crate::cg_item_move`] carried a second,
+//! byte-identical three-byte `TItemPos` under the name `CgItemPos`, and the four
+//! game-to-client item-window records in [`crate::gc_item_window`] needed a third.
+//! All of them are now this one type.
+//!
+//! A type with one consumer belongs beside that consumer; a type with two belongs
+//! on its own. There are now **eight** modules that use the type in code
+//! (`cg_change_look`, `cg_dragon_soul`, `cg_exchange`, `cg_item_move`, `cg_sash`,
+//! `gc_item_window`, `gc_vid`, and the wiring test), so the rule has stopped being
+//! interesting and the duplication has stopped being harmless.
+//!
+//! The one place the old name is kept is [`crate::cg_item_move`], which does
+//! `pub use crate::item_pos::ItemPos as CgItemPos;` so the item records keep
+//! reading as the item records. A `pub use` is an alias, not a second type, so
+//! the two names cannot drift: any edit to one is an edit to both. That is the
+//! property the duplicated struct did not have.
 //!
 //! # `TItemPos` is 3 bytes
 //!
@@ -34,6 +49,19 @@
 //! The two records are unrelated in every other respect -- different headers,
 //! different fields, different dispatch arms -- so their agreement is a real
 //! cross-check rather than a shared constant.
+//!
+//! # Both directions use it
+//!
+//! `TItemPos` is one legacy struct in `server/server/common/length.h`, and both
+//! directions embed it: the client sends it in the item, safebox, exchange, sash,
+//! pick, refine and quickslot records, and the server returns it in the
+//! item-window records. Sharing the Rust type is therefore a parity statement,
+//! not a convenience, and it is not the sharing that `AGENTS.md` forbids. That
+//! rule is about **header tables**, where a shared number-to-name map has already
+//! caused a real wrong answer in this repository because the client and the
+//! server name the same byte differently (bytes 20 and 21 of the item window; see
+//! ledger 193). A shared *struct* is the opposite case: one legacy struct, one
+//! layout, and the risk of two Rust copies is higher than the risk of one.
 //!
 //! # What this codec does not do
 //!

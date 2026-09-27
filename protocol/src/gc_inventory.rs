@@ -387,7 +387,13 @@ pub const LEGACY_GC_PACKET_INVENTORY: &[LegacyGcPacket] = &[
         server_name: Some("HEADER_GC_LOGIN_SUCCESS"),
         cpp_type: "TPacketGCLoginSuccess3",
         framing: GcFraming::StaticSize,
-        implemented_in_rust: true,
+        // The server names byte 6 and has the struct, but its only login-success
+        // send site writes `HEADER_GC_LOGIN_SUCCESS_NEWSLOT` (32) into that same
+        // struct (`server/server/game/desc.cpp:880`). A whole-word search for
+        // `HEADER_GC_LOGIN_SUCCESS` over `server/server` returns the enumerator
+        // at `packet.h:106` and nothing else, so byte 6 has no producer. The
+        // Rewrite's `GcLoginSuccess` encodes byte 32, so this stays false.
+        implemented_in_rust: false,
     },
     LegacyGcPacket {
         header: HEADER_GC_LOGIN_FAILURE,
@@ -491,7 +497,10 @@ pub const LEGACY_GC_PACKET_INVENTORY: &[LegacyGcPacket] = &[
         server_name: Some("HEADER_GC_ITEM_DEL"),
         cpp_type: "TPacketGCItemSet",
         framing: GcFraming::StaticSize,
-        implemented_in_rust: false,
+        // `crate::gc_item_window::GcItemDel`, the 62-byte
+        // `TPacketGCItemDelDeprecated` the server actually writes. The client's
+        // own struct for byte 20 is 72 bytes, so the client name is misleading.
+        implemented_in_rust: true,
     },
     LegacyGcPacket {
         header: HEADER_GC_ITEM_SET2,
@@ -499,7 +508,8 @@ pub const LEGACY_GC_PACKET_INVENTORY: &[LegacyGcPacket] = &[
         server_name: Some("HEADER_GC_ITEM_SET"),
         cpp_type: "TPacketGCItemSet2",
         framing: GcFraming::StaticSize,
-        implemented_in_rust: false,
+        // `crate::gc_item_window::GcItemSet`, the 72-byte `TPacketGCItemSet`.
+        implemented_in_rust: true,
     },
     LegacyGcPacket {
         header: HEADER_GC_ITEM_USE,
@@ -515,7 +525,8 @@ pub const LEGACY_GC_PACKET_INVENTORY: &[LegacyGcPacket] = &[
         server_name: Some("HEADER_GC_ITEM_UPDATE"),
         cpp_type: "TPacketGCItemUpdate",
         framing: GcFraming::StaticSize,
-        implemented_in_rust: false,
+        // `crate::gc_item_window::GcItemUpdate`, 59 bytes.
+        implemented_in_rust: true,
     },
     LegacyGcPacket {
         header: HEADER_GC_ITEM_GROUND_ADD,
@@ -523,7 +534,8 @@ pub const LEGACY_GC_PACKET_INVENTORY: &[LegacyGcPacket] = &[
         server_name: Some("HEADER_GC_ITEM_GROUND_ADD"),
         cpp_type: "TPacketGCItemGroundAdd",
         framing: GcFraming::StaticSize,
-        implemented_in_rust: false,
+        // `crate::gc_item_window::GcItemGroundAdd`, 21 bytes.
+        implemented_in_rust: true,
     },
     LegacyGcPacket {
         header: HEADER_GC_ITEM_GROUND_DEL,
@@ -1555,8 +1567,8 @@ mod tests {
             .filter(|entry| entry.implemented_in_rust)
             .map(|entry| entry.client_name)
             .collect();
-        assert_eq!(done.len(), 99);
-        assert_eq!(gc_missing_codec_count(), 35);
+        assert_eq!(done.len(), 102);
+        assert_eq!(gc_missing_codec_count(), 32);
         for name in [
             "HEADER_GC_AFFECT_ADD",
             "HEADER_GC_PLAYER_POINT_CHANGE",
@@ -1609,7 +1621,7 @@ mod tests {
         assert!(resolve_gc_packet(HEADER_GC_HANDSHAKE_OK.value()).is_some());
     }
 
-    /// Implementation status must be keyed by wire byte, not by the client-side name.
+    /// Implementation status must be keyed by wire byte, not by client-side name.
     ///
     /// The two trees rename some record generations in opposite directions, so a record can be
     /// implemented under its server name while the client calls the same byte something else.
@@ -1617,7 +1629,14 @@ mod tests {
     /// `HEADER_GC_LOGIN_SUCCESS` on the server), byte 32 (`HEADER_GC_LOGIN_SUCCESS4` on the
     /// client, `HEADER_GC_LOGIN_SUCCESS_NEWSLOT` on the server), and byte 252
     /// (`HEADER_GC_HANDSHAKE_OK` on the client, `HEADER_GC_TIME_SYNC` on the server). The Rust
-    /// constants use the server names, so a name-keyed scan would report all three as missing.
+    /// constants use the server names, so a name-keyed scan would report all three as renamed.
+    ///
+    /// Two of the three are implemented; byte 6 is not, and that is the finding rather than an
+    /// oversight. The server keeps the enumerator and the struct, but its only login-success send
+    /// site writes byte 32 into that struct (`server/server/game/desc.cpp:880`), so a whole-word
+    /// search for `HEADER_GC_LOGIN_SUCCESS` over `server/server` returns `packet.h:106` and
+    /// nothing else. The Rewrite's `GcLoginSuccess` encodes byte 32, so byte 6 is unreachable and
+    /// a codec for it would model a send that never happens.
     #[test]
     fn implementation_status_is_keyed_by_wire_byte_not_by_client_name() {
         // The server-side names the Rust constants actually use, with the bytes they declare.
@@ -1629,17 +1648,27 @@ mod tests {
         for (server_name, byte) in SERVER_NAMED {
             let entry = resolve_gc_packet(byte)
                 .unwrap_or_else(|| panic!("byte {byte:#04x} is not registered"));
-            assert!(
-                entry.implemented_in_rust,
-                "byte {byte:#04x} is decoded by the crate as {server_name} but the inventory \
-                 calls {} unimplemented",
-                entry.client_name
-            );
             assert_ne!(
                 entry.client_name, server_name,
                 "byte {byte:#04x} is expected to be renamed between the trees"
             );
         }
-        assert_eq!(gc_missing_codec_count(), 35);
+        // Byte 32 and byte 252 are the renamed rows the crate actually decodes.
+        for byte in [32u8, 0xfc] {
+            let entry = resolve_gc_packet(byte).expect("row is registered");
+            assert!(
+                entry.implemented_in_rust,
+                "byte {byte:#04x} is decoded as {} and must stay implemented",
+                entry.client_name
+            );
+        }
+        // Byte 6 is the third renamed row and has no producer, so it must stay unimplemented.
+        let six = resolve_gc_packet(6).expect("byte 6 is registered");
+        assert_eq!(six.client_name, "HEADER_GC_LOGIN_SUCCESS3");
+        assert!(
+            !six.implemented_in_rust,
+            "byte 6 has no server producer and must not claim a codec"
+        );
+        assert_eq!(gc_missing_codec_count(), 32);
     }
 }

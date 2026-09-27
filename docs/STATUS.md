@@ -1,6 +1,6 @@
 # Rewrite status
 
-Last reviewed: 2026-09-27, after ledger section 187 (character select, the loading burst, and enter-game).
+Last reviewed: 2026-09-27, after ledger section 193 (the four item-window game-to-client records, and the item data readers of sections 191 and 192).
 Steps 1 and 2 are done; step 3 is next.
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
@@ -10,7 +10,7 @@ and the ledger disagree, the most recent ledger section wins; update this page i
 ## Summary
 
 **No client can log in yet.** The workspace has broad, well-tested client wire codecs (CG 91 of 92,
-GC 96 of 134), TEA, and transport-free descriptor reducers. The two-process layout (a `game-server`
+GC 102 of 134), TEA, and transport-free descriptor reducers. The two-process layout (a `game-server`
 and a `db-server` talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177;
 sections 1-175 record how it was built and stay as history. Since section 178 the one `prodomo`
 binary reads `prodomo.toml` and binds the auth listener and every Channel port. Since section 179 it migrates a PostgreSQL 18 store before admitting
@@ -35,7 +35,7 @@ Each step lands as one or more ledger sections with a gate receipt.
 | 1. Restructure | Retire the DB-peer and GG code and move the pure rule modules into `gamedata`. Rename `game-server` to the single `prodomo` binary with TOML configuration for the auth and Channel listeners, the Channel map sets, and PostgreSQL. First PostgreSQL schema and migrations. The Operator command that creates accounts and GMs. | **Done.** Retirement and `gamedata` (177). The rename, the TOML document, and the listeners (178). The account and GM schema, store readiness, and the Operator commands (179). |
 | 2. Parity inventory | Every legacy system and handler, listed from the source in `.scratch/parity/`, each with a porting status. The scripted-client test crate. | **Done** (181). 1,643 rows in nine tables; `.scratch/parity/spec.md` has the statuses, the regeneration command, and four findings for the owner. The scripted client is the `parity` crate; its scenarios are `prodomo/tests/parity.rs`. Two rows are `ported` (the keepalive and unknown-header framing rules). |
 | 3. Vertical slice | Handshake and TEA, auth (`LOGIN3`), login by key, character select, create, and delete, loading, entering the game, movement and chat, a Warp between maps, and logout with save. | **In progress.** The handshake, TEA, time sync, and the ping cycle are live (182), and so are the Channel status list (183) auth `LOGIN3` with its login keys (184), the Channel login by key (`LOGIN2`) with the character list (185), the select screen's empire choice, character create, delete, and forced rename (186), and character select, the loading burst, and enter-game (187), each with a scripted-client scenario. Movement, chat, the Warp home move, and the save cycle and logout save are now live (188, 189, 190). What is left in this step is the in-game Warp, and it is **blocked on step 4 rather than next**: `WarpEnd` only acts on a pending `m_posWarp`, and every caller that sets one lives in a step 4 system (`pc.warp` and the rest in the quest runtime, `GUILD_SKILL_TELEPORT` in the guild system, `/mto` behind the monarch castle flag, `GoHome` from the monster RETURN event). Wiring `CG_WARP` before any of those would add a handler whose only reachable input is nothing. Step 4 therefore starts at items and inventory, and the in-game Warp lands with the first caller. |
-| 4. Game systems | In dependency order: items and inventory; NPCs, shops, and Transfers (trade, safebox); the quest runtime (`qc` port and Lua 5.1, with its API growing as each later system lands); monsters, combat, drops, and exp; skills and affects; party, guild, messenger, and the cross-Channel bus; dungeons, events, guild war, and OX; the Prodomo custom systems (sash, aura, pets, battle pass, switchbot, item shop, premium shop, and the rest); GM commands, the adminpage, and logs. | **Started.** The item prototype and the item locale names are read from the legacy files (191), with the tables, lookups, and refusals pinned against the owner’s data. No Parity inventory row is `ported` yet, because a data reader is not a system a client can reach. |
+| 4. Game systems | In dependency order: items and inventory; NPCs, shops, and Transfers (trade, safebox); the quest runtime (`qc` port and Lua 5.1, with its API growing as each later system lands); monsters, combat, drops, and exp; skills and affects; party, guild, messenger, and the cross-Channel bus; dungeons, events, guild war, and OX; the Prodomo custom systems (sash, aura, pets, battle pass, switchbot, item shop, premium shop, and the rest); GM commands, the adminpage, and logs. | **Started.** The item prototype and the item locale names are read from the legacy files (191), and `special_item_group.txt` through the ported `CTextFileLoader` (192), with the tables, lookups, refusals, and the compiled apply-type range pinned against the owner’s data. `data.item.special_group` and `sys.item.proto` are `partial`; no row is `ported` yet, because a data reader is not a system a client can reach. The four item-window game-to-client records are now codec-only (193): `GC_ITEM_SET` 72, `GC_ITEM_DEL` 62, `GC_ITEM_UPDATE` 59 and `GC_ITEM_GROUND_ADD` 21, with the six sockets and seven attributes the `ENABLE_EXTENDED_SOCKETS` build actually uses. `sys.item.core` is `codec` and nothing sends these records, so the next step-4 work is the item instance and the inventory, not more codecs. |
 | 5. Game data and play test | Finish the importers, fix what the full data set breaks, then the owner's play test with the Reference client. | Not started. |
 
 The Game data arrived before step 1 (`legacy/`), so each system's reader or importer is built with
@@ -94,7 +94,7 @@ owner should know about (178.5):
 
 | code | today | in the Rewrite |
 |---|---|---|
-| `protocol` CG and GC codecs, TEA, inventories | 91 of 92 CG and 96 of 134 GC records, golden-byte tested. Most CG codecs have no caller. | Kept. |
+| `protocol` CG and GC codecs, TEA, inventories | 91 of 92 CG and 102 of 134 GC records, golden-byte tested. Most CG codecs have no caller. | Kept. |
 | `protocol` `db_*` and `gg*` modules | Deleted in 177. `TSimplePlayer` moved to `protocol::simple_player`. | Done. |
 | `net` | Client framing. `buffer.rs` and the DB-peer transport were deleted in 177. | Kept. |
 | `db` | `store` (the PostgreSQL pool, the embedded migrations, and the transient-error rule), `credentials` (logins, argon2id passwords, delete codes), `accounts` (accounts, Coins and Cash, GM grants), and `item_id_range`. Tested against PostgreSQL 18.6 when `DATABASE_URL` is set. | Grows with each system's tables. |
@@ -173,6 +173,9 @@ owner should know about (178.5):
   interpolated into SQL.
 - The proxy `lAddr` is written after the `memcpy` that sends it (`G/desc.cpp:874-907`).
 - A use-after-free at `G/char_item.cpp:7438-7439` on every successful item destroy.
+- The item-window delete record is 62 bytes on a byte the client reads as a 72- or 60-byte
+  item set, so a stock client drops it (ledger 193, `G/char_item.cpp:597-610`). The codec
+  records the legacy send; what the Rewrite should send instead is left open.
 - A 17-byte desync in `PrivateShopItemCheckin` (ledger 148).
 - An out-of-bounds write at `D/ClientManagerBoot.cpp:357-362`.
 - Never send the Panama packet (151).

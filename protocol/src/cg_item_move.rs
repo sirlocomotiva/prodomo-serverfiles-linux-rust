@@ -18,9 +18,10 @@ use std::fmt;
 
 use crate::cg_inventory::HEADER_CG_ITEM_MOVE;
 use crate::cg_wire::ClientFrame;
+use crate::item_pos::ItemPos;
 
 /// Packed size of one `TItemPos`, including its `BYTE window_type`.
-pub const CG_ITEM_POS_SIZE: usize = 3;
+pub const CG_ITEM_POS_SIZE: usize = crate::item_pos::ITEM_POS_WIRE_SIZE;
 
 /// Complete packed wire size, including the one-byte header.
 pub const CG_ITEM_MOVE_WIRE_SIZE: usize = 9;
@@ -30,48 +31,11 @@ pub const CG_ITEM_MOVE_PAYLOAD_SIZE: usize = 8;
 
 /// One packed legacy `TItemPos`.
 ///
-/// Both fields are preserved verbatim. `window_type` is a byte whose meaning
-/// is selected by the server build's feature flags, and `cell` is an opaque
-/// cell word. Neither is range-checked here. This type carries both the
-/// source and the destination position of a move record, so its field docs
-/// are deliberately position-neutral.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct CgItemPos {
-    /// Opaque `window_type` byte.
-    pub window_type: u8,
-    /// Opaque `cell` word.
-    pub cell: u16,
-}
-
-impl CgItemPos {
-    /// Construct a position without interpreting either field.
-    ///
-    /// Both the window byte and the cell word are preserved exactly as
-    /// supplied. This type carries the source and the destination position
-    /// of a move record, and the source position of an item-use record, so
-    /// its field documentation is deliberately position-neutral.
-    #[must_use]
-    pub const fn new(window_type: u8, cell: u16) -> Self {
-        Self { window_type, cell }
-    }
-
-    /// Append the exact three packed bytes to `out`.
-    ///
-    /// The buffer must already have room for [`CG_ITEM_POS_SIZE`] bytes.
-    /// The output is exactly `[window_type][cell LE]`.
-    pub fn encode_into(self, out: &mut Vec<u8>) {
-        out.push(self.window_type);
-        out.extend_from_slice(&self.cell.to_le_bytes());
-    }
-
-    /// Read one packed position from the start of `data`.
-    ///
-    /// `data` must hold at least [`CG_ITEM_POS_SIZE`] bytes. Callers are
-    /// responsible for that exact-length check.
-    pub fn decode_at(data: &[u8]) -> Self {
-        Self::new(data[0], u16::from_le_bytes([data[1], data[2]]))
-    }
-}
+/// The type itself lives in [`crate::item_pos`], where the three-byte width is
+/// cross-checked against three independent legacy registrations. This module
+/// re-exports it under the name the item records use, so a move, a use-to-item,
+/// and a safebox move cannot drift onto two different 3-byte layouts.
+pub use crate::item_pos::ItemPos as CgItemPos;
 
 /// One fixed client-to-game inventory-move record.
 ///
@@ -131,8 +95,8 @@ impl CgItemMove {
         check_exact(data)?;
         decode_parts(
             data[0],
-            CgItemPos::decode_at(&data[1..4]),
-            CgItemPos::decode_at(&data[4..7]),
+            ItemPos::decode_at(data, 1),
+            ItemPos::decode_at(data, 4),
             u16::from_le_bytes([data[7], data[8]]),
         )
     }
@@ -163,8 +127,8 @@ impl CgItemMove {
                 let bytes = frame.payload.as_slice();
                 decode_parts(
                     frame.header,
-                    CgItemPos::decode_at(&bytes[0..3]),
-                    CgItemPos::decode_at(&bytes[3..6]),
+                    ItemPos::decode_at(bytes, 0),
+                    ItemPos::decode_at(bytes, 3),
                     u16::from_le_bytes([bytes[6], bytes[7]]),
                 )
             }

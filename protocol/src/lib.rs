@@ -66,6 +66,7 @@ pub mod gc_chat;
 pub mod gc_entity;
 pub mod gc_fields;
 pub mod gc_inventory;
+pub mod gc_item_window;
 pub mod gc_nested;
 pub mod gc_npc_position;
 pub mod gc_position;

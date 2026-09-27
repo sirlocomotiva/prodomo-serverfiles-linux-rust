@@ -17462,3 +17462,428 @@ across every definition form" rule, and the pins are the durable form of the ans
 ported when a scripted-client scenario passes and no scenario can reach a data reader from a
 client; `data.item.special_group` and `sys.item.proto` move to `partial` and say so. And no codec
 was added, because a text reader has no wire bytes to get wrong.
+
+## 193. The four item-window records, and a byte the inventory claims but never sends
+
+### 193.1 The two window records are named backwards between the trees
+
+The legacy item inventory sends two records, and this is the sharpest rename in the
+tree, so it is worth stating precisely before anything else.
+
+| wire byte | server enumerator | client name | client struct | server struct | width |
+|---|---|---|---|---|---|
+| 20 | `HEADER_GC_ITEM_DEL` | `HEADER_GC_ITEM_SET` | `TPacketGCItemSet` | `TPacketGCItemDelDeprecated` | 62 |
+| 21 | `HEADER_GC_ITEM_SET` | `HEADER_GC_ITEM_SET2` | `TPacketGCItemSet2` | `TPacketGCItemSet` | 72 |
+
+`server/server/game/packet.h:121-122` declares the two enumerators. The only send
+site for each is in `CHARACTER::SetItem`:
+
+- `server/server/game/char_item.cpp:571-593` builds a `TPacketGCItemSet`, sets
+  `pack.header = HEADER_GC_ITEM_SET` at `:572`, and sends `sizeof(TPacketGCItemSet)`
+  at `:593`. One site; the whole-word search for `HEADER_GC_ITEM_SET` over
+  `server/server` returns exactly this line and `packet.h:122`.
+- `server/server/game/char_item.cpp:597-610` builds a `TPacketGCItemDelDeprecated`,
+  sets `pack.header = HEADER_GC_ITEM_DEL` at `:598`, and sends
+  `sizeof(TPacketGCItemDelDeprecated)` at `:610`. Every field except the cell is
+  zeroed, so this is a 62-byte frame whose only information is the window and cell.
+
+Each search was run with a positive control (the other enumerator) and a negative
+control (`HEADER_GC_ITEM_DEL_ZZZ`, which returns nothing), because
+`HEADER_GC_ITEM_SET` is a prefix of `HEADER_GC_ITEM_SET2` and a substring search
+would have merged the two rows.
+
+The consequence for the code: the **client's** name for byte 20 is
+`HEADER_GC_ITEM_SET` and the client's struct for byte 20 is a 72-byte
+`TPacketGCItemSet`, but the server sends 62 bytes there. Anything that reads the
+client table and assumes the client's name describes the server's record is wrong
+twice over on byte 20.
+
+`protocol/src/gc_item_window.rs` therefore names its types and constants after the
+**server**, matching the crate's existing convention for `HEADER_GC_TIME_SYNC`.
+`GcItemSet` is byte 21 and `GcItemDel` is byte 20. A test asserts each Rust byte
+against `crate::gc_inventory`, which is keyed by the client names, so the two tables
+cannot drift apart unnoticed.
+
+### 193.2 The 5-byte `TPacketGCItemDel` is not the inventory delete
+
+`server/server/game/packet.h:1446-1454` also declares a `TPacketGCItemDel`, which
+is a `DWORD pos` under `__EXTENDED_SAFEBOX__` and is 5 bytes. It is easy to mistake
+for the inventory delete, and it is not. Its only producer in the whole tree is
+`server/server/game/safebox.cpp:117`, where it shares a ternary with
+`HEADER_GC_SAFEBOX_DEL` and `HEADER_GC_MALL_DEL`. It is a safebox record. This unit
+does not implement it.
+
+The same name collision bites in the other direction, and it is worth recording
+because a search finds both: `packet_item_move` (`packet.h:1465`) and
+`packet_item_use` (`packet.h:1456`) exist, are game-to-client, and are **not** the
+`TPacketCGItemMove` and `TPacketCGItemUse` records of the client-to-game direction.
+The measured widths make the confusion impossible to sustain: `TPacketCGItemMove`
+is 9 bytes and the game-to-client `packet_item_move` is 7.
+
+### 193.3 `ITEM_SOCKET_MAX_NUM` is 6, and the `#else` arm is dead
+
+`server/server/common/item_length.h:13-18`:
+
+```c
+#ifdef ENABLE_EXTENDED_SOCKETS
+	ITEM_SOCKET_MAX_NUM			= 6,
+	ITEM_STONES_MAX_NUM 		= 3, //If you are extending stones in item, change to 6. If you do not want more than 3 stones, keep 3.(git)
+#else
+	ITEM_SOCKET_MAX_NUM			= 3,
+#endif
+```
+
+`ENABLE_EXTENDED_SOCKETS` **is** defined, at
+`server/server/common/prodomodefines.h:76`, and a whole-word search for
+`#undef ENABLE_EXTENDED_SOCKETS` over `server/server` returns nothing. So
+`ITEM_SOCKET_MAX_NUM` is 6 and the socket array on the wire is 24 bytes, not 12.
+Every width in this unit follows from that one byte.
+
+`ITEM_ATTRIBUTE_MAX_NUM` is 7 (`item_length.h:30`, computed as
+`ITEM_ATTRIBUTE_RARE_END` = `ITEM_ATTRIBUTE_NORM_START` + 5 normal + 2 rare, with
+the arithmetic spelled out at `item_length.h:21-30`), so the attribute array is 21
+bytes.
+
+The three remaining feature gates on the two window records are all on:
+`ENABLE_REFINE_ELEMENT` (`prodomodefines.h:28`), `__CHANGELOOK_SYSTEM__`
+(`:16`) and `__BL_ENABLE_PICKUP_ITEM_EFFECT__` (`:23`). The last one matters for a
+field: `char_item.cpp:585-589` offers `pack.highlight = bHighlight` or
+`pack.highlight = (Cell.window_type == DRAGON_SOUL_INVENTORY)`, and because the macro
+is defined the first is the live branch, so `highlight` is the `SetItem` parameter
+and is **not** derived from the cell. Either way it is a C++ `bool`, which is one
+byte under `#pragma pack(1)`, so the codec stores a raw `u8` and never a Rust
+`bool`.
+
+### 193.4 The window enum, and one `#define` that `wc -l` hides
+
+`TItemPos::window_type` is an `EWindows` value. The enum is `EWindows`, not
+`EWindowType`; a whole-word search for `EWindowType` over `server/server` returns
+nothing, and `EWindows` is at `server/server/common/length.h:657`. The live members,
+read off a compiled reproduction of the enum body with the gates in place, are
+`RESERVED_WINDOW` 0, `INVENTORY` 1, `EQUIPMENT` 2, `SAFEBOX` 3, `MALL` 4,
+`DRAGON_SOUL_INVENTORY` 5, `ATTR67_ADD` 6, `AURA_REFINE` 7, `SWITCHBOT` 8,
+`BELT_INVENTORY` 9, `GROUND` 10. Three members sit behind gates that are all
+defined: `__ATTR_6TH_7TH__` (`prodomodefines.h:31`), `__AURA_SYSTEM__` (`:30`) and
+`ENABLE_SWITCHBOT` (`:191`). With any one of them off, every later value shifts
+down, which is why the values are pinned by a test rather than written as a
+comment. `GROUND` is not a window a character owns; it is where dropped items lie.
+
+`EWindows` has no `GUILD` member. The claim needs its own care, because a
+whole-word search for `GUILD` over `server/server` returns 19 hits, so the bare
+name is not absent: the first is a `strcmp` on a database table name at
+`server/server/db/ClientManager.cpp:164`, and the rest are guild tables and guild
+managers. The absence that matters is narrower, and it was checked in two spellings:
+`GUILD_WINDOW` returns **zero** hits, and `GUILD` returns zero hits in the `EWindows`
+body at `length.h:657-676`, which was read line by line. `MALL` is the positive
+control for the spelling search: 15 hits, with `length.h:663` inside the enum.
+
+**A `#define` on the last line of `prodomodefines.h`, past the include guard.**
+`server/server/common/prodomodefines.h:202` is:
+
+```
+#define ENABLE_CUSTOM_INVENTORY
+```
+
+`wc -l` reports 201 for that file, because line 202 has **no trailing newline**. A
+reader who trusts the line count and stops at 201 never sees this line, and the
+symbol is unconditional, sitting outside the guard that opens at `:1` and closes at
+`:139`. This is the same class of mistake as the socket count: a define that is
+invisible to a line-count-bounded read. The consequence for the window layout is
+recorded in the survey notes rather than here, because no window record in this
+unit changes width because of it, but it must be written down once.
+
+### 193.5 The measured widths, and the limits of the measurement
+
+This machine has no `i686-linux-gnu-g++-12`, no `i686-linux-gnu-g++`, no
+`g++-12`, and no 32-bit multilib (`g++ -m32` fails on a missing
+`bits/c++config.h`). The widths were therefore **not** measured on the legacy
+target, and the receipt says so.
+
+They were measured by a compiled probe on the host with one textual substitution:
+`#define long int32_t` before the verbatim struct bodies, under the real gate
+macros and the real `item_length.h` and `length.h` enums. The probe re-measured
+three controls on every run and all three passed, which is what makes the
+substitution defensible for the records that contain `long`:
+
+| control | must be | measured |
+|---|---|---|
+| packed two `long` | 8 | 8 |
+| `BYTE WORD bool` packed | 4 | 4 |
+| three `DWORD` | 12 | 12 |
+
+| record | probe | hand sum | independent witness |
+|---|---|---|---|
+| `GcItemSet` | 72 | 1+3+4+2+4+4+4+4+1+24+21 = 72 | `REWRITE_LEDGER.md:11325` records 72 for byte 21 |
+| `GcItemDel` | 62 | 1+3+4+1+4+4+24+21 = 62 | 62 + 10 = 72, see below |
+| `GcItemUpdate` | 59 | 1+3+2+4+4+24+21 = 59 | omits `vnum` and both flag words |
+| `GcItemGroundAdd` | 21 | 1+12+4+4 = 21 | -- |
+| `ItemAttribute` | 3 | 1+2 = 3 | derived, see below |
+
+The `REWRITE_LEDGER.md:11325` witness is the useful one, because it was written by
+an earlier pass with no access to this module: 72 is the **six**-socket width, so a
+three-socket reading would have produced 60 and that table would read 60.
+
+The `ItemAttribute` width is **derived**, not independently registered, and it is
+worth saying which. `TPlayerItemAttribute` is `BYTE bType` then `short sValue` at
+`server/server/common/tables.h:426-430`, so the probe and the hand sum both give 3.
+`packet_info.cpp:171` registers `sizeof(TPacketCGDragonSoulRefine)`, which witnesses
+the 3 bytes of a `TItemPos`, not of `TPlayerItemAttribute`; that record has no
+independent registration to lean on, and pretending otherwise would overstate the
+evidence. What does support the 3 is the 72: with `ITEM_ATTRIBUTE_MAX_NUM` at 7
+(`item_length.h:30`) and `ITEM_SOCKET_MAX_NUM` at 6 (`item_length.h:14`), the two
+arrays must be 24 and 21 bytes, and 1+3+4+2+4+4+4+4+1+24+21 lands on the 72 that
+`REWRITE_LEDGER.md:11325` already recorded. The attribute width is therefore as
+well-supported as the record width, through the record.
+
+The 72-versus-62 relationship is the check that catches a forgotten field. The set
+record has a `WORD` count where the delete record has a `BYTE`, and the set record
+carries `flags`, `anti_flags` and `highlight` which the delete record does not. That
+is 1 byte plus 4 plus 4 plus 1 = 10, and 62 + 10 is exactly 72. A dropped field
+breaks the identity in both directions.
+
+### 193.6 What the codec does and does not do
+
+Four records, one shared attribute type, one socket alias:
+
+- `GcItemSet` (byte 21, 72 bytes): cell, `vnum`, `WORD count`, the two gated
+  `DWORD`s, `flags`, `anti_flags`, `highlight`, six sockets, seven attributes.
+- `GcItemDel` (byte 20, 62 bytes): cell, `vnum`, `BYTE count`, the two gated
+  `DWORD`s, six sockets, seven attributes.
+- `GcItemUpdate` (byte 25, 59 bytes): cell, `WORD count`, the two gated `DWORD`s,
+  six sockets, seven attributes. No `vnum` and no flag words.
+- `GcItemGroundAdd` (byte 26, 21 bytes): three `long` coordinates, `vid`, `vnum`.
+
+`ItemAttribute` is `BYTE bType` then `short sValue`, so `s_value` is an `i16` and
+every one of the 65,536 values round-trips. `b_type` is opaque: the item manager
+resolves it through `FN_get_apply_type`, which is policy above the codec. Sockets
+are `long` on the 32-bit target, so they are `i32` here; legacy stores a vnum in a
+socket and treats 0 as empty, but nothing on the send path range-checks it, so every
+`i32` round-trips. `TItemPos::window_type` and `cell` stay opaque for the same
+reason: `SItemPos::IsValidItemPosition` range-checks them, but that is session
+policy and two of its arms are themselves gated.
+
+`GcItemDel` deliberately keeps the five always-zero fields (`vnum`, `count`, the two
+gated words, and the two arrays) instead of modelling a shorter record, because
+that is what the server sends and the client reads the same shape. A named
+constructor `GcItemDel::default_record()` returns exactly the frame
+`char_item.cpp:597-610` builds: the header, the cell, and 57 zero bytes. It is a
+named constructor rather than a `Default` derive because the header byte is part of
+the record, and a zeroed default would decode as nothing.
+
+### 193.7 Byte 6 is claimed by the inventory and sent by nobody
+
+While re-counting the coverage numbers, byte 6 turned out to be wrong in the
+inventory, and this is a correction to an earlier claim rather than new work.
+
+`protocol/src/gc_inventory.rs` marked byte 6
+(`HEADER_GC_LOGIN_SUCCESS3` on the client, `HEADER_GC_LOGIN_SUCCESS` on the server)
+as `implemented_in_rust: true`, on the reasoning that the crate's `GcLoginSuccess`
+decodes the shared `TPacketGCLoginSuccess` struct. That reasoning is false. The
+server has the enumerator at `packet.h:106` and the struct at `packet.h:839`, and
+the struct is written in exactly one function in the whole tree:
+`DESC::SendLoginSuccessPacket` at `desc.cpp:874-906`. It sets
+`p.bHeader = HEADER_GC_LOGIN_SUCCESS_NEWSLOT` at `desc.cpp:880`, and
+`HEADER_GC_LOGIN_SUCCESS_NEWSLOT` is byte 32 (`packet.h:132`). A whole-word search
+for `HEADER_GC_LOGIN_SUCCESS` over `server/server` returns `packet.h:106` and
+nothing else; the positive control is the same search for
+`..._NEWSLOT`, which returns `desc.cpp:880` and `packet.h:132`, and the negative
+control is `HEADER_GC_LOGIN_SUCCESS_ZZZ`, which returns nothing.
+
+So byte 6 has an enumerator, a struct, and no producer. The row is now
+`implemented_in_rust: false`, and the test that pinned the old status was rewritten
+to pin the new one **with** the reasoning, so the next reader sees why.
+
+This makes the list of client-decoded-but-never-sent bytes **nine**, not eight: 6,
+15, 18, 72, 73, 84, 112, 117 and 213. `AGENTS.md` and `docs/PROTOCOL_NOTES.md` both
+said eight, and both now say nine.
+
+### 193.8 The byte-20 frame does not match the client, and that question is now closed
+
+`docs/PROTOCOL_NOTES.md` recorded, for byte 20, that the client has no
+`HEADER_GC_ITEM_DEL` at all and that its only 20 is `HEADER_GC_ITEM_SET`,
+registered at `PythonNetworkStream.cpp:71` and dispatched to the item-**set**
+handler at `PythonNetworkStreamPhaseGame.cpp:342`. It also recorded that whether the
+two widths match "is not determined", because the client's own
+`ITEM_SOCKET_SLOT_MAX_NUM` is 3 or 6 at `GameType.h:550-552` and only the server was
+confirmed x86.
+
+The server side is now measured, and that closes the question. The server sends 62.
+The client's registered width for byte 20 is its own item-set width, which is 72 at
+six sockets and 60 at three. **62 matches neither.** The `GameType.h:550-552`
+ambiguity therefore does not have to be resolved to decide that this frame is the
+wrong size, because it is the wrong size under both readings, and
+`CheckPacket` at `PythonNetworkStream.cpp:537-543` drops it either way.
+
+It also settles a classification the same note left open. Because the two widths
+differ, byte 20 is a **live two-sizes** collision rather than the width-equal case,
+so the original section 145 bucket for 20 was right and the later correction of it
+was wrong. Both the note and `AGENTS.md` now say so.
+
+**This is a Defect, and this unit does not reproduce it.** The codec models the
+legacy send faithfully because that is what a codec is for, but a Rewrite that sends
+byte 20 to clear a window slot sends a frame a stock client drops. What the Rewrite
+should send instead is a design question for the owner and the play test, and it is
+recorded as open rather than answered here. The one thing this unit does assert is
+that the frame is 62 bytes, because that is now measured rather than inferred.
+
+### 193.9 Coverage, and a correction to `AGENTS.md`
+
+Game-to-client coverage, measured from the inventory table rather than counted by
+hand:
+
+| | registered | implemented | missing |
+|---|---|---|---|
+| before this unit | 134 | 99 | 35 |
+| after 193.7 (byte 6 corrected) | 134 | 98 | 36 |
+| after 193.1 to 193.6 (four codecs) | 134 | 102 | 32 |
+
+The final split is 99 fixed-size and 3 dynamic implemented, 16 fixed-size and 16
+dynamic missing.
+
+`AGENTS.md`'s coverage table said `134 | 96 | 38 (19 fixed-size, 19 dynamic)`. All
+three of its numbers were wrong, and its "96" happened to be the *fixed-size
+implemented* count rather than the implemented total. It now reads
+`134 | 102 | 32 (16 fixed-size, 16 dynamic)`. The client-to-game row
+(`92 | 91 | 1`) is unchanged and was not touched by this unit.
+
+Four rows moved from `implemented_in_rust: false` to `true`: bytes 20, 21, 25 and
+26, that is `HEADER_GC_ITEM_SET`, `HEADER_GC_ITEM_SET2`, `HEADER_GC_ITEM_UPDATE`
+and `HEADER_GC_ITEM_GROUND_ADD` by their client names. One row moved the other way,
+byte 6.
+
+That last correction needed the generated Parity table, and comparing it against the
+inventory surfaced **two more errors in the table itself**, which is why it is worth
+recording that the table was checked at all. `.scratch/parity/server-records.md` had
+byte 6 as `codec` for the same false reason the inventory did, and the ledger's own
+193.7 correction would have left the two files disagreeing. It had `gc.npc_position`
+as `missing` although `protocol/src/gc_npc_position.rs` has carried that codec for
+several ledgers, so an earlier change updated the inventory and forgot the table.
+Both are fixed. The generator keeps the `status`, `scenario` and `note` cells of any
+ID it finds again, so it does not catch this class of drift on its own; the
+inventory's own test still passed throughout, because the test enforces the status
+*rules* and the ID set, not agreement with `implemented_in_rust`. The two files are
+now compared by hand and recorded here.
+
+The remaining 28 rows that differ are `ported` (27) and `partial` (1, byte 7
+`gc.login_failure`), which is the table being **ahead** of the inventory, as a
+`ported` or `partial` row is allowed to be. Those are not drift.
+
+`sys.item.core` moved from `missing` to `codec`. The spec defines `codec` as "the wire
+codec exists and is golden-byte tested; nothing sends or handles it", which is
+exactly this module, and it is more accurate than `partial`, whose definition is
+"some of the behaviour exists". This is the first `systems.md` row to use it, and the
+reason is the label's meaning rather than an extension of it.
+
+### 193.10 What this unit does not claim
+
+No Parity inventory row is `ported`. A row is ported when a scripted-client
+scenario passes, and no scenario in `prodomo/tests/parity.rs` creates an item and
+draws a bag yet, so `sys.item.core` stays `partial` with this unit's codecs named
+as the reason it is no longer `not_started`. Codecs are not a game system: nothing
+here decides which items a fresh character has, and the 72 records a login pushes
+come from a path the Rewrite does not have yet.
+
+Nothing here sends anything. The descriptors do not yet own an item window, so
+`GcItemSet` has no producer in the Rewrite. The four codecs are a dependency, not a
+feature.
+
+The client-side widths of 60 and 72 for byte 20 are **derived** from the client's own
+struct description as recorded in `PROTOCOL_NOTES.md`, not measured, because the
+Reference client source is no longer in the repository (ADR-0001). What is measured
+is the server's 62. The conclusion that 62 matches neither candidate does not depend
+on the derivation being exact: both candidates are 10 bytes away from 62 in
+opposite directions, so no plausible reading of the client's socket count makes
+them agree.
+
+### 193.11 Receipt
+
+`rustfmt` and `cargo-clippy` are installed and their gates ran. `i686` measurement
+was not possible, as 193.5 states.
+
+- `cargo fmt --all -- --check`: clean.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: clean.
+  Three findings in the new module were fixed by refactoring, not suppressed: 51
+  `tabs_in_doc_comments` hits from transcribing the C bodies with their original
+  tab indentation (the tabs are now four spaces, with a note in the module doc
+  saying so, because no field of any of these structs is a character literal and
+  nothing about the layout depends on it), 4 `useless_conversion` hits from
+  comparing a `u8` const against a `GcHeader`, and 6 `cast_possible_truncation` /
+  `cast_possible_wrap` hits from `as` casts on a `usize` loop index in a test.
+  No `#[allow]` was added.
+- `cargo build --workspace --locked --offline`: clean.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: 2,087
+  passed and 0 failed across 31 targets, up from 2,071 at section 192 by exactly the
+  16 new `gc_item_window` tests. `protocol` went from 1,151 to 1,167 unit tests and
+  holds at 66 wiring tests.
+- `cargo test --workspace --doc --locked --offline`: 1 passed, 0 failed, 12 ignored
+  (the 12 are the pre-existing ignored `protocol` doc examples).
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`:
+  clean.
+- The PostgreSQL 18.6 gate passed: the same `--all-targets` run with
+  `DATABASE_URL` set, 2,087 passed and 0 failed, and
+  `SELECT datname FROM pg_database WHERE datname LIKE 'prodomo\_%'` afterwards
+  returned no rows, so every scratch database was dropped. The gate without
+  `DATABASE_URL` also passed, which is the state the repository requires to stay
+  green on a machine with no server. Nothing in this unit touches the store, so
+  the two counts are expected to be equal; they are equal, and the operator and
+  process tests are the ones that actually differ when the variable is unset.
+  `host.docker.internal` does not resolve on this machine, so the published port
+  was reached on `127.0.0.1:55432`, as `AGENTS.md` describes.
+
+Two golden-byte expectations in the first draft of the tests were wrong and the
+tests caught them, which is the reason to write them as exact byte witnesses
+rather than as round trips. The two's-complement bytes of `-0x3c4d` in 16 bits are
+`b3 c3` and not `b3 c4`, and the two's-complement bytes of `-0x01020304` in 32 bits
+are `fc fc fd fe` and not `fc fb fe ff`. Both were hand-computed and both were
+wrong; both are now computed rather than reasoned. A round trip would have passed
+on either, because the encoder and the decoder agreed on the same mistake.
+
+### 193.12 A second 3-byte `TItemPos` was found, and removed
+
+Writing the game-to-client item-window records meant embedding a `TItemPos`, and
+the first thing that happened is that the crate turned out to own **two** of them.
+
+`protocol/src/cg_item_move.rs` had a `pub struct CgItemPos` with `window_type: u8`
+and `cell: u16` and its own `decode_at(&[u8])`, and it was already being used by
+seven other client-to-game modules: `cg_item_destroy`, `cg_item_drop`,
+`cg_item_drop2`, `cg_item_use`, `cg_item_use_to_item`, `cg_safebox` and
+`cg_safebox_move`. `protocol/src/item_pos.rs` had `pub struct ItemPos` with the
+same two fields and the same three bytes, built for `cg_sash` and
+`cg_dragon_soul`, and used by `cg_change_look`, `cg_exchange`, `gc_vid` and the
+wiring test.
+
+Two independently written codecs for one legacy struct is the failure mode this
+repository's rules are written against, so the duplicate is gone. `cg_item_move`
+now does `pub use crate::item_pos::ItemPos as CgItemPos;`, `CG_ITEM_POS_SIZE` is
+`crate::item_pos::ITEM_POS_WIRE_SIZE` instead of a bare `3`, and the seven call
+sites moved from the slice-only `decode_at(&data[1..4])` form to the offset form
+`decode_at(data, 1)`.
+
+Three things were checked before the merge rather than after, because the merge
+would have made each of them invisible:
+
+- **No module had its own copy.** A search for `pub struct \w*ItemPos` across
+  `protocol/src` returns exactly one hit, in `item_pos.rs`, after the change. Before
+  it, it returned two.
+- **The public surface did not shrink.** The alias keeps `CgItemPos` available
+  under the old name with `new`, `encode_into` and `decode_at`, so no call site
+  needed rewriting beyond the argument shape, and the two spellings cannot drift
+  because a `pub use` is an alias rather than a second type. A duplicated `struct`
+  had no such property, which is the whole argument for the change.
+- **The width is still one constant.** `CG_ITEM_POS_SIZE` is now a re-export of
+  the shared constant, so a future edit to the legacy width moves the alias with
+  it instead of leaving a `3` behind in a module that no longer owns the type.
+
+The offset form of `decode_at` is the reason this was a small change. A decoder
+that takes a sub-slice forces every call site to slice, and a slice is where a
+bounds mistake hides: `decode_at(&data[1..4])` panics on a 3-byte frame in a way
+`decode_at(data, 1)` does not, and the offset form reads the offset from the
+record rather than from the reader.
+
+**Sharing `TItemPos` between the two directions is not the sharing `AGENTS.md`
+forbids.** That rule is about header tables, and it exists because one shared
+number-to-name map has already produced a wrong answer here: the client and the
+server name bytes 20 and 21 differently, which is 193.1. `TItemPos` is the
+opposite case. It is one struct in `length.h`, both directions embed it, and two
+Rust copies of it is a larger risk than one. The module doc in `item_pos.rs` now
+says this, so the next reader does not have to re-derive it.

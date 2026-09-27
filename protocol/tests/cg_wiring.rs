@@ -1428,7 +1428,7 @@ fn the_client_only_game_to_client_records_are_usable_through_the_public_api() {
 fn the_game_to_client_inventory_and_the_small_codec_agree_on_thirty_two_records() {
     use protocol::gc_inventory::{gc_missing_codec_count, resolve_gc_packet, GcFraming};
 
-    assert_eq!(gc_missing_codec_count(), 35);
+    assert_eq!(gc_missing_codec_count(), 32);
     // Every header this module decodes must be a registered client row that the
     // inventory marks implemented. This is the check that keeps the metric and
     // the codecs from drifting apart.
@@ -1652,7 +1652,7 @@ fn the_fishing_game_to_client_record_exposes_both_meanings_of_info() {
 fn the_game_to_client_inventory_agrees_with_the_thirty_two_bit_value_codecs() {
     use protocol::gc_inventory::{gc_missing_codec_count, resolve_gc_packet, GcFraming};
 
-    assert_eq!(gc_missing_codec_count(), 35);
+    assert_eq!(gc_missing_codec_count(), 32);
     let mut checked = 0usize;
     for header in [
         HEADER_GC_CHARACTER_DEL,
@@ -1898,7 +1898,7 @@ fn the_two_64_bit_game_to_client_records_use_opposite_signedness() {
 fn the_field_inventory_agrees_with_the_eighteen_field_records() {
     use protocol::gc_inventory::{gc_missing_codec_count, resolve_gc_packet, GcFraming};
 
-    assert_eq!(gc_missing_codec_count(), 35);
+    assert_eq!(gc_missing_codec_count(), 32);
     let mut checked = 0usize;
     for header in [
         HEADER_GC_PLAYER_POINTS,
@@ -2000,8 +2000,8 @@ fn the_gc_inventory_marks_the_twelve_nested_records_implemented() {
         .filter(|e| e.implemented_in_rust)
         .map(|e| e.client_name)
         .collect();
-    assert_eq!(done.len(), 99, "implemented game-to-client rows");
-    assert_eq!(gc_missing_codec_count(), 35, "missing game-to-client rows");
+    assert_eq!(done.len(), 102, "implemented game-to-client rows");
+    assert_eq!(gc_missing_codec_count(), 32, "missing game-to-client rows");
     for name in [
         "HEADER_GC_AFFECT_ADD",
         "HEADER_GC_PLAYER_POINT_CHANGE",

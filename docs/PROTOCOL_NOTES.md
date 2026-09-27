@@ -35,6 +35,7 @@
 14. [M3: the legacy game server has no boot-ready gate, and four framing defects](#m3-the-legacy-game-server-has-no-boot-ready-gate-and-four-framing-defects)
 15. [Boot table loader audit (section 175)](#boot-table-loader-audit-section-175)
 16. [The item prototype reader (section 191)](#the-item-prototype-reader-section-191)
+17. [The item-window records (section 193)](#the-item-window-records-section-193)
 
 ## Module map
 
@@ -363,6 +364,35 @@ Sections 163 through 167 establish the honest baseline and correct three method 
   76. Byte 117 has no server enumerator at all. The client registers and decodes all eight, so
   their framing is real, but they are unreachable in the checked-in server and are better read
   as server reachability questions than as porting work.
+- **Corrected 2026-09-28 (ledger 193):** the list is **nine**, not eight: byte 6 joins it. The
+  server has both the enumerator (`HEADER_GC_LOGIN_SUCCESS = 6`, `packet.h:106`) and the struct
+  (`TPacketGCLoginSuccess`, `packet.h:839`), and the client's row for byte 6 is the differently
+  named `HEADER_GC_LOGIN_SUCCESS3` / `TPacketGCLoginSuccess3`. There is exactly one write of that
+  struct in the whole tree, `DESC::SendLoginSuccessPacket` at `desc.cpp:874-906`, and it sets
+  `p.bHeader = HEADER_GC_LOGIN_SUCCESS_NEWSLOT`, which is byte 32, at `desc.cpp:880`. Byte 6 is
+  therefore never sent. Verified with a positive control (a whole-word search for
+  `HEADER_GC_LOGIN_SUCCESS_NEWSLOT` returns `desc.cpp:880` and `packet.h:132`) and a negative
+  control (a nonsense `HEADER_GC_LOGIN_SUCCESS_ZZZ` returns nothing). Consequence: the
+  `gc_inventory` row for byte 6 was marked implemented, on the reasoning that the crate's
+  `GcLoginSuccess` decodes the shared struct, and that was **wrong**: the crate's codec writes
+  byte 32. The row is now `implemented_in_rust: false`. The client's name for byte 6 remains one
+  of the three rows that exist only because of a cross-direction rename, so this correction
+  changes the status, not the rename finding.
+
+- The four item-window records are in `protocol/src/gc_item_window.rs`, and the two window records
+  are **named backwards between the trees**. Byte 20 is the server's `HEADER_GC_ITEM_DEL` and the
+  client's `HEADER_GC_ITEM_SET`; byte 21 is the server's `HEADER_GC_ITEM_SET` and the client's
+  `HEADER_GC_ITEM_SET2`. The Rust types and constants use the **server** names, and a test asserts
+  the byte values against `gc_inventory`, which is keyed by the client names, so the two tables
+  cannot drift apart unnoticed. `GC_ITEM_SET` is 72 bytes, `GC_ITEM_DEL` is 62, `GC_ITEM_UPDATE`
+  is 59, and `GC_ITEM_GROUND_ADD` is 21. The delete record has a `BYTE` count where the set record
+  has a `WORD`, and it omits `vnum`, `flags`, `anti_flags` and `highlight`, which is exactly the
+  10-byte difference. The 5-byte `TPacketGCItemDel` at `packet.h:1446-1454` is **not** the inventory
+  delete: its only producer in the tree is `safebox.cpp:117`, and it is a safebox record.
+  `highlight` is a C++ `bool` and therefore one byte under `pack(1)`; it is stored as a raw `u8` and
+  never as a Rust `bool`. `ENABLE_EXTENDED_SOCKETS` is defined (`prodomodefines.h:76`), so
+  `ITEM_SOCKET_MAX_NUM` is 6 and the socket array is 24 bytes, not 12; `ITEM_ATTRIBUTE_MAX_NUM`
+  is 7 and the attribute array is 21.
 
 ## Shared record types
 
@@ -458,7 +488,7 @@ sentinels such as `CG_REFINE_ELEMENT_CLOSE = 255`, and range checks are not fram
 
 ## Cross-direction header collisions
 
-- Cross-direction header collisions are not a single category, and the distinction decides how much a codec may assume. Sort every header into one of **four** buckets and record which one applies. *Live two-sizes*: the value names a different struct of a different width on the two trees, so a shared table is actively wrong. Headers 21 and 77 are in this bucket; 21 is the `packet_item_set`/`packet_set_item2` drift above, and 77 is the safebox/mall pair where two server structs and three client declarations share three values. *Colliding but not two-sizes*: the value is reused across directions while the width stays consistent, as for 11, 13, 15, 22, 69, 70, 71, and 83. *Width-equal semantic collision*: the value is reused across directions, the widths match, and the two records are **unrelated or opposite** operations. This is the only bucket in which the client **cannot** fail closed, because the header is already a known size, and the only one where width agreement is a **coincidence of layout** rather than evidence of a shared record. Never report one of these as safe merely because the widths match. Header 20 is the confirmed case: the server sends `HEADER_GC_ITEM_DEL` at `packet.h:121` as a bare `struct TPacketGCItemDelDeprecated` at `packet.h:1085-1099`, set at `char_item.cpp:598` and sized at `:610`, while the client has **no** `HEADER_GC_ITEM_DEL` at all and its only 20 is `HEADER_GC_ITEM_SET` at `Packet.h:116`, registered at `PythonNetworkStream.cpp:71` and dispatched to the item-**set** handler at `PythonNetworkStreamPhaseGame.cpp:342`. The two declarations are field-for-field identical, so an item-delete record would be executed by the item-set handler. Whether the widths match **exactly** is not determined, because the client `ITEM_SOCKET_SLOT_MAX_NUM` is itself 3 or 6 at `GameType.h:550-552` and only the server is confirmed x86 at `premake5.lua:12`; a width match means a silent wrong operation, and a width mismatch means `CheckPacket` drops the connection at `PythonNetworkStream.cpp:537-543`. Note that Section 145 had classified header 20 as a live two-sizes collision, which was wrong on both counts and is corrected here. *Nominally colliding, server-enum-only*: the enum value exists but no struct, no send site, and no client consumer exist for it, so it imposes no second size; 12 is the only header confirmed in this bucket, and the client's own unused `TPacketGCAttack` at `Packet.h:2102-2108` is what would change that if a live GC 12 were ever implemented. Headers 52 and 60 are free. A value can also appear outside `packet.h`: the game-to-DB constants live in `common/tables.h`, so header 20 is a fourth `HEADER_GD_GUILD_EXP_UPDATE` at `tables.h:39` and 20 is a `HEADER_GG_LOGIN_PING` at `packet.h:249`. Use targeted `HEADER_(CG|GC|GD|DG|GG)` patterns, never a bare `HEADER_[A-Z]_` one, and give every negative result a known-positive control. Never share a header table between directions, and never infer a width from the fact that two directions use the same number.
+- Cross-direction header collisions are not a single category, and the distinction decides how much a codec may assume. Sort every header into one of **four** buckets and record which one applies. *Live two-sizes*: the value names a different struct of a different width on the two trees, so a shared table is actively wrong. Headers 21 and 77 are in this bucket; 21 is the `packet_item_set`/`packet_set_item2` drift above, and 77 is the safebox/mall pair where two server structs and three client declarations share three values. *Colliding but not two-sizes*: the value is reused across directions while the width stays consistent, as for 11, 13, 15, 22, 69, 70, 71, and 83. *Width-equal semantic collision*: the value is reused across directions, the widths match, and the two records are **unrelated or opposite** operations. This is the only bucket in which the client **cannot** fail closed, because the header is already a known size, and the only one where width agreement is a **coincidence of layout** rather than evidence of a shared record. Never report one of these as safe merely because the widths match. Header 20 is the confirmed case: the server sends `HEADER_GC_ITEM_DEL` at `packet.h:121` as a bare `struct TPacketGCItemDelDeprecated` at `packet.h:1085-1099`, set at `char_item.cpp:598` and sized at `:610`, while the client has **no** `HEADER_GC_ITEM_DEL` at all and its only 20 is `HEADER_GC_ITEM_SET` at `Packet.h:116`, registered at `PythonNetworkStream.cpp:71` and dispatched to the item-**set** handler at `PythonNetworkStreamPhaseGame.cpp:342`. The two declarations are field-for-field identical, so an item-delete record would be executed by the item-set handler. **Corrected 2026-09-28 (ledger 193): the server side of this width is now measured, and that resolves the question this sentence left open.** `TPacketGCItemDelDeprecated` is **62 bytes** packed, with `ITEM_SOCKET_MAX_NUM` at its live value of 6 (`ENABLE_EXTENDED_SOCKETS`, `prodomodefines.h:76`); `TPacketGCItemSet` is **72**. The client's registered width for byte 20 is its own item-set width, which is 72 at six sockets and 60 at three, so **62 matches neither**. The `GameType.h:550-552` ambiguity therefore does not have to be resolved to decide that this frame is the wrong size: it is the wrong size under both readings, and `CheckPacket` at `PythonNetworkStream.cpp:537-543` drops it either way. This also settles the classification the next sentence leaves open: because the two widths differ, 20 is a **live two-sizes** collision rather than the width-equal case, so Section 145's original bucket was right about 20 and the correction was wrong about it. What the Rewrite should send to clear a window slot is a design question for the owner; `protocol/src/gc_item_window.rs` models the legacy send faithfully and does not answer it. Note that Section 145 had classified header 20 as a live two-sizes collision, which was wrong on both counts and is corrected here. *Nominally colliding, server-enum-only*: the enum value exists but no struct, no send site, and no client consumer exist for it, so it imposes no second size; 12 is the only header confirmed in this bucket, and the client's own unused `TPacketGCAttack` at `Packet.h:2102-2108` is what would change that if a live GC 12 were ever implemented. Headers 52 and 60 are free. A value can also appear outside `packet.h`: the game-to-DB constants live in `common/tables.h`, so header 20 is a fourth `HEADER_GD_GUILD_EXP_UPDATE` at `tables.h:39` and 20 is a `HEADER_GG_LOGIN_PING` at `packet.h:249`. Use targeted `HEADER_(CG|GC|GD|DG|GG)` patterns, never a bare `HEADER_[A-Z]_` one, and give every negative result a known-positive control. Never share a header table between directions, and never infer a width from the fact that two directions use the same number.
 
 ## DB records and boot
 
@@ -1148,3 +1178,51 @@ the repeats through `ItemProtos::duplicates` rather than hiding them. This is a
 recorded Divergence; the alternative would be a reader whose answer changes
 with the standard library.
 
+## The item-window records (section 193)
+
+Four game-to-client records carry an item into or out of a window, and they are the
+first item records the Rewrite has a codec for. `protocol/src/gc_item_window.rs` holds
+all four. The findings that a future reader most needs are these.
+
+**The two window records are named backwards between the trees.** Byte 20 is the
+server's `HEADER_GC_ITEM_DEL` and the client's `HEADER_GC_ITEM_SET`; byte 21 is the
+server's `HEADER_GC_ITEM_SET` and the client's `HEADER_GC_ITEM_SET2`. The Rust
+constants use the **server** names, because the server writes the wire. A test
+asserts each Rust byte against `gc_inventory`, which is keyed by the client names, so
+the tables cannot drift apart unnoticed.
+
+**The server's byte 20 does not match the client's.** The server sends 62 bytes; the
+client's item set on that byte is 72 at six sockets or 60 at three, so the frame is
+the wrong size under either reading and `CheckPacket` drops it. The codec models the
+legacy 62 faithfully, because a codec records what is sent, and the mismatch is
+recorded as a legacy Defect with the Rewrite's answer left open. This also settles the
+cross-direction classification: byte 20 is a **live two-sizes** collision.
+
+**`ITEM_SOCKET_MAX_NUM` is 6, not 3.** `ENABLE_EXTENDED_SOCKETS` is defined at
+`prodomodefines.h:76` and nothing undefines it, so `item_length.h:14` wins over the
+`#else` arm at `:17`. The socket array is 24 bytes, and `ITEM_ATTRIBUTE_MAX_NUM` is 7
+(`item_length.h:30`), so the attribute array is 21. Getting this wrong turns 72 into
+60 and 62 into 50.
+
+**`prodomodefines.h` has a define on a line `wc -l` cannot see.** Line 202 is
+`#define ENABLE_CUSTOM_INVENTORY` with no trailing newline, so the file reports 201
+lines and the symbol sits outside the include guard. Any read bounded by the line count
+misses it. No record in this section changes width because of it, but the lesson is the
+same one as the socket count: verify a `#define` with a search, never with a line number.
+
+**Widths.** `GC_ITEM_SET` 72, `GC_ITEM_DEL` 62, `GC_ITEM_UPDATE` 59,
+`GC_ITEM_GROUND_ADD` 21, `TPlayerItemAttribute` 3. They were measured by a compiled
+probe with a controlled `long` substitution because no `i686` compiler is installed
+here; the probe's three controls and the 72-versus-62 identity are in the ledger. The
+62+10=72 identity is the cheap regression check: the set record adds one `WORD`-over-
+`BYTE` byte, `flags`, `anti_flags` and `highlight`, and anything else that changes one
+side only will break it.
+
+**A third `TPacketGCItemDel` name.** `packet.h:1446-1454` declares a 5-byte
+`TPacketGCItemDel` that is a safebox record, produced only at `safebox.cpp:117`. It is
+not the inventory delete. Searches for it find the wrong thing.
+
+**Coverage.** Game-to-client coverage is **102 of 134 implemented**, 32 missing (16
+fixed-size, 16 dynamic). Bytes 20, 21, 25 and 26 moved to implemented. Byte 6 moved the
+other way, for the reason above. `AGENTS.md` said 96 of 134 and 38 missing; all three of
+its numbers were wrong.

@@ -176,7 +176,7 @@ impl CgItemGive {
         vid.copy_from_slice(&bytes[1..5]);
         Ok(Self {
             target_vid: u32::from_le_bytes(vid),
-            item_pos: crate::cg_item_move::CgItemPos::decode_at(&bytes[5..8]),
+            item_pos: crate::cg_item_move::CgItemPos::decode_at(bytes, 5),
             item_count: bytes[8],
         })
     }
@@ -212,7 +212,7 @@ impl CgItemGive {
         vid.copy_from_slice(&frame.payload[0..4]);
         Ok(Self {
             target_vid: u32::from_le_bytes(vid),
-            item_pos: crate::cg_item_move::CgItemPos::decode_at(&frame.payload[4..7]),
+            item_pos: crate::cg_item_move::CgItemPos::decode_at(&frame.payload, 4),
             item_count: frame.payload[7],
         })
     }

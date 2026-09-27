@@ -209,7 +209,7 @@ impl CgItemDrop {
         check_exact(bytes.len())?;
         check_header(bytes[0])?;
         Ok(Self {
-            cell: crate::cg_item_move::CgItemPos::decode_at(&bytes[1..4]),
+            cell: crate::cg_item_move::CgItemPos::decode_at(bytes, 1),
             gold: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
         })
     }
@@ -242,7 +242,7 @@ impl CgItemDrop {
         }
         check_header(frame.header)?;
         Ok(Self {
-            cell: crate::cg_item_move::CgItemPos::decode_at(&frame.payload[0..3]),
+            cell: crate::cg_item_move::CgItemPos::decode_at(&frame.payload, 0),
             gold: u32::from_le_bytes([
                 frame.payload[3],
                 frame.payload[4],

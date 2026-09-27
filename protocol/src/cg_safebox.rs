@@ -340,7 +340,7 @@ impl CgSafeBoxItem {
         Ok(Self {
             kind,
             container_pos: u32::from_le_bytes(pos),
-            item_pos: crate::cg_item_move::CgItemPos::decode_at(&bytes[5..8]),
+            item_pos: crate::cg_item_move::CgItemPos::decode_at(bytes, 5),
         })
     }
 
@@ -359,7 +359,7 @@ impl CgSafeBoxItem {
         Ok(Self {
             kind,
             container_pos: u32::from_le_bytes(pos),
-            item_pos: crate::cg_item_move::CgItemPos::decode_at(&frame.payload[4..7]),
+            item_pos: crate::cg_item_move::CgItemPos::decode_at(&frame.payload, 4),
         })
     }
 }

@@ -110,8 +110,8 @@ impl CgItemUseToItem {
         check_exact(bytes.len())?;
         check_header(bytes[0])?;
         Ok(Self {
-            from: CgItemPos::decode_at(&bytes[1..4]),
-            to: CgItemPos::decode_at(&bytes[4..7]),
+            from: CgItemPos::decode_at(bytes, 1),
+            to: CgItemPos::decode_at(bytes, 4),
         })
     }
 
@@ -143,8 +143,8 @@ impl CgItemUseToItem {
         }
         check_header(frame.header)?;
         Ok(Self {
-            from: CgItemPos::decode_at(&frame.payload[0..3]),
-            to: CgItemPos::decode_at(&frame.payload[3..6]),
+            from: CgItemPos::decode_at(&frame.payload, 0),
+            to: CgItemPos::decode_at(&frame.payload, 3),
         })
     }
 }
@@ -315,8 +315,8 @@ mod tests {
         assert_eq!(use_bytes[0], 0x3c);
         assert_ne!(move_bytes[0], use_bytes[0]);
         // The same type decodes both records.
-        assert_eq!(CgItemPos::decode_at(&use_bytes[1..4]).window_type, 0x02);
-        assert_eq!(CgItemPos::decode_at(&use_bytes[4..7]).cell, 0x0605);
+        assert_eq!(CgItemPos::decode_at(&use_bytes, 1).window_type, 0x02);
+        assert_eq!(CgItemPos::decode_at(&use_bytes, 4).cell, 0x0605);
     }
 
     #[test]

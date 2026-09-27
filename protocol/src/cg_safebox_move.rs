@@ -276,8 +276,8 @@ impl CgSafeboxItemMove {
             return Err(CgSafeboxMoveError::InvalidHeader { actual: bytes[0] });
         }
         Ok(Self {
-            from: CgItemPos::decode_at(&bytes[1..4]),
-            to: CgItemPos::decode_at(&bytes[4..7]),
+            from: CgItemPos::decode_at(bytes, 1),
+            to: CgItemPos::decode_at(bytes, 4),
             count: u16::from_le_bytes([bytes[7], bytes[8]]),
         })
     }
@@ -297,8 +297,8 @@ impl CgSafeboxItemMove {
             });
         }
         Ok(Self {
-            from: CgItemPos::decode_at(&frame.payload[0..3]),
-            to: CgItemPos::decode_at(&frame.payload[3..6]),
+            from: CgItemPos::decode_at(&frame.payload, 0),
+            to: CgItemPos::decode_at(&frame.payload, 3),
             count: u16::from_le_bytes([frame.payload[6], frame.payload[7]]),
         })
     }

@@ -144,7 +144,7 @@ Key every coverage metric on the **wire byte**, never on an identifier name.
 | direction | registered | implemented | missing |
 |---|---|---|---|
 | client to game | 92 | 91 | 1 (`KEY_AGREEMENT`, dead: `_IMPROVED_PACKET_ENCRYPTION_` is never defined) |
-| game to client | 134 | 96 | 38 (19 fixed-size, 19 dynamic) |
+| game to client | 134 | 102 | 32 (16 fixed-size, 16 dynamic) |
 
 - The game-to-client registration table was taken from the client's `PythonNetworkStream.cpp`
   while the client source was in the repository. It is recorded in `protocol/src/gc_inventory.rs`.
@@ -155,8 +155,10 @@ Key every coverage metric on the **wire byte**, never on an identifier name.
   the Reference client in the play test.
 - `protocol/src/cg_inventory.rs` and `gc_inventory.rs` are the machine-readable tables. Each row's
   implemented flag is tested, so update the flag in the same change as the codec.
-- Eight GC bytes are decoded by the client but never sent by the checked-in server: 15, 18, 72, 73,
-  84, 112, 117, and 213. Treat them as reachability questions, not porting work.
+- Nine GC bytes are decoded by the client but never sent by the checked-in server: 6, 15, 18, 72,
+  73, 84, 112, 117, and 213. Treat them as reachability questions, not porting work. Byte 6 is the
+  newest member: the server has the enumerator and the struct, but `DESC::SendLoginSuccessPacket`
+  writes byte 32 into it (`server/server/game/desc.cpp:880`).
 - Add a codec only when the system being ported needs it.
 
 ## VERIFICATION AND SEARCH RULES
