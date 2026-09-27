@@ -7,6 +7,17 @@
 //! The windows are laid out end to end in one address space, which is why the
 //! `TItemPos` `cell` is a plain index with no per-window base.
 //!
+//! **Correction, ledger 195.** Ledger 194.1 said these were "the only item
+//! storage on a character". That was too strong, and the error was mine: I read
+//! `char.h:458-461` and did not read the rest of the struct. A character also owns
+//! `pCubeItems[24]`, `pSashMaterials[2]`, `pClMaterials[2]`, `pAttr67AddItem` and
+//! `pSwitchbotItems[5]` (`char.h:462-478`). The accurate statement is narrower and
+//! is the one that matters: those four arrays are the **`TItemPos`-addressable**
+//! storage, and the other five are sub-system windows reached through their own
+//! accessors -- `GetCubeItem`, `GetSashMaterials`, `GetClWindowMaterials` -- and
+//! never through a window byte. So the slot space is still exactly one flat
+//! address space, and the overreach was in the word "only", not in the layout.
+//!
 //! # The layout, with this tree's feature switches
 //!
 //! | range | constant | start | end |
@@ -186,6 +197,54 @@ pub const INVENTORY_PAGE_COUNT: u16 = 4;
 /// INVENTORY_PAGE_COUNT`. The legacy comment's `90 (default)` is the two-page
 /// figure and is wrong for this build.
 pub const INVENTORY_MAX_NUM: u16 = 180;
+
+/// The stride `CHARACTER::SetItem` walks a stack with, `char_item.cpp:422` and
+/// `:452`.
+///
+/// The source writes a bare `5`. It is the same value as
+/// [`INVENTORY_WIDTH`], and nothing in the source says so, so the equality is a
+/// measured fact rather than an alias: a test asserts the two, and the probe
+/// re-checks the constant against the frozen source. A bare literal with a named
+/// twin is the shape that drifts silently.
+pub const FLAT_STACK_STRIDE: u16 = 5;
+
+/// `DRAGON_SOUL_BOX_COLUMN_NUM` = 8 (`length.h:84`): the stride the dragon soul
+/// arm of `SetItem` walks with (`char_item.cpp:481`).
+///
+/// The committed ledger-194 probe transcribed this as 6 and had no control that
+/// checked it, so the error sat in a probe that reported success. It never
+/// reached a constant, because nothing in the tree used it yet. It is recorded
+/// here because the next unit does, and because "a probe that passes while
+/// enshrinning a wrong value" is worth naming.
+///
+/// The sibling [`crate::item_slots::DRAGON_SOUL_BOX_SIZE`] is 32, so the box is
+/// eight wide by four deep.
+pub const DRAGON_SOUL_BOX_COLUMN_NUM: u16 = 8;
+
+/// `DRAGON_SOUL_BOX_ROW_NUM` = `DRAGON_SOUL_BOX_SIZE /
+/// DRAGON_SOUL_BOX_COLUMN_NUM` = 4 (`length.h:85`).
+pub const DRAGON_SOUL_BOX_ROW_NUM: u16 = 4;
+
+/// `CUBE_MAX_NUM` = 24 (`cuberenewal.h:5`): the item-cube window's own storage,
+/// reached through `CHARACTER::GetCubeItem` (`char.h:1998`) and not by a
+/// [`crate::item_slots::EWindows`].
+pub const CUBE_MAX_NUM: u16 = 24;
+
+/// `SASH_WINDOW_MAX_MATERIALS` = 2 (`item_length.h:515`), reached through
+/// `CHARACTER::GetSashMaterials` (`char.h:2385`).
+pub const SASH_WINDOW_MAX_MATERIALS: u16 = 2;
+
+/// `CL_WINDOW_MAX_MATERIALS` = 2 (`length.h:178`), reached through
+/// `CHARACTER::GetClWindowMaterials` (`char.h:2404`).
+pub const CL_WINDOW_MAX_MATERIALS: u16 = 2;
+
+/// `g_bItemCountLimit` = 5000 (`config.cpp:41`): the stack ceiling
+/// `CItem::SetCount` clamps to (`item.cpp:304`).
+///
+/// Legacy holds it in a mutable `WORD` global that the admin page can change, so
+/// the frozen value is the default rather than a constant. The Rewrite keeps it
+/// as configuration; 5000 is the compiled-in default.
+pub const ITEM_COUNT_LIMIT: u16 = 5000;
 
 /// `INVENTORY_OPEN_PAGE_COUNT` = 2 (`length.h:278`): the pages a fresh character
 /// may use with no inventory stat.
@@ -818,5 +877,115 @@ mod tests {
         assert!(range.contains(range.start));
         assert!(range.contains(range.end - 1));
         assert!(!range.contains(range.end));
+    }
+
+    #[test]
+    fn the_flat_stack_stride_is_the_inventory_width_the_source_never_names() {
+        // char_item.cpp:422 and :452 walk with a bare `5`. The constant has a
+        // named twin, and nothing connects them, so the equality is asserted
+        // rather than assumed. If the two ever diverged the grid would be walked
+        // with the wrong stride and every multi-cell item would overlap wrongly.
+        assert_eq!(FLAT_STACK_STRIDE, INVENTORY_WIDTH);
+        assert_eq!(FLAT_STACK_STRIDE, 5);
+    }
+
+    #[test]
+    fn the_dragon_soul_box_is_eight_wide_and_four_deep() {
+        // length.h:83-85: SIZE 32, COLUMN_NUM 8, ROW_NUM = SIZE / COLUMN_NUM.
+        assert_eq!(DRAGON_SOUL_BOX_COLUMN_NUM, 8);
+        assert_eq!(DRAGON_SOUL_BOX_ROW_NUM, 4);
+        assert_eq!(
+            u32::from(DRAGON_SOUL_BOX_ROW_NUM) * u32::from(DRAGON_SOUL_BOX_COLUMN_NUM),
+            u32::from(DRAGON_SOUL_BOX_SIZE)
+        );
+    }
+
+    #[test]
+    fn a_dragon_soul_stack_can_walk_past_the_array_so_the_bound_is_load_bearing() {
+        // The DS array is six slots by six grades by a 32-cell box, so a grade
+        // cell is 32 wide with an 8-wide stride. Anchored at the last cell of the
+        // array, a four-deep stack walks to 1151 + 3 * 8 = 1175, which is past
+        // the 1152 array. Legacy only survives that because the walk does
+        // `if (p >= DRAGON_SOUL_INVENTORY_MAX_NUM) continue;` (char_item.cpp:486),
+        // and that check is inside `if (pItem)`, so a removal skips it.
+        //
+        // This is asserted, not avoided, because it is why the Rewrite's own
+        // validator has to reject a stack that does not fit rather than truncate
+        // it. It also separates this from the flat walk, whose bound comes from
+        // the category end and is therefore safe for any stride.
+        let last_anchor = u32::from(DRAGON_SOUL_INVENTORY_MAX_NUM - 1);
+        let worst = last_anchor
+            + (u32::from(DRAGON_SOUL_BOX_ROW_NUM) - 1) * u32::from(DRAGON_SOUL_BOX_COLUMN_NUM);
+        assert_eq!(worst, 1175);
+        assert!(
+            worst >= u32::from(DRAGON_SOUL_INVENTORY_MAX_NUM),
+            "the DS walk is only safe because of its own continue"
+        );
+
+        // The flat walk is the opposite case, and the difference is the point:
+        // every category end is at or below the array, so a `p < end` test bounds
+        // the walk for any size and any stride.
+        // Six real categories of 180 from 290 gives exactly 1370, so the array is
+        // precisely the last category's end. `CUSTOM_INVENTORY_CATEGORY_NUM` is
+        // also the count and a sentinel category index, and those two roles
+        // disagree: 290 + 7 * 180 = 1550 is past the array. `custom_inventory_
+        // start_checked` is what refuses the sentinel, and this pins why it has
+        // to keep refusing.
+        let last_real_end = u32::from(CUSTOM_INVENTORY_SLOT_START)
+            + u32::from(CUSTOM_INVENTORY_CATEGORY_NUM) * u32::from(CUSTOM_INVENTORY_MAX_NUM);
+        assert_eq!(last_real_end, u32::from(INVENTORY_AND_EQUIP_SLOT_MAX));
+
+        let sentinel_end = u32::from(CUSTOM_INVENTORY_SLOT_START)
+            + (u32::from(CUSTOM_INVENTORY_CATEGORY_NUM) + 1) * u32::from(CUSTOM_INVENTORY_MAX_NUM);
+        assert_eq!(sentinel_end, 1550);
+        assert!(sentinel_end > u32::from(INVENTORY_AND_EQUIP_SLOT_MAX));
+    }
+
+    #[test]
+    fn the_storage_outside_the_slot_space_keeps_its_own_sizes() {
+        // char.h:462-478 and the accessors that reach it. None of these is
+        // addressed by a window byte; they belong to their own windows.
+        assert_eq!(CUBE_MAX_NUM, 24);
+        assert_eq!(SASH_WINDOW_MAX_MATERIALS, 2);
+        assert_eq!(CL_WINDOW_MAX_MATERIALS, 2);
+    }
+
+    #[test]
+    fn the_stack_ceiling_is_five_thousand() {
+        // config.cpp:41. Legacy holds this in a mutable WORD global the admin
+        // page can change, so this is the compiled-in default.
+        assert_eq!(ITEM_COUNT_LIMIT, 5000);
+    }
+
+    #[test]
+    fn the_stack_ceiling_matches_the_other_legacy_statement_of_it() {
+        // Two independent legacy sources say 5000: `g_bItemCountLimit`
+        // (`config.cpp:41`), which is what `SetCount` clamps to, and
+        // `ITEM_MAX_COUNT` (`item_length.h:16`), which the prototype carries.
+        // They are separate constants in separate headers, and nothing in the
+        // Rewrite tied them together.
+        //
+        // The pair is held in a table and read at runtime because a direct
+        // `assert_eq!` between two constants is folded away by the compiler and
+        // then linted out: a check that cannot fail is not a check.
+        let ceilings: [(u16, u32); 2] = [
+            (ITEM_COUNT_LIMIT, crate::constants::ITEM_MAX_COUNT),
+            (ITEM_COUNT_LIMIT, 5000),
+        ];
+        for (rewrite, legacy) in ceilings {
+            assert_eq!(
+                u32::from(rewrite),
+                legacy,
+                "the Rewrite ceiling and the legacy ceiling must agree"
+            );
+        }
+
+        // The ceiling has to leave room below `u16::MAX`, because legacy's
+        // `SetCount` takes a `DWORD` and clamps into a `WORD`: a ceiling at or
+        // above 65535 would make the clamp a no-op.
+        let limits: [u32; 1] = [u32::from(ITEM_COUNT_LIMIT)];
+        for limit in limits {
+            assert!(limit < u32::from(u16::MAX));
+        }
     }
 }

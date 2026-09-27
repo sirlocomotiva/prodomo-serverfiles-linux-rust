@@ -20,5 +20,7 @@ pub mod sector;
 /// Deterministic entity membership across configured map sectors.
 pub mod spatial;
 
+pub mod item;
+
 pub use common;
 pub use protocol;

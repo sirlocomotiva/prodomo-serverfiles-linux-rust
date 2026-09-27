@@ -490,34 +490,18 @@ impl PacketSerialize for TSimplePlayer {
 
 /// Item attribute for player items
 /// C++: `TPlayerItemAttribute` (3 bytes with `#pragma pack(1)`)
-#[derive(Debug, Clone, Copy)]
-pub struct TPlayerItemAttribute {
-    /// Attribute type
-    pub b_type: u8,
-    /// Attribute value
-    pub s_value: i16,
-}
-
-impl PacketSerialize for TPlayerItemAttribute {
-    fn packed_size() -> usize {
-        3
-    }
-
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(3);
-        write_u8(&mut buf, self.b_type);
-        buf.extend_from_slice(&self.s_value.to_le_bytes());
-        buf
-    }
-
-    fn from_bytes(data: &[u8]) -> io::Result<Self> {
-        ensure_exact_len(data, Self::packed_size())?;
-        let mut offset = 0;
-        let b_type = read_u8(data, &mut offset)?;
-        let s_value = i16::from_le_bytes([data[offset], data[offset + 1]]);
-        Ok(Self { b_type, s_value })
-    }
-}
+///
+/// **Alias, ledger 195.** This was a second `struct` modelling the same three
+/// wire bytes as [`gc_item_window::ItemAttribute`], with the same two fields. It had no consumer
+/// outside its own definition and its own tests, so the two could drift and
+/// nothing would fail. It is now a `pub use`, so the legacy name still resolves
+/// and there is one type.
+///
+/// The surviving type is [`gc_item_window::ItemAttribute`], not this name, because that is the
+/// one the four game-to-client item records are built around and the one pinned
+/// by golden bytes. The rename direction is deliberate: the item-window name is
+/// the one the rest of the workspace reaches for.
+pub type TPlayerItemAttribute = crate::gc_item_window::ItemAttribute;
 
 /// Quickslot entry
 /// C++: `TQuickslot` (2 bytes with `#pragma pack(1)`)

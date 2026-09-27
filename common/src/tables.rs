@@ -28,7 +28,14 @@ pub const SKILL_MAX_NUM: usize = 255;
 pub const QUICKSLOT_MAX_NUM: usize = 36;
 pub const PART_MAX_NUM: usize = 6;
 pub const PREMIUM_MAX_NUM: usize = 9;
-pub const ITEM_SOCKET_MAX_NUM: usize = 6;
+/// `ITEM_SOCKET_MAX_NUM` = 6 in this build (`item_length.h:14` under
+/// `ENABLE_EXTENDED_SOCKETS`).
+///
+/// **Ledger 195.** This was a second literal saying 6 while
+/// [`crate::constants::ITEM_SOCKET_MAX_NUM`] said 3 in the same crate, and
+/// nothing failed. It now widens that one definition, which is a lossless cast
+/// in this direction.
+pub const ITEM_SOCKET_MAX_NUM: usize = crate::constants::ITEM_SOCKET_MAX_NUM as usize;
 pub const ITEM_ATTRIBUTE_MAX_NUM: usize = 7;
 pub const SHOP_HOST_ITEM_MAX_NUM: usize = 40;
 pub const QUEST_NAME_MAX_LEN: usize = 32;

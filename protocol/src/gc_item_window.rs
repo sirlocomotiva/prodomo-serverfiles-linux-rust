@@ -188,7 +188,10 @@
 use std::error::Error;
 use std::fmt;
 
+use std::io;
+
 use crate::item_pos::ItemPos;
+use crate::PacketSerialize;
 
 /// Server enumerator `HEADER_GC_ITEM_DEL` (20), which the client calls
 /// `HEADER_GC_ITEM_SET`. This is the byte that clears a window slot.
@@ -319,6 +322,33 @@ impl ItemAttribute {
         Ok(Self {
             b_type: raw[0],
             s_value: i16::from_le_bytes([raw[1], raw[2]]),
+        })
+    }
+}
+
+impl PacketSerialize for ItemAttribute {
+    fn packed_size() -> usize {
+        ITEM_ATTRIBUTE_WIRE_SIZE
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        self.encode()
+    }
+
+    fn from_bytes(data: &[u8]) -> io::Result<Self> {
+        // The same length rule the window codecs use, reported through the two
+        // `io::ErrorKind`s the rest of this crate's `PacketSerialize` types use,
+        // so a caller that goes through either door learns the same thing.
+        Self::decode(data).map_err(|e| match e {
+            GcItemWindowError::Truncated { .. } => {
+                io::Error::new(io::ErrorKind::UnexpectedEof, e.to_string())
+            }
+            // `Header` cannot come out of a three-byte attribute decode, and
+            // naming it keeps a future variant from being swept into this arm
+            // silently. Both are "the bytes are not a valid record".
+            GcItemWindowError::LengthMismatch { .. } | GcItemWindowError::Header { .. } => {
+                io::Error::new(io::ErrorKind::InvalidData, e.to_string())
+            }
         })
     }
 }

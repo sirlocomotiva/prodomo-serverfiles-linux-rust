@@ -146,8 +146,20 @@ pub const ITEM_SMALL_DESCR_MAX_LEN: u32 = 256;
 pub const ITEM_LIMIT_MAX_NUM: u32 = 2;
 /// Maximum item apply count
 pub const ITEM_APPLY_MAX_NUM: u32 = 3;
-/// Maximum item socket count (default)
-pub const ITEM_SOCKET_MAX_NUM: u32 = 3;
+/// Maximum item socket count.
+///
+/// **Corrected, ledger 195.** This was `3` here while
+/// [`crate::tables::ITEM_SOCKET_MAX_NUM`] said `6` in the same crate, and the
+/// live build is **6**: `ENABLE_EXTENDED_SOCKETS` is defined at
+/// `prodomodefines.h:76`, so `item_length.h:13-18` takes the 6 arm and the `#else`
+/// arm is dead. Two crates in one workspace disagreed, and the two
+/// `ITEM_SOCKET_UNIQUE_*` values below inherited the error through their
+/// derivation.
+///
+/// [`crate::tables::ITEM_SOCKET_MAX_NUM`] now derives from this one, so there
+/// is a single definition and a second copy cannot drift. The value is not 3 in
+/// this build.
+pub const ITEM_SOCKET_MAX_NUM: u32 = 6;
 /// Maximum item stack count
 pub const ITEM_MAX_COUNT: u32 = 5000;
 /// Normal attribute count
@@ -174,10 +186,11 @@ pub const REFINE_MATERIAL_MAX_NUM: u32 = 5;
 pub const ITEM_ELK_VNUM: u32 = 50026;
 /// Toggle item group value index
 pub const ITEM_VALUE_TOGGLE_GROUP: u32 = 5;
-/// Socket index for unique save time
-pub const ITEM_SOCKET_UNIQUE_SAVE_TIME: u32 = ITEM_SOCKET_MAX_NUM - 2; // 1
-/// Socket index for unique remain time
-pub const ITEM_SOCKET_UNIQUE_REMAIN_TIME: u32 = ITEM_SOCKET_MAX_NUM - 1; // 2
+/// Socket index for unique save time, `item_length.h:46`. 4 with 6 sockets, so
+/// the "1" this carried while the socket count said 3 was the same error twice.
+pub const ITEM_SOCKET_UNIQUE_SAVE_TIME: u32 = ITEM_SOCKET_MAX_NUM - 2; // 4
+/// Socket index for unique remain time, `item_length.h:47`. 5 with 6 sockets.
+pub const ITEM_SOCKET_UNIQUE_REMAIN_TIME: u32 = ITEM_SOCKET_UNIQUE_SAVE_TIME + 1; // 5
 /// Socket index for toggle time
 pub const ITEM_SOCKET_TOGGLE_TIME: u32 = 0;
 /// Socket index for toggle active state
@@ -584,3 +597,87 @@ pub const CUSTOM_INVENTORY_SLOT_START: u32 = BELT_INVENTORY_SLOT_END; // 200
 /// Custom inventory slot end position
 pub const CUSTOM_INVENTORY_SLOT_END: u32 =
     CUSTOM_INVENTORY_SLOT_START + (CUSTOM_INVENTORY_MAX_NUM * CUSTOM_INVENTORY_CATEGORY_NUM); // 1280
+
+#[cfg(test)]
+mod socket_tests {
+    use super::*;
+
+    /// The live build has `ENABLE_EXTENDED_SOCKETS` (`prodomodefines.h:76`), so
+    /// `item_length.h:13-18` takes the 6 arm. This test exists because it did
+    /// not: two crates in this workspace disagreed (6 against 3) and nothing
+    /// failed, because each copy was self-consistent. The values below are the
+    /// ones `item_length.h` compiles to under the live feature gates, and the
+    /// derived pair is asserted through its derivation so the arithmetic cannot
+    /// drift either.
+    #[test]
+    fn the_socket_count_is_six_and_the_unique_indices_derive_from_it() {
+        assert_eq!(ITEM_SOCKET_MAX_NUM, 6);
+        assert_eq!(ITEM_SOCKET_UNIQUE_SAVE_TIME, ITEM_SOCKET_MAX_NUM - 2);
+        assert_eq!(ITEM_SOCKET_UNIQUE_REMAIN_TIME, ITEM_SOCKET_MAX_NUM - 1);
+        assert_eq!(ITEM_SOCKET_UNIQUE_SAVE_TIME, 4);
+        assert_eq!(ITEM_SOCKET_UNIQUE_REMAIN_TIME, 5);
+    }
+
+    /// The toggle indices are plain literals in `item_length.h:50-52`, not
+    /// derived from the socket count, so a socket-count change must NOT move
+    /// them. This pins that distinction, which is easy to "fix" wrongly.
+    #[test]
+    fn the_toggle_indices_are_literals_and_do_not_derive_from_the_socket_count() {
+        assert_eq!(ITEM_SOCKET_TOGGLE_TIME, 0);
+        assert_eq!(ITEM_SOCKET_TOGGLE_ACTIVE, 3);
+        assert_eq!(ITEM_SOCKET_TOGGLE_RIDING, 4);
+    }
+
+    /// A second definition of `ITEM_SOCKET_MAX_NUM` anywhere in the crate is
+    /// the actual failure that let the drift through, so the test looks for the
+    /// name itself and not merely for a wrong value.
+    #[test]
+    fn the_socket_count_has_exactly_one_definition_in_this_crate() {
+        // `constants.rs` is the one definition: it is where the legacy arm and
+        // the `#ifdef` that selects it are recorded. `tables.rs` widens it for
+        // its own indexing. Any second literal anywhere is a copy that can
+        // drift, and the drift that happened was exactly that.
+        let this_file = file!();
+        assert_eq!(this_file, "common/src/constants.rs");
+        let source = include_str!("constants.rs");
+        let definitions: Vec<&str> = source
+            .lines()
+            .filter(|l| l.trim_start().starts_with("pub const ITEM_SOCKET_MAX_NUM"))
+            .collect();
+        assert_eq!(
+            definitions.len(),
+            1,
+            "expected one definition here, found: {definitions:?}"
+        );
+        assert!(
+            !definitions[0].contains("crate::"),
+            "this is the source, so it must not derive from anywhere: {}",
+            definitions[0]
+        );
+
+        // The negative control, in the file that is supposed to derive. Without
+        // this the test would still pass with two literals, one in each file,
+        // which is the shape the drift actually had.
+        let tables = include_str!("tables.rs");
+        let copies: Vec<&str> = tables
+            .lines()
+            .filter(|l| l.trim_start().starts_with("pub const ITEM_SOCKET_MAX_NUM"))
+            .collect();
+        assert_eq!(
+            copies.len(),
+            1,
+            "expected one line in tables.rs: {copies:?}"
+        );
+        assert!(
+            copies[0].contains("crate::constants::ITEM_SOCKET_MAX_NUM"),
+            "tables.rs must widen the one definition, not state its own: {}",
+            copies[0]
+        );
+        // And the positive control: the value both files agree on is 6, not 3.
+        // This build has `ENABLE_EXTENDED_SOCKETS` defined
+        // (`prodomodefines.h:76`), so the 6 arm of `item_length.h:13-18` is the
+        // live one and the `#else` arm is dead.
+        assert_eq!(crate::constants::ITEM_SOCKET_MAX_NUM, 6);
+        assert_eq!(crate::tables::ITEM_SOCKET_MAX_NUM, 6);
+    }
+}

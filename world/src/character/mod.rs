@@ -2,6 +2,7 @@
 
 mod combat;
 mod inventory;
+mod items;
 mod manager;
 mod model;
 mod state;
@@ -19,6 +20,7 @@ pub use inventory::{
     is_valid_item_position, placeholder, stored_window, CellBound, FLAT_RANGES,
     INVENTORY_PLACEHOLDER, NPOS,
 };
+pub use items::{CharacterItems, Lookup, Rejected, ATTR67_SLOTS};
 pub use manager::{CharacterManager, CharacterManagerError, UpdateReport};
 pub use model::{Character, CharacterKind};
 pub use state::{Activity, CoreState, Posture};

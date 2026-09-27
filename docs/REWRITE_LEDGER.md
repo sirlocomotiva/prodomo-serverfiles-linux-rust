@@ -18183,3 +18183,298 @@ trip, the stat-derived usable count, and the corrected page Defect demonstration
 `protocol` is unchanged at 1,167 unit and 66 wiring tests.
 
 No database was involved: this unit reads no SQL and writes no migration.
+
+## 195. The item instance, the ids that name it, and the storage that holds it
+
+Ledger 194 built the slot space and the two validity functions that disagree
+about it. This unit puts a tenant in it: the item instance (`world::item`), the
+ids that name one (`world::item::ItemIds`), and the character-side storage that
+holds them (`world::character::items::CharacterItems`). Three legacy constants
+were wrong in the workspace and one legacy *shape* was wrong in the model, and
+all four are corrected here.
+
+It still ports no behaviour a client can reach end to end: no record is sent, no
+handler calls this, and the safebox and shop are untouched. So no Parity row
+moves, and `sys.item.core` stays `codec`.
+
+### 195.1 What the instance is, and what it refuses to be
+
+`world::item::Item` is the legacy `TItemData` field set (`packet.h:1440-1446`) as
+an **owned value**. Legacy makes it a `CItem *` owned by a singleton
+`ITEM_MANAGER`, and a character holds that bare pointer; the Rewrite holds the
+item itself, so there is no pointer to dangle, no delete-inside-a-member-function
+to reproduce, and no back pointer to keep honest.
+
+Three properties are deliberate and each has a test:
+
+- **Every field is set at construction.** Legacy's one constructor leaves the
+  proto and the owner indeterminate, so reading either before it is set reads
+  whatever was on the heap (`item.cpp:47-64`).
+- **A count is a total function.** `Item::set_count` reports
+  `CountRejected::Zero` or `CountRejected::AboveLimit` and changes nothing on a
+  refusal. Legacy's `SetCount` accepts zero and, when the item has an owner,
+  calls `M2_DESTROY_ITEM(this)` from inside its own body (`item.cpp:307-338`), so
+  the caller is holding a freed pointer afterwards and the *setter* is what
+  destroyed the object. Destroying is storage's decision, not a field setter's.
+- **An id is never reused.** See 195.2.
+
+`ItemAttribute` is not declared a second time in `world`: the instance reuses
+`protocol::gc_item_window::ItemAttribute`, and `protocol`'s old
+`TPlayerItemAttribute` struct is now a `pub use` of it. Before this, the
+workspace had two structs for the same three wire bytes with the same two fields
+and no consumer linking them, so they could have drifted silently. The legacy
+name still resolves.
+
+### 195.2 Ids: monotonic, never reused, finite, and never zero
+
+`ItemIds` is `ITEM_MANAGER::GetNewID` (`item_manager_idrange.cpp:20-49`) with the
+shutdown replaced by an error:
+
+- **Monotonic**, a bare `m_dwCurrentID++`, so ids are dense in the range.
+- **Never reused.** Nothing rewinds the counter, not even on release, which is
+  what makes an id safe to cache in a packet and to leave in a log line.
+- **Finite.** The range is an exhaustible resource and `allocate` says so.
+
+Legacy handles exhaustion by logging ten times, touching `.killscript`, calling
+`thecore_shutdown()` and returning **0** (`item_manager_idrange.cpp:29-34`).
+Returning 0 is the part worth not copying, because 0 is the one value an id
+cannot take, so `ItemIdRange::new` refuses a range whose `first_usable` is 0 and
+`IdRangeExhausted` is returned instead. Legacy gets the same protection from
+`assert(m_dwCurrentID != 0)` (`:23`), which is an assertion and not a check, and
+which compiles out in Release; a range seeded at 0 would sail through. The test
+pins both directions: a range seeded at 0 is refused, and an exhausted allocator
+is left byte-for-byte unchanged.
+
+### 195.3 Three constants were wrong, and one shape was wrong
+
+**The socket count was 6, and two literals said otherwise.**
+`common::constants::ITEM_SOCKET_MAX_NUM` said `3` while
+`common::tables::ITEM_SOCKET_MAX_NUM` said `6`, in the same crate, and nothing
+failed. The live build is **6**: `ENABLE_EXTENDED_SOCKETS` is defined at
+`prodomodefines.h:76`, so `item_length.h:13-18` takes the 6 arm and the `#else`
+arm is dead. `constants.rs` is now the single definition and `tables.rs` widens
+it; the uniqueness test asserts one definition *in each file* with the direction
+between them, because a test that only counted definitions would have passed with
+the drift it was written to catch.
+
+The two derived values inherit the fix and are pinned:
+`ITEM_SOCKET_UNIQUE_SAVE_TIME` is 4 and `ITEM_SOCKET_UNIQUE_REMAIN_TIME` is 5,
+so the unique sockets are the last two. `world::item` derives its `SOCKETS`,
+`ATTRIBUTES` and `LIMITS` from the same `common` constants rather than restating
+them, with a test that states 6, 7 and 2 so a derivation that pointed at the
+wrong constant fails here rather than in a wire format three crates downstream.
+
+**`aLimits` is `[TItemLimit; 2]`, and the model had it as `[i32; 2]`.**
+`tables.h:879` is `TItemLimit aLimits[ITEM_LIMIT_MAX_NUM]`, and `TItemLimit` is
+`BYTE bType; long lValue;` (`tables.h:844-847`) -- five bytes each on the 32-bit
+target, ten for the pair. The model stored two bare `i32`: eight bytes, with the
+`bType` half gone. The type byte is not decoration: the loader keys the whole
+limit system off it and reads the seconds out of the value
+(`ClientManagerBoot.cpp:1610-1626`), and a `LIMIT_REAL_TIME` value is a `time_t`
+offset, so it is signed and 32 bits wide. `world::item::ItemLimit` carries both
+halves, and the test walks indices 2 through 11 to show that a limit index valid
+in the enumeration is out of the array.
+
+`ITEM_LIMIT_MAX_NUM` is 2 and `ELimitTypes` (`item_length.h:427-450`) names **ten**
+types, `LIMIT_NONE` through `LIMIT_CHAMPION`, then `LIMIT_MAX_NUM` as an
+eleventh. The tenth type has nowhere to live, and every legacy loop over
+`aLimits` is bounded by the array rather than by the enumeration, so widening to
+match the enumeration would change behaviour with no test failing.
+
+**The Dragon Soul stride is 8, and ledger 194's probe said 6.**
+`.scratch/probe194/slot_space.cpp` transcribed `DRAGON_SOUL_BOX_COLUMN_NUM` as 6;
+`length.h:84` says 8. The probe is corrected, and the storage now derives its
+stride from `common::length` rather than restating it, so the transcription
+cannot come back. The test is the independent witness: a three-cell dragon soul
+stack at cell 3 marks 3, 11 and 19, and cells 9 and 15 are asserted free. Six
+would have marked 3, 9 and 15.
+
+### 195.4 The storage, and the three questions its type can answer
+
+`CharacterItems` holds the four arrays `char.h:458-461` holds, plus the two
+small windows: 1370 flat id cells with a 1370-entry one-based grid, 1152 dragon
+soul id cells with their own grid, one attribute-67 slot and five switchbot
+slots. The window byte selects between the pairs; it does not select between
+seven inventories, which is ledger 194's finding and the reason this is one type
+with a match and not seven types.
+
+`Lookup` keeps three answers apart that legacy returns as the same `NULL`:
+
+| answer | when | legacy |
+|---|---|---|
+| `Empty` | a real cell with nothing in it | `NULL` |
+| `OutOfRange` | the position names no cell of this character | `NULL` |
+| `NoContainer` | a safebox or mall position: valid, but not this type's | `NULL` |
+
+The third is the one that matters. `GetItem` accepts a safebox or mall position
+-- `IsValidItemPosition` defers to the live container -- and then has no case for
+it and returns `NULL` (`char_item.cpp:260`, `:301-303`). A caller that reads that
+as "the safebox is empty" writes a duplicate. A test sweeps **all 256 window
+bytes** rather than sampling, because the whole point of the type is that those
+three are different.
+
+### 195.5 The one-based grid, and why `WORD` is load-bearing
+
+The grid stores `cell + 1`, so 0 means free. Cell 1369 therefore stores **1370**,
+which is where the element width decides whether the storage is correct: the grid
+is a `WORD` (2 bytes) and 1370 is exact, while a `BYTE` would wrap it to 90 --
+which is a live base inventory cell, so the grid would report a cell as occupied
+that no item is in. The test checks **both directions**, that the value fits a
+`WORD` and does *not* fit a `BYTE`, so it still passes if the element is ever
+widened to a `u32`.
+
+The id array and the grid answer different questions, and the tests keep them
+apart: a three-cell dragon soul stack puts the id at the anchor only and the
+coverage in the grid. That is legacy's shape (`char_item.cpp:462` writes
+`bItemGrid[p] = wCell + 1` for the whole footprint and `:464` writes
+`pItems[wCell] = pItem` once), and it is why the grid exists at all.
+
+The walks are literal, with their bounds. A base inventory stack walks with a bare
+5 (`char_item.cpp:422`, which is `INVENTORY_WIDTH`) and a dragon soul stack with
+`DRAGON_SOUL_BOX_COLUMN_NUM` (`char_item.cpp:481`); both skip a cell at or past
+the bound with `continue` (`:426`, `:486`). For a cell outside the base inventory
+the bounds stay at their defaults and the default test `cell < 180` is false, so
+only the anchor is marked (`:437-438`).
+
+### 195.6 The four refuses
+
+Each is a place where legacy continues past a check that does not hold, or writes
+before it knows. Each is a `Rejected` variant a caller must handle, and each has
+a test that fails if the refusal is removed.
+
+| site | what legacy does | what the Rewrite does |
+|---|---|---|
+| `char_item.cpp:537` then `:543` | reads `pSwitchbotItems[wCell]` and only checks the bound six lines later, so a cell of 100 reads past a five-element array before the check runs | bound first, so there is nothing to read: `OutOfRange`, and the test sweeps cells 5, 6, 100, 1369 and `u16::MAX` |
+| `char_item.cpp:462` | writes `bItemGrid[p] = wCell + 1` for the whole footprint with **no conflict test at all**, silently taking over a neighbour's marks; the neighbour's later `RemoveItem` then zeroes them, because its guard at `:432` reads `pItems[p]`, which is 0 for a non-anchor cell | the whole footprint is checked first, and a conflict is `GridConflict { blocked, owner }` with the grid byte-for-byte unchanged |
+| `char_item.cpp:380-383` | `if (pItem && pItem->GetOwner()) { assert(!"GetOwner exist"); return; }` -- and the assert compiles out in Release (`premake5.lua:54,59`), so the `return` is unreachable in a shipping build and the item is stored twice with no diagnostic, and because `SetItem` is `void` there is not even a packet | `AlreadyOwned { id, at }`, answered by **scanning this storage** rather than by trusting the caller's `item.pos` |
+| `char_item.cpp:426`, `:437-438` | a stack anchored near the end of its category has its tail skipped, and an item larger than one cell in the equipment band marks only its anchor, so the stored item's recorded footprint is shorter than its `size` and every later overlap check trusts the grid | `FootprintCutOff { size, covered }`, and nothing is stored |
+
+The third row is why `AlreadyOwned` is a storage question and not a field read. A
+check that trusted `item.pos` would miss the real case -- an item sitting in cell
+40 whose `pos` still says 0 -- and would make `move_item` impossible, because a
+move necessarily holds an item that is already placed. The test holds an item
+whose `pos` is still unplaced, stores it, and shows that the second cell is
+refused and that the successful move that follows is not.
+
+`move_item` is remove then set, in that order, because legacy's grid is cleared
+with the **stored** item's size (`char_item.cpp:420`, `pOld->GetSize()`), so the
+old cells are only freed by the removal. The difference is what happens when the
+second step fails: the item is put back where it was, so a refused move is not a
+lost item. Two tests cover both outcomes, and the refused one asserts the item is
+still at its old cell *and* that the grid mark is intact.
+
+### 195.7 Divergences
+
+- **A refused footprint.** Legacy stores a stack whose walk leaves its category,
+  or an oversized item in the equipment band, with a grid that records fewer cells
+  than the item claims. The Rewrite refuses. Recorded because it is a deliberate
+  difference, not because legacy is wrong about a value: the legacy grid is a
+  statement about which cells are covered, and storing an item that contradicts
+  it is how two items come to share cells.
+- **`AlreadyOwned` is asked of the storage.** Legacy asks the item for its owner.
+  A bare `LPITEM` has no liveness signal, so the Rewrite's answer is the only one
+  it can give honestly.
+- **`OutOfRange` and `NoContainer` are separate answers.** Legacy returns `NULL`
+  for both. A caller that treats them alike is the duplication bug in 195.4.
+
+### 195.8 The sibling survey: three client-reachable Defects recorded, not ported
+
+A parallel read-only survey of the frozen legacy item-attribute and socket model
+(`/tmp/survey195_FINAL.md`, 4,292 lines) finished during this unit. Its three
+client-reachable Defects are recorded here so the next unit that touches sockets
+or attributes inherits the decision rather than re-deriving it. None of them has
+code in this unit; the model they constrain is `Item::sockets` and
+`Item::attributes`, which exist now.
+
+1. **A private shop destroys sockets 3, 4 and 5.** `ENABLE_PRIVATE_SHOP_SOCKET5`
+   is commented out at `prodomodefines.h:189`, so the shop's SQL table and its
+   reader handle only sockets 0..2, while
+   `private_shop_util.cpp:238,258` copy all six and `CItem::SetSockets`
+   (`item.cpp:1637`) saves. Putting your own unique in your own shop and taking it
+   back **zeroes socket 5**, which is `ITEM_SOCKET_UNIQUE_REMAIN_TIME`, and the
+   loss is persisted. **Decision: do not reproduce.** A shop round trip preserves
+   all six sockets, and the unique-destruction consequence is stated in the
+   ledger when the shop is ported.
+2. **`USE_CHANGE_ATTRIBUTE2` is a no-op 27% of the time, after consuming the
+   scroll and reporting success.** The table `{0,0,30,40,3}` at
+   `char_item.cpp:6434` sums to 73, so 27 of 100 rolls produce level 6, which
+   `item_attribute.cpp:161-162` rejects -- after `ClearAttribute()` at `:233` has
+   already erased the attributes. The scroll is consumed and success is still
+   reported. **Decision: do not reproduce the false success.** A 100-total table
+   is a Divergence to record when the scroll is ported, with the no-op called out.
+3. **`AddRareAttribute` never tests `nAttrSet == -1`** (`item_attribute.cpp:439`),
+   where its two siblings at `:157` and `:497` do. It is reachable from a client
+   record: `input_main.cpp:3504` forwards `CG_ATTR67_ADD` into
+   `CHARACTER::Attr67Add`, whose gate at `char_item.cpp:10534` admits `ITEM_WEAPON`
+   with no subtype check, and arrows (vnums 8000-8009) are the only `ITEM_ARMOR` /
+   `ITEM_WEAPON` class for which `GetAttributeSetIndex()` returns -1
+   (`item_attribute.cpp:14-19`). `questlua_attr67add.cpp:89` then reads
+   `bMaxLevelBySet[-1]`, discards the bool, and pushes `true` at `:92`, so the
+   quest prints "Bonus added successfully!". **Decision: refuse the `-1` set at
+   every boundary** and say so when the attribute-67 system is ported.
+
+The survey also overturned three of its own claims, recorded in its section 1 so
+they are not re-introduced: the no-op rate is 27% and not 57%; the U+FEFF at
+`prodomodefines.h:85` does not break the build; and `PutAttributeWithLevel(6)`
+does not crash. `ITEM_SOCKET_INFINITE` does not exist on either side, so the
+Rewrite does not invent it. Its 5.5 table of socket drift inside the 6-socket
+build, and its ten-item Rewrite checklist, are the port checklist for the unit
+that actually sends an item window.
+
+### 195.9 Controls
+
+- Every negative claim in this section was checked with a positive and a negative
+  control. The window-byte sweep is a sweep for that reason: it asserts the right
+  answer for all 256 bytes, and the test for a 12-cell socket array walks indices
+  0 through 11 so an accessor that returned `Some` for everything would fail at
+  index 6.
+- The `aLimits` shape claim is a positive claim about `tables.h:844-847` and
+  `:879`, read directly, with the loader sites `ClientManagerBoot.cpp:1610-1626`
+  that consume both halves. `width` was not re-measured by a probe this unit; see
+  the receipt.
+- The stride-8 claim has two independent witnesses: the enum at `length.h:84`, and
+  the test that asserts cells 9 and 15 stay free where a stride of 6 would have
+  marked them.
+- The claim that legacy's `SetItem` overwrites rather than half-updates the grid
+  was **corrected during this unit**. The first description, taken from the
+  audit, said it "writes as it walks and returns mid-loop". Reading
+  `char_item.cpp:441-462` numbered shows there is no conflict test and no early
+  return at all. The code comments and this section carry the source's behaviour.
+
+### 195.10 Out of scope
+
+- **No codec moves.** The four game-to-client item-window records stay codec-only
+  (193) and `sys.item.core` stays `codec`.
+- **No Parity row is `ported`.** A storage model is not a scenario.
+- **The safebox and the shop** are not modelled. `NoContainer` names them and
+  stops.
+- **The cube, the sash materials and the cloth materials** are on `CCharacter` in
+  legacy and are not represented here; the probe records their widths.
+- **No `SetCount` can destroy an item**, and the unit that wires destruction into
+  storage has to decide who owns the `Item` when a count change removes it.
+- **The attribute and socket *effects*** (the timer countdowns, the unique-expiry
+  arithmetic, the apply types) are not implemented. 195.8 constrains them; it
+  does not port them.
+
+### 195.11 Receipt
+
+- `cargo fmt --all -- --check`: clean.
+- `cargo build --workspace --locked --offline`: clean.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast`
+  (`env -u DATABASE_URL`): **PASSED=2179 FAILED=0** across 31 targets.
+- `cargo test --workspace --doc --locked --offline`: **DOC_FAILED=0**.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: clean.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: clean.
+
+Test counts moved from 2,130 to 2,179, which is exactly the 49 new tests: 40 in
+`world` (15 in `world/src/item.rs`, 25 in `world/src/character/items.rs`) and 9 in
+`common` (3 in `constants.rs`, 6 in `item_slots.rs`). Crate totals after this
+unit: `common` 89, `protocol` 1,167, `world` 72, `gamedata` 266.
+
+**Not measured.** `i686-linux-gnu-g++-12` is not installed on this machine, so no
+packed-width probe ran. The two widths this unit reasons about -- the 2-byte grid
+element and the 5-byte `TItemLimit` -- are read from the legacy struct
+declarations and confirmed by the arithmetic a value-only test would not catch
+(1370 fits a `WORD` and not a `BYTE`; 2 x 5 = 10 and not 8). The ledger-194 probe
+was corrected for the Dragon Soul stride and re-run for that constant only, so
+its own `sizeof` results stand.
