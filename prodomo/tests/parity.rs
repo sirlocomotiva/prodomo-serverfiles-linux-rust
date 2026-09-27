@@ -1564,6 +1564,33 @@ fn check(database: &ScratchDatabase, condition: &str) {
     .unwrap_or_else(|error| panic!("{condition}: {error}"));
 }
 
+/// Assert a condition once it holds, up to a deadline.
+///
+/// A save is an effect of the server, not an answer to the client, so a disconnect and the write
+/// it causes are not ordered on the wire: the client sees the socket close and the row may be a
+/// moment behind it. A test that reads the row straight after the close would be racing its own
+/// server, and a failure would mean nothing.
+fn wait_for(database: &ScratchDatabase, condition: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut last;
+    loop {
+        match execute(
+            database.url(),
+            &format!(
+                "DO $$ BEGIN IF NOT ({condition}) THEN RAISE EXCEPTION 'failed'; END IF; END $$"
+            ),
+        ) {
+            Ok(()) => return,
+            Err(error) => last = error.to_string(),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{condition} never held: {last}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// Log `login` in on Channel 1, once no closing descriptor holds it, and return the connection,
 /// the empire it shows, and the character list.
 fn select_screen(server: &Server, login: &[u8]) -> (Keyed, u8, Vec<u8>) {
@@ -2438,4 +2465,94 @@ fn a_claim_on_a_character_who_has_left_finds_nobody() {
     // `if (!victim) continue;` skips an element whose VID is not in the world, so the batch
     // ends up empty and no record is written at all.
     yankee.unanswered(&client_sync_position(&[(alpha, 470_010, 950_010)]));
+}
+
+/// `sys.char.save`: a character that walks and then disconnects has its new position in the
+/// row, because `CHARACTER::Disconnect` flushes the queued save and, when nothing was queued,
+/// calls `SaveReal` itself (`G/char.cpp:1786-1789`).
+///
+/// Nothing saves while the descriptor lives. Legacy's first save is one full
+/// `save_event_second_cycle` after `CInputLogin::Entergame` calls `StartSaveEvent`
+/// (`G/input_login.cpp:656`), and the default cycle is 120 seconds, so a scenario that asserts
+/// an unchanged row is asserting the arming delay and not a missing write.
+#[test]
+fn a_logout_writes_where_the_character_stands() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    check(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Alpha') = 470000",
+    );
+    check(
+        &database,
+        "(SELECT y FROM player WHERE name = 'Alpha') = 950000",
+    );
+
+    let (mut alice, _alpha) = enter_world(&server, b"alice", 0);
+    // `FUNC_COMBO` is 3, the branch that steps without a duration.
+    alice.send_record(&client_move(3, 7, 40, 470_100, 950_100, 0x5eed));
+    alice.quiet("PacketAround excludes the mover");
+    // The row is not written while the descriptor lives: the event is armed a full cycle out.
+    check(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Alpha') = 470000",
+    );
+
+    // The disconnect is what writes it. `drop` closes the socket; the server reads the EOF,
+    // breaks the read loop, and saves before the descriptor is torn down.
+    drop(alice);
+    wait_for(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Alpha') = 470100",
+    );
+    wait_for(
+        &database,
+        "(SELECT y FROM player WHERE name = 'Alpha') = 950100",
+    );
+
+    // And the row is committed, so the next login enters the game at the position the character
+    // was left at rather than the one it was created at.
+    let (mut again, _) = enter_world(&server, b"alice", 0);
+    again.send_record(&client_move(3, 7, 0, 470_200, 950_200, 0x5eee));
+    again.quiet("the reloaded character is in the game at the saved position");
+    drop(again);
+}
+
+/// `sys.char.save`: the row is written by the save event too, not only at logout. This is
+/// ADR-0003's "in the background at most a few seconds late", with the cycle shortened to a
+/// second so a scenario can watch it.
+#[test]
+fn the_save_cycle_writes_the_row_while_the_character_is_still_connected() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "save_event_second_cycle = 1",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+
+    let (mut alice, _alpha) = enter_world(&server, b"alice", 0);
+    alice.send_record(&client_move(3, 7, 40, 470_100, 950_100, 0x5eed));
+    alice.quiet("the mover is excluded from its own broadcast");
+    wait_for(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Alpha') = 470100",
+    );
+    // The descriptor is still open: the write came from the event, not from a disconnect.
+    let (bytes, state) = alice.client.drain(std::time::Duration::from_millis(200));
+    assert!(bytes.is_empty(), "a save sends no record: {bytes:02x?}");
+    assert_eq!(
+        state,
+        parity::client::Quiet::Open,
+        "the client is still connected"
+    );
+    drop(alice);
 }

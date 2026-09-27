@@ -180,6 +180,8 @@ fn initialize_server(config_path: &Path, verbose: bool) -> Result<ServerConfig, 
 struct ConnectionContext {
     clock: BootLiveClock,
     ping_cycle: Duration,
+    /// `[game] save_event_second_cycle` as an interval, from `prodomo::save::event_period`.
+    save_cycle: Duration,
     state: Arc<ServerState>,
     channels: Arc<ChannelStatusBoard>,
     store: Store,
@@ -259,6 +261,30 @@ struct Held {
     /// The registry entry this descriptor occupies on its map, taken when the game phase is
     /// entered and released when the descriptor ends.
     presence: Option<Lease>,
+    /// The save event, started when the character enters the game and stopped when the
+    /// descriptor ends (legacy `StartSaveEvent` at `G/input_login.cpp:656`).
+    save: Option<SaveEvent>,
+}
+
+/// The per-descriptor half of legacy's save cycle.
+///
+/// Legacy keeps a shared queue (`CHARACTER_MANAGER::m_set_pkChrForDelayedSave`) that the game
+/// loop drains every 29 Pulses, and a per-character event that queues. There is no game loop yet,
+/// so the Rewrite runs the event on the descriptor that owns the character and writes the row
+/// itself. The queue is therefore not reproduced: [`SaveEvent::queued`] records only whether the
+/// event has fired at least once, which is when legacy's set would first have held this
+/// character, and both arms of the disconnect save write the row, so nothing observable rides on
+/// it. What is reproduced is the two things a client can see: the row is written within one
+/// cycle, and it is written when the character disconnects.
+struct SaveEvent {
+    /// `event_create(save_event, info, save_event_second_cycle)`. The first tick is one full
+    /// cycle after `enter_game`, because `event_create` arms the first fire a period out.
+    interval: tokio::time::Interval,
+    /// `m_dwPlayStartTime`, which `ResetPlayTime()` sets to the current `get_dword_time()` in
+    /// `CInputLogin::Entergame` (`G/input_login.cpp:653`).
+    play_start: std::time::Instant,
+    /// Whether the save event has fired, which is when legacy's queue first holds the character.
+    queued: bool,
 }
 
 /// The slice of `CHARACTER` that movement and chat need, kept on the descriptor rather than
@@ -368,6 +394,22 @@ async fn handle_connection(
         &mut held,
     )
     .await;
+    // `CHARACTER::Disconnect` flushes the queued save and, if the character was not queued,
+    // calls `SaveReal` itself (`G/char.cpp:1786-1789`), then sets `m_bSkipSave` so nothing
+    // writes after (`G/char.cpp:1800`). Both arms write the row, so the branch is the log line
+    // only; the write is here because the descriptor still exists, which is the other of
+    // `SaveReal`'s two guards (`G/char.cpp:1660-1664`).
+    if held.save.is_some() {
+        let queued = held.save.as_ref().is_some_and(|event| event.queued);
+        let written = save_held(&context, &held, std::time::Instant::now()).await;
+        info!(
+            %addr,
+            ?queued,
+            route = ?prodomo::save::judge_disconnect_save(queued),
+            written,
+            "Character disconnected; wrote the row"
+        );
+    }
     if let Some(lease) = held.presence.as_ref() {
         info!(%addr, presence = lease.id(), "Leaving the client set");
         // `DESC::SetPlayer(NULL)` on a disconnect removes the character from the world, so a
@@ -490,6 +532,17 @@ async fn pump_descriptor<S>(
                 if session.phase() == ClientPhase::Close {
                     info!(%addr, "Client did not answer the ping; closing");
                     break;
+                }
+            }
+            // `CHARACTER::save_event` (`G/char.cpp:5070-5082`): the character is queued, and
+            // the row is written on the next drain. There is no game loop to drain here, so
+            // this arm writes the row the drain would have written.
+            () = save_tick(held.save.as_mut()) => {
+                if let Some(event) = held.save.as_mut() {
+                    event.queued = true;
+                }
+                if save_held(context, &*held, std::time::Instant::now()).await {
+                    info!(%addr, "Save event wrote the character row");
                 }
             }
             _ = shutdown_rx.recv() => {
@@ -1620,6 +1673,17 @@ where
         move_duration: 0,
         sync_hack_count: 0,
     });
+    // `CInputLogin::Entergame` calls `ResetPlayTime()` and then `StartSaveEvent()`
+    // (`G/input_login.cpp:653-656`), so the playtime clock and the save event both start when
+    // the character enters the game, not when the descriptor is accepted.
+    if held.save.is_none() {
+        let now = tokio::time::Instant::now();
+        held.save = Some(SaveEvent {
+            interval: tokio::time::interval_at(now + context.save_cycle, context.save_cycle),
+            play_start: std::time::Instant::now(),
+            queued: false,
+        });
+    }
     if held.presence.is_none() {
         let lease = context.clients.join(ClientEntry {
             channel: seat.number,
@@ -1648,6 +1712,76 @@ where
         held.presence = Some(lease);
     }
     true
+}
+
+/// Write the character's row, the way `CHARACTER::SaveReal` does.
+///
+/// Returns `false` when the character could not be written, which is either legacy's own
+/// refusal (`m_bSkipSave`, or no descriptor) or a store error. The caller logs; nothing here
+/// reports success to a client, because legacy's write goes to the DB process and the game loop
+/// never learns whether it landed.
+///
+/// The playtime is accumulated from [`SaveEvent::play_start`], not from the session length, so a
+/// save at ninety seconds banks the minute a save at thirty seconds did not. Legacy's remainder
+/// carry is what makes that work, and [`prodomo::save::playtime`] is the rule.
+async fn save_held(context: &ConnectionContext, held: &Held, at: std::time::Instant) -> bool {
+    let (Some(character), Some(account), Some(avatar)) = (
+        held.character.as_ref(),
+        held.account.as_ref(),
+        held.avatar.as_ref(),
+    ) else {
+        return false;
+    };
+    let Some(event) = held.save.as_ref() else {
+        return false;
+    };
+    if prodomo::save::judge_save_real(false, true) != prodomo::save::SaveRealOutcome::Write {
+        return false;
+    }
+    // `get_dword_time() - m_dwPlayStartTime` is an unsigned 32-bit millisecond count
+    // (`server/server/libthecore/utils.cpp:467-472`), so an elapsed time that overflowed a
+    // 32-bit `DWORD` wraps in legacy and wraps here. `Instant` cannot go backwards, so this is
+    // the one value that is clamped rather than wrapped: a negative elapsed time is not a time
+    // travel, it is a clock this Rewrite does not have.
+    let elapsed = u32::try_from(at.saturating_duration_since(event.play_start).as_millis())
+        .unwrap_or(u32::MAX);
+    let save = prodomo::save::player_save(
+        character,
+        prodomo::save::SavePosition {
+            x: avatar.x,
+            y: avatar.y,
+        },
+        prodomo::save::playtime(character.playtime_minutes, elapsed),
+    );
+    match db::players::save_character(&context.store, account.id, character.id, &save).await {
+        Ok(true) => true,
+        Ok(false) => {
+            warn!(
+                player = character.id,
+                account = account.id.get(),
+                "Save reached no character row"
+            );
+            false
+        }
+        Err(error) => {
+            warn!(player = character.id, %error, "Could not save the character");
+            false
+        }
+    }
+}
+
+/// The next fire of the save event, or nothing at all when the character is not in the game.
+///
+/// The arm in the descriptor loop borrows `held.save`, so it cannot be a `tokio::time::Interval`
+/// held in the select itself. Before `enter_game` the event does not exist in legacy either, and
+/// a descriptor that never reaches the game has no row to write.
+async fn save_tick(save: Option<&mut SaveEvent>) {
+    match save {
+        Some(event) => {
+            event.interval.tick().await;
+        }
+        None => std::future::pending().await,
+    }
 }
 
 /// The `bLanguage` byte a Channel descriptor carries.
@@ -2295,6 +2429,14 @@ fn connection_context(
     ConnectionContext {
         clock: BootLiveClock::new(),
         ping_cycle: Duration::from_secs(u64::from(config.game.ping_event_second_cycle)),
+        // `ServerConfig::validate` has already refused a zero cycle, so this cannot be `None`
+        // for a process that started; it is `expect`ed rather than defaulted so a caller that
+        // builds a context by hand cannot get a busy loop.
+        save_cycle: prodomo::save::event_period(
+            config.game.save_event_second_cycle,
+            prodomo::save::PASSES_PER_SEC,
+        )
+        .expect("[game] save_event_second_cycle was refused by validate"),
         state: Arc::clone(state),
         channels: Arc::new(ChannelStatusBoard::new(channel_ports, &config.game)),
         store: store.clone(),

@@ -771,6 +771,7 @@ mod tests {
             x: 0x0012_3456,
             y: -0x0012_3457,
             skill_group: 6,
+            playtime_minutes: 0x0a0b_0c0d,
             change_name: false,
         }
     }

@@ -8,8 +8,8 @@ mod support;
 use db::accounts::{create_account, AccountError, AccountId, Name, NewAccount};
 use db::credentials::{DeleteCode, Login, NewPassword};
 use db::players::{
-    change_name, create_player, delete_player, load_character, lobby, save_position, select_empire,
-    Created, LobbyPlayer, NewPlayer, PlayerDelete,
+    change_name, create_player, delete_player, load_character, lobby, save_character,
+    save_position, select_empire, Created, LobbyPlayer, NewPlayer, PlayerDelete, PlayerSave,
 };
 use db::sqlx::{self, Row};
 use db::store::Store;
@@ -624,5 +624,126 @@ async fn a_saved_position_takes_the_origin_and_negative_coordinates() {
         );
         let moved = load_character(store, alice, hero).await.unwrap();
         assert_eq!((moved.x, moved.y), (x, y));
+    }
+}
+
+/// A whole-row save writes every mutable column, and the next load reads them all back. The
+/// values are chosen so that no two columns share a byte pattern, so a column bound to the wrong
+/// parameter is visible.
+#[tokio::test]
+async fn a_whole_row_save_is_what_the_next_load_reads() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let hero = created(store, alice, 0, "Hero").await;
+    let other = created(store, bob, 0, "Other").await;
+
+    let save = PlayerSave {
+        level: 41,
+        exp: 0x0102_0304_0506,
+        conqueror_level: 7,
+        conqueror_exp: 0x00fe_dcba_9876,
+        st: 51,
+        ht: 52,
+        dx: 53,
+        iq: 54,
+        hp: 0x0012_3456,
+        sp: 0x00ab_cdef,
+        stamina: 0x0011_2233,
+        gold: 0x0012_3456_789a_bcde,
+        voice: 77,
+        part_base: 3,
+        main_part: 0x1122,
+        hair_part: 0x3344,
+        sash_part: 0x5566,
+        x: 459_812,
+        y: -953_877,
+        skill_group: 9,
+        playtime_minutes: 137,
+    };
+    assert!(save_character(store, alice, hero, &save).await.unwrap());
+    // The other account's row is untouched: the write names the account as well as the player.
+    assert!(load_character(store, bob, other).await.is_ok());
+
+    let read = load_character(store, alice, hero).await.unwrap();
+    assert_eq!(read.level, save.level);
+    assert_eq!(read.exp, save.exp);
+    assert_eq!(read.conqueror_level, save.conqueror_level);
+    assert_eq!(read.conqueror_exp, save.conqueror_exp);
+    assert_eq!(read.st, save.st);
+    assert_eq!(read.ht, save.ht);
+    assert_eq!(read.dx, save.dx);
+    assert_eq!(read.iq, save.iq);
+    assert_eq!(read.hp, save.hp);
+    assert_eq!(read.sp, save.sp);
+    assert_eq!(read.stamina, save.stamina);
+    assert_eq!(read.gold, save.gold);
+    assert_eq!(read.voice, save.voice);
+    assert_eq!(read.part_base, save.part_base);
+    assert_eq!(read.main_part, save.main_part);
+    assert_eq!(read.hair_part, save.hair_part);
+    assert_eq!(read.sash_part, save.sash_part);
+    assert_eq!((read.x, read.y), (save.x, save.y));
+    assert_eq!(read.skill_group, save.skill_group);
+    assert_eq!(read.playtime_minutes, save.playtime_minutes);
+}
+
+/// A save cannot reach a row of another account, and a player ID above the column's range is
+/// reported instead of wrapped into a negative ID that could name a real character.
+#[tokio::test]
+async fn a_save_names_the_account_and_refuses_a_wide_player_id() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let hero = created(store, alice, 0, "Hero").await;
+    let other = created(store, bob, 0, "Other").await;
+    let before = load_character(store, bob, other).await.unwrap();
+
+    let save = PlayerSave {
+        level: 99,
+        exp: 1,
+        conqueror_level: 0,
+        conqueror_exp: 0,
+        st: 1,
+        ht: 1,
+        dx: 1,
+        iq: 1,
+        hp: 1,
+        sp: 1,
+        stamina: 1,
+        gold: 1,
+        voice: 1,
+        part_base: 1,
+        main_part: 1,
+        hair_part: 1,
+        sash_part: 1,
+        x: 1,
+        y: 1,
+        skill_group: 1,
+        playtime_minutes: 1,
+    };
+    // Bob's account naming Alice's character is a miss, not a write.
+    assert!(!save_character(store, bob, hero, &save).await.unwrap());
+    let after = load_character(store, bob, other).await.unwrap();
+    assert_eq!(
+        after.level, before.level,
+        "another account's row is still where it was"
+    );
+
+    // An ID inside the column's range that names no row is a miss too.
+    assert!(!save_character(store, alice, 1_000_000, &save)
+        .await
+        .unwrap());
+    for too_wide in [i32::MAX as u32 + 1, u32::MAX] {
+        assert!(matches!(
+            save_character(store, alice, too_wide, &save).await,
+            Err(AccountError::NoSuchPlayer(missing)) if missing == too_wide
+        ));
     }
 }

@@ -16555,3 +16555,158 @@ run; and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --
 with the PostgreSQL-backed tests run against
 `postgres://prodomo:prodomo-test@127.0.0.1:55432/prodomo` and no scratch database left behind.
 The i686 cross compiler was not needed: no width was measured in this slice.
+
+## 190. The save cycle, the disconnect save, and the playtime carry
+
+ADR-0003 asks for two things: player state is written in the background at most a few seconds
+late, and always on logout, Warp, Channel change, and shutdown. Warp is done (ledger 189). This
+entry is the other three, and the arithmetic that sits under them.
+
+### 190.1 Two schedules, one of them not what the key says
+
+Legacy has **two** independent schedules, and they are easy to conflate.
+
+`CHARACTER::StartSaveEvent` (`G/char.cpp:5084-5093`) creates a repeating event with period
+`save_event_second_cycle` and calls `ch->Save()` and `ch->FlushDelayedSaveItem()` on each fire.
+`StartSaveEvent` is called from `CInputLogin::Entergame` at `G/input_login.cpp:656`, so the cycle
+starts when the character enters the game, not when the descriptor is accepted.
+
+`CHARACTER::Save()` (`G/char.cpp:1472-1476`) writes nothing. It calls
+`CHARACTER_MANAGER::DelayedSave`, which inserts the character into `m_set_pkChrForDelayedSave`
+(`G/char_manager.cpp:798-801`). The row is written by `SaveReal`, reached two ways:
+`CHARACTER_MANAGER::ProcessDelayedSave` sweeps the whole set (`G/char_manager.cpp:759-770`), and
+the game loop calls it on `pulse % (passes_per_sec + 4)` (`G/main.cpp:276`).
+
+So the delay between a change and its row is **29 Pulses**, not `save_event_second_cycle`. The
+`+ 4` is legacy's, and it is what makes the drain 1.16 seconds rather than a clean second. It is
+kept: `prodomo::save::drain_period` pins it and a test asserts 1160 ms.
+
+`save_event_second_cycle` is a *different* thing: how often an unchanged character is rewritten.
+Its default is `passes_per_sec * 120` (`G/config.cpp:31`), which is 3000 Pulses and therefore
+**120 seconds, not the 3 minutes the Korean comment beside it claims**. The comment is wrong and
+the value is not; the Rewrite's default was already 120 and is now pinned to the value rather
+than the comment. The `[game]` key stays in seconds, because legacy multiplies by 25 while
+parsing (`G/config.cpp:934`) and the event fires on a Pulse boundary, which makes the round trip
+an identity. `prodomo::save::event_period` performs the multiply so a cycle that cannot be held
+in Pulses is refused the same way legacy would overflow it.
+
+**The queue is not reproduced.** There is no game loop yet, so there is nothing to drain a shared
+set. The Rewrite runs the event on the descriptor that owns the character and writes the row
+itself. Both arms of the disconnect branch write the row, so nothing a client can see rides on
+the difference, and `SaveEvent::queued` records only whether the event has fired — which is when
+legacy's set would first have held the character. When ADR-0002's game thread lands, the event
+moves onto it and the drain is restored; the policy module does not change.
+
+### 190.2 The disconnect save, and the two guards above it
+
+`CHARACTER::Disconnect` (`G/char.cpp:1786-1789`) ends with:
+
+```cpp
+if (!CHARACTER_MANAGER::instance().FlushDelayedSave(this))
+    SaveReal();
+```
+
+`FlushDelayedSave` (`G/char_manager.cpp:803-813`) removes the character from the set and saves it
+if it was there, and returns whether it was. So both arms write the row; only the route differs.
+`judge_disconnect_save` records the branch, and the only consequence in the Rewrite is the log
+line, which is exactly what distinguishes them in legacy.
+
+`CHARACTER::SaveReal` has two guards before it does anything (`G/char.cpp:1656-1664`):
+`m_bSkipSave` returns first, and then `!GetDesc()` returns with a log line. `m_bSkipSave` is
+`false` in the constructor (`G/char.cpp:300`) and is set `true` as the **last** statement of
+`Disconnect` (`G/char.cpp:1800`, "after this, do not save any more"), and never cleared. So the
+disconnect save must happen *before* that assignment, and nothing saves after it. The Rewrite's
+disconnect save runs in `handle_connection` after the read loop breaks and before `held` drops,
+which is the same order, and the `judge_save_real` arm for it is `Write` because the descriptor
+still exists.
+
+The second guard is the reason the Rewrite can assert `judge_save_real(false, true) == Write` at
+the call site: it is structurally impossible to reach `save_held` without a descriptor, so
+`NoDescriptor` is dead there. It is kept in the enum because it is a real legacy arm and a
+future caller that saves from a background task will need it.
+
+### 190.3 The playtime carry, which is the arithmetic worth pinning
+
+`POINT_PLAYTIME` is a running whole-minute counter, and it does not simply count session length.
+`CreatePlayerProto` (`G/char.cpp:1519-1550`) computes
+`dwPlayedTime = get_dword_time() - m_dwPlayStartTime` and then:
+
+- banks `dwPlayedTime / 60000` minutes **only if `dwPlayedTime > 60000`**, strictly greater;
+- hands `dwPlayedTime % 60000` to `ResetPlayTime`, which sets
+  `m_dwPlayStartTime = get_dword_time() - remainder`.
+
+The remainder is never stored, so two 40-second sessions bank nothing on their own and bank one
+minute between them, because the second session's elapsed time is 80 seconds. `get_dword_time` is
+milliseconds since boot in a `DWORD` (`server/server/libthecore/utils.cpp:467-472`), so the
+elapsed time is an unsigned 32-bit count and the subtraction wraps every ~49.7 days. A test pins
+each of the four cases: exactly 60.000 s banks nothing, 60.001 s banks a minute, an under-minute
+session carries its whole elapsed time, and the pair of 40-second sessions banks one.
+
+The Rewrite clamps the elapsed time instead of wrapping it, and this is recorded rather than
+reproduced: `tokio::time::Instant` cannot go backwards, so a negative elapsed time is a clock the
+Rewrite does not have. Legacy's wrap at 49.7 days would need a server up that long to observe.
+
+`POINT_PLAYTIME` needed a column to live in: `Character` did not carry `playtime_minutes`, so
+`load_character` now reads it and `save_character` writes it. Every other column in the save is
+the value the load returned, because nothing in the Rewrite changes a column yet. A save rewrites
+the whole row rather than the columns that changed, because that is what `CreatePlayerProto`
+does — it `memset`s the table and fills every field — so a missing column would be a value legacy
+preserved from its own read and the Rewrite would silently drop.
+
+### 190.4 What is proved, and by what
+
+`db::players::save_character` names the account and the player, so a descriptor holding a stale
+claim cannot write another account's row, and reports a miss instead of reporting a save that
+reached nothing. Legacy cannot report this: its write goes to the DB process, which drops a
+missing row without telling the game process. Two store tests cover the round trip and the
+ownership.
+
+Two scenarios cover the live path:
+
+- `a_logout_writes_where_the_character_stands` — the character walks, the row is **unchanged**
+  while the descriptor lives (which is the arming delay, not a missing write), the client
+  disconnects, and the row is at the new position and is committed.
+- `the_save_cycle_writes_the_row_while_the_character_is_still_connected` — the same walk with
+  `save_event_second_cycle = 1`, and the row moves **without** a disconnect, which is the
+  background half of ADR-0003. The connection is asserted still open afterwards, and no record
+  arrives, because a save is not a client-visible event.
+
+Both need a `wait_for` helper. A save is an effect of the server, not an answer to the client:
+the client sees the socket close and the row may be a moment behind it, so a test that read the
+row straight after the close would be racing its own server.
+
+Three mutants were applied to the pristine file and each was killed by the scenario that owns
+its path, which is the point of having two scenarios rather than one:
+
+| mutant | killed by |
+|---|---|
+| the disconnect save never runs | `a_logout_writes_where_the_character_stands` |
+| the save event never fires | `the_save_cycle_writes_the_row_while_the_character_is_still_connected` |
+| the save writes the row's stored position, not the avatar's | both |
+
+The third is the one that matters most: a save that wrote the row it read would pass every
+existing test and would lose every move a character ever made.
+
+### 190.5 The three events ADR-0003 names
+
+- **Logout** — done, above.
+- **Warp** — the login home move writes its own row in the refusal transaction (ledger 189). The
+  in-game Warp has no handler yet, so `CG_WARP` is still unwired; when it lands, `WarpSet` saves
+  (`G/char.cpp:6747`) and the same row write covers it.
+- **Channel change** — a Divergence by construction. Legacy changes Channel by disconnecting and
+  reconnecting through `P2P_MANAGER` (retired by ADR-0001), and in the Rewrite a Channel change
+  *is* a logout and a login, so the logout save is the Channel-change save. There is no separate
+  path to add.
+- **Shutdown** — a descriptor ends on the shutdown broadcast, which is the same break as a
+  disconnect, so the same save runs. A `SIGKILL` leaves rows up to one cycle stale, which is
+  legacy's behaviour too: it has no shutdown save either, and its process is killed the same
+  way.
+
+### 190.6 Receipt
+
+`cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets --locked --offline -- -D
+warnings`; `cargo test --workspace --all-targets --locked --offline --no-fail-fast`; the `--doc`
+run; and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` all pass,
+with the PostgreSQL-backed tests run against
+`postgres://prodomo:prodomo-test@127.0.0.1:55432/prodomo` and no scratch database left behind.
+The i686 cross compiler was not needed: no width was measured in this slice.

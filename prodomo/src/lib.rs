@@ -65,6 +65,9 @@ pub mod listeners;
 
 pub mod operator;
 
+/// When a character's row is written, as legacy's save cycle and disconnect decide it.
+pub mod save;
+
 /// Pure, injected policy for the legacy sync-position gameplay action.
 pub mod sync_position;
 pub mod warp;

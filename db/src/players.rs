@@ -360,6 +360,121 @@ pub async fn save_position(
     Ok(updated.rows_affected() == 1)
 }
 
+/// The mutable columns of one character row, which is what a save writes.
+///
+/// Legacy builds the same set in `CHARACTER::CreatePlayerProto` (`G/char.cpp:1478-1654`) and
+/// sends it whole in `CHARACTER::SaveReal` (`G/char.cpp:1656-1683`) through
+/// `HEADER_GD_PLAYER_SAVE`. Only the columns a live session can change are here: the select
+/// slot, the Name, the race, the parts, and the creation stamp are fixed at create time, and
+/// the account's empire is the account row's, not this one's.
+///
+/// A save writes the whole row rather than the columns that changed, because that is what
+/// legacy does: `CreatePlayerProto` clears the table with `memset` and fills every field, so a
+/// write is a full replacement and a missing column is a value legacy would have preserved
+/// from its own read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerSave {
+    /// `tab.level`.
+    pub level: u8,
+    /// `tab.exp`.
+    pub exp: i64,
+    /// `tab.conqueror_level`, which legacy only has under `__CONQUEROR_LEVEL__`.
+    pub conqueror_level: u8,
+    /// The conqueror experience, the conqueror counterpart of `tab.exp`.
+    pub conqueror_exp: i64,
+    /// `tab.st`.
+    pub st: u8,
+    /// `tab.ht`.
+    pub ht: u8,
+    /// `tab.dx`.
+    pub dx: u8,
+    /// `tab.iq`.
+    pub iq: u8,
+    /// `POINT_HP` through `GetRealPoint`, which is `tab.hp` after `tab.st`/`tab.ht` are added.
+    pub hp: i32,
+    /// `POINT_SP`.
+    pub sp: i32,
+    /// `POINT_STAMINA`.
+    pub stamina: i32,
+    /// `tab.gold`, carried in `__ENABLE_GAYA_SYSTEM__` as `tab.gaya` as well.
+    pub gold: i64,
+    /// `tab.voice`, which is `POINT_VOICE`.
+    pub voice: u8,
+    /// `tab.part_base`, a `BYTE` from `m_pointsInstant.bBasePart`.
+    pub part_base: u8,
+    /// `tab.part_main`.
+    pub main_part: u16,
+    /// `tab.part_hair`.
+    pub hair_part: u16,
+    /// `tab.part_sash`, which `__SASH_SYSTEM__` adds.
+    pub sash_part: u16,
+    /// The saved x, in world units.
+    pub x: i32,
+    /// The saved y, in world units.
+    pub y: i32,
+    /// `tab.skill_group`.
+    pub skill_group: u8,
+    /// Minutes played, `POINT_PLAYTIME` accumulated in `CreatePlayerProto`.
+    pub playtime_minutes: i32,
+}
+
+/// Write every mutable column of one character row.
+///
+/// This is the Rewrite's `CHARACTER::SaveReal`, reached on the save event and at disconnect.
+/// The account and the player are both named, so a descriptor cannot write a character of
+/// another account by holding a stale claim.
+///
+/// Returns `false` when the account holds no such character. Legacy cannot report this: its
+/// write goes to the DB process, which drops a row that does not exist without telling the game
+/// process, so the rewrite reports it instead of reporting a save that reached nothing.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchPlayer`] for a player ID above `i32::MAX`, for the reason
+/// [`save_position`] gives, and [`AccountError::Database`] otherwise. Every value is a bound
+/// parameter; no SQL is formatted.
+pub async fn save_character(
+    store: &Store,
+    account: AccountId,
+    player: u32,
+    save: &PlayerSave,
+) -> Result<bool, AccountError> {
+    let player_id = i32::try_from(player).map_err(|_| AccountError::NoSuchPlayer(player))?;
+    let updated = sqlx::query(
+        "UPDATE player SET level = $3, exp = $4, conqueror_level = $5, conqueror_exp = $6, \
+         st = $7, ht = $8, dx = $9, iq = $10, hp = $11, sp = $12, stamina = $13, gold = $14, \
+         voice = $15, part_base = $16, part_main = $17, part_hair = $18, part_sash = $19, \
+         x = $20, y = $21, skill_group = $22, playtime_minutes = $23 \
+         WHERE account_id = $1 AND id = $2",
+    )
+    .bind(account.to_column()?)
+    .bind(player_id)
+    .bind(i16::from(save.level))
+    .bind(save.exp)
+    .bind(i16::from(save.conqueror_level))
+    .bind(save.conqueror_exp)
+    .bind(i16::from(save.st))
+    .bind(i16::from(save.ht))
+    .bind(i16::from(save.dx))
+    .bind(i16::from(save.iq))
+    .bind(save.hp)
+    .bind(save.sp)
+    .bind(save.stamina)
+    .bind(save.gold)
+    .bind(i16::from(save.voice))
+    .bind(i16::from(save.part_base))
+    .bind(i32::from(save.main_part))
+    .bind(i32::from(save.hair_part))
+    .bind(i32::from(save.sash_part))
+    .bind(save.x)
+    .bind(save.y)
+    .bind(i16::from(save.skill_group))
+    .bind(save.playtime_minutes)
+    .execute(store.pool())
+    .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
 /// Choose the account's empire and move its characters to that empire's start. Returns
 /// `false`, and changes nothing, when the account already has an empire and a character.
 ///
@@ -502,6 +617,8 @@ pub struct Character {
     pub y: i32,
     /// The skill group.
     pub skill_group: u8,
+    /// Whole minutes played (`POINT_PLAYTIME`, sent as a `DWORD` and stored as `tab.playtime`).
+    pub playtime_minutes: i32,
     /// Whether the player must choose a new Name before playing.
     pub change_name: bool,
 }
@@ -524,7 +641,7 @@ pub async fn load_character(
     let row = sqlx::query(
         "SELECT p.slot, p.id, p.name, p.job, p.level, p.exp, p.conqueror_level, p.conqueror_exp, p.st, p.ht, \
          p.dx, p.iq, p.hp, p.sp, p.stamina, p.gold, p.voice, p.part_base, p.part_main, \
-         p.part_hair, p.part_sash, p.x, p.y, p.skill_group, p.change_name, a.empire \
+         p.part_hair, p.part_sash, p.x, p.y, p.skill_group, p.playtime_minutes, p.change_name, a.empire \
          FROM player AS p JOIN account AS a ON a.id = p.account_id \
          WHERE p.account_id = $1 AND p.id = $2",
     )
@@ -559,6 +676,7 @@ pub async fn load_character(
         x: row.try_get("x")?,
         y: row.try_get("y")?,
         skill_group: narrow(row.try_get::<i16, _>("skill_group")?, "skill_group")?,
+        playtime_minutes: row.try_get("playtime_minutes")?,
         change_name: row.try_get("change_name")?,
     })
 }
