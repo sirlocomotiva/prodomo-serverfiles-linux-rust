@@ -62,3 +62,39 @@ Each one is a real choice, not a lookup, so each gets a reason here.
 The unit is done when: `prodomo item give <name> <vnum> [count]` creates a persisted item in an
 online character's first legal cell, the client receives `GC_ITEM_SET`, and every gate in AGENTS.md
 is green.
+
+## Progress
+
+This issue is still `ready-for-agent`, because none of the gates above is met. Three units have
+landed against it and the remaining work is smaller each time.
+
+- **Ledger 199** (committed `396fdc95`): the placement half. `world::character::grant` ports the
+  `do_item` placement rule, and a live `Character` owns its four item windows.
+- **Ledger 200** (this tree): the whole grant as one transport-free reducer,
+  `prodomo::item_grant::grant_item`. It resolves the name, reads the prototype, allocates an id,
+  places the item, and returns the `ItemRow` and the `GcItemSet` together. Not called by anything.
+
+Three of the decisions above are now answered by the code rather than by argument:
+
+- **Targeting online characters only, by exact name.** Confirmed necessary, not just chosen: the
+  name index is keyed on the lower-cased name, so a case-sensitive lookup would be free to pick a
+  different character than the operator typed. The grant goes through
+  `CharacterManager::find_player_mut`, and a test grants to `"SHAMAN"` after creating `"Shaman"`.
+- **No `dwStackMax` in this fork.** The clamp decision above assumed a per-prototype maximum. The
+  search for it returns nothing while the same search for `bSize` returns two files, so the tree is
+  being searched and the constant is absent. The only ceiling is the global `ITEM_MAX_COUNT`, and
+  the reducer clamps to that.
+- **The log line is a warning, not a dependency.** The reducer logs a warning when the allocator
+  repeats an id, but the refusal itself is a returned `Err`, never a log line a caller has to read.
+
+Still to do, in the order the gates imply:
+
+1. A game-thread command that carries a `GrantRequest` from an async task to the thread that owns
+   the world, since a descriptor and a store handle are not `Send` into the game thread.
+2. The `GC_ITEM_SET` write to the descriptor, and the refusal replies (legacy answers with the
+   plain sentence, so a refusal is a chat line the operator sees).
+3. The Operator interface itself. The survey settled that this is **new**, not a port: legacy has
+   no adminpage item-give path, and the chat command is the only grant that exists.
+4. Persistence of the returned `ItemRow` in the same transaction as the save, then the
+   create-and-destroy round trip as a scripted-client scenario. That scenario is what moves
+   `sys.item.core` off `codec`.

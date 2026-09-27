@@ -41,7 +41,7 @@
 
 use protocol::item_pos::ItemPos;
 
-use crate::character::{CharacterItems, NPOS};
+use crate::character::{CharacterItems, Rejected, NPOS};
 use crate::item::Item;
 
 /// The window a granted item is placed in, unless it is a dragon soul.
@@ -66,12 +66,21 @@ pub enum GrantRefused {
     },
     /// The item could not be placed in a cell the search had already found free.
     ///
-    /// This is not a gameplay outcome. It means the search and the placement
-    /// disagreed, which they share code to make impossible; it is reported rather
-    /// than ignored so that if it ever happens it is a bug with a name.
+    /// This is not a gameplay outcome, and the [`Rejected`] is carried rather than
+    /// flattened to a message. Two very different things land here and a caller that
+    /// cannot tell them apart will pick the wrong remedy for each:
+    ///
+    /// * the search and the placement disagreed, which they share
+    ///   `footprint_is_clear` to make impossible, so this is a bug; or
+    /// * the item id is already held by this character, which is
+    ///   [`Rejected::AlreadyOwned`] and means the **caller** replayed an id. A fresh
+    ///   `ItemIds` handed to a world that already owns items does exactly that, and
+    ///   reporting it as "no room" would send an operator looking at the wrong thing.
     SearchDisagreedWithPlacement {
         /// The cell the search chose.
         cell: u16,
+        /// What the placement actually reported.
+        reason: Rejected,
     },
 }
 
@@ -155,9 +164,9 @@ fn place(
         // than a silently dropped item. The position is put back to `NPOS` so a
         // refused grant leaves the item unplaced rather than claiming a cell no grid
         // record points at.
-        Err(_) => {
+        Err(reason) => {
             item.pos = NPOS;
-            Err(GrantRefused::SearchDisagreedWithPlacement { cell })
+            Err(GrantRefused::SearchDisagreedWithPlacement { cell, reason })
         }
     }
 }

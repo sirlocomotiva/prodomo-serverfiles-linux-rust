@@ -151,6 +151,21 @@ impl CharacterManager {
         self.find_by_vid(vid)
     }
 
+    /// Finds a player character by name for mutation.
+    ///
+    /// The write-side twin of [`CharacterManager::find_player_by_name`], and the reason the
+    /// name lookup is not open-coded in the caller: the name index is keyed by the
+    /// lower-cased name, so a caller that iterated the character map instead would
+    /// match case-sensitively and disagree with the rule that names are unique
+    /// **regardless** of case.
+    ///
+    /// Returns `None` for an unknown name and for a name whose character is no longer
+    /// indexed, which is the same answer for both and needs no second question asked.
+    pub fn find_player_mut(&mut self, name: &str) -> Option<&mut Character> {
+        let vid = *self.by_player_name.get(&name.to_ascii_lowercase())?;
+        self.characters.get_mut(&vid)
+    }
+
     /// Destroys a character and removes all manager-owned memberships.
     ///
     /// # Errors

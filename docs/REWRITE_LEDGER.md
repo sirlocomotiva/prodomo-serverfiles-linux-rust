@@ -19250,3 +19250,128 @@ after the run: 0.
 **Not measured.** `i686-linux-gnu-g++-12` is still not installed, so the 72-byte width
 is the host `-m32` probe from 198.6 plus the encoded-length assertion here, not a fresh
 i686 compile.
+
+## 200. The item grant as one transport-free reducer
+
+### 200.1 What this unit is
+
+Ledger 199 ported the placement half of `ACMD(do_item)` into `world::character::grant`,
+and built the `GC_ITEM_SET` record, but a caller still had to do five things correctly
+by hand: resolve the name, look up the prototype, take an id, place the item, and build
+the store row. Five steps that must agree on one id and one cell is five chances to
+disagree, and a disagreement between the store row and the client record is not an
+error anywhere -- it is an item the client draws and the database has never heard of.
+
+`prodomo/src/item_grant.rs` is that composition as one function. `grant_item` takes
+the world, the prototypes, the allocator and a request, and returns a `GrantOutcome`
+carrying **both** the `ItemRow` to write and the `GcItemSet` to send. There is no
+intermediate state in which one exists without the other, which is the property the
+individual pieces did not have.
+
+It owns no I/O, no socket, no timer and no clock, so it is a reducer in the same sense
+`ClientLifecycle` and `DescriptorCrypto` are. `prodomo` is the composition layer, so
+this is where `world` and `db` meet: `world::item::Item` becomes `db::items::ItemRow`
+here and nowhere else.
+
+### 200.2 The name lookup is in the manager, not in the caller
+
+The first draft took a `&mut Character` and compared `character.name()` to the request
+name. That is a weaker check than it looks. `CharacterManager` indexes names by their
+lower-cased form, because the rule is that names are unique **regardless** of case; a
+caller that iterated the character map instead would match case-sensitively and hand
+the same target to a different character. So the lookup is
+`CharacterManager::find_player_mut`, the write-side twin of the existing
+`find_player_by_name`, and the grant takes the manager. A test grants to `"SHAMAN"`
+after creating `"Shaman"`.
+
+### 200.3 A refusal that is not a refusal, found by a probe
+
+Four tests failed on the first run and none of them was the implementation being wrong.
+The useful one: a test that built a second `ItemIds` over a world that already held
+items got `NoRoom { size: 1 }`, and the real cause was that the fresh allocator handed
+back id 1, which the character already owned. The code flattened
+`Rejected::AlreadyOwned` into "no room", which sends whoever debugs it to the
+inventory instead of the allocator.
+
+So `GrantRefused::SearchDisagreedWithPlacement` now carries the `Rejected` rather than
+discarding it, and `GrantRefusal::IdAlreadyOwned { id }` is its own answer. Any
+*other* disagreement is still a bug in the shared footprint rule, and is logged at
+`error` rather than dressed up as a gameplay refusal.
+
+This is recorded as a lesson, not a fix: a negative result is not a fact about the
+world, it is a fact about the code path that produced it, and flattening a cause into
+a user-visible message hides it.
+
+The same probe corrected a second wrong claim, in the other direction. A refused
+**target** takes no id, because the name is resolved first. A refused **placement**
+does take one, because the id is allocated before the cell is chosen. The first draft
+of the test asserted the opposite for both. The property that actually matters is
+weaker and is what the test now asserts: the allocator is monotonic and never
+reissues, so a retry cannot collide. (Legacy burns ids the same way; its counter is
+`dwMaxItemID` in `item.h` and the Rewrite's `ItemIds` is documented as the opposite,
+but a spent id is a spent id either way.)
+
+### 200.4 This fork has no `dwStackMax`
+
+The count clamp was going to be `min(requested, prototype stack max)`, because that is
+the usual Metin2 shape. Before transcribing it, the ceiling was searched for:
+
+```
+command grep -ral dwStackMax server/server/ legacy/
+```
+
+returns **nothing**, while the same search for `bSize` returns `common/tables.h` and
+`common/length.h`. That is a positive control: the tree is being searched, and the
+needle is absent. This fork has no per-prototype stack maximum. The only ceiling is
+the global `ITEM_MAX_COUNT = 5000` (`common/item_length.h:19`), already exposed as
+`common::item_slots::ITEM_COUNT_LIMIT`.
+
+So the count is `requested.unwrap_or(1).clamp(1, ITEM_COUNT_LIMIT)`. A zero is raised to
+one rather than stored, because a zero count means "destroy this" everywhere else in
+the codebase, so storing it here would create an item the first save deletes.
+
+### 200.5 Deliberate divergences from `ACMD(do_item)`
+
+* **No stacking.** Legacy `do_item` always creates a new item and a new cell. Kept.
+* **No random magic, socket or refine rolls.** A grant is a plain item: zeroed
+  sockets, attributes and refine state. Legacy rolls them through the item manager;
+  the RNG and prototype rules are not ported, and a silent approximation would be a
+  Quirk nobody chose.
+* **No locked page.** Inherited from 199.2, and re-pinned at the reducer level: a test
+  fills 90 cells, asserts the 91st is refused, then asserts the same grant *succeeds*
+  at cell 90 with one more `inven_point`. The positive control is on the same world
+  and the same allocator, so it separates the bound from a broken search.
+* **No delayed write.** The row comes out of the grant; when it is persisted is the
+  caller's decision, and the caller is told to do it immediately.
+
+### 200.6 Test counts and gates
+
+13 tests in `prodomo::item_grant`. They read the owner's real
+`legacy/gamedata/proto/item_proto.txt` and `item_names.txt` through the real reader and
+select vnums by searching for the property they need (a prototype of `size` 1, one in no
+custom bank, one in a custom bank) rather than hard-coding a vnum that would silently
+stop existing when the owner's data changes.
+
+`cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean;
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` 0
+diagnostics (three in the new tests, fixed by refactoring: two unnecessary casts that
+turned out to be identity conversions and so removed the cast *and* the `map`, and one
+`map_unwrap_or`); `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+--locked --offline` 0 diagnostics after one fix: a doc link from
+`CharacterManager::find_player_mut` to the private `characters` field, which became
+prose.
+
+**Test counts.** 33 targets, 2259 passed, 0 failed, both without a database and with
+PostgreSQL 18. 199.6 had 33 and 2,246, so this unit adds 13 tests and no targets.
+`cargo test --workspace --doc` is 9 targets, 1 passed, 0 failed, 15 ignored. Leftover
+`prodomo\_%` databases after the run: 0.
+
+**Still not reachable.** `grant_item` is not called by anything. There is no
+`CharacterItems` in a live `prodomo` character on the wire, no Operator command, and
+the slash-command handler in `main.rs:639` still logs `no interpreter yet`.
+`sys.item.core` therefore stays `codec`: a reducer with no scenario is not a ported
+system.
+
+**Not measured.** `i686-linux-gnu-g++-12` is still not installed. Nothing in this unit
+claims a new width; the 72-byte assertion is the encoded length of the existing
+measured codec from 198.6.
