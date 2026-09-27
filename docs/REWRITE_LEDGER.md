@@ -18991,3 +18991,125 @@ passing run and not only on a panic.
 **Not measured.** `i686-linux-gnu-g++-12` is still not installed, so no packed-width
 probe ran. Nothing in this unit turns on a width: every width here is a PostgreSQL type
 chosen against a C++ field, and those were probed in 196.3b by running the values.
+
+
+## 198. The custom-inventory category rule, and the free-cell search (ledger 198)
+
+Parent: `e4d5ebbf` (ledger 197). Two new read-side pieces, so the Operator item grant that
+is next has somewhere to put an item.
+
+### 198.0 What legacy has, and what it does not
+
+The survey behind this unit is at `/tmp/survey198_itemgrant.md`. Its first finding sets the
+scope: **legacy has no adminpage item-give path in this tree.** `command grep -ril adminpage`
+over `server/server` returns `game/config.cpp`, `game/config.h` and `game/input.cpp` only,
+and those are configuration keys and accessors. So the path to port is the in-game chat
+command `ACMD(do_item)` at `game/cmd_gm.cpp:467-519`, registered `game/cmd.cpp:282` as
+`{ "item", do_item, 0, POS_DEAD, GM_GOD }`. The Operator command that wraps it is a **new
+interface**, not a port, and the ledger records which half of this unit is which.
+
+### 198.1 `gamedata::item_custom_category`
+
+`CItem::IsCustomCategory` (`item.cpp:3002-3148`) is six `else if` arms over a `BYTE`
+category, each a hard-coded vnum list, a type, a sub-type, or an exclusion list checked
+before the type. It is **not** proto data, so it cannot be derived from the imported Game
+data and had to be transcribed.
+
+`is_custom_category` answers per category, which is the honest question, because the
+caller is a scan over all six. Three findings that the transcription tests pin:
+
+* **The 71083 guard is dead.** `item.cpp:1432-1434` skips vnum 71083 inside the category 4
+  list, and 71083 is in **no** list in that function. The branch is unreachable and the
+  vnum is placed by its type like any other. Carried as `CATEGORY_4_SKIPPED_VNUM` with a
+  test that asserts both halves, because "this is dead" is a claim that needs a witness.
+* **Category 5's vnum list is never read.** `dwCategory_5_Items` (`item.cpp:1292`) is
+  `[90000, 70063, 70064]`, and the loop that would consult it is commented out. The
+  constant lives in the test module, not the parent, because a constant in the parent that
+  nothing reads is dead code and looks live to the next reader.
+* **A category is not exclusive, and that is measurable.** `CItem::GetItemCategory`
+  (`item.cpp:3149-3158`) returns the *first* matching category, but legacy's own
+  `GetEmptyInventory` takes the **first category with a free cell**
+  (`char_item.cpp:1214-1225`). Over the owner's 7,305 `item_proto.txt` rows, **5 items
+  are in two categories**: 27987 (gift box, also listed in category 2), 30270 (leather,
+  also listed in category 3), and 55003, 55004, 55005 (leather, also listed in category
+  0). A caller that wants legacy's placement must scan; taking `item_category` would put
+  three of those five in the wrong bank whenever only the second bank had room.
+
+### 198.2 `CharacterItems` free-cell search
+
+`find_free_inventory_cell`, `find_free_inventory_cell_for`, and `find_free_custom_cell`,
+all built on one private `footprint_is_clear`, which is
+`CHARACTER::IsEmptyItemGrid` (`char_item.cpp:737-859`).
+
+The subtle part is the page bound, and it is a single rule rather than two. Legacy checks
+the walk twice, once against the category end and once against
+`GetInventoryPageByPos` (`char_item.cpp:803-807`). Here both fall out of asking
+`page_of` for the anchor and for every walked cell, and comparing. `page_of` is
+`GetInventoryPageByPos` (`char_item.cpp:334-348`): the base band pages by
+`cell / 45`, and **each custom bank pages from its own start**, so bank 0 page 3 and bank 1
+page 3 are different pages and a stack cannot cross between them. `page_of` answers `None`
+for the equipment band, the dragon-soul equip band, the belt band and anything past the
+flat space, which is what legacy signals by returning `255` (`char_item.cpp:346`).
+
+The search and `set` share `footprint_is_clear` and `grid_owner_flat` deliberately. If the
+two ever disagreed the search could return a cell `set` then refuses, and a caller would
+loop forever.
+
+### 198.3 Divergence: a locked inventory page is never offered
+
+Legacy's pickup-shaped `GetEmptyInventoryEx` scans all 180 base cells
+(`char_item.cpp:1228-1233`) with no test of the unlock stat, while `Inventory_Size()` is
+`90 + 5 * Inven_Point()` (`char.h:1285`). So it can place an item in a page the player has
+not paid for, and `AddToCharacter` accepts it (`item.cpp:447-454` rejects only
+`m_wCell >= 180 && 242 > m_wCell`). The client will not draw it. The other legacy overload
+bounds on `Inventory_Size()` (`char_item.cpp:1260-1261`) and the shop, quest, daily-gift and
+battle-pass paths all use that one.
+
+**This is a Defect**: an honest client can trigger it, so it is not reproduced. The bound
+is an argument rather than a stat read, because `CharacterItems` holds no stats. The test
+pins the refusal *and* the positive control that cell 90 really does hold an item, because
+without the control the refusal would also pass if `set` had refused cell 90 outright.
+
+### 198.4 Corrections this unit made to its own claims
+
+Five, all found by running the tests or clippy rather than by reading.
+
+* The first `footprint_is_clear` bounded a custom cell by `INVENTORY_AND_EQUIP_SLOT_MAX`
+  (1370) instead of by its own bank, so a search of a full bank offered cell 438.
+* `cargo fmt` sorts the `use` list, which twice made a patch to it a no-op. The edits
+  were re-applied against the formatted text and verified before compiling.
+* The bank start was written as 258. `CUSTOM_INVENTORY_SLOT_START` is **290**
+  (`length.h:921-927`); 258 is the belt band's end. The constants are now read, not
+  restated, so the next reader cannot repeat the slip.
+* The `size == 0` guard was lost when the walk was rewritten as an iterator, and a
+  zero-size item then reported cell 0 -- a cell `set` refuses as `ZeroFootprint`.
+* Two test expectations were wrong arithmetic, not code: a 45-cell page is 5 wide by 9
+  deep, so a 10-cell item can never fit in one, and a 5-cell item at cell 41 is refused
+  because 41 + 20 is in the next page.
+
+### 198.5 Not ported here, named so it is not silently dropped
+
+The Operator grant, the item id allocation, the `GC_ITEM_SET` send, the game-thread
+hand-off, and the whole `do_item` command. Decisions for all of them are in
+`.scratch/ledger198-operator-item-grant.md`, which was written **before** the code so that
+each one is a recorded choice rather than a decision discovered afterwards.
+
+### 198.6 Gates
+
+`cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean;
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` 0 diagnostics
+(five were fixed by refactoring, never by `#[allow]`); `RUSTDOCFLAGS="-D warnings" cargo
+doc --workspace --no-deps --locked --offline` 0 diagnostics.
+
+**Test counts.** 33 targets, 2,227 passed, 0 failed, both without a database and with
+PostgreSQL 18. 197.7 had 33 and 2,202, so this unit adds 25 tests and no targets: 17 in
+`gamedata::item_custom_category` and 8 in `world::character::items`. `cargo test
+--workspace --doc` is 9 targets, 1 passed, 0 failed, 15 ignored. Leftover `prodomo\_%`
+databases after the run: 0.
+
+**Not measured.** `i686-linux-gnu-g++-12` is still not installed on this machine. The
+survey measured `TPacketGCItemSet` at 72 bytes with a host `g++ -m32` probe instead, which
+emits real i386 objects; its controls (an unpacked two-field struct at 8, the same under
+`pack(1)` at 5) passed in the same probe. `protocol::gc_item_window` already encodes
+those 72 bytes, so no codec work is needed for the next unit and the width is already
+pinned by golden bytes.

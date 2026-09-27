@@ -12,6 +12,7 @@ pub mod banword;
 pub mod csv_table;
 pub mod event;
 pub mod item_attr;
+pub mod item_custom_category;
 pub mod item_proto;
 pub mod item_proto_value;
 pub mod land;

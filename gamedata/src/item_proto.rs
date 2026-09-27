@@ -187,6 +187,46 @@ impl ItemProto {
     pub fn is_range(&self) -> bool {
         self.vnum_range != 0
     }
+
+    /// A proto carrying only a vnum, a type and a sub-type, and zero everywhere else.
+    ///
+    /// For the rules that read nothing but those three -- `item_custom_category` is the
+    /// first -- so a test can vary one field and know the rest hold. It is public because
+    /// those rules live in their own module and each needs its own handful of shapes, and a
+    /// `pub(crate)` constructor under `#[cfg(test)]` would put a test-only type in the
+    /// crate's public surface for every other reader to see in the docs.
+    #[must_use]
+    pub fn for_category_rule(vnum: u32, item_type: i32, sub_type: i32) -> Self {
+        Self {
+            vnum,
+            line: 0,
+            vnum_range: 0,
+            name: Vec::new(),
+            locale_name: Vec::new(),
+            item_type,
+            sub_type,
+            weight: 0,
+            size: 1,
+            anti_flags: 0,
+            flags: 0,
+            wear_flags: 0,
+            immune_flags: 0,
+            gold: 0,
+            shop_buy_price: 0,
+            limits: Default::default(),
+            applies: Default::default(),
+            values: Default::default(),
+            sockets: Default::default(),
+            refined_vnum: 0,
+            refine_set: 0,
+            alter_to_magic_item_pct: 0,
+            specular: 0,
+            gain_socket_pct: 0,
+            addon_type: 0,
+            real_time_first_use: None,
+            timer_based_on_wear: None,
+        }
+    }
 }
 
 /// The item protos of one file, in the order the game process sees them: sorted by vnum.

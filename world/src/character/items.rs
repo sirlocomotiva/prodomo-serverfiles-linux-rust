@@ -47,9 +47,10 @@
 //! them.
 
 use common::item_slots::{
-    EWindows, CUSTOM_INVENTORY_MAX_NUM, CUSTOM_INVENTORY_SLOT_START, DRAGON_SOUL_BOX_COLUMN_NUM,
-    DRAGON_SOUL_INVENTORY_MAX_NUM, FLAT_STACK_STRIDE, INVENTORY_AND_EQUIP_SLOT_MAX,
-    INVENTORY_MAX_NUM, SWITCHBOT_SLOT_COUNT,
+    usable_inventory_cells, EWindows, CUSTOM_INVENTORY_CATEGORY_NUM, CUSTOM_INVENTORY_MAX_NUM,
+    CUSTOM_INVENTORY_SLOT_START, DRAGON_SOUL_BOX_COLUMN_NUM, DRAGON_SOUL_INVENTORY_MAX_NUM,
+    FLAT_STACK_STRIDE, INVENTORY_AND_EQUIP_SLOT_MAX, INVENTORY_MAX_NUM, INVENTORY_PAGE_SIZE,
+    SWITCHBOT_SLOT_COUNT,
 };
 use protocol::item_pos::ItemPos;
 
@@ -424,6 +425,140 @@ impl CharacterItems {
             0 => None,
             anchor => Some(anchor - 1),
         }
+    }
+
+    /// The first cell in the base inventory that can hold a `size`-cell item.
+    ///
+    /// This is the second half of `CHARACTER::GetEmptyInventory(LPITEM)`
+    /// (`char_item.cpp:1228-1233`): a linear scan from cell 0 to
+    /// [`INVENTORY_MAX_NUM`], and the first cell whose whole footprint is clear. **Cell 0 is
+    /// the first cell tried**, which is what makes a newly created item land at the top-left
+    /// of the client's first page.
+    ///
+    /// `None` means every cell is occupied, which is the ordinary "inventory full" answer and
+    /// not an error.
+    ///
+    /// `usable_cells` is [`usable_inventory_cells`] for this character, **not**
+    /// [`INVENTORY_MAX_NUM`]. The difference is a gameplay rule and not a memory bound, and
+    /// legacy's pickup-shaped `GetEmptyInventoryEx` gets it wrong: it scans all 180 cells
+    /// (`char_item.cpp:1228-1233`) with no test of the unlock stat, so it can place an item in
+    /// a page the player has not paid for, and the client will not draw it. The other legacy
+    /// overload bounds on `Inventory_Size()` (`char_item.cpp:1260-1261`) and the shop, quest,
+    /// gift and battle-pass paths all use that one. The bound is an argument rather than a stat
+    /// read because [`CharacterItems`] holds no stats; the caller that has them is the one that
+    /// has to know. Recorded as a Divergence.
+    #[must_use]
+    pub fn find_free_inventory_cell(&self, usable_cells: u16, size: u8) -> Option<u16> {
+        (0..usable_cells.min(INVENTORY_MAX_NUM)).find(|&cell| self.footprint_is_clear(cell, size))
+    }
+
+    /// The first free cell in one custom-inventory category.
+    ///
+    /// This is `CHARACTER::GetEmptyCustomInventory` (`char_item.cpp:319-332`), which scans one
+    /// category's 180 cells and returns the **absolute** `INVENTORY` cell, not a category-local
+    /// one. The six banks are contiguous from [`CUSTOM_INVENTORY_SLOT_START`], 180 cells each.
+    ///
+    /// A `category` of 6 or more has no cells, so the answer is `None`. That is not a
+    /// validation error: legacy returns `-1` for it (`char_item.cpp:321-322`).
+    ///
+    /// The whole 180-cell bank is scanned. The custom banks have their own unlock rule, which
+    /// is not ported; if it is, its bound belongs here.
+    #[must_use]
+    pub fn find_free_custom_cell(&self, category: u8, size: u8) -> Option<u16> {
+        if category >= CUSTOM_INVENTORY_CATEGORY_NUM {
+            return None;
+        }
+        let start = CUSTOM_INVENTORY_SLOT_START + u16::from(category) * CUSTOM_INVENTORY_MAX_NUM;
+        (start..start + CUSTOM_INVENTORY_MAX_NUM).find(|&cell| self.footprint_is_clear(cell, size))
+    }
+
+    /// The first free cell for a character whose `Inven_Point` is `inven_point`.
+    ///
+    /// This is the call most callers want, and it exists so the unlock formula is written down
+    /// once. `Inven_Point` is the character's `m_points.envanter` (`char.h:1284`); the
+    /// [`usable_inventory_cells`] doc records why the sum is clamped here rather than there.
+    #[must_use]
+    pub fn find_free_inventory_cell_for(&self, inven_point: u16, size: u8) -> Option<u16> {
+        self.find_free_inventory_cell(usable_inventory_cells(inven_point), size)
+    }
+
+    fn one_based(cell: u16) -> ItemPos {
+        ItemPos {
+            window_type: EWindows::Inventory as u8,
+            cell,
+        }
+    }
+
+    /// Which 45-cell page of which bank a flat cell belongs to, or `None` when it is not a cell
+    /// a grant may land in.
+    ///
+    /// This is `CHARACTER::GetInventoryPageByPos` (`char_item.cpp:334-348`). It answers with a
+    /// page number and `None` for three real cases, which is what makes the page bound
+    /// fall out of a comparison rather than out of a separate range check:
+    ///
+    /// * a base-inventory cell, when the cell is below [`INVENTORY_MAX_NUM`] and no category
+    ///   applies, and its page is `cell / INVENTORY_PAGE_SIZE` (`char_item.cpp:336-337`);
+    /// * a custom cell, when the cell is inside a bank, and its page is counted from the
+    ///   bank's own start (`char_item.cpp:339-344`), so each bank is 4 pages of 45 and does not
+    ///   share page numbers with any other;
+    /// * a cell in the **equipment** band, the **dragon-soul equip** band, the **belt** band, or
+    ///   past the end of the flat space. Legacy returns `255` for those
+    ///   (`char_item.cpp:346`, the `return -1` narrowed to a `BYTE`), which is not a page any
+    ///   real cell reports, so a walk that left the bank failed the comparison. Answering
+    ///   `None` keeps the same refusal and makes it a `None` rather than a magic number.
+    fn page_of(cell: u16) -> Option<u16> {
+        if cell >= INVENTORY_AND_EQUIP_SLOT_MAX {
+            return None;
+        }
+        if let Some(category) = custom_inventory_category_of(Self::one_based(cell)) {
+            let start =
+                CUSTOM_INVENTORY_SLOT_START + u16::from(category) * CUSTOM_INVENTORY_MAX_NUM;
+            return Some((cell - start) / INVENTORY_PAGE_SIZE);
+        }
+        if cell < INVENTORY_MAX_NUM {
+            return Some(cell / INVENTORY_PAGE_SIZE);
+        }
+        None
+    }
+
+    /// Could a `size`-cell item be anchored at `cell`?
+    ///
+    /// This is `CHARACTER::IsEmptyItemGrid` (`char_item.cpp:737-859`) with three things left
+    /// out, all deliberate, and each one noted where it is left out:
+    ///
+    /// * the **belt** arm (`char_item.cpp:764-778`), which is gated on the character wearing a
+    ///   belt and reads the belt item's own values. [`CharacterItems`] holds no worn items, so
+    ///   there is no belt to consult, and the page scan never reaches the belt band anyway.
+    /// * the **exception cell** (`iExceptionCell`, `char_item.cpp:762`), which lets a caller
+    ///   ask about a cell while ignoring one specific item. The only legacy caller is
+    ///   `GetEmptyDragonSoulInventoryWithExceptions` (`char_item.cpp:1291`), a dragon-soul path
+    ///   and not this one.
+    /// * the **occupied-slot** check. Legacy reads only `bItemGrid` and never `pItems`, so a
+    ///   slot holding an item whose grid is empty reads as free here and is then refused by
+    ///   `set` as `AlreadyOccupied`. That asymmetry is legacy's; this matches it rather than
+    ///   quietly fixing it, because a fix would change which cell a grant picks.
+    ///
+    /// The page bound is the subtle part and it is kept. A `size`-cell item may not straddle a
+    /// page, because the walk is `anchor + i * 5` and the client draws 5 columns by 45 rows.
+    /// Legacy enforces it twice (`char_item.cpp:803-807`), once against the category end and
+    /// once against the page; here both fall out of asking for the page of every walked cell,
+    /// so a cell that left the bank and a cell that left the page are the same refusal.
+    fn footprint_is_clear(&self, cell: u16, size: u8) -> bool {
+        // A zero-size item is refused by `set` as `ZeroFootprint`, so there is no cell that
+        // can hold one, and the walk below is empty and would report every cell clear.
+        // Reporting cell 0 would hand a caller a cell its own `set` will refuse.
+        if size == 0 {
+            return false;
+        }
+        let Some(page) = Self::page_of(cell) else {
+            return false;
+        };
+        (0..u16::from(size)).all(|j| {
+            let p = cell.saturating_add(j * FLAT_STACK_STRIDE);
+            // The same read `set_flat` does before it writes, so a cell this call calls clear
+            // is a cell `set` will not refuse for a grid conflict.
+            Self::page_of(p) == Some(page) && self.grid_owner_flat(p).is_none()
+        })
     }
 
     /// Which cells a stored item's grid footprint covers, and the anchor.
@@ -1099,6 +1234,154 @@ mod tests {
         let mut item = Item::new(id, 30_000);
         item.set_size(size).expect("a size of at least one");
         item
+    }
+
+    /// Fill `start..start+count` with one-cell items and return the store.
+    fn filled(start: u16, count: u16) -> CharacterItems {
+        let mut store = CharacterItems::new();
+        for cell in start..start + count {
+            let item = one_cell(1000 + u32::from(cell));
+            store
+                .set(pos(INV, cell), &item)
+                .expect("a free cell takes an item");
+        }
+        store
+    }
+
+    #[test]
+    fn the_first_free_cell_is_cell_zero() {
+        // The scan starts at 0, not at the first hole, so a fresh character gets a new item
+        // at the top-left of the client's first page. Asserting the exact cell is what pins
+        // that; a test that only checked "some cell" would also pass for a scan that started
+        // at 89.
+        let store = CharacterItems::new();
+        assert_eq!(store.find_free_inventory_cell(180, 1), Some(0));
+        assert_eq!(store.find_free_inventory_cell(180, 2), Some(0));
+    }
+
+    #[test]
+    fn a_full_scan_walks_forward_and_stops_at_the_first_hole() {
+        let store = filled(0, 5);
+        assert_eq!(store.find_free_inventory_cell(180, 1), Some(5));
+        // Occupying 5 as well moves the answer on, which is what distinguishes a real scan
+        // from a test that only ever looks at a fixed pair of cells.
+        let mut store = store;
+        store.set(pos(INV, 5), &one_cell(2005)).unwrap();
+        assert_eq!(store.find_free_inventory_cell(180, 1), Some(6));
+    }
+
+    #[test]
+    fn a_two_cell_item_cannot_straddle_a_page_boundary() {
+        // A page is 45 cells wide, so a 2-cell item at cell 44 would put its second cell on
+        // the next page, which the client cannot draw. Legacy refuses it in the same place
+        // (`char_item.cpp:806-807`): the walk stops when the page changes.
+        let mut store = filled(0, 45);
+        // 44 is the last cell of page 0 and 45 the first of page 1, so neither of them is
+        // where the search stops: 45 anchors a 2-cell item at 45 and 50, both in page 1.
+        assert_eq!(store.find_free_inventory_cell(180, 2), Some(45));
+        // Filling page 1 as well leaves only page 2, whose first cell is 90. That is a page
+        // the base unlock does not reach, so the usable bound is what refuses it, not the
+        // page rule -- which is the two limits being independent, and both are needed.
+        store = filled(0, 90);
+        assert_eq!(store.find_free_inventory_cell(180, 2), Some(90));
+        assert_eq!(store.find_free_inventory_cell_for(0, 2), None);
+        // A 5-cell item needs five rows of its own column, so its last legal anchor is 0:
+        // 0 + 4*5 = 20 is the deepest cell page 0 has room for at that column. An anchor of 1
+        // would reach 21, which is still in page 0, so the rule is about leaving the page and
+        // not about being the first cell.
+        let store = filled(0, 1);
+        assert_eq!(store.find_free_inventory_cell(180, 5), Some(1));
+        // Anchoring at 41 reaches 61, which is in page 1, so 41 is refused even though 41
+        // itself is in page 0. The search therefore steps over the last usable anchor and
+        // lands on 45, the first cell of the next page, which has all five of its rows.
+        let store = filled(0, 41);
+        assert_eq!(store.find_free_inventory_cell(180, 5), Some(45));
+        // A 9-cell item is the largest that can fit at all: nine rows is one whole page.
+        // Ten cannot, whatever the occupancy, because a page is 5 wide by 9 deep.
+        let store = filled(0, 0);
+        assert_eq!(store.find_free_inventory_cell(180, 9), Some(0));
+        assert_eq!(store.find_free_inventory_cell(180, 10), None);
+    }
+
+    #[test]
+    fn a_locked_page_is_never_offered_and_the_usable_count_is_what_bounds_it() {
+        // This is the Divergence. Legacy's pickup-shaped `GetEmptyInventoryEx` scans all 180
+        // cells (`char_item.cpp:1228-1233`) and ignores the unlock stat, so it can place an
+        // item in a page the player has not paid for. The Rewrite bounds on the usable count.
+        let mut store = filled(0, 90);
+        assert_eq!(
+            store.find_free_inventory_cell_for(0, 1),
+            None,
+            "cell 90 is in a locked page and must not be offered"
+        );
+        // Cell 90 does hold an item, which is the positive control: the refusal above is the
+        // bound and not a storage that cannot hold a locked cell. Without this the assertion
+        // above would also pass if `set` had refused cell 90 outright.
+        store.set(pos(INV, 90), &one_cell(7777)).unwrap();
+        assert_eq!(store.find_free_inventory_cell(180, 1), Some(91));
+        // One unlock point is one more page, five columns wide, so the usable count becomes
+        // 95 and cell 90 is now inside it.
+        assert_eq!(usable_inventory_cells(1), 95);
+        assert_eq!(store.find_free_inventory_cell_for(1, 1), Some(91));
+        // The same call with the same bound must agree, which is the whole point of the
+        // convenience wrapper: it computes the formula and changes nothing else.
+        assert_eq!(
+            store.find_free_inventory_cell_for(1, 1),
+            store.find_free_inventory_cell(usable_inventory_cells(1), 1)
+        );
+    }
+
+    #[test]
+    fn a_full_inventory_has_no_cell_at_every_size() {
+        let store = filled(0, 180);
+        assert_eq!(store.find_free_inventory_cell(180, 1), None);
+        assert_eq!(store.find_free_inventory_cell(180, 2), None);
+        // The banks are separate space, so a full base inventory still offers a bank cell.
+        // Legacy's `GetEmptyInventory` searches the banks first (`char_item.cpp:1209-1226`)
+        // and only then the base range, so this is what it does too.
+        assert_eq!(store.find_free_custom_cell(0, 1), Some(290));
+    }
+
+    #[test]
+    fn a_zero_size_item_has_no_cell_rather_than_cell_zero() {
+        // `set` refuses a zero-size item as `ZeroFootprint`, so reporting cell 0 would hand a
+        // caller a cell its own `set` will refuse. That the two agree is the point.
+        let store = CharacterItems::new();
+        assert_eq!(store.find_free_inventory_cell(180, 0), None);
+        assert_eq!(store.find_free_custom_cell(0, 0), None);
+    }
+
+    #[test]
+    fn a_custom_category_starts_where_the_previous_one_ended() {
+        // The six banks are contiguous from 290, 180 cells each, so category 0 is 290..470,
+        // category 1 is 470..650, and so on. A granted skill book must land in category 0 and
+        // not spill into the base inventory.
+        let store = CharacterItems::new();
+        assert_eq!(store.find_free_custom_cell(0, 1), Some(290));
+        assert_eq!(store.find_free_custom_cell(1, 1), Some(470));
+        assert_eq!(store.find_free_custom_cell(5, 1), Some(1190));
+        // The last bank's last cell, which is the one a test that only checks the first answer
+        // would never reach.
+        let mut store = store;
+        for cell in 0..179u16 {
+            store
+                .set(pos(INV, 290 + cell), &one_cell(5000 + u32::from(cell)))
+                .unwrap();
+        }
+        assert_eq!(store.find_free_custom_cell(0, 1), Some(469));
+        // Category 6 does not exist, which is legacy's `-1` (`char_item.cpp:321-322`).
+        assert_eq!(store.find_free_custom_cell(6, 1), None);
+        // And the base inventory is a different answer, so the two searches are not aliases.
+        assert_eq!(store.find_free_inventory_cell(180, 1), Some(0));
+    }
+
+    #[test]
+    fn a_custom_category_search_stays_inside_its_own_bank() {
+        // Filling category 0 must not move category 1's answer down, and filling a bank to the
+        // brim must not offer a cell in the next one.
+        let store = filled(290, 180);
+        assert_eq!(store.find_free_custom_cell(0, 1), None);
+        assert_eq!(store.find_free_custom_cell(1, 1), Some(470));
     }
 
     #[test]
