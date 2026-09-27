@@ -44,10 +44,7 @@ async fn a_game_state_is_the_value_the_thread_steps() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
     let protos =
         gamedata::item_proto::ItemProtos::load(&dir).expect("the owner's item protos load");
-    let state = GameState::new(
-        protos,
-        world::item::ItemIdRange::new(1, 1_000_000, 1).expect("a range that can issue an id"),
-    );
+    let state = GameState::new(protos);
     let metrics = state.metrics();
     assert_eq!(metrics.pulses(), 0, "nothing has stepped it yet");
 
@@ -93,6 +90,95 @@ async fn a_game_state_is_the_value_the_thread_steps() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_id_range_installed_from_tokio_lands_on_the_thread_that_owns_the_world() {
+    // The load-bearing test for this unit. `serve` builds the world before the store
+    // is readable, so the allocator has to cross the same channel every other command
+    // does. Before the install, a grant is refused; after it, the same grant is
+    // applied. The two answers together are the only thing that shows the install
+    // reached the thread and changed the world, rather than the grant working for
+    // some other reason.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
+    let protos =
+        gamedata::item_proto::ItemProtos::load(&dir).expect("the owner's item protos load");
+    let vnum = protos
+        .rows()
+        .iter()
+        .find(|proto| {
+            proto.size == 1
+                && (0..6).all(|category| {
+                    !gamedata::item_custom_category::is_custom_category(proto, category)
+                })
+        })
+        .expect("a one-cell item outside every custom bank")
+        .vnum;
+
+    // Given: a world with a player and no allocator, exactly as `serve` builds it.
+    let mut state = GameState::new(protos);
+    state
+        .characters_mut()
+        .create_player(11, "Shaman")
+        .expect("the name is free");
+    let mut game_loop = spawn_game_loop(GameLoopConfig::default(), state).unwrap();
+    let controller = game_loop.controller();
+    let request = prodomo::item_grant::GrantRequest {
+        target: "Shaman".to_owned(),
+        vnum,
+        count: None,
+    };
+
+    // When: a grant is asked for before the range is installed.
+    let before = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.request_grant(request.clone()),
+    )
+    .await
+    .expect("the game thread answered within five seconds")
+    .expect("the answer crossed back");
+    assert_eq!(
+        before,
+        Err(prodomo::item_grant::GrantRefusal::NoAllocator),
+        "a world with no allocator must refuse, not answer from a placeholder"
+    );
+
+    // And: the range is installed through the same channel.
+    let range = world::item::ItemIdRange::new(1, 1_000_000, 1).expect("a range");
+    tokio::time::timeout(Duration::from_secs(5), controller.install_item_ids(range))
+        .await
+        .expect("the game thread answered within five seconds")
+        .expect("the install command was delivered")
+        .expect("the world took the allocator");
+
+    // Then: the same grant now happens, and the id it took is the installed one.
+    let after = tokio::time::timeout(Duration::from_secs(5), controller.request_grant(request))
+        .await
+        .expect("the game thread answered within five seconds")
+        .expect("the answer crossed back")
+        .expect("a refusal is not expected after the install");
+    assert_eq!(after.row.id, 1, "the id came from the installed allocator");
+    assert_eq!(after.row.owner_id, Some(11));
+
+    // And: a second install is refused rather than replacing the live allocator.
+    // A replacement would start again at id 1 and reissue it to the item above.
+    let second = tokio::time::timeout(Duration::from_secs(5), controller.install_item_ids(range))
+        .await
+        .expect("the game thread answered within five seconds")
+        .expect("the install command was delivered");
+    assert_eq!(
+        second,
+        Err(prodomo::game_loop_messages::InstallError::AlreadyInstalled),
+        "a second allocator would reissue ids live items already hold"
+    );
+
+    controller.request_stop().await.unwrap();
+    let terminal = tokio::time::timeout(Duration::from_secs(1), game_loop.wait_for_terminal())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(terminal, GameLoopTerminal::Stopped(_)));
+    game_loop.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_grant_sent_from_tokio_is_applied_on_the_thread_that_owns_the_world() {
     // Given: a real `GameState` on the dedicated game thread, holding a player.
     //
@@ -115,10 +201,10 @@ async fn a_grant_sent_from_tokio_is_applied_on_the_thread_that_owns_the_world() 
         .expect("a one-cell item outside every custom bank")
         .vnum;
 
-    let mut state = GameState::new(
-        protos,
-        world::item::ItemIdRange::new(1, 1_000_000, 1).expect("a range that can issue an id"),
-    );
+    let mut state = GameState::new(protos);
+    state
+        .install_item_ids(world::item::ItemIdRange::new(1, 1_000_000, 1).expect("a range"))
+        .expect("the first install");
     state
         .characters_mut()
         .create_player(11, "Shaman")

@@ -40,11 +40,13 @@
 use std::error::Error;
 use std::fmt;
 
+use common::config::ItemIdSpan;
 use common::constants::{ITEM_ATTRIBUTE_MAX_NUM, ITEM_MAX_COUNT, ITEM_SOCKET_MAX_NUM};
 use sqlx::postgres::{PgArguments, PgRow};
 use sqlx::query::Query;
 use sqlx::{Postgres, Row};
 
+use crate::item_id_range::MINIMUM_REMAIN_COUNT;
 use crate::store::Store;
 
 /// [`ITEM_SOCKET_MAX_NUM`] as a `usize`, which array lengths and const generics need.
@@ -195,6 +197,34 @@ pub enum ItemError {
         /// The character that holds it, or `None` when it is on the ground.
         owner_id: Option<u32>,
     },
+    /// The configured item-id span has fewer than
+    /// [`MINIMUM_REMAIN_COUNT`] ids left above the id the allocator would start at.
+    ///
+    /// Legacy `CItemIDRangeManager::BuildRange` logged this and returned false, which
+    /// made `CClientManager::InitializeNowItemID` fail the boot.
+    ItemIdRangeExhausted {
+        /// `dwMin`, the configured first id.
+        first: u32,
+        /// `dwMax`, the configured last id.
+        last: u32,
+        /// `dwUsableItemIDMin`, the id the allocator would have started at.
+        next: u32,
+    },
+    /// An item row sits between the id the allocator would start at and the last id.
+    ///
+    /// Unreachable through the two-step path that produces `next`, because `next` is
+    /// `MAX(id) + 1`. It is legacy's belt-and-braces check and it catches the one
+    /// thing the other two queries cannot: a row inserted between them.
+    ItemIdRangeOccupied {
+        /// `dwMin`, the configured first id.
+        first: u32,
+        /// `dwMax`, the configured last id.
+        last: u32,
+        /// `dwUsableItemIDMin`, the id the allocator would have started at.
+        next: u32,
+        /// How many rows the count query found.
+        count: i64,
+    },
     /// A stored value breaks a rule the schema should have enforced.
     Corrupt(String),
     /// The server refused or failed a query.
@@ -218,6 +248,20 @@ impl fmt::Display for ItemError {
                 ),
                 None => write!(f, "item {id} is on the ground"),
             },
+            Self::ItemIdRangeExhausted { first, last, next } => write!(
+                f,
+                "item id range {first}..={last} would start at {next}, which leaves fewer than \
+                 {MINIMUM_REMAIN_COUNT} ids"
+            ),
+            Self::ItemIdRangeOccupied {
+                first,
+                last,
+                next,
+                count,
+            } => write!(
+                f,
+                "item id range {first}..={last} has {count} item rows from {next} to {last}"
+            ),
             Self::Corrupt(detail) => write!(f, "stored item data is invalid: {detail}"),
             Self::Database(error) => write!(f, "PostgreSQL error: {error}"),
         }
@@ -237,6 +281,82 @@ impl From<sqlx::Error> for ItemError {
     fn from(error: sqlx::Error) -> Self {
         Self::Database(error)
     }
+}
+
+/// Legacy `CItemIDRangeManager::BuildRange` (`server/server/db/ItemIDRangeManager.cpp:87`),
+/// with the configured span standing in for the two arguments the DB server passed it.
+///
+/// Legacy built 427 ten-million-wide blocks in
+/// [`ItemIdRangePool::new`](crate::item_id_range::ItemIdRangePool::new) for the game
+/// servers, skipped every block the configured span covered, and had each game server
+/// check the range against its live peers before taking it. None of that exists here:
+/// ADR-0002 puts every Channel in one process and gives the world one allocator, so
+/// there is one span, one `MAX(id)`, and nobody to collide with. The two checks below
+/// are the ones that changed whether the range was accepted at all.
+///
+/// # Errors
+///
+/// Returns [`ItemError::ItemIdRangeExhausted`] when the span would start within
+/// [`MINIMUM_REMAIN_COUNT`] of its end, and [`ItemError::ItemIdRangeOccupied`] when a
+/// row sits above the id the allocator would start at.
+pub async fn resolve_item_id_range(
+    store: &Store,
+    span: ItemIdSpan,
+) -> Result<crate::item_id_range::ItemIdRange, ItemError> {
+    if !span.is_ordered() {
+        // `ServerConfig::validate` already refuses this, and reaching it here would mean
+        // a caller that skipped validation. The first id is used as the start either
+        // way, so a reversed span is reported as exhausted rather than trusted.
+        return Err(ItemError::ItemIdRangeExhausted {
+            first: span.first,
+            last: span.last,
+            next: span.first,
+        });
+    }
+    let highest: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(id) FROM item WHERE id >= $1 AND id <= $2")
+            .bind(i64::from(span.first))
+            .bind(i64::from(span.last))
+            .fetch_one(store.pool())
+            .await?;
+    // `BuildRange` treats a NULL `MAX(id)` and a real 0 alike, and so does this: an
+    // empty span is handed out from its first id.
+    let next = match highest
+        .map(|value| narrow::<i64, u32>(value, "MAX(id)"))
+        .transpose()?
+    {
+        None | Some(0) => span.first,
+        Some(max) => max.checked_add(1).ok_or(ItemError::ItemIdRangeExhausted {
+            first: span.first,
+            last: span.last,
+            next: span.last,
+        })?,
+    };
+    if span.remaining_from(next) < MINIMUM_REMAIN_COUNT {
+        return Err(ItemError::ItemIdRangeExhausted {
+            first: span.first,
+            last: span.last,
+            next,
+        });
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM item WHERE id >= $1 AND id <= $2")
+        .bind(i64::from(next))
+        .bind(i64::from(span.last))
+        .fetch_one(store.pool())
+        .await?;
+    if count > 0 {
+        return Err(ItemError::ItemIdRangeOccupied {
+            first: span.first,
+            last: span.last,
+            next,
+            count,
+        });
+    }
+    Ok(crate::item_id_range::ItemIdRange {
+        min: span.first,
+        max: span.last,
+        usable_item_id_min: next,
+    })
 }
 
 /// The plain columns, in the order the load reads them.

@@ -119,6 +119,33 @@ pub struct ServerConfig {
     pub game: GameSettings,
 }
 
+/// The owner's `ITEM_ID_RANGE` (`legacy/config/db/conf.txt:8`).
+///
+/// Not a value legacy compiled in -- see [`ItemIdSpan`]. A deployment that needs a
+/// different id space sets the key; one that does not gets the owner's span, which
+/// is the span the live deployment used.
+const fn default_item_id_span() -> ItemIdSpan {
+    ItemIdSpan {
+        first: 100_000_000,
+        last: 200_000_000,
+    }
+}
+
+/// Reads `item_id_range = [first, last]`.
+///
+/// A two-element array rather than a sub-table because legacy's `GetTwoValue` read
+/// two whitespace-separated numbers off one line, and the array is the same shape.
+fn deserialize_item_id_span<'de, D>(deserializer: D) -> Result<ItemIdSpan, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let pair: [u32; 2] = serde::Deserialize::deserialize(deserializer)?;
+    Ok(ItemIdSpan {
+        first: pair[0],
+        last: pair[1],
+    })
+}
+
 const fn default_bind_ip() -> IpAddr {
     IpAddr::V4(Ipv4Addr::UNSPECIFIED)
 }
@@ -228,6 +255,17 @@ pub struct GameSettings {
     /// Admin page password. Legacy defaults to `SHOWMETHEMONEY`; here the default is empty,
     /// which disables the admin page.
     pub adminpage_password: Secret,
+    /// The item-id span the world's allocator hands ids out of, as `first` and `last`.
+    ///
+    /// Legacy read this as `ITEM_ID_RANGE` in the DB process. It is a `[game]` key
+    /// here because the Rewrite has one process (ADR-0002), so the id space belongs
+    /// to the world and not to a database peer.
+    #[serde(
+        default = "default_item_id_span",
+        deserialize_with = "deserialize_item_id_span"
+    )]
+    pub item_id_range: ItemIdSpan,
+
     /// Seconds between character saves. Legacy multiplied the configured value by
     /// `passes_per_sec` when parsing; here the value stays in seconds.
     pub save_event_second_cycle: u32,
@@ -437,7 +475,54 @@ impl Default for GameSettings {
             player_delete_level_limit: 251,
             player_delete_level_limit_lower: 0,
             skill_disable: false,
+            item_id_range: default_item_id_span(),
         }
+    }
+}
+
+/// The item-id span the allocator draws from, as legacy's `ITEM_ID_RANGE` pair.
+///
+/// Legacy read this with `GetTwoValue("ITEM_ID_RANGE", &dwMin, &dwMax)` in the **DB**
+/// process (`ClientManager.cpp:3394`) and fed it straight to
+/// `CItemIDRangeManager::BuildRange`. The owner's snapshot has exactly one value,
+/// `100000000 200000000` (`legacy/config/db/conf.txt:8`), and it is the only
+/// `conf.txt` of the five that carries the key. There is no compiled-in default:
+/// `InitializeNowItemID` returns false when the key is missing, which aborts the
+/// boot, so the default here is the owner's value and not a value legacy had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemIdSpan {
+    /// `dwMin`. The first id in the span.
+    pub first: u32,
+    /// `dwMax`. The end of the span.
+    ///
+    /// Legacy never hands this one out: the range is switched "once the next ID
+    /// reaches this value", and `BuildRange` refuses a span whose remaining count is
+    /// below `MINIMUM_REMAIN_COUNT`.
+    pub last: u32,
+}
+
+impl ItemIdSpan {
+    /// Whether `first` is below `last`, which is the only shape a span can take.
+    #[must_use]
+    pub const fn is_ordered(self) -> bool {
+        self.first < self.last
+    }
+
+    /// How many ids are left above `next`.
+    ///
+    /// Zero when `next` is at or past `last`. That is the whole point of writing it
+    /// this way: a plain subtraction would wrap and report billions of ids left in a
+    /// span that has none, and the store would go on handing out ids tens of millions
+    /// past its configured end.
+    #[must_use]
+    pub const fn remaining_from(self, next: u32) -> u32 {
+        self.last.saturating_sub(next)
+    }
+}
+
+impl fmt::Display for ItemIdSpan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}..={}", self.first, self.last)
     }
 }
 
@@ -467,6 +552,16 @@ pub enum TopologyError {
     DuplicatePort(u16),
     /// A `[game]` event cycle is zero seconds, so its event would never wait.
     ZeroCycle(&'static str),
+    /// `game.item_id_range` is not `first..last`.
+    ///
+    /// Checked at startup rather than at first use because a range that only fails
+    /// when the first item is granted is a range that has already admitted a client.
+    UnorderedItemIdRange {
+        /// The configured first id.
+        first: u32,
+        /// The configured last id.
+        last: u32,
+    },
     /// A Shared Channel map is also hosted by another Channel, so a Warp to it is ambiguous.
     SharedMapElsewhere {
         /// The map index.
@@ -496,6 +591,10 @@ impl fmt::Display for TopologyError {
             }
             Self::DuplicatePort(port) => write!(f, "port {port} is used by two listeners"),
             Self::ZeroCycle(key) => write!(f, "game.{key} must be at least 1 second"),
+            Self::UnorderedItemIdRange { first, last } => write!(
+                f,
+                "game.item_id_range is [{first}, {last}]; the first id must be below the last"
+            ),
             Self::SharedMapElsewhere { map, channel } => write!(
                 f,
                 "map {map} is on the shared channel and also on channel {channel}"
@@ -518,6 +617,13 @@ impl ServerConfig {
         }
         if self.game.ping_event_second_cycle == 0 {
             return Err(TopologyError::ZeroCycle("ping_event_second_cycle"));
+        }
+        let span = self.game.item_id_range;
+        if !span.is_ordered() {
+            return Err(TopologyError::UnorderedItemIdRange {
+                first: span.first,
+                last: span.last,
+            });
         }
         let mut numbers = BTreeSet::new();
         let mut ports = BTreeSet::new();

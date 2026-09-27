@@ -410,6 +410,23 @@ fn serve_admits_clients_once_the_store_is_migrated() {
         "the schema was migrated:\n{}",
         server.console.join("\n")
     );
+    // The id range is resolved against the migrated table and installed into the world
+    // that owns it, and it happens before the gate opens. The three log lines are
+    // ordered by this test's reading of the log, which is all the ordering guarantee
+    // the console can give: a process has one stdout and the lines arrive in the order
+    // it wrote them.
+    let console = server.console.join("\n");
+    let resolved = console
+        .find("Item id range resolved")
+        .unwrap_or_else(|| panic!("the id range was not resolved:\n{console}"));
+    let accepting = console
+        .find(ACCEPTING)
+        .unwrap_or_else(|| panic!("the gate never opened:\n{console}"));
+    assert!(
+        resolved < accepting,
+        "the id range must be installed before the gate opens, or a client can reach a \
+         world that refuses every grant:\n{console}"
+    );
 
     let addresses = bound_addresses(&server.console);
     for &address in &addresses {
@@ -457,6 +474,39 @@ fn serve_exits_when_the_store_refuses_it_for_good() {
     assert!(
         !console.contains(ACCEPTING),
         "the gate never opened:\n{console}"
+    );
+    assert!(
+        console.contains("Store closed"),
+        "the store is closed on the way out:\n{console}"
+    );
+}
+
+#[test]
+fn serve_refuses_to_start_when_the_configured_item_id_span_is_too_narrow() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    // A span of 9_000 ids, against a `MINIMUM_REMAIN_COUNT` of 10_000. Legacy refused
+    // this at boot, after its listeners were up; here it must stop the process before
+    // the gate opens, because a world with no allocator answers no grant at all.
+    let config = format!(
+        "{}[store]\nurl = \"{}\"\n[auth]\nport = 0\n\
+         [[channel]]\nnumber = 1\nports = [0]\nmaps = [1]\n\
+         [game]\nitem_id_range = [1, 9000]\n",
+        data_keys(),
+        database.url()
+    );
+    let (status, console) = run_to_exit(Some(&config));
+    assert!(!status.success(), "a dead id space should stop the server");
+    assert!(
+        // The span renders as `first..=last`, which is how the refusal is logged.
+        console.contains("Item id range 1..=9000 is unusable")
+            && console.contains("which leaves fewer than 10000 ids"),
+        "the refusal should name the span:\n{console}"
+    );
+    assert!(
+        !console.contains(ACCEPTING),
+        "the gate must not open on a world that cannot give items out:\n{console}"
     );
     assert!(
         console.contains("Store closed"),

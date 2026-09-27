@@ -57,28 +57,89 @@ impl GameStateMetrics {
     }
 }
 
+/// An id range was installed over an allocator that is already installed.
+///
+/// Named rather than logged, because the consequence is a duplicate item id and no
+/// store write will report it: the second allocator hands out the same numbers the
+/// first one did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AlreadyInstalled;
+
+impl std::fmt::Display for AlreadyInstalled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an item id allocator is already installed")
+    }
+}
+
+impl std::error::Error for AlreadyInstalled {}
+
+/// A grant was asked for before the world had an allocator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoItemIds;
+
+impl std::fmt::Display for NoItemIds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the world has no item id allocator yet")
+    }
+}
+
+impl std::error::Error for NoItemIds {}
+
+/// The world-facing range for a range the store resolved.
+///
+/// The two range types are deliberately different: [`db::item_id_range::ItemIdRange`]
+/// carries legacy's `dwMin`/`dwMax`/`dwUsableItemIDMin` and performs no checks, and
+/// [`world::item::ItemIdRange`] refuses a range that would hand out id 0. The
+/// conversion is here because `db` is below `world` and cannot see it, and a
+/// `From` impl would be two foreign types. Both agree that `last` is never issued,
+/// so the mapping is one to one.
+///
+/// # Errors
+///
+/// [`world::item::BadIdRange`] when `first_usable` is 0 or falls outside the span.
+/// `db::items::resolve_item_id_range` cannot produce that for a span it accepted,
+/// because it starts above the highest stored id, so this is a seam check rather than
+/// an expected failure.
+pub fn world_item_id_range(
+    range: db::item_id_range::ItemIdRange,
+) -> Result<world::item::ItemIdRange, world::item::BadIdRange> {
+    world::item::ItemIdRange::new(range.min, range.max, range.usable_item_id_min)
+}
+
 /// The world state one game thread owns.
 #[derive(Debug)]
 pub struct GameState {
     characters: CharacterManager,
-    item_ids: ItemIds,
+    item_ids: Option<ItemIds>,
     protos: ItemProtos,
     metrics: Arc<GameStateMetrics>,
     last_pulse: u64,
 }
 
 impl GameState {
-    /// Build a state from the Game data and the id range.
+    /// Build a state from the Game data alone.
     ///
     /// `protos` is read before the thread starts, not inside it, so a missing or
     /// malformed proto file stops `serve` before any port opens. That ordering is
     /// the same one `load_atlas` already uses, and it is the Rewrite's own: legacy
     /// accepts clients before its DB boot finishes, which AGENTS.md records as a
     /// Defect.
-    pub fn new(protos: ItemProtos, id_range: ItemIdRange) -> Self {
+    ///
+    /// There is no id range and no way to give this constructor one, because the
+    /// start id is `MAX(id)` over the item table and that table is not readable
+    /// until the store has migrated -- which happens inside the accept loop, after
+    /// the listeners are bound. The range arrives later as
+    /// [`GameCommand::InstallItemIdRange`].
+    ///
+    /// The alternative was a range in this constructor, and there is no honest value
+    /// to put there: any fixed start would either reissue an id a stored item holds
+    /// or leave a gap. An `Option` that is honestly absent is the only state that
+    /// does not invent one.
+    #[must_use]
+    pub fn new(protos: ItemProtos) -> Self {
         Self {
             characters: CharacterManager::new(),
-            item_ids: ItemIds::new(id_range),
+            item_ids: None,
             protos,
             metrics: Arc::new(GameStateMetrics::default()),
             last_pulse: 0,
@@ -102,14 +163,47 @@ impl GameState {
         &mut self.characters
     }
 
-    /// The item id allocator.
-    pub fn item_ids(&self) -> &ItemIds {
-        &self.item_ids
+    /// The item id allocator, or `None` until one has been installed.
+    ///
+    /// `None` is a real state, not a placeholder: the start id is a fact about the
+    /// stored items, and it is not known when this state is built.
+    #[must_use]
+    pub fn item_ids(&self) -> Option<&ItemIds> {
+        self.item_ids.as_ref()
     }
 
     /// The item id allocator, mutably.
-    pub fn item_ids_mut(&mut self) -> &mut ItemIds {
-        &mut self.item_ids
+    pub fn item_ids_mut(&mut self) -> Option<&mut ItemIds> {
+        self.item_ids.as_mut()
+    }
+
+    /// Install the allocator.
+    ///
+    /// Refuses a second install. One allocator has to serve the world's whole life:
+    /// a second one starts again at the same `usable_item_id_min` and reissues ids
+    /// that live items already hold, and there is no database write that would
+    /// notice. An allocator that is installed over cannot be recovered, so this
+    /// returns what the caller would lose rather than taking the first answer.
+    ///
+    /// # Errors
+    ///
+    /// [`AlreadyInstalled`] when an allocator is already installed. The existing one
+    /// is left untouched, so a caller that ignores this error has lost nothing.
+    ///
+    /// # Panics
+    ///
+    /// Never. The borrow of the freshly installed value is taken from the same
+    /// `Option` that was just assigned, so the `expect` cannot fail; it is written
+    /// out because `Option::as_mut` says `None` is possible and here it is not.
+    pub fn install_item_ids(
+        &mut self,
+        range: ItemIdRange,
+    ) -> Result<&mut ItemIds, AlreadyInstalled> {
+        if self.item_ids.is_some() {
+            return Err(AlreadyInstalled);
+        }
+        self.item_ids = Some(ItemIds::new(range));
+        Ok(self.item_ids.as_mut().expect("just installed"))
     }
 
     /// The item prototypes.
@@ -155,6 +249,18 @@ impl GameState {
                     );
                 }
             }
+            GameCommand::InstallItemIdRange { range, reply } => {
+                let answer = self.install_item_ids(range);
+                // A dropped install answer leaves the world without an allocator,
+                // which is the state it started in, so the caller can ask again.
+                if reply.send(answer.is_ok()).is_err() {
+                    warn!(
+                        first = range.first,
+                        last = range.last,
+                        "the item id range was installed but nobody was left to hear about it"
+                    );
+                }
+            }
             GameCommand::Stop => {
                 // The loop handles `Stop` itself, before a command ever reaches a
                 // processor. Reaching here would mean the loop and the state
@@ -167,6 +273,11 @@ impl GameState {
 
     /// Run one grant against the world, taking the target's own `Inven_Point`.
     fn grant(&mut self, request: &GrantRequest) -> Result<GrantOutcome, GrantRefusal> {
+        let Some(item_ids) = self.item_ids.as_mut() else {
+            // Refused before anything is placed, so no id is burned and the world is
+            // unchanged. A caller that retries after the install gets a fresh answer.
+            return Err(GrantRefusal::NoAllocator);
+        };
         let inven_point = self
             .characters
             .find_player_mut(&request.target)
@@ -174,7 +285,7 @@ impl GameState {
         grant_item(
             &mut self.characters,
             &self.protos,
-            &mut self.item_ids,
+            item_ids,
             request,
             inven_point,
         )
@@ -217,17 +328,112 @@ mod tests {
         ItemIdRange::new(1, 1_000_000, 1).expect("a range that can issue an id")
     }
 
+    /// A state with an allocator installed, which is the shape every world test
+    /// after the install wants.
     fn a_state() -> GameState {
-        GameState::new(owners(), a_range())
+        let mut state = GameState::new(owners());
+        state
+            .install_item_ids(a_range())
+            .expect("the first install");
+        state
     }
 
     #[test]
-    fn a_new_state_starts_with_no_characters_and_an_unissued_allocator() {
-        let state = a_state();
+    fn a_new_state_starts_with_no_characters_and_no_allocator() {
+        let state = GameState::new(owners());
         assert_eq!(state.characters().len(), 0);
-        assert_eq!(state.item_ids().issued(), 0);
+        // No allocator, and not a placeholder one: the start id is a fact about the
+        // stored items, and a state that is built before the store is ready does not
+        // know it.
+        assert!(state.item_ids().is_none());
         assert_eq!(state.protos().len(), 7_305);
         assert_eq!(state.last_pulse(), 0);
+    }
+
+    #[test]
+    fn an_installed_allocator_starts_unissued_at_the_first_usable_id() {
+        let state = a_state();
+        let ids = state.item_ids().expect("the allocator was installed");
+        assert_eq!(ids.issued(), 0);
+        assert_eq!(ids.peek(), 1);
+        assert_eq!(ids.range().first, 1);
+        assert_eq!(ids.range().last, 1_000_000);
+    }
+
+    #[test]
+    fn a_second_install_is_refused_rather_than_replacing_the_allocator() {
+        // A second allocator starts again at the same first usable id and reissues
+        // ids live items hold. Nothing in the store would notice, so the refusal is
+        // the only thing standing between a bug and duplicate item ids.
+        let mut state = a_state();
+        let before = state.item_ids().expect("one allocator").peek();
+        assert_eq!(state.install_item_ids(a_range()), Err(AlreadyInstalled));
+        assert_eq!(
+            state.item_ids().expect("still one allocator").peek(),
+            before
+        );
+    }
+
+    #[test]
+    fn a_grant_is_refused_before_an_allocator_is_installed_and_changes_nothing() {
+        let mut state = GameState::new(owners());
+        state
+            .characters_mut()
+            .create_player(1, "Shaman")
+            .expect("the character exists");
+        let request = GrantRequest {
+            target: "Shaman".to_owned(),
+            vnum: 30_000,
+            count: None,
+        };
+        assert_eq!(state.grant(&request), Err(GrantRefusal::NoAllocator));
+        // The refused grant placed nothing: no cell is taken, and no id is burned,
+        // because the allocator is read before the placement search runs.
+        let character = state
+            .characters_mut()
+            .find_player_mut("Shaman")
+            .expect("the character");
+        assert_eq!(character.items().len(), 0);
+        // The control for that claim: the same world with an allocator hands the
+        // first usable id out, so the ids above really were still unissued.
+        state
+            .install_item_ids(a_range())
+            .expect("the first install");
+        assert_eq!(state.item_ids().expect("the allocator").peek(), 1);
+    }
+
+    #[test]
+    fn the_same_grant_succeeds_once_an_allocator_is_installed() {
+        // The control for the test above, and the reason a retry is the answer:
+        // the refusal above left the world in a state this one can act on.
+        let mut state = GameState::new(owners());
+        state
+            .characters_mut()
+            .create_player(1, "Shaman")
+            .expect("the character exists");
+        let request = GrantRequest {
+            target: "Shaman".to_owned(),
+            vnum: 30_000,
+            count: None,
+        };
+        assert_eq!(state.grant(&request), Err(GrantRefusal::NoAllocator));
+        state
+            .install_item_ids(a_range())
+            .expect("the first install");
+        let outcome = state.grant(&request).expect("the grant happened");
+        assert_eq!(
+            state
+                .characters_mut()
+                .find_player_mut("Shaman")
+                .expect("the character")
+                .items()
+                .len(),
+            1
+        );
+        // The id came from the allocator that was installed after the refusal, so
+        // the retry really did use the new allocator.
+        assert_eq!(outcome.row.id, 1);
+        assert_eq!(state.item_ids().expect("the allocator").issued(), 1);
     }
 
     #[test]

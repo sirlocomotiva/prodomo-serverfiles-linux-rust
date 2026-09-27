@@ -106,6 +106,16 @@ pub enum GrantRefusal {
     /// that live items still hold. The Rewrite's [`ItemIds`] refuses, and this is
     /// where that surfaces.
     IdsExhausted,
+    /// The world has no allocator yet.
+    ///
+    /// Refused before anything is placed, so no id is burned and nothing changes.
+    /// A caller that retries after [`GameCommand::InstallItemIdRange`] gets a fresh
+    /// answer. The ready gate stays closed until the install lands, so a client
+    /// cannot reach a world in this state; the variant exists because a grant can be
+    /// asked for from a path that does not go through the gate.
+    ///
+    /// [`GameCommand::InstallItemIdRange`]: crate::game_loop_messages::GameCommand::InstallItemIdRange
+    NoAllocator,
     /// The allocator handed back an id this character already owns.
     ///
     /// Not a gameplay outcome and not reachable through one: the world has a single
@@ -130,6 +140,7 @@ impl std::fmt::Display for GrantRefusal {
                 write!(formatter, "{NO_ROOM_MESSAGE} (the item is {size} cells)")
             }
             Self::IdsExhausted => formatter.write_str("the item id range is exhausted"),
+            Self::NoAllocator => formatter.write_str("the world has no item id allocator yet"),
             Self::IdAlreadyOwned { id } => {
                 write!(formatter, "item id {id} is already held by this character")
             }

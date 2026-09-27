@@ -19532,3 +19532,118 @@ The count moved from 2270 to 2278. Leftover `prodomo\_%` databases after the run
 **Not measured.** `i686-linux-gnu-g++-12` is still not installed. This unit adds no
 width claim; it moves an existing 72-byte record across a thread.
 
+## 203. The world gets its item ids from the store, after the ports are open
+
+**What changed.** `common::config` gains `ItemIdSpan` and the `game.item_id_range`
+key. `db::items::resolve_item_id_range` ports `CItemIDRangeManager::BuildRange` for a
+configured span. `GameCommand` gains `InstallItemIdRange { range, reply }`,
+`GameLoopController` gains `install_item_ids`, and `GameState` gains
+`install_item_ids`, which refuses a second install. `GameState::new` no longer takes a
+range: it holds `Option<ItemIds>`. `serve` loads the item protos before it binds, moves
+a real `GameState` into the game thread, and installs the range from inside the accept
+loop's `prepared` branch, before `ready_gate.open()`.
+
+**`serve` is wired, and the ports still open before the world is ready.** That
+ordering is the one thing the unit had to preserve, and the three candidate designs
+all broke it differently. Reading the store before binding would invert it: `serve`
+documents that a database which is down does not stop the listeners from coming up, and
+a `MAX(id)` query needs a connection. Spawning the loop inside the accept loop would
+mean the `select!` had no terminal arm before the first store attempt finished, which
+changes when a SIGTERM is observed. Building the state with a range needs a range, and
+the only ranges available are invented. Installing it as a command needs none of those,
+and it is the same crossing every other command already makes. The startup log shows the
+result: protos load, ports bind, the loop starts, the store migrates, the range
+resolves, the gate opens.
+
+**`ItemIdSpan` defaults to the owner's configured value, and the doc says so.**
+`legacy/config/db/conf.txt:8` carries `ITEM_ID_RANGE = 100000000 200000000`, and it is
+the only one of that process's five `conf.txt` files that sets the key. Legacy has no
+compiled-in value: `CClientManager::InitializeNowItemID` calls `GetTwoValue`, and a
+missing key returns false and aborts the boot. So the default here is the owner's span
+because that is what the live deployment used, not because legacy had a value to copy.
+The key moved under `[game]` because ADR-0002 leaves one process, and an id space
+belongs to the world rather than to a database peer.
+
+**`BuildRange` is ported, and the parts that went are named.** Legacy built 427
+ten-million-wide blocks, skipped every block the configured span covered, and had each
+game server check the range against its live peers before taking it. With one process
+and one allocator there is one span, one `MAX(id)`, and nobody to collide with, so the
+pool, the block split, and the peer check are gone. What stays is the part that
+changed whether the range was accepted: the `MAX(id)` read, the `+ 1` when a row
+exists, the refusal below `MINIMUM_REMAIN_COUNT`, and legacy's redundant `COUNT(*)`
+check -- which cannot fail on the path that produced `next`, and is kept because it
+catches the one thing the other two queries cannot, a row inserted between them.
+
+**A span that is not ascending is refused in `validate`, not at first use.** The
+original plan was to let the store refuse it. That was wrong: the store runs inside the
+accept loop, so a reversed span would have bound the ports before anything noticed, and
+a server that has already admitted clients is the state `validate` exists to prevent.
+
+**`remaining_from` is a `saturating_sub`, and that is the whole point.** The first
+version compared before subtracting, and Clippy called it a manual arithmetic check --
+correctly, because the `u64` cast in the middle of it made the intent obscure. A span
+with `next` past its `last` must report zero room, not four billion. The store's
+acceptance test is `remaining_from(next) < MINIMUM_REMAIN_COUNT`, so a wrapped
+subtraction here is a store that keeps handing out ids tens of millions past its
+configured end, and nothing else in the process would notice.
+
+**A second install is refused, and it is refused loudly.** A second allocator starts
+again at the same `first_usable` and reissues ids live items already hold. No store
+write would notice: the ids are distinct per item and the unique key is on the cell, so
+a duplicate id produces two rows and a client that cannot tell them apart. This is the
+same reasoning as ledger 202's decision to drop `Copy`, applied to state: the safe move
+is to refuse and say so, not to pick one.
+
+**`GrantRefusal::NoAllocator` and the gate.** A grant asked for before the install is
+refused before the placement search runs, so no id is burned and the world is
+unchanged; a retry after the install gets a fresh answer. The ready gate stays closed
+until the install lands, so a client cannot reach a world in that state through the
+normal path. The variant exists because a grant can be asked for from a path that does
+not go through the gate, and a refusal that names its own cause is worth more than a
+silent no-op.
+
+**One test found two of my own mistakes.** The first draft of the store tests used the
+span `[1_000, 9_000]`, and four of them failed with
+`ItemIdRangeExhausted { .. }`: 8_000 ids left against a minimum of 10_000. The check was
+right and the test values were wrong, which is the best possible direction for that
+failure. Widening the span then broke
+`a_stored_id_above_the_span_does_not_move_the_start_id`, because the id I had picked to
+be *outside* the span was inside the widened one -- a test whose premise had silently
+stopped being true.
+
+**Mutation.** Making the `InstallItemIdRange` arm answer `Err(AlreadyInstalled)` without
+installing anything is killed by
+`an_id_range_installed_from_tokio_lands_on_the_thread_that_owns_the_world` with a
+semantic failure, and the other six tests in that file still pass. A first attempt at
+the same mutant was a compile error rather than a kill, because it also unbound the
+`range` that the dropped-answer log line names; the version reported above keeps the
+binding and skips the install, which is the honest semantic mutant.
+
+**Two process tests.** `serve_admits_clients_once_the_store_is_migrated` now asserts
+that `Item id range resolved` is logged *before* `Accepting clients`, which is the
+ordering claim the unit exists to establish, read off the one stdout a process has.
+`serve_refuses_to_start_when_the_configured_item_id_span_is_too_narrow` is new: a
+9,000-id span stops the process, the refusal names the span, and the gate never opens.
+Legacy refused the same span at boot, but only after its listeners were up.
+
+**Receipt.** 18 new tests and no new targets: 7 in `common/tests/config_test.rs`, 6 in
+`db/tests/items.rs`, 4 in `prodomo::game_state`, 1 in
+`prodomo/tests/game_loop_thread.rs`.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2278 to 2296 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2296 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+Leftover `prodomo\_%` databases after the run: 0.
+
+**Not measured.** `i686-linux-gnu-g++-12` is still not installed. This unit adds no
+width claim.
+
+**Still not a live item.** The world has an allocator and a grant reducer, and the
+range is real. Nothing yet writes the returned row, writes `GC_ITEM_SET` to a
+descriptor, or authorizes a caller. `sys.item.core` stays at `codec`.

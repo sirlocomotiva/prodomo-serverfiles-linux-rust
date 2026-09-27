@@ -89,6 +89,12 @@ maps = [
 ]
 
 [game]
+# The item-id span the world's allocator hands ids out of. The default is the owner's own
+# ITEM_ID_RANGE, from legacy/config/db/conf.txt:8, which is the only one of that process's five
+# conf.txt files that sets the key; legacy has no compiled-in value and refused to boot without
+# it. The Rewrite puts the key under [game] because there is one process (ADR-0002), so the id
+# space belongs to the world rather than to a database peer. The last id is never handed out.
+item_id_range = [100000000, 200000000]
 # Gameplay settings shared by every Channel. Omitted keys keep the legacy compiled-in default.
 # The values set here are the ones the owner's legacy CONFIG files set, identical on every Core.
 view_range = 10000

@@ -8,8 +8,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 
 use common::config::{
-    load_server_config, parse_server_config, redact_url, ConfigError, GameSettings, Secret,
-    TopologyError, SHARED_CHANNEL,
+    load_server_config, parse_server_config, redact_url, ConfigError, GameSettings, ItemIdSpan,
+    Secret, TopologyError, SHARED_CHANNEL,
 };
 use tempfile::NamedTempFile;
 
@@ -21,6 +21,9 @@ fn temp_toml(content: &str) -> NamedTempFile {
 }
 
 /// The smallest valid document: a store, auth, and one Channel.
+/// One valid non-shared Channel, the smallest text that reaches `validate`.
+const CHANNEL: &str = "[[channel]]\nnumber = 1\nports = [1]\nmaps = [1]\n";
+
 const MINIMAL: &str = r#"
 [store]
 url = "postgres://prodomo@127.0.0.1/prodomo"
@@ -389,4 +392,94 @@ fn errors_name_the_file() {
         "invalid topology in test.toml: no channel other than the shared channel 99, so none \
          can be picked at login"
     );
+}
+
+/// Legacy `ITEM_ID_RANGE` in the owner's `conf.txt`
+/// (`legacy/config/db/conf.txt:8`), which is the only one of the five that carries
+/// the key. Positive control: the value is the one the live deployment used, so a
+/// config that does not set the key must produce it.
+const OWNER_SPAN: ItemIdSpan = ItemIdSpan {
+    first: 100_000_000,
+    last: 200_000_000,
+};
+
+#[test]
+fn the_item_id_span_defaults_to_the_owners_configured_range() {
+    let config = parse(&with_channels(CHANNEL)).unwrap();
+    assert_eq!(config.game.item_id_range, OWNER_SPAN);
+}
+
+#[test]
+fn the_item_id_span_is_read_as_a_pair() {
+    let config = parse(&with_channels(&format!(
+        "[game]\nitem_id_range = [7, 9]\n{CHANNEL}"
+    )))
+    .unwrap();
+    assert_eq!(config.game.item_id_range, ItemIdSpan { first: 7, last: 9 });
+}
+
+#[test]
+fn an_item_id_span_that_is_not_ascending_is_refused_before_anything_binds() {
+    // Legacy `BuildRange` refuses this span at boot, but only after the listeners
+    // were up. Here `validate` runs first, so a bad span never opens a port.
+    for (first, last) in [(9u32, 9u32), (9, 7), (0, 0)] {
+        let text = with_channels(&format!(
+            "[game]\nitem_id_range = [{first}, {last}]\n{CHANNEL}"
+        ));
+        assert_eq!(
+            invalid(&text),
+            TopologyError::UnorderedItemIdRange { first, last }
+        );
+    }
+}
+
+#[test]
+fn the_item_id_span_pair_must_have_exactly_two_numbers() {
+    for value in ["[7]", "[7, 9, 11]", "7", "\"7 9\""] {
+        let text = with_channels(&format!("[game]\nitem_id_range = {value}\n{CHANNEL}"));
+        let error = parse(&text).unwrap_err();
+        assert!(
+            matches!(error, ConfigError::Value { .. }),
+            "item_id_range = {value}\ngot {error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_span_above_its_last_id_reports_no_room_rather_than_wrapping() {
+    // The failure this guards is silent: a wrapped subtraction turns an exhausted
+    // id space into one that looks like it has four billion ids left.
+    let span = ItemIdSpan {
+        first: 100,
+        last: 200,
+    };
+    assert_eq!(span.remaining_from(100), 100);
+    assert_eq!(span.remaining_from(199), 1);
+    assert_eq!(span.remaining_from(200), 0);
+    assert_eq!(span.remaining_from(201), 0);
+    assert_eq!(span.remaining_from(u32::MAX), 0);
+    // A plain subtraction here would give 4_294_967_295, which is what the store
+    // would read as a span with billions of ids left. 10_000 is
+    // `db::item_id_range::MINIMUM_REMAIN_COUNT`, spelled out because `common` is
+    // below `db` and cannot import it.
+    assert!(span.remaining_from(u32::MAX) < 10_000);
+}
+
+#[test]
+fn a_span_reports_room_below_its_own_last_id_only() {
+    let span = ItemIdSpan {
+        first: 100,
+        last: 200,
+    };
+    assert!(span.is_ordered());
+    assert!(!ItemIdSpan {
+        first: 200,
+        last: 100
+    }
+    .is_ordered());
+    assert!(!ItemIdSpan {
+        first: 200,
+        last: 200
+    }
+    .is_ordered());
 }

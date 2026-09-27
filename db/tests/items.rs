@@ -9,11 +9,13 @@
 
 mod support;
 
+use common::config::ItemIdSpan;
 use db::accounts::create_account;
 use db::credentials::{DeleteCode, Login, NewPassword};
+use db::item_id_range::MINIMUM_REMAIN_COUNT;
 use db::items::{
-    destroy_item, load_item, load_owner_items, max_id_in_range, save_item, save_owner_items,
-    set_count, Attribute, ItemError, ItemRow, GROUND, MAX_ITEM_ID, SOCKETS,
+    destroy_item, load_item, load_owner_items, max_id_in_range, resolve_item_id_range, save_item,
+    save_owner_items, set_count, Attribute, ItemError, ItemRow, GROUND, MAX_ITEM_ID, SOCKETS,
 };
 use db::players::{create_player, Created, NewPlayer};
 use db::store::Store;
@@ -626,4 +628,136 @@ async fn the_six_socket_columns_and_seven_attribute_pairs_are_the_measured_count
     assert_eq!(db::items::ATTRVALUE_COLUMNS.len(), 7);
     // The thirty columns an insert binds: ten plain, six sockets, seven pairs.
     assert_eq!(10 + SOCKETS + 2 * 7, 30);
+}
+
+/// A span a test builds by hand. The width matters: [`MINIMUM_REMAIN_COUNT`] is
+/// `10_000`, so the short `[1_000, 9_000]` span a first draft of these tests used is
+/// refused for leaving only `8_000` ids, which is the check working rather than the
+/// span being wrong.
+fn span(first: u32, last: u32) -> ItemIdSpan {
+    ItemIdSpan { first, last }
+}
+
+#[tokio::test]
+async fn an_empty_item_table_hands_out_the_first_id_of_the_span() {
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    let range = resolve_item_id_range(&db.store, span(1_000, 1_000_000))
+        .await
+        .unwrap();
+    // `BuildRange` sets `dwUsableItemIDMin` to `dwMin` when `MAX(id)` comes back NULL
+    // or 0, so an untouched store starts at the first id and not at first + 1.
+    assert_eq!(range.min, 1_000);
+    assert_eq!(range.max, 1_000_000);
+    assert_eq!(range.usable_item_id_min, 1_000);
+    assert!(range.is_usable());
+}
+
+#[tokio::test]
+async fn the_start_id_is_one_past_the_highest_stored_id_in_the_span() {
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    let owner = player(&db.store, "a1", "Aaa").await;
+    for id in [1_000, 1_500, 2_000] {
+        save_item(&db.store, &row(id, owner, 1, id - 1_000))
+            .await
+            .unwrap();
+    }
+    let range = resolve_item_id_range(&db.store, span(1_000, 1_000_000))
+        .await
+        .unwrap();
+    assert_eq!(range.usable_item_id_min, 2_001);
+}
+
+#[tokio::test]
+async fn a_stored_id_above_the_span_does_not_move_the_start_id() {
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    let owner = player(&db.store, "a1", "Aaa").await;
+    // Inside and outside the span, interleaved. Only the inside one may count: the
+    // span ends at 1_000_000, so 1_500_000 is above it and must not move the start.
+    save_item(&db.store, &row(1_000, owner, 1, 0))
+        .await
+        .unwrap();
+    save_item(&db.store, &row(1_500_000, owner, 1, 1))
+        .await
+        .unwrap();
+    let range = resolve_item_id_range(&db.store, span(1_000, 1_000_000))
+        .await
+        .unwrap();
+    assert_eq!(range.usable_item_id_min, 1_001);
+}
+
+#[tokio::test]
+async fn a_span_with_too_few_ids_left_is_refused_the_way_build_range_refused_it() {
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    let owner = player(&db.store, "a1", "Aaa").await;
+    // Leave exactly MINIMUM_REMAIN_COUNT - 1 ids above the next id.
+    let last = 100_000;
+    let next = last - MINIMUM_REMAIN_COUNT + 1;
+    save_item(&db.store, &row(next - 1, owner, 1, 0))
+        .await
+        .unwrap();
+    let error = resolve_item_id_range(&db.store, span(1_000, last))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ItemError::ItemIdRangeExhausted {
+                first: 1_000,
+                last: 100_000,
+                next: n
+            } if n == next
+        ),
+        "got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_span_with_exactly_the_minimum_left_is_accepted() {
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    let owner = player(&db.store, "a1", "Aaa").await;
+    // The control for the test above: one more id and the same span resolves.
+    let last = 100_000;
+    let next = last - MINIMUM_REMAIN_COUNT;
+    save_item(&db.store, &row(next - 1, owner, 1, 0))
+        .await
+        .unwrap();
+    let range = resolve_item_id_range(&db.store, span(1_000, last))
+        .await
+        .unwrap();
+    assert_eq!(range.usable_item_id_min, next);
+    assert_eq!(
+        ItemIdSpan { first: 1_000, last }.remaining_from(next),
+        MINIMUM_REMAIN_COUNT
+    );
+}
+
+#[tokio::test]
+async fn a_span_whose_first_id_is_not_below_its_last_is_refused() {
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    // Positive control first: the same table resolves an ordered span, so a refusal
+    // below is about the order and not about the table.
+    assert!(resolve_item_id_range(&db.store, span(1_000, 1_000_000))
+        .await
+        .is_ok());
+    for (first, last) in [(1_000_000u32, 1_000u32), (1_000_000, 1_000_000)] {
+        let error = resolve_item_id_range(&db.store, span(first, last))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ItemError::ItemIdRangeExhausted { .. }),
+            "span [{first}, {last}] gave {error:?}"
+        );
+    }
 }

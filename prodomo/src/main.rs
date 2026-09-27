@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-use common::config::{load_server_config, ServerConfig, DEFAULT_CONFIG_PATH};
+use common::config::{load_server_config, ItemIdSpan, ServerConfig, DEFAULT_CONFIG_PATH};
 use common::enums::ELocale;
 use common::logging::{init_from_env, init_logging, LogConfig};
 use common::vid::Vid;
@@ -36,6 +36,7 @@ use db::players::{
 };
 use db::store::{schema_version, Store, StoreConfig};
 use gamedata::banword::banwords_from_dump;
+use gamedata::item_proto::ItemProtos;
 use gamedata::map_atlas::MapAtlas;
 use gamedata::mob_names::MobNames;
 use prodomo::auth_login::{
@@ -55,6 +56,7 @@ use prodomo::client_registry::{ChannelClients, ClientEntry, Lease, PositionTable
 use prodomo::client_session::ClientPhase;
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
 use prodomo::game_loop_messages::GameLoopTerminal;
+use prodomo::game_state::{world_item_id_range, GameState};
 use prodomo::handshake::HandshakeServerKind;
 use prodomo::lifecycle::{LifecycleError, PostHandshakePhase};
 use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
@@ -2253,6 +2255,7 @@ async fn run_accept_loop(
     shutdown_signal: ShutdownSignal,
     store: &Store,
     ready_gate: &ReadyGate,
+    item_id_span: ItemIdSpan,
 ) -> Result<AcceptLoopExit, Box<dyn Error>> {
     // Boxed and pinned once, not per `select!` iteration: the wait future owns
     // the signal streams, so recreating it each pass would drop them and lose a
@@ -2274,6 +2277,13 @@ async fn run_accept_loop(
             }
             prepared = &mut store_ready, if !ready => {
                 prepared?;
+                // The world's item id allocator is installed before the gate opens,
+                // and not before: its start id is a fact about the stored items, so
+                // it cannot be known until the schema is up and the table is
+                // readable. Opening the gate without it would admit clients onto a
+                // world that refuses every grant, which is the failure this ordering
+                // exists to prevent.
+                install_item_ids(game_loop, store, item_id_span).await?;
                 ready = true;
                 ready_gate.open();
                 info!("Accepting clients");
@@ -2461,6 +2471,35 @@ fn connection_context(
     }
 }
 
+/// Resolves the world's item id range against the store and hands it to the game
+/// thread.
+///
+/// Every failure here stops the server instead of opening the gate. A range the
+/// store cannot resolve, a range the world refuses, and a lost command all leave a
+/// world that answers no grant, and a server that admits clients and cannot give
+/// anything out is worse than one that does not start.
+async fn install_item_ids(
+    game_loop: &mut GameLoopHandle,
+    store: &Store,
+    span: ItemIdSpan,
+) -> Result<(), Box<dyn Error>> {
+    let resolved = db::items::resolve_item_id_range(store, span)
+        .await
+        .map_err(|error| format!("Item id range {span} is unusable: {error}"))?;
+    let range = world_item_id_range(resolved)
+        .map_err(|error| format!("Item id range {span} is unusable: {error}"))?;
+    info!(
+        first = range.first,
+        last = range.last,
+        first_usable = range.first_usable,
+        "Item id range resolved"
+    );
+    match game_loop.controller().install_item_ids(range).await? {
+        Ok(()) => Ok(()),
+        Err(error) => Err(format!("The world refused the item id range: {error}").into()),
+    }
+}
+
 /// `prodomo serve`.
 async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> {
     let config = initialize_server(config_path, verbose)?;
@@ -2490,6 +2529,19 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     let atlas = load_atlas(&config)?;
     let names = load_name_rules(&config)?;
 
+    // The item prototypes are Game data the grant path needs. They are read here,
+    // for the same reason as the atlas: a missing or malformed file stops the server
+    // before any port opens, so a broken Game data tree is a startup failure rather
+    // than a grant that fails for a minute later.
+    let proto_dir = config.proto_dir();
+    let protos = ItemProtos::load(&proto_dir).map_err(|error| {
+        format!(
+            "Item prototypes are unusable in {}: {error}",
+            proto_dir.display()
+        )
+    })?;
+    info!(prototypes = protos.rows().len(), "Item prototypes loaded");
+
     let mut listeners = Listeners::bind(&listener_plan(&config)).await?;
     for listener in listeners.iter() {
         info!(
@@ -2504,7 +2556,12 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     // The gate opens in the accept loop once the schema is up to date.
     let ready_gate = ReadyGate::closed();
 
-    let mut game_loop = spawn_game_loop(GameLoopConfig::default(), |_| {})?;
+    // The world is built here and moved into the game thread. It is built without an
+    // item id allocator on purpose: the start id is `MAX(id)` over the item table, and
+    // that table is only readable once the store has migrated, which happens inside
+    // the accept loop below. The allocator arrives as a command from there.
+    let game_state = GameState::new(protos);
+    let mut game_loop = spawn_game_loop(GameLoopConfig::default(), game_state)?;
     let controller = game_loop.controller();
     info!(thread_id = ?game_loop.thread_id(), "Dedicated game loop started");
     info!("Waiting for the store before accepting clients");
@@ -2521,6 +2578,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
         shutdown_signal,
         &store,
         &ready_gate,
+        config.game.item_id_range,
     )
     .await;
     ready_gate.close();

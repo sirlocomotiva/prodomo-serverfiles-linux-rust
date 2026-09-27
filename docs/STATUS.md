@@ -64,8 +64,19 @@ the outcome or closes, and the caller reports "no answer" as a different type fr
 world said no". The loop delegates everything that is not `Stop` to the processor, and
 `GameState::apply` runs the grant against the target's own `Inven_Point`, which needed
 a new `envanter` field on `Character` and gives Divergence 202.1 when it is clamped.
-`serve` still spawns the loop with `|_| {}`; the item-id range install is the last
-reason, and it is the next unit.
+
+
+`serve` now starts a world (203). It loads the item protos before it binds, moves a real
+`GameState` into the game thread, and installs the world's item id allocator from inside
+the accept loop once the store has migrated, before the ready gate opens. The allocator
+had to be a command rather than a constructor argument: its start id is `MAX(id)` over
+the item table, and reading that needs a connection, which `serve` documents it does not
+open before the ports are bound. The span is a `[game]` key,
+`item_id_range = [first, last]`, defaulting to the owner's own `ITEM_ID_RANGE`; it is
+refused in `validate` when it does not ascend, and a span with fewer than 10,000 ids
+left stops the process rather than admitting a client to a world that cannot give items
+out. What is still missing is the far end: nothing writes the row, sends `GC_ITEM_SET`,
+or authorizes a caller.
 
 The Game data arrived before step 1 (`legacy/`), so each system's reader or importer is built with
 the system that first needs it, starting with the maps and protos in the vertical slice. Step 5 is

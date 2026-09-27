@@ -98,10 +98,28 @@ Still to do, in the order the gates imply:
    because that is the one input `serve` cannot have when the loop is spawned (ledger 201
    explains the ordering). The state is built with a range today, so the startup path still
    passes `|_| {}` and nothing reaches it.
-2. The `GC_ITEM_SET` write to the descriptor, and the refusal replies (legacy answers with the
+2. **Write the row before the record reaches the client.** The order is deliberate and is
+   the opposite of the intuitive one: persist `GrantOutcome::row` first, in its own
+   transaction, and only then send `GrantOutcome::record`. A client that sees an item it
+   does not have on a relog is a divergence; a stored item nobody has seen yet is not.
+   Legacy sends `GC_ITEM_SET` from `SetItem` and the save is a background flush, so this
+   is a recorded improvement rather than parity.
+3. The `GC_ITEM_SET` write to the descriptor, and the refusal replies (legacy answers with the
    plain sentence, so a refusal is a chat line the operator sees).
-3. The Operator interface itself. The survey settled that this is **new**, not a port: legacy has
+4. The Operator interface itself. The survey settled that this is **new**, not a port: legacy has
    no adminpage item-give path, and the chat command is the only grant that exists.
-4. Persistence of the returned `ItemRow` in the same transaction as the save, then the
-   create-and-destroy round trip as a scripted-client scenario. That scenario is what moves
-   `sys.item.core` off `codec`.
+5. The create-and-destroy round trip as a scripted-client scenario: an Operator grants an
+   item, the client receives `GC_ITEM_SET`, the item survives a relog, and destroying it
+   removes the row. That scenario is what moves `sys.item.core` off `codec`, and nothing
+   short of it counts.
+
+**Open question for the owner, recorded rather than assumed.** Legacy's
+`ACMD(do_item)` is reachable from the game-server console (`cmd.cpp:282`) and from a GM
+chat line, and the survey found no adminpage path for it. The `ChatEffect::Command`
+interpreter is still a stub, so the legacy route is unreachable too. Step 4 therefore
+picks an interface, and the choice is the owner's: a new `prodomo item grant` subcommand
+is the smallest thing that works, but the Operator CLI is a separate process and there is
+no channel from it to a running `prodomo serve`. Either the grant runs *inside* the serve
+process (an in-process console reader, closest to legacy's console) or a control channel
+is built. This is called out rather than decided because both are real work and the
+legacy source does not point at one.

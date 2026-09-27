@@ -151,6 +151,25 @@ pub enum GameCommand {
         /// channel is a missing one.
         reply: oneshot::Sender<Result<GrantOutcome, GrantRefusal>>,
     },
+    /// Installs the world's item id allocator.
+    ///
+    /// The range cannot be a constructor argument: its start id is `MAX(id)` over
+    /// the item table, and that table is only readable once the store has migrated,
+    /// which happens inside the accept loop after the listeners are bound. Sending
+    /// it as a command is what lets the world be built, and the ports be opened,
+    /// before that fact exists, without either step inventing a range.
+    ///
+    /// The answer is a `bool` rather than the [`AlreadyInstalled`](crate::game_state::AlreadyInstalled)
+    /// error because the caller is `serve`, which treats a second install as a bug
+    /// it must not paper over; the error type stays for callers that want it.
+    InstallItemIdRange {
+        /// The range, already resolved against the store.
+        range: world::item::ItemIdRange,
+        /// Where the game thread reports whether it installed.
+        ///
+        /// Closed, not sent, when the world could not act on the request at all.
+        reply: oneshot::Sender<bool>,
+    },
     /// Requests terminal loop shutdown.
     Stop,
 }
@@ -208,6 +227,34 @@ impl std::fmt::Display for GrantError {
 }
 
 impl std::error::Error for GrantError {}
+
+/// Why installing the item id allocator did not succeed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InstallError {
+    /// The command never reached the game thread.
+    NotSent,
+    /// The command was sent and the thread dropped it without answering.
+    NoAnswer,
+    /// The world already had an allocator.
+    ///
+    /// A bug, not a state to recover from: a second allocator starts again at the
+    /// same id and reissues ids live items hold.
+    AlreadyInstalled,
+}
+
+impl std::fmt::Display for InstallError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSent => write!(formatter, "the install command was not delivered"),
+            Self::NoAnswer => write!(formatter, "the game thread gave no install answer"),
+            Self::AlreadyInstalled => {
+                write!(formatter, "the world already has an item id allocator")
+            }
+        }
+    }
+}
+
+impl std::error::Error for InstallError {}
 
 /// Cloneable Tokio-side command endpoint for the game thread.
 #[derive(Clone, Debug)]
@@ -285,6 +332,30 @@ impl GameLoopController {
             .await
             .map_err(|_| GrantError::NotSent)?;
         answer.await.map_err(|_| GrantError::NoAnswer)
+    }
+
+    /// Gives the world its item id allocator, and waits for the answer.
+    ///
+    /// # Errors
+    ///
+    /// [`InstallError::NotSent`] when the game thread has closed its receiver and
+    /// [`InstallError::NoAnswer`] when it closed the reply without sending. The
+    /// caller must not open the ready gate on either: a world with no allocator
+    /// refuses every grant, so a silently missing install is a server that looks up
+    /// and cannot give anything out.
+    pub async fn install_item_ids(
+        &self,
+        range: world::item::ItemIdRange,
+    ) -> Result<Result<(), InstallError>, InstallError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::InstallItemIdRange { range, reply })
+            .await
+            .map_err(|_| InstallError::NotSent)?;
+        if answer.await.map_err(|_| InstallError::NoAnswer)? {
+            Ok(Ok(()))
+        } else {
+            Ok(Err(InstallError::AlreadyInstalled))
+        }
     }
 
     /// Attempts to send without waiting when the command queue is full.
