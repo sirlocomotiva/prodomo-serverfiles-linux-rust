@@ -18809,3 +18809,185 @@ refusing everything.
 so no packed-width probe ran. The `TItemLimit` width claim in 196.0 (five bytes,
 ten for the pair) is a hand sum from `tables.h:844-847` on the 32-bit target and
 is not probe-confirmed. Nothing else in this unit turns on a width.
+
+## 197. `db/src/items.rs`: the queries over the item table, and the owner in every `WHERE`
+
+Ledger 196 gave items a table and no way to reach it. This adds the read and write
+path: load one character's items, load one item by id, save one, save a whole
+inventory in one transaction, delete one, set one stack size, and ask the table for
+the highest id in a range. 23 tests, 19 of them against PostgreSQL 18.
+
+### 197.0 Why the store has its own item struct, and what the real difference is
+
+`db` depends on `common` and not on `world`, because the world is above the store, so
+`db::items::ItemRow` repeats the instance record rather than borrowing it. Writing the
+drift test is what turned the claim into an answer, and the answer was not the one I
+had written down.
+
+I had documented the two structures as "field-for-field equal". They are not, and
+three differences are all deliberate:
+
+| | `ItemRow` | `world::item::Item` |
+|---|---|---|
+| the nine instance fields | same names, same widths | the same |
+| where it is | `owner_id` and `window_type`, separately | `pos: ItemPos`, which bundles both |
+| the grid footprint | **no column** | `size: u8` |
+
+`ItemPos` is the packed `BYTE window_type` + `WORD cell` (`protocol/src/item_pos.rs:143`),
+so the split between one field and two columns is at the storage boundary and is a shape
+difference, not drift. `size` is `TItemTable::bSize`, a **prototype** fact: the table
+does not store it, legacy does not store it, and the load cannot fill it. The world reads
+it from `gamedata::item_proto` when it builds the instance. A schema column for it would
+have been a second source of truth for a value that the prototype table already owns.
+
+The fourth difference was a real drift I created. The first draft of `Attribute` called
+its signed half `value`, and `protocol::gc_item_window::ItemAttribute` calls it `s_value`
+after the legacy `TPlayerItemAttribute::sValue`. That is exactly the rename the drift test
+is for, and it was found by writing the test rather than before it. The field is now
+`s_value` on both sides, and the reason is in its doc comment.
+
+`prodomo/tests/item_row.rs` pins all of it: the nine shared names as a literal on each
+side, the two socket and two attribute counts across the seam, the attribute pair
+converting with its sign intact, and the id. The names are written out by hand rather
+than derived, because a derive would make the test agree with whatever the structs
+happen to be, which is the opposite of what it is for.
+
+**And the id check is absent on purpose.** The test's first draft asserted that
+`u32::from(id)` widens an `ItemId` into a row id, and clippy's `useless_conversion` was
+right to refuse it: `world::item::ItemId` is `pub type ItemId = u32` (`world/src/item.rs:85`),
+a type alias and not a newtype. The two sides share the type outright, so they cannot
+disagree about the width, and the alias **is** the check. The test now says that, and
+asserts the two things that are actually worth asserting about the id: it is the first
+*usable* id, because the ids below `first_usable` are reserved, and it is never 0,
+because 0 is `NO_ITEM`.
+
+### 197.1 Never `REPLACE`, and delete on the owner
+
+Both of these are in the module documentation and both are tested, because neither is
+visible without a database.
+
+Legacy's save is `REPLACE INTO item` (`db/Cache.cpp:178`) and it was safe with one
+unique key. This table has a second one, `(owner_id, window_type, pos)`, and MySQL's
+`REPLACE` answers a conflict by **deleting** the other row. So a save that moves an item
+onto an occupied cell would destroy the item it landed on. Every write here is
+`INSERT ... ON CONFLICT (id) DO UPDATE`, and
+`a_save_moves_an_item_without_touching_its_new_neighbour` moves an item onto a taken
+cell, then asserts that the database **refused** it and that both rows are still there.
+That test is the reason the rule is written down: with `REPLACE` it would have passed
+with the wrong item deleted.
+
+Legacy's destroy is `DELETE FROM item%s WHERE id=%u` (`db/ClientManager.cpp:1838`). It is
+handed the owning pid, uses it for the log line and the branch, and then deletes on the
+id alone across a global id space. `destroy_item` takes the owner and puts it in the
+`WHERE` clause, and a delete is refused rather than reported as a no-op when the id
+belongs to somebody else. `NoSuchItem` and `NotOwned` are separate cases on purpose:
+"no such id" and "somebody else holds it" are different answers and a caller acts
+differently on each.
+
+### 197.2 Every column is read as the type that column is
+
+The first draft read all thirty columns as `i64`, which is the natural thing to write
+and does not work: sqlx refuses a type mismatch in both directions, and
+`reading an integer as i64` comes back as
+`mismatched types; Rust type i64 (as SQL type INT8) is not compatible with SQL type INT4`.
+Each column is now read as the Rust type matching its PostgreSQL type, which is the
+table's: `bigint` for the six `DWORD`s, `integer` for `pos` and the six sockets,
+`smallint` for the window, the count and both halves of every attribute.
+
+The same mismatch applies to a **bind**, and in the other direction, which is easier to
+miss. `set_count` binds `i64::from(count)` for a `smallint` column: sqlx encodes a
+bound value as the type it is given and the server parses `$3` as the column's type, so
+an `i64` bind puts 8 bytes where it reads 2. `check` therefore returns the count as the
+`i16` the column is, so there is one conversion and the value that was checked is the
+value that is bound, not a re-derivation of it.
+
+### 197.3 A load that cannot silently lose an item
+
+Legacy's character load (`db/ClientManagerPlayer.cpp:386`) filters in the query -- the
+six `INVENTORY` windows, tested on `row[0]` and a `switch` -- and **silently drops** a
+row it does not recognise. A character that owns an item in a window this build does not
+have loses it at the next login, and nothing is logged.
+
+This load does not repeat that. The only filter is `owner_id`, so a row in any window
+arrives, and a row that cannot be decoded is an `ItemError::Corrupt` naming the column
+rather than a missing item.
+`a_load_does_not_hide_a_row_the_build_cannot_decode` writes a row with `pos = -1` by
+hand, having dropped the CHECK for the moment, and asserts the error says `pos`. The
+test is the only place the CHECK is dropped, and only because the crate cannot produce
+the row.
+
+The order is `window_type, pos, id`, so the load is deterministic. A world that hands
+the client its items in load order needs exactly this order, and the assertion in
+`a_load_returns_one_characters_items_and_nobody_elses` is on the id list, not on a set.
+
+Ground items are not returned, and that is not a filter: 196's biconditional makes a row
+with an owner never a ground row, so adding `AND window_type <> 10` would be a second
+copy of a rule that already holds. `ItemRow::on_ground` exists so the ground unit does
+not invent a second shape for it, and its `pos` is a map index rather than a cell, which
+is stated in its doc comment.
+
+### 197.4 The rules are checked in Rust so the error names the value
+
+The migration's `CHECK`s are the real enforcement, and they stay. Checking in Rust as
+well is for the error: `item_count_check` tells a caller nothing, and
+`CountOutOfRange(5001)` tells it exactly what it passed.
+`the_rules_the_migration_enforces_are_named_before_the_statement` covers all seven
+cases -- id 0, id above the ceiling, window 11, count 0, count 5001, and both halves of
+the ground/owner biconditional -- and then counts the rows, which is the part that
+proves the refusals happened **before** the statement rather than being turned into
+constraint violations after it. That count is also what makes the test about the
+ordering, which was the whole claim.
+
+`saving_a_whole_inventory_is_one_transaction` is the ADR-0003 background write: one
+transaction, and one refused row rolls back the whole call. Its middle case puts a
+third item onto a cell the second already holds and asserts eight rows remain and the
+third item's cell is unchanged, which is what "rolled back" means as opposed to "the
+loop stopped".
+
+### 197.5 `max_id_in_range` is the pool's one question, and it is not wired yet
+
+Legacy asks `SELECT MAX(id) FROM item%s WHERE id >= %u and id <= %u`
+(`db/ItemIDRangeManager.cpp:94`) so its pool starts above what is already written. In
+one process that is the same question `db::item_id_range` already models arithmetically
+for the game thread, so `max_id_in_range` exists for the **Operator** path, which has to
+answer it once at startup rather than on every allocation. It is tested against three
+rows, one of them outside the range, and the negative case is checked too.
+
+**Not wired.** Nothing calls it. The pool still does not refill from the table, and
+`sys.item.core` is still `codec`, because an item cannot reach a client until the
+Operator can create one and the world can send it. That is the next unit, and it is
+listed in 196.4 as well.
+
+### 197.6 Corrections this unit made to its own claims
+
+Three, all found by writing the test or by the gate rather than by reading.
+
+* The module documentation claimed the two structures were "field-for-field equal"
+  (197.0).
+* The id test claimed a width check that a type alias makes impossible, and clippy
+  refused the conversion (197.0).
+* The store's attribute field was `value` where the wire type says `s_value` (197.0).
+
+### 197.7 Gates
+
+`cargo fmt --all -- --check` clean; `cargo build --workspace --locked --offline` clean;
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` 0 diagnostics;
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` 0
+diagnostics; `cargo test --workspace --doc --locked --offline` 9 targets, 0 failed.
+
+The five rustdoc errors in this unit were all intra-doc links to crates `db` does not
+depend on -- `world::item`, `gamedata::item_proto`, `protocol::item_pos::ItemPos` -- plus
+one link to a function that is named `destroy_item`. They are plain text now, which is
+the honest form for a link that cannot resolve: the whole point of the paragraph is that
+this crate cannot see those types.
+
+**Test counts.** 33 targets, 2,202 passed, 0 failed, both without a database and with
+PostgreSQL 18. 196.7 had 31 and 2,179, so this unit adds 2 targets (`db/tests/items.rs`
+and `prodomo/tests/item_row.rs`) and 23 tests. `cargo test --workspace --doc` is 9
+targets, 1 passed, 0 failed, 15 ignored. The count of leftover `prodomo\_%` databases
+after the run is 0, which is the check that the scratch database helper still drops on a
+passing run and not only on a panic.
+
+**Not measured.** `i686-linux-gnu-g++-12` is still not installed, so no packed-width
+probe ran. Nothing in this unit turns on a width: every width here is a PostgreSQL type
+chosen against a C++ field, and those were probed in 196.3b by running the values.
