@@ -58,20 +58,58 @@ impl fmt::Display for CsvError {
 
 impl Error for CsvError {}
 
+/// One parsed row and the 1-based file line it starts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumberedRow {
+    /// The 1-based line of the file this row **starts** on, counting the header and every blank
+    /// and `#` line.
+    ///
+    /// A row whose quoted field spans several lines reports the first of them, which is the line
+    /// an operator opens in an editor to see the row.
+    pub line: usize,
+    /// The fields, as raw bytes.
+    pub fields: CsvRow,
+}
+
 /// Parse a file the way `cCsvFile::Load(file, separator, quote)` does.
 ///
 /// # Errors
 ///
 /// Returns [`CsvError`] for a line legacy would cut or a quote legacy would leave open.
 pub fn parse(bytes: &[u8], separator: u8, quote: u8) -> Result<Vec<CsvRow>, CsvError> {
+    Ok(parse_numbered(bytes, separator, quote)?
+        .into_iter()
+        .map(|numbered| numbered.fields)
+        .collect())
+}
+
+/// [`parse`], with the file line each row starts on.
+///
+/// Legacy reports no line at all: `sys_err` in `Set_Proto_Item_Table` names the column and the
+/// index, not the row, so an operator reading a rejection of one item had to count rows by hand.
+/// The number here is the file line, not the row ordinal, because the reader skips blank lines and
+/// `#` lines and a row ordinal would point at the wrong line in any file that has one.
+///
+/// # Errors
+///
+/// Returns [`CsvError`] for a line legacy would cut or a quote legacy would leave open.
+pub fn parse_numbered(
+    bytes: &[u8],
+    separator: u8,
+    quote: u8,
+) -> Result<Vec<NumberedRow>, CsvError> {
     let mut rows = Vec::new();
     let mut row: CsvRow = Vec::new();
     let mut token: Vec<u8> = Vec::new();
     let mut quoted = false;
-    for raw in lines(bytes)? {
+    let mut start_line = 0;
+    for (index, raw) in lines(bytes)?.into_iter().enumerate() {
         let line = trim(until_nul(raw));
         if line.is_empty() || (!quoted && line[0] == b'#') {
             continue;
+        }
+        if row.is_empty() && token.is_empty() {
+            start_line = index + 1;
         }
         let mut cursor = 0;
         while cursor < line.len() {
@@ -100,7 +138,10 @@ pub fn parse(bytes: &[u8], separator: u8, quote: u8) -> Result<Vec<CsvRow>, CsvE
             token.extend_from_slice(b"\r\n");
         } else {
             row.push(std::mem::take(&mut token));
-            rows.push(std::mem::take(&mut row));
+            rows.push(NumberedRow {
+                line: start_line,
+                fields: std::mem::take(&mut row),
+            });
         }
     }
     if quoted {
@@ -216,5 +257,30 @@ mod tests {
             parse(b"1\t\"open\n", b'\t', b'"'),
             Err(CsvError::UnterminatedQuote)
         );
+    }
+
+    #[test]
+    fn a_row_reports_the_file_line_it_starts_on() {
+        let rows = parse_numbered(b"1\t2\n\n#skip\n3\t4\n", b'\t', b'"').unwrap();
+        let lines: Vec<usize> = rows.iter().map(|r| r.line).collect();
+        assert_eq!(lines, [1, 4]);
+        assert_eq!(fields(&rows[1].fields), [&b"3"[..], b"4"]);
+    }
+
+    #[test]
+    fn a_row_joined_from_several_lines_reports_the_first_of_them() {
+        let rows = parse_numbered(b"y\t2\nx\t\"ab\ncd\"\n", b'\t', b'"').unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].line, 2);
+        assert_eq!(fields(&rows[1].fields), [&b"x"[..], b"ab\r\ncd"]);
+    }
+
+    #[test]
+    fn parse_and_parse_numbered_agree_on_the_fields() {
+        let bytes = b"VNUM\tNAME\n1\t\"a b\"\n#c\n2\t\"x\ny\"\n";
+        let plain = parse(bytes, b'\t', b'"').unwrap();
+        let numbered = parse_numbered(bytes, b'\t', b'"').unwrap();
+        let stripped: Vec<CsvRow> = numbered.into_iter().map(|r| r.fields).collect();
+        assert_eq!(plain, stripped);
     }
 }

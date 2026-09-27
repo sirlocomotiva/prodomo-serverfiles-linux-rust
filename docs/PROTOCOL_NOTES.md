@@ -32,6 +32,9 @@
 11. [Width probe and test values](#width-probe-and-test-values)
 12. [Section 162 mutation evidence](#section-162-mutation-evidence)
 13. [Module index](#module-index)
+14. [M3: the legacy game server has no boot-ready gate, and four framing defects](#m3-the-legacy-game-server-has-no-boot-ready-gate-and-four-framing-defects)
+15. [Boot table loader audit (section 175)](#boot-table-loader-audit-section-175)
+16. [The item prototype reader (section 191)](#the-item-prototype-reader-section-191)
 
 ## Module map
 
@@ -1015,4 +1018,133 @@ exactly one wrong conclusion in this repository, and the parity suite caught it
 because two existing scenarios had been encoding the correct behaviour all
 along. When a change makes several unrelated tests go red at once, suspect the
 change before the tests.
+
+## The item prototype reader (section 191)
+
+The findings below are about `item_proto.txt` and `item_names.txt`, read by
+`gamedata::item_proto`. They are data findings, not wire findings, so they sit
+here because the boot-table audit above did and because the same legacy files
+reach the client.
+
+### Two columns are read and dropped, and three fields are therefore always zero
+
+`Set_Proto_Item_Table` (`server/server/db/ProtoReader.cpp:862-1010`) reads
+`int dataArray[33]`, so columns 0 to 32 of the 35 the file has. Column 30, the
+`Specular` column, is read into `dataArray[30]` and then **never assigned**:
+the comment `//column for 'Specular'` at `:1005` sits above the `bGainSocketPct`
+line, so `bSpecular` keeps the zero `memset` put there at boot
+(`ClientManagerBoot.cpp:591`). `alSockets` is never mentioned at all, and
+`bWeight` is forced with `str_to_number(itemTable->bWeight, "0")` at `:1008`.
+
+So `bWeight`, `bSpecular` and `alSockets` are zero for every item in the game.
+A reader that populated `bSpecular` from the file would give every item a socket
+slot legacy never grants, which is the kind of difference that only shows up as
+a missing socket months later.
+
+### The sub-type and limit columns spell names the enum does not contain
+
+`get_Item_SubType_Value` and `get_Item_LimitType_Value` compare the file's
+spelling against **enum member names**, not against the names in the file's
+header. The file writes `REAL_TIME_FIRST_USE` where the enum member is
+`LIMIT_REAL_TIME_START_FIRST_USE`, and `TIMER_BASED_ON_WEAR` against
+`LIMIT_TIMER_BASED_ON_WEAR`. Both are index 7 and 8, and both resolve, because
+the comparison is against the enum, not the header.
+
+A reader that matched the file's header would leave every real-time limit and
+every wear timer switched off, and the file would still load: nothing is
+unknown, the values are simply zero.
+
+### A vnum range excludes both of its own endpoints
+
+`dwVnumRange = end - start` (`:944`) and the lookup at
+`item_manager.cpp:674-690` tests
+`p->dwVnum < vnum && vnum < (p->dwVnum + p->dwVnumRange)`. A row written
+`110000~110099` therefore covers 110001 to 110098, and **110099 is outside it**.
+The row's own start is found by the exact lookup, so the two lookups together
+do cover a whole range, but neither the range nor the endpoint pair is
+self-consistent on its own.
+
+### A range ending in `0` covers nothing
+
+Both the subtraction at `:944` and the addition in the lookup are `DWORD`
+arithmetic, so a row written `100~0` stores `dwVnumRange = 0u32 - 100u32` and
+`dwVnum + dwVnumRange` wraps back to 0. The row matches **no vnum at all**,
+rather than being an open-ended range. This is inherited arithmetic, not an
+intent, and the Rewrite reproduces it.
+
+### `RealNumber` reads past the end of the table
+
+`ITEM_MANAGER::RealNumber` (`item_manager.cpp:696-720`) has three faults.
+`:703` takes `&m_vec_prototype[0]` with no empty-vector check, so on an empty
+table the base pointer is itself out of bounds. `:707` computes
+`mid = (bot + top) >> 1` and `:709` dereferences `pTable[mid]` **before** the
+`bot >= top` test at `:712`, so the "not found" answer is one iteration late.
+And `:716` narrows `top` to `mid - 1`, which can make `top` negative: from
+`bot = 0, top = 1`, a `vnum` below the only row sets `top = -1`, and
+`(0 + -1) >> 1` is `-1` under the arithmetic shift GCC and Clang use, so `:709`
+reads one element **before** the buffer. The read walks off the front, not
+merely past the end. It is a Defect and is not reproduced; the Rewrite uses
+`partition_point`.
+
+Its one good property is that the forward walk answers with the **first** equal
+row, which is the copy a duplicate vnum needs. The Rewrite keeps that with
+`partition_point`, so the first copy in file order wins.
+
+### The four flag resolvers read past the end of their own split
+
+`get_Item_AntiFlag_Value`, `get_Item_Flag_Value`, `get_Item_WearFlag_Value` and
+`get_Item_Immune_Value` (`:365-483`) each do
+`string* arInputString = StringSplit(inputString, "|")` and then index
+`arInputString[j]` for `j < 30` with no check against the number of tokens. A
+flag column with more than 30 tokens overruns the array. The widest flag column
+in the owner's file has 9 tokens, so the Rewrite's `MAX_FLAG_TOKENS` of 30 is a
+guard on the data rather than on a row that exists, and a test asserts the bound
+against the real file so it cannot go stale.
+
+The same four resolvers **never return `-1`**: a name that is not in the table
+is silently dropped and the other names still count. The Rewrite reproduces
+that, because a typo in one flag column is a data defect and refusing to load
+would be a behaviour change on a file the owner already runs.
+
+### A quoted type is load-bearing, not cosmetic
+
+Exactly one data line in the owner's `item_proto.txt` is quoted, and it is the
+`ITEM_UNIQUE` row for vnum 30341. `cCsvFile::Load`'s `QUOTE` state strips the
+quotes; without that, `get_Item_Type_Value` returns `-1` and
+`Set_Proto_Item_Table` calls `exit(0)` on the owner's own data.
+
+### `exit(0)` on a name it cannot resolve
+
+`ProtoReader.cpp:911-920` ends the process with **status 0** and no message on
+stdout when any of the eleven name columns fails to resolve. It runs on the DB
+process's boot path, so one typo in one item's `ITEM_TYPE` ends the server. The
+Rewrite returns `ItemProtoError` naming the file line, the vnum, and the column.
+
+Legacy's own diagnostic names the column and the index, not the row, so even the
+log line leaves an operator counting rows by hand. The Rewrite reports the
+**file** line, not the row ordinal, because the reader skips blank and `#` lines, and
+the gap between the two grows. The owner's `item_proto.txt` has eleven rows that are
+a bare carriage return and no `#` rows at all; the first is at file line 3269, so
+by the duplicated vnum 71224 — whose first copy is at file line 5779 — the row
+ordinal is already nine lower than the file line. Neither number is wrong and an
+operator holding the log has no way to know which one they were given.
+
+### The names file is keyed by `atoi`, and the last row wins
+
+`localMap[atoi(col0)] = col1` (`ClientManagerBoot.cpp:557-559`) keys an
+`std::map<int, const char*>` on the vnum, and the lookup at `ProtoReader.cpp:952`
+passes a `DWORD`. Two consequences: a vnum column with trailing junk still keys
+on the digits before it, and a vnum above `i32::MAX` is a key no row can hold.
+The owner's `item_names.txt` has exactly one such key, `162000O`, and 36 vnums
+the file lists twice, where the last row wins.
+
+### A duplicated vnum is a data defect, and a genuine Divergence
+
+The owner's file repeats two vnums, `71224` and `71225`, in four rows, and the
+two copies of each disagree on their applies. Legacy sorts with `std::sort`
+comparing `dwVnum` alone, so **its answer is unspecified**. The Rewrite sorts by
+`(vnum, file line)` and answers with the first copy in file order, and reports
+the repeats through `ItemProtos::duplicates` rather than hiding them. This is a
+recorded Divergence; the alternative would be a reader whose answer changes
+with the standard library.
 

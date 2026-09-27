@@ -16710,3 +16710,407 @@ run; and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --
 with the PostgreSQL-backed tests run against
 `postgres://prodomo:prodomo-test@127.0.0.1:55432/prodomo` and no scratch database left behind.
 The i686 cross compiler was not needed: no width was measured in this slice.
+
+
+## 191. `item_proto.txt` and `item_names.txt`: the first step 4 reader
+
+Step 4 starts at items and inventory, and the first thing any item system needs is the table
+itself. This entry is the reader for the item prototype and the item locale names, and nothing
+else: no `TItem` instance, no inventory, no `GC_ITEM_LOAD`. The parity inventory is not touched,
+so no row is `ported` and no scenario is named.
+
+### 191.1 What legacy reads, and the two files it reads it from
+
+`CClientManager::InitializeItemTable` (`server/server/db/ClientManagerBoot.cpp:522-700`) is the
+only place the file is read, and it is worth reading as a whole before porting any of it, because
+three of its behaviours are not what the surrounding code suggests.
+
+**The names file is read first and into a map keyed by `int`.** `localMap[atoi(col0)] = col1`
+(`:557-560`), so the key is `atoi` and the **last** row for a vnum wins. The key is `int`, and
+`nameMap.find(itemTable->dwVnum)` (`ProtoReader.cpp:952`) passes a `DWORD`, so a vnum above
+`i32::MAX` is a different key and falls back to the original name. `ItemProtos` models the map as
+`HashMap<i32, Vec<u8>>` and indexes it with `vnum as i32`, which reproduces that without a
+special case.
+
+The owner's `item_names.txt` has one key with trailing junk: `162000O`. `atoi` reads 162000, so
+the name is found; a stricter integer parse would drop it and the item would fall back to its
+Korean original name. Pinned in `the_owners_names_file_has_one_vnum_with_trailing_junk`.
+
+**The proto file is loaded twice.** `:567-568` loads it and `:573` calls `Next()` to skip the header,
+`:583` calls `Destroy()`, and `:584` and `:589` load and skip it **again** before the rows are read.
+The comment at `:582` says the first load is for counting and that the second is because
+`GetRowCount()` is wanted. The observable effect is that a file whose line count the `cCsvFile`
+disagrees with would size the vector wrong; the Rewrite sizes from the parsed rows, so the second
+load is not reproduced. Nothing a client can see rides on it.
+
+**The vector is `memset` to zero and then every field is filled.** `:591-592` is
+`resize(GetRowCount() - 1)` followed by `memset`. That is why the three columns below are zero:
+the memset is the only thing that ever sets them.
+
+**The vector is sorted by vnum alone.** `:650` is
+`sort(m_vec_itemTable.begin(), m_vec_itemTable.end(), FCompareVnum())` and the comparator is
+`dwVnum < dwVnum.dwVnum`. The sort runs **before** `m_vec_item_vnum_range_info` is filled
+The range list is not built here. The sorted vector is shipped to the game process, and
+`ITEM_MANAGER::Initialize` (`item_manager.cpp:75-81`) walks it in that same order and pushes every
+row with a non-zero `dwVnumRange` into `m_vec_item_vnum_range_info`, so the list is in ascending
+vnum order. It is a vector of pointers, not a second copy, so an exact row and a range row are the
+same object.
+
+`std::sort` is not stable, so for a repeated vnum legacy's answer is unspecified. The Rewrite uses
+`sort_by_key`, which is stable, and keeps the **first row in file order**. This is a recorded
+Divergence (see `docs/PROTOCOL_NOTES.md`); it is the only way to make the two duplicated vnums in
+the owner's file deterministic. `ItemProtos::duplicates` reports them so the data defect stays
+visible rather than being silently resolved.
+
+### 191.2 The 33 columns, and the three that are never read
+
+`Set_Proto_Item_Table` (`ProtoReader.cpp:861-1003`) reads `int dataArray[33]`, so columns 0 to 32
+and nothing else. The owner's file has **35** header columns. The two extra ones are not read,
+and neither is column 30:
+
+| column | header | where it goes |
+|---|---|---|
+| 30 | `Specular` | read into `dataArray[30]` and then **dropped**. `bSpecular` is never assigned. |
+| 33, 34 | `Value4_0`, `Value4_1` | never read; the loop stops at 32. |
+
+`bSpecular`, `alSockets` and `bWeight` are therefore **always zero**. `bWeight` is the joke worth
+spelling out: the last statement of the function is
+`str_to_number(itemTable->bWeight, "0")` (`:1003`), which sets it to 0. A reader that populated
+`bSpecular` from the file's `Specular` column would give every item a socket slot legacy never
+grants, and `bWeight` is the sort of thing a future inventory system would reach for and get 0
+from. `ItemProto` keeps all three as fields so the next system finds them and finds them zero, and
+`specular_sockets_and_weight_are_always_zero` pins it.
+
+The remaining 30 columns are the row: vnum and range, name, type and sub-type, the four flag
+masks, size, seven plain numbers, two limit pairs, three apply pairs, six values, socket chance,
+and add-on type. `the_plain_numeric_columns_land_in_the_right_fields` pins each one individually,
+because a column shifted by one still produces a loadable file.
+
+### 191.3 The column widths are not the field widths
+
+Two legacy narrowing assignments are load-bearing and neither is a plain copy:
+
+- `cLimitRealTimeFirstUseIndex` and `cLimitTimerBasedOnWearIndex` are `char`, and they are set to
+  `(char)i` inside the limit loop. They are the **slot index**, not a limit type, and they are
+  initialised to `-1` at `:971-972` before the loop. `ItemProto` therefore reports
+  `real_time_first_use: Option<usize>`, and `the_limit_indices_come_from_the_enum_numbering` pins
+  that a row with `LIMIT_NONE` in slot 0 reports `Some(0)` — which is what legacy computes, and
+  which is why a Rewrite that treated 0 as "unset" would differ on every item in the file.
+- `wRefineSet` is a `short` and column 12 is read as an `int`, so a value above `i32::MAX` wraps.
+  Column 12 in the file is small everywhere, so this is inherited rather than measured.
+
+The two limit *types* are compared against the `ELimitTypes` member, not against the spelling in
+the file. The file says `REAL_TIME_FIRST_USE` where the enum says
+`LIMIT_REAL_TIME_START_FIRST_USE`, and both are **index 7**. A reader that matched the name would
+leave every real-time limit in the game switched off, and the four giftbox items would load. The
+same applies to `TIMER_BASED_ON_WEAR` at index 8.
+
+### 191.4 The resolvers, and what each one does with a name it does not know
+
+**Eleven** columns hold a name, resolved by **six** functions, and they do not fail the same way.
+This is the part of the port that needed the most care, because the resolvers differ in three
+separate dimensions: exact versus substring, trimmed versus untrimmed, and what happens on a miss.
+
+The dispatch is the `if (i == ...)` chain at `:866-903`, and the miss check is the single
+`if (validCheck == -1)` at `:905-917` that ends in `exit(0)`. Only the columns that assign
+`validCheck = dataArray[i]` can reach that check, which is why the two rows below behave
+differently.
+
+| column(s) | column name | resolver | on a miss | stored at |
+|---|---|---|---|---|
+| 2 | `ITEM_TYPE` | `get_Item_Type_Value` (`:57-102`, the test at `:92`) | `-1`, so `exit(0)` | `:959` |
+| 3 | `SUB_TYPE` | `get_Item_SubType_Value` (`:104-359`) | `-1`, so `exit(0)` | `:960` |
+| 14, 16 | `LIMIT_TYPE` | `get_Item_LimitType_Value` (`:488-507`) | `-1`, so `exit(0)` | `:978`, `aLimits[i].bType` |
+| 18, 20, 22 | `ADDON_TYPE` | `get_Item_ApplyType_Value` (`:510-583`) | `-1`, so `exit(0)` | `:991`, `aApplies[i].bType` |
+| 5 | `ANTI_FLAG` | `get_Item_AntiFlag_Value` (`:365-393`) | `0` | `:962` |
+| 6 | `FLAG` | `get_Item_Flag_Value` (`:395-422`) | `0` | `:963` |
+| 7 | `WEAR_FLAG` | `get_Item_WearFlag_Value` (`:424-457`) | `0` | `:964` |
+| 8 | `IMMUNE_FLAG` | `get_Item_Immune_Value` (`:459-483`) | `0` | `:965` |
+
+The four flag resolvers are not ignored. They all return a **bit set** built with
+`pow(2, i)`, they all store that value, and the unknown sub-strings in a `|`-separated field are
+simply not counted. `get_Item_AntiFlag_Value` starts `retValue` at `0` and only ever adds, so it
+cannot return `-1`; the other three are the same shape. An unrecognised flag name is therefore
+**silently dropped**, which is the one name column in this table that cannot reach `exit(0)`.
+
+`get_Item_Type_Value` is the one that looks like a substring match and is not. It tests
+`inputString.find(tempString) != string::npos && tempString.find(inputString) != string::npos` (`:92`). For two non-empty
+strings, each containing the other means they are **equal**; the test only looks like `contains`
+because both sides are `find`. Two consequences follow from the code rather than its intent: an
+empty field never matches (`entry.find("")` is 0 but `"".find(entry)` is `npos`), and a field with
+surrounding whitespace does not match either, because this is the one resolver that does not call
+`trim` first. `csv_table` stripping the line ends is the only reason the file loads at all.
+`the_type_column_is_matched_exactly` pins this with `ITEM_WEAPON_SWORD`, a name that a substring
+match would have resolved and an exact match refuses.
+
+`get_Item_SubType_Value` is **not** a `switch`. It is a 41-entry array of sub-type name tables,
+`arSubType` at `:242`, with a parallel count array, `arNumberOfSubtype`, and three arms:
+
+- `:329` is an `assert` that fires in a debug build when the type is past the array. It is
+  compiled out in release, so it is not a behaviour and is not reproduced.
+- `:332-336` is the out-of-range arm, and it returns `-1`. A resolved `bType` of 36 or more lands
+  here, which is how `ITEM_TOGGLE` — the one `ITEM_TYPE` with no `EItemTypes` member — reaches
+  `exit(0)`.
+- `:339-341` returns `0` when the count for the type is zero, before any name is looked at. This
+  is how an item with no sub-types keeps a `SUB_TYPE` of `0`, and it is most of the file: 25 of
+  the 41 types have no sub-type table.
+- `:346-355` compares `trim(inputString)` for **equality** against each name in the table, and
+  returns the index, or `-1`.
+
+`a_bad_subtype_is_refused_but_an_unregistered_type_is_not` pins the two arms that matter, because
+the zero arm is most of the file and a reader that returned `-1` for it would refuse the owner's
+own data.
+
+The four flag resolvers accumulate `pow((float)2, (float)i)` over the table indices whose names
+appear in the field, and **never return `-1`**: a name that is not in the table is silently
+dropped. This is reproduced rather than fixed, because a flag column with a typo in it is a data
+defect, and refusing to load would be a behaviour change on a file the owner already runs.
+`an_unknown_flag_name_is_dropped_and_known_ones_still_count` pins that a typo loses a bit and the
+other bits still land.
+
+One thing is **not** reproduced. Each flag resolver does
+`string* arInputString = StringSplit(inputString, "|")` and then indexes `arInputString[j]` for
+`j < 30` with no bounds check against the number of tokens. A field with more than 30 tokens is a
+buffer overrun. `MAX_FLAG_TOKENS` is 30 and `flag_mask` refuses such a field with
+`ItemProtoError::TooManyFlagTokens`, which names the column. The widest flag column in the
+owner's file has 9 tokens, so this is a guard on the data rather than on a row that exists; a test
+asserts the bound against the real file so the guard cannot go stale.
+
+### 191.5 `exit(0)` is a Defect, and this is what replaced it
+
+`ProtoReader.cpp:916` is `exit(0)`, reached whenever any of the five name columns does not
+resolve. It is called on the DB process's boot path, so one typo in one item's `ITEM_TYPE` ends
+the process with status 0 and no message on stdout. The Rewrite returns a typed error instead:
+
+```rust
+pub enum ItemProtoError {
+    Csv(CsvError),
+    ShortRow { line: usize, found: usize },
+    BadVnum { line: usize, field: Vec<u8> },
+    UnknownType { line: usize, vnum: i32, field: Vec<u8> },
+    UnknownSubType { line: usize, vnum: i32, field: Vec<u8> },
+    UnknownLimitType { line: usize, vnum: i32, slot: usize, field: Vec<u8> },
+    UnknownApplyType { line: usize, vnum: i32, slot: usize, field: Vec<u8> },
+    TooManyFlagTokens { line: usize, vnum: i32, column: &'static str, source: TooManyFlagTokens },
+}
+```
+
+Each names the line, the vnum, and the field, so an Operator can open the file at that row. The
+five name columns are reported **separately**, because "an unknown name" without saying which
+column is not actionable, and `every_named_column_is_reported_separately` pins that the slot
+number in the error matches the column.
+
+**`line` is a file line, not a row ordinal.** Legacy reports no line at all: `sys_err` names the
+column and the index, not the row, so an operator had to count rows by hand. The first version of
+this reader passed `index + 1` from the parsed rows, which is wrong for any file with a blank line
+or a `#` line in it, and the owner's file has nine of them before row 5,779. `csv_table` now has
+`parse_numbered`, which returns each row with the 1-based file line it **starts** on, counting
+blank and `#` lines; a row whose quoted field spans several lines reports the first of them.
+`parse` is a thin wrapper over it, and `parse_and_parse_numbered_agree_on_the_fields` pins that
+the two see the same fields. The ordinal is still what the `duplicates` report and the ordering key
+need, and it is derived from the file line, not the other way round.
+
+The diagnostic renders the field as text (`String::from_utf8_lossy`) rather than as a list of byte
+values. The columns these errors name hold ASCII enum spellings, so the message is exact, and
+`a_diagnostic_survives_a_field_that_is_not_utf8` pins that a non-UTF-8 field still produces a
+message rather than a panic.
+
+`Set_Proto_Item_Table` also returns `false` for a `VNUM` that is a range starting at 0 or with an
+end below its start (`:938-941`), and the caller prints "Failed to load item_proto table." and
+stops. That one is kept, as `ItemProtoError::BadVnum`, because it is a refusal and not a crash.
+
+The `strtol` behaviour of the numeric columns is kept exactly, because four giftbox items depend
+on it: their `ADDON_TYPE` and two value columns spell `APPLY_NONE` and `NONE`, and
+`str_to_number` reads those as 0. A parser that required digits would refuse four rows in the
+owner's file. `a_numeric_column_keeps_its_leading_digits` pins the whole shape, including the
+`i32` saturation, because `strtol` returns a `long` and the legacy target is 32-bit x86
+(`server/server/premake5.lua:12`).
+
+### 191.6 The lookups, and the two that a range row never answers
+
+`ITEM_MANAGER::GetTable` (`server/server/game/item_manager.cpp:674-690`) tries the exact row first
+and then walks `m_vec_item_vnum_range_info` in order, taking the first row for which
+
+```cpp
+(p->dwVnum < vnum) && vnum < (p->dwVnum + p->dwVnumRange)
+```
+
+**Both endpoints are excluded.** `dwVnumRange` is `end - start` (`:945`), so a row written
+`110000~110099` covers 110001 to 110098, and 110099 is not in it — the row's own start is found
+by the exact lookup instead. `a_range_row_excludes_both_of_its_endpoints` pins all four of
+110000, 110050, 110099 and 110100.
+
+The sum is a `DWORD` sum and it wraps. A row written `100~0` therefore has
+`dwVnumRange == 0u32 - 100u32`, and `dwVnum + dwVnumRange` wraps back to 0, so the row covers
+**nothing at all** rather than being an open-ended range. This is inherited, not invented: the
+same two `DWORD` arithmetic operations are what legacy performs, and a reader that "fixed" the
+wrap would hand every item in that row to every vnum. `a_backwards_or_zero_started_range_is_refused`
+pins it.
+
+Legacy finds the exact row with `RealNumber` (`:696-720`), and that function is a Defect: it
+indexes `m_vec_prototype[0]` and then reads `pTable[mid]` **before** it checks `bot >= top`, so for
+a vnum that is not in the table it reads past the end of the vector, and for an empty vector
+`&m_vec_prototype[0]` is itself out of bounds. It is not reproduced. `ItemProtos::get` uses
+`partition_point` to find the lower bound, which has the second property that matters: for a
+duplicated vnum it returns the **first** row, which is what `RealNumber`'s forward walk returns and
+what a binary search would not guarantee. `the_exact_lookup_answers_with_the_first_copy_of_a_duplicate`
+pins that, and the owner's file has two vnums where the two copies disagree on their applies.
+
+`GetVnum` and `GetVnumByOriginalName` (`:722-756`) are linear scans over the sorted vector that
+compare the **argument's** first `len` bytes with `strncasecmp`, so the argument is a
+case-insensitive prefix, and they read different columns: `szLocaleName` and `szName`. An empty
+argument has `len == 0`, which `strncasecmp` calls equal, so it returns the first row; that is
+reproduced and pinned, because a caller that turns an empty item name into a lookup would otherwise
+get a real vnum instead of a miss. The fold is ASCII, as `strncasecmp` is in the C locale, so a
+Latin-9 `á` does not fold to `a`; `only_ascii_letters_are_folded` pins that with the owner's own
+Latin-9 locale names.
+
+### 191.7 The owner's file, measured
+
+Every number below is asserted by a test against the real file, so none of it is from reading the
+file by eye.
+
+| fact | value | test |
+|---|---|---|
+| data rows | 7,305 | `the_owners_file_loads` |
+| header columns | 35, of which 33 are read | `the_owners_file_loads` |
+| row start vnums | 1 to 165,400 over 7,305 rows, so 7,303 distinct starts and one repeat each of 71224 and 71225 | `the_owners_file_loads` |
+| vnums covered | 1 to 165,499; the last row is `165400~165499` at file line 6680 | `the_owners_file_loads` |
+| range rows | 180 | `the_owners_file_loads` |
+| quoted data rows | exactly 1, on file line 3,886 (vnum 30341) | `the_only_quoted_data_line_is_the_unique_row` |
+| duplicated vnums | 2 (`71224`, `71225`), 4 rows | `the_owners_file_has_four_duplicate_vnum_rows` |
+| widest flag column | 9 tokens, against a limit of 30 | `a_flag_column_wider_than_the_legacy_buffer_is_refused` |
+| names over `ITEM_NAME_MAX_LEN` | none | `a_name_longer_than_the_struct_is_truncated` uses a synthetic row |
+
+Line 3,886 is worth a note. It is the only row that depends on the CSV reader's quote handling:
+its type is `"ITEM_UNIQUE"` and its `ADDON_TYPE` columns are `"LIMIT_NONE"`, quotes included. The
+`QUOTE` state of `cCsvFile::Load` strips them; without it `get_Item_Type_Value` returns `-1` and
+legacy calls `exit(0)` on the owner's own data. So the reader's quote handling is load-bearing,
+not cosmetic, and the test says so. The row's other quoted columns include a seven-token
+`ANTI_FLAG`, which is why it is also the widest flag column in the file.
+
+`gamedata::item_proto_value` (905 lines) holds the 37 `ITEM_TYPE` names, the 16 sub-type tables
+and their dispatch, the four flag tables, the 9 `LIMIT_TYPE` names, and the 56 `ADDON_TYPE`
+names, with the resolver each column uses. `gamedata::item_proto` (1,470 lines) holds
+`ItemProto`, `ItemProtos`, `ItemProtoError`, and the reader. Both are pure and transport-free, and
+`item_proto` is the only new public module in the crate. `csv_table` gained `parse_numbered` and
+three tests; its `parse` is unchanged in behaviour and is now a wrapper over it.
+
+Every table length is pinned by a test, so a table edited by hand fails rather than silently
+shifting an index. The two subtlest tables are pinned by value, not by length: `get_Item_Type_Value`
+compares against a function-local array of 37 names where `ITEM_TOGGLE` at index 36 has **no**
+`EItemTypes` member, and the comment beside `ITEM_TOGGLE` at `:84` says the empire enum covers 34. The Rewrite keeps
+the array's own numbering, so the client-visible `bType` matches legacy for every vnum in the file.
+
+**Every column is parsed into the field's own width.** The first version read each numeric column
+into an `i32` and cast it to `u32` or `u16` at the field, and Clippy was right to call every one of
+those casts a possible loss. The narrowing is not a cast the Rewrite invented: `dataArray` is an
+`int` array and every `DWORD` field is assigned from it, so the conversion is the same 32 bits
+under a different spelling, and `wRefineSet` is a `short` that keeps the low half. Each column is
+now read straight into the width the struct has — `dword` and `word` next to `number`, each
+documented with the assignment it reproduces — so no `as` remains on the row path and the one place
+the value is reinterpreted says so. A const-generic `named_values` reads the two limit pairs and
+the three apply pairs, which is the same loop twice; the first attempt at that helper stepped by
+`N * 2` instead of 2 and every limit test failed at once, which is the sign it was worth writing
+once.
+
+The mutation sweep was run against the pristine files, each mutant restored by SHA-256, and each
+change asserted to be in executable code rather than in a comment. Nine mutants were run and
+**seven were killed**; the two survivors are recorded below rather than quietly dropped.
+
+| mutant | result | killed by |
+|---|---|---|
+| the exact lookup answers the last copy of a duplicate | semantic kill | `the_exact_lookup_answers_with_the_first_copy_of_a_duplicate`, and 18 more because the wrong row has the wrong applies |
+| a range row treats its end as inclusive | semantic kill | `a_range_row_excludes_both_of_its_endpoints` |
+| `type_value` matching substrings | compile kill | the resolver returns `Option`, so `contains` on `&[u8]` against an array of `&[u8; N]` does not typecheck |
+| `bSpecular` read from the file's `Specular` column | semantic kill | `specular_sockets_and_weight_are_always_zero` |
+| a numeric column refusing a word | semantic kill | `a_numeric_column_keeps_its_leading_digits`, `an_apply_value_may_be_negative`, `the_owners_names_file_has_one_vnum_with_trailing_junk` |
+| the limit index holding the limit type, not the slot | compile kill | the replacement assigned `Option<usize>` from a `bool` comparison that does not hold for `LIMIT_NONE` |
+| the locale name keyed by `u32`, so a vnum above `i32::MAX` found a name | semantic kill | `the_locale_name_is_keyed_by_atoi_and_the_last_row_wins` and three more |
+| the limit and apply pairs stepping by four columns | semantic kill | the width refactor's own regression: every limit test at once |
+| the name column read from the value column | semantic kill | `the_plain_numeric_columns_land_in_the_right_fields`, `an_apply_value_may_be_negative` |
+| a flag table with no 32-bit bound | semantic kill | `a_flag_name_past_the_thirty_second_bit_is_dropped` |
+| the flag bit bound at 30 rather than 32 | semantic kill | `a_flag_name_past_the_thirty_second_bit_is_dropped` |
+| **the sort made unstable** | **survivor, equivalent** | below |
+| **the sort key losing the line tiebreaker** | **survivor, equivalent** | below |
+
+Eleven mutants were run and nine were killed. The two survivors are recorded rather than quietly
+dropped.
+
+The two survivors are equivalent mutants, and the reason is the same: the sort key is
+`(vnum, line)`, and `line` is a **file** line, so no two rows share a key. A total order sorts the
+same way whichever algorithm sorts it, which is why replacing `sort_by_key` with
+`sort_unstable_by_key` changes nothing and why dropping the line from the key changes nothing on
+this file, where the two copies of each repeated vnum already happen to sit in ascending line order.
+
+The first version of this reader *did* sort by `vnum` alone, and that version had a real survivor:
+`sort_by_key` happened to be stable, so a reader that relied on the sort for the file order was
+correct by accident. The fix was to make the key a total order and to assert the ordering property
+itself, in `the_rows_are_ordered_by_vnum_and_then_by_file_line`, rather than asserting a
+particular duplicate's statistics. A `dedup_by` that dropped the repeated rows was tried and
+rejected: `m_vec_itemTable` keeps them, so `rows()` would have reported 7,303 instead of 7,305 and
+`ItemProtos::duplicates` would have had nothing to report.
+
+**A round trip is not an independent witness here** (the rule in `AGENTS.md`), so no codec is
+involved and none is claimed: this is a data reader, and its evidence is the legacy source, the
+owner's file, and the values pinned above.
+
+### 191.9 Divergences and Defects recorded by this entry
+
+- **Divergence.** A duplicated vnum resolves to the first row in file order. Legacy's `std::sort`
+  is not stable, so its answer is unspecified. Recorded in `docs/PROTOCOL_NOTES.md`.
+- **Defect, not reproduced.** `RealNumber` (`item_manager.cpp:696-720`) has three faults, and the
+  second is the one that bites. `:703` takes `&m_vec_prototype[0]` with no empty-vector check.
+  `:707` computes `mid = (bot + top) >> 1` and `:709` dereferences `pTable[mid]` **before** the
+  `bot >= top` termination test at `:712`, so the "not found" answer is always one iteration late.
+  And `:716` narrows `top` to `mid - 1`, which can make `top` negative: starting from
+  `bot = 0, top = 1`, a `vnum` below the only row sets `top = -1`, and then `(0 + -1) >> 1` is
+  `-1` under the arithmetic shift both compilers use, so `:709` reads one element **before** the
+  buffer. A binary search that walks off the front of the array is not a boundary to reproduce.
+- **Defect, not reproduced.** `exit(0)` on an unresolvable name (`ProtoReader.cpp:916`) ends the
+  process with status 0 and no message.
+- **Defect, not reproduced.** The four flag resolvers index `StringSplit`'s result for `j < 30`
+  with no bounds check, so a field with more than 30 tokens overruns the array.
+- **Inherited, recorded.** A `start~0` range row covers nothing, because both the subtraction and
+  the addition are `DWORD`.
+- **Inherited, recorded.** `bWeight` is hardcoded to 0 by `ProtoReader.cpp:1003`, and the
+  prototype never carries a specular or a socket. `bSpecular` (`tables.h:886`) and `alSockets`
+  (`tables.h:882`) are members of `SItemTable`, and a sweep of the whole legacy tree for each name
+  finds **no assignment to either on an `SItemTable`**; both therefore hold the `memset` zero from
+  `ClientManagerBoot.cpp:592`. The scope matters, because `alSockets` is also a member of the
+  player-item structs and **is** filled there, from the database at `ClientManagerBoot.cpp:446` and
+  from an award at `ClientManager.cpp:1020-1022`. The absence was checked with a positive control
+  (the sweep finds the declaration and finds `bAlterToMagicItemPct` being assigned) and a negative
+  control (the same sweep returns those player-item hits), so it is a real absence and not a
+  broken search.
+
+### 191.10 Receipt
+
+Every gate passes on the final tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | pass |
+| `cargo build --workspace --locked --offline` | pass |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | pass |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | **1,999 tests across 31 targets, 0 failed** |
+| `cargo test --workspace --doc --locked --offline` | pass |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | pass |
+
+The database-backed tests were also run against
+`postgres://prodomo:prodomo-test@127.0.0.1:55432/prodomo` (PostgreSQL 18 in Podman): the same
+1,999 tests pass, and `SELECT datname FROM pg_database WHERE datname LIKE 'prodomo\_%'` returns
+nothing afterwards, so no scratch database was left behind. The database tests report the same
+count either way, because they **return early** with a notice rather than being `#[ignore]`d, so
+the two runs were told apart directly: with `DATABASE_URL` set the notices do not appear, and
+without it 25 of them do.
+
+The i686 cross compiler is not installed on this machine, so no width was measured. None was
+needed: this is a data reader, and the struct widths it depends on are already pinned by
+`common::tables`. `rustfmt` is installed and its gate ran.
+
+Two things this entry does **not** claim. No Parity inventory row is `ported`, because a Parity
+row is ported when a scripted-client scenario passes and no scenario can reach a data reader from
+a client. And no codec was added: `AGENTS.md` says a round trip is not an independent witness,
+and a text reader has no round trip to mistake for one, so the evidence here is the legacy source,
+the owner's file, and the values pinned in 191.7.

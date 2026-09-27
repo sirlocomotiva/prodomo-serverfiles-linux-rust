@@ -7,6 +7,8 @@ pub mod banword;
 pub mod csv_table;
 pub mod event;
 pub mod item_attr;
+pub mod item_proto;
+pub mod item_proto_value;
 pub mod land;
 pub mod map_atlas;
 pub mod mob_names;
