@@ -12,7 +12,8 @@
 //!   and produces a candidate reduction.
 //! - [`DescriptorCrypto`] owns the TEA boundary, the aligned-input tail, and
 //!   the zero-padded output units.
-//! - [`ClientFrameDecoder`] resolves the fixed client frame size.
+//! - [`VariableClientFrameDecoder`] resolves the client frame size, including the
+//!   records whose own length field carries it.
 //!
 //! # The one ordering rule this module exists to enforce
 //!
@@ -41,8 +42,9 @@ use std::time::Instant;
 
 use protocol::cg_handshake::CgHandshakeHeader;
 use protocol::cg_inventory::{CG_KEEP_ALIVE, HEADER_CG_PONG};
+use protocol::cg_variable::VariableClientFrameDecoder;
 use protocol::cg_wire::{
-    resolve_client_frame_size, ClientFrame, ClientFrameDecoder, ClientFrameError, ClientFrameSize,
+    resolve_client_frame_size, ClientFrame, ClientFrameError, ClientFrameSize,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -348,7 +350,7 @@ pub enum LiveStep {
 pub struct LiveClientSession<S> {
     stream: S,
     crypto: DescriptorCrypto,
-    decoder: ClientFrameDecoder,
+    decoder: VariableClientFrameDecoder,
     lifecycle: ClientLifecycle,
 }
 
@@ -411,7 +413,7 @@ where
         Ok(Self {
             stream,
             crypto,
-            decoder: ClientFrameDecoder::new(),
+            decoder: VariableClientFrameDecoder::new(),
             lifecycle,
         })
     }

@@ -8,8 +8,8 @@ mod support;
 use db::accounts::{create_account, AccountError, AccountId, Name, NewAccount};
 use db::credentials::{DeleteCode, Login, NewPassword};
 use db::players::{
-    change_name, create_player, delete_player, lobby, select_empire, Created, LobbyPlayer,
-    NewPlayer, PlayerDelete,
+    change_name, create_player, delete_player, load_character, lobby, select_empire, Created,
+    LobbyPlayer, NewPlayer, PlayerDelete,
 };
 use db::sqlx::{self, Row};
 use db::store::Store;
@@ -73,6 +73,119 @@ async fn insert(store: &Store, account: AccountId, slot: i16, name: &str) -> sql
     .bind(name)
     .fetch_one(store.pool())
     .await
+}
+
+/// `load_character` is the loading phase's read, and the one place a descriptor names a
+/// character by ID. It must be scoped to the account: a character of another account is the
+/// same refusal as a character that does not exist, so a client cannot probe for IDs.
+/// Move the `player` id sequence above every account id.
+///
+/// The load query takes one value from each table, and both identity sequences start at 1, so
+/// `p.account_id = <character id> AND p.id = <account id>` is still satisfiable on a fresh
+/// scratch database and swapping the two binds survives. A deleted row still advances
+/// `GENERATED ALWAYS AS IDENTITY`, so this burns one id per account by inserting a character and
+/// deleting it. Every character created afterwards is above every account id, so the two ranges
+/// are disjoint. The count comes from the sequence itself, so it does not assume where the
+/// sequence starts.
+async fn separate_id_spaces(store: &Store) {
+    let owner = account(store, "burn").await;
+    let gap: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COALESCE(MAX(id), 0) + 1 FROM account) - COALESCE((SELECT last_value \
+         FROM pg_sequences WHERE schemaname = current_schema() AND sequencename = \
+         split_part(pg_get_serial_sequence('player', 'id'), '.', 2)), 0)",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    for n in 0..gap.max(1) {
+        let id = insert(store, owner, 0, &format!("Burn{n}")).await.unwrap();
+        sqlx::query("DELETE FROM player WHERE id = $1")
+            .bind(id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn load_character_reads_every_field_and_never_another_accounts_character() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    // The load query binds two parameters, and swapping them is only observable when the
+    // account id and the character id differ. A fresh scratch database starts both sequences at
+    // 1, where `p.account_id = <character id> AND p.id = <account id>` is still satisfiable, so
+    // the swap survives. `separate_id_spaces` moves the player sequence clear of the account
+    // sequence first, and the precondition it asserts below is what makes the swap killable.
+    separate_id_spaces(store).await;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    sqlx::query("UPDATE account SET empire = 1 WHERE id = $1")
+        .bind(column(alice))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let alpha = insert(store, alice, 0, "Alpha").await.unwrap();
+    let other = insert(store, bob, 0, "Other").await.unwrap();
+    let alpha_id = u32::try_from(alpha).unwrap();
+    let other_id = u32::try_from(other).unwrap();
+    let alice_id = u32::try_from(column(alice)).unwrap();
+    assert_ne!(alpha_id, alice_id, "Alpha's id equals the account id");
+    assert_ne!(other_id, alice_id, "Other's id equals the account id");
+
+    let found = load_character(store, alice, alpha_id).await.unwrap();
+    assert_eq!(found.id, alpha_id);
+    assert_eq!(found.slot, 0);
+    assert_eq!(found.name.as_str(), "Alpha");
+    assert_eq!(
+        found.empire, 1,
+        "the empire comes from the account, not the player row"
+    );
+    assert_eq!(found.job, 3);
+    assert_eq!(found.level, 0x9a);
+    assert_eq!(found.st, 0x11);
+    assert_eq!(found.ht, 0x12);
+    assert_eq!(found.dx, 0x13);
+    assert_eq!(found.iq, 0x14);
+    assert_eq!(found.conqueror_level, 0x21);
+    assert_eq!(found.main_part, 0xa1b2);
+    assert_eq!(found.hair_part, 0xc3d4);
+    assert_eq!(found.sash_part, 0xe5f6);
+    assert_eq!((found.x, found.y), (-469_300, 964_200));
+    assert_eq!(found.skill_group, 0x31);
+    assert!(found.change_name);
+    // The columns a fresh row leaves at their defaults come back as the column default, not as
+    // stack garbage, which is what the points record needs to stay honest.
+    assert_eq!(found.exp, 0, "exp");
+    assert_eq!(found.conqueror_exp, 0, "conqueror_exp");
+    assert_eq!(found.gold, 0, "gold");
+    assert_eq!(found.voice, 0, "voice");
+    assert_eq!(found.hp, 0, "hp");
+    assert_eq!(found.sp, 0, "sp");
+    assert_eq!(found.stamina, 0, "stamina");
+    assert_eq!(found.part_base, 0, "part_base");
+
+    // The other account's character is refused, and so is an ID no row has. The two must be
+    // indistinguishable, or the refusal is an ID oracle. `AccountError` carries no `PartialEq`,
+    // so each refusal is matched on its variant and its payload.
+    for (label, id) in [
+        ("another account's character", other_id),
+        ("an id no row has", alpha_id + 1_000_000),
+        ("id zero", 0),
+    ] {
+        assert!(
+            matches!(
+                load_character(store, alice, id).await,
+                Err(AccountError::NoSuchPlayer(refused)) if refused == id
+            ),
+            "{label} ({id}) is not refused as NoSuchPlayer"
+        );
+    }
+    let owned = load_character(store, bob, other_id)
+        .await
+        .expect("the owning account reads its own character");
+    assert_eq!(owned.name.as_str(), "Other");
 }
 
 #[tokio::test]

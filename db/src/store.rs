@@ -306,6 +306,19 @@ mod tests {
         assert_eq!(versions, expected);
     }
 
+    /// A test that waits for the server's "Store ready at schema version N" line must not
+    /// spell N out. Ledger 187 added migration `0004` and left
+    /// `prodomo/tests/process.rs` waiting for version 3, which would have failed the moment
+    /// `DATABASE_URL` was set. The assertion now reads the same `schema_version` the log
+    /// line does, and this test is what keeps the two in step.
+    #[test]
+    fn the_schema_version_the_server_logs_is_the_one_a_migration_added() {
+        assert_eq!(
+            schema_version(),
+            i64::try_from(MIGRATOR.iter().count()).unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn a_zero_sized_pool_is_refused() {
         let mut config = StoreConfig::new("postgres://prodomo@127.0.0.1/prodomo");

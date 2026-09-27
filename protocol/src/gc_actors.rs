@@ -447,6 +447,15 @@ impl GcCharacterMove {
         HEADER_GC_CHARACTER_MOVE.value()
     }
 
+    /// The exact 24 packed bytes, in the struct order at
+    /// `server/server/game/packet.h:1701-1712`.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(GC_CHARACTER_MOVE_WIRE_SIZE);
+        self.encode_into(&mut out);
+        out
+    }
+
     /// Append the 24 packed bytes to `out`, starting with the fixed header.
     pub fn encode_into(&self, out: &mut Vec<u8>) {
         out.push(Self::header());

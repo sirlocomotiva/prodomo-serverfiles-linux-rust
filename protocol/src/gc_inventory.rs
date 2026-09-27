@@ -371,7 +371,7 @@ pub const LEGACY_GC_PACKET_INVENTORY: &[LegacyGcPacket] = &[
         server_name: Some("HEADER_GC_CHAT"),
         cpp_type: "TPacketGCChat",
         framing: GcFraming::DynamicSize,
-        implemented_in_rust: false,
+        implemented_in_rust: true,
     },
     LegacyGcPacket {
         header: HEADER_GC_SYNC_POSITION,
@@ -987,7 +987,7 @@ pub const LEGACY_GC_PACKET_INVENTORY: &[LegacyGcPacket] = &[
         server_name: Some("HEADER_GC_NPC_POSITION"),
         cpp_type: "TPacketGCNPCPosition",
         framing: GcFraming::DynamicSize,
-        implemented_in_rust: false,
+        implemented_in_rust: true,
     },
     LegacyGcPacket {
         header: HEADER_GC_CHARACTER_UPDATE2,
@@ -1379,7 +1379,7 @@ pub const LEGACY_GC_PACKET_INVENTORY: &[LegacyGcPacket] = &[
         server_name: Some("HEADER_GC_ENTITY"),
         cpp_type: "TPacketGCEntity",
         framing: GcFraming::DynamicSize,
-        implemented_in_rust: false,
+        implemented_in_rust: true,
     },
     LegacyGcPacket {
         header: HEADER_GC_HANDSHAKE_OK,
@@ -1555,8 +1555,8 @@ mod tests {
             .filter(|entry| entry.implemented_in_rust)
             .map(|entry| entry.client_name)
             .collect();
-        assert_eq!(done.len(), 96);
-        assert_eq!(gc_missing_codec_count(), 38);
+        assert_eq!(done.len(), 99);
+        assert_eq!(gc_missing_codec_count(), 35);
         for name in [
             "HEADER_GC_AFFECT_ADD",
             "HEADER_GC_PLAYER_POINT_CHANGE",
@@ -1640,6 +1640,6 @@ mod tests {
                 "byte {byte:#04x} is expected to be renamed between the trees"
             );
         }
-        assert_eq!(gc_missing_codec_count(), 38);
+        assert_eq!(gc_missing_codec_count(), 35);
     }
 }

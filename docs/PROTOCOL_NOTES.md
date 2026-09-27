@@ -186,6 +186,23 @@ Sections 163 through 167 establish the honest baseline and correct three method 
 
 ## Verification lessons
 
+- **A mutation sweep must be scoped to the function under test, and it must report the landing
+  line.** A sweep that replaces the first textual occurrence of a pattern in a file can mutate a
+  *different* function that happens to share the pattern, then report the mutant as a survivor. This
+  happened when sweeping `load_character`: swapping its two bound parameters reported as "survived",
+  but the replacement had landed 100 lines earlier in `create_player`, which binds the same pair,
+  so the function under test was never modified. The repeat sweep, scoped to the function's own
+  text, killed all three mutants. Report the line number with every result; a survivor reported
+  without one cannot be told apart from a real gap.
+- **Two tables whose id sequences both start at 1 cannot be separated by counting.** A query that
+  takes one value from each is ambiguous on a fresh scratch database: reading the character id into
+  the account column still finds a row, so a swapped-parameter defect is invisible. Creating one
+  row per round on each side keeps the two sequences in lockstep and never separates them. The
+  reliable gap is that **a deleted row still advances `GENERATED ALWAYS AS IDENTITY`**: insert and
+  delete one row per existing id, and every id created afterwards lies above the other sequence.
+  Ask `pg_sequences` for the current value rather than assuming where the sequence starts, and
+  assert the disjointness as a precondition so a change to id allocation fails loudly instead of
+  turning a scope assertion into decoration.
 - **A name-keyed enum diff across the two trees is unsound.** The four `HEADER_GC_*` names whose
   values differ between server and client (`SKILL_LEVEL`, `MAIN_CHARACTER`, `REFINE_INFORMATION`,
   `ITEM_SET`) are the same record generations under opposite naming conventions: the server suffixes
@@ -393,6 +410,36 @@ sentinels such as `CG_REFINE_ELEMENT_CLOSE = 255`, and range checks are not fram
 - Client variable framing is a pure protocol boundary. Header `0x08` SyncPosition has a 3-byte full-frame prefix and 12-byte elements; retain all declared elements, keep the gameplay cap of 16 out of the protocol decoder, and keep TEA/descriptor/session integration separate. Header `0xdb` FishEvent consumes a 2-byte prefix, extends box-use to 5 bytes and shape-add to 3 bytes, and leaves unknown subheaders at the 2-byte legacy prefix. Header `0x32` Shop consumes a 2-byte prefix; END/unknown subheaders consume no extension, BUY adds 2 bytes, SELL adds 1 byte, and SELL2 adds the active x86 four-byte `TfckOFF` (including its uninitialized padding byte). No shop action belongs in the framing layer. The pure game policy caps only processed elements and models owner, interval, displacement, close, and self-send effects through injected ports.
 - *(From README.md.)* Client variable framing is a pure, source-verified boundary. Header `0x08` SyncPosition has a 3-byte full-frame prefix and 12-byte elements; keep every declared element, do not enforce the gameplay cap of 16 in the protocol decoder, and keep TEA/descriptor/session integration separate. The pure game policy caps only the first 16 processed elements, preserves the full declared consumption, and models the legacy owner, interval, displacement, descriptor-close, and self-send effects through injected ports. Messenger header `0x43` has a 2-byte base; ADD_BY_VID adds a packed 4-byte VID, ADD_BY_NAME and REMOVE add a raw 24-byte name field, and subheader 3 or unknown values consume only the base. This framing slice does not resolve players or invoke messenger actions. Private shop header `236` is the third sub-header-routed two-byte prefix in the same layer: 22 sub-header constants, 21 constant extension sizes, and one count-derived `BUILD` rule that reads `wItemCount` little-endian at frame offset 41. Ten sub-headers extend by zero, including `STATE_UPDATE` (9), which is enumerated but never dispatched, and unrecognised sub-headers take the same `default:` path; never give either a payload. The sub-header values live at wire offset 1, so they are not a header space and the collision taxonomy does not apply to them. This slice frames private-shop sub-records and nothing more: it parses no sub-record field, resolves no shop or owner, and runs no buy, check-in, checkout, price-change, or search logic.
 - *(From README.md.)* Header 77 collides across directions with the five-byte inbound `HEADER_GC_PARTY_INVITE`, so a header-keyed table would need two sizes for one value and the directions must never share one.
+- Ledger 188 made four game-phase records live, and the framing rule behind them is two
+  steps, not one. `CInputProcessor::Process` (`G/input.cpp:59-124`) takes `iPacketLen` from the
+  phase table and then **adds** the analyzer's return value (`iPacketLen += iExtraPacketSize`,
+  `G/input.cpp:104`); a `-1` return stops consuming without closing (`G/input.cpp:101-102`). So
+  the frame is as long as the record's own size field says, and a fixed-size table alone can
+  never frame a variable record. `net::ClientFrameTransport` resolves the total from the
+  registered base prefix plus that field, through
+  `protocol::cg_variable::VariableClientFrameDecoder`. The two live variable headers are
+  `CG_CHAT` (3) and `CG_SYNC_POSITION` (8). **Divergence:** an undersized declaration closes
+  the descriptor (`ClientFrameError::InvalidVariableSize`) where legacy consumes nothing and
+  waits for the ping cycle to drop it, on the same grounds as ledger 160.5.
+- `CG_CHAT` (3) is 4 + `sizeof(buffer)`, and `CInputMain::Chat` (`G/input_main.cpp:781-991`) has
+  **no** `strlen(buf) < 1` arm. `strlcpy` copies at most `iExtraLen + 1` bytes and stops at the
+  first NUL, so an empty payload and a payload whose first byte is NUL both reach the map as
+  the bare `"Name : "` line. An earlier reading of this handler claimed a `strlen` arm; the
+  parity scenario pins the source behaviour. `CG_MOVE` (7) is **16** bytes: `G/packet.h` gives
+  `command_move` a `bHeader`, `bFunc`, `bArg`, `bRot`, `lX`, `lY`, and `dwTime`, and there is
+  no `dwDuration` in the tree. Its distance test divides **before** it measures:
+  `DISTANCE_SQRT((x - lX) / 100, (y - lY) / 100)` with `long` operands
+  (`G/input_main.cpp:1782`), so the limits 750 and 999 are in metres. `GC_MOVE` (3) is
+  `TPacketGCMove` at **24** bytes, not the width of the `GC_CHARACTER_ADD` encoder it was
+  first written as.
+- Three distances govern the sync slice and they are not interchangeable. The
+  `SetSyncOwner` claim range (`G/char.cpp:5510`) is `DISTANCE_APPROX` over **raw** map units,
+  with no `/ 100`, so its 250 limit is 261 raw on one axis; the `SyncPosition` owner range
+  (`G/input_main.cpp:2086`) is `DISTANCE_SQRT` over `/ 100` against `2500 + 1000`; and the
+  `SyncPosition` displacement close (`G/input_main.cpp:2108`) is `DISTANCE_SQRT` over `/ 100`
+  against 25. `TPacketGCOwnership` (header 62) is `packet.h:1716-1720`: a header, `dwOwnerVID`,
+  and `dwVictimVID`, so 9 bytes, and `SetSyncOwner` writes it with a `PacketAround` that has
+  **no** except, so the victim sees its own ownership.
 
 ## Game-to-client login-flow records
 
@@ -412,6 +459,39 @@ sentinels such as `CG_REFINE_ELEMENT_CLOSE = 255`, and range checks are not fram
 
 ## DB records and boot
 
+- `CG_ENTERGAME` is a **header-only** record (10); it carries no client version, so the
+  version check cannot be reproduced from the packet it names (ledger 187). The version arrives
+  on `CG_CLIENT_VERSION`, which is 0xf1 and, on the legacy tree, also 0xfd in the
+  client-to-game direction. **0xfd is therefore a cross-direction collision**: inbound it is
+  `CG_CLIENT_VERSION`, outbound it is `GC_PHASE`. It belongs in the *width-equal semantic
+  collision* bucket only if the two widths match, and the two are unrelated operations, so a
+  shared table between the directions is wrong. A second measurement this ledger corrected: a
+  round trip through a codec is not an independent witness for either of these records, and
+  neither the enter-game record nor `GC_PHASE` may take its width from the other's.
+- `GC_CHARACTER_ADD` is **byte 1** and 35 packed bytes. Byte 68 is `GC_CHARACTER_POSITION`, a
+  different record. `GC_CHAR_ADDITIONAL_INFO` is byte 136 and 70 packed bytes, and 70 rather
+  than 73 because `dwNewIsGuildName` is a `BYTE` (`G/packet.h`). `GC_MAIN_CHARACTER2_EMPIRE` is
+  byte **113**; byte 15 is the two-empire variant legacy never sends. Each of these three is a
+  place where a name-based guess selects a real but wrong record, and none of them is detectable
+  by a round trip (ledger 187).
+- `GC_ENTITY` has **no count field**. Its `wSize` is the whole record and the count is inferred
+  from the size, so a view with no character is a 3-byte record, not a header plus a zero. A
+  codec that requires a count field, or that treats a size of 3 as malformed, breaks an empty
+  map (ledger 187).
+- **Not every record in a burst is size-prefixed.** `GC_ENTITY` (249) and `GC_CHAT` (4) carry a
+  `WORD` at bytes 1 and 2 covering the whole record; `TPacketGCCharacterAdd` and
+  `TPacketGCCharacterAdditionalInfo` carry no such field at all, and the client sizes them by the
+  header alone because the server writes each in one `Packet` call. A reader that assumes a
+  `WORD wSize` because a record grows with its contents will read the `dwVID` as a size and
+  either hang or truncate. Read the struct, not the record's role (ledger 187).
+- **A C enum with explicit values must be measured by the compiler, not counted.** `EPointTypes`
+  (`G/char.h:140-346`) mixes auto-incremented members with explicit ones (`POINT_ENERGY = 128`,
+  `POINT_GAYA = 207`) and with members behind `#ifdef`. Counting the members the preprocessor
+  leaves live gives `POINT_CONQUEROR_LEVEL` = 152 where the compiler puts it at 173, and the
+  error is silent: the count is a plausible-looking number. Compile the verbatim enum body with
+  the tree's switches defined and print the compiler's numbering. This is the same rule as the
+  packed-width probe, applied to enumeration: measure, never sum. Ledger 187 found 16 wrong
+  hand-entered indices this way, all of them in the same explicit-value region.
 - Select a DB boot feature profile explicitly. Keep ordinary table records opaque until feature-dependent C++ record widths are verified; `TBanwordTable`, `TRefineTable`, optional `TEventTable`, optional `TMarketItemPrice`, and `TPacketUpdateHorseName` are source-fixed typed exceptions. `ENABLE_ITEMSHOP` data is a separate DB frame. `BootSnapshot` is caller-resolved and profile-bound; it must not query SQL, infer rows, or reuse request-specific hosts/admins. Horse-name lookups are injected and must not invent SQL results; missing rows are 25 zero bytes. Channel lookup is injected too: zero selectors are silent, valid no-match results are six zero bytes, and matches echo the request handle. Login-by-key and primary player-load adapters frame only already-resolved outcomes; they must not infer missing results, execute SQL, or mutate login state. The separate `player_index` boundary builds only the source-fixed login-by-key index query, preserves SQL NULLs, rejects out-of-range empire values, and its SQLx adapter uses a one-row bounded stream without implementing the legacy missing-row repair path. The primary login success payload is 362 bytes, the missing/invalid payload is empty, and an already-logged-in result preserves the caller's exact raw 31-byte record.
 - *(From README.md.)* Select a DB boot feature profile explicitly. Keep ordinary table records opaque until their feature-dependent C++ record widths are verified; the source-fixed `TBanwordTable`, `TRefineTable`, optional `TEventTable`, optional `TMarketItemPrice`, and `TPacketUpdateHorseName` boundaries are the typed exceptions. `ENABLE_ITEMSHOP` data is a separate DB frame. Horse-name lookups must be injected; a missing row produces 25 zero bytes, while returned bytes are copied exactly. Channel lookup is also injected: a zero map/channel selector produces no frame, a valid request without a matching peer produces an all-zero six-byte result, and a match echoes the incoming DB handle. Login-by-key and primary player-load services are framing boundaries only: they must not infer missing results, execute SQL, or mutate login state. A resolved login success is 362 bytes, a missing/invalid result is empty, and an already-logged-in result preserves the caller-supplied raw 31-byte record; header 33 is not a primary key-login outcome. DB-peer identity must come from an external, generation-bound verification; the setup `bAuthServer` byte, frame handle, source prefix, login key, and account/player IDs are not authentication. The current policy authorizes only an explicitly verified `Auth`-role, base-only setup and emits an effect for caller application; it does not replace the legacy auth-pointer overwrite or authorize live setup.
 - *(From README.md.)* `db-server::postfix` is the required allowlist before interpolating `TABLE_POSTFIX` into SQL. `db-server::player_index` builds the fixed login-by-key index query and rejects SQL NULL/out-of-range values; `db-server::player_index_sqlx` acquires at most one row, preserves NULLs, and keeps database failures distinct from an empty result. `db-server::banword_sqlx` accepts only the fixed banword query, preserves raw bytes and NULLs, and uses the pool's bounded retry-preserving stream. `db-server::quest`/`quest_sqlx` preserve the two exact quest query variants and the count-prefixed 106-byte response boundary. `db-server::event`/`event_sqlx` preserve the exact seven-column event query, positional timestamp extraction, raw type bytes, strict NULL/numeric handling, and bounded 85-byte sections without becoming a live cache. `db-server::item_attr`/`item_attr_sqlx` preserve the exact 18-column normal and 16-column rare item-attribute queries, raw NULL/byte cells, source order and duplicates, strict versus explicitly named legacy conversion, and the active 71-byte section boundary without becoming a live cache. `db-server::boot_snapshot` is caller-resolved and profile-bound; it does not query tables or choose a feature profile from bytes. `ENABLE_ITEMSHOP` stays in its separate frame.

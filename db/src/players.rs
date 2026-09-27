@@ -75,6 +75,23 @@ impl Lobby {
     pub fn in_slot(&self, slot: u8) -> Option<&LobbyPlayer> {
         self.players.iter().find(|player| player.slot == slot)
     }
+
+    /// The character IDs by slot, with 0 for an empty slot.
+    ///
+    /// This is the shape the character-select reducer judges against, and it matches legacy's
+    /// `TAccountTable::players`, whose unused entries keep `dwID == 0` (`G/input_login.cpp:265-306`
+    ///). A slot past the end of the array is `Ignore` in the reducer, which is where the
+    /// Rewrite's bound check lives.
+    #[must_use]
+    pub fn slot_ids(&self) -> [u32; PLAYER_SLOTS] {
+        let mut slots = [0; PLAYER_SLOTS];
+        for player in &self.players {
+            if let Some(slot) = slots.get_mut(usize::from(player.slot)) {
+                *slot = player.id;
+            }
+        }
+        slots
+    }
 }
 
 /// Read an account's empire and characters.
@@ -382,5 +399,209 @@ pub async fn change_name(
         Ok(_) => Err(AccountError::NoSuchPlayer(player)),
         Err(sqlx::Error::Database(error)) if error.is_unique_violation() => Ok(false),
         Err(error) => Err(error.into()),
+    }
+}
+
+/// One character as the loading phase and the game phase read it.
+///
+/// This is the part of legacy `TPlayerTable` (`common/tables.h`) the loading burst and the
+/// enter-game burst read, plus the account's empire. Legacy loads the whole table with
+/// `QUERY_PLAYER_LOAD` (`D/ClientManagerPlayer.cpp:275-400`); the Rewrite reads only the
+/// columns a shipped record needs, and a later system adds its own in a new migration.
+///
+/// # Values the Rewrite computes, not stores
+///
+/// The next-level cost, the maximum hit points, spell points and stamina are derived from
+/// `common::levels` at the point of use, exactly as `CHARACTER::Init` does. Storing a
+/// derived maximum would let a row written by hand disagree with the level and the race.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Character {
+    /// The character ID, the 32-bit value the client sees.
+    pub id: u32,
+    /// The slot it was selected from, 0 to 3.
+    pub slot: u8,
+    /// The Name: 2 to 24 ASCII letters and digits.
+    pub name: String,
+    /// The account's empire.
+    pub empire: u8,
+    /// The race.
+    pub job: u8,
+    /// The level.
+    pub level: u8,
+    /// Experience banked towards the next level.
+    pub exp: i64,
+    /// The conqueror level (`__CONQUEROR_LEVEL__` is on).
+    pub conqueror_level: u8,
+    /// Strength.
+    pub st: u8,
+    /// Vitality.
+    pub ht: u8,
+    /// Dexterity.
+    pub dx: u8,
+    /// Intelligence.
+    pub iq: u8,
+    /// Current hit points.
+    pub hp: i32,
+    /// Current spell points.
+    pub sp: i32,
+    /// Current stamina.
+    pub stamina: i32,
+    /// Gold carried. Legacy is unsigned 64-bit; the column holds the low 63 bits of that
+    /// range and the check refuses anything wider.
+    pub gold: i64,
+    /// Conqueror experience banked towards the next conqueror level.
+    pub conqueror_exp: i64,
+    /// `POINT_VOICE`, which legacy leaves uninitialised in the points record.
+    pub voice: u8,
+    /// The body shape, a `BYTE` (`part_base`).
+    pub part_base: u8,
+    /// The armour part.
+    pub main_part: u16,
+    /// The hair part.
+    pub hair_part: u16,
+    /// The sash part (`__SASH_SYSTEM__` is on).
+    pub sash_part: u16,
+    /// The last saved x, in world units.
+    pub x: i32,
+    /// The last saved y, in world units.
+    pub y: i32,
+    /// The skill group.
+    pub skill_group: u8,
+    /// Whether the player must choose a new Name before playing.
+    pub change_name: bool,
+}
+
+/// Read one character of an account for the loading phase.
+///
+/// The account is named as well as the character, so a descriptor that holds a login can
+/// never load a character of another account by guessing an ID.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchPlayer`] when the account holds no such character, or
+/// [`AccountError::Database`].
+pub async fn load_character(
+    store: &Store,
+    account: AccountId,
+    player: u32,
+) -> Result<Character, AccountError> {
+    let player_id = i32::try_from(player).map_err(|_| AccountError::NoSuchPlayer(player))?;
+    let row = sqlx::query(
+        "SELECT p.slot, p.id, p.name, p.job, p.level, p.exp, p.conqueror_level, p.conqueror_exp, p.st, p.ht, \
+         p.dx, p.iq, p.hp, p.sp, p.stamina, p.gold, p.voice, p.part_base, p.part_main, \
+         p.part_hair, p.part_sash, p.x, p.y, p.skill_group, p.change_name, a.empire \
+         FROM player AS p JOIN account AS a ON a.id = p.account_id \
+         WHERE p.account_id = $1 AND p.id = $2",
+    )
+    .bind(account.to_column()?)
+    .bind(player_id)
+    .fetch_optional(store.pool())
+    .await?
+    .ok_or(AccountError::NoSuchPlayer(player))?;
+    Ok(Character {
+        id: narrow(row.try_get::<i32, _>("id")?, "id")?,
+        slot: narrow(row.try_get::<i16, _>("slot")?, "slot")?,
+        name: row.try_get("name")?,
+        empire: narrow(row.try_get::<i16, _>("empire")?, "empire")?,
+        job: narrow(row.try_get::<i16, _>("job")?, "job")?,
+        level: narrow(row.try_get::<i16, _>("level")?, "level")?,
+        exp: row.try_get("exp")?,
+        conqueror_level: narrow(row.try_get::<i16, _>("conqueror_level")?, "conqueror")?,
+        conqueror_exp: row.try_get("conqueror_exp")?,
+        st: narrow(row.try_get::<i16, _>("st")?, "st")?,
+        ht: narrow(row.try_get::<i16, _>("ht")?, "ht")?,
+        dx: narrow(row.try_get::<i16, _>("dx")?, "dx")?,
+        iq: narrow(row.try_get::<i16, _>("iq")?, "iq")?,
+        hp: row.try_get("hp")?,
+        sp: row.try_get("sp")?,
+        stamina: row.try_get("stamina")?,
+        gold: row.try_get("gold")?,
+        voice: narrow(row.try_get::<i16, _>("voice")?, "voice")?,
+        part_base: narrow(row.try_get::<i16, _>("part_base")?, "part_base")?,
+        main_part: narrow(row.try_get::<i32, _>("part_main")?, "part_main")?,
+        hair_part: narrow(row.try_get::<i32, _>("part_hair")?, "part_hair")?,
+        sash_part: narrow(row.try_get::<i32, _>("part_sash")?, "part_sash")?,
+        x: row.try_get("x")?,
+        y: row.try_get("y")?,
+        skill_group: narrow(row.try_get::<i16, _>("skill_group")?, "skill_group")?,
+        change_name: row.try_get("change_name")?,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Lobby, LobbyPlayer, PLAYER_SLOTS};
+
+    fn player(slot: u8, id: u32) -> LobbyPlayer {
+        LobbyPlayer {
+            slot,
+            id,
+            name: "Hero".to_string(),
+            job: 1,
+            level: 1,
+            play_minutes: 0,
+            st: 4,
+            ht: 4,
+            dx: 4,
+            iq: 4,
+            conqueror_level: 0,
+            sungma_str: 0,
+            sungma_hp: 0,
+            sungma_move: 0,
+            sungma_immune: 0,
+            main_part: 0,
+            hair_part: 0,
+            sash_part: 0,
+            x: 0,
+            y: 0,
+            skill_group: 1,
+            change_name: false,
+        }
+    }
+
+    fn lobby(players: Vec<LobbyPlayer>) -> Lobby {
+        Lobby { empire: 1, players }
+    }
+
+    /// A full account keeps the ID in the character's own slot, and 0 in the rest. That is the
+    /// shape `judge_select` reads, where 0 is what makes an empty slot a close.
+    #[test]
+    fn slot_ids_put_each_character_in_its_own_slot() {
+        let table = lobby(vec![player(0, 11), player(2, 33)]).slot_ids();
+        assert_eq!(table, [11, 0, 33, 0]);
+    }
+
+    /// A character created in the last slot is still found, so the array length is the
+    /// `PLAYER_PER_ACCOUNT` bound rather than a coincidence.
+    #[test]
+    fn the_last_slot_is_reachable() {
+        let last = u8::try_from(PLAYER_SLOTS - 1).expect("four slots fit in a u8");
+        let table = lobby(vec![player(last, 44)]).slot_ids();
+        assert_eq!(table, [0, 0, 0, 44]);
+    }
+
+    /// An account with no character is four zeros, which is `TAccountTable` after
+    /// `PlayerDeleteSuccess` cleared the last entry (`G/input_db.cpp`).
+    #[test]
+    fn an_empty_account_is_all_zeros() {
+        assert_eq!(lobby(Vec::new()).slot_ids(), [0; PLAYER_SLOTS]);
+    }
+
+    /// A slot outside the array is ignored rather than panicking. The store's `CHECK` keeps a
+    /// slot in range, so a row cannot carry one; the guard is what lets a hand-edited row fail
+    /// to be a crash.
+    #[test]
+    fn a_slot_past_the_array_is_ignored() {
+        let table = lobby(vec![player(1, 22), player(9, 99)]).slot_ids();
+        assert_eq!(table, [0, 22, 0, 0], "slot 9 has nowhere to go");
+    }
+
+    /// The array is exactly `PLAYER_PER_ACCOUNT` wide, which is the bound the select reducer
+    /// range-checks against.
+    #[test]
+    fn the_array_is_as_wide_as_the_account() {
+        let table = lobby(Vec::new()).slot_ids();
+        assert_eq!(table.len(), PLAYER_SLOTS);
+        assert_eq!(PLAYER_SLOTS, 4);
     }
 }

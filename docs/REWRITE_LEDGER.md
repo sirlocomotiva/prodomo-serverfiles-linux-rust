@@ -15877,3 +15877,541 @@ both were fixed and every gate was run again. `prodomo/tests/process.rs` expects
 There are four new Rust files (`gamedata/src/csv_table.rs`, `gamedata/src/mob_names.rs`,
 `gamedata/src/sql_dump.rs`, and `prodomo/src/select_phase.rs`), for 158 files and 94,250 lines. No
 scratch database was left behind, and there is no stray `*.core` file in the workspace root.
+
+
+## 187. Character select, the loading burst, and enter-game
+
+`CG_CHARACTER_SELECT` (6), the load answer, and `CG_ENTER_GAME` (10) take a descriptor from the
+select screen to a live character. The two bursts, and the verdicts for the two client records
+that ask for them, live in the new transport-free `prodomo::loading_phase`. It holds no
+descriptor, no store, and no world: the caller supplies the character the store read and the
+neighbourhood the world knows, and sends what comes back.
+
+### 187.1 What the enter-game packet carries
+
+`TPacketCGEnterGame` is a single header byte (`G/packet.h:594-597`). It carries **no version**.
+The client version arrives on a separate record, `CG_CLIENT_VERSION` (0xf1) or the 0xfd variant
+(0xfd), and legacy stores its timestamp on the descriptor (`DESC::SetClientVersion`). Two
+consequences:
+
+- **`GC_PHASE` and inbound `CG_CLIENT_VERSION` are both byte 0xfd.** This is a cross-direction
+  header collision and is recorded as such; the direction, not the byte, tells them apart.
+- The version check is not part of the enter-game handler's payload, so it cannot be reproduced
+  from the packet. See 187.4.
+
+### 187.2 The two bursts, in legacy order
+
+Loading, from `loading_burst` (`CInputDB::PlayerLoad`, `G/input_db.cpp:414-455`):
+
+1. `GC_PHASE` (253) with `PHASE_LOADING` (4) — 2 bytes
+2. `GC_ENTITY` (249) — 3 bytes when the map is empty, 31 for one character
+3. `GC_MAIN_CHARACTER2_EMPIRE` (113) — 46 bytes
+4. one `GC_QUICKSLOT_ADD` (28) per non-empty quickslot
+5. `GC_CHARACTER_GOLD` (224) — 9 bytes
+6. `GC_CHARACTER_POINTS` (16) — 2041 bytes
+7. `GC_SKILL_LEVEL` (76) — 1531 bytes
+
+Steps 4 to 7 sit **after** the map test, and step 1 is the descriptor's own phase transition
+rather than burst content, so `loading_burst` returns two halves (`LoadingBurst::before_map_test`
+and `::after_map_test`) and never a `GC_PHASE`. The same split applies to `enter_game_burst`, so
+each burst is written as `set_phase` then one half, `set_phase` then the other. That is what keeps
+exactly one `GC_PHASE` on the wire per transition.
+
+Enter-game, from `enter_game_burst` (`CInputLogin::Entergame`, `G/input_login.cpp:562-790`):
+
+1. `GC_CHARACTER_ADD` (1) and `GC_CHAR_ADDITIONAL_INFO` (136) for the entering character, then the
+   same pair for every character already in view
+2. `GC_NPC_POSITION` (115), only when the map has NPCs
+3. `GC_AFFECT_ADD` (126) for the five-second revive-invisible affect
+4. `GC_PHASE` (253) with `PHASE_GAME` (5)
+5. `GC_PVP` (41), one per live duel
+6. `GC_LAND_LIST` (130), only for a map with guild land
+7. `GC_TIME` (106)
+8. `GC_CHANNEL` (121)
+9. one `GC_CHAT` (4) line, `letters_event 0`
+
+Every header byte was read out of `G/packet.h` for this change, not inferred from a name.
+`GC_CHARACTER_ADD` is **byte 1**; byte 68 is `GC_CHARACTER_POSITION`, and
+`GC_CHAR_ADDITIONAL_INFO` is 70 packed bytes because `dwNewIsGuildName` is a `BYTE`.
+
+Two of those names differ between the two registration tables, and only the byte is the contract:
+
+| byte | server `G/packet.h` | client registration |
+| --- | --- | --- |
+| 16 | `HEADER_GC_CHARACTER_POINTS` | `HEADER_GC_PLAYER_POINTS` |
+| 76 | `HEADER_GC_SKILL_LEVEL` | `HEADER_GC_SKILL_LEVEL_NEW` |
+
+The client table also has a `GC_SKILL_LEVEL` at byte 72, which the server never names. Both rows
+are keyed on the byte, so `GcPoints` sends 16 and `GcSkillLevelNew` sends 76. This is a naming
+difference, not a collision.
+
+Only two of the records in the two bursts carry a length field. `GC_ENTITY` and `GC_CHAT` have a
+`WORD` at bytes 1 and 2 covering the whole record. `TPacketGCCharacterAdd` and
+`TPacketGCCharacterAdditionalInfo` have **no** such field: the client sizes them by the header and
+the server writes each in one `DESC::Packet` call, which is why they are 35 and 70 fixed bytes.
+
+Each record is returned as its own frame, because legacy writes each with its own
+`DESC::Packet` call. Concatenating the burst would hand the client one TEA unit where legacy
+hands it several.
+
+### 187.3 Validation before and inside the handlers
+
+- `judge_select` is the only new validation. Legacy's first test is
+  `c_r.players[pinfo->index].dwID == 0`, which reads the slot array *before* it checks
+  `pinfo->index >= PLAYER_PER_ACCOUNT` one line later (`G/input_login.cpp:265-274`). A client that
+  sends an index of 4 or more makes the server read past the end of a four-element array. The
+  Rewrite range-checks the index first, so an index past the last slot is `Ignore` — not a close,
+  not a load. `SelectVerdict::Close` is reserved for a real empty slot, which is what legacy
+  answers with `SetPhase(PHASE_CLOSE)`.
+- `judge_enter_game` has nothing to check: the record is a header byte, and legacy's one guard is
+  whether the descriptor holds a character.
+- **No phase-table change is needed.** Phase `5` already installs `CInputMain`, and a repeated
+  `0x0a` in that phase reaches `CInputMain`'s default branch and is consumed. This was verified
+  against the frozen source rather than assumed.
+
+### 187.4 Legacy defects not reproduced, and the divergences they cause
+
+- **The client-version disconnect.** `g_bCheckClientVersion` defaults to `true` and
+  `g_stClientVersion` to `"1215955205"` (`config.cpp:86-87`), and `legacy/config/ch1/core1/CONFIG`
+  sets neither `check_version_server` nor `check_version_value`. So every client whose version
+  differs gets a notice chat and `DelayedDisconnect(0)`, an immediate close
+  (`G/input_login.cpp:743-771`). The `if (!d->GetClientVersion())` arm above it is dead code:
+  `GetClientVersion()` returns `std::string::c_str()`, which is never null, so the ten-second
+  branch cannot be taken either. That is a Defect and a Divergence. The Rewrite lets the client
+  into the game and records the client version it saw.
+- **The two uninitialised point slots.** `CHARACTER::PointsPacket` declares `TPacketGCPoints
+  pack;` on the stack and never writes slot 0 (`POINT_NONE`) or slot 2 (`POINT_VOICE`), so 16
+  bytes of stack garbage reach the client (`G/char.cpp:2033-2086`). The Rewrite writes all 255
+  slots, with `POINT_VOICE` holding the character's stored voice. That is a Defect, and it is why
+  migration `0004_character_load_state.sql` adds a `voice` column: without a value there is
+  nothing honest to send.
+- **The out-of-bounds select index** described in 187.3.
+- **The stale `z` after a position fallback.** Legacy logs and falls back to the empire recall
+  point (`G/input_login.cpp:572-585`) and leaves the old `z` behind. The Rewrite does the same
+  fallback but has no `z` yet: the world owns height.
+
+### 187.5 Records and data this deployment cannot reach
+
+Each is a reachability question, not a missing codec, and each is listed so a later ledger does
+not re-derive it:
+
+- `GC_HYBRIDCRYPT_SDB` (153), the package SDB, is a **loading** record, not an enter-game one.
+  `SendClientPackageSDBToLoadMap` writes only when the package crypt knows the map's SDB stream,
+  and `legacy/` has no `package_info.txt`, so legacy sends it for no map.
+- The BGM variants of the main-character record (137, 138) need `CHARACTER_AddBGMInfo`, fed by
+  the legacy `map_bgm_info` table. `legacy/sql/` has no such table, so byte 113 is the only
+  variant this deployment can send.
+- `BroadcastEventFlagOnLogin` sends one `GC_CHAT` per non-zero quest event flag (`worldboss`,
+  `xmas_snow`, `xmas_boom`, `xmas_tree`, `DayMode`, `newyear_boom`). Every flag is 0 in a fresh
+  database, so none is sent.
+- `SendGreetMessage` sends one `GC_CHAT` per legacy DB `string` row named `GREET`. The snapshot
+  has no such row, so none is sent. **A hard-coded welcome would be a Divergence**, and a test
+  pins that the only chat line in the burst is `letters_event 0`.
+- `CPVP::SendList` emits nothing when there are no live PVP entries, and `SEventLetters` always
+  emits the command chat `letters_event 0` because the flag is 0 for a character not in the event.
+- Two claims from the research were corrected against the source and are **not** carried here:
+  `ENABLE_DICE_SYSTEM` is defined nowhere, so `CHAT_TYPE_MAX_NUM == 10` and the existing
+  `gc_chat` codec is right; and the alleged unconditional duplicate `POINT_CHANGE(POINT_SP)`
+  during enter-game is a conflation with the asynchronous `LoadAffect`, which
+  `ReviveInvisible` does not emit.
+- `ReviveInvisible(5)` does create exactly one unconditional `AFFECT_ADD`:
+  `AFFECT_REVIVE_INVISIBLE = 215`, `AFF_REVIVE_INVISIBLE = 28`. A test pins all six fields.
+
+### 187.6 The point-slot indices, measured rather than counted
+
+`prodomo::point_slot` carries the `EPointTypes` indices as constants, because every record that
+names a slot by number depends on them. The first derivation **counted** the enumerator members
+the preprocessor leaves live, and that is wrong: `EPointTypes` (`G/char.h:140-346`) mixes
+auto-incremented members with explicit ones (`POINT_ENERGY = 128`, `POINT_GAYA = 207`,
+`POINT_PRIVATE_SHOP_UNLOCKED_SLOT = 210`), so the count closes gaps the compiler leaves open and
+puts `POINT_CONQUEROR_LEVEL` at 152 where the compiler puts it at 173. The error is silent,
+because 152 is a plausible-looking index.
+
+The table was therefore rebuilt by **compiling** the verbatim enum body with the switches
+`prodomodefines.h` defines in this snapshot and printing the compiler's own numbering. All 190
+constants agree with the compiler, and the test now pins every one of the 189 enumerators, so a
+mistranscribed constant fails the build. A mutation check confirms the pin bites: changing
+`POINT_CONQUEROR_LEVEL` from 173 to 151 fails `the_pinned_indices_are_the_legacy_ones`.
+
+### 187.7 The store change and the point slots
+
+`PointsPacket` writes nine named slots, loops `POINT_ST` to `POINT_MAX_NUM`, then overwrites five
+slots above that range. A fresh character with no affect, no item and no quickslot has its own
+level, experience, next-level cost, hit points, spell points, stamina, gold and voice; its four
+attributes; the three base speeds of 100; and zero everywhere else. `loading_phase::points` builds
+exactly that, and a test asserts every unnamed slot is zero.
+
+Migration `0004_character_load_state.sql` adds `exp`, `conqueror_exp`, `gold`, and `voice` to
+`player`. Two notes on `gold`:
+
+- `ENABLE_REMOVE_LIMIT_GOLD` is on, so legacy's `TPlayerTable::gold` and `CHARACTER::GetGold()`
+  are `unsigned long long` and cannot be negative. The column is `bigint` checked at or above zero.
+- The legacy field is unsigned 64-bit and a PostgreSQL `bigint` is signed, so the column holds the
+  low 63 bits of that range. A value a `bigint` cannot hold is **refused by the check, never
+  wrapped** — a currency value is not clamped silently.
+
+`next_exp`, `max_hp`, `max_sp`, `max_stamina`, and `conqueror_next_exp` are read from
+`common::levels` at the point of use, never stored, so a row written by hand cannot disagree with
+its level and race.
+
+### 187.8 The live wiring, and the defect the first scenario found
+
+`prodomo/src/main.rs` now routes the two records, in the select and loading phases:
+
+```
+CG_CHARACTER_SELECT in PHASE_SELECT | PHASE_LOADING  -> select_character
+CG_ENTER_GAME       in PHASE_LOADING | PHASE_GAME    -> enter_game
+```
+
+`select_character` decodes `CgPlayerSelect`, maps the slot through
+`db::players::Lobby::slot_ids()`, runs `judge_select`, reads the row with
+`db::players::load_character`, and builds the burst. `enter_game` runs `judge_enter_game` on
+whether the login state holds a character and then sends the enter-game burst. The loaded
+`Character` and the listener's Channel number are held on the connection state for the
+descriptor's life, so the select and the enter-game agree on the character and the Channel.
+
+The first live scenario failed on `CG_ENTER_GAME`, which closed the connection. The cause was a
+real wiring gap, not a wrong expectation: **`select_character` built the burst but never stored
+the character it had just loaded.** `d->BindCharacter(ch)` in `CInputDB::PlayerLoad` is the step
+that makes the character the descriptor's own, and it is exactly what `CInputLogin::Entergame`
+reads first; without it `judge_enter_game` sees no character and the descriptor closes. The
+scenario caught it in the first run, which is the reason it was written to drive the whole
+sequence rather than one record.
+
+Four more of my own expectations were wrong and were corrected against the source, not against
+the server's output:
+
+- `POINT_LEVEL` is slot **1**, not 3. Counting the enumerators is exactly the mistake 187.6
+  records; the slot indices come from the compiler-measured table, and the scenario reads the
+  slot it names.
+- `GC_CHARACTER_ADD` is byte 1, not 68, and neither it nor `GC_CHAR_ADDITIONAL_INFO` carries a
+  `WORD` size. 187.2 now says so.
+- `CHARACTER::ChatPacket` writes `id = 0` for every line it formats itself
+  (`G/char.cpp:5178`), and `size` is `sizeof(packet_chat) + len`, so the `letters_event 0` line is
+  25 bytes.
+- `CHAT_TYPE_COMMAND` is 5.
+
+### 187.9 The scenarios
+
+`prodomo/tests/parity.rs` drives the real binary with raw client bytes, and each of these reads
+the records back off the socket and decodes them:
+
+- `a_character_is_loaded_and_the_game_is_entered_in_legacy_order` reads the whole sequence: the
+  loading phase, the empty entity list with `wSize == 3`, the 46-byte own-character record field
+  by field, the gold, points and skill-level records, then `CG_ENTER_GAME` and the enter-game
+  burst with the `GC_PHASE` between the affect and the time. It asserts the record **order**,
+  every fixed width, and the `wSize`-sized widths, so an off-by-one in either burst fails it.
+- `an_empty_slot_closes_and_an_index_past_the_last_is_ignored` pins the out-of-range index
+  Divergence: an index of 4 or `0xff` is `Ignore` and leaves the connection open, and slot 2,
+  which is empty, closes it.
+- `a_map_the_channel_does_not_host_closes_after_the_records_before_the_test` pins the split
+  around `map_allow_find`: the phase, the entity list and the own-character record arrive, and
+  then the connection closes with no gold, points, or skill-level record. It also checks the
+  stored position afterwards, which is where the warp-location Divergence shows.
+
+### 187.10 The `load_character` store test, and a survivor that was the harness's fault
+
+`db/tests/players.rs` now pins the loading phase's read directly rather than only through a
+parity scenario: every field it selects, the empire read from the **account** row and not the
+player row, the four default columns coming back as their column default, and the account scope.
+The scope is the point, because `load_character` is the one place a descriptor names a character
+by ID:
+
+- another account's character is refused, and so is an ID no row has, and so is ID `0`;
+- the owning account still reads its own character.
+
+`AccountError` carries no `PartialEq`, so each refusal is matched with `matches!` on the variant
+and its payload rather than compared, which is also why the success case goes through `expect`
+instead of an `assert_eq!` on a `Result`.
+
+**A mutation sweep must be scoped to the function under test.** The first sweep reported that
+swapping the two binds of the account and character parameters **survived**. It had not survived.
+The sweep replaced the first occurrence of the pattern in the file, and `create_player` binds the
+same pair earlier, so the mutant landed 100 lines above `load_character` and the function under
+test was never changed. The landing line is now reported with every result, and the repeat sweep
+found all three kills: `drop the account scope`, `swap the two binds`, and `narrow nothing on the
+id`. A harness that reports a survivor without its line number cannot tell this failure from a
+real gap.
+
+There is a second lesson in the same test. **Two tables whose id sequences both start at 1 cannot
+be separated by counting.** The first fixture created a filler account and a filler character per
+round, which kept the two sequences in lockstep, so `p.account_id = <character id> AND
+p.id = <account id>` was satisfiable no matter how many rounds ran. The fixture now asks the
+sequence where it is and burns one id per account, because a **deleted row still advances
+`GENERATED ALWAYS AS IDENTITY`**. Every character created afterwards is above every account id.
+The test asserts that precondition, so a future change to id allocation fails loudly instead of
+quietly turning the scope assertions into decoration.
+
+### 187.11 Receipt
+
+Run on 2026-09-27 with rustc 1.85.1, `--locked --offline`:
+
+| gate | result |
+| --- | --- |
+| `cargo fmt --all -- --check` | green |
+| `cargo build --workspace` | green, 0 warnings |
+| `cargo test --workspace --all-targets --no-fail-fast`, without `DATABASE_URL` | **1,770 passed, 0 failed, 0 ignored**, across 31 test binaries |
+| the same, with `DATABASE_URL` (PostgreSQL 18.6) | **1,770 passed, 0 failed, 0 ignored**, 0 store-backed tests skipped |
+| `cargo test --workspace --doc` | **1 passed**, 3 ignored |
+| `cargo clippy --workspace --all-targets -- -D warnings` | green |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | green |
+
+Against 186's receipt that is **143 more tests** and no new test binary: 39 in
+`prodomo/src/loading_phase.rs`, the rest in the `common` unit-test module, the `protocol` codecs
+this change added or widened, and the fourteen the live wiring added — the three parity scenarios
+in 187.9, six for `Lobby::slot_ids()`, and six in the `db` store tests, the last of which is the
+`load_character` account-scoping test in 187.11.
+
+The two runs report the same count, which is the point of running both: the store-backed tests
+run rather than skip when `DATABASE_URL` is set, and the parity scenarios are in the count either
+way. The earlier `1,754`/`1,755` pair in this section was the unreconciled receipt from before
+the live wiring; both numbers are replaced by the single verified count above.
+
+Three Clippy findings came out of the live wiring and were fixed by refactoring, not by
+`#[allow]`:
+
+- `loading_burst` built its second half with `Vec::with_capacity(3)` followed by three `push`
+  calls, which is `clippy::vec_init_then_push`. Both halves are now `vec![]` literals, and the
+  entity collection moved above them so the two halves read the same way.
+- `game_len` in the parity harness had two arms with identical bodies. They are one arm now.
+- Two `Ok(_)` arms in `main.rs` were on `Result<(), _>`, so `ignored_unit_patterns` fired.
+  Those became `Ok(())`; the three arms whose `Ok` carries the sent bytes stayed `Ok(_)`, which is
+  why this is a note and not a blanket search-and-replace.
+
+One gate could not run as the project would prefer, and it was not worked around:
+
+- **`i686-linux-gnu-g++-12` is not installed on this machine**, so no packed width was measured
+  with the i686 probe for this change. Every width in 187.2 was instead derived from the frozen
+  `G/packet.h` field order and then **pinned by a golden-byte test** in
+  `prodomo/src/loading_phase.rs` that asserts each frame's length and every field offset. The
+  one width a compiler was asked for, the `EPointTypes` enumeration in 187.6, does not depend on
+  the target's word size, and the native `g++` the probe used agrees with every constant.
+- The **database gate did run**, against a PostgreSQL 18.6 server started from the
+  already-pulled `docker.io/library/postgres:18` image in a Podman container on
+  `127.0.0.1:55432` (`host.docker.internal` does not resolve on this machine, so the port is
+  published on `127.0.0.1`, as `AGENTS.md` records). `DATABASE_URL` was set, the store-backed
+  tests reported no `skipped: DATABASE_URL is not set` notice (0 skips), the `db` integration
+  suite passed 11 of 11, and `serve_admits_clients_once_the_store_is_migrated` passed, so
+  migration `0004` is exercised against a live server rather than only by the `db` unit tests.
+  Afterwards `SELECT count(*) FROM pg_database WHERE datname LIKE 'prodomo\_%'` returned 0, so
+  the tests dropped every scratch database, and the container was removed.
+
+  One trap is worth recording: the agent's own shell environment kept `DATABASE_URL` exported
+  after the container was stopped. A later "no database" run then **failed 59 lines of output**
+  because the store-backed tests were still gated on and had nothing to connect to. Pass
+  `DATABASE_URL=` inline per command, or unset it before the final no-database gate, and read
+  the test count rather than trusting that a green build means the gate was skipped.
+- This change **found a defect the earlier runs had been hiding**: `prodomo/tests/process.rs`
+  waited for the log line `Store ready at schema version 3` with the number written out, so
+  adding migration `0004` would have failed that test. The assertion now reads
+  `db::store::schema_version()`, the same value the log line formats, and
+  `the_schema_version_the_server_logs_is_the_one_a_migration_added` keeps the two in step.
+
+Four Clippy findings were not `#[allow]` material; fixing them made the tests stronger:
+
+- three `matches!` arms bound a value they never checked, so each now binds in the guard and
+  compares the decoded field against the input;
+- a chat-type assertion read `value == CHAT_TYPE_TALKING + value` with `CHAT_TYPE_TALKING == 0`,
+  so it held for every value. It is now a written-out list of the ten enumerator numbers, which
+  fails if any is renumbered;
+- two `assert!` on constant expressions were optimized out, and are now `const _: () = assert!`
+  checks that fail when the crate is compiled.
+
+`common::point_slot` also had its 38-row spot check replaced by a table of **all 189**
+enumerators. The test is not a tautology: the table holds the numbers the compiler printed and
+the lookup is built from the constants, so they are independent. Two mutation checks confirm it
+bites: `POINT_GAYA` from 207 to 206, and `POINT_CONQUEROR_LEVEL` from 173 to 151, each fail the
+pin.
+
+## 188. Chat, movement, character position, and sync position on a live map
+
+Four game-phase records go live: `CG_CHAT` (3), `CG_MOVE` (7), `CG_CHARACTER_POSITION` (28),
+and `CG_SYNC_POSITION` (8). Their rules live in three new transport-free modules
+(`prodomo::chat`, `prodomo::movement`, `prodomo::sync_position`); `prodomo/src/main.rs` holds
+only the ports. Four parity scenarios observe each one against a real PostgreSQL and a real
+`prodomo` process.
+
+### 188.1 Broadcast scope is `PacketAround`, and there are three shapes
+
+`CEntity::PacketView` (`G/entity.cpp:93-104`) always ends with a self-send,
+`f(std::make_pair(this, 0))`, so a `PacketAround` with a `NULL` except still reaches the sender.
+`FuncPacketAround::operator()` returns early only for a non-null `m_except`. The four handlers
+therefore fall into three groups, and getting the group wrong is a silent Parity break:
+
+| handler | call | sender sees it? |
+|---|---|---|
+| `Chat` → `FEmpireChatPacket` | the descriptor set, filtered by `GetMapIndex()` | yes |
+| `Position` → `CHARACTER::Sitdown`/`Standup` | `PacketAround` with no except | yes |
+| `Move` | `PacketAround(&pack, sizeof(pack), ch)` | no |
+| `SyncPosition` | `ch->PacketAround(..., ch)` | no, and `SetSyncOwner` writes `GC_OWNERSHIP` first with no except |
+
+`prodomo::client_registry::ChannelClients` has exactly these three deliveries:
+`broadcast_on_map` (no exception), `broadcast_excluding` (one lease), and
+`broadcast_on_channel` (no map filter, for the shout scope). The world never writes to a
+socket: it enqueues onto the lease receiver, and `pump_descriptor` writes the pending records
+after the `select!` so an analyzer may replace the lease in `held` mid-frame.
+
+### 188.2 Variable-length client framing
+
+`CInputProcessor::Process` (`G/input.cpp:59-124`) resolves a frame in two steps. The phase
+table gives `iPacketLen`; the analyzer's return value is *added* to it
+(`iPacketLen += iExtraPacketSize`, `G/input.cpp:104`), and a `-1` return stops consuming
+without closing. So the frame is as long as the record's own size field says, and the phase
+table alone never frames a variable record.
+
+Until this ledger the live transport used `ClientFrameDecoder`, which is fixed-size only and
+reported `VariableLengthUnsupported` for `CG_CHAT` and `CG_SYNC_POSITION`; those two records
+never reached a handler. `net::ClientFrameTransport` now uses
+`protocol::cg_variable::VariableClientFrameDecoder`, which resolves the total from the
+registered base prefix plus the record's own `WORD` size. `ClientFrameDecoder` stays in
+`protocol` for callers that want fixed-only behaviour. `net` gained three scenarios: a
+variable record across fragmented and coalesced input, a declaration below the base prefix,
+and a truncated stream reported against the declared total.
+
+### 188.3 Two framing Divergences
+
+- **An undersized declaration closes instead of stalling.** `CInputMain::Chat` returns -1 on
+  `iExtraLen < 0` and `CInputMain::SyncPosition` on the same test, so legacy consumes nothing
+  and hands the same bytes to the analyzer again on the next read; the descriptor waits for the
+  ping cycle to drop it. The Rewrite reports `ClientFrameError::InvalidVariableSize` and closes
+  at once. Recorded as a Divergence, on the same grounds as ledger 160.5.
+- **A zero-length chat payload is a line.** `CInputMain::Chat` (`G/input_main.cpp:781-991`) has
+  **no** `strlen(buf) < 1` arm. `strlcpy` copies at most `iExtraLen + 1` bytes and stops at the
+  first NUL, `snprintf` then builds `"%s : %s"`, and the talking arm broadcasts it. So both an
+  empty payload and a payload whose first byte is NUL reach the map as the bare `"Name : "`
+  line. An earlier reading of this handler claimed a `strlen` arm; the scenario now pins the
+  source behaviour and `strlcpy` truncation is the only thing that empties the text.
+
+### 188.4 `SetSyncOwner` is a port, not a policy branch
+
+`CHARACTER::SetSyncOwner` (`G/char.cpp:5469-5551`) is a chain of entity state the pure policy
+does not own, so it is one port method, `SyncPositionPorts::set_sync_owner`, judged by the pure
+`judge_sync_ownership` and applied by the caller. In source order:
+
+1. `AIFLAG_NOMOVE` refuses a monster victim.
+2. `!battle_is_attackable(actor, victim)` refuses and sends a blocked-damage record. This is the
+   PK rule (`sys.char.pk`), and two player characters are always attackable in legacy, so it
+   cannot refuse one of them and is left out as a recorded divergence.
+3. `ch == this` refuses. A client cannot move itself by naming its own VID.
+4. `!IsSyncOwner(ch)` refuses while another character holds a claim. `IsSyncOwner`
+   (`G/char.cpp:5577-5590`) accepts the current owner, or any character once `m_fSyncTime` is
+   old enough; `ENABLE_FLY_FIX` is defined (`G/prodomodefines.h:70`), so the window is
+   `get_dword_time() - m_fSyncTime >= 100`, which is 100 milliseconds.
+5. `DISTANCE_APPROX(GetX() - ch->GetX(), GetY() - ch->GetY()) > 250` refuses a new owner and
+   lets the current owner keep its claim. `DISTANCE_APPROX` (`G/utils.h:17-40`) is the octagonal
+   approximation `(123/128) * max + (51/128) * min` on **raw** map units, with no `/ 100`. The
+   limit is compared against the *approximated* value, so on one axis the raw boundary is 261,
+   not 250; the unit tests pin 260 and 261 either side of it.
+6. An accepted claim refreshes `m_fSyncTime` every time and resets the last-sync stamp only
+   when the owner changes.
+7. An accepted claim writes `TPacketGCOwnership` (9 bytes, `G/packet.h:1716-1720`) with a
+   `PacketAround` and no exception, so the victim sees its own ownership. That record is
+   delivered before the position batch, because `SetSyncOwner` runs inside the element loop.
+
+`PositionTable` (`prodomo/src/client_registry.rs`) holds `vid`, `kind`, `x`, `y`, `last_sync`,
+and the `(owner, claimed_at)` pair. A character that was never claimed carries no owner, which
+is the faithful answer: `CHARACTER::CHARACTER` (`G/char.cpp:191`) seeds `m_fSyncTime` with
+`get_float_time() - 3`, so a fresh victim is already past the window.
+
+`CInputMain::SyncPosition` (`G/input_main.cpp:2010-2167`) then judges, per element and in order:
+the 16-element cap, the NPC/Warp/Goto skip, `SetSyncOwner`, the owner distance
+`DISTANCE_SQRT((victim - ch) / 100) > 2500 + 1000`, the 100 ms interval
+(`g_lValidSyncInterval = 100 * 1000` **microseconds**), and the 25-unit displacement close. The
+hack counter (`g_iSyncHackLimitCount = 10`, `G/config.cpp:119`, and the owner's config does not
+override it) counts the first two and caps them. The last two close at once. One detail the
+Rewrite had wrong: `too_soon` used `unwrap_or(Duration::ZERO)`, which made a stamp in the future
+read as "just now"; legacy's `tvDiff->tv_sec == 0` arm is false for a negative difference, so
+`checked_sub` returning `None` is now the "not too soon" answer.
+
+### 188.5 The distance rules are two different rules
+
+Three distances appear in this slice and they are easy to confuse, so each is pinned:
+
+| rule | source | unit | limit |
+|---|---|---|---|
+| `SetSyncOwner` claim range | `G/char.cpp:5510` | raw map units, `DISTANCE_APPROX` | 250 approximated, 261 raw |
+| `SyncPosition` owner range | `G/input_main.cpp:2086` | `/ 100`, `DISTANCE_SQRT` | `2500 + 1000` |
+| `SyncPosition` displacement | `G/input_main.cpp:2108` | `/ 100`, `DISTANCE_SQRT` | 25.0 |
+
+The movement limit is a third one again, and it has no state in it at all:
+`CInputMain::Move` (`G/input_main.cpp:1782-1786`) computes
+`DISTANCE_SQRT((x - lX) / 100, (y - lY) / 100)` and refuses a non-rider over 750, or anybody
+over 999, with `OXEVENT_MAP_INDEX` exempt from both. Both arguments are `long`, so the
+division is integer division by 100 **before** the square root, which makes the limits 750 and
+999 *metres* rather than the centimetres the numbers suggest. `prodomo::movement` therefore
+computes `(from - to) / 100` as integers and only then measures, which is why the earlier `i16`
+narrowing and the float constants had to go. A refusal calls `Show` and `Stop`, not `Goto`, so a
+refused move answers with the view record and never with a `GC_MOVE`.
+
+### 188.6 Where a character is
+
+`PositionTable` is process-wide, keyed by the registry lease id, and every lookup goes through
+`ChannelClients::ids_on_map`, so a claim never leaves the claimer's Channel and map. Entering
+the game tracks the position; an accepted move steps it; a lease drop forgets it. A claim on a
+victim outside the claimer's map resolves to nobody, which is how the Rewrite keeps one process
+from answering for another Channel.
+
+### 188.7 Divergences recorded here
+
+- Variable-frame framing closes on an undersized declaration where legacy stalls (188.3).
+- `Sitdown` honours the chair and the ground separately; legacy writes
+  `POSITION_SITTING_GROUND` for both and drops its `is_ground` argument.
+- `SetSyncOwner` does not judge `AIFLAG_NOMOVE` or `battle_is_attackable` (188.4, step 2).
+- A chat line of fewer than one character is broadcast, which is legacy behaviour, not a
+  difference (188.3).
+
+### 188.8 Receipt
+
+Every gate run locked and offline, with `DATABASE_URL` pointing at the PostgreSQL 18 container
+on `127.0.0.1:55432`:
+
+- `cargo fmt --all -- --check` clean.
+- `cargo build --workspace --locked --offline` clean.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast`: **1,901 passed, 0
+  failed** across 31 targets. Five are the new parity scenarios.
+- `cargo test --workspace --doc --locked --offline` clean.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` clean.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` clean.
+- `SELECT datname FROM pg_database WHERE datname LIKE 'prodomo\_%'` returns nothing after the
+  run, so no scratch database leaked.
+- Three inventory rows had to be corrected by the `inventory_rows_keep_the_rules` gate,
+  which enforces the spec rule that only a `ported` row may name a scenario.
+  `sys.world.move` and `sys.char.chat` cover only some of their behaviour, and
+  `cg.any.analyzer_refusal` is proved only by a unit test, so all three are `partial` with
+  the scenario named in the note instead of the column. Marking them `ported` would have
+  claimed a coverage the scenarios do not give.
+- The parity client now tolerates a `GC_PING` cycle inside a "nothing was expected" window. A
+  ping runs on its own timer and is not an answer, and a scenario that grew past the ping
+  interval would otherwise fail for a reason that has nothing to do with the record under test.
+- **The i686 cross compiler is not installed on this machine**, so the `TPacketGCOwnership`
+  width was not measured with `i686-linux-gnu-g++-12`. It is pinned three ways instead: the
+  hand sum 1 + 4 + 4, a `debug_assert_eq!` on the encoder, the golden-byte test
+  `ownership_record_is_the_source_field_order`, and the end-to-end scenario, which reads a
+  9-byte record off a real socket.
+- `sync_hack_count` still lives on the avatar, so it is per session and not restored from the
+  store. Legacy keeps it on the character. That is a divergence to settle with the save path.
+
+### 188.9 A defect the slice introduced, and a mutant that survived
+
+`PositionTable::forget` existed with no caller, so the table kept one row for every character
+that had ever entered the game and then left. The rows were unreachable for a claim, because
+every lookup goes through `PositionTable::find_on_map`, which iterates
+`ChannelClients::ids_on_map` and so had already lost the lease. The defect was therefore a
+leak, not a wrong answer, and it grew one entry per departed character for as long as the
+process ran. `handle_connection` now calls `context.positions.forget(lease.id())` on the same
+path that logs the departure, before `drop(held)`.
+
+The end-to-end scenario `a_claim_on_a_character_who_has_left_finds_nobody` was written to cover
+it, and **it survives the mutation**: removing the `forget` call leaves the scenario green,
+because the registry filter already answers the claim correctly. That is an equivalent mutant
+for the wire behaviour, and the scenario's own doc comment says so rather than claiming
+coverage it does not have. What covers the fix instead is
+`forgetting_a_character_removes_its_position_and_its_ownership`, which pins that `forget`
+drops the row, its last-sync stamp, and its ownership, and
+`a_forgotten_character_is_not_reclaimable`, which pins that a late write for a closed
+descriptor cannot resurrect it.
+
+The general lesson is the one this repository has already paid for twice: a behavioural
+scenario cannot witness bookkeeping that no behaviour depends on. Claiming otherwise would
+have put a green tick on an unfixed leak.
+

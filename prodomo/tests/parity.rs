@@ -1187,6 +1187,8 @@ fn a_login2_outside_the_login_phases_closes_the_connection() {
 
 const CG_CHARACTER_CREATE: u8 = 0x04;
 const CG_CHARACTER_DELETE: u8 = 0x05;
+const CG_CHARACTER_SELECT: u8 = 0x06;
+const CG_ENTER_GAME: u8 = 0x0a;
 const CG_EMPIRE: u8 = 0x5a;
 const CG_CHANGE_NAME: u8 = 0x6a;
 const GC_PLAYER_CREATE_SUCCESS: u8 = 8;
@@ -1209,6 +1211,196 @@ fn select_answer_len(header: u8) -> usize {
         GC_LOGIN_SUCCESS => LOGIN_SUCCESS_LEN,
         other => panic!("unexpected select-screen header {other}"),
     }
+}
+
+/// `CG_CHARACTER_SELECT`: the header and the one slot byte, `TPacketCGPlayerSelect`.
+fn client_select(index: u8) -> Vec<u8> {
+    vec![CG_CHARACTER_SELECT, index]
+}
+
+/// `GC_CHARACTER_ADD` (1), `GC_CHAR_ADDITIONAL_INFO` (136) and `GC_CHAT` (4) carry a `WORD`
+/// length at bytes 1 and 2 covering the whole record. `GC_ENTITY` (249) is the same shape. The
+/// rest of the two bursts are fixed width, and those widths are the ones the loading phase's own
+/// golden-byte tests pin.
+fn dynamic_len(header: u8) -> usize {
+    match header {
+        GC_CHARACTER_ADD | GC_CHAR_ADDITIONAL_INFO | GC_CHAT | GC_ENTITY | GC_SYNC_POSITION => {
+            usize::MAX
+        }
+        other => panic!("{other} is a fixed-width loading or enter-game record"),
+    }
+}
+
+/// A record whose `WORD wSize` covers the whole record, or `None` when the header is a
+/// fixed-width one. Reading it is how the harness sizes a variable record.
+fn word_sized(record: &[u8]) -> Option<usize> {
+    let header = record[0];
+    if matches!(header, GC_CHAT | GC_ENTITY | GC_SYNC_POSITION) {
+        Some(usize::from(record[1]) | (usize::from(record[2]) << 8))
+    } else {
+        None
+    }
+}
+
+/// `CG_ENTER_GAME`: the header alone, `TPacketCGEnterGame`.
+fn client_enter_game() -> Vec<u8> {
+    vec![CG_ENTER_GAME]
+}
+
+/// The loading and enter-game records, by header, for the two bursts.
+const GC_ENTITY: u8 = 249;
+const GC_MAIN_CHARACTER2_EMPIRE: u8 = 113;
+const GC_CHARACTER_GOLD: u8 = 224;
+const GC_PLAYER_POINTS: u8 = 16;
+const GC_SKILL_LEVEL_NEW: u8 = 76;
+const GC_CHARACTER_ADD: u8 = 1;
+const GC_CHAR_ADDITIONAL_INFO: u8 = 136;
+const GC_AFFECT_ADD: u8 = 126;
+const GC_TIME: u8 = 106;
+const GC_CHANNEL: u8 = 121;
+const GC_CHAT: u8 = 4;
+/// `PHASE_LOADING` and `PHASE_GAME` in `EPhase` (`G/desc.h`).
+const PHASE_LOADING: u8 = 4;
+const PHASE_GAME: u8 = 5;
+/// `GC_PHASE` carries one payload byte.
+const PHASE_LEN: usize = 2;
+/// `GC_MAIN_CHARACTER2_EMPIRE`: header, `dwVID`, `bJob`, `szName[25]`, `x`, `y`, `z`,
+/// `bEmpire`, `bSkillGroup` (46 bytes under the packed x86 profile).
+const MAIN_CHARACTER_LEN: usize = 1 + 4 + 2 + 25 + 4 + 4 + 4 + 1 + 1;
+/// `GC_CHARACTER_GOLD`: header and a `long long` (`ENABLE_REMOVE_LIMIT_GOLD`).
+const GOLD_LEN: usize = 1 + 8;
+/// `TPacketGCCharacterAdd`: header, `dwVID`, `angle`, `x`, `y`, `z`, `bType`, `wRaceNum`,
+/// `bMovingSpeed`, `bAttackSpeed`, `bStateFlag`, `dwAffectFlag[2]`, with no `wSize`.
+const CHARACTER_ADD_LEN: usize = 1 + 4 + 4 + 4 + 4 + 4 + 1 + 2 + 1 + 1 + 1 + 8;
+/// `TPacketGCCharacterAdditionalInfo`: the own-character record, whose `bLanguage` is its last
+/// field, at offset 69.
+const CHAR_ADDITIONAL_INFO_LEN: usize = 70;
+/// `GC_PLAYER_POINTS`: header and 255 eight-byte point entries.
+const POINTS_LEN: usize = 1 + 255 * 8;
+/// `GC_SKILL_LEVEL_NEW`: header and 255 six-byte skill entries.
+const SKILL_LEVEL_LEN: usize = 1 + 255 * 6;
+/// `GC_AFFECT_ADD`: header and one 21-byte affect element.
+const AFFECT_ADD_LEN: usize = 1 + 21;
+/// `GC_TIME`: header and a `long`.
+const TIME_LEN: usize = 1 + 4;
+/// `GC_CHANNEL`: header and one byte.
+const CHANNEL_LEN: usize = 1 + 1;
+
+/// The length of each loading and enter-game record. A variable record reports `usize::MAX`, and
+/// the caller sizes it from its own `WORD wSize`.
+fn game_len(header: u8) -> usize {
+    match header {
+        GC_PHASE => PHASE_LEN,
+        GC_MAIN_CHARACTER2_EMPIRE => MAIN_CHARACTER_LEN,
+        GC_CHARACTER_GOLD => GOLD_LEN,
+        GC_PLAYER_POINTS => POINTS_LEN,
+        GC_SKILL_LEVEL_NEW => SKILL_LEVEL_LEN,
+        GC_CHARACTER_ADD => CHARACTER_ADD_LEN,
+        GC_CHAR_ADDITIONAL_INFO => CHAR_ADDITIONAL_INFO_LEN,
+        GC_ENTITY | GC_CHAT => dynamic_len(header),
+        GC_AFFECT_ADD => AFFECT_ADD_LEN,
+        GC_TIME => TIME_LEN,
+        GC_CHANNEL => CHANNEL_LEN,
+        GC_MOVE => GC_MOVE_LEN,
+        GC_CHARACTER_POSITION => CHARACTER_POSITION_LEN,
+        GC_SYNC_POSITION => usize::MAX,
+        GC_OWNERSHIP => OWNERSHIP_LEN,
+        other => panic!("unexpected loading or enter-game header {other}"),
+    }
+}
+
+/// `cg.world.move`, `sys.world.move`: the headers of the movement and chat records, the widths the
+/// loading phase's golden-byte tests pin, and the record builders a client needs to play them.
+const CG_CHAT: u8 = 0x03;
+const CG_MOVE: u8 = 0x07;
+const CG_SYNC_POSITION: u8 = 0x08;
+const CG_CHARACTER_POSITION: u8 = 0x1c;
+const GC_MOVE: u8 = 0x03;
+const GC_SYNC_POSITION: u8 = 0x05;
+const GC_CHARACTER_POSITION: u8 = 0x2b;
+
+/// `TPacketCGMove` is 16 bytes: the three header bytes, then `lX`, `lY`, `dwTime`,
+/// `dwDuration`, and `bFunc` on the wire.
+const MOVE_LEN: usize = 16;
+/// `TPacketGCMove` is 24 bytes in the struct order at `server/server/game/packet.h:1701-1712`.
+const GC_MOVE_LEN: usize = 24;
+/// `GC_SYNC_POSITION` is a three-byte prefix plus 12 bytes per element.
+const SYNC_POSITION_LEN: usize = 3 + 12;
+/// `HEADER_GC_OWNERSHIP` is 62, from `packet.h:151`.
+const GC_OWNERSHIP: u8 = 62;
+/// `TPacketGCOwnership` is the header plus two DWORDs.
+const OWNERSHIP_LEN: usize = 1 + 4 + 4;
+/// `GC_CHARACTER_POSITION` is the header, the VID, and the pose.
+const CHARACTER_POSITION_LEN: usize = 6;
+/// The `EChatType` byte of a talking line.
+const CHAT_TALKING: u8 = 0;
+/// `EPosition`, of which the Rewrite honours all three.
+const POSITION_GENERAL: u8 = 0;
+const POSITION_SITTING_CHAIR: u8 = 1;
+const POSITION_SITTING_GROUND: u8 = 2;
+
+/// The 16 bytes of a client `MOVE`, in `TPacketCGMove` field order with the header first.
+fn client_move(function: u8, argument: u8, rotation: u8, x: i32, y: i32, time: u32) -> Vec<u8> {
+    let mut fixed = vec![CG_MOVE, function, argument, rotation];
+    fixed.extend_from_slice(&x.to_le_bytes());
+    fixed.extend_from_slice(&y.to_le_bytes());
+    fixed.extend_from_slice(&time.to_le_bytes());
+    assert_eq!(fixed.len(), MOVE_LEN, "TPacketCGMove has no dwDuration");
+    fixed
+}
+
+/// The 4 header bytes plus the text of a client `CHAT`. `size` counts the whole record.
+fn client_chat(chat_type: u8, text: &[u8]) -> Vec<u8> {
+    let total = 4 + text.len();
+    let mut record = vec![CG_CHAT];
+    record.extend_from_slice(&u16::try_from(total).expect("a short line").to_le_bytes());
+    record.push(chat_type);
+    record.extend_from_slice(text);
+    record
+}
+
+/// The 2 bytes of a client `CHARACTER_POSITION`, which are the header and the pose.
+fn client_position(position: u8) -> Vec<u8> {
+    vec![CG_CHARACTER_POSITION, position]
+}
+
+/// A client `SYNC_POSITION`: the three-byte prefix, then one 12-byte element per victim.
+fn client_sync_position(elements: &[(u32, i32, i32)]) -> Vec<u8> {
+    let total = SYNC_POSITION_LEN - 12 + 12 * elements.len();
+    let mut record = vec![CG_SYNC_POSITION];
+    record.extend_from_slice(&u16::try_from(total).expect("16 elements fit").to_le_bytes());
+    for (vid, x, y) in elements {
+        record.extend_from_slice(&vid.to_le_bytes());
+        record.extend_from_slice(&x.to_le_bytes());
+        record.extend_from_slice(&y.to_le_bytes());
+    }
+    record
+}
+
+/// Log `login` in, select slot `slot`, and enter the game, leaving the connection in the game
+/// phase with every loading and enter-game record already read.
+fn enter_world(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed) {
+    let (mut keyed, _empire, list) = select_screen(server, login);
+    let character = listed(&list, usize::from(slot));
+    keyed.send_record(&client_select(slot));
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
+    assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
+    let main = keyed.read_game();
+    assert_eq!(main[0], GC_MAIN_CHARACTER2_EMPIRE);
+    assert_eq!(keyed.read_game()[0], GC_CHARACTER_GOLD);
+    assert_eq!(keyed.read_game()[0], GC_PLAYER_POINTS);
+    assert_eq!(keyed.read_game()[0], GC_SKILL_LEVEL_NEW);
+    keyed.send_record(&client_enter_game());
+    assert_eq!(keyed.read_game()[0], GC_CHARACTER_ADD);
+    assert_eq!(keyed.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    assert_eq!(keyed.read_game()[0], GC_AFFECT_ADD);
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
+    assert_eq!(keyed.read_game()[0], GC_TIME);
+    assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
+    let notice = keyed.read_game();
+    assert_eq!(notice[0], GC_CHAT);
+    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    (keyed, character)
 }
 
 /// A 25-byte Name field holding `name`, NUL-padded.
@@ -1258,17 +1450,101 @@ impl Keyed {
         self.read(select_answer_len)
     }
 
+    /// Assert that nothing but a `GC_PING` cycle arrives.
+    ///
+    /// A ping is on its own timer and says nothing about the record just sent, so a ping
+    /// inside the window is not an answer. Anything else is.
+    fn quiet(&mut self, note: &str) {
+        let key = self.output;
+        let deadline = std::time::Instant::now() + QUIET_WINDOW;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            match self.client.drain(left) {
+                (bytes, Quiet::Open) if bytes.is_empty() => return,
+                (bytes, Quiet::Open) => {
+                    assert_eq!(
+                        bytes.len() % 8,
+                        0,
+                        "the wire carries whole TEA units ({note})"
+                    );
+                    for unit in bytes.chunks(8) {
+                        let plain = decrypt_padded(unit, &key).expect("aligned");
+                        assert_eq!(
+                            plain[0], GC_PING,
+                            "only a ping may arrive while nothing is expected ({note})"
+                        );
+                    }
+                }
+                (_, closed) => panic!("{note} closed the connection: {closed:?}"),
+            }
+        }
+    }
+
     /// Send one select-screen record that the server answers with nothing, leaving the
     /// connection open.
     fn unanswered(&mut self, record: &[u8]) {
         self.send_record(record);
-        assert_eq!(self.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+        self.quiet("a refused record");
     }
 
     /// Send one select-screen record that closes the connection without an answer.
     fn closed_by(&mut self, record: &[u8]) {
         self.send_record(record);
         assert_eq!(self.client.expect_closed(), Vec::<u8>::new());
+    }
+    /// Read one record whose length the first TEA unit already carries, which is how every
+    /// `WORD wSize` record sizes itself on the wire.
+    fn read_sized(&mut self, len_of: impl Fn(u8, &[u8]) -> usize) -> Vec<u8> {
+        let key = self.output;
+        let mut wire = self.client.expect_bytes(8);
+        let first = decrypt_padded(&wire, &key).expect("aligned");
+        let len = len_of(first[0], &first);
+        wire.extend(self.client.expect_bytes(len.div_ceil(8) * 8 - 8));
+        let mut record = decrypt_padded(&wire, &key).expect("aligned");
+        assert!(record[len..].iter().all(|&byte| byte == 0), "{record:02x?}");
+        record.truncate(len);
+        record
+    }
+
+    /// Read the next loading or enter-game record, sizing a `WORD wSize` record from the first
+    /// TEA unit and a fixed-width one from [`game_len`].
+    fn read_game(&mut self) -> Vec<u8> {
+        self.read_sized(|header, first| match game_len(header) {
+            usize::MAX => usize::from(first[1]) | (usize::from(first[2]) << 8),
+            fixed => fixed,
+        })
+    }
+
+    /// Read the next loading or enter-game record, or `None` when the descriptor closed the
+    /// connection without one, which is how a refused load looks from the client side.
+    fn read_game_or_close(&mut self) -> Option<Vec<u8>> {
+        let (bytes, quiet) = self.client.drain(Duration::from_secs(2));
+        assert_eq!(
+            quiet,
+            Quiet::Closed,
+            "the descriptor closed after {} bytes",
+            bytes.len()
+        );
+        if bytes.is_empty() {
+            return None;
+        }
+        let key = self.output;
+        let head = decrypt_padded(&bytes[..8.min(bytes.len())], &key).expect("aligned");
+        let len = match game_len(head[0]) {
+            usize::MAX => usize::from(head[1]) | (usize::from(head[2]) << 8),
+            fixed => fixed,
+        };
+        let mut wire = bytes;
+        while wire.len() < len.div_ceil(8) * 8 {
+            wire.extend(self.client.expect_bytes(8));
+        }
+        let mut record = decrypt_padded(&wire, &key).expect("aligned");
+        assert!(record[len..].iter().all(|&byte| byte == 0), "{record:02x?}");
+        record.truncate(len);
+        Some(record)
     }
 }
 
@@ -1618,4 +1894,520 @@ fn a_character_asked_to_rename_takes_a_free_name() {
 
     let (mut alice, _, _) = select_screen(&server, b"alice");
     alice.closed_by(&client_rename(4, b"Delta"));
+}
+
+/// `cg.login.character_select`, `sys.login.enter`: `CG_CHARACTER_SELECT` loads the character
+/// and answers the loading burst, and `CG_ENTER_GAME` answers the enter-game burst, each in
+/// `CInputDB::PlayerLoad` and `CInputLogin::Entergame` order with `SetPhase` in the middle. An
+/// empty slot and a slot past the last close; a map the Channel does not host closes after the
+/// records written before the map test.
+#[test]
+fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+
+    let (mut keyed, empire, list) = select_screen(&server, b"alice");
+    assert_eq!(empire, 1);
+    let alpha = listed(&list, 0);
+    assert_eq!(alpha.name.as_slice(), b"Alpha");
+
+    // `CG_CHARACTER_SELECT` on slot 0. `PlayerLoad` moves the descriptor to the loading phase
+    // first, so `GC_PHASE` with 4 is the first record and the rest are sealed on the key the
+    // `LOGIN2` installed.
+    keyed.send_record(&client_select(0));
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
+    // `SendEntity` with nobody in view is still written: a size of 3 and no entries.
+    let entity = keyed.read_game();
+    assert_eq!(
+        word_sized(&entity),
+        Some(entity.len()),
+        "wSize is the record"
+    );
+    assert_eq!(entity, [GC_ENTITY, 3, 0]);
+    // `MainCharacterPacket` is the 46-byte empire variant, carrying the VID, the job, the Name,
+    // the position, the empire, and the skill group, in source field order.
+    let main = keyed.read_game();
+    assert_eq!(main[0], GC_MAIN_CHARACTER2_EMPIRE);
+    assert_eq!(main.len(), MAIN_CHARACTER_LEN);
+    assert_eq!(&main[1..5], &alpha.id.to_le_bytes(), "dwVID");
+    assert_eq!(&main[5..7], &3u16.to_le_bytes(), "wJob");
+    assert_eq!(&main[7..32], &name_field(b"Alpha"), "szName");
+    assert_eq!(&main[32..36], &470_000i32.to_le_bytes(), "x");
+    assert_eq!(&main[36..40], &950_000i32.to_le_bytes(), "y");
+    assert_eq!(&main[40..44], &0i32.to_le_bytes(), "z");
+    assert_eq!(main[44], 1, "bEmpire");
+    assert_eq!(main[45], 49, "bSkillGroup");
+    // `PointsPacket` writes the gold record immediately before the points record, because
+    // `ENABLE_REMOVE_LIMIT_GOLD` is on.
+    let gold = keyed.read_game();
+    assert_eq!(gold.len(), GOLD_LEN);
+    assert_eq!(gold[0], GC_CHARACTER_GOLD);
+    assert_eq!(&gold[1..9], &0u64.to_le_bytes(), "the stored gold");
+    let points = keyed.read_game();
+    assert_eq!(points.len(), POINTS_LEN);
+    assert_eq!(points[0], GC_PLAYER_POINTS);
+    // The 255 eight-byte slots start one byte after the header. Slot 0 is `POINT_NONE`, written
+    // as zero rather than the stack garbage `TPacketGCPoints` would carry, and slot 1 is
+    // `POINT_LEVEL`, whose value is the character's level.
+    assert_eq!(&points[1..9], &0i64.to_le_bytes(), "POINT_NONE");
+    assert_eq!(&points[9..17], &154i64.to_le_bytes(), "POINT_LEVEL");
+    let levels = keyed.read_game();
+    assert_eq!(levels.len(), SKILL_LEVEL_LEN);
+    assert_eq!(levels[0], GC_SKILL_LEVEL_NEW);
+    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+
+    // `CG_ENTER_GAME`. `Entergame` writes the own-character pair, then the revive-invisible
+    // affect, then `SetPhase(PHASE_GAME)`, then the time, Channel, and event records.
+    keyed.send_record(&client_enter_game());
+    let add = keyed.read_game();
+    assert_eq!(
+        add.len(),
+        CHARACTER_ADD_LEN,
+        "no wSize: the client sizes it by the header"
+    );
+    assert_eq!(add[0], GC_CHARACTER_ADD);
+    assert_eq!(word_sized(&add), None);
+    assert_eq!(&add[1..5], &alpha.id.to_le_bytes(), "dwVID");
+    let additional = keyed.read_game();
+    assert_eq!(
+        additional.len(),
+        CHAR_ADDITIONAL_INFO_LEN,
+        "no wSize: the client sizes it by the header"
+    );
+    assert_eq!(additional[0], GC_CHAR_ADDITIONAL_INFO);
+    assert_eq!(word_sized(&additional), None);
+    assert_eq!(&additional[1..5], &alpha.id.to_le_bytes(), "dwVID");
+    assert_eq!(&additional[5..30], &name_field(b"Alpha"), "szName");
+    assert_eq!(additional[69], 0, "bLanguage from the descriptor");
+    let affect = keyed.read_game();
+    assert_eq!(affect.len(), AFFECT_ADD_LEN);
+    assert_eq!(affect[0], GC_AFFECT_ADD);
+    assert_eq!(
+        &affect[1..5],
+        &215u32.to_le_bytes(),
+        "AffectType is REVIVE_INVISIBLE"
+    );
+    assert_eq!(&affect[10..14], &28u32.to_le_bytes(), "AFFECT_FLAG 28");
+    assert_eq!(&affect[14..18], &5i32.to_le_bytes(), "five seconds");
+    // The phase record is between the affect and the time record, so exactly one is written.
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
+    let time = keyed.read_game();
+    assert_eq!(time.len(), TIME_LEN);
+    assert_eq!(time[0], GC_TIME);
+    let channel = keyed.read_game();
+    assert_eq!(
+        channel,
+        [GC_CHANNEL, 1],
+        "the Channel the client logged in through"
+    );
+    let chat = keyed.read_game();
+    assert_eq!(chat[0], GC_CHAT);
+    assert_eq!(word_sized(&chat), Some(chat.len()), "wSize is the record");
+    assert_eq!(chat[3], 5, "CHAT_TYPE_COMMAND");
+    assert_eq!(chat.len(), 10 + "letters_event 0".len());
+    // `ChatPacket` writes `id = 0` for every line it formats itself.
+    assert_eq!(&chat[4..8], &0u32.to_le_bytes(), "id");
+    assert_eq!(chat[8], 1, "bEmpire");
+    assert_eq!(chat[9], 1, "bCanFormat");
+    assert_eq!(&chat[10..], b"letters_event 0");
+    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+}
+
+/// `cg.login.character_select`: an empty slot is `SetPhase(PHASE_CLOSE)`, and an index past the
+/// last slot is ignored rather than closing. Legacy reads the slot array before it range-checks
+/// the index, which is a Defect the Rewrite does not reproduce.
+#[test]
+fn an_empty_slot_closes_and_an_index_past_the_last_is_ignored() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+
+    // Slot 2 is empty.
+    let (mut keyed, _empire, list) = select_screen(&server, b"alice");
+    assert!(slot_is_empty(&list, 2), "slot 2 is empty");
+    keyed.closed_by(&client_select(2));
+
+    // An index of 4 reads past the end of `TAccountTable::players` in legacy. Here it is
+    // `Ignore`: nothing is sent and the connection stays open.
+    let (mut keyed, _empire, _list) = select_screen(&server, b"alice");
+    keyed.unanswered(&client_select(4));
+    keyed.unanswered(&client_select(0xff));
+    keyed.closed_by(&client_select(2));
+}
+
+/// `sys.login.enter`: a character standing on a map the Channel does not host is refused at
+/// `map_allow_find`, after the records `PlayerLoad` writes before that test and before the gold,
+/// points, and skill-level records that follow it. Slot 3 of alice stands on map 2, which no
+/// Channel in the default configuration hosts.
+#[test]
+fn a_map_the_channel_does_not_host_closes_after_the_records_before_the_test() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+
+    let (_keyed, _empire, list) = select_screen(&server, b"alice");
+    // The character list moved Delta to the empire 1 start, so the refusal is about the map the
+    // stored position is on, not about the moved one.
+    assert_eq!(listed(&list, 3).port, server.channel(1).port());
+
+    sql(
+        &database,
+        "UPDATE player SET x = 60000, y = 150000 WHERE name = 'Delta'",
+    );
+    let (mut keyed, _empire, _list) = select_screen(&server, b"alice");
+    keyed.send_record(&client_select(3));
+    // The phase record, the entity list, and the own-character record are written, then the
+    // close. Nothing else.
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
+    assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
+    let main = keyed.read_game();
+    assert_eq!(main[0], GC_MAIN_CHARACTER2_EMPIRE);
+    assert_eq!(&main[7..32], &name_field(b"Delta"), "szName");
+    assert_eq!(
+        keyed.read_game_or_close(),
+        None,
+        "no gold, points, or skill-level record after the map test"
+    );
+    // The character is untouched: the refusal sets a warp location in legacy, and the Rewrite
+    // has no world to hold one.
+    check(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Delta') = 60000",
+    );
+}
+
+/// `sys.char.chat`: a talking line reaches every client on the sender's map, including the
+/// sender, and no client on another Channel or another map. A line that is only whitespace, an
+/// empty line, and a line whose declared size is under the fixed part are all consumed without a
+/// record, and the tenth line in a run schedules a disconnect.
+#[test]
+fn a_talking_line_reaches_the_map_including_its_sender() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    // Bob's character stands on another map, so the map filter has something to exclude.
+    sql(
+        &database,
+        "UPDATE player SET x = 470000, y = 950000 WHERE name = 'Zulu'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+
+    let (mut alice, alpha) = enter_world(&server, b"alice", 0);
+    let (mut yankee, _) = enter_world(&server, b"bob", 0);
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"hello"));
+    // The sender gets its own line: `FEmpireChatPacket` filters by map index only.
+    let own = alice.read_game();
+    assert_eq!(own[0], GC_CHAT);
+    assert_eq!(word_sized(&own), Some(own.len()));
+    assert_eq!(&own[4..8], &alpha.id.to_le_bytes(), "id");
+    assert_eq!(own[8], 1, "bEmpire is the character's empire");
+    assert_eq!(&own[10..], b"Alpha : hello");
+    // The other client on the same map gets the same bytes.
+    let heard = yankee.read_game();
+    assert_eq!(heard, own, "the same record reaches the neighbour");
+    yankee.quiet("exactly one record");
+
+    // `strlcpy` copies at most `iExtraLen + 1` bytes and stops at the first NUL, then
+    // `snprintf` builds `"%s : %s"`. There is no `strlen(buf) < 1` arm, so an empty payload
+    // and one whose first byte is NUL both become the bare name line and are broadcast.
+    for payload in [&b""[..], &[b'\0', b'x'][..]] {
+        alice.send_record(&client_chat(CHAT_TALKING, payload));
+        let bare = alice.read_game();
+        assert_eq!(bare[0], GC_CHAT);
+        assert_eq!(word_sized(&bare), Some(bare.len()));
+        assert_eq!(&bare[4..8], &alpha.id.to_le_bytes(), "id");
+        assert_eq!(&bare[10..], b"Alpha : ", "the name line with no text");
+        assert_eq!(
+            yankee.read_game(),
+            bare,
+            "the neighbour sees the same record"
+        );
+    }
+    yankee.quiet("exactly two more records");
+
+    // `if (buflen > 1 && *buf == '/')` is checked before the counter, so a slash line costs
+    // nothing and is consumed: the Rewrite has no command interpreter yet.
+    alice.unanswered(&client_chat(CHAT_TALKING, b"/who"));
+
+    // A declared size under the record's own prefix cannot be framed. Legacy's
+    // `if (size < sizeof(TPacketCGChat)) return -1;` stops consuming without
+    // closing, so the descriptor stalls until the ping cycle drops it; the
+    // Rewrite closes at once, which is the recorded framing Divergence.
+    let mut short = client_chat(CHAT_TALKING, b"x");
+    short[1] = 3;
+    short[2] = 0;
+    alice.closed_by(&short);
+}
+
+/// `cg.world.move`: an accepted move reaches the clients around the mover and never the mover,
+/// and a move past the legacy distance limit is refused without a record. The moved position is
+/// the client's own bytes, so the broadcast relays `lX` and `lY` unchanged and carries the
+/// duration only on the `FUNC_MOVE` branch.
+#[test]
+fn a_move_reaches_the_map_around_the_mover_and_not_the_mover() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+
+    let (mut alice, alpha) = enter_world(&server, b"alice", 0);
+    let (mut yankee, _) = enter_world(&server, b"bob", 0);
+
+    // `FUNC_COMBO` is 3. A step lands at the position, and the record carries no duration.
+    alice.send_record(&client_move(3, 7, 40, 470_100, 950_100, 0x5eed));
+    let seen = yankee.read_game();
+    assert_eq!(seen.len(), GC_MOVE_LEN);
+    assert_eq!(seen[0], GC_MOVE);
+    assert_eq!(seen[1], 3, "bFunc is relayed");
+    assert_eq!(seen[2], 7, "bArg is relayed");
+    assert_eq!(seen[3], 40, "bRot is relayed, not multiplied, on the wire");
+    assert_eq!(&seen[4..8], &alpha.id.to_le_bytes(), "dwVID");
+    assert_eq!(&seen[8..12], &470_100i32.to_le_bytes(), "lX");
+    assert_eq!(&seen[12..16], &950_100i32.to_le_bytes(), "lY");
+    assert_eq!(&seen[16..20], &0x5eedu32.to_le_bytes(), "dwTime");
+    assert_eq!(&seen[20..24], &0u32.to_le_bytes(), "dwDuration");
+    alice.quiet("PacketAround excludes the mover");
+
+    // `FUNC_MOVE` is 1 and it is the branch that calls `Goto`, so the record carries the duration
+    // the client sent. The distance test compares against 999 units of 100, so 200000 is refused.
+    alice.send_record(&client_move(1, 0, 0, 470_200, 950_200, 0x5eee));
+    let stepped = yankee.read_game();
+    assert_eq!(stepped[1], 1, "bFunc");
+    assert_eq!(&stepped[8..12], &470_200i32.to_le_bytes(), "lX");
+    alice.quiet("the mover is still excluded");
+    alice.send_record(&client_move(1, 0, 0, 470_000 + 200_000, 950_000, 0x5eef));
+    yankee.quiet("a refused move sends nothing to anyone");
+    alice
+        .quiet("and the mover only has the legacy Show record, which the Rewrite has no world for");
+
+    // A function byte of 6 is past `FUNC_MAX_NUM`, which is the first refused value.
+    alice.unanswered(&client_move(6, 0, 0, 470_100, 950_100, 0x5ef0));
+    // A function byte with the skill bit set passes the range test and steps.
+    alice.send_record(&client_move(0x80, 0, 0, 470_300, 950_300, 0x5ef1));
+    let skill = yankee.read_game();
+    assert_eq!(skill[1], 0x80, "bFunc is relayed");
+    assert_eq!(&skill[8..12], &470_300i32.to_le_bytes(), "lX");
+}
+
+/// `sys.char.position`: sitting and standing reach every client on the map including the
+/// sender, because `Standup` and `Sitdown` call `PacketAround` with no `except`. A pose the
+/// character is already in is ignored, and legacy collapses the ground pose onto the chair
+/// value, which is a Defect the Rewrite does not reproduce.
+#[test]
+fn a_pose_reaches_the_map_including_its_sender() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+
+    let (mut alice, alpha) = enter_world(&server, b"alice", 0);
+    let (mut yankee, _) = enter_world(&server, b"bob", 0);
+
+    // Legacy `Sitdown` writes `POSITION_SITTING_GROUND` for both chair and ground and drops
+    // its `is_ground` argument, so the chair request is a recorded Divergence: the Rewrite
+    // answers the chair with `POSITION_SITTING_CHAIR` and the ground with
+    // `POSITION_SITTING_GROUND`.
+    alice.send_record(&client_position(POSITION_SITTING_CHAIR));
+    let pose = alice.read_game();
+    assert_eq!(pose.len(), CHARACTER_POSITION_LEN);
+    assert_eq!(pose[0], GC_CHARACTER_POSITION);
+    assert_eq!(&pose[1..5], &alpha.id.to_le_bytes(), "dwVID");
+    assert_eq!(pose[5], POSITION_SITTING_CHAIR);
+    assert_eq!(
+        yankee.read_game(),
+        pose,
+        "the neighbour gets the same record"
+    );
+
+    // Standing again is a second record to everyone.
+    alice.send_record(&client_position(POSITION_GENERAL));
+    let stood = alice.read_game();
+    assert_eq!(stood[5], POSITION_GENERAL);
+    assert_eq!(yankee.read_game(), stood);
+
+    // `Sitdown(1)` is the other arm of the same switch and reaches the same state.
+    alice.send_record(&client_position(POSITION_SITTING_GROUND));
+    let ground = alice.read_game();
+    assert_eq!(ground[5], POSITION_SITTING_GROUND);
+    assert_eq!(yankee.read_game(), ground);
+
+    // Sitting while already sitting is the `if (IsPosition(POS_SITTING)) return;` arm.
+    alice.unanswered(&client_position(POSITION_SITTING_CHAIR));
+
+    // Standing from the ground is a third record, and it leaves the character standing.
+    alice.send_record(&client_position(POSITION_GENERAL));
+    let stood_again = alice.read_game();
+    assert_eq!(stood_again[5], POSITION_GENERAL);
+    assert_eq!(yankee.read_game(), stood_again);
+
+    // Standing while already standing is the `if (!IsPosition(POS_SITTING)) return;` arm.
+    alice.unanswered(&client_position(POSITION_GENERAL));
+    // An unknown pose byte is not a legacy arm, so nothing is sent.
+    alice.unanswered(&client_position(0x7f));
+}
+
+/// `sys.world.move`: a sync batch is relayed around the claimer and never to the claimer, and an
+/// unknown VID or a victim of the wrong kind is skipped while the rest of the batch still goes
+/// out.
+#[test]
+fn a_sync_batch_is_relayed_around_the_claimer_only() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+
+    let (mut alice, alpha) = enter_world(&server, b"alice", 0);
+    let (mut yankee, yankee_id) = enter_world(&server, b"bob", 0);
+
+    // A claim on Yankee from a position 10 units away, inside every limit.
+    //
+    // `SetSyncOwner` writes `TPacketGCOwnership` with a plain `PacketAround` as it judges
+    // the claim, so the victim sees its own ownership. The position batch follows and
+    // excepts the claimer.
+    alice.send_record(&client_sync_position(&[(yankee_id.id, 470_010, 950_010)]));
+    let claimed = yankee.read_game();
+    assert_eq!(claimed.len(), OWNERSHIP_LEN, "TPacketGCOwnership");
+    assert_eq!(claimed[0], GC_OWNERSHIP);
+    assert_eq!(&claimed[1..5], &alpha.id.to_le_bytes(), "dwOwnerVID");
+    assert_eq!(&claimed[5..9], &yankee_id.id.to_le_bytes(), "dwVictimVID");
+    let relayed = yankee.read_game();
+    assert_eq!(relayed[0], GC_SYNC_POSITION);
+    assert_eq!(word_sized(&relayed), Some(relayed.len()));
+    assert_eq!(relayed.len(), SYNC_POSITION_LEN);
+    assert_eq!(&relayed[3..7], &yankee_id.id.to_le_bytes(), "dwVID");
+    assert_eq!(&relayed[7..11], &470_010i32.to_le_bytes(), "lX");
+    assert_eq!(&relayed[11..15], &950_010i32.to_le_bytes(), "lY");
+
+    // The ownership record has no exception, so the claimer reads that one and never the
+    // position batch.
+    let own = alice.read_game();
+    assert_eq!(
+        own[0], GC_OWNERSHIP,
+        "the claimer sees the ownership record"
+    );
+    alice.quiet("the claimer never sees its own batch");
+
+    // An unknown VID is skipped, so an empty batch produces no record at all.
+    alice.unanswered(&client_sync_position(&[(999_999, 470_010, 950_010)]));
+    yankee.quiet("an empty batch sends nothing");
+
+    // `if (ch == this) { sys_err("SetSyncOwner owner == this"); return false; }` refuses a
+    // character that names itself, so a client cannot move itself by claiming its own VID.
+    alice.unanswered(&client_sync_position(&[(alpha.id, 470_010, 950_010)]));
+    yankee.quiet("a self claim sends nothing");
+
+    // The other direction works the same way: Yankee claims Alpha, and the ownership record
+    // goes around the map with no exception, so Alice reads it and Yankee does not read the
+    // position batch that follows it.
+    yankee.send_record(&client_sync_position(&[(alpha.id, 470_020, 950_020)]));
+    let seen = alice.read_game();
+    assert_eq!(seen.len(), OWNERSHIP_LEN);
+    assert_eq!(seen[0], GC_OWNERSHIP);
+    assert_eq!(
+        &seen[1..5],
+        &yankee_id.id.to_le_bytes(),
+        "dwOwnerVID is Yankee"
+    );
+    assert_eq!(&seen[5..9], &alpha.id.to_le_bytes(), "dwVictimVID is Alpha");
+    // The ownership record has no exception, so the claimer reads that one too and never the
+    // position batch that follows it.
+    let own_claim = yankee.read_game();
+    assert_eq!(own_claim.len(), OWNERSHIP_LEN);
+    assert_eq!(own_claim[0], GC_OWNERSHIP);
+    yankee.quiet("the claimer never sees its own batch");
+    // The batch excepts the claimer, not the victim, so Alice also reads the relayed
+    // position of the character Yankee moved.
+    let moved = alice.read_game();
+    assert_eq!(moved[0], GC_SYNC_POSITION);
+    assert_eq!(word_sized(&moved), Some(moved.len()));
+    assert_eq!(&moved[3..7], &alpha.id.to_le_bytes(), "dwVID");
+    assert_eq!(&moved[7..11], &470_020i32.to_le_bytes(), "lX");
+    assert_eq!(&moved[11..15], &950_020i32.to_le_bytes(), "lY");
+    alice.quiet("the victim sees the ownership record and the batch");
+
+    // `if (!IsSyncOwner(ch)) return false;` keeps a second character off a target another
+    // character still holds, because `ENABLE_FLY_FIX` refreshes the 100-unit claim stamp on
+    // every accepted claim. Alpha is now Yankee's.
+    alice.send_record(&client_sync_position(&[(alpha.id, 470_030, 950_030)]));
+    alice.quiet("a refused claim writes no record to the claimer");
+    yankee.quiet("a refused claim writes no record to the victim");
+}
+
+/// `FindCharacter` looks a sync victim up in the world, and a disconnect removes the
+/// character from the world, so the lookup returns null and the element is skipped
+/// (`G/input_main.cpp:2060-2063`). A claim naming a character who has gone must therefore
+/// produce no record at all.
+///
+/// This pins the behaviour, not the bookkeeping. It passes whether or not the descriptor's
+/// exit path forgets the position, because every claim lookup also filters through the
+/// Channel registry, which has already dropped the lease; see the mutant note in ledger 188.
+#[test]
+fn a_claim_on_a_character_who_has_left_finds_nobody() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+
+    // Alice's connection is dropped at the end of the block, so the claim below is made by
+    // a descriptor that outlives hers.
+    let alpha = {
+        let (_alice, listed) = enter_world(&server, b"alice", 0);
+        listed.id
+    };
+    let (mut yankee, _yankee_id) = enter_world(&server, b"bob", 0);
+
+    // `if (!victim) continue;` skips an element whose VID is not in the world, so the batch
+    // ends up empty and no record is written at all.
+    yankee.unanswered(&client_sync_position(&[(alpha, 470_010, 950_010)]));
 }

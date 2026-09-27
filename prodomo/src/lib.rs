@@ -15,10 +15,13 @@ pub mod auth_login;
 
 /// The Channel login rules, the logon registry, and the character list.
 pub mod channel_login;
+pub mod chat;
 
 /// The Channel status list answered to `STATE_CHECKER`.
 pub mod channel_status;
 pub mod client_live;
+pub mod client_registry;
+pub mod movement;
 
 /// Isolated fixed-frame client session and dispatch boundary.
 pub mod client_session;
@@ -55,6 +58,8 @@ pub mod account_records;
 pub mod ready_gate;
 
 pub mod select_phase;
+
+pub mod loading_phase;
 
 pub mod listeners;
 

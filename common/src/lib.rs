@@ -29,6 +29,12 @@ pub mod tables;
 /// GM host and administrator rules ported from the legacy boot tail
 pub mod gm;
 
+/// The compiled-in level and job tables of the legacy `constants.cpp`
+pub mod levels;
+
+/// The `EPointTypes` point-slot indices of the legacy `char.h`
+pub mod point_slot;
+
 pub use tracing::{debug, error, info, trace, warn};
 
 /// Entity identifier type used throughout the server

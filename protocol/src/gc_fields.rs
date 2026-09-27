@@ -302,7 +302,6 @@ impl GcNamed {
     }
 
     /// Read the 30 packed bytes for whichever of the three headers is expected.
-    /// Read the 30 packed bytes for whichever of the three headers is expected.
     ///
     /// # Errors
     ///
@@ -353,7 +352,6 @@ impl GcTwoWord {
         out.extend_from_slice(&self.second.to_le_bytes());
     }
 
-    /// Read the 9 packed bytes for whichever of the three headers is expected.
     /// Read the 9 packed bytes for whichever of the three headers is expected.
     ///
     /// # Errors
@@ -410,7 +408,6 @@ impl GcPvp {
     }
 
     /// Read the 10 packed bytes, rejecting any other header.
-    /// Read the 10 packed bytes, rejecting any other header.
     ///
     /// # Errors
     ///
@@ -460,7 +457,6 @@ impl GcPickupItem {
         out.extend_from_slice(&self.item_count.to_le_bytes());
     }
 
-    /// Read the 9 packed bytes, rejecting any other header.
     /// Read the 9 packed bytes, rejecting any other header.
     ///
     /// # Errors
@@ -516,7 +512,6 @@ impl GcMotion {
     }
 
     /// Read the 11 packed bytes, rejecting any other header.
-    /// Read the 11 packed bytes, rejecting any other header.
     ///
     /// # Errors
     ///
@@ -568,7 +563,6 @@ impl GcCreateFly {
         out.extend_from_slice(&self.end_vid.to_le_bytes());
     }
 
-    /// Read the 10 packed bytes, rejecting any other header.
     /// Read the 10 packed bytes, rejecting any other header.
     ///
     /// # Errors
@@ -625,7 +619,6 @@ impl GcShamanSkill {
     }
 
     /// Read the 10 packed bytes, rejecting any other header.
-    /// Read the 10 packed bytes, rejecting any other header.
     ///
     /// # Errors
     ///
@@ -679,7 +672,6 @@ impl GcTargetUpdate {
     }
 
     /// Read the 13 packed bytes, rejecting any other header.
-    /// Read the 13 packed bytes, rejecting any other header.
     ///
     /// # Errors
     ///
@@ -728,7 +720,6 @@ impl GcLoverInfo {
     }
 
     /// Read the 27 packed bytes, rejecting any other header.
-    /// Read the 27 packed bytes, rejecting any other header.
     ///
     /// # Errors
     ///
@@ -774,7 +765,6 @@ impl GcShopSign {
         out.extend_from_slice(&self.sign);
     }
 
-    /// Read the 38 packed bytes, rejecting any other header.
     /// Read the 38 packed bytes, rejecting any other header.
     ///
     /// # Errors
@@ -825,7 +815,6 @@ impl GcSpecificEffect {
         out.extend_from_slice(&self.effect_file);
     }
 
-    /// Read the 133 packed bytes, rejecting any other header.
     /// Read the 133 packed bytes, rejecting any other header.
     ///
     /// # Errors
@@ -884,7 +873,6 @@ impl GcQuestConfirm {
     }
 
     /// Read the 74 packed bytes, rejecting any other header.
-    /// Read the 74 packed bytes, rejecting any other header.
     ///
     /// # Errors
     ///
@@ -936,7 +924,6 @@ impl GcPoints {
     }
 
     /// Read the 2041 packed bytes, rejecting any other header.
-    /// Read the 2041 packed bytes, rejecting any other header.
     ///
     /// # Errors
     ///
@@ -985,7 +972,6 @@ impl GcGold {
         out.extend_from_slice(&self.gold.to_le_bytes());
     }
 
-    /// Read the 9 packed bytes, rejecting any other header.
     /// Read the 9 packed bytes, rejecting any other header.
     ///
     /// # Errors

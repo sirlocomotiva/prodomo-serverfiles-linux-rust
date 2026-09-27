@@ -150,11 +150,20 @@ def client_packets():
     lines = read(path)
     keep = next(i for i, line in enumerate(lines) if re.search(r'if \(bHeader == 0\)', line))
     unknown = next(i for i, line in enumerate(lines) if 'UNKNOWN HEADER' in line)
+    extra = next(i for i, line in enumerate(lines) if 'iExtraPacketSize' in line)
+    negative = next(i for i, line in enumerate(lines)
+                    if re.search(r'if \(iExtraPacketSize < 0\)', line))
     # `CInputProcessor::Process` handles these before any phase analyzer sees the frame.
     rows = [('cg.any.keep_alive', cite(path, keep + 1),
              'header 0x00 in every phase → one byte consumed, no analyzer call', 'missing', ''),
             ('cg.any.unknown_header', cite(path, unknown + 1),
-             'a header the phase table does not register → descriptor closed', 'missing', '')]
+             'a header the phase table does not register → descriptor closed', 'missing', ''),
+            ('cg.any.variable_length', cite(path, extra + 1),
+             'a registered header whose analyzer returns a size adds it to the phase-table '
+             'length, so the frame is as long as the record says it is', 'missing', ''),
+            ('cg.any.analyzer_refusal', cite(path, negative + 1),
+             'an analyzer that returns -1 consumes nothing and leaves the descriptor open',
+             'missing', '')]
     for file_name, klass, phase in ANALYZERS:
         path = os.path.join(GAME, file_name)
         lines = read(path)
@@ -348,7 +357,7 @@ INTRO = {
 Every client-to-server header each legacy analyzer handles, one row per phase in which it is
 handled. The handshake analyzer (`CInputHandshake`) also serves the Channel status query the
 login screen sends. The handler named is the first call in the `case` arm; many handlers switch
-again on a sub-header, and those sub-headers are listed in `sub-headers.md`. The two `cg.any`
+again on a sub-header, and those sub-headers are listed in `sub-headers.md`. The `cg.any`
 rows are the framing rules `CInputProcessor::Process` applies before any analyzer.
 """,
     'sub-headers.md': """

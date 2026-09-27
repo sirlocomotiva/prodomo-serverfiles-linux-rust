@@ -1,0 +1,870 @@
+//! The `EPointTypes` point-slot indices of `server/server/game/char.h:141-330`.
+//!
+//! `CHARACTER` holds a fixed array of 255 slots (`POINT_MAX_NUM = 255`,
+//! `common/length.h:82`) and `GC_CHARACTER_POINTS` writes one signed 64-bit value per slot.
+//! Every record that names a slot by number depends on these indices, so they are carried as
+//! constants rather than written inline at each use site.
+//!
+//! # How the indices were derived
+//!
+//! The C enumerator is not a flat list: it mixes auto-incremented members with explicit values
+//! (`POINT_ENERGY = 128`, `POINT_GAYA = 207`, `POINT_PRIVATE_SHOP_UNLOCKED_SLOT = 210`) and
+//! with members behind feature switches. Counting the live members is therefore **wrong**: a
+//! count of the enumerator with this tree's switches on gives `POINT_CONQUEROR_LEVEL` as 152
+//! where the compiler puts it at 173, because the explicit values leave gaps the count closes.
+//!
+//! The indices here were therefore **measured, not counted**. The verbatim enum body from
+//! `char.h` was compiled with the switches `server/server/common/prodomodefines.h` defines in
+//! this snapshot (`ENABLE_EXTEND_INVEN_SYSTEM`, `ENABLE_GAYA_SYSTEM`, `BONUS_PCT`,
+//! `__CONQUEROR_LEVEL__`, `__ENABLE_BIOLOGIST_RENEWAL_SYSTEM__`,
+//! `__ENABLE_INVENTORY_PROTECTED_SYSTEM__`, and `__PREMIUM_PRIVATE_SHOP__` are all on) and the
+//! compiler's own numbering was printed. The test pins all 189 of them, so a mistranscribed
+//! constant fails the build. A deployment that changes a switch must regenerate this table,
+//! because legacy would then renumber the slots it sends. The probe that measures the table sits
+//! with this change's research in `.scratch/ledger187/point_enum.cpp`: the verbatim enum body,
+//! the seven `#define`s this tree compiles with, and a loop that prints `name value` for every
+//! enumerator.
+//!
+//! The highest index the enumerator reaches is `POINT_PRIVATE_SHOP_UNLOCKED_SLOT` at 210, well
+//! inside the 255 slots the record carries, so the remaining slots stay zero and are never
+//! named by the enumerator.
+
+/// The number of slots `GC_CHARACTER_POINTS` carries (`POINT_MAX_NUM = 255`).
+pub const POINT_MAX_NUM: usize = 255;
+
+/// `POINT_NONE`
+pub const POINT_NONE: usize = 0;
+/// `POINT_LEVEL`
+pub const POINT_LEVEL: usize = 1;
+/// `POINT_VOICE`
+pub const POINT_VOICE: usize = 2;
+/// `POINT_EXP`
+pub const POINT_EXP: usize = 3;
+/// `POINT_NEXT_EXP`
+pub const POINT_NEXT_EXP: usize = 4;
+/// `POINT_HP`
+pub const POINT_HP: usize = 5;
+/// `POINT_MAX_HP`
+pub const POINT_MAX_HP: usize = 6;
+/// `POINT_SP`
+pub const POINT_SP: usize = 7;
+/// `POINT_MAX_SP`
+pub const POINT_MAX_SP: usize = 8;
+/// `POINT_STAMINA`
+pub const POINT_STAMINA: usize = 9;
+/// `POINT_MAX_STAMINA`
+pub const POINT_MAX_STAMINA: usize = 10;
+/// `POINT_GOLD`
+pub const POINT_GOLD: usize = 11;
+/// `POINT_ST`
+pub const POINT_ST: usize = 12;
+/// `POINT_HT`
+pub const POINT_HT: usize = 13;
+/// `POINT_DX`
+pub const POINT_DX: usize = 14;
+/// `POINT_IQ`
+pub const POINT_IQ: usize = 15;
+/// `POINT_DEF_GRADE`
+pub const POINT_DEF_GRADE: usize = 16;
+/// `POINT_ATT_SPEED`
+pub const POINT_ATT_SPEED: usize = 17;
+/// `POINT_ATT_GRADE`
+pub const POINT_ATT_GRADE: usize = 18;
+/// `POINT_MOV_SPEED`
+pub const POINT_MOV_SPEED: usize = 19;
+/// `POINT_CLIENT_DEF_GRADE`
+pub const POINT_CLIENT_DEF_GRADE: usize = 20;
+/// `POINT_CASTING_SPEED`
+pub const POINT_CASTING_SPEED: usize = 21;
+/// `POINT_MAGIC_ATT_GRADE`
+pub const POINT_MAGIC_ATT_GRADE: usize = 22;
+/// `POINT_MAGIC_DEF_GRADE`
+pub const POINT_MAGIC_DEF_GRADE: usize = 23;
+/// `POINT_EMPIRE_POINT`
+pub const POINT_EMPIRE_POINT: usize = 24;
+/// `POINT_LEVEL_STEP`
+pub const POINT_LEVEL_STEP: usize = 25;
+/// `POINT_STAT`
+pub const POINT_STAT: usize = 26;
+/// `POINT_SUB_SKILL`
+pub const POINT_SUB_SKILL: usize = 27;
+/// `POINT_SKILL`
+pub const POINT_SKILL: usize = 28;
+/// `POINT_WEAPON_MIN`
+pub const POINT_WEAPON_MIN: usize = 29;
+/// `POINT_WEAPON_MAX`
+pub const POINT_WEAPON_MAX: usize = 30;
+/// `POINT_PLAYTIME`
+pub const POINT_PLAYTIME: usize = 31;
+/// `POINT_HP_REGEN`
+pub const POINT_HP_REGEN: usize = 32;
+/// `POINT_SP_REGEN`
+pub const POINT_SP_REGEN: usize = 33;
+/// `POINT_BOW_DISTANCE`
+pub const POINT_BOW_DISTANCE: usize = 34;
+/// `POINT_HP_RECOVERY`
+pub const POINT_HP_RECOVERY: usize = 35;
+/// `POINT_SP_RECOVERY`
+pub const POINT_SP_RECOVERY: usize = 36;
+/// `POINT_POISON_PCT`
+pub const POINT_POISON_PCT: usize = 37;
+/// `POINT_STUN_PCT`
+pub const POINT_STUN_PCT: usize = 38;
+/// `POINT_SLOW_PCT`
+pub const POINT_SLOW_PCT: usize = 39;
+/// `POINT_CRITICAL_PCT`
+pub const POINT_CRITICAL_PCT: usize = 40;
+/// `POINT_PENETRATE_PCT`
+pub const POINT_PENETRATE_PCT: usize = 41;
+/// `POINT_CURSE_PCT`
+pub const POINT_CURSE_PCT: usize = 42;
+/// `POINT_ATTBONUS_HUMAN`
+pub const POINT_ATTBONUS_HUMAN: usize = 43;
+/// `POINT_ATTBONUS_ANIMAL`
+pub const POINT_ATTBONUS_ANIMAL: usize = 44;
+/// `POINT_ATTBONUS_ORC`
+pub const POINT_ATTBONUS_ORC: usize = 45;
+/// `POINT_ATTBONUS_MILGYO`
+pub const POINT_ATTBONUS_MILGYO: usize = 46;
+/// `POINT_ATTBONUS_UNDEAD`
+pub const POINT_ATTBONUS_UNDEAD: usize = 47;
+/// `POINT_ATTBONUS_DEVIL`
+pub const POINT_ATTBONUS_DEVIL: usize = 48;
+/// `POINT_ATTBONUS_INSECT`
+pub const POINT_ATTBONUS_INSECT: usize = 49;
+/// `POINT_ATTBONUS_FIRE`
+pub const POINT_ATTBONUS_FIRE: usize = 50;
+/// `POINT_ATTBONUS_ICE`
+pub const POINT_ATTBONUS_ICE: usize = 51;
+/// `POINT_ATTBONUS_DESERT`
+pub const POINT_ATTBONUS_DESERT: usize = 52;
+/// `POINT_ATTBONUS_MONSTER`
+pub const POINT_ATTBONUS_MONSTER: usize = 53;
+/// `POINT_ATTBONUS_WARRIOR`
+pub const POINT_ATTBONUS_WARRIOR: usize = 54;
+/// `POINT_ATTBONUS_ASSASSIN`
+pub const POINT_ATTBONUS_ASSASSIN: usize = 55;
+/// `POINT_ATTBONUS_SURA`
+pub const POINT_ATTBONUS_SURA: usize = 56;
+/// `POINT_ATTBONUS_SHAMAN`
+pub const POINT_ATTBONUS_SHAMAN: usize = 57;
+/// `POINT_ATTBONUS_TREE`
+pub const POINT_ATTBONUS_TREE: usize = 58;
+/// `POINT_RESIST_WARRIOR`
+pub const POINT_RESIST_WARRIOR: usize = 59;
+/// `POINT_RESIST_ASSASSIN`
+pub const POINT_RESIST_ASSASSIN: usize = 60;
+/// `POINT_RESIST_SURA`
+pub const POINT_RESIST_SURA: usize = 61;
+/// `POINT_RESIST_SHAMAN`
+pub const POINT_RESIST_SHAMAN: usize = 62;
+/// `POINT_STEAL_HP`
+pub const POINT_STEAL_HP: usize = 63;
+/// `POINT_STEAL_SP`
+pub const POINT_STEAL_SP: usize = 64;
+/// `POINT_MANA_BURN_PCT`
+pub const POINT_MANA_BURN_PCT: usize = 65;
+/// `POINT_DAMAGE_SP_RECOVER`
+pub const POINT_DAMAGE_SP_RECOVER: usize = 66;
+/// `POINT_BLOCK`
+pub const POINT_BLOCK: usize = 67;
+/// `POINT_DODGE`
+pub const POINT_DODGE: usize = 68;
+/// `POINT_RESIST_SWORD`
+pub const POINT_RESIST_SWORD: usize = 69;
+/// `POINT_RESIST_TWOHAND`
+pub const POINT_RESIST_TWOHAND: usize = 70;
+/// `POINT_RESIST_DAGGER`
+pub const POINT_RESIST_DAGGER: usize = 71;
+/// `POINT_RESIST_BELL`
+pub const POINT_RESIST_BELL: usize = 72;
+/// `POINT_RESIST_FAN`
+pub const POINT_RESIST_FAN: usize = 73;
+/// `POINT_RESIST_BOW`
+pub const POINT_RESIST_BOW: usize = 74;
+/// `POINT_RESIST_FIRE`
+pub const POINT_RESIST_FIRE: usize = 75;
+/// `POINT_RESIST_ELEC`
+pub const POINT_RESIST_ELEC: usize = 76;
+/// `POINT_RESIST_MAGIC`
+pub const POINT_RESIST_MAGIC: usize = 77;
+/// `POINT_RESIST_WIND`
+pub const POINT_RESIST_WIND: usize = 78;
+/// `POINT_REFLECT_MELEE`
+pub const POINT_REFLECT_MELEE: usize = 79;
+/// `POINT_REFLECT_CURSE`
+pub const POINT_REFLECT_CURSE: usize = 80;
+/// `POINT_POISON_REDUCE`
+pub const POINT_POISON_REDUCE: usize = 81;
+/// `POINT_KILL_SP_RECOVER`
+pub const POINT_KILL_SP_RECOVER: usize = 82;
+/// `POINT_EXP_DOUBLE_BONUS`
+pub const POINT_EXP_DOUBLE_BONUS: usize = 83;
+/// `POINT_GOLD_DOUBLE_BONUS`
+pub const POINT_GOLD_DOUBLE_BONUS: usize = 84;
+/// `POINT_ITEM_DROP_BONUS`
+pub const POINT_ITEM_DROP_BONUS: usize = 85;
+/// `POINT_POTION_BONUS`
+pub const POINT_POTION_BONUS: usize = 86;
+/// `POINT_KILL_HP_RECOVERY`
+pub const POINT_KILL_HP_RECOVERY: usize = 87;
+/// `POINT_IMMUNE_STUN`
+pub const POINT_IMMUNE_STUN: usize = 88;
+/// `POINT_IMMUNE_SLOW`
+pub const POINT_IMMUNE_SLOW: usize = 89;
+/// `POINT_IMMUNE_FALL`
+pub const POINT_IMMUNE_FALL: usize = 90;
+/// `POINT_PARTY_ATTACKER_BONUS`
+pub const POINT_PARTY_ATTACKER_BONUS: usize = 91;
+/// `POINT_PARTY_TANKER_BONUS`
+pub const POINT_PARTY_TANKER_BONUS: usize = 92;
+/// `POINT_ATT_BONUS`
+pub const POINT_ATT_BONUS: usize = 93;
+/// `POINT_DEF_BONUS`
+pub const POINT_DEF_BONUS: usize = 94;
+/// `POINT_ATT_GRADE_BONUS`
+pub const POINT_ATT_GRADE_BONUS: usize = 95;
+/// `POINT_DEF_GRADE_BONUS`
+pub const POINT_DEF_GRADE_BONUS: usize = 96;
+/// `POINT_MAGIC_ATT_GRADE_BONUS`
+pub const POINT_MAGIC_ATT_GRADE_BONUS: usize = 97;
+/// `POINT_MAGIC_DEF_GRADE_BONUS`
+pub const POINT_MAGIC_DEF_GRADE_BONUS: usize = 98;
+/// `POINT_RESIST_NORMAL_DAMAGE`
+pub const POINT_RESIST_NORMAL_DAMAGE: usize = 99;
+/// `POINT_HIT_HP_RECOVERY`
+pub const POINT_HIT_HP_RECOVERY: usize = 100;
+/// `POINT_HIT_SP_RECOVERY`
+pub const POINT_HIT_SP_RECOVERY: usize = 101;
+/// `POINT_MANASHIELD`
+pub const POINT_MANASHIELD: usize = 102;
+/// `POINT_PARTY_BUFFER_BONUS`
+pub const POINT_PARTY_BUFFER_BONUS: usize = 103;
+/// `POINT_PARTY_SKILL_MASTER_BONUS`
+pub const POINT_PARTY_SKILL_MASTER_BONUS: usize = 104;
+/// `POINT_HP_RECOVER_CONTINUE`
+pub const POINT_HP_RECOVER_CONTINUE: usize = 105;
+/// `POINT_SP_RECOVER_CONTINUE`
+pub const POINT_SP_RECOVER_CONTINUE: usize = 106;
+/// `POINT_STEAL_GOLD`
+pub const POINT_STEAL_GOLD: usize = 107;
+/// `POINT_POLYMORPH`
+pub const POINT_POLYMORPH: usize = 108;
+/// `POINT_MOUNT`
+pub const POINT_MOUNT: usize = 109;
+/// `POINT_PARTY_HASTE_BONUS`
+pub const POINT_PARTY_HASTE_BONUS: usize = 110;
+/// `POINT_PARTY_DEFENDER_BONUS`
+pub const POINT_PARTY_DEFENDER_BONUS: usize = 111;
+/// `POINT_STAT_RESET_COUNT`
+pub const POINT_STAT_RESET_COUNT: usize = 112;
+/// `POINT_HORSE_SKILL`
+pub const POINT_HORSE_SKILL: usize = 113;
+/// `POINT_MALL_ATTBONUS`
+pub const POINT_MALL_ATTBONUS: usize = 114;
+/// `POINT_MALL_DEFBONUS`
+pub const POINT_MALL_DEFBONUS: usize = 115;
+/// `POINT_MALL_EXPBONUS`
+pub const POINT_MALL_EXPBONUS: usize = 116;
+/// `POINT_MALL_ITEMBONUS`
+pub const POINT_MALL_ITEMBONUS: usize = 117;
+/// `POINT_MALL_GOLDBONUS`
+pub const POINT_MALL_GOLDBONUS: usize = 118;
+/// `POINT_MAX_HP_PCT`
+pub const POINT_MAX_HP_PCT: usize = 119;
+/// `POINT_MAX_SP_PCT`
+pub const POINT_MAX_SP_PCT: usize = 120;
+/// `POINT_SKILL_DAMAGE_BONUS`
+pub const POINT_SKILL_DAMAGE_BONUS: usize = 121;
+/// `POINT_NORMAL_HIT_DAMAGE_BONUS`
+pub const POINT_NORMAL_HIT_DAMAGE_BONUS: usize = 122;
+/// `POINT_SKILL_DEFEND_BONUS`
+pub const POINT_SKILL_DEFEND_BONUS: usize = 123;
+/// `POINT_NORMAL_HIT_DEFEND_BONUS`
+pub const POINT_NORMAL_HIT_DEFEND_BONUS: usize = 124;
+/// `POINT_RAMADAN_CANDY_BONUS_EXP`
+pub const POINT_RAMADAN_CANDY_BONUS_EXP: usize = 125;
+/// `POINT_ENERGY`
+pub const POINT_ENERGY: usize = 128;
+/// `POINT_ENERGY_END_TIME`
+pub const POINT_ENERGY_END_TIME: usize = 129;
+/// `POINT_COSTUME_ATTR_BONUS`
+pub const POINT_COSTUME_ATTR_BONUS: usize = 130;
+/// `POINT_MAGIC_ATT_BONUS_PER`
+pub const POINT_MAGIC_ATT_BONUS_PER: usize = 131;
+/// `POINT_MELEE_MAGIC_ATT_BONUS_PER`
+pub const POINT_MELEE_MAGIC_ATT_BONUS_PER: usize = 132;
+/// `POINT_RESIST_ICE`
+pub const POINT_RESIST_ICE: usize = 133;
+/// `POINT_RESIST_EARTH`
+pub const POINT_RESIST_EARTH: usize = 134;
+/// `POINT_RESIST_DARK`
+pub const POINT_RESIST_DARK: usize = 135;
+/// `POINT_RESIST_CRITICAL`
+pub const POINT_RESIST_CRITICAL: usize = 136;
+/// `POINT_RESIST_PENETRATE`
+pub const POINT_RESIST_PENETRATE: usize = 137;
+/// `POINT_INVEN`
+pub const POINT_INVEN: usize = 145;
+/// `POINT_ATTBONUS_METIN`
+pub const POINT_ATTBONUS_METIN: usize = 146;
+/// `POINT_ATTBONUS_BOSS`
+pub const POINT_ATTBONUS_BOSS: usize = 147;
+/// `POINT_ENCHANT_ELECT`
+pub const POINT_ENCHANT_ELECT: usize = 148;
+/// `POINT_ENCHANT_FIRE`
+pub const POINT_ENCHANT_FIRE: usize = 149;
+/// `POINT_ENCHANT_ICE`
+pub const POINT_ENCHANT_ICE: usize = 150;
+/// `POINT_ENCHANT_WIND`
+pub const POINT_ENCHANT_WIND: usize = 151;
+/// `POINT_ENCHANT_EARTH`
+pub const POINT_ENCHANT_EARTH: usize = 152;
+/// `POINT_ENCHANT_DARK`
+pub const POINT_ENCHANT_DARK: usize = 153;
+/// `POINT_BIOLOGIST_STATE`
+pub const POINT_BIOLOGIST_STATE: usize = 166;
+/// `POINT_BIOLOGIST_ITEMS_TAKEN`
+pub const POINT_BIOLOGIST_ITEMS_TAKEN: usize = 167;
+/// `POINT_BIOLOGIST_COMPLETED`
+pub const POINT_BIOLOGIST_COMPLETED: usize = 168;
+/// `POINT_SUNGMA_STR`
+pub const POINT_SUNGMA_STR: usize = 169;
+/// `POINT_SUNGMA_HP`
+pub const POINT_SUNGMA_HP: usize = 170;
+/// `POINT_SUNGMA_MOVE`
+pub const POINT_SUNGMA_MOVE: usize = 171;
+/// `POINT_SUNGMA_IMMUNE`
+pub const POINT_SUNGMA_IMMUNE: usize = 172;
+/// `POINT_CONQUEROR_LEVEL`
+pub const POINT_CONQUEROR_LEVEL: usize = 173;
+/// `POINT_CONQUEROR_LEVEL_STEP`
+pub const POINT_CONQUEROR_LEVEL_STEP: usize = 174;
+/// `POINT_CONQUEROR_EXP`
+pub const POINT_CONQUEROR_EXP: usize = 175;
+/// `POINT_CONQUEROR_NEXT_EXP`
+pub const POINT_CONQUEROR_NEXT_EXP: usize = 176;
+/// `POINT_CONQUEROR_POINT`
+pub const POINT_CONQUEROR_POINT: usize = 177;
+/// `POINT_ATTBONUS_ANIMAL_PCT`
+pub const POINT_ATTBONUS_ANIMAL_PCT: usize = 178;
+/// `POINT_ATTBONUS_UNDEAD_PCT`
+pub const POINT_ATTBONUS_UNDEAD_PCT: usize = 179;
+/// `POINT_ATTBONUS_DEVIL_PCT`
+pub const POINT_ATTBONUS_DEVIL_PCT: usize = 180;
+/// `POINT_ATTBONUS_ORC_PCT`
+pub const POINT_ATTBONUS_ORC_PCT: usize = 181;
+/// `POINT_ATTBONUS_MILGYO_PCT`
+pub const POINT_ATTBONUS_MILGYO_PCT: usize = 182;
+/// `POINT_ATTBONUS_DESERT_PCT`
+pub const POINT_ATTBONUS_DESERT_PCT: usize = 183;
+/// `POINT_ATTBONUS_INSECT_PCT`
+pub const POINT_ATTBONUS_INSECT_PCT: usize = 184;
+/// `POINT_ATTBONUS_TREE_PCT`
+pub const POINT_ATTBONUS_TREE_PCT: usize = 185;
+/// `POINT_ATTBONUS_BOSS_PCT`
+pub const POINT_ATTBONUS_BOSS_PCT: usize = 186;
+/// `POINT_ATTBONUS_METIN_PCT`
+pub const POINT_ATTBONUS_METIN_PCT: usize = 187;
+/// `POINT_ATTBONUS_CZ_PCT`
+pub const POINT_ATTBONUS_CZ_PCT: usize = 188;
+/// `POINT_ATTBONUS_HUMAN_PCT`
+pub const POINT_ATTBONUS_HUMAN_PCT: usize = 189;
+/// `POINT_ATTBONUS_MONSTER_PCT`
+pub const POINT_ATTBONUS_MONSTER_PCT: usize = 190;
+/// `POINT_ENCHANT_ELECT_PCT`
+pub const POINT_ENCHANT_ELECT_PCT: usize = 191;
+/// `POINT_ENCHANT_FIRE_PCT`
+pub const POINT_ENCHANT_FIRE_PCT: usize = 192;
+/// `POINT_ENCHANT_ICE_PCT`
+pub const POINT_ENCHANT_ICE_PCT: usize = 193;
+/// `POINT_ENCHANT_WIND_PCT`
+pub const POINT_ENCHANT_WIND_PCT: usize = 194;
+/// `POINT_ENCHANT_EARTH_PCT`
+pub const POINT_ENCHANT_EARTH_PCT: usize = 195;
+/// `POINT_ENCHANT_DARK_PCT`
+pub const POINT_ENCHANT_DARK_PCT: usize = 196;
+/// `POINT_RESIST_ELECT_PCT`
+pub const POINT_RESIST_ELECT_PCT: usize = 197;
+/// `POINT_RESIST_FIRE_PCT`
+pub const POINT_RESIST_FIRE_PCT: usize = 198;
+/// `POINT_RESIST_ICE_PCT`
+pub const POINT_RESIST_ICE_PCT: usize = 199;
+/// `POINT_RESIST_WIND_PCT`
+pub const POINT_RESIST_WIND_PCT: usize = 200;
+/// `POINT_RESIST_EARTH_PCT`
+pub const POINT_RESIST_EARTH_PCT: usize = 201;
+/// `POINT_RESIST_DARK_PCT`
+pub const POINT_RESIST_DARK_PCT: usize = 202;
+/// `POINT_RESIST_HUMAN_PCT`
+pub const POINT_RESIST_HUMAN_PCT: usize = 203;
+/// `POINT_RESIST_FALL`
+pub const POINT_RESIST_FALL: usize = 204;
+/// `POINT_RESIST_COMBAT`
+pub const POINT_RESIST_COMBAT: usize = 205;
+/// `POINT_GAYA`
+pub const POINT_GAYA: usize = 207;
+/// `POINT_SECURED_STATE`
+pub const POINT_SECURED_STATE: usize = 208;
+/// `POINT_SECURED_PASSWORD`
+pub const POINT_SECURED_PASSWORD: usize = 209;
+/// `POINT_PRIVATE_SHOP_UNLOCKED_SLOT`
+pub const POINT_PRIVATE_SHOP_UNLOCKED_SLOT: usize = 210;
+
+#[cfg(test)]
+const ALL: [(&str, usize); 189] = [
+    ("POINT_NONE", POINT_NONE),
+    ("POINT_LEVEL", POINT_LEVEL),
+    ("POINT_VOICE", POINT_VOICE),
+    ("POINT_EXP", POINT_EXP),
+    ("POINT_NEXT_EXP", POINT_NEXT_EXP),
+    ("POINT_HP", POINT_HP),
+    ("POINT_MAX_HP", POINT_MAX_HP),
+    ("POINT_SP", POINT_SP),
+    ("POINT_MAX_SP", POINT_MAX_SP),
+    ("POINT_STAMINA", POINT_STAMINA),
+    ("POINT_MAX_STAMINA", POINT_MAX_STAMINA),
+    ("POINT_GOLD", POINT_GOLD),
+    ("POINT_ST", POINT_ST),
+    ("POINT_HT", POINT_HT),
+    ("POINT_DX", POINT_DX),
+    ("POINT_IQ", POINT_IQ),
+    ("POINT_DEF_GRADE", POINT_DEF_GRADE),
+    ("POINT_ATT_SPEED", POINT_ATT_SPEED),
+    ("POINT_ATT_GRADE", POINT_ATT_GRADE),
+    ("POINT_MOV_SPEED", POINT_MOV_SPEED),
+    ("POINT_CLIENT_DEF_GRADE", POINT_CLIENT_DEF_GRADE),
+    ("POINT_CASTING_SPEED", POINT_CASTING_SPEED),
+    ("POINT_MAGIC_ATT_GRADE", POINT_MAGIC_ATT_GRADE),
+    ("POINT_MAGIC_DEF_GRADE", POINT_MAGIC_DEF_GRADE),
+    ("POINT_EMPIRE_POINT", POINT_EMPIRE_POINT),
+    ("POINT_LEVEL_STEP", POINT_LEVEL_STEP),
+    ("POINT_STAT", POINT_STAT),
+    ("POINT_SUB_SKILL", POINT_SUB_SKILL),
+    ("POINT_SKILL", POINT_SKILL),
+    ("POINT_WEAPON_MIN", POINT_WEAPON_MIN),
+    ("POINT_WEAPON_MAX", POINT_WEAPON_MAX),
+    ("POINT_PLAYTIME", POINT_PLAYTIME),
+    ("POINT_HP_REGEN", POINT_HP_REGEN),
+    ("POINT_SP_REGEN", POINT_SP_REGEN),
+    ("POINT_BOW_DISTANCE", POINT_BOW_DISTANCE),
+    ("POINT_HP_RECOVERY", POINT_HP_RECOVERY),
+    ("POINT_SP_RECOVERY", POINT_SP_RECOVERY),
+    ("POINT_POISON_PCT", POINT_POISON_PCT),
+    ("POINT_STUN_PCT", POINT_STUN_PCT),
+    ("POINT_SLOW_PCT", POINT_SLOW_PCT),
+    ("POINT_CRITICAL_PCT", POINT_CRITICAL_PCT),
+    ("POINT_PENETRATE_PCT", POINT_PENETRATE_PCT),
+    ("POINT_CURSE_PCT", POINT_CURSE_PCT),
+    ("POINT_ATTBONUS_HUMAN", POINT_ATTBONUS_HUMAN),
+    ("POINT_ATTBONUS_ANIMAL", POINT_ATTBONUS_ANIMAL),
+    ("POINT_ATTBONUS_ORC", POINT_ATTBONUS_ORC),
+    ("POINT_ATTBONUS_MILGYO", POINT_ATTBONUS_MILGYO),
+    ("POINT_ATTBONUS_UNDEAD", POINT_ATTBONUS_UNDEAD),
+    ("POINT_ATTBONUS_DEVIL", POINT_ATTBONUS_DEVIL),
+    ("POINT_ATTBONUS_INSECT", POINT_ATTBONUS_INSECT),
+    ("POINT_ATTBONUS_FIRE", POINT_ATTBONUS_FIRE),
+    ("POINT_ATTBONUS_ICE", POINT_ATTBONUS_ICE),
+    ("POINT_ATTBONUS_DESERT", POINT_ATTBONUS_DESERT),
+    ("POINT_ATTBONUS_MONSTER", POINT_ATTBONUS_MONSTER),
+    ("POINT_ATTBONUS_WARRIOR", POINT_ATTBONUS_WARRIOR),
+    ("POINT_ATTBONUS_ASSASSIN", POINT_ATTBONUS_ASSASSIN),
+    ("POINT_ATTBONUS_SURA", POINT_ATTBONUS_SURA),
+    ("POINT_ATTBONUS_SHAMAN", POINT_ATTBONUS_SHAMAN),
+    ("POINT_ATTBONUS_TREE", POINT_ATTBONUS_TREE),
+    ("POINT_RESIST_WARRIOR", POINT_RESIST_WARRIOR),
+    ("POINT_RESIST_ASSASSIN", POINT_RESIST_ASSASSIN),
+    ("POINT_RESIST_SURA", POINT_RESIST_SURA),
+    ("POINT_RESIST_SHAMAN", POINT_RESIST_SHAMAN),
+    ("POINT_STEAL_HP", POINT_STEAL_HP),
+    ("POINT_STEAL_SP", POINT_STEAL_SP),
+    ("POINT_MANA_BURN_PCT", POINT_MANA_BURN_PCT),
+    ("POINT_DAMAGE_SP_RECOVER", POINT_DAMAGE_SP_RECOVER),
+    ("POINT_BLOCK", POINT_BLOCK),
+    ("POINT_DODGE", POINT_DODGE),
+    ("POINT_RESIST_SWORD", POINT_RESIST_SWORD),
+    ("POINT_RESIST_TWOHAND", POINT_RESIST_TWOHAND),
+    ("POINT_RESIST_DAGGER", POINT_RESIST_DAGGER),
+    ("POINT_RESIST_BELL", POINT_RESIST_BELL),
+    ("POINT_RESIST_FAN", POINT_RESIST_FAN),
+    ("POINT_RESIST_BOW", POINT_RESIST_BOW),
+    ("POINT_RESIST_FIRE", POINT_RESIST_FIRE),
+    ("POINT_RESIST_ELEC", POINT_RESIST_ELEC),
+    ("POINT_RESIST_MAGIC", POINT_RESIST_MAGIC),
+    ("POINT_RESIST_WIND", POINT_RESIST_WIND),
+    ("POINT_REFLECT_MELEE", POINT_REFLECT_MELEE),
+    ("POINT_REFLECT_CURSE", POINT_REFLECT_CURSE),
+    ("POINT_POISON_REDUCE", POINT_POISON_REDUCE),
+    ("POINT_KILL_SP_RECOVER", POINT_KILL_SP_RECOVER),
+    ("POINT_EXP_DOUBLE_BONUS", POINT_EXP_DOUBLE_BONUS),
+    ("POINT_GOLD_DOUBLE_BONUS", POINT_GOLD_DOUBLE_BONUS),
+    ("POINT_ITEM_DROP_BONUS", POINT_ITEM_DROP_BONUS),
+    ("POINT_POTION_BONUS", POINT_POTION_BONUS),
+    ("POINT_KILL_HP_RECOVERY", POINT_KILL_HP_RECOVERY),
+    ("POINT_IMMUNE_STUN", POINT_IMMUNE_STUN),
+    ("POINT_IMMUNE_SLOW", POINT_IMMUNE_SLOW),
+    ("POINT_IMMUNE_FALL", POINT_IMMUNE_FALL),
+    ("POINT_PARTY_ATTACKER_BONUS", POINT_PARTY_ATTACKER_BONUS),
+    ("POINT_PARTY_TANKER_BONUS", POINT_PARTY_TANKER_BONUS),
+    ("POINT_ATT_BONUS", POINT_ATT_BONUS),
+    ("POINT_DEF_BONUS", POINT_DEF_BONUS),
+    ("POINT_ATT_GRADE_BONUS", POINT_ATT_GRADE_BONUS),
+    ("POINT_DEF_GRADE_BONUS", POINT_DEF_GRADE_BONUS),
+    ("POINT_MAGIC_ATT_GRADE_BONUS", POINT_MAGIC_ATT_GRADE_BONUS),
+    ("POINT_MAGIC_DEF_GRADE_BONUS", POINT_MAGIC_DEF_GRADE_BONUS),
+    ("POINT_RESIST_NORMAL_DAMAGE", POINT_RESIST_NORMAL_DAMAGE),
+    ("POINT_HIT_HP_RECOVERY", POINT_HIT_HP_RECOVERY),
+    ("POINT_HIT_SP_RECOVERY", POINT_HIT_SP_RECOVERY),
+    ("POINT_MANASHIELD", POINT_MANASHIELD),
+    ("POINT_PARTY_BUFFER_BONUS", POINT_PARTY_BUFFER_BONUS),
+    (
+        "POINT_PARTY_SKILL_MASTER_BONUS",
+        POINT_PARTY_SKILL_MASTER_BONUS,
+    ),
+    ("POINT_HP_RECOVER_CONTINUE", POINT_HP_RECOVER_CONTINUE),
+    ("POINT_SP_RECOVER_CONTINUE", POINT_SP_RECOVER_CONTINUE),
+    ("POINT_STEAL_GOLD", POINT_STEAL_GOLD),
+    ("POINT_POLYMORPH", POINT_POLYMORPH),
+    ("POINT_MOUNT", POINT_MOUNT),
+    ("POINT_PARTY_HASTE_BONUS", POINT_PARTY_HASTE_BONUS),
+    ("POINT_PARTY_DEFENDER_BONUS", POINT_PARTY_DEFENDER_BONUS),
+    ("POINT_STAT_RESET_COUNT", POINT_STAT_RESET_COUNT),
+    ("POINT_HORSE_SKILL", POINT_HORSE_SKILL),
+    ("POINT_MALL_ATTBONUS", POINT_MALL_ATTBONUS),
+    ("POINT_MALL_DEFBONUS", POINT_MALL_DEFBONUS),
+    ("POINT_MALL_EXPBONUS", POINT_MALL_EXPBONUS),
+    ("POINT_MALL_ITEMBONUS", POINT_MALL_ITEMBONUS),
+    ("POINT_MALL_GOLDBONUS", POINT_MALL_GOLDBONUS),
+    ("POINT_MAX_HP_PCT", POINT_MAX_HP_PCT),
+    ("POINT_MAX_SP_PCT", POINT_MAX_SP_PCT),
+    ("POINT_SKILL_DAMAGE_BONUS", POINT_SKILL_DAMAGE_BONUS),
+    (
+        "POINT_NORMAL_HIT_DAMAGE_BONUS",
+        POINT_NORMAL_HIT_DAMAGE_BONUS,
+    ),
+    ("POINT_SKILL_DEFEND_BONUS", POINT_SKILL_DEFEND_BONUS),
+    (
+        "POINT_NORMAL_HIT_DEFEND_BONUS",
+        POINT_NORMAL_HIT_DEFEND_BONUS,
+    ),
+    (
+        "POINT_RAMADAN_CANDY_BONUS_EXP",
+        POINT_RAMADAN_CANDY_BONUS_EXP,
+    ),
+    ("POINT_ENERGY", POINT_ENERGY),
+    ("POINT_ENERGY_END_TIME", POINT_ENERGY_END_TIME),
+    ("POINT_COSTUME_ATTR_BONUS", POINT_COSTUME_ATTR_BONUS),
+    ("POINT_MAGIC_ATT_BONUS_PER", POINT_MAGIC_ATT_BONUS_PER),
+    (
+        "POINT_MELEE_MAGIC_ATT_BONUS_PER",
+        POINT_MELEE_MAGIC_ATT_BONUS_PER,
+    ),
+    ("POINT_RESIST_ICE", POINT_RESIST_ICE),
+    ("POINT_RESIST_EARTH", POINT_RESIST_EARTH),
+    ("POINT_RESIST_DARK", POINT_RESIST_DARK),
+    ("POINT_RESIST_CRITICAL", POINT_RESIST_CRITICAL),
+    ("POINT_RESIST_PENETRATE", POINT_RESIST_PENETRATE),
+    ("POINT_INVEN", POINT_INVEN),
+    ("POINT_ATTBONUS_METIN", POINT_ATTBONUS_METIN),
+    ("POINT_ATTBONUS_BOSS", POINT_ATTBONUS_BOSS),
+    ("POINT_ENCHANT_ELECT", POINT_ENCHANT_ELECT),
+    ("POINT_ENCHANT_FIRE", POINT_ENCHANT_FIRE),
+    ("POINT_ENCHANT_ICE", POINT_ENCHANT_ICE),
+    ("POINT_ENCHANT_WIND", POINT_ENCHANT_WIND),
+    ("POINT_ENCHANT_EARTH", POINT_ENCHANT_EARTH),
+    ("POINT_ENCHANT_DARK", POINT_ENCHANT_DARK),
+    ("POINT_BIOLOGIST_STATE", POINT_BIOLOGIST_STATE),
+    ("POINT_BIOLOGIST_ITEMS_TAKEN", POINT_BIOLOGIST_ITEMS_TAKEN),
+    ("POINT_BIOLOGIST_COMPLETED", POINT_BIOLOGIST_COMPLETED),
+    ("POINT_SUNGMA_STR", POINT_SUNGMA_STR),
+    ("POINT_SUNGMA_HP", POINT_SUNGMA_HP),
+    ("POINT_SUNGMA_MOVE", POINT_SUNGMA_MOVE),
+    ("POINT_SUNGMA_IMMUNE", POINT_SUNGMA_IMMUNE),
+    ("POINT_CONQUEROR_LEVEL", POINT_CONQUEROR_LEVEL),
+    ("POINT_CONQUEROR_LEVEL_STEP", POINT_CONQUEROR_LEVEL_STEP),
+    ("POINT_CONQUEROR_EXP", POINT_CONQUEROR_EXP),
+    ("POINT_CONQUEROR_NEXT_EXP", POINT_CONQUEROR_NEXT_EXP),
+    ("POINT_CONQUEROR_POINT", POINT_CONQUEROR_POINT),
+    ("POINT_ATTBONUS_ANIMAL_PCT", POINT_ATTBONUS_ANIMAL_PCT),
+    ("POINT_ATTBONUS_UNDEAD_PCT", POINT_ATTBONUS_UNDEAD_PCT),
+    ("POINT_ATTBONUS_DEVIL_PCT", POINT_ATTBONUS_DEVIL_PCT),
+    ("POINT_ATTBONUS_ORC_PCT", POINT_ATTBONUS_ORC_PCT),
+    ("POINT_ATTBONUS_MILGYO_PCT", POINT_ATTBONUS_MILGYO_PCT),
+    ("POINT_ATTBONUS_DESERT_PCT", POINT_ATTBONUS_DESERT_PCT),
+    ("POINT_ATTBONUS_INSECT_PCT", POINT_ATTBONUS_INSECT_PCT),
+    ("POINT_ATTBONUS_TREE_PCT", POINT_ATTBONUS_TREE_PCT),
+    ("POINT_ATTBONUS_BOSS_PCT", POINT_ATTBONUS_BOSS_PCT),
+    ("POINT_ATTBONUS_METIN_PCT", POINT_ATTBONUS_METIN_PCT),
+    ("POINT_ATTBONUS_CZ_PCT", POINT_ATTBONUS_CZ_PCT),
+    ("POINT_ATTBONUS_HUMAN_PCT", POINT_ATTBONUS_HUMAN_PCT),
+    ("POINT_ATTBONUS_MONSTER_PCT", POINT_ATTBONUS_MONSTER_PCT),
+    ("POINT_ENCHANT_ELECT_PCT", POINT_ENCHANT_ELECT_PCT),
+    ("POINT_ENCHANT_FIRE_PCT", POINT_ENCHANT_FIRE_PCT),
+    ("POINT_ENCHANT_ICE_PCT", POINT_ENCHANT_ICE_PCT),
+    ("POINT_ENCHANT_WIND_PCT", POINT_ENCHANT_WIND_PCT),
+    ("POINT_ENCHANT_EARTH_PCT", POINT_ENCHANT_EARTH_PCT),
+    ("POINT_ENCHANT_DARK_PCT", POINT_ENCHANT_DARK_PCT),
+    ("POINT_RESIST_ELECT_PCT", POINT_RESIST_ELECT_PCT),
+    ("POINT_RESIST_FIRE_PCT", POINT_RESIST_FIRE_PCT),
+    ("POINT_RESIST_ICE_PCT", POINT_RESIST_ICE_PCT),
+    ("POINT_RESIST_WIND_PCT", POINT_RESIST_WIND_PCT),
+    ("POINT_RESIST_EARTH_PCT", POINT_RESIST_EARTH_PCT),
+    ("POINT_RESIST_DARK_PCT", POINT_RESIST_DARK_PCT),
+    ("POINT_RESIST_HUMAN_PCT", POINT_RESIST_HUMAN_PCT),
+    ("POINT_RESIST_FALL", POINT_RESIST_FALL),
+    ("POINT_RESIST_COMBAT", POINT_RESIST_COMBAT),
+    ("POINT_GAYA", POINT_GAYA),
+    ("POINT_SECURED_STATE", POINT_SECURED_STATE),
+    ("POINT_SECURED_PASSWORD", POINT_SECURED_PASSWORD),
+    (
+        "POINT_PRIVATE_SHOP_UNLOCKED_SLOT",
+        POINT_PRIVATE_SHOP_UNLOCKED_SLOT,
+    ),
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `EPointTypes` enumerator and the index the C compiler gives it.
+    ///
+    /// The values were measured, not counted: the verbatim enum body from `char.h` was
+    /// compiled with this tree's feature switches defined and the compiler's own numbering
+    /// printed. That matters because the enumerator mixes auto-incremented members with
+    /// explicit values (`POINT_ENERGY = 128`, `POINT_GAYA = 207`) and with members behind
+    /// `#ifdef` blocks, so counting the live members gives a different, wrong answer. The
+    /// probe is `.scratch/ledger187/point_enum.cpp`.
+    ///
+    /// Each name is paired with the constant that must carry it, so one test below covers all
+    /// 189 and a mistranscribed constant fails the build.
+    const PINNED: [(&str, usize); 189] = [
+        ("POINT_NONE", 0),
+        ("POINT_LEVEL", 1),
+        ("POINT_VOICE", 2),
+        ("POINT_EXP", 3),
+        ("POINT_NEXT_EXP", 4),
+        ("POINT_HP", 5),
+        ("POINT_MAX_HP", 6),
+        ("POINT_SP", 7),
+        ("POINT_MAX_SP", 8),
+        ("POINT_STAMINA", 9),
+        ("POINT_MAX_STAMINA", 10),
+        ("POINT_GOLD", 11),
+        ("POINT_ST", 12),
+        ("POINT_HT", 13),
+        ("POINT_DX", 14),
+        ("POINT_IQ", 15),
+        ("POINT_DEF_GRADE", 16),
+        ("POINT_ATT_SPEED", 17),
+        ("POINT_ATT_GRADE", 18),
+        ("POINT_MOV_SPEED", 19),
+        ("POINT_CLIENT_DEF_GRADE", 20),
+        ("POINT_CASTING_SPEED", 21),
+        ("POINT_MAGIC_ATT_GRADE", 22),
+        ("POINT_MAGIC_DEF_GRADE", 23),
+        ("POINT_EMPIRE_POINT", 24),
+        ("POINT_LEVEL_STEP", 25),
+        ("POINT_STAT", 26),
+        ("POINT_SUB_SKILL", 27),
+        ("POINT_SKILL", 28),
+        ("POINT_WEAPON_MIN", 29),
+        ("POINT_WEAPON_MAX", 30),
+        ("POINT_PLAYTIME", 31),
+        ("POINT_HP_REGEN", 32),
+        ("POINT_SP_REGEN", 33),
+        ("POINT_BOW_DISTANCE", 34),
+        ("POINT_HP_RECOVERY", 35),
+        ("POINT_SP_RECOVERY", 36),
+        ("POINT_POISON_PCT", 37),
+        ("POINT_STUN_PCT", 38),
+        ("POINT_SLOW_PCT", 39),
+        ("POINT_CRITICAL_PCT", 40),
+        ("POINT_PENETRATE_PCT", 41),
+        ("POINT_CURSE_PCT", 42),
+        ("POINT_ATTBONUS_HUMAN", 43),
+        ("POINT_ATTBONUS_ANIMAL", 44),
+        ("POINT_ATTBONUS_ORC", 45),
+        ("POINT_ATTBONUS_MILGYO", 46),
+        ("POINT_ATTBONUS_UNDEAD", 47),
+        ("POINT_ATTBONUS_DEVIL", 48),
+        ("POINT_ATTBONUS_INSECT", 49),
+        ("POINT_ATTBONUS_FIRE", 50),
+        ("POINT_ATTBONUS_ICE", 51),
+        ("POINT_ATTBONUS_DESERT", 52),
+        ("POINT_ATTBONUS_MONSTER", 53),
+        ("POINT_ATTBONUS_WARRIOR", 54),
+        ("POINT_ATTBONUS_ASSASSIN", 55),
+        ("POINT_ATTBONUS_SURA", 56),
+        ("POINT_ATTBONUS_SHAMAN", 57),
+        ("POINT_ATTBONUS_TREE", 58),
+        ("POINT_RESIST_WARRIOR", 59),
+        ("POINT_RESIST_ASSASSIN", 60),
+        ("POINT_RESIST_SURA", 61),
+        ("POINT_RESIST_SHAMAN", 62),
+        ("POINT_STEAL_HP", 63),
+        ("POINT_STEAL_SP", 64),
+        ("POINT_MANA_BURN_PCT", 65),
+        ("POINT_DAMAGE_SP_RECOVER", 66),
+        ("POINT_BLOCK", 67),
+        ("POINT_DODGE", 68),
+        ("POINT_RESIST_SWORD", 69),
+        ("POINT_RESIST_TWOHAND", 70),
+        ("POINT_RESIST_DAGGER", 71),
+        ("POINT_RESIST_BELL", 72),
+        ("POINT_RESIST_FAN", 73),
+        ("POINT_RESIST_BOW", 74),
+        ("POINT_RESIST_FIRE", 75),
+        ("POINT_RESIST_ELEC", 76),
+        ("POINT_RESIST_MAGIC", 77),
+        ("POINT_RESIST_WIND", 78),
+        ("POINT_REFLECT_MELEE", 79),
+        ("POINT_REFLECT_CURSE", 80),
+        ("POINT_POISON_REDUCE", 81),
+        ("POINT_KILL_SP_RECOVER", 82),
+        ("POINT_EXP_DOUBLE_BONUS", 83),
+        ("POINT_GOLD_DOUBLE_BONUS", 84),
+        ("POINT_ITEM_DROP_BONUS", 85),
+        ("POINT_POTION_BONUS", 86),
+        ("POINT_KILL_HP_RECOVERY", 87),
+        ("POINT_IMMUNE_STUN", 88),
+        ("POINT_IMMUNE_SLOW", 89),
+        ("POINT_IMMUNE_FALL", 90),
+        ("POINT_PARTY_ATTACKER_BONUS", 91),
+        ("POINT_PARTY_TANKER_BONUS", 92),
+        ("POINT_ATT_BONUS", 93),
+        ("POINT_DEF_BONUS", 94),
+        ("POINT_ATT_GRADE_BONUS", 95),
+        ("POINT_DEF_GRADE_BONUS", 96),
+        ("POINT_MAGIC_ATT_GRADE_BONUS", 97),
+        ("POINT_MAGIC_DEF_GRADE_BONUS", 98),
+        ("POINT_RESIST_NORMAL_DAMAGE", 99),
+        ("POINT_HIT_HP_RECOVERY", 100),
+        ("POINT_HIT_SP_RECOVERY", 101),
+        ("POINT_MANASHIELD", 102),
+        ("POINT_PARTY_BUFFER_BONUS", 103),
+        ("POINT_PARTY_SKILL_MASTER_BONUS", 104),
+        ("POINT_HP_RECOVER_CONTINUE", 105),
+        ("POINT_SP_RECOVER_CONTINUE", 106),
+        ("POINT_STEAL_GOLD", 107),
+        ("POINT_POLYMORPH", 108),
+        ("POINT_MOUNT", 109),
+        ("POINT_PARTY_HASTE_BONUS", 110),
+        ("POINT_PARTY_DEFENDER_BONUS", 111),
+        ("POINT_STAT_RESET_COUNT", 112),
+        ("POINT_HORSE_SKILL", 113),
+        ("POINT_MALL_ATTBONUS", 114),
+        ("POINT_MALL_DEFBONUS", 115),
+        ("POINT_MALL_EXPBONUS", 116),
+        ("POINT_MALL_ITEMBONUS", 117),
+        ("POINT_MALL_GOLDBONUS", 118),
+        ("POINT_MAX_HP_PCT", 119),
+        ("POINT_MAX_SP_PCT", 120),
+        ("POINT_SKILL_DAMAGE_BONUS", 121),
+        ("POINT_NORMAL_HIT_DAMAGE_BONUS", 122),
+        ("POINT_SKILL_DEFEND_BONUS", 123),
+        ("POINT_NORMAL_HIT_DEFEND_BONUS", 124),
+        ("POINT_RAMADAN_CANDY_BONUS_EXP", 125),
+        ("POINT_ENERGY", 128),
+        ("POINT_ENERGY_END_TIME", 129),
+        ("POINT_COSTUME_ATTR_BONUS", 130),
+        ("POINT_MAGIC_ATT_BONUS_PER", 131),
+        ("POINT_MELEE_MAGIC_ATT_BONUS_PER", 132),
+        ("POINT_RESIST_ICE", 133),
+        ("POINT_RESIST_EARTH", 134),
+        ("POINT_RESIST_DARK", 135),
+        ("POINT_RESIST_CRITICAL", 136),
+        ("POINT_RESIST_PENETRATE", 137),
+        ("POINT_INVEN", 145),
+        ("POINT_ATTBONUS_METIN", 146),
+        ("POINT_ATTBONUS_BOSS", 147),
+        ("POINT_ENCHANT_ELECT", 148),
+        ("POINT_ENCHANT_FIRE", 149),
+        ("POINT_ENCHANT_ICE", 150),
+        ("POINT_ENCHANT_WIND", 151),
+        ("POINT_ENCHANT_EARTH", 152),
+        ("POINT_ENCHANT_DARK", 153),
+        ("POINT_BIOLOGIST_STATE", 166),
+        ("POINT_BIOLOGIST_ITEMS_TAKEN", 167),
+        ("POINT_BIOLOGIST_COMPLETED", 168),
+        ("POINT_SUNGMA_STR", 169),
+        ("POINT_SUNGMA_HP", 170),
+        ("POINT_SUNGMA_MOVE", 171),
+        ("POINT_SUNGMA_IMMUNE", 172),
+        ("POINT_CONQUEROR_LEVEL", 173),
+        ("POINT_CONQUEROR_LEVEL_STEP", 174),
+        ("POINT_CONQUEROR_EXP", 175),
+        ("POINT_CONQUEROR_NEXT_EXP", 176),
+        ("POINT_CONQUEROR_POINT", 177),
+        ("POINT_ATTBONUS_ANIMAL_PCT", 178),
+        ("POINT_ATTBONUS_UNDEAD_PCT", 179),
+        ("POINT_ATTBONUS_DEVIL_PCT", 180),
+        ("POINT_ATTBONUS_ORC_PCT", 181),
+        ("POINT_ATTBONUS_MILGYO_PCT", 182),
+        ("POINT_ATTBONUS_DESERT_PCT", 183),
+        ("POINT_ATTBONUS_INSECT_PCT", 184),
+        ("POINT_ATTBONUS_TREE_PCT", 185),
+        ("POINT_ATTBONUS_BOSS_PCT", 186),
+        ("POINT_ATTBONUS_METIN_PCT", 187),
+        ("POINT_ATTBONUS_CZ_PCT", 188),
+        ("POINT_ATTBONUS_HUMAN_PCT", 189),
+        ("POINT_ATTBONUS_MONSTER_PCT", 190),
+        ("POINT_ENCHANT_ELECT_PCT", 191),
+        ("POINT_ENCHANT_FIRE_PCT", 192),
+        ("POINT_ENCHANT_ICE_PCT", 193),
+        ("POINT_ENCHANT_WIND_PCT", 194),
+        ("POINT_ENCHANT_EARTH_PCT", 195),
+        ("POINT_ENCHANT_DARK_PCT", 196),
+        ("POINT_RESIST_ELECT_PCT", 197),
+        ("POINT_RESIST_FIRE_PCT", 198),
+        ("POINT_RESIST_ICE_PCT", 199),
+        ("POINT_RESIST_WIND_PCT", 200),
+        ("POINT_RESIST_EARTH_PCT", 201),
+        ("POINT_RESIST_DARK_PCT", 202),
+        ("POINT_RESIST_HUMAN_PCT", 203),
+        ("POINT_RESIST_FALL", 204),
+        ("POINT_RESIST_COMBAT", 205),
+        ("POINT_GAYA", 207),
+        ("POINT_SECURED_STATE", 208),
+        ("POINT_SECURED_PASSWORD", 209),
+        ("POINT_PRIVATE_SHOP_UNLOCKED_SLOT", 210),
+    ];
+
+    #[test]
+    fn every_enumerator_has_the_index_the_compiler_gave_it() {
+        let mut checked = 0;
+        for (name, index) in PINNED {
+            assert_eq!(index_of(name), Some(index), "{name}");
+            checked += 1;
+        }
+        assert_eq!(
+            checked,
+            PINNED.len(),
+            "the loop must check every pinned row"
+        );
+    }
+
+    /// A name no enumerator has, so a lookup miss is distinguishable from a match that
+    /// happens to carry a wrong value.
+    #[test]
+    fn an_unknown_name_is_not_in_the_table() {
+        assert_eq!(index_of("POINT_NOT_A_SLOT"), None);
+    }
+
+    /// The two bounds the record depends on. They are constant expressions, so they are
+    /// checked when the crate is compiled and no test can fail to notice a change.
+    const _: () = assert!(
+        POINT_LEVEL < POINT_MAX_NUM,
+        "POINT_LEVEL must be inside the record"
+    );
+    const _: () = assert!(
+        POINT_PRIVATE_SHOP_UNLOCKED_SLOT < POINT_MAX_NUM,
+        "the last legacy slot must be inside the record"
+    );
+
+    /// The name-to-index lookup, built from the constants themselves so a new enumerator is
+    /// covered by adding its row to `PINNED` and nothing else. It is a table rather than a
+    /// scan because the 189 rows keep the function short and the lookup exact.
+    fn index_of(name: &str) -> Option<usize> {
+        ALL.iter().find(|(key, _)| *key == name).map(|(_, v)| *v)
+    }
+}

@@ -737,8 +737,12 @@ mod tests {
         );
     }
 
+    /// A variable header whose declared size is below its own base prefix never reaches
+    /// the analyzer. The live transport resolves the frame itself, so the failure is the
+    /// typed `InvalidVariableSize` rather than the fixed-only
+    /// `VariableLengthUnsupported` the transport used to report.
     #[tokio::test]
-    async fn returns_a_typed_variable_analyze_error() {
+    async fn refuses_a_variable_declaration_below_its_base_prefix() {
         let (mut writer, reader) = duplex(4);
         let feed = tokio::spawn(async move {
             writer
@@ -748,10 +752,15 @@ mod tests {
         });
         let mut session = ClientSession::new(reader);
         match session.read_dispatch().await {
-            Err(ClientSessionError::Dispatch(ClientDispatchError::Unsupported(
-                ClientUnsupportedError::VariableAnalyze { header, base_size },
+            Err(ClientSessionError::Dispatch(ClientDispatchError::Protocol(
+                ClientFrameError::InvalidVariableSize {
+                    header,
+                    declared_size,
+                    base_size,
+                },
             ))) => {
                 assert_eq!(header, HEADER_CG_CHAT.value());
+                assert_eq!(declared_size, 0);
                 assert_eq!(base_size, 4);
             }
             other => panic!("unexpected variable Analyze result: {other:?}"),

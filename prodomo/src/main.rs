@@ -26,10 +26,13 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use common::config::{load_server_config, ServerConfig, DEFAULT_CONFIG_PATH};
+use common::enums::ELocale;
 use common::logging::{init_from_env, init_logging, LogConfig};
+use common::vid::Vid;
 use db::accounts::{find_auth_account, record_login, AccountError};
 use db::players::{
-    change_name, create_player, delete_player, lobby, select_empire, Created, PlayerDelete,
+    change_name, create_player, delete_player, load_character, lobby, select_empire, Created,
+    PlayerDelete,
 };
 use db::store::{schema_version, Store, StoreConfig};
 use gamedata::banword::banwords_from_dump;
@@ -44,15 +47,24 @@ use prodomo::channel_login::{
     LogonRegistry, MapLocations,
 };
 use prodomo::channel_status::ChannelStatusBoard;
+use prodomo::chat::{judge_chat, ChatContext, ChatEffect, ChatOutcome, ChatState};
 use prodomo::client_live::{
-    handshake_token, BootLiveClock, LiveClientSession, LiveClock, LiveOutcome, LiveStep,
+    handshake_token, BootLiveClock, LiveClientSession, LiveClock, LiveError, LiveOutcome, LiveStep,
 };
+use prodomo::client_registry::{ChannelClients, ClientEntry, Lease, PositionTable};
 use prodomo::client_session::ClientPhase;
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
 use prodomo::game_loop_messages::GameLoopTerminal;
 use prodomo::handshake::HandshakeServerKind;
-use prodomo::lifecycle::PostHandshakePhase;
+use prodomo::lifecycle::{LifecycleError, PostHandshakePhase};
 use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
+use prodomo::loading_phase::{
+    enter_game_burst, judge_enter_game, judge_select, loading_burst, map_is_allowed, points,
+    public_map_index, EnterGameVerdict, Neighbourhood, SelectVerdict,
+};
+use prodomo::movement::{
+    judge_move, judge_pose, MoveContext, MoveDisposition, MoveOutcome, MoveRefusal, PoseOutcome,
+};
 use prodomo::operator::{prepare, read_new_password, AccountCommand, GmCommand, OperatorCommand};
 use prodomo::ready_gate::ReadyGate;
 use prodomo::select_phase::{
@@ -60,22 +72,33 @@ use prodomo::select_phase::{
     judge_empire, judge_rename, renamed, CreateCooldown, DeleteVerdict, EmpireVerdict, NameRules,
     RenameVerdict, SelectAccount, CREATE_REFUSED, CREATE_TAKEN,
 };
+use prodomo::sync_position::{
+    judge_sync_ownership, SyncOwnershipOutcome, SyncOwnershipState, SyncPositionActor,
+    SyncPositionCloseReason, SyncPositionPorts, SyncPositionVictim,
+};
 use prodomo::ServerState;
-use protocol::cg_account::{CgLoginByKey, CgPlayerCreate, CgPlayerDelete};
+use protocol::cg_account::{
+    CgEnterGame, CgLoginByKey, CgPlayerCreate, CgPlayerDelete, CgPlayerSelect,
+};
+use protocol::cg_chat::CgChat;
 use protocol::cg_inventory::{
     HEADER_CG_CHANGE_NAME, HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE,
-    HEADER_CG_EMPIRE, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_STATE_CHECKER,
+    HEADER_CG_CHARACTER_POSITION, HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_EMPIRE,
+    HEADER_CG_ENTERGAME, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_MOVE,
+    HEADER_CG_STATE_CHECKER, HEADER_CG_SYNC_POSITION,
 };
 use protocol::cg_login::CgEmpire;
 use protocol::cg_login3::CgLogin3;
+use protocol::cg_move::CgMove;
 use protocol::cg_name::CgChangeName;
+use protocol::cg_position::CgCharacterPosition;
 use protocol::cg_wire::ClientFrame;
 use protocol::gc::{GcAuthSuccess, GcLoginFailure};
 use protocol::gc_inventory::HEADER_GC_EMPIRE;
 use protocol::gc_small::GcHeaderAndByte;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::signal;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
 
 /// The command line.
@@ -179,6 +202,12 @@ struct ConnectionContext {
     handles: Arc<AtomicU32>,
     /// The Names a character may not take.
     names: Arc<NameRules>,
+    /// The per-Channel client set that talking chat and movement broadcast through
+    /// (legacy `DESC_MANAGER::GetClientSet`).
+    clients: Arc<ChannelClients>,
+    /// Every character position in the process, which stands in for the sectree the legacy
+    /// `FindCharacter` and `Sync` walk.
+    positions: Arc<PositionTable>,
     /// When each account last created a character.
     creates: Arc<CreateCooldown>,
     /// `[game] block_char_creation`.
@@ -209,6 +238,58 @@ struct Held {
     logon: Option<LogonClaim>,
     /// The account table a Channel login filled (legacy `DESC::m_accountTable`).
     account: Option<SelectAccount>,
+    /// The character the client selected, once the load answered
+    /// (legacy `DESC::m_pCharacter`).
+    character: Option<db::players::Character>,
+    /// The channel the client logged in through, which is `g_bChannel` on the descriptor.
+    ///
+    /// It is held from the Channel login rather than read from the listener, because a
+    /// descriptor reaches the game phase only through a Channel listener and legacy keeps the
+    /// one value in the process.
+    channel: u8,
+    /// Where the character is and what it can do, once the load has answered.
+    avatar: Option<Avatar>,
+    /// The atlas index of the loaded position, which is `GetMapIndex()` for a loaded
+    /// character. It is set at character select, because the map test in the loading burst
+    /// is the first place the index exists.
+    map: Option<i32>,
+    /// `m_bChatCounter` (`server/server/game/char.cpp:8759`), which is per character and
+    /// therefore per descriptor.
+    chat: ChatState,
+    /// The registry entry this descriptor occupies on its map, taken when the game phase is
+    /// entered and released when the descriptor ends.
+    presence: Option<Lease>,
+}
+
+/// The slice of `CHARACTER` that movement and chat need, kept on the descriptor rather than
+/// in a world, because one world per Channel has not been built yet.
+///
+/// # Where each field comes from
+///
+/// `map` is the atlas lookup of the loaded x and y, `x` and `y` are the saved columns,
+/// `sitting` starts false because a loaded character is always standing, and
+/// `move_speed` is `POINT_MOV_SPEED` from the same [`points`] array the loading burst
+/// sends, so the movement gate and the record the client shows cannot disagree.
+#[derive(Debug, Clone, PartialEq)]
+struct Avatar {
+    /// `GetMapIndex()`.
+    map: i32,
+    /// `GetX()`, the authoritative x.
+    x: i32,
+    /// `GetY()`, the authoritative y.
+    y: i32,
+    /// `m_fRot`, from `SetRotation(pinfo->bRot * 5)`.
+    rotation: f32,
+    /// `m_posDest`, which `Goto` sets and `Stop` clears.
+    destination: Option<(i32, i32)>,
+    /// `IsState(POS_SITTING)`.
+    sitting: bool,
+    /// `GetLimitPoint(POINT_MOV_SPEED)`, which gates the `FUNC_MOVE` branch.
+    move_speed: i32,
+    /// `GetCurrentMoveDuration()`, the `dwDuration` a `FUNC_MOVE` record carries.
+    move_duration: u32,
+    /// `GetSyncHackCount()`, the per-character sync-position refusal counter.
+    sync_hack_count: u32,
 }
 
 /// Resolves when another descriptor has logged in with the login this one holds; never without
@@ -239,6 +320,10 @@ async fn handle_connection(
         ListenerRole::Auth => HandshakeServerKind::Auth,
         ListenerRole::Channel(_) => HandshakeServerKind::Game,
     };
+    let channel_number = match role {
+        ListenerRole::Channel(number) => number,
+        ListenerRole::Auth => 0,
+    };
     let locations = match (role, stream.local_addr()) {
         (ListenerRole::Channel(number), Ok(local)) => Some(context.locations(number, local.port())),
         (ListenerRole::Channel(_), Err(error)) => {
@@ -262,26 +347,118 @@ async fn handle_connection(
         };
     // `event_create(ping_event, ..., ping_event_second_cycle)`: the first ping is one full cycle
     // after the accept.
-    let mut ping = tokio::time::interval_at(
+    let ping = tokio::time::interval_at(
         tokio::time::Instant::now() + context.ping_cycle,
         context.ping_cycle,
     );
     let mut held = Held::default();
+    let mut descriptor = Descriptor {
+        addr,
+        clock,
+        ping,
+        locations,
+        handle,
+        channel_number,
+    };
+    pump_descriptor(
+        &mut session,
+        &context,
+        &mut descriptor,
+        &mut shutdown_rx,
+        &mut held,
+    )
+    .await;
+    if let Some(lease) = held.presence.as_ref() {
+        info!(%addr, presence = lease.id(), "Leaving the client set");
+        // `DESC::SetPlayer(NULL)` on a disconnect removes the character from the world, so a
+        // later `FindCharacter` in `CInputMain::SyncPosition` finds nobody. Releasing the
+        // lease takes the client out of the Channel set, but the position table stands in
+        // for the world, so it has to be told as well or a departed character would keep
+        // answering claims.
+        context.positions.forget(lease.id());
+    }
+    // `held` drops here, which releases the lease and deregisters the character.
+    drop(held);
+}
+
+/// The per-connection values the read loop needs, none of which change while it runs.
+///
+/// They are grouped so the loop takes five arguments instead of ten, and so the values a
+/// handler might need are named in one place.
+struct Descriptor {
+    /// The peer's address, which every log line carries.
+    addr: SocketAddr,
+    /// The monotonic clock the ping and the session timeouts read.
+    clock: BootLiveClock,
+    /// `event_create(ping_event, ..., ping_event_second_cycle)`.
+    ping: tokio::time::Interval,
+    /// Where each map is served from, for a Channel descriptor.
+    locations: Option<MapLocations>,
+    /// The connection's ordinal, which is `m_dwHandle`.
+    handle: u32,
+    /// The Channel number, which is `g_bChannel`.
+    channel_number: u8,
+}
+
+/// The descriptor read loop: consume frames, write broadcasts, and stop at a close.
+///
+/// The loop owns the lease's queue between turns, so it is a function of its own rather than
+/// a block inside `handle_connection`. It returns when the descriptor must end; the caller
+/// then drops the lease, which deregisters the character.
+async fn pump_descriptor<S>(
+    session: &mut LiveClientSession<S>,
+    context: &ConnectionContext,
+    descriptor: &mut Descriptor,
+    shutdown_rx: &mut broadcast::Receiver<()>,
+    held: &mut Held,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let addr = descriptor.addr;
+    let clock = descriptor.clock;
+    let locations = descriptor.locations.as_ref();
+    let handle = descriptor.handle;
+    let channel_number = descriptor.channel_number;
+    // Broadcast records land in the lease's queue and are written here, so no world work
+    // ever awaits a socket. The queue is lent out of the lease for the duration of one
+    // `select!`, because the lease itself belongs to `held` and the analyzer may replace it.
+    let mut outbox: Option<mpsc::UnboundedReceiver<Vec<u8>>> = None;
+    let mut pending: Vec<Vec<u8>> = Vec::new();
 
     loop {
+        // Take the queue back from the previous turn and lend it out again for this turn's
+        // select. A lease the analyzer created still has its queue in place, so
+        // `take_receiver` hands that one straight over.
+        match held.presence.as_mut() {
+            Some(lease) => {
+                if let Some(inbox) = outbox.take() {
+                    lease.put_receiver(inbox);
+                }
+                outbox = lease.take_receiver();
+            }
+            None => outbox = None,
+        }
+        // A burst another client caused while this one was thinking is written before the
+        // next read, so a record can never sit behind a frame the client already sent.
+        let mut wrote = true;
+        for record in pending.drain(..) {
+            if let Err(error) = session.send(&record).await {
+                warn!(%addr, %error, "Client session stopped while writing a broadcast");
+                wrote = false;
+                break;
+            }
+        }
+        if !wrote {
+            break;
+        }
         match session.next_buffered(clock.now()).await {
             Ok(Some(step)) => {
-                let open = analyze(
-                    &mut session,
-                    addr,
-                    &context,
-                    locations
-                        .as_ref()
-                        .map(|locations| ChannelSeat { locations, handle }),
-                    step,
-                    &mut held,
-                )
-                .await;
+                let seat = locations.map(|locations| ChannelSeat {
+                    locations,
+                    handle,
+                    number: channel_number,
+                });
+                let open = analyze(session, addr, context, seat, step, held).await;
                 if !open || session.phase() == ClientPhase::Close {
                     break;
                 }
@@ -305,7 +482,7 @@ async fn handle_connection(
                     break;
                 }
             },
-            _ = ping.tick() => {
+            _ = descriptor.ping.tick() => {
                 if let Err(error) = session.tick(clock.now()).await {
                     warn!(%addr, %error, "Client session stopped");
                     break;
@@ -324,8 +501,539 @@ async fn handle_connection(
                 info!(%addr, "Another client logged in with this login; closing");
                 break;
             }
+            // A record another character caused: chat on this map, or a move around it. The
+            // arm only receives; the write happens after the select, because `session` is
+            // borrowed mutably by the other arms.
+            broadcast = next_broadcast(&mut outbox) => {
+                if let Some(record) = broadcast {
+                    pending.push(record);
+                } else {
+                    // The member's sender is gone, which deregistration would also do. The
+                    // lease is still held, so the only way here is a closed queue: keep the
+                    // descriptor and stop expecting records.
+                    info!(%addr, "Broadcast queue closed; no more records");
+                    outbox = None;
+                }
+            }
         }
     }
+}
+
+/// Wait for the next record another character caused this descriptor's map to receive.
+///
+/// A descriptor with no lease has no queue to wait on, so its future never completes and
+/// `select!` waits on the other arms alone. That is why this is one function rather than a
+/// `select!` arm over an `Option`: an arm over a `None` receiver returns at once and would
+/// spin the loop.
+async fn next_broadcast(outbox: &mut Option<mpsc::UnboundedReceiver<Vec<u8>>>) -> Option<Vec<u8>> {
+    match outbox.as_mut() {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// `CG_CHAT` (3) in the game phase: `CInputMain::Chat` (`input_main.cpp:781-991`).
+///
+/// The judge owns the legacy order, so this function only applies the effects. The two
+/// broadcasts are the ones the judge asks for: an info line to the sender, and a talking
+/// line to every client on the sender's map including the sender. The registry lease is
+/// what makes the sender one of its own recipients.
+async fn chat_line<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgChat::decode(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            // A `size` under the fixed part is the legacy close case and is already
+            // expressed as `ChatOutcome::Close`; anything else here is a frame this
+            // process could not read, which is the recorded divergence.
+            warn!(%addr, %error, "Client sent a malformed CHAT; closing");
+            return false;
+        }
+    };
+    let Some(character) = held.character.as_ref() else {
+        warn!(%addr, "CHAT without a character; ignoring");
+        return true;
+    };
+    let map = held.avatar.as_ref().map_or(0, |avatar| avatar.map);
+    let chat_context = ChatContext {
+        name: character.name.clone(),
+        vid: character.id,
+        empire: character.empire,
+        level: character.level,
+        // The Rewrite has no way to set `AFFECT_BLOCK_CHAT` yet, so it is always absent,
+        // which is the legacy state for a character that was never silenced.
+        block_chat_seconds: None,
+    };
+    let outcome = judge_chat(&record, &mut held.chat, &chat_context);
+    let ChatOutcome::Judged { effects } = outcome else {
+        info!(%addr, "CHAT declared a size under the fixed part; closing");
+        return false;
+    };
+    for effect in &effects {
+        match effect {
+            ChatEffect::Close => {
+                info!(%addr, "CHAT refused by size; closing");
+                return false;
+            }
+            ChatEffect::Command { argument } => {
+                // `interpret_command(ch, buf + 1, buflen - 1)`. The Rewrite has no command
+                // interpreter, so a slash line is consumed and logged. It is still a
+                // distinct effect from the rest, because it costs no chat counter and so a
+                // client may send it between two normal lines.
+                info!(%addr, bytes = argument.len(), "Command line received; no interpreter yet");
+            }
+            ChatEffect::DelayedDisconnect => {
+                // `ch->GetDesc()->DelayedDisconnect(0)`: no record, the frame is consumed,
+                // and the descriptor closes on its own schedule.
+                info!(%addr, "Chat counter reached the disconnect line; closing");
+                return false;
+            }
+            ChatEffect::InfoToSender { text } => {
+                let notice = prodomo::chat::talking_record(&ChatEffect::InfoToSender { text });
+                if let Some(notice) = notice {
+                    let Ok(bytes) = notice.encode() else {
+                        warn!(%addr, "Info line did not fit the record; closing");
+                        return false;
+                    };
+                    if let Err(error) = send_all(session, &[bytes]).await {
+                        warn!(%addr, %error, "Client session stopped");
+                        return false;
+                    }
+                }
+            }
+            ChatEffect::TalkingToMap { vid, empire, text } => {
+                let record = prodomo::chat::talking_record(effect)
+                    .unwrap_or_else(|| panic!("a talking effect always builds a record"));
+                if record.id != *vid || record.empire != *empire || record.text != *text {
+                    warn!(%addr, "Talking record does not match its effect");
+                }
+                // `FEmpireChatPacket` walks the process client set and filters by map
+                // index, with no self-exclusion, so this reaches the speaker too.
+                let bytes = record
+                    .encode()
+                    .unwrap_or_else(|error| panic!("a talking record always fits: {error}"));
+                let sent = context.clients.broadcast_on_map(held.channel, map, &bytes);
+                info!(%addr, vid, map, recipients = sent, "Talking line sent to the map");
+            }
+            ChatEffect::UnknownType { chat_type } => {
+                // The legacy default arm only logs. Nothing reaches the client.
+                info!(%addr, chat_type, "Unknown chat type; nothing sent");
+            }
+            other => {
+                warn!(%addr, effect = ?other, "Chat effect not yet wired");
+            }
+        }
+    }
+    true
+}
+
+/// `CG_MOVE` (7) in the game phase: `CInputMain::Move` (`input_main.cpp:1757-1915`).
+fn move_character<S>(
+    _session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgMove::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed MOVE; closing");
+            return false;
+        }
+    };
+    let Some(avatar) = held.avatar.as_mut() else {
+        warn!(%addr, "MOVE without a character; ignoring");
+        return true;
+    };
+    let move_context = MoveContext {
+        vid: held.character.as_ref().map_or(0, |character| character.id),
+        map: avatar.map,
+        x: avatar.x,
+        y: avatar.y,
+        // The Rewrite has no mount yet, so nothing is riding.
+        riding: false,
+        // The Rewrite has no death state yet.
+        dead: false,
+        // The Rewrite has no stun affect and no private shop, so `CanMove` always holds.
+        can_move: true,
+        move_speed: avatar.move_speed,
+        move_duration: avatar.move_duration,
+    };
+    let outcome = judge_move(&record, &move_context);
+    let Some(lease) = held.presence.as_ref() else {
+        // A move with no registry entry is a character that never entered the game phase,
+        // which the phase gate already prevents. Log it rather than broadcasting blind.
+        warn!(%addr, "MOVE without a registry lease; ignoring");
+        return true;
+    };
+    match outcome {
+        MoveOutcome::Ignore(reason) => {
+            info!(%addr, reason, "MOVE consumed without a record");
+        }
+        MoveOutcome::Refuse(refusal) => {
+            // `ch->Show(current)` and `ch->Stop()`: the client is pulled back. The
+            // Rewrite has no view record for a character to show itself, so the
+            // rejection is a log line; the position is already unchanged.
+            match refusal {
+                MoveRefusal::CannotMove => info!(%addr, "MOVE refused: cannot move"),
+                MoveRefusal::InvalidFunction { function } => {
+                    warn!(%addr, function, "MOVE refused: invalid function byte");
+                }
+                MoveRefusal::TooFar { distance } => {
+                    warn!(%addr, distance, "MOVE refused: too far");
+                }
+                MoveRefusal::Dead => info!(%addr, "MOVE refused: dead character"),
+            }
+        }
+        MoveOutcome::Accept(accepted) => {
+            avatar.rotation = accepted.rotation;
+            match accepted.disposition {
+                MoveDisposition::Goto { x, y } => {
+                    // `Goto` only stores the destination. The authoritative position is not
+                    // updated, so the next move is measured from where the character still
+                    // is, which is what the legacy distance test reads.
+                    avatar.destination = Some((x, y));
+                }
+                MoveDisposition::Step { x, y } => {
+                    avatar.x = x;
+                    avatar.y = y;
+                    avatar.destination = Some((x, y));
+                }
+            }
+            // Only a step moves the character, so only a step updates the table a
+            // sync-position claim is measured against. A `Goto` leaves the position where it
+            // was, which is the legacy behaviour and the reason the next move is still
+            // measured from the old spot.
+            if let MoveDisposition::Step { x, y } = accepted.disposition {
+                context.positions.sync(lease.id(), x, y, sync_clock());
+            }
+            // `ch->PacketAround(&pack, sizeof(TPacketGCMove), ch)`: the mover is the
+            // `except` argument, so the record never echoes to its own sender.
+            let recipients = context.clients.broadcast_excluding(
+                held.channel,
+                avatar.map,
+                lease.id(),
+                &accepted.broadcast.encode(),
+            );
+            info!(
+                %addr,
+                function = record.function,
+                x = record.x,
+                y = record.y,
+                recipients,
+                "Move broadcast"
+            );
+        }
+    }
+    true
+}
+
+/// `CG_CHARACTER_POSITION` (28) in the game phase: `CInputMain::Position`
+/// (`input_main.cpp:1530-1548`).
+///
+/// The pose record goes to everyone on the map **including** this character, because
+/// `CHARACTER::Standup` and `CHARACTER::Sitdown` call `PacketAround` with no `except`
+/// and `CEntity::PacketView` always finishes with a self-send.
+fn character_pose<S>(
+    _session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgCharacterPosition::decode(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed CHARACTER_POSITION; closing");
+            return false;
+        }
+    };
+    let Some(avatar) = held.avatar.as_mut() else {
+        warn!(%addr, "CHARACTER_POSITION without a character; ignoring");
+        return true;
+    };
+    let position = match judge_pose(record.position) {
+        PoseOutcome::Ignore => return true,
+        PoseOutcome::Stand => {
+            if !avatar.sitting {
+                // `if (!IsPosition(POS_SITTING)) return;`
+                return true;
+            }
+            avatar.sitting = false;
+            protocol::cg_position::POSITION_GENERAL
+        }
+        PoseOutcome::Sit { ground } => {
+            if avatar.sitting {
+                // `if (IsPosition(POS_SITTING)) return;`
+                return true;
+            }
+            avatar.sitting = true;
+            // Legacy always writes the ground value. The Rewrite honours the request,
+            // which is the one deliberate difference in this function.
+            if ground {
+                protocol::cg_position::POSITION_SITTING_GROUND
+            } else {
+                protocol::cg_position::POSITION_SITTING_CHAIR
+            }
+        }
+    };
+    let Some(lease) = held.presence.as_ref() else {
+        warn!(%addr, "CHARACTER_POSITION without a registry lease; ignoring");
+        return true;
+    };
+    let vid = held.character.as_ref().map_or(0, |character| character.id);
+    let recipients = context.clients.broadcast_on_map(
+        held.channel,
+        avatar.map,
+        &prodomo::movement::pose_record(vid, position).encode(),
+    );
+    info!(%addr, position, recipients, "Pose broadcast, including the sender");
+    // `PacketAround` with a `NULL` except still runs the trailing self-send, so the
+    // sender's own descriptor needs the record too. It is already in the map broadcast
+    // above, so the lease is only read for the map scope.
+    let _ = lease;
+    true
+}
+
+/// The live ports for `CG_SYNC_POSITION` (8): `CInputMain::SyncPosition`
+/// (`input_main.cpp:2088-2171`).
+///
+/// The policy in [`prodomo::sync_position`] is already complete, so this adapter supplies
+/// the six things it deliberately does not own: the victim lookup, the sync-ownership
+/// bookkeeping, the movement itself, the close, and the view broadcast.
+struct LiveSync<'a> {
+    /// The position table, which stands in for the process character map.
+    table: &'a PositionTable,
+    /// The client set, for the victim search and the broadcast.
+    clients: &'a ChannelClients,
+    /// The claimer's Channel.
+    channel: u8,
+    /// The claimer's map. A claim never leaves the claimer's map, which is how the
+    /// Rewrite keeps one process from answering for another Channel.
+    map: i32,
+    /// The claimer's own lease, which is the `except` of the broadcast.
+    actor: u64,
+    /// Every close the policy asked for, in order. The handler acts on them after the
+    /// policy returns, because the policy must not be able to end the descriptor
+    /// half-way through its own broadcast.
+    closes: Vec<SyncPositionCloseReason>,
+    /// The lease the last successful `resolve` found, so the ownership and stamp calls
+    /// that follow it do not each have to search again.
+    remembered: Option<u64>,
+    /// The clock reading the stamps are taken from, so every element in one frame carries
+    /// the same instant, as legacy's single `get_dword_time()` does.
+    now: Duration,
+    /// The claimer's own x, which `SetSyncOwner`'s `DISTANCE_APPROX` compares.
+    actor_x: i32,
+    /// The claimer's own y.
+    actor_y: i32,
+    /// One `TPacketGCOwnership` per accepted claim. `SetSyncOwner` writes each one with a
+    /// plain `PacketAround` as the claim is judged, which is before `CInputMain::SyncPosition`
+    /// sends its own position batch at the end of the handler.
+    ownership: Vec<Vec<u8>>,
+    /// The position batch, which is the handler's own `PacketAround(ch, ...)` and the only
+    /// record that excepts the claimer.
+    batch: Option<Vec<u8>>,
+}
+
+impl SyncPositionPorts for LiveSync<'_> {
+    fn resolve(&mut self, vid: Vid) -> Option<SyncPositionVictim> {
+        let (id, tracked) =
+            self.table
+                .find_on_map(self.clients, self.channel, self.map, vid.raw())?;
+        self.remembered = Some(id);
+        Some(SyncPositionVictim {
+            vid,
+            kind: tracked.kind,
+            x: tracked.x,
+            y: tracked.y,
+        })
+    }
+
+    fn set_sync_owner(&mut self, actor: Vid, victim: &SyncPositionVictim) -> bool {
+        // `CHARACTER::SetSyncOwner` (`server/server/game/char.cpp:5469-5551`) is judged by
+        // the pure policy; this applies the two state effects its acceptance asks for.
+        let Some(id) = self.remembered else {
+            return false;
+        };
+        let state = match self.table.sync_owner(id) {
+            Some((owner, claimed_at)) => SyncOwnershipState {
+                owner: Some(Vid::new(owner)),
+                claimed_at,
+            },
+            None => SyncOwnershipState {
+                owner: None,
+                claimed_at: Duration::ZERO,
+            },
+        };
+        let outcome =
+            judge_sync_ownership(actor, victim, state, self.actor_x, self.actor_y, self.now);
+        match outcome {
+            SyncOwnershipOutcome::Refused => false,
+            SyncOwnershipOutcome::Accepted {
+                owner_changed,
+                record,
+            } => {
+                // A new owner resets the victim's last-sync stamp, which is what lets its
+                // first accepted sync pass the 100 ms interval check. The claim stamp is
+                // refreshed on every accepted claim, which is what keeps the claim
+                // exclusive for as long as the other owner keeps claiming.
+                if owner_changed {
+                    self.table.forget_sync(id);
+                }
+                self.table.set_sync_owner(id, actor.raw(), self.now);
+                self.ownership.push(record);
+                true
+            }
+        }
+    }
+
+    fn broadcast_around_victim(&mut self, _victim: Vid, packet: &[u8]) {
+        self.ownership.push(packet.to_vec());
+    }
+
+    fn last_sync_time(&mut self, victim: Vid) -> Option<Duration> {
+        let (id, _) = self
+            .table
+            .find_on_map(self.clients, self.channel, self.map, victim.raw())?;
+        self.remembered = Some(id);
+        self.table.last_sync(id)
+    }
+
+    fn set_last_sync_time(&mut self, victim: Vid, now: Duration) {
+        if let Some((id, _)) =
+            self.table
+                .find_on_map(self.clients, self.channel, self.map, victim.raw())
+        {
+            self.table.sync(
+                id,
+                self.table.get(id).map_or(0, |t| t.x),
+                self.table.get(id).map_or(0, |t| t.y),
+                now,
+            );
+        }
+    }
+
+    fn sync(&mut self, victim: Vid, x: i32, y: i32) {
+        if let Some((id, _)) =
+            self.table
+                .find_on_map(self.clients, self.channel, self.map, victim.raw())
+        {
+            self.table.sync(id, x, y, self.now);
+        }
+    }
+
+    fn close(&mut self, _actor: Vid, reason: SyncPositionCloseReason) {
+        self.closes.push(reason);
+    }
+
+    fn broadcast(&mut self, _actor: Vid, packet: &[u8]) {
+        // `CInputMain::SyncPosition` passes `ch` as the `except`, and
+        // `FuncPacketAround::operator()` returns early for the excepted entity, so the
+        // claimer never receives its own accepted positions. The record is queued so the
+        // ownership records `SetSyncOwner` already wrote are delivered first.
+        self.batch = Some(packet.to_vec());
+    }
+}
+
+/// `CG_SYNC_POSITION` (8) in the game phase.
+fn sync_positions<S>(
+    _session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let packet = match protocol::cg_variable::decode_sync_position(frame) {
+        Ok(packet) => packet,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed SYNC_POSITION; closing");
+            return false;
+        }
+    };
+    let Some(avatar) = held.avatar.as_mut() else {
+        warn!(%addr, "SYNC_POSITION without a character; ignoring");
+        return true;
+    };
+    let Some(lease) = held.presence.as_ref() else {
+        warn!(%addr, "SYNC_POSITION without a registry lease; ignoring");
+        return true;
+    };
+    let mut actor = SyncPositionActor {
+        vid: held
+            .character
+            .as_ref()
+            .map_or_else(|| Vid::new(0), |character| Vid::new(character.id)),
+        x: avatar.x,
+        y: avatar.y,
+        sync_hack_count: avatar.sync_hack_count,
+    };
+    let now = sync_clock();
+    let mut port = LiveSync {
+        table: &context.positions,
+        clients: &context.clients,
+        channel: held.channel,
+        map: avatar.map,
+        actor: lease.id(),
+        closes: Vec::new(),
+        now,
+        remembered: None,
+        actor_x: avatar.x,
+        actor_y: avatar.y,
+        ownership: Vec::new(),
+        batch: None,
+    };
+    let result = prodomo::sync_position::process(&mut port, &packet, &mut actor, now);
+    // The policy counts a refusal on the actor, and that count survives the frame even
+    // though the descriptor stays open.
+    avatar.sync_hack_count = actor.sync_hack_count;
+    if !port.closes.is_empty() {
+        warn!(
+            %addr,
+            reason = ?port.closes,
+            "SYNC_POSITION refused the client; closing"
+        );
+        return false;
+    }
+    // `SetSyncOwner` writes `TPacketGCOwnership` with a plain `PacketAround`, so the
+    // victim and every other client on the map sees it, the claimer included. The
+    // position batch is written after every claim is judged and excepts the claimer.
+    for record in &port.ownership {
+        context
+            .clients
+            .broadcast_on_map(held.channel, port.map, record);
+    }
+    if let Some(batch) = &port.batch {
+        context
+            .clients
+            .broadcast_excluding(held.channel, port.map, port.actor, batch);
+    }
+    info!(
+        %addr,
+        processed = result.processed_elements,
+        accepted = result.accepted_elements.len(),
+        broadcast = result.gc_packet.is_some(),
+        "Sync positions judged"
+    );
+    true
 }
 
 /// Apply the analyzer of the descriptor's phase to one step; `false` when the connection must
@@ -382,6 +1090,58 @@ where
                 None => report_step(addr, LiveStep::Record { phase, frame }),
             }
         }
+        // `CG_CHARACTER_SELECT` (6) in the select phase: `CInputLogin::CharacterSelect`
+        // (`G/input_login.cpp:265-306`). Legacy sends nothing and waits for the load answer,
+        // which the store gives in this process.
+        LiveStep::Record { phase, frame }
+            if matches!(phase, ClientPhase::Select | ClientPhase::Loading)
+                && frame.header == HEADER_CG_CHARACTER_SELECT.value() =>
+        {
+            match seat {
+                Some(seat) => select_character(session, addr, context, &seat, &frame, held).await,
+                None => report_step(addr, LiveStep::Record { phase, frame }),
+            }
+        }
+        // `CG_ENTER_GAME` (10) in the loading phase: `CInputLogin::Entergame`
+        // (`G/input_login.cpp:562-606`).
+        LiveStep::Record { phase, frame }
+            if matches!(phase, ClientPhase::Loading | ClientPhase::Game)
+                && frame.header == HEADER_CG_ENTERGAME.value() =>
+        {
+            match seat {
+                Some(seat) => enter_game(session, addr, context, &seat, &frame, held).await,
+                None => report_step(addr, LiveStep::Record { phase, frame }),
+            }
+        }
+        // `CG_CHAT` (3) in the game phase: `CInputMain::Chat` (`G/input_main.cpp:781`).
+        // `CInputDead::Analyze` maps the same header, but a dead character cannot be
+        // reached yet because the Rewrite has no death state.
+        LiveStep::Record { phase, frame }
+            if phase == ClientPhase::Game && frame.header == HEADER_CG_CHAT.value() =>
+        {
+            chat_line(session, addr, context, held, &frame).await
+        }
+        // `CG_MOVE` (7) in the game phase: `CInputMain::Move` (`G/input_main.cpp:1757`).
+        LiveStep::Record { phase, frame }
+            if phase == ClientPhase::Game && frame.header == HEADER_CG_MOVE.value() =>
+        {
+            move_character(session, addr, context, held, &frame)
+        }
+        // `CG_CHARACTER_POSITION` (28) in the game phase: `CInputMain::Position`
+        // (`G/input_main.cpp:1530`).
+        LiveStep::Record { phase, frame }
+            if phase == ClientPhase::Game
+                && frame.header == HEADER_CG_CHARACTER_POSITION.value() =>
+        {
+            character_pose(session, addr, context, held, &frame)
+        }
+        // `CG_SYNC_POSITION` (8) in the game phase: `CInputMain::SyncPosition`
+        // (`G/input_main.cpp:2088`).
+        LiveStep::Record { phase, frame }
+            if phase == ClientPhase::Game && frame.header == HEADER_CG_SYNC_POSITION.value() =>
+        {
+            sync_positions(session, addr, context, held, &frame)
+        }
         step => report_step(addr, step),
     }
 }
@@ -391,6 +1151,8 @@ where
 struct ChannelSeat<'a> {
     locations: &'a MapLocations,
     handle: u32,
+    /// The Channel number, which `g_bChannel` is on a legacy game process.
+    number: u8,
 }
 
 /// Answer `LOGIN2` with the character list or `LOGIN_FAILURE`; `false` when the connection must
@@ -514,6 +1276,52 @@ const SELECT_HEADERS: [u8; 4] = [
     HEADER_CG_CHANGE_NAME.value(),
 ];
 
+/// The world view the bursts describe.
+///
+/// The Rewrite has no world yet, so a Channel always reports an empty view: a second character
+/// in the same map and a map's NPCs are both contributed by the world system, and neither has
+/// a store to read them from. `Neighbourhood::default` is that empty view, and the bursts take
+/// it the same way they will take a populated one.
+fn empty_view() -> Neighbourhood {
+    Neighbourhood::default()
+}
+
+/// The time `get_global_time()` reports: `time(0)` plus the game server's gap.
+///
+/// The Rewrite has no accumulated game time, so this is the wall clock. Legacy's
+/// `get_global_time` adds a gap that starts at zero and grows with uptime (`G/game.cpp:106`),
+/// which a client that shows a countdown would read differently; that is a Divergence until
+/// the world system owns the clock.
+/// The clock the sync-position policy reads.
+///
+/// The legacy stamps come from `get_dword_time()`, which is a 32-bit second count, but the
+/// policy's shortest interval is 100 ms, so the Rewrite passes a `Duration` read from the
+/// system clock at nanosecond resolution. A backwards clock step can only make a stamp look
+/// older, which lets a client through the interval check sooner, exactly as a second counter
+/// that rolls back would.
+fn sync_clock() -> Duration {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+}
+
+fn global_time() -> u32 {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    u32::try_from(seconds).unwrap_or(u32::MAX)
+}
+
+/// The VID the bursts use for the entering character.
+///
+/// Legacy's VID comes from `CHARACTER_MANAGER::CreateCharacter`, which hands out a world-wide
+/// handle distinct from the player's ID. The Rewrite has no world, so the character's own
+/// store ID stands in. A second character in the world will need a real allocator; the wire
+/// layout is unchanged either way, so this is a Divergence in the value only.
+fn character_vid(character: &db::players::Character) -> u32 {
+    character.id
+}
+
 /// Serve one select-screen record; `false` when the connection must close. A malformed record
 /// closes the connection.
 async fn select_screen<S>(
@@ -551,6 +1359,253 @@ where
         }
     }
     true
+}
+
+/// `CG_CHARACTER_SELECT`: load the selected character and send the loading burst; `false` when
+/// the connection must close.
+///
+/// The order is legacy's `CInputDB::PlayerLoad` (`G/input_db.cpp:414-455`): the descriptor moves
+/// to the loading phase first, then the entity and own-character records, then the `map_allow_find`
+/// test, and only then the gold, points, and skill-level records. A character on a map this
+/// Channel does not host is refused at that test, which is the branch the two halves of
+/// [`LoadingBurst`] exist for.
+///
+/// The load itself is a store read here, where legacy asked its DB process. The two are the
+/// same step in the same order; the Rewrite has no server-to-server protocol (ADR-0001).
+async fn select_character<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    seat: &ChannelSeat<'_>,
+    frame: &ClientFrame,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgPlayerSelect::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed CHARACTER_SELECT; closing");
+            return false;
+        }
+    };
+    let Some(account) = held.account.as_ref() else {
+        // No account table means the descriptor never completed a Channel login. Legacy's
+        // `CharacterSelect` reads `c_r.players[pinfo->index]` straight away, which a client
+        // that skipped the login can reach; there is nothing to select from here.
+        warn!(%addr, "CHARACTER_SELECT without an account table; ignoring");
+        return true;
+    };
+    let slots = account.lobby.slot_ids();
+    let player = match judge_select(record.index, Some(&slots)) {
+        SelectVerdict::Ignore => return true,
+        SelectVerdict::Close => {
+            // `SetPhase(PHASE_CLOSE)` writes no record, so the descriptor is simply
+            // dropped: `analyze` returns false and the read loop breaks.
+            info!(%addr, slot = record.index, "Empty character slot; closing");
+            return false;
+        }
+        SelectVerdict::Load { player } => player,
+    };
+    let character = match load_character(&context.store, account.id, player).await {
+        Ok(character) => character,
+        Err(error) => {
+            warn!(%addr, account = account.id.get(), player, %error, "Character load failed; closing");
+            return false;
+        }
+    };
+    if held.character.is_some() {
+        // `PlayerLoad` refuses a second character on one descriptor and logs it. The client is
+        // not asked to leave, so the descriptor stays in the loading phase with the character
+        // it already has.
+        error!(%addr, player, "Login state already has a character; ignoring the selection");
+        return true;
+    }
+    let vid = character_vid(&character);
+    let view = empty_view();
+    // `d->BindCharacter(ch)` is the step that makes the character the descriptor's own, and it
+    // is what `CInputLogin::Entergame` later reads. Without it `CG_ENTER_GAME` has nothing to
+    // answer, so the loaded row is held here and kept for the descriptor's life.
+    let burst = loading_burst(&character, vid, &view);
+    held.character = Some(character.clone());
+    held.channel = seat.number;
+    info!(
+        %addr,
+        player,
+        vid,
+        channel = seat.number,
+        name = %character.name.as_str(),
+        "Character selected; sending the loading burst",
+    );
+    let delivery = async {
+        // `SetPhase(PHASE_LOADING)` writes `GC_PHASE` and then installs the loading phase's
+        // input boundary, before any other loading record.
+        session.set_phase(PostHandshakePhase::Loading).await?;
+        send_all(session, &burst.before_map_test).await?;
+        // The map test. `PlayerLoad` folds an instance map onto its base map first.
+        let map_index = context.atlas.index_at(character.x, character.y);
+        let allowed = map_index.is_some_and(|index| {
+            map_is_allowed(
+                public_map_index(index),
+                context
+                    .routes
+                    .channel_maps
+                    .get(&seat.number)
+                    .map_or(&[][..], Vec::as_slice),
+            )
+        });
+        if !allowed {
+            // Legacy sets the character's warp location to the empire start and closes. The
+            // Rewrite has no world to hold a warp location, so the location is not set: the
+            // character is left exactly as stored and the descriptor closes.
+            warn!(
+                %addr,
+                player,
+                map = ?map_index,
+                channel = seat.number,
+                "Entering map is not allowed on this Channel; closing",
+            );
+            return Err(LiveError::Phase(LifecycleError::Closed));
+        }
+        send_all(session, &burst.after_map_test).await
+    };
+    if let Err(error) = delivery.await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    // `PlayerLoad` leaves the character on the map its saved position belongs to, so the index
+    // the map test just resolved is the character's map. It is held here because the first
+    // thing the game phase does with it is join the client set.
+    held.map = context.atlas.index_at(character.x, character.y);
+    true
+}
+
+/// `CG_ENTER_GAME`: send the enter-game burst; `false` when the connection must close.
+///
+/// The order is legacy's `CInputLogin::Entergame` (`G/input_login.cpp:562-606`): the own and
+/// visible characters, the NPCs, and the revive-invisible affect, then `SetPhase(PHASE_GAME)`,
+/// then the time, Channel, and event records. The phase change is the boundary between the two
+/// halves of [`EnterGameBurst`], because in legacy it is a `DESC::SetPhase` call.
+async fn enter_game<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    seat: &ChannelSeat<'_>,
+    frame: &ClientFrame,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if let Err(error) = CgEnterGame::decode_frame(frame) {
+        warn!(%addr, %error, "Client sent a malformed ENTER_GAME; closing");
+        return false;
+    }
+    if let EnterGameVerdict::Close = judge_enter_game(held.character.is_some()) {
+        info!(%addr, "ENTER_GAME without a character; closing");
+        return false;
+    }
+    // The reducer proved the character is there; the field is the only place it lives.
+    let Some(character) = held.character.as_ref() else {
+        return false;
+    };
+    let vid = character_vid(character);
+    let burst = enter_game_burst(
+        character,
+        vid,
+        &empty_view(),
+        seat.number,
+        global_time(),
+        LANGUAGE_EUROPE,
+    );
+    info!(
+        %addr,
+        vid,
+        channel = seat.number,
+        "Entering the game; sending the enter-game burst",
+    );
+    let delivery = async {
+        send_all(session, &burst.before_phase).await?;
+        // `SetPhase(PHASE_GAME)` writes `GC_PHASE` through the boundary the loading phase left
+        // installed, which is the encrypted one.
+        session.set_phase(PostHandshakePhase::Game).await?;
+        send_all(session, &burst.after_phase).await
+    };
+    if let Err(error) = delivery.await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    // The world state is created only once the game phase is on the wire, because a
+    // descriptor that never received `GC_PHASE(5)` never gets a lease and so never appears
+    // in another client's broadcast. `DESC::SetPlayer` is the legacy step that makes a
+    // descriptor visible to the others, and it happens at this same moment.
+    let slots = points(character);
+    let speed = i32::try_from(slots[common::point_slot::POINT_MOV_SPEED]).unwrap_or(0);
+    let map = held.map.unwrap_or_default();
+    held.avatar = Some(Avatar {
+        map,
+        x: character.x,
+        y: character.y,
+        rotation: 0.0,
+        destination: None,
+        sitting: false,
+        move_speed: speed,
+        move_duration: 0,
+        sync_hack_count: 0,
+    });
+    if held.presence.is_none() {
+        let lease = context.clients.join(ClientEntry {
+            channel: seat.number,
+            map,
+            name: character.name.clone(),
+            vid,
+        });
+        info!(
+            %addr,
+            vid,
+            channel = seat.number,
+            map,
+            name = %character.name.as_str(),
+            presence = lease.id(),
+            "Character entered the game; registered on its map"
+        );
+        // `DESC::SetPlayer` also puts the character in the world, which is what a
+        // sync-position claim later looks it up in. The table stands in for the world.
+        context.positions.track(
+            lease.id(),
+            prodomo::sync_position::SyncPositionVictimKind::Player,
+            vid,
+            character.x,
+            character.y,
+        );
+        held.presence = Some(lease);
+    }
+    true
+}
+
+/// The `bLanguage` byte a Channel descriptor carries.
+///
+/// `DESC::GetLanguage` returns `m_accountTable.bLanguage` (`G/desc.h:181`), and the account table
+/// is zeroed by `DESC::Setup`, so a descriptor that has not been through character creation
+/// carries 0. `SetLanguage` has exactly one caller, the character-creation path
+/// (`G/char.cpp:11641`). The Rewrite ports only the `europe` Locale (`CONTEXT.md`), whose Game
+/// data is the one the legacy deployment loaded for that byte, so 0 is the only value this port
+/// can produce and the only one a first-login descriptor would carry in legacy either.
+const LANGUAGE_EUROPE: u8 = ELocale::Ymir as u8;
+
+/// Send each record in order as its own frame; `false` when the connection must close.
+async fn send_all<S>(
+    session: &mut LiveClientSession<S>,
+    records: &[Vec<u8>],
+) -> Result<(), LiveError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    for record in records {
+        session.send(record).await?;
+    }
+    Ok(())
 }
 
 /// The records a select-screen handler sends, or why the connection closes.
@@ -1187,6 +2242,8 @@ fn connection_context(
         routes: Arc::new(map_routes(config, listeners)),
         handles: Arc::new(AtomicU32::new(0)),
         names: Arc::new(names),
+        clients: Arc::new(ChannelClients::new()),
+        positions: Arc::new(PositionTable::new()),
         creates: Arc::new(CreateCooldown::default()),
         block_char_creation: config.game.block_char_creation,
         delete_levels: (

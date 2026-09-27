@@ -1,16 +1,24 @@
-//! Tokio transport boundary for fixed legacy client-to-game frames.
+//! Tokio transport boundary for legacy client-to-game frames.
 //!
 //! This module owns stream I/O and fragmentation only. Header lookup, frame
-//! sizing, variable-header rejection, and EOF validation stay in
-//! [`protocol::cg_wire`].
+//! sizing, variable-length resolution, and EOF validation stay in
+//! [`protocol::cg_wire`] and [`protocol::cg_variable`].
+//!
+//! Framing is phase-independent because legacy framing is: `CInputProcessor::
+//! Process` reads one header and then exactly the bytes that header declares,
+//! in `PHASE_HANDSHAKE` as much as in `PHASE_GAME`. A record whose header the
+//! inventory lists as variable is therefore sized here, once its fixed prefix
+//! has arrived, and the phase decides afterwards whether a handler exists for
+//! it. A variable header with no source-verified length rule still reports
+//! [`ClientFrameError::VariableLengthUnsupported`] rather than guessing.
 
 use std::error::Error;
 use std::fmt;
 use std::io;
 
+use protocol::cg_variable::VariableClientFrameDecoder;
 use protocol::cg_wire::{
-    ClientFrame, ClientFrameDecoder, ClientFrameEncoder, ClientFrameError,
-    DEFAULT_MAX_CLIENT_FRAME_SIZE,
+    ClientFrame, ClientFrameEncoder, ClientFrameError, DEFAULT_MAX_CLIENT_FRAME_SIZE,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -56,16 +64,17 @@ impl From<ClientFrameError> for ClientTransportError {
     }
 }
 
-/// A fixed legacy client frame stream backed by a Tokio reader and writer.
+/// A legacy client frame stream backed by a Tokio reader and writer.
 ///
 /// Reads may contain any number of partial or coalesced frames. Each call to
 /// [`Self::read_frame`] returns one complete frame and leaves following frames
 /// buffered. A clean EOF returns `Ok(None)`; EOF during a known frame returns
-/// the protocol's typed truncation error.
+/// the protocol's typed truncation error, naming the declared total for a
+/// variable frame.
 #[derive(Debug)]
 pub struct ClientFrameTransport<S> {
     stream: S,
-    decoder: ClientFrameDecoder,
+    decoder: VariableClientFrameDecoder,
     encoder: ClientFrameEncoder,
 }
 
@@ -83,7 +92,7 @@ impl<S> ClientFrameTransport<S> {
     pub fn with_max_frame_size(stream: S, max_frame_size: usize) -> Self {
         Self {
             stream,
-            decoder: ClientFrameDecoder::with_max_frame_size(max_frame_size),
+            decoder: VariableClientFrameDecoder::with_max_frame_size(max_frame_size),
             encoder: ClientFrameEncoder::with_max_frame_size(max_frame_size),
         }
     }
@@ -132,12 +141,13 @@ impl<S> ClientFrameTransport<S>
 where
     S: AsyncRead + Unpin,
 {
-    /// Read and decode the next fixed legacy client frame.
+    /// Read and decode the next legacy client frame.
     ///
     /// The method accepts arbitrary fragmented reads and coalesced frames. A
-    /// clean EOF between frames returns `Ok(None)`. If EOF arrives while a
-    /// fixed frame is incomplete, the protocol decoder returns its typed
-    /// [`ClientFrameError::Truncated`] error.
+    /// clean EOF between frames returns `Ok(None)`. If EOF arrives while a frame
+    /// is incomplete, the protocol decoder returns its typed
+    /// [`ClientFrameError::Truncated`] error, naming the prefix size when even
+    /// the length field has not arrived and the declared total once it has.
     ///
     /// # Errors
     ///
@@ -166,7 +176,7 @@ impl<S> ClientFrameTransport<S>
 where
     S: AsyncWrite + Unpin,
 {
-    /// Encode and write one complete fixed legacy client frame.
+    /// Encode and write one complete legacy client frame.
     ///
     /// The protocol encoder validates the header and exact frame size. Tokio's
     /// `write_all` boundary completes all short writes before returning.
@@ -198,6 +208,9 @@ mod tests {
     use protocol::cg_inventory::{
         HEADER_CG_CHAT, HEADER_CG_LOGIN, HEADER_CG_MOVE, HEADER_CG_TIME_SYNC,
     };
+
+    /// `EChatType::CHAT_TYPE_TALKING` in `common/enums.h`.
+    const CHAT_TYPE_TALKING: u8 = 0;
     use tokio::io::{duplex, AsyncReadExt};
 
     fn move_frame() -> ClientFrame {
@@ -303,25 +316,64 @@ mod tests {
         feed.await.unwrap();
     }
 
+    /// A variable record is sized by its own `WORD wSize`, so the header alone
+    /// is not enough to know how many bytes belong to the frame. The decoder
+    /// waits for the four-byte prefix, then for the declared total, and a
+    /// `wSize` of 3 is refused rather than treated as a four-byte record.
     #[tokio::test]
-    async fn delegates_variable_headers_to_the_protocol_error() {
-        let (mut writer, reader) = duplex(4);
+    async fn sizes_a_variable_record_from_its_declared_length() {
+        let (mut writer, reader) = duplex(64);
+        // `TPacketCGChat` is header, `WORD wSize`, `BYTE bChatType`, and the
+        // text: a declared 6 is the header, the size, the type, and two letters.
         let feed = tokio::spawn(async move {
             writer
-                .write_all(&[HEADER_CG_CHAT.value(), 0, 0, 0])
+                .write_all(&[HEADER_CG_CHAT.value(), 6, 0, CHAT_TYPE_TALKING, b'h', b'i'])
+                .await
+                .unwrap();
+            writer
+                .write_all(&[HEADER_CG_CHAT.value(), 3, 0, CHAT_TYPE_TALKING, b'x', b'y'])
                 .await
                 .unwrap();
         });
 
         let mut transport = ClientFrameTransport::new(reader);
+        let frame = transport.read_frame().await.unwrap().unwrap();
+        assert_eq!(frame.header, HEADER_CG_CHAT.value());
+        // A coalesced read keeps the following record out of this frame.
+        assert_eq!(frame.payload, [6, 0, CHAT_TYPE_TALKING, b'h', b'i']);
+        // The second record declares less than its own prefix.
         assert!(matches!(
             transport.read_frame().await,
             Err(ClientTransportError::Frame(
-                ClientFrameError::VariableLengthUnsupported {
+                ClientFrameError::InvalidVariableSize {
                     header,
+                    declared_size: 3,
                     base_size: 4,
                 }
             )) if header == HEADER_CG_CHAT.value()
+        ));
+        feed.await.unwrap();
+    }
+
+    /// The prefix may arrive a byte at a time, and EOF before the declared
+    /// total names that total rather than the prefix.
+    #[tokio::test]
+    async fn reports_the_declared_total_when_a_variable_record_is_cut_off() {
+        let (mut writer, reader) = duplex(64);
+        let feed = tokio::spawn(async move {
+            writer.write_all(&[HEADER_CG_CHAT.value()]).await.unwrap();
+            writer.write_all(&[12, 0]).await.unwrap();
+            writer.write_all(&[CHAT_TYPE_TALKING]).await.unwrap();
+        });
+
+        let mut transport = ClientFrameTransport::new(reader);
+        assert!(matches!(
+            transport.read_frame().await,
+            Err(ClientTransportError::Frame(ClientFrameError::Truncated {
+                header,
+                expected: 12,
+                available: 4,
+            })) if header == HEADER_CG_CHAT.value()
         ));
         feed.await.unwrap();
     }

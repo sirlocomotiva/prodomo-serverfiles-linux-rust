@@ -13,6 +13,120 @@ use std::time::Duration;
 use common::vid::Vid;
 use protocol::cg_variable::{SyncPositionElement, SyncPositionPacket};
 
+/// Wire size of `TPacketGCOwnership`, which an accepted claim sends.
+pub const OWNERSHIP_RECORD_SIZE: usize = 1 + 4 + 4;
+
+/// Wire byte of `HEADER_GC_OWNERSHIP`.
+pub const HEADER_GC_OWNERSHIP: u8 = 62;
+
+/// `SetSyncOwner`'s `DISTANCE_APPROX(...) > 250` limit, compared against the *approximated*
+/// distance rather than the raw coordinates, so the effective raw threshold is 260 on one
+/// axis. Both distances are raw map units, which are 100th of a tile.
+pub const SYNC_OWNER_APPROX_DISTANCE: i32 = 250;
+
+/// `ENABLE_FLY_FIX` claim lifetime in `IsSyncOwner`, which is
+/// `get_dword_time() - m_fSyncTime >= 100`. `get_dword_time()` is milliseconds, so the
+/// Rewrite counts the same 100 units.
+pub const SYNC_CLAIM_LIFETIME: Duration = Duration::from_millis(100);
+
+/// `DISTANCE_APPROX` from `server/server/game/utils.h:17-40`: the octagonal
+/// approximation `(123/128) * max + (51/128) * min`, evaluated in the shifted
+/// integer form the source uses so no rounding difference appears.
+#[must_use]
+pub fn distance_approx(dx: i32, dy: i32) -> i32 {
+    let (dx, dy) = (i64::from(dx).abs(), i64::from(dy).abs());
+    let (min, max) = if dx < dy { (dx, dy) } else { (dy, dx) };
+    let value = (max << 8) + (max << 3) - (max << 4) - (max << 1) + (min << 7) - (min << 5)
+        + (min << 3)
+        - (min << 1);
+    // The source computes this in a 32-bit `int` and shifts it back down. A `u32`
+    // coordinate space keeps the shifts exact, so only the final narrowing needs a
+    // checked cast.
+    i32::try_from(value >> 8).unwrap_or(i32::MAX)
+}
+
+/// What `CHARACTER::IsSyncOwner` reads off a victim.
+///
+/// `None` is a character that was never claimed. The source does not store that case: its
+/// constructor seeds `m_fSyncTime` with `get_float_time() - 3`, which is already past the
+/// window, so a fresh victim is always claimable and `None` is the faithful answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncOwnershipState {
+    /// `m_pkChrSyncOwner`, the character currently allowed to move the victim.
+    pub owner: Option<Vid>,
+    /// `m_fSyncTime`, refreshed on every accepted claim, in the same units as `now`.
+    pub claimed_at: Duration,
+}
+
+/// The result of judging one `SetSyncOwner(actor)` call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncOwnershipOutcome {
+    /// The claim was accepted. `owner_changed` tells the caller to reset the victim's
+    /// last-sync stamp, and `record` is the `TPacketGCOwnership` to send around the victim.
+    Accepted {
+        /// True when `m_pkChrSyncOwner` was not already the actor, which is the arm that
+        /// resets the last-sync stamp and rewrites the owned list.
+        owner_changed: bool,
+        /// `TPacketGCOwnership`, which the source sends after every accepted claim.
+        record: Vec<u8>,
+    },
+    /// The claim was refused, and the element is skipped.
+    Refused,
+}
+
+/// Judge one `CHARACTER::SetSyncOwner(actor)` call against a victim.
+///
+/// `server/server/game/char.cpp:5469-5551`, in the source's own order. The two arms that
+/// need state the pure policy cannot own are left to the caller: `AIFLAG_NOMOVE` and
+/// `!battle_is_attackable`, which is the PK rule. Neither can refuse a pair of player
+/// characters, so neither is judged here and both are recorded as a `sys.char.pk`
+/// divergence.
+#[must_use]
+pub fn judge_sync_ownership(
+    actor: Vid,
+    victim: &SyncPositionVictim,
+    state: SyncOwnershipState,
+    actor_x: i32,
+    actor_y: i32,
+    now: Duration,
+) -> SyncOwnershipOutcome {
+    // `if (ch == this) { sys_err("SetSyncOwner owner == this"); return false; }`. A client
+    // cannot move itself by naming its own VID.
+    if victim.vid == actor {
+        return SyncOwnershipOutcome::Refused;
+    }
+    // `if (!IsSyncOwner(ch)) return false;`. `IsSyncOwner` accepts the current owner, or any
+    // character once the claim stamp is at least `SYNC_CLAIM_LIFETIME` old.
+    let holds = state.owner == Some(actor);
+    let age = state.owner.and(now.checked_sub(state.claimed_at));
+    let claim_is_fresh = age.is_some_and(|age| age < SYNC_CLAIM_LIFETIME);
+    if !holds && claim_is_fresh {
+        return SyncOwnershipOutcome::Refused;
+    }
+    // `DISTANCE_APPROX(GetX() - ch->GetX(), GetY() - ch->GetY()) > 250`, on the raw
+    // coordinates with no `/ 100`. A character that already holds the claim keeps it past
+    // the limit; a new owner does not get one.
+    let over = distance_approx(victim.x - actor_x, victim.y - actor_y) > SYNC_OWNER_APPROX_DISTANCE;
+    if over && !holds {
+        return SyncOwnershipOutcome::Refused;
+    }
+    SyncOwnershipOutcome::Accepted {
+        owner_changed: !holds,
+        record: ownership_record(actor, victim.vid),
+    }
+}
+
+/// The `TPacketGCOwnership` bytes an accepted claim sends.
+#[must_use]
+pub fn ownership_record(owner: Vid, victim: Vid) -> Vec<u8> {
+    let mut record = Vec::with_capacity(OWNERSHIP_RECORD_SIZE);
+    record.push(HEADER_GC_OWNERSHIP);
+    record.extend_from_slice(&owner.raw().to_le_bytes());
+    record.extend_from_slice(&victim.raw().to_le_bytes());
+    debug_assert_eq!(record.len(), OWNERSHIP_RECORD_SIZE);
+    record
+}
+
 /// Wire size of the fixed `TPacketCGSyncPosition` prefix.
 pub const SYNC_POSITION_PREFIX_SIZE: usize = 3;
 
@@ -231,8 +345,25 @@ pub trait SyncPositionPorts {
     fn resolve(&mut self, vid: Vid) -> Option<SyncPositionVictim>;
 
     /// Applies the legacy `SetSyncOwner(actor)` operation and returns its
-    /// acceptance result.  Any ownership packets or damage-block effects belong
-    /// to the implementation of this port.
+    /// acceptance result.
+    ///
+    /// The whole of `CHARACTER::SetSyncOwner`
+    /// (`server/server/game/char.cpp:5469-5551`) is the port, because every arm
+    /// of it is entity state the pure policy does not own:
+    ///
+    /// * `AIFLAG_NOMOVE` refuses a monster victim.
+    /// * `!battle_is_attackable(actor, victim)` sends a blocked-damage record
+    ///   and refuses, which is the PK rule and belongs to `sys.char.pk`.
+    /// * `ch == this` refuses, so a character cannot claim itself.
+    /// * `!IsSyncOwner(actor)` refuses while another character holds a claim
+    ///   that `ENABLE_FLY_FIX`'s 100-unit `m_fSyncTime` has not expired.
+    /// * `DISTANCE_APPROX(...) > 250` on the raw coordinates refuses a new
+    ///   claim and lets the current owner keep it.
+    /// * An accepted claim refreshes `m_fSyncTime` and, when the owner
+    ///   changes, resets the last-sync stamp.
+    /// * Every accepted claim sends `TPacketGCOwnership` with
+    ///   `PacketAround` and no exception, so the victim sees its own
+    ///   ownership; that record belongs to this port too.
     fn set_sync_owner(&mut self, actor: Vid, victim: &SyncPositionVictim) -> bool;
 
     /// Returns the victim's current last-sync timestamp, if one exists.
@@ -247,10 +378,18 @@ pub trait SyncPositionPorts {
     /// Closes the actor descriptor for a policy rejection.
     fn close(&mut self, actor: Vid, reason: SyncPositionCloseReason);
 
-    /// Broadcasts a complete GC frame around the actor.  Although the legacy
-    /// call passes the actor as the `except` argument, `PacketView` always
-    /// sends the frame to the entity itself after skipping that entity in the
-    /// view loop; this port therefore preserves the source self-send quirk.
+    /// Broadcasts one record to the victim's view, the victim included, which is
+    /// `PacketAround` with no exception argument.
+    fn broadcast_around_victim(&mut self, victim: Vid, packet: &[u8]);
+
+    /// Broadcasts a complete GC frame around the actor, without the actor.
+    ///
+    /// `CEntity::PacketView` (`server/server/game/entity.cpp:93-104`) always ends
+    /// with `f(std::make_pair(this, 0))`, a self-send, but `FuncPacketAround::operator()`
+    /// returns early for `m_except`. `CInputMain::SyncPosition` passes `ch` as that
+    /// argument (`input_main.cpp:2161`), so the self-send is suppressed and the
+    /// requester never sees the accepted positions. This port therefore delivers to
+    /// the view minus the actor.
     fn broadcast(&mut self, actor: Vid, packet: &[u8]);
 }
 
@@ -359,9 +498,14 @@ pub fn process<P: SyncPositionPorts + ?Sized>(
 
         let position_delta_x = scaled_delta(victim.x, element.x);
         let position_delta_y = scaled_delta(victim.y, element.y);
-        let too_soon = ports.last_sync_time(victim.vid).is_some_and(|last| {
-            now.checked_sub(last).unwrap_or(Duration::ZERO) < SYNC_VALID_INTERVAL
-        });
+        // `static const long g_lValidSyncInterval = 100 * 1000;` is microseconds, and the
+        // test is `tvDiff->tv_sec == 0 && tvDiff->tv_usec < g_lValidSyncInterval`. A stamp in
+        // the future gives a negative difference, so it is not "too soon", and
+        // `checked_sub` returning `None` is the same answer as legacy's `tv_sec != 0` arm.
+        let too_soon = ports
+            .last_sync_time(victim.vid)
+            .and_then(|last| now.checked_sub(last))
+            .is_some_and(|age| age < SYNC_VALID_INTERVAL);
         if too_soon {
             if actor.sync_hack_count < SYNC_HACK_LIMIT_COUNT {
                 actor.sync_hack_count += 1;
@@ -418,7 +562,8 @@ mod tests {
     use protocol::cg_variable::{SyncPositionElement, SyncPositionPacket};
 
     use super::{
-        encode_gc_sync_position, process, SyncPositionActor, SyncPositionCloseReason,
+        distance_approx, encode_gc_sync_position, judge_sync_ownership, ownership_record, process,
+        SyncOwnershipOutcome, SyncOwnershipState, SyncPositionActor, SyncPositionCloseReason,
         SyncPositionDisposition, SyncPositionEncodeError, SyncPositionPorts, SyncPositionResult,
         SyncPositionVictim, SyncPositionVictimKind, HEADER_GC_SYNC_POSITION, SYNC_HACK_LIMIT_COUNT,
         SYNC_POSITION_ELEMENT_LIMIT, SYNC_POSITION_PREFIX_SIZE, SYNC_VALID_INTERVAL,
@@ -433,6 +578,183 @@ mod tests {
         Sync(u32, i32, i32),
         Close(u32, SyncPositionCloseReason),
         Broadcast(u32, Vec<u8>),
+        Around(u32, Vec<u8>),
+    }
+
+    /// A player victim on the same map, at the origin.
+    fn at_origin(vid: u32) -> SyncPositionVictim {
+        SyncPositionVictim {
+            vid: Vid::new(vid),
+            kind: SyncPositionVictimKind::Player,
+            x: 0,
+            y: 0,
+        }
+    }
+
+    /// Never claimed, which is the state `CHARACTER::CHARACTER`'s `get_float_time() - 3`
+    /// seed leaves behind.
+    fn unowned() -> SyncOwnershipState {
+        SyncOwnershipState {
+            owner: None,
+            claimed_at: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn ownership_record_is_the_source_field_order() {
+        // `packet.h:1716-1720`: header, dwOwnerVID, dwVictimVID, little-endian.
+        assert_eq!(
+            ownership_record(Vid::new(0x0102_0304), Vid::new(0x0a0b_0c0d)),
+            [62, 4, 3, 2, 1, 0x0d, 0x0c, 0x0b, 0x0a]
+        );
+    }
+
+    #[test]
+    fn distance_approx_matches_the_shifted_source_form() {
+        // `(123/128) * max + (51/128) * min`, from `utils.h:17-40`.
+        assert_eq!(distance_approx(0, 0), 0);
+        assert_eq!(distance_approx(128, 0), 123);
+        assert_eq!(distance_approx(0, 128), 123);
+        assert_eq!(distance_approx(128, 128), 174);
+        // The sign of either argument is taken away before the coefficients apply.
+        assert_eq!(distance_approx(-200, 300), distance_approx(200, 300));
+        // A zero on one axis stays an exact multiple of the other.
+        assert_eq!(distance_approx(1000, 0), 960);
+    }
+
+    #[test]
+    fn a_claim_on_oneself_is_refused() {
+        // `if (ch == this) { sys_err("SetSyncOwner owner == this"); return false; }`
+        let vid = Vid::new(7);
+        assert_eq!(
+            judge_sync_ownership(vid, &at_origin(7), unowned(), 0, 0, Duration::ZERO),
+            SyncOwnershipOutcome::Refused
+        );
+    }
+
+    #[test]
+    fn an_unclaimed_victim_is_accepted_and_its_stamp_is_reset() {
+        let actor = Vid::new(1);
+        assert_eq!(
+            judge_sync_ownership(actor, &at_origin(2), unowned(), 0, 0, Duration::ZERO),
+            SyncOwnershipOutcome::Accepted {
+                owner_changed: true,
+                record: ownership_record(actor, Vid::new(2)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_second_character_is_refused_while_the_claim_is_fresh() {
+        let actor = Vid::new(3);
+        let state = SyncOwnershipState {
+            owner: Some(Vid::new(1)),
+            claimed_at: Duration::from_millis(20),
+        };
+        assert_eq!(
+            judge_sync_ownership(actor, &at_origin(2), state, 0, 0, Duration::from_millis(50)),
+            SyncOwnershipOutcome::Refused
+        );
+    }
+
+    #[test]
+    fn a_claim_takes_over_once_the_stamp_is_old_enough() {
+        // `ENABLE_FLY_FIX` selects the 100-unit form of `IsSyncOwner`.
+        let actor = Vid::new(3);
+        let state = SyncOwnershipState {
+            owner: Some(Vid::new(1)),
+            claimed_at: Duration::from_millis(20),
+        };
+        assert_eq!(
+            judge_sync_ownership(
+                actor,
+                &at_origin(2),
+                state,
+                0,
+                0,
+                Duration::from_millis(120)
+            ),
+            SyncOwnershipOutcome::Accepted {
+                owner_changed: true,
+                record: ownership_record(actor, Vid::new(2)),
+            }
+        );
+    }
+
+    #[test]
+    fn the_current_owner_may_claim_again_without_a_reset() {
+        let actor = Vid::new(1);
+        let state = SyncOwnershipState {
+            owner: Some(actor),
+            claimed_at: Duration::ZERO,
+        };
+        assert_eq!(
+            judge_sync_ownership(actor, &at_origin(2), state, 0, 0, Duration::from_millis(1)),
+            SyncOwnershipOutcome::Accepted {
+                owner_changed: false,
+                record: ownership_record(actor, Vid::new(2)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_new_owner_is_refused_past_the_approximate_distance() {
+        // `DISTANCE_APPROX(GetX() - ch->GetX(), GetY() - ch->GetY()) > 250`. The limit is on
+        // the *approximated* distance, not the raw one, so with only x set the boundary is
+        // 123/128 of the raw value: 260 approximates to 249 and 261 to 250, and only a
+        // value above 250 refuses. 260 raw units is 2.6 map units.
+        let actor = Vid::new(1);
+        assert_eq!(distance_approx(260, 0), 249, "just inside the limit");
+        assert_eq!(distance_approx(261, 0), 250, "on the limit");
+        let mut far = at_origin(2);
+        far.x = 262;
+        assert_eq!(
+            judge_sync_ownership(actor, &far, unowned(), 0, 0, Duration::ZERO),
+            SyncOwnershipOutcome::Refused
+        );
+        let mut near = at_origin(2);
+        near.x = 261;
+        assert!(matches!(
+            judge_sync_ownership(actor, &near, unowned(), 0, 0, Duration::ZERO),
+            SyncOwnershipOutcome::Accepted { .. }
+        ));
+    }
+
+    #[test]
+    fn the_current_owner_keeps_a_claim_past_the_approximate_distance() {
+        // `if (m_pkChrSyncOwner == ch) return true;`
+        let actor = Vid::new(1);
+        let mut far = at_origin(2);
+        far.x = 4000;
+        let state = SyncOwnershipState {
+            owner: Some(actor),
+            claimed_at: Duration::ZERO,
+        };
+        assert_eq!(
+            judge_sync_ownership(actor, &far, state, 0, 0, Duration::from_millis(1)),
+            SyncOwnershipOutcome::Accepted {
+                owner_changed: false,
+                record: ownership_record(actor, Vid::new(2)),
+            }
+        );
+    }
+
+    #[test]
+    fn the_distance_limit_is_checked_before_the_stamp_arms_the_takeover() {
+        // A far-away new owner is refused on distance even when the old claim has expired,
+        // because the source tests `IsSyncOwner` first and distance second, and both
+        // refusals land on the same answer.
+        let actor = Vid::new(1);
+        let mut far = at_origin(2);
+        far.y = 1000;
+        let state = SyncOwnershipState {
+            owner: Some(Vid::new(9)),
+            claimed_at: Duration::ZERO,
+        };
+        assert_eq!(
+            judge_sync_ownership(actor, &far, state, 0, 0, Duration::from_secs(60)),
+            SyncOwnershipOutcome::Refused
+        );
     }
 
     #[derive(Debug, Default)]
@@ -459,6 +781,10 @@ mod tests {
     }
 
     impl SyncPositionPorts for MockPorts {
+        fn broadcast_around_victim(&mut self, victim: Vid, packet: &[u8]) {
+            self.calls.push(Call::Around(victim.raw(), packet.to_vec()));
+        }
+
         fn resolve(&mut self, vid: Vid) -> Option<SyncPositionVictim> {
             self.calls.push(Call::Resolve(vid.raw()));
             self.victims.get(&vid.raw()).copied()

@@ -403,7 +403,10 @@ fn serve_admits_clients_once_the_store_is_migrated() {
     server.wait_for(ACCEPTING);
     assert!(server.logged(WAITING), "the gate waited for the store");
     assert!(
-        server.logged("Store ready at schema version 3"),
+        server.logged(&format!(
+            "Store ready at schema version {}",
+            db::store::schema_version()
+        )),
         "the schema was migrated:\n{}",
         server.console.join("\n")
     );

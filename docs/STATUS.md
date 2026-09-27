@@ -1,6 +1,6 @@
 # Rewrite status
 
-Last reviewed: 2026-09-26, after ledger section 181 (the Parity inventory and the scripted client).
+Last reviewed: 2026-09-27, after ledger section 187 (character select, the loading burst, and enter-game).
 Steps 1 and 2 are done; step 3 is next.
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
@@ -34,7 +34,7 @@ Each step lands as one or more ledger sections with a gate receipt.
 |---|---|---|
 | 1. Restructure | Retire the DB-peer and GG code and move the pure rule modules into `gamedata`. Rename `game-server` to the single `prodomo` binary with TOML configuration for the auth and Channel listeners, the Channel map sets, and PostgreSQL. First PostgreSQL schema and migrations. The Operator command that creates accounts and GMs. | **Done.** Retirement and `gamedata` (177). The rename, the TOML document, and the listeners (178). The account and GM schema, store readiness, and the Operator commands (179). |
 | 2. Parity inventory | Every legacy system and handler, listed from the source in `.scratch/parity/`, each with a porting status. The scripted-client test crate. | **Done** (181). 1,643 rows in nine tables; `.scratch/parity/spec.md` has the statuses, the regeneration command, and four findings for the owner. The scripted client is the `parity` crate; its scenarios are `prodomo/tests/parity.rs`. Two rows are `ported` (the keepalive and unknown-header framing rules). |
-| 3. Vertical slice | Handshake and TEA, auth (`LOGIN3`), login by key, character select, create, and delete, loading, entering the game, movement and chat, a Warp between maps, and logout with save. | **In progress.** The handshake, TEA, time sync, and the ping cycle are live (182), and so are the Channel status list (183) auth `LOGIN3` with its login keys (184), the Channel login by key (`LOGIN2`) with the character list (185), and the select screen's empire choice, character create, delete, and forced rename (186). Next: character select, loading, and entering the game. |
+| 3. Vertical slice | Handshake and TEA, auth (`LOGIN3`), login by key, character select, create, and delete, loading, entering the game, movement and chat, a Warp between maps, and logout with save. | **In progress.** The handshake, TEA, time sync, and the ping cycle are live (182), and so are the Channel status list (183) auth `LOGIN3` with its login keys (184), the Channel login by key (`LOGIN2`) with the character list (185), the select screen's empire choice, character create, delete, and forced rename (186), and character select, the loading burst, and enter-game (187), each with a scripted-client scenario. Next: movement and chat. |
 | 4. Game systems | In dependency order: items and inventory; NPCs, shops, and Transfers (trade, safebox); the quest runtime (`qc` port and Lua 5.1, with its API growing as each later system lands); monsters, combat, drops, and exp; skills and affects; party, guild, messenger, and the cross-Channel bus; dungeons, events, guild war, and OX; the Prodomo custom systems (sash, aura, pets, battle pass, switchbot, item shop, premium shop, and the rest); GM commands, the adminpage, and logs. | Not started. |
 | 5. Game data and play test | Finish the importers, fix what the full data set breaks, then the owner's play test with the Reference client. | Not started. |
 
@@ -112,9 +112,9 @@ owner should know about (178.5):
 | Handshake and TEA | Live on every connection with scenarios (182). The Channel status list (183). The login's `SetSecurityKey` (185). | The status list counts characters in game once entering the game publishes the count (`ChannelStatusBoard::set_online`). |
 | Auth | Live with a scenario (184): every legacy check in order, `AUTH_SUCCESS` (0x96) with a login key, and `LOGIN_FAILURE`. `prodomo::auth_login` holds the rules and the login-key registry. | Premium times on the login data (no columns yet). |
 | Login by key | Live with scenarios (185): `SHUTDOWN` under the handshake key, then the client key pair, the login-key judgement (`NOID`), the logon registry (`ALREADY` and the kick of a holder without a character), `GC_EMPIRE`, the 357-byte character list with each map's Channel address from the map atlas (`gamedata::map_atlas`), and `PHASE(SELECT)`. `prodomo::channel_login` holds the rules; `db::players` reads the characters. | `FULL` (unit-tested; the online count arrives with entering the game). The delayed kick of a holder in game. The blocked-country IP list (`is_blocked_country_ip`, `G/block_country.cpp`; empty tables behave as today). The mark-login table keyed by handle and random key (guild marks). Guild ids and names (zeros until guilds exist). |
-| Select, create, delete | Empire choice, create, delete, and forced rename are live with scenarios (186): the Name rules (letters and digits, 2 to 24 bytes, the `banword` table read from `legacy/sql/gamedata/player.sql`, and the lowercase mob names from the text protos), the create checks in legacy order, the job points, the create start and spread, the 30-second create cooldown per account, the delete code and level limits (`[game]`), and the deleted row kept in `player_deleted`. `prodomo::select_phase` holds the rules; `db::players` writes the rows. `on_select` and the select CG codec. | Choosing a character (`CHARACTER_SELECT`) and the loading phase. The `CREATE PLAYER` character log row (`G/input_db.cpp:274`; the log store does not exist yet). |
-| Loading | Loading-phase GC records 15, 16, 76, and 28-30; `gc_actors` | `ITEM_SET2` (21), `ENTITY` (249), map data from `legacy/gamedata`. |
-| Enter game, movement, chat | `CgEnterGame`, `on_enter_game`, `CharacterAdd`, `GcTime`, `GcChannel`, `sync_position`, the move codecs | Game-phase dispatch; world placement; view range; `CHAT` (4). |
+| Select, create, delete | Empire choice, create, delete, and forced rename are live with scenarios (186): the Name rules (letters and digits, 2 to 24 bytes, the `banword` table read from `legacy/sql/gamedata/player.sql`, and the lowercase mob names from the text protos), the create checks in legacy order, the job points, the create start and spread, the 30-second create cooldown per account, the delete code and level limits (`[game]`), and the deleted row kept in `player_deleted`. `prodomo::select_phase` holds the rules; `db::players` writes the rows. Choosing a character (`CHARACTER_SELECT`) is live since 187: the slot index, the store read, and the empty-slot close. | The `CREATE PLAYER` character log row (`G/input_db.cpp:274`; the log store does not exist yet). |
+| Loading | Live with scenarios (187): the store read, `GC_ENTITY` (249), `GC_MAIN_CHARACTER2_EMPIRE` (113), `GC_CHARACTER_GOLD` (224), `GC_CHARACTER_POINTS` (16), `GC_SKILL_LEVEL` (76), and the map test at the legacy split. `prodomo::loading_phase` holds the bursts. | The quickslots (28-30), the package SDB (153), and the safebox query: not records this deployment can send, per ledger 187.5. `GetValidLocation` and the movable-position fallback need a map instance. |
+| Enter game, movement, chat | The enter-game burst is live with a scenario (187). Live with scenarios since 188: `CHAT` (3) with the counter, the block-chat arm, and the map broadcast that reaches the sender; `MOVE` (7) with the 750/999 distance limits, `CanMove`, and the broadcast that does not; `CHARACTER_POSITION` (28) for sit and stand; `SYNC_POSITION` (8) with the whole element loop, `SetSyncOwner`, `GC_OWNERSHIP` (62), the owner range, the 100 ms interval, and the displacement close. `prodomo::chat`, `prodomo::movement`, and `prodomo::sync_position` hold the rules, and the live framing now resolves a variable-length frame (`net::ClientFrameTransport`). | `SendNPCPosition` and the post-phase events. Whisper, the banword conversion, the prism check, and `interpret_command`; the riding and OX-event speed checks; `char_state.cpp`; the `View` distance check; `SetSyncOwner`'s `AIFLAG_NOMOVE` and `battle_is_attackable` arms; a real map instance behind `PositionTable`; the `sync_hack_count` restore with the save path. |
 | Warp | The GC warp record | Map-to-Channel routing; the reconnect. |
 | Logout and save | Nothing live | Background save; the logon record. |
 
@@ -192,6 +192,16 @@ owner should know about (178.5):
   transaction as the check (ledger 186).
 - Three client Python wrappers send uninitialized stack data; the server must not trust those
   bytes.
+- The client-version check is on by default against a hard-coded `"1215955205"` and neither config
+  key is set, so every client with another version gets a notice and `DelayedDisconnect(0)`
+  (`G/input_login.cpp:743-771`). The `if (!d->GetClientVersion())` arm above it is dead, because
+  `GetClientVersion()` returns `c_str()`. The Rewrite lets the client in and records the version
+  it saw (ledger 187).
+- `CHARACTER::PointsPacket` sends 16 bytes of uninitialized stack in point slots 0 (`POINT_NONE`)
+  and 2 (`POINT_VOICE`) (`G/char.cpp:2033-2086`). The Rewrite writes all 255 slots (ledger 187).
+- The position fallback after a failed `GetPosition` logs and keeps the old `z`
+  (`G/input_login.cpp:572-585`). The Rewrite does the same fallback and has no `z`: the world owns
+  height (ledger 187).
 
 ## Environment
 
@@ -204,6 +214,10 @@ owner should know about (178.5):
   applied `cargo fmt` to the drift that built up while they were missing and cleared every Clippy
   finding. Both gates run again.
 - `i686-linux-gnu-g++-12`, used by the width probe, is not installed on the current machine.
+- The **database gate runs on the current machine** as of section 187: `postgres:18` (18.6) is
+  already pulled, so a Podman container on `127.0.0.1:55432` and an exported `DATABASE_URL` are
+  enough to exercise every store-backed test. Section 187 ran it and left no scratch database
+  behind. `DATABASE_URL` is unset by default, so every gate stays green without a database.
 
 ## Code-quality backlog
 
@@ -222,4 +236,13 @@ Take these on when a step touches the code.
   created. The rest are invariant panics that cannot fire today: 8 `.expect` calls in
   `protocol/src/cg_account.rs`, and one each at `protocol/src/cg_attack.rs:134` and
   `prodomo/src/sync_position.rs:177`.
+- **`#[allow]` is banned** (`AGENTS.md`: "Fix Clippy findings by refactoring, never by
+  `#[allow]`"), and **59 of them are checked in**. The rule is stated as how a new finding is
+  fixed, and every current use predates the rule, so this is debt rather than a violation to
+  correct in passing. It is worth its own section: 14 are `clippy::too_many_arguments` in
+  `protocol/src/gc_actors.rs` alone, 14 in `gamedata/src/records.rs` and 12 in
+  `gamedata/src/renewal_shop.rs`. Most take a wire struct field by field, so a builder that takes
+  the struct would remove them all at once, and the same builder would also remove the field-by-
+  field constructor duplication the first bullet describes. Do this when a step already touches the
+  file; do not do it as its own sweep, because the diff is large and unrelated to any one system.
 - **Toolchain:** Rust is not pinned. Consider a `rust-toolchain.toml` for 1.85.1.
