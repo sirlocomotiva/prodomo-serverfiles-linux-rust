@@ -53,6 +53,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use crate::csv_table::{self, CsvError};
 use crate::item_proto_value::{
@@ -239,6 +240,31 @@ pub struct ItemProtos {
 }
 
 impl ItemProtos {
+    /// Read `item_proto.txt` and `item_names.txt` from the proto folder.
+    ///
+    /// The two file names live here rather than in each caller, because a caller that
+    /// spelled them itself would be free to spell one of them differently and get a
+    /// table that parses. [`crate::mob_names::MobNames::load`] and the other proto
+    /// readers each own their own pair the same way.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ItemProtoError::Io`] when a file is missing or unreadable, and any
+    /// other [`ItemProtoError`] when a row is one legacy would have answered with
+    /// `exit(0)`.
+    pub fn load(proto_dir: &Path) -> Result<Self, ItemProtoError> {
+        let read = |name: &str| {
+            let path = proto_dir.join(name);
+            std::fs::read(&path).map_err(|source| ItemProtoError::Io {
+                path: path.clone(),
+                message: source.to_string(),
+            })
+        };
+        let proto = read("item_proto.txt")?;
+        let locale_names = read("item_names.txt")?;
+        parse(&proto, &locale_names)
+    }
+
     /// The number of rows, which is the file's data-row count and not the header.
     pub fn len(&self) -> usize {
         self.by_vnum.len()
@@ -343,6 +369,18 @@ fn starts_with_ignore_case(haystack: &[u8], name: &[u8]) -> bool {
 /// A row legacy could not read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemProtoError {
+    /// A proto file could not be read.
+    ///
+    /// The operating system's message is kept as text rather than as an
+    /// [`std::io::Error`], because that type is neither `Clone` nor `Eq` and this
+    /// enum is both. The path is kept because "No such file or directory" without
+    /// a name is not a diagnostic an Operator can act on.
+    Io {
+        /// The file that could not be read.
+        path: PathBuf,
+        /// The operating system's message.
+        message: String,
+    },
     /// The file did not parse as the tab-separated CSV the legacy reader accepts.
     Csv(CsvError),
     /// A row had fewer than [`COLUMNS`] fields, so `AsStringByIndex` would read past the row.
@@ -423,6 +461,9 @@ fn as_text(field: &[u8]) -> String {
 impl fmt::Display for ItemProtoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Io { path, message } => {
+                write!(f, "{}: {message}", path.display())
+            }
             Self::Csv(source) => write!(f, "could not read the table: {source}"),
             Self::ShortRow { line, found } => write!(
                 f,
@@ -480,6 +521,8 @@ impl Error for ItemProtoError {
         match self {
             Self::Csv(source) => Some(source),
             Self::TooManyFlagTokens { source, .. } => Some(source),
+            // The `io::Error` was flattened into text when it was read, so there is
+            // no source left to hand back and this arm says so rather than guessing.
             _ => None,
         }
     }
@@ -804,6 +847,52 @@ mod tests {
     fn owners() -> ItemProtos {
         let (proto, names) = owners_files();
         parse(&proto, &names).expect("the owner's item proto loads")
+    }
+
+    /// The owner's proto folder, as a path.
+    fn owners_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto")
+    }
+
+    #[test]
+    fn load_reads_the_same_table_parse_reads() {
+        // `load` exists so that no caller spells a file name. The property that
+        // justifies it is that it and `parse` are the same reader, which is only
+        // checkable by comparing their answers over the whole table.
+        let by_load = ItemProtos::load(&owners_dir()).expect("the owner's proto folder loads");
+        let by_parse = owners();
+        assert_eq!(by_load.len(), by_parse.len());
+        assert_eq!(by_load.len(), 7_305, "the owner's data-row count");
+        for (loaded, parsed) in by_load.rows().iter().zip(by_parse.rows()) {
+            assert_eq!(loaded.vnum, parsed.vnum);
+            assert_eq!(loaded.size, parsed.size);
+            assert_eq!(loaded.name, parsed.name);
+            assert_eq!(loaded.locale_name, parsed.locale_name);
+        }
+    }
+
+    #[test]
+    fn a_missing_proto_file_names_itself_rather_than_only_saying_io_failed() {
+        // The negative path of the new `Io` variant. The message alone would be
+        // "No such file or directory", which an Operator cannot act on; the path is
+        // the part that tells them which file.
+        let empty = std::env::temp_dir().join("prodomo-no-such-proto-folder");
+        let error = ItemProtos::load(&empty).expect_err("an empty folder has no item_proto.txt");
+        let ItemProtoError::Io { path, message } = &error else {
+            panic!("expected Io, got {error:?}");
+        };
+        assert!(
+            path.ends_with("item_proto.txt"),
+            "the path names the file that was missing, got {}",
+            path.display()
+        );
+        assert!(
+            !message.is_empty(),
+            "the operating system's message is kept"
+        );
+        // The first file read is the one named, so the error is about
+        // `item_proto.txt` and not about a file the reader never reached.
+        assert!(error.to_string().contains("item_proto.txt"), "{error}");
     }
 
     /// A synthetic 35-column row whose resolved values are all zero, so a test can change exactly

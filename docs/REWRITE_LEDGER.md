@@ -19375,3 +19375,67 @@ system.
 **Not measured.** `i686-linux-gnu-g++-12` is still not installed. Nothing in this unit
 claims a new width; the 72-byte assertion is the encoded length of the existing
 measured codec from 198.6.
+
+## 201. The world lives in the game thread
+
+**What changed.** `prodomo::game_state` is a new module holding `GameState`, the value
+one game thread owns. It holds a `CharacterManager`, an `ItemIds` allocator, an
+`ItemProtos` table, and a `last_pulse` number, and it implements `PulseProcessor`.
+`GameStateMetrics` is a shared counter the owning side keeps a handle to, because the
+state is **moved** into the thread and cannot be read after the move. `ItemProtos::load`
+was added in `gamedata` so `serve` can read the owner's `item_proto.txt` and
+`item_names.txt` by directory rather than by two hand-joined paths; a missing file is
+`ItemProtoError::Io { path, message }`, which keeps `Clone` and `Eq` because no
+`io::Error` is retained.
+
+**Why the module doc argues the shape.** The game thread already existed and
+`spawn_game_loop` already took a `PulseProcessor` by value, but `main.rs` passed
+`|_| {}`. The thread ticked and discarded its own count, so "all worlds step on one
+game thread at 25 Pulses per second" (ADR-0002) was true of the scheduler and false of
+anything else. `GameState` is what the thread holds now, and owning it outright, with
+no `Arc` and no lock, is what makes "only the game thread mutates a world" checkable
+rather than a convention.
+
+**A false test name, corrected.** `prodomo/tests/game_loop_thread.rs` had a test called
+`game_state_runs_on_a_dedicated_thread_and_acknowledges_stop` whose body spawned
+`|_| {}` and asserted "state was owned elsewhere". Nothing in it owned state; the name
+was a claim the body did not support. It is now `the_game_thread_is_dedicated_and_
+acknowledges_stop` and says what it checks. The test that earns the old name is
+`a_game_state_is_the_value_the_thread_steps`: it builds a real `GameState` from the
+owner's Game data, moves it into the loop, waits for `metrics.pulses() >= 1`, and then
+asserts the state's own count equals `GameLoopSummary::final_pulse`. That last
+assertion is the load-bearing one, because it compares two independently produced
+numbers from the two sides of the thread boundary.
+
+**`serve` is deliberately not wired yet.** `main.rs` still spawns the loop with `|_| {}`.
+This is not an oversight and the reason is an ordering the project already committed to.
+The client ports open *before* the world is ready, as legacy's do, and `main.rs` says
+so in a comment at the spawn site. The item-id range the allocator needs comes from the
+store's `item_id_range` table, and the store is built without connecting and is only
+migrated inside the accept loop. So there is no point at which `serve` can build a
+`GameState` with a range it legitimately knows: before the ports bind it cannot read
+the store, and after the gate opens the world is already supposed to exist. Wiring it
+any sooner would invert the documented ordering; wiring it with an invented range would
+put a made-up default into a world whose ids must never collide with stored items.
+Both are worse than leaving `serve` alone, so the wiring belongs to the unit that adds
+the command channel, which installs the range through the game thread and acknowledges
+before the gate opens.
+
+**Not measured.** `i686-linux-gnu-g++-12` is still not installed and this unit claims no
+new width. `PULSE_PERIOD` is pinned to 40 ms by a test, but that is the value the loop
+already ran at, not a measurement taken here.
+
+**Receipt.** 11 new tests and no new targets: 8 in `prodomo::game_state`, 1 in
+`prodomo/tests/game_loop_thread.rs`, and 2 in `gamedata` for `ItemProtos::load`.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 33 targets, 2270 passed, 0 failed |
+| the same with `DATABASE_URL` set | 33 targets, 2270 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 9 targets, 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+The count moved from 2259 to 2270. Leftover `prodomo\_%` databases after the run: 0.
+

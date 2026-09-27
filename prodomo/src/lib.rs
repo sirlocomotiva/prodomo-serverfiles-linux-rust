@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Deterministic scheduling and dedicated game-loop thread ownership.
 pub mod game_loop;
 
+/// The characters, item ids, and item prototypes one game thread owns.
+pub mod game_state;
+
 /// Typed commands, effects, and terminal acknowledgements for the game loop.
 pub mod game_loop_messages;
 

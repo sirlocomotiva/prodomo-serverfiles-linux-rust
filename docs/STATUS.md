@@ -44,6 +44,18 @@ An item can now be given to a character and the client record built (199). `Char
 `sys.item.core` is still `codec`, and the reason is now narrow: the whole grant is one transport-free reducer (200), `prodomo::item_grant::grant_item`, which returns the store row and the client record together so they cannot disagree about the id or the cell -- but nothing calls it. There is no Operator command, and the slash-command handler in `main.rs` is still a stub, so no client and no operator can reach any of it. The next step-4 work is the game-thread command that carries a grant from an async task, the `GC_ITEM_SET` write, then the Operator interface, then create-and-destroy end to end. The decisions that unit has to make are written down in `.scratch/ledger198-operator-item-grant.md`, ahead of the code. One of them is already answered by a survey: **legacy has no adminpage item-give path in this tree**, so the path being ported is the chat command `ACMD(do_item)` (`cmd_gm.cpp:467-519`) and the Operator command around it is a new interface rather than a port. |
 | 5. Game data and play test | Finish the importers, fix what the full data set breaks, then the owner's play test with the Reference client. | Not started. |
 
+The game thread now owns a world (201). `prodomo::game_state::GameState` holds the
+`CharacterManager`, the `ItemIds` allocator, and the `ItemProtos` table, and implements
+`PulseProcessor`; `serve` still passes `|_| {}` to the loop, and that is deliberate
+rather than forgotten. The client ports open before the world is ready, so there is no
+point at which `serve` holds both the bound port and the store's item-id range, and
+inventing a range to get past the gap would put a made-up default in front of every
+stored item. The loop is spawned, then the accept loop migrates, then the gate opens;
+the range is installed through the game thread in the unit that adds the command
+channel. One test in `prodomo/tests/game_loop_thread.rs` was renamed in the process:
+it claimed to prove a game state ran on the thread while spawning an empty closure, and
+it now asserts what it checks.
+
 The Game data arrived before step 1 (`legacy/`), so each system's reader or importer is built with
 the system that first needs it, starting with the maps and protos in the vertical slice. Step 5 is
 what is left over.

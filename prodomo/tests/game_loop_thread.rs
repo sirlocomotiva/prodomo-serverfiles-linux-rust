@@ -7,9 +7,10 @@ use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, PULSE_PERIOD};
 use prodomo::game_loop_messages::{
     AsyncCompletionStatus, CompletionId, GameCommand, GameLoopFailure, GameLoopTerminal,
 };
+use prodomo::game_state::GameState;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn game_state_runs_on_a_dedicated_thread_and_acknowledges_stop() {
+async fn the_game_thread_is_dedicated_and_acknowledges_stop() {
     // Given: a synchronous game loop supervised from Tokio.
     let supervisor_thread = thread::current().id();
     let mut game_loop = spawn_game_loop(GameLoopConfig::default(), |_| {}).unwrap();
@@ -22,10 +23,73 @@ async fn game_state_runs_on_a_dedicated_thread_and_acknowledges_stop() {
         .unwrap()
         .unwrap();
 
-    // Then: state was owned elsewhere, stop was acknowledged, and join completes.
+    // Then: the thread was elsewhere, stop was acknowledged, and join completes.
+    //
+    // This test used to be named `game_state_runs_on_a_dedicated_thread_and_
+    // acknowledges_stop` and to assert "state was owned elsewhere", while spawning
+    // an empty closure and holding no state at all. The name was a claim the body
+    // did not support; `a_game_state_is_the_value_the_thread_steps` below is the
+    // test that supports it.
     assert_ne!(game_loop.thread_id(), supervisor_thread);
     assert!(matches!(terminal, GameLoopTerminal::Stopped(_)));
     assert_eq!(game_loop.join().await.unwrap(), terminal);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_game_state_is_the_value_the_thread_steps() {
+    // Given: a real `GameState`, built before the spawn, with the item protos read
+    // from the owner's Game data. This is the unit that makes ADR-0002's "all
+    // worlds step on one game thread" true rather than merely intended: before
+    // ledger 201 the thread was spawned with `|_| {}` and owned nothing.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
+    let protos =
+        gamedata::item_proto::ItemProtos::load(&dir).expect("the owner's item protos load");
+    let state = GameState::new(
+        protos,
+        world::item::ItemIdRange::new(1, 1_000_000, 1).expect("a range that can issue an id"),
+    );
+    let metrics = state.metrics();
+    assert_eq!(metrics.pulses(), 0, "nothing has stepped it yet");
+
+    // A character is added on this side, before the move, so the assertion below
+    // is about the thread reaching the value and not about the thread constructing
+    // it.
+    let mut game_loop = spawn_game_loop(GameLoopConfig::default(), state).unwrap();
+    let controller = game_loop.controller();
+
+    // When: the thread is given one pulse period to run.
+    // The loop parks between pulses, so a short wait is a wait for the first tick
+    // and not for a fixed count of them. Two periods makes the test tolerant of a
+    // scheduling delay without making it slow.
+    let deadline = Instant::now() + 2 * PULSE_PERIOD;
+    while metrics.pulses() == 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    // Then: the counter the thread owns advanced, and only the thread moved it.
+    assert!(
+        metrics.pulses() >= 1,
+        "the game thread did not step the state within {}ms",
+        (2 * PULSE_PERIOD).as_millis()
+    );
+    // And the state is still owned when the thread is joined: the world was moved
+    // in, not copied, so nothing outside can have mutated it while the thread ran.
+    controller.request_stop().await.unwrap();
+    let terminal = tokio::time::timeout(Duration::from_secs(1), game_loop.wait_for_terminal())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(terminal, GameLoopTerminal::Stopped(_)));
+    let summary = match &terminal {
+        GameLoopTerminal::Stopped(summary) => summary,
+        failed @ GameLoopTerminal::Failed { .. } => panic!("expected Stopped, got {failed:?}"),
+    };
+    assert_eq!(
+        summary.final_pulse,
+        metrics.pulses(),
+        "the loop's last pulse and the state's own count are the same number"
+    );
+    game_loop.join().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
