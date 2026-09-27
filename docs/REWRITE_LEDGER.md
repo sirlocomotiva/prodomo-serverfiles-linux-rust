@@ -16415,3 +16415,143 @@ The general lesson is the one this repository has already paid for twice: a beha
 scenario cannot witness bookkeeping that no behaviour depends on. Claiming otherwise would
 have put a green tick on an unfixed leak.
 
+## 189. Warp: the login home move, and a close that is not a record
+
+Two findings this ledger has to carry, and the second one reverses an earlier conclusion.
+
+### 189.1 The home move on a map the Channel does not host
+
+`CInputDB::PlayerLoad` (`G/input_db.cpp:426-436`) folds the stored map onto its base map, asks
+`map_allow_find` whether this Channel hosts it, and when it does not:
+
+```cpp
+ch->SetWarpLocation(EMPIRE_START_MAP(bEmpire), EMPIRE_START_X(bEmpire) / 100, EMPIRE_START_Y(bEmpire) / 100);
+d->SetPhase(PHASE_CLOSE);
+```
+
+`EMPIRE_START_MAP` is `g_start_map` at `G/start_position.cpp:18-24` and is `[0, 1, 21, 41]`. It is
+a **separate array** from `g_start_position`, and conflating them is the easy mistake here:
+`g_start_map` names where the character goes, `g_start_position` gives the coordinates, and
+`CMapLocation::Get` resolves the map from the coordinates on the next login. The Rewrite now
+carries `EMPIRE_START_MAP` in `prodomo/src/channel_login.rs` next to `EMPIRE_START`, and a test
+checks the values against the real atlas under `legacy/gamedata/locale/europe/map`, so a bad
+constant fails on data rather than on opinion.
+
+`SetWarpLocation` multiplies both axes by 100 (`G/char.cpp:6672-6677`), so the `/ 100` in the
+refusal and the `* 100` in the setter cancel. They cancel exactly only because every
+`g_start_position` value is a multiple of 100, which is an invariant of the data and not of the
+code, so a test pins it. The rewrite is `prodomo::warp::home_warp_location`.
+
+The move reaches the store through the save, not through a Warp record. `CHARACTER::Save`
+prefers `m_posWarp` over the live position whenever either axis is nonzero
+(`G/char.cpp:1551-1565`); `CHARACTER::Disconnect` flushes the delayed save or saves for real
+(`G/char.cpp:1784-1788`); and `DESC::Destroy` disconnects (`G/desc.cpp:121-125`). So the
+character is moved by the close, the client is told nothing, and the next login loads the home
+map. **No `GC_WARP` is sent on this path**, which is the part that is easy to get wrong.
+
+ADR-0003 makes a Transfer one transaction, so the move is now `db::players::save_position`, called
+in the same statement as the refusal instead of in a later background save. It reports a miss
+(`Ok(false)`) for a row that does not exist and refuses a `u32` above `i32::MAX` outright: the
+column is `integer`, and `as i32` would wrap that value into a negative ID that could name a real
+character. The refusal path is `refuse_map` in `prodomo/src/main.rs`.
+
+Proved by
+`a_map_the_channel_does_not_host_warps_home_and_closes_silently_after_the_records`, which reads
+the close, checks the stored row moved to `(469300, 964200)`, and then logs in again to show the
+next load is accepted. The mutation that drops the store write is **killed** by the stored-value
+check.
+
+An account with no empire start has nowhere to go, so the row is left where it is and the
+descriptor still closes. Legacy stores `(0, 0)` there, and `Save` treats a zero axis as no pending
+warp, so the same map is refused on every login. That is a legacy Defect and is not reproduced.
+
+### 189.2 `SetPhase(PHASE_CLOSE)` writes nothing
+
+This ledger previously recorded the opposite, and two committed parity scenarios had to be
+changed to match the wrong version. The corrected reading:
+
+`DESC::SetPhase` (`G/desc.cpp:493-501`) assigns `m_iPhase = _phase` on its **first** line, builds
+a `TPacketGCPhase`, and only then calls `Packet`. `Packet` (`G/desc.cpp:397-401`) begins:
+
+```cpp
+if (m_iPhase == PHASE_CLOSE)
+    return;
+```
+
+So the phase is already `PHASE_CLOSE` when the write is attempted and the record is dropped. A
+close is byte-free. The guard is not incidental; it is the terminal write barrier.
+
+Two consequences, both load-bearing:
+
+- **`m_bEncrypted` survives a close.** The `PHASE_CLOSE` arm assigns `m_pInputProcessor` and
+  never touches `m_bEncrypted`, which `SetPhase` sets for `SELECT`, `LOGIN`, `LOADING`, `GAME`,
+  `DEAD`, and `AUTH` (`G/desc.cpp:504-537`). Input decryption is a separate flag from the
+  processor pointer. A close behind TEA is therefore still a TEA read. It is unobservable,
+  because `CInputClose::Analyze` returns `m_iBufferLeft` (`G/input.h:35-41`) and consumes
+  nothing, but a transport that reads the close as "return to plaintext" will refuse the
+  transition it cannot make.
+- **A phase close and a teardown are different events that agree on the wire.** `SetPhase
+  (PHASE_CLOSE)` changes the phase and installs the refusing processor; `DESC::Destroy` is a
+  socket close. Neither sends anything.
+
+The Rewrite keeps both. `ClientLifecycle::close_phase` models `SetPhase(PHASE_CLOSE)` and
+`ClientLifecycle::close` the teardown, `encode_lifecycle_effect` returns no bytes for
+`SetPhase(Close)`, and `HandshakeEffect::Close` maps to `SetPhase(Close)` because every handshake
+refusal in legacy is `d->SetPhase(PHASE_CLOSE)` (`G/input.cpp:138` bad token, `:265` unexpected
+header, `:218` guild-mark login, `:87` in `CInputProcessor::Handshake`). Four committed tests in
+`prodomo/src/handshake_dispatch.rs` asserted the teardown effect for those refusals; they now
+assert `SetPhase(Close)` and that nothing is written.
+
+**The lesson, which is the part worth keeping.** A record's fate is decided by the callee.
+`SetPhase` is not the writer; `Packet` is, and it has a guard the caller cannot see. Reading a
+call site without its callee's first three lines produced one wrong conclusion here. The tell was
+that one change turned several unrelated scenarios red at once, and the committed expectations were
+right. When a change breaks tests that encode legacy behaviour, suspect the change first.
+
+### 189.3 The rest of the Warp is policy only
+
+`prodomo::warp` holds the whole pure policy with 20 source-verified tests: the scale round trip
+and its truncation, `set_warp_location_checked`, `home_warp_location` and `go_home`,
+`judge_warp_set` (the source-ordered refusals, the sort cooldown, the private-map check, the SDB
+decision) and `judge_warp_end` (not-pending, not-allowed, `GoHome`, invalid empire, private
+parent), and the 15-byte `GC_WARP` projection. `WarpEnd` reuses `loading_phase::public_map_index`
+and `map_is_allowed`, so the loading and Warp paths cannot drift apart on the map fold or the
+allow set.
+
+`WarpEnd` deliberately uses `>= 10000` where legacy uses `> 10000` for the instance-map fold. That
+off-by-one is a legacy Defect and the Rewrite matches its sibling checks instead. `GetDungeonForce`
+has its own separate `> 10000` test (`G/char.cpp:7635-7640`) and is not touched by this.
+
+**Not wired, and why.** The in-game path has no handler. `CG_WARP` has no entry point, so
+`WarpEnd` and the `WarpSet` refusals are reached only from quests — and ADR-0004 makes all 51
+quest scripts live, so `pc.warp` (`G/questlua_pc.cpp:235`), `pc.warp_local` (`:308`),
+`pc.warp_to_guild_war_observer_position` (`:441`), `d.new_jump` (`G/questlua_dungeon.cpp:345`) and
+`warp_to_village` (`G/questlua_global.cpp:1067`) are all live call sites that need it. The
+war- and wedding-map login Warp (`G/input_login.cpp:876-885`) is gated on `!test_server`, and both
+legacy (`G/config.cpp:72`) and the Rewrite default to `test_server = true`, so it is off under the
+owner's configuration; it is recorded rather than wired. The monarch `/mto` and `/mtr` commands
+(`G/cmd_general.cpp:2491-2508`) require the player to be their empire's monarch, hold the
+`MI_WARP` castle flag, and pay 10,000, so they are feature-gated and not player-reachable.
+`guild.cpp:1352` `GUILD_SKILL_TELEPORT` (vnum 158) is client-reachable and is a real gameplay
+Warp. The arena login sites (`G/input_login.cpp:839`, `:844`) are provably dead in this
+deployment: `m_mapArenaMap` is filled only by `arena.add_map`, and no script in the owner's corpus
+calls it. `FRemoveIfAttr` and `skill_gwihwan_event` are likewise never instantiated, and map 115
+(`dance_event.gohome`) is in no `MAP_ALLOW` list under `legacy/config`.
+
+ADR-0002 removes the separate auth server, so legacy's `g_bAuthServer` refusal has no Rewrite
+equivalent. The `ENABLE_NEWSTUFF` address override and the retired P2P behaviour are deliberate
+omissions. The legacy login refusal loop's habit of writing `(0, 0)` for an out-of-range empire is
+recorded above rather than reproduced.
+
+The row `sys.world.warp` moves from `missing` to `partial` with this scenario named in its note.
+`gc.warp` stays `codec`: the 15-byte `TPacketGCWarp` in `protocol/src/gc_nested.rs` is already
+implemented and golden-byte pinned, and nothing sends it yet.
+
+### 189.4 Receipt
+
+`cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets --locked --offline -- -D
+warnings`; `cargo test --workspace --all-targets --locked --offline --no-fail-fast`; the `--doc`
+run; and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` all pass,
+with the PostgreSQL-backed tests run against
+`postgres://prodomo:prodomo-test@127.0.0.1:55432/prodomo` and no scratch database left behind.
+The i686 cross compiler was not needed: no width was measured in this slice.

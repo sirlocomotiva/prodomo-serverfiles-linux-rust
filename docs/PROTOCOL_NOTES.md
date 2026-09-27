@@ -960,3 +960,59 @@ Retargeting the constant killed it immediately.
 The lesson generalizes: a text replacement that is expected to change behavior
 must be confirmed to have landed on the *executable* text. Matching a comment
 produces a green run that proves nothing.
+
+### `SetPhase(PHASE_CLOSE)` writes nothing, and the guard is in `Packet`
+
+Reading only `DESC::SetPhase` (`G/desc.cpp:493-501`) suggests a close is the
+loudest event in the descriptor: it builds a `TPacketGCPhase`, calls
+`Packet(&pack, sizeof(pack))`, and only then reaches the `switch` that installs
+`m_inputClose`. A record of `[HEADER_GC_PHASE, PHASE_CLOSE]` seems to follow.
+
+It does not. `SetPhase` assigns `m_iPhase = _phase` on its **first** line
+(`G/desc.cpp:495`), and the write path guards on that same field:
+
+```
+void DESC::Packet(const void* c_pvData, int iSize)   // G/desc.cpp:397
+{
+	assert(iSize > 0);
+	if (m_iPhase == PHASE_CLOSE)
+		return;
+```
+
+So the phase is already `PHASE_CLOSE` when `Packet` is called, the record is
+dropped, and a close is **byte-free**. The guard is not incidental: it is what
+makes a close a terminal write barrier, since a closed descriptor must not
+answer anything that is still in flight.
+
+Two further facts fall out of the same reading and both are load-bearing:
+
+- **`m_bEncrypted` survives the close.** The `PHASE_CLOSE` arm of the `switch`
+  assigns `m_pInputProcessor` and never touches `m_bEncrypted`, which
+  `SetPhase` sets to `true` for `SELECT`, `LOGIN`, `LOADING`, `GAME`, `DEAD`,
+  and `AUTH` (`G/desc.cpp:504-537`). Input decryption is a separate flag from
+  the processor pointer, so a close behind TEA is still a TEA read. It is
+  unobservable, because `CInputClose::Analyze` returns `m_iBufferLeft`
+  (`G/input.h:35-41`), so nothing is consumed; but modelling the close as a
+  return to plaintext is wrong, and a transport that treats "install plaintext"
+  as a transition to a state it has already left will refuse it.
+- **A phase close and a teardown are different events that agree on the wire.**
+  `SetPhase(PHASE_CLOSE)` changes the phase and installs the refusing
+  processor. `DESC::Destroy` (`G/desc.cpp:121-125`) is a socket close. Both send
+  nothing, so a scenario cannot tell them apart from the wire; the distinction
+  belongs in the reducer, where a refusal has to be recorded as having gone
+  through `SetPhase`.
+
+The Rewrite's `ClientLifecycle::close_phase` models the former and
+`ClientLifecycle::close` the latter, and `encode_lifecycle_effect` returns no
+bytes for `SetPhase(Close)`. The handshake refusals keep the simpler
+`LifecycleEffect::Close`, which is byte-equivalent and was the committed
+behaviour.
+
+**The lesson.** A record's fate is decided by the callee, not the caller.
+`SetPhase` is not the only writer; `Packet` is, and it has a guard the caller
+cannot see. Reading a call site without its callee's first three lines produced
+exactly one wrong conclusion in this repository, and the parity suite caught it
+because two existing scenarios had been encoding the correct behaviour all
+along. When a change makes several unrelated tests go red at once, suspect the
+change before the tests.
+

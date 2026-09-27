@@ -8,8 +8,8 @@ mod support;
 use db::accounts::{create_account, AccountError, AccountId, Name, NewAccount};
 use db::credentials::{DeleteCode, Login, NewPassword};
 use db::players::{
-    change_name, create_player, delete_player, load_character, lobby, select_empire, Created,
-    LobbyPlayer, NewPlayer, PlayerDelete,
+    change_name, create_player, delete_player, load_character, lobby, save_position, select_empire,
+    Created, LobbyPlayer, NewPlayer, PlayerDelete,
 };
 use db::sqlx::{self, Row};
 use db::store::Store;
@@ -556,5 +556,73 @@ async fn a_new_name_is_unique_regardless_of_case_and_clears_the_request() {
             change_name(store, who, id, &fresh).await,
             Err(AccountError::NoSuchPlayer(missing)) if missing == id
         ));
+    }
+}
+
+/// The Warp write. A character's stored position is what a login loads, so moving it is the
+/// Warp: the next login must see the new coordinates, and another account's character must not
+/// move when a Warp names a row that account does not hold.
+#[tokio::test]
+async fn a_saved_position_is_the_one_the_next_load_reads() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let hero = created(store, alice, 0, "Hero").await;
+    let other = created(store, bob, 0, "Other").await;
+    let (before_x, before_y) = (459_812, -953_877);
+
+    assert!(
+        save_position(store, alice, hero, 469_300, 964_200)
+            .await
+            .unwrap(),
+        "the row belongs to the account"
+    );
+    let moved = load_character(store, alice, hero).await.unwrap();
+    assert_eq!((moved.x, moved.y), (469_300, 964_200));
+
+    // Another account's character keeps its position: the Warp names an account and an ID.
+    let untouched = load_character(store, bob, other).await.unwrap();
+    assert_eq!((untouched.x, untouched.y), (before_x, before_y));
+
+    // A character ID the account does not hold moves nothing and says so.
+    assert!(!save_position(store, alice, other, 1, 2).await.unwrap());
+    assert_eq!(
+        load_character(store, bob, other).await.unwrap().x,
+        before_x,
+        "another account's row is still where it was"
+    );
+    // An ID inside the column's range that names no row is a miss, not an error.
+    assert!(!save_position(store, alice, 1_000_000, 1, 2).await.unwrap());
+    // An ID above i32::MAX cannot name a row, and it is reported rather than wrapped: a cast
+    // would turn it into a negative ID that could match a real character.
+    for too_wide in [i32::MAX as u32 + 1, u32::MAX] {
+        assert!(matches!(
+            save_position(store, alice, too_wide, 1, 2).await,
+            Err(AccountError::NoSuchPlayer(missing)) if missing == too_wide
+        ));
+    }
+}
+
+/// A Warp can move a character to the origin and to negative coordinates, so neither is
+/// special. Legacy writes both through the same `m_posWarp` fields.
+#[tokio::test]
+async fn a_saved_position_takes_the_origin_and_negative_coordinates() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let alice = account(store, "alice").await;
+    let hero = created(store, alice, 0, "Hero").await;
+
+    for (x, y) in [(0, 0), (-1, -1), (i32::MAX, i32::MIN)] {
+        assert!(
+            save_position(store, alice, hero, x, y).await.unwrap(),
+            "{x},{y}"
+        );
+        let moved = load_character(store, alice, hero).await.unwrap();
+        assert_eq!((moved.x, moved.y), (x, y));
     }
 }

@@ -718,6 +718,21 @@ where
         self.apply(reduction).await
     }
 
+    /// Close the descriptor the way `DESC::SetPhase(PHASE_CLOSE)` does, writing the phase
+    /// record and installing the close input processor.
+    ///
+    /// Use this for a refusal legacy reports with `SetPhase(PHASE_CLOSE)`, not
+    /// [`ClientLifecycle::close`], which is the byte-free socket close. The returned records are
+    /// the ones written, already through the boundary that was in force.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiveError`] when the record cannot be written.
+    pub async fn close_phase(&mut self) -> Result<Vec<Vec<u8>>, LiveError> {
+        let reduction = self.lifecycle.close_phase();
+        self.apply(reduction).await
+    }
+
     /// Install the client-specific key pair for `SetSecurityKey`.
     ///
     /// Legacy performs this after the phase has already selected TEA, so the
@@ -790,6 +805,56 @@ mod tests {
 
     fn handshake_frame() -> Vec<u8> {
         CgInboundHandshake::new(CgHandshakeHeader::Handshake, TOKEN, NOW, 0).encode()
+    }
+
+    /// A close phase and a teardown both leave the socket without a record, because legacy's
+    /// `SetPhase(PHASE_CLOSE)` builds its `GC_PHASE` record and then `DESC::Packet` drops it
+    /// (`G/desc.cpp:495-500` against `:397-401`). They differ in the phase change, which is
+    /// what the refusal paths in `main` need to record where it happened.
+    #[tokio::test]
+    async fn a_close_phase_is_silent_and_leaves_the_boundary_alone() {
+        let (mut first, _peer) = session();
+        let written = first.close_phase().await.unwrap();
+        assert!(
+            written.is_empty(),
+            "the descriptor is write-silent from the moment its phase becomes PHASE_CLOSE"
+        );
+        assert_eq!(first.phase(), ClientPhase::Close);
+        assert_eq!(
+            first.cipher_mode(),
+            DescriptorCryptoMode::Plaintext,
+            "the handshake phase was plaintext and the close does not change that"
+        );
+
+        let (mut other, _other_peer) = session();
+        let closed = other.apply((*other.lifecycle()).close()).await.unwrap();
+        assert!(
+            closed.is_empty(),
+            "DESC::Destroy writes nothing, so the socket must carry no record"
+        );
+    }
+
+    /// A close behind TEA keeps TEA: the `PHASE_CLOSE` arm assigns `m_pInputProcessor` and
+    /// never touches `m_bEncrypted` (`G/desc.cpp:504-507` against `:520-537`). Modelling it
+    /// as a return to plaintext would be a Divergence, and one the transport used to reject.
+    #[tokio::test]
+    async fn a_close_phase_after_the_handshake_keeps_tea_installed() {
+        let (mut session, mut peer) = session();
+        peer.write_all(&handshake_frame()).await.unwrap();
+        session.step(NOW).await.unwrap();
+        assert_eq!(
+            session.cipher_mode(),
+            DescriptorCryptoMode::LegacyTeaDefault
+        );
+
+        let written = session.close_phase().await.unwrap();
+        assert!(written.is_empty(), "still no record, behind TEA as well");
+        assert_eq!(
+            session.cipher_mode(),
+            DescriptorCryptoMode::LegacyTeaDefault,
+            "m_bEncrypted survives the close phase"
+        );
+        assert_eq!(session.phase(), ClientPhase::Close);
     }
 
     /// The headline rule: `GC_PHASE` is written in **plaintext** and TEA is

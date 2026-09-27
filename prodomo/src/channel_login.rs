@@ -39,6 +39,20 @@ pub const EMPIRE_START: [(i32, i32); 4] = [
     (969_600, 278_400),
 ];
 
+/// Legacy `g_start_map` (`G/start_position.cpp:18-24`): the map an empire starts on, and the
+/// map `EMPIRE_START_MAP` hands to `SetWarpLocation` when a character must be sent home.
+///
+/// This is a **separate** table from [`EMPIRE_START`]. `g_start_position` and `g_start_map` are
+/// two independent arrays in the legacy source, and nothing in the source checks that they
+/// agree, so the Rewrite keeps them separate and `each_empire_starts_on_the_map_that_holds_its
+/// _position` is the test that ties them together.
+pub const EMPIRE_START_MAP: [i32; 4] = [
+    0,  // reserved
+    1,  // Arirang
+    21, // Balar
+    41, // Shinjo
+];
+
 /// A reason the Channel login refuses `LOGIN2`. Each is sent as `HEADER_GC_LOGIN_FAILURE`, and
 /// the descriptor stays open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -377,6 +391,14 @@ mod tests {
     use db::accounts::AccountId;
     use gamedata::map_atlas::MapRegion;
 
+    /// The owner's real map data, so the `g_start_map` agreement is checked against the maps
+    /// the server actually serves rather than against fixtures that could drift.
+    fn real_atlas() -> MapAtlas {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe/map");
+        MapAtlas::load(&dir).expect("the legacy map directory parses")
+    }
+
     fn login(text: &str) -> Login {
         Login::new(text).unwrap()
     }
@@ -514,6 +536,27 @@ mod tests {
             zero.get(1),
             Some((i32::from_le_bytes([127, 0, 0, 1]), 30003))
         );
+    }
+
+    /// `g_start_map` and `g_start_position` are two independent arrays in the legacy source and
+    /// nothing there checks that they agree, so the Rewrite pins the agreement itself. The
+    /// check is not a tautology: the constants are the hard-coded legacy numbers and the
+    /// regions come from the map data, so a wrong `g_start_map` value fails it.
+    #[test]
+    fn each_empire_starts_on_the_map_that_holds_its_position() {
+        let atlas = real_atlas();
+        assert_eq!(EMPIRE_START_MAP, [0, 1, 21, 41], "g_start_map");
+        for empire in 1..=3usize {
+            let (x, y) = EMPIRE_START[empire];
+            let found = atlas
+                .index_at(x, y)
+                .unwrap_or_else(|| panic!("empire {empire} start {x},{y} is on no map"));
+            assert_eq!(
+                found, EMPIRE_START_MAP[empire],
+                "empire {empire} starts on map {found}, not {}",
+                EMPIRE_START_MAP[empire]
+            );
+        }
     }
 
     #[test]

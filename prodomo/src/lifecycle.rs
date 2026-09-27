@@ -432,6 +432,45 @@ impl ClientLifecycle {
             effects: vec![LifecycleEffect::Close],
         }
     }
+
+    /// `DESC::SetPhase(PHASE_CLOSE)`, as opposed to [`ClientLifecycle::close`].
+    ///
+    /// The two are not the same event and they are not interchangeable. `close` is a socket
+    /// teardown. `SetPhase(PHASE_CLOSE)` assigns the phase and installs the close input
+    /// processor, and it is **also** byte-free: `SetPhase` sets `m_iPhase` before it calls
+    /// `Packet`, and `Packet` returns immediately for `PHASE_CLOSE`
+    /// (`G/desc.cpp:495-500` and `:397-401`). Use `close_phase` for a refusal legacy reports
+    /// with `SetPhase(PHASE_CLOSE)`, so the phase change is recorded where it happened.
+    ///
+    /// The input boundary does not change. The `PHASE_CLOSE` arm of the `switch` assigns
+    /// `m_pInputProcessor` and never touches `m_bEncrypted` (`G/desc.cpp:504-507` against
+    /// `:520-537`), so input decryption keeps whatever it was doing. The close processor is
+    /// `CInputClose`, whose `Analyze` returns `m_iBufferLeft` (`G/input.h:35-41`) and therefore
+    /// consumes nothing, which is how the descriptor learns to close.
+    ///
+    /// Nothing is written, so the two boundaries are the same value and the caller cannot tell
+    /// them apart. They are kept separate so the reduction still says what it did.
+    ///
+    /// Idempotent: closing an already-closed lifecycle produces no effects.
+    #[must_use]
+    pub fn close_phase(self) -> LifecycleReduction {
+        if self.phase == ClientPhase::Close {
+            return no_op(self);
+        }
+        let boundary = self.input_boundary();
+        LifecycleReduction {
+            state: Self {
+                phase: ClientPhase::Close,
+                handshake: self.handshake.close(),
+                heartbeat: self.heartbeat,
+            },
+            effects: vec![LifecycleEffect::SetPhase {
+                phase: ClientPhase::Close,
+                output_boundary: boundary,
+                input_boundary: boundary,
+            }],
+        }
+    }
 }
 
 /// State and source-ordered effects returned by one lifecycle event.
@@ -496,7 +535,18 @@ fn map_handshake_effect(
             delta: *delta,
         },
         HandshakeEffect::SendTimeSyncAck => LifecycleEffect::SendTimeSyncAck,
-        HandshakeEffect::Close => LifecycleEffect::Close,
+        // `HandshakeEffect::Close` is legacy's `SetPhase(PHASE_CLOSE)`, not a socket teardown,
+        // so it is a phase change; the teardown is [`LifecycleEffect::Close`], which
+        // [`ClientLifecycle::close`] emits. The phase change is silent, because `SetPhase`
+        // assigns `m_iPhase` before it calls `Packet` and `Packet` returns at once for
+        // `PHASE_CLOSE` (`G/desc.cpp:495-500` against `:397-401`). It leaves the input
+        // boundary as it found it, because the `PHASE_CLOSE` arm assigns `m_pInputProcessor`
+        // and never touches `m_bEncrypted` (`G/desc.cpp:504-507`).
+        HandshakeEffect::Close => LifecycleEffect::SetPhase {
+            phase: ClientPhase::Close,
+            output_boundary,
+            input_boundary: output_boundary,
+        },
     }
 }
 
@@ -513,11 +563,49 @@ fn map_heartbeat_effect(effect: HeartbeatEffect) -> LifecycleEffect {
 
 /// Project one lifecycle effect into its raw legacy wire record.
 ///
-/// State-only effects and close produce no bytes. The function does not merge
-/// records or apply a socket/encryption boundary.
+/// State-only effects and a bare [`LifecycleEffect::Close`] produce no bytes. A
+/// [`LifecycleEffect::SetPhase`] produces its `GC_PHASE` record for every phase **except**
+/// `PHASE_CLOSE`.
+///
+/// ```text
+/// void DESC::SetPhase(int _phase)
+/// {
+///     m_iPhase = _phase;                      // assigned before the write
+///     TPacketGCPhase pack;
+///     pack.header = HEADER_GC_PHASE;
+///     pack.phase = _phase;
+///     Packet(&pack, sizeof(TPacketGCPhase));  // and the write path guards on that field
+///     switch (m_iPhase)
+///     {
+///         case PHASE_CLOSE:
+///             m_pInputProcessor = &m_inputClose;   // m_bEncrypted is not touched
+///             break;
+/// ```
+///
+/// The `Packet` side of the pair is what decides it:
+///
+/// ```text
+/// void DESC::Packet(const void* c_pvData, int iSize)   // G/desc.cpp:397
+/// {
+///     assert(iSize > 0);
+///     if (m_iPhase == PHASE_CLOSE)
+///         return;
+/// ```
+///
+/// So the record is built and then dropped, and a close is byte-free. That is the whole reason:
+/// a closed descriptor must answer nothing, including anything still in flight. The two
+/// effects remain distinct because `SetPhase(PHASE_CLOSE)` and a teardown are different events
+/// that happen to agree on the wire, and a refusal has to be recorded as having gone through
+/// `SetPhase`.
+/// The function does not merge records or apply a socket/encryption boundary.
 #[must_use]
 pub fn encode_lifecycle_effect(effect: &LifecycleEffect) -> Vec<u8> {
     match effect {
+        // `SetPhase` assigns `m_iPhase` on its first line and only then calls `Packet`, and
+        // `Packet` returns at once for `PHASE_CLOSE` (`G/desc.cpp:495-500` and `:397-401`). So
+        // the close record is built and then dropped, and the phase close is byte-free. This
+        // is not an omission in the adapter: a descriptor is write-silent from the moment its
+        // phase becomes `PHASE_CLOSE`.
         LifecycleEffect::SetPhase { phase, .. } if *phase == ClientPhase::Close => Vec::new(),
         LifecycleEffect::SetPhase { phase, .. } => GcPhase::new(phase.legacy_value()).encode(),
         LifecycleEffect::SendHandshake { token, time, delta } => {
@@ -542,6 +630,25 @@ pub fn encode_lifecycle_effects(effects: &[LifecycleEffect]) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Legacy's `SetPhase(PHASE_CLOSE)`, which is a phase change with **no** record: it assigns
+    /// `m_iPhase` and then calls `Packet`, which returns at once for `PHASE_CLOSE`
+    /// (`G/desc.cpp:495-500` and `:397-401`).
+    fn close_phase(boundary: LifecycleInputBoundary) -> LifecycleEffect {
+        LifecycleEffect::SetPhase {
+            phase: ClientPhase::Close,
+            output_boundary: boundary,
+            input_boundary: boundary,
+        }
+    }
+
+    /// The boundary a close transition leaves installed.
+    fn input_boundary_from(effects: &[LifecycleEffect]) -> LifecycleInputBoundary {
+        match effects {
+            [LifecycleEffect::SetPhase { input_boundary, .. }] => *input_boundary,
+            other => panic!("expected one SetPhase effect, got {other:?}"),
+        }
+    }
     use crate::handshake::HANDSHAKE_RETRY_LIMIT;
     use protocol::cg_handshake::CgHandshakeHeader;
 
@@ -714,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn post_handshake_wrong_token_closes_without_wire_bytes() {
+    fn a_post_handshake_wrong_token_closes_through_the_close_phase() {
         let start = ClientLifecycle::start(TOKEN, HandshakeServerKind::Game, 100);
         let login = start
             .state
@@ -729,12 +836,27 @@ mod tests {
             PostHandshakePhase::Dead,
         ] {
             let phase_state = login.transition_to(target).unwrap().state;
+            let boundary = phase_state.input_boundary();
             let mut bad = packet(CgHandshakeHeader::TimeSync, 2_000, 0);
             bad.token = TOKEN ^ 1;
             let result = phase_state.on_handshake(bad, 2_010).unwrap();
             assert_eq!(result.state.phase(), ClientPhase::Close);
-            assert_eq!(result.effects, vec![LifecycleEffect::Close]);
-            assert!(encode_lifecycle_effects(&result.effects).is_empty());
+            let effects = result.effects;
+            assert_eq!(
+                effects,
+                vec![close_phase(boundary)],
+                "the close keeps the boundary {target:?} had in force"
+            );
+            assert!(
+                encode_lifecycle_effects(&effects).is_empty(),
+                "the descriptor is write-silent from the moment its phase becomes PHASE_CLOSE, \
+                 so the {target:?} close carries no record"
+            );
+            assert_eq!(
+                input_boundary_from(&effects),
+                boundary,
+                "SetPhase(PHASE_CLOSE) installs a processor and never touches m_bEncrypted"
+            );
         }
     }
 
@@ -849,6 +971,82 @@ mod tests {
         assert!(encode_lifecycle_effects(&close.effects).is_empty());
     }
 
+    /// A phase close and a teardown are different events that agree on the wire: neither
+    /// sends anything, because `SetPhase(PHASE_CLOSE)` is dropped by `Packet`. They are kept
+    /// apart so a refusal can be recorded as having gone through `SetPhase`.
+    #[test]
+    fn a_phase_close_and_a_teardown_both_end_silently() {
+        let start = ClientLifecycle::start(TOKEN, HandshakeServerKind::Game, 100);
+        let login = start
+            .state
+            .on_handshake(packet(CgHandshakeHeader::Handshake, 100, 0), 100)
+            .unwrap()
+            .state;
+
+        let teardown = login.close();
+        assert_eq!(teardown.state.phase(), ClientPhase::Close);
+        assert_eq!(teardown.effects, vec![LifecycleEffect::Close]);
+        assert!(
+            encode_lifecycle_effects(&teardown.effects).is_empty(),
+            "DESC::Destroy writes nothing"
+        );
+
+        let phased = login.close_phase();
+        assert_eq!(phased.state.phase(), ClientPhase::Close);
+        assert_eq!(
+            phased.effects,
+            vec![close_phase(LifecycleInputBoundary::LegacyTea)]
+        );
+        assert!(
+            encode_lifecycle_effects(&phased.effects).is_empty(),
+            "SetPhase builds the GC_PHASE(0) record and Packet drops it, because m_iPhase is \
+             already PHASE_CLOSE by then (G/desc.cpp:495-500 against :397-401)"
+        );
+        assert_eq!(
+            input_boundary_from(&phased.effects),
+            LifecycleInputBoundary::LegacyTea,
+            "the PHASE_CLOSE arm assigns m_pInputProcessor and leaves m_bEncrypted alone"
+        );
+    }
+
+    /// A close keeps the input boundary the phase had. `SetPhase(PHASE_CLOSE)` assigns
+    /// `m_pInputProcessor` and never touches `m_bEncrypted` (`G/desc.cpp:504-507` against
+    /// `:520-537`), so a close behind TEA is still a TEA read.
+    #[test]
+    fn a_close_keeps_the_boundary_the_phase_had() {
+        let start = ClientLifecycle::start(TOKEN, HandshakeServerKind::Game, 100);
+        let login = start
+            .state
+            .on_handshake(packet(CgHandshakeHeader::Handshake, 100, 0), 100)
+            .unwrap()
+            .state;
+        for target in [
+            PostHandshakePhase::Select,
+            PostHandshakePhase::Loading,
+            PostHandshakePhase::Game,
+            PostHandshakePhase::Dead,
+        ] {
+            let state = login.transition_to(target).unwrap().state;
+            let expected = state.input_boundary();
+            let boundary = expected;
+            let effects = state.close_phase().effects;
+            assert_eq!(effects, vec![close_phase(boundary)], "{target:?}");
+        }
+    }
+
+    /// Closing twice writes the record once. Legacy's `SetPhase` is unconditional, but a
+    /// descriptor that has already stopped reading cannot receive a second one, and the
+    /// reducer must not go behind the socket.
+    #[test]
+    fn a_second_close_phase_writes_nothing() {
+        let start = ClientLifecycle::start(TOKEN, HandshakeServerKind::Game, 100);
+        let once = start.state.close_phase();
+        let twice = once.state.close_phase();
+        assert_eq!(twice.state.phase(), ClientPhase::Close);
+        assert!(twice.effects.is_empty());
+        assert!(encode_lifecycle_effects(&twice.effects).is_empty());
+    }
+
     #[test]
     fn close_is_terminal_and_blocks_input_but_ticks_are_inert() {
         let start = ClientLifecycle::start(TOKEN, HandshakeServerKind::Game, 100);
@@ -867,14 +1065,23 @@ mod tests {
     }
 
     #[test]
-    fn invalid_handshake_closes_without_wire_bytes() {
+    fn an_invalid_handshake_closes_through_the_close_phase() {
         let start = ClientLifecycle::start(TOKEN, HandshakeServerKind::Game, 100);
         let mut bad = packet(CgHandshakeHeader::Handshake, 100, 0);
         bad.token = TOKEN ^ 1;
         let result = start.state.on_handshake(bad, 100).unwrap();
         assert_eq!(result.state.phase(), ClientPhase::Close);
-        assert_eq!(result.effects, vec![LifecycleEffect::Close]);
-        assert!(encode_lifecycle_effects(&result.effects).is_empty());
+        let effects = result.effects;
+        let boundary = LifecycleInputBoundary::Plaintext;
+        assert_eq!(
+            effects,
+            vec![close_phase(boundary)],
+            "the phase changes, the socket is quiet"
+        );
+        assert!(
+            encode_lifecycle_effects(&effects).is_empty(),
+            "a bad token closes without a record"
+        );
     }
 
     #[test]

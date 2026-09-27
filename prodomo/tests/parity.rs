@@ -55,6 +55,7 @@ const AUTH_SUCCESS_LEN: usize = 6;
 
 /// `HEADER_GC_PHASE` (`game/packet.h:98`).
 const GC_PHASE: u8 = 0xfd;
+
 /// `HEADER_GC_HANDSHAKE` (`game/packet.h:100`) and `HEADER_CG_HANDSHAKE`.
 const HANDSHAKE: u8 = 0xff;
 /// `HEADER_GC_TIME_SYNC` and `HEADER_CG_TIME_SYNC` (`game/packet.h:10`, `:97`).
@@ -284,7 +285,9 @@ fn the_handshake_is_sent_on_accept_and_selects_the_phase() {
         let (_, quiet) = client.drain(QUIET_WINDOW);
         assert_eq!(quiet, Quiet::Open, "{address} closed after the handshake");
 
-        // Controls: each descriptor has its own token, and a wrong one closes without a record.
+        // Controls: each descriptor has its own token, and a wrong one closes without a
+        // record. `SetPhase(PHASE_CLOSE)` assigns the phase before it calls `Packet`, and
+        // `Packet` returns at once for that phase, so the record it built is dropped.
         let (mut other, second) = accepted(address);
         assert_ne!(second.token, first.token);
         let mut wrong = second.answer(HANDSHAKE);
@@ -330,7 +333,11 @@ fn a_mistimed_handshake_is_retried_until_the_limit() {
     let mut late = first.answer(HANDSHAKE);
     late.time = first.time.wrapping_sub(gap);
     client.send(&late.bytes());
-    assert_eq!(client.expect_closed(), Vec::<u8>::new());
+    assert_eq!(
+        client.expect_closed(),
+        Vec::<u8>::new(),
+        "the retry limit closes silently: Packet drops the record once the phase is PHASE_CLOSE"
+    );
 }
 
 /// `cg.auth.pong`, `cg.auth.handshake`: after the phase record the input is TEA under the setup
@@ -2047,7 +2054,7 @@ fn an_empty_slot_closes_and_an_index_past_the_last_is_ignored() {
 /// points, and skill-level records that follow it. Slot 3 of alice stands on map 2, which no
 /// Channel in the default configuration hosts.
 #[test]
-fn a_map_the_channel_does_not_host_closes_after_the_records_before_the_test() {
+fn a_map_the_channel_does_not_host_warps_home_and_closes_silently_after_the_records() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
@@ -2073,16 +2080,37 @@ fn a_map_the_channel_does_not_host_closes_after_the_records_before_the_test() {
     let main = keyed.read_game();
     assert_eq!(main[0], GC_MAIN_CHARACTER2_EMPIRE);
     assert_eq!(&main[7..32], &name_field(b"Delta"), "szName");
+    // The refusal is `SetPhase(PHASE_CLOSE)`, and it is silent: the phase is assigned before
+    // `Packet` is called, and `Packet` returns at once for `PHASE_CLOSE`, so the `GC_PHASE`
+    // record it built is dropped. No gold, points, or skill level either, because
+    // `PlayerLoad` returns straight after the call.
     assert_eq!(
         keyed.read_game_or_close(),
         None,
-        "no gold, points, or skill-level record after the map test"
+        "the descriptor closes without a record after the map test"
     );
-    // The character is untouched: the refusal sets a warp location in legacy, and the Rewrite
-    // has no world to hold one.
+    // The character was moved home in the store. Legacy sets a pending warp location and lets
+    // the save on close write it (`G/input_db.cpp:432-434` then `G/char.cpp:1551-1565`); ADR-0003
+    // makes that one transaction, and this is the statement that performs it. No `GC_WARP` is
+    // sent, so the client learns nothing about the move except the close.
     check(
         &database,
-        "(SELECT x FROM player WHERE name = 'Delta') = 60000",
+        "(SELECT x FROM player WHERE name = 'Delta') = 469300",
+    );
+    check(
+        &database,
+        "(SELECT y FROM player WHERE name = 'Delta') = 964200",
+    );
+    // And the move is committed, so the next login loads the character on its home map and the
+    // Channel accepts it.
+    let (mut again, _empire, _list) = select_screen(&server, b"alice");
+    again.send_record(&client_select(3));
+    assert_eq!(again.read_game(), [GC_PHASE, PHASE_LOADING]);
+    assert_eq!(again.read_game(), [GC_ENTITY, 3, 0]);
+    let main = again.read_game();
+    assert_eq!(
+        main[0], GC_MAIN_CHARACTER2_EMPIRE,
+        "the load is no longer refused"
     );
 }
 

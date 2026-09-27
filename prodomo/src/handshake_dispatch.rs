@@ -304,6 +304,20 @@ fn expected_input_boundary(phase: ClientPhase) -> HandshakeInputBoundary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every handshake refusal in legacy is `d->SetPhase(PHASE_CLOSE)`
+    /// (`G/input.cpp:138` for a bad token, `:265` for an unexpected header, `:218` for a
+    /// guild-mark login it cannot serve, `:87` in `CInputProcessor::Handshake`), so the effect
+    /// is a phase change and not a teardown. It is byte-free either way, because `SetPhase`
+    /// assigns `m_iPhase` before it calls `Packet` and `Packet` returns at once for
+    /// `PHASE_CLOSE` (`G/desc.cpp:495-500` against `:397-401`).
+    fn set_close(boundary: LifecycleInputBoundary) -> LifecycleEffect {
+        LifecycleEffect::SetPhase {
+            phase: ClientPhase::Close,
+            output_boundary: boundary,
+            input_boundary: boundary,
+        }
+    }
     use crate::handshake::{HandshakeServerKind, HANDSHAKE_RETRY_LIMIT};
     use crate::lifecycle::{
         encode_lifecycle_effects, LifecycleEffect, LifecycleInputBoundary, PostHandshakePhase,
@@ -420,8 +434,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.reduction.state.phase(), ClientPhase::Close);
-        assert_eq!(result.reduction.effects, vec![LifecycleEffect::Close]);
-        assert!(encode_lifecycle_effects(&result.reduction.effects).is_empty());
+        let effects = result.reduction.effects;
+        assert_eq!(effects, vec![set_close(LifecycleInputBoundary::Plaintext)]);
+        assert!(
+            encode_lifecycle_effects(&effects).is_empty(),
+            "a bad token is silent"
+        );
     }
 
     #[test]
@@ -487,7 +505,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(closed.reduction.state.phase(), ClientPhase::Close);
-        assert_eq!(closed.reduction.effects, vec![LifecycleEffect::Close]);
+        let effects = closed.reduction.effects;
+        assert_eq!(effects, vec![set_close(LifecycleInputBoundary::Plaintext)]);
+        assert!(
+            encode_lifecycle_effects(&effects).is_empty(),
+            "the retry limit closes silently, like every other handshake refusal"
+        );
     }
 
     #[test]
@@ -520,8 +543,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rejected.reduction.state.phase(), ClientPhase::Close);
-        assert_eq!(rejected.reduction.effects, vec![LifecycleEffect::Close]);
-        assert!(encode_lifecycle_effects(&rejected.reduction.effects).is_empty());
+        let effects = rejected.reduction.effects;
+        assert_eq!(
+            effects,
+            vec![set_close(LifecycleInputBoundary::LegacyTea)],
+            "the close keeps the TEA the descriptor had"
+        );
+        assert!(encode_lifecycle_effects(&effects).is_empty());
     }
 
     #[test]
@@ -728,7 +756,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.reduction.state.phase(), ClientPhase::Close);
-        assert_eq!(result.reduction.effects, vec![LifecycleEffect::Close]);
-        assert!(encode_lifecycle_effects(&result.reduction.effects).is_empty());
+        let effects = result.reduction.effects;
+        assert_eq!(effects, vec![set_close(LifecycleInputBoundary::Plaintext)]);
+        assert!(encode_lifecycle_effects(&effects).is_empty());
     }
 }

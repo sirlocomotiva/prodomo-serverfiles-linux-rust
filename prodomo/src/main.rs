@@ -1456,17 +1456,7 @@ where
             )
         });
         if !allowed {
-            // Legacy sets the character's warp location to the empire start and closes. The
-            // Rewrite has no world to hold a warp location, so the location is not set: the
-            // character is left exactly as stored and the descriptor closes.
-            warn!(
-                %addr,
-                player,
-                map = ?map_index,
-                channel = seat.number,
-                "Entering map is not allowed on this Channel; closing",
-            );
-            return Err(LiveError::Phase(LifecycleError::Closed));
+            return refuse_map(session, addr, context, seat, &character, account, map_index).await;
         }
         send_all(session, &burst.after_map_test).await
     };
@@ -1479,6 +1469,82 @@ where
     // thing the game phase does with it is join the client set.
     held.map = context.atlas.index_at(character.x, character.y);
     true
+}
+
+/// The loading map test failed: move the character home in the store and close, the way
+/// `CInputDB::PlayerLoad` does (`G/input_db.cpp:426-436`).
+///
+/// Two separate things happen, and only one of them is observable on the wire:
+///
+/// 1. `SetPhase(PHASE_CLOSE)` is **silent**. It assigns the phase before it calls `Packet`, and
+///    `Packet` returns at once for `PHASE_CLOSE` (`G/desc.cpp:495-500` against `:397-401`), so
+///    the record it built is dropped. The client sees the close and nothing else.
+/// 2. The pending warp location is what `CHARACTER::Save` writes instead of the live position
+///    (`G/char.cpp:1551-1565`), and the save on close is what persists it
+///    (`G/char.cpp:1784-1788`). No `GC_WARP` is sent on this path; the move happens entirely in
+///    the store, and the next login loads the home map.
+///
+/// ADR-0003 makes a Warp one transaction, so the position write is the same event as the
+/// refusal and happens here rather than in a later background save.
+///
+/// # Errors
+///
+/// Returns [`LiveError`] when the close record cannot be written. A position that cannot be
+/// stored is logged and the descriptor still closes, because the refusal has to close either
+/// way; leaving the character where it is makes the next login refuse the same map again, which
+/// is the legacy Defect recorded below.
+async fn refuse_map<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    seat: &ChannelSeat<'_>,
+    character: &db::players::Character,
+    account: &SelectAccount,
+    map_index: Option<i32>,
+) -> Result<(), LiveError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let player = character.id;
+    match prodomo::warp::home_warp_location(account.lobby.empire) {
+        Some(target) => {
+            if let Err(error) =
+                db::players::save_position(&context.store, account.id, player, target.x, target.y)
+                    .await
+            {
+                warn!(%addr, player, %error, "Could not store the Warp position");
+            } else {
+                info!(
+                    %addr,
+                    player,
+                    channel = seat.number,
+                    map = ?map_index,
+                    to_map = target.map_index,
+                    x = target.x,
+                    y = target.y,
+                    "Entering map is not allowed on this Channel; warping home and closing \
+                     silently",
+                );
+            }
+        }
+        None => {
+            // Empire 0 or above 3 has no start, so there is nowhere to move the character to and
+            // the row is left as it is. This is a legacy Defect: `EMPIRE_START_X` and
+            // `EMPIRE_START_Y` are `((DWORD []) {0, ...})[ch->GetEmpire()]`, so an out-of-range
+            // empire reads past the array; and legacy stores `(0, 0)`, which `Save` treats as
+            // no pending warp, so the next login refuses the same map again.
+            warn!(
+                %addr,
+                player,
+                channel = seat.number,
+                map = ?map_index,
+                "Entering map is not allowed on this Channel and the account has no empire \
+                 start; closing without moving the character",
+            );
+        }
+    }
+    session.close_phase().await?;
+    Err(LiveError::Phase(LifecycleError::Closed))
 }
 
 /// `CG_ENTER_GAME`: send the enter-game burst; `false` when the connection must close.

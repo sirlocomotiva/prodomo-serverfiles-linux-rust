@@ -325,6 +325,41 @@ pub async fn delete_player(
     Ok(archived == 1)
 }
 
+/// Write a character's stored position, which is what a Warp commits.
+///
+/// Legacy does this in `CHARACTER::Save` (`G/char.cpp:1551-1565`), which prefers a pending
+/// `m_posWarp` over the live position and then writes the row through the retired DB process.
+/// ADR-0003 makes every Transfer commit in the one transaction that performs it, and this is
+/// that transaction: the caller's Warp and this write are the same event, so a character that
+/// is refused a map is moved in the same statement that moves it.
+///
+/// Returns `false` when the account holds no such character, so a caller cannot report a Warp
+/// that did not reach a row.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchPlayer`] for a player ID above `i32::MAX`. The column is
+/// `integer` and a `u32` above `i32::MAX` cannot name a row, so this is reported rather than
+/// converted: `as i32` would wrap to a negative ID that could match a real character. Returns
+/// [`AccountError::Database`] otherwise. Every value is a bound parameter; no SQL is formatted.
+pub async fn save_position(
+    store: &Store,
+    account: AccountId,
+    player: u32,
+    x: i32,
+    y: i32,
+) -> Result<bool, AccountError> {
+    let player_id = i32::try_from(player).map_err(|_| AccountError::NoSuchPlayer(player))?;
+    let updated = sqlx::query("UPDATE player SET x = $3, y = $4 WHERE account_id = $1 AND id = $2")
+        .bind(account.to_column()?)
+        .bind(player_id)
+        .bind(x)
+        .bind(y)
+        .execute(store.pool())
+        .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
 /// Choose the account's empire and move its characters to that empire's start. Returns
 /// `false`, and changes nothing, when the account already has an empire and a character.
 ///

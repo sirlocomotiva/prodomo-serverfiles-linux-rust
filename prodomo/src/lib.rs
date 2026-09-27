@@ -67,6 +67,7 @@ pub mod operator;
 
 /// Pure, injected policy for the legacy sync-position gameplay action.
 pub mod sync_position;
+pub mod warp;
 
 /// Process-level shutdown and connection-acceptance flags.
 pub struct ServerState {
