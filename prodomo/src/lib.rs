@@ -69,6 +69,7 @@ pub mod listeners;
 pub mod item_grant;
 pub mod item_persist;
 pub mod operator;
+pub mod operator_console;
 
 /// When a character's row is written, as legacy's save cycle and disconnect decide it.
 pub mod save;

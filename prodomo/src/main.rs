@@ -2338,6 +2338,69 @@ enum AcceptLoopExit {
     Signal,
     GameLoop(GameLoopTerminal),
 }
+/// What the world is given once the store is ready.
+///
+/// These two travel together because they are the same moment: the item id allocator is
+/// what makes a grant possible, and the Operator console is how a grant is asked for, so
+/// one installed without the other gives an Operator a console that refuses everything.
+struct WorldStartup {
+    /// The span the world's allocator hands ids out of.
+    item_id_span: ItemIdSpan,
+    /// The named pipe the Operator console reads, or `None` to leave the console off.
+    console_path: Option<PathBuf>,
+}
+
+/// Read the world's readiness inputs out of the configuration.
+fn world_startup(config: &ServerConfig) -> WorldStartup {
+    WorldStartup {
+        item_id_span: config.game.item_id_range,
+        console_path: config.game.operator_console.clone(),
+    }
+}
+
+/// Create the Operator console's pipe and start its reader, or report why not.
+///
+/// The pipe is created here, in the accept loop, rather than inside the reader task, so a
+/// path this server cannot create is one line at startup instead of a reader that retries
+/// forever without saying why. The `None` return is the real off switch: the first draft
+/// logged the failure and started the reader anyway, so the message said "the console will
+/// stay off" while the console was very much on, pointed at a regular file whose contents
+/// the tail loop then replayed for as long as the server ran.
+async fn start_operator_console(
+    path: &Path,
+    store: &Store,
+    game_loop: &mut GameLoopHandle,
+    context: &ServerContext,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if let Err(error) = prodomo::operator_console::prepare(path).await {
+        // Not fatal, and the console really does stay off. Clients matter more than a
+        // console, and a server that refuses to start over an Operator's pipe trades a
+        // convenience for an outage.
+        error!(
+            %error,
+            path = %path.display(),
+            "Operator console is configured but its pipe is unusable; the console will \
+             stay off"
+        );
+        return None;
+    }
+    info!(path = %path.display(), "Operator console pipe ready");
+
+    // The path, the store, the controller, and the shutdown receiver are all taken by
+    // value, so the task owns everything it reads and borrows nothing from this frame.
+    let path = path.to_path_buf();
+    let store = store.clone();
+    let controller = game_loop.controller();
+    let shutdown = context.shutdown_tx.subscribe();
+    Some(tokio::spawn(async move {
+        prodomo::operator_console::run(
+            &path,
+            prodomo::operator_console::ConsoleContext { store, controller },
+            shutdown,
+        )
+        .await;
+    }))
+}
 
 /// Bring the store's schema up to date, retrying while the server is unreachable.
 ///
@@ -2370,7 +2433,7 @@ async fn run_accept_loop(
     shutdown_signal: ShutdownSignal,
     store: &Store,
     ready_gate: &ReadyGate,
-    item_id_span: ItemIdSpan,
+    startup: &WorldStartup,
 ) -> Result<AcceptLoopExit, Box<dyn Error>> {
     // Boxed and pinned once, not per `select!` iteration: the wait future owns
     // the signal streams, so recreating it each pass would drop them and lose a
@@ -2380,15 +2443,18 @@ async fn run_accept_loop(
     // the retry pause from the beginning after every refused client.
     let mut store_ready = Box::pin(prepare_store(store));
     let mut ready = false;
+    // Background tasks started by this loop, so the console is shut down with the
+    // server rather than left reading a pipe nobody owns.
+    let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-    loop {
+    let exit = 'run: loop {
         tokio::select! {
             signal_result = &mut shutdown => {
                 signal_result?;
-                return Ok(AcceptLoopExit::Signal);
+                break 'run AcceptLoopExit::Signal;
             }
             terminal = game_loop.wait_for_terminal() => {
-                return Ok(AcceptLoopExit::GameLoop(terminal?));
+                break 'run AcceptLoopExit::GameLoop(terminal?);
             }
             prepared = &mut store_ready, if !ready => {
                 prepared?;
@@ -2398,10 +2464,29 @@ async fn run_accept_loop(
                 // readable. Opening the gate without it would admit clients onto a
                 // world that refuses every grant, which is the failure this ordering
                 // exists to prevent.
-                install_item_ids(game_loop, store, item_id_span).await?;
+                install_item_ids(game_loop, store, startup.item_id_span).await?;
                 ready = true;
                 ready_gate.open();
                 info!("Accepting clients");
+
+                // The Operator console starts HERE, and not earlier, for the same
+                // reason the gate does not open earlier: the world's item id allocator
+                // is installed one line above, and a console that accepted a grant
+                // before it would refuse every one of them with `IdsExhausted` or a
+                // missing allocator. A console that is up but refuses everything is
+                // worse than one that is not up, because it looks like the grant failed.
+                if let Some(console_path) = &startup.console_path {
+                    if let Some(task) =
+                        start_operator_console(console_path, store, game_loop, context).await
+                    {
+                        info!(
+                            path = %console_path.display(),
+                            "Operator console task started; write a command with \
+                             `echo 'item give <name> <vnum> [count]' > <path>`"
+                        );
+                        tasks.push(task);
+                    }
+                }
             }
             (role, result) = listeners.accept() => match result {
                 Ok((stream, addr)) if !context.state.should_accept_connections() => {
@@ -2431,7 +2516,23 @@ async fn run_accept_loop(
                 Err(error) => error!(%error, %role, "Failed to accept connection"),
             }
         }
+    };
+
+    // The console is a background task, and dropping its `JoinHandle` would leave it
+    // running: the pipe stays open and the process would not exit. It is aborted
+    // explicitly, and the abort is acknowledged, because an Operator looking at a
+    // console that went quiet needs to know the server is the reason.
+    for task in tasks {
+        task.abort();
+        match task.await {
+            Err(error) if error.is_cancelled() => {
+                info!("Operator console task stopped with the server");
+            }
+            Err(error) => warn!(%error, "Operator console task join failed"),
+            Ok(()) => info!("Operator console task finished before the server stopped"),
+        }
     }
+    Ok(exit)
 }
 
 #[tokio::main]
@@ -2703,7 +2804,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
         shutdown_signal,
         &store,
         &ready_gate,
-        config.game.item_id_range,
+        &world_startup(&config),
     )
     .await;
     ready_gate.close();

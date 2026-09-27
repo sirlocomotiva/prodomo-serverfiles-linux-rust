@@ -371,3 +371,133 @@ async fn a_taken_cell_is_reported_as_a_taken_cell_and_not_as_a_taken_id() {
     assert_eq!(read.vnum, 30_000, "the held item was replaced");
     assert_eq!(read.count, 1);
 }
+
+// ---------------------------------------------------------------------------
+// The delivery order. These are the tests that decide whether `sys.item.core`
+// can leave `codec`, so they are written against a real store, a real game
+// thread, and a real outbox a test can read back.
+// ---------------------------------------------------------------------------
+
+/// A store, a world on its own thread, and a client whose queue the test holds.
+///
+/// The queue is the observation point. A delivery path that wrote the record somewhere
+/// the descriptor does not drain would pass every other test here and reach no client,
+/// so the outbox is kept by the test rather than dropped.
+struct AWorld {
+    store: db::store::Store,
+    controller: prodomo::game_loop_messages::GameLoopController,
+    inbox: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    #[allow(dead_code)]
+    game_loop: prodomo::game_loop::GameLoopHandle,
+}
+
+/// A world holding one live character called `name`, who owns a stored row, with a
+/// client attached whose outbox this function keeps.
+async fn a_world_with_a_client(database: &ScratchDatabase, name: &str) -> AWorld {
+    let store = database.store().await;
+    let owner = a_stored_player(&store, name).await;
+    let mut state = GameState::new(
+        gamedata::item_proto::ItemProtos::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto"),
+        )
+        .expect("the owner's item protos load"),
+    );
+    state
+        .install_item_ids(world::item::ItemIdRange::new(1, 1_000_000, 1).expect("a range"))
+        .expect("the first install");
+    let (tx, inbox) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    state
+        .enter_world(
+            common::vid::Vid::new(owner),
+            owner,
+            name,
+            prodomo::client_registry::ClientOutbox::new(tx),
+        )
+        .expect("the character is admitted");
+    let game_loop = spawn_game_loop(GameLoopConfig::default(), state).unwrap();
+    let controller = game_loop.controller();
+    AWorld {
+        store,
+        controller,
+        inbox,
+        game_loop,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_granted_item_is_written_and_then_reaches_the_client() {
+    // Given: a live client in the world, with a client queue this test reads.
+    let Some(database) = ScratchDatabase::create_async().await else {
+        return;
+    };
+    let AWorld {
+        store,
+        controller,
+        mut inbox,
+        ..
+    } = a_world_with_a_client(&database, "Shaman").await;
+
+    // When: the whole grant runs, from the world to the socket queue.
+    let granted = tokio::time::timeout(
+        Duration::from_secs(15),
+        prodomo::item_persist::grant_and_deliver(
+            &store,
+            &controller,
+            &prodomo::item_grant::GrantRequest {
+                target: "Shaman".to_owned(),
+                vnum: a_plain_vnum(),
+                count: None,
+            },
+        ),
+    )
+    .await
+    .expect("the grant finished within fifteen seconds");
+
+    // Then: it was delivered, and the row is really there.
+    let id = match granted {
+        prodomo::item_persist::Granted::Delivered { id, .. } => id,
+        other => panic!("the client must be told, got {other}"),
+    };
+    let stored = first_row_for(&store, id).await;
+    assert_eq!(
+        stored.vnum,
+        a_plain_vnum(),
+        "the row is the item that was granted"
+    );
+
+    // And: the record that reached the client is the `GC_ITEM_SET` for that item. Read
+    // off the queue rather than trusted from the return value, because the queue is
+    // the only thing a client can see.
+    let record = inbox.try_recv().expect("the record was queued");
+    assert_eq!(record.len(), 72, "TPacketGCItemSet is 72 bytes");
+    assert_eq!(record[0], 21, "the header is GC_ITEM_SET");
+    // `GC_ITEM_SET` carries **no item id**. Its fields are the window and cell, the
+    // vnum, the stack count, the refine and transmutation words, the flags, the six
+    // sockets, and the seven attributes -- there is no `dwID` in the wire form, so the
+    // first draft of this test looked for the id at offset 1 and read `window_type` and
+    // the low half of the cell as one number. The identity of an item on the wire is
+    // the *cell*: the client re-reads a window and finds what is in each slot, and the
+    // id is a server-side fact that never goes out.
+    //
+    // So the record is pinned against the row through the codec rather than by a
+    // hand-decoded offset, which also keeps the test honest if `ItemPos` ever changes.
+    let expected = protocol::item_pos::ItemPos::new(
+        stored.window_type,
+        u16::try_from(stored.pos).expect("a cell index is a u16"),
+    )
+    .encode();
+    assert_eq!(
+        &record[1..=3],
+        &expected[..],
+        "the record must name the row's cell"
+    );
+    assert_eq!(
+        u32::from_le_bytes([record[4], record[5], record[6], record[7]]),
+        stored.vnum,
+        "the record must name the vnum the row recorded"
+    );
+    assert_ne!(
+        id, 0,
+        "the row keeps its own id even though the wire does not"
+    );
+}

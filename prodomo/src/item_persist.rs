@@ -24,6 +24,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::game_loop_messages::GameLoopController;
+use crate::item_grant::GrantRequest;
 
 use db::items::{insert_item, ItemError, ItemRow};
 use db::store::Store;
@@ -149,6 +150,166 @@ where
         Err(error) => match revoker.revoke_grant(target, row.id).await {
             Ok(()) => Persisted::Undone { error },
             Err(revoke) => Persisted::Diverged { error, revoke },
+        },
+    }
+}
+
+/// What happened to a grant that reached the store and then the client.
+///
+/// The three outcomes are named separately because a caller acts on each one
+/// differently, and collapsing them is how a player ends up with an item nobody can
+/// account for:
+///
+/// - [`Granted::Delivered`] is the only one where the client has seen the item.
+/// - [`Granted::Stored`] is an item with a row that the client has not been told about.
+///   The item is safe and the player will see it at relog, or a second grant of the
+///   same vnum will produce a second row. It is not a failure and not a success.
+/// - [`Granted::Failed`] is a grant the client was never told about, so the player sees
+///   nothing at all. A failed write that was repaired, and a failed write that was not,
+///   both land here; the difference is in the `Display` text and in the log the
+///   caller writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Granted {
+    /// The row was written and the client was told.
+    Delivered {
+        /// The item id, which is also the row's primary key and the id the world holds.
+        id: u32,
+        /// The cell the item was placed in, as `(window_type, pos)`.
+        cell: (u8, u32),
+    },
+    /// The row was written, but the client could not be told.
+    ///
+    /// Distinct from [`Granted::Delivered`] because the item exists and will be there at
+    /// relog, so the caller must not try to re-grant it. Re-granting would make a
+    /// second row and a second cell for one Operator action.
+    Stored {
+        /// The item id, so the Operator can find the row and correct it.
+        id: u32,
+        /// The cell the item was placed in, as `(window_type, pos)`.
+        cell: (u8, u32),
+        /// Why the client was not told. Kept as text because the two causes -- an
+        /// offline character and a gone descriptor -- are the caller's to report
+        /// differently, and neither has a value this crate can name.
+        why: String,
+    },
+    /// The grant did not happen.
+    Failed {
+        /// The full text of the [`Persisted`] outcome, so a `Diverged` -- where the
+        /// player may hold an item with no row -- is visible in one log line rather
+        /// than hidden behind a single word.
+        why: String,
+    },
+}
+
+impl std::fmt::Display for Granted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Delivered { id, cell } => {
+                write!(
+                    formatter,
+                    "item {id} was given and the client was told (cell {}.{})",
+                    cell.0, cell.1
+                )
+            }
+            Self::Stored { id, cell, why } => write!(
+                formatter,
+                "item {id} was given and saved (cell {}.{}), but the client was not told: {why}",
+                cell.0, cell.1
+            ),
+            Self::Failed { why } => {
+                write!(formatter, "the grant did not happen: {why}")
+            }
+        }
+    }
+}
+
+/// Grant an item to `target`, save it, and tell the client -- in that order, and only
+/// then.
+///
+/// This is the whole grant end to end, and it is one function so the order cannot be
+/// got wrong by a caller. The three steps are not interchangeable:
+///
+/// 1. The world places the item, because the world alone chooses the cell and the cell
+///    is part of the row.
+/// 2. The row is written, because a client that is told about an item with no row sees
+///    something the next login takes away.
+/// 3. The client is told, and only then. Sending before step 2 is the failure this
+///    ordering exists to prevent.
+///
+/// The record is encoded here rather than in the world, so `world` never depends on
+/// `protocol` and the encode stays next to the tests that pin its bytes.
+///
+/// # Errors
+///
+/// Never. Every failure is an outcome, because a caller has to report all three and a
+/// `Result` would let a caller report only two.
+pub async fn grant_and_deliver(
+    store: &Store,
+    controller: &GameLoopController,
+    request: &GrantRequest,
+) -> Granted {
+    let outcome = match controller.request_grant(request.clone()).await {
+        Ok(Ok(outcome)) => outcome,
+        // The world refused. The item was not placed, so there is nothing to write and
+        // nothing to tell. The refusal is the answer.
+        Ok(Err(refusal)) => {
+            return Granted::Failed {
+                why: refusal.to_string(),
+            }
+        }
+        // No answer at all means the game thread is gone. Reporting this as a refusal
+        // would be a lie: the item may or may not have been placed, and only the world
+        // knows. It is reported as its own failure so nobody retries blindly.
+        Err(error) => {
+            return Granted::Failed {
+                why: format!("the world could not be asked: {error}"),
+            }
+        }
+    };
+
+    // The id and the cell are read before the outcome is moved, because a
+    // `Diverged` still has to name the item the player may be holding.
+    let id = outcome.row.id;
+    let cell = (outcome.row.window_type, outcome.row.pos);
+    // The world admitted this character under its store `player.id` (ledger 205), and
+    // the row's owner is that same id, so the owner is the address the record goes to.
+    // `None` cannot happen here: a grant always has an owner, and a row without one
+    // would have been refused by the store's own foreign key.
+    let Some(owner) = outcome.row.owner_id else {
+        return Granted::Failed {
+            why: "the granted row has no owner, so there is no client to tell".to_owned(),
+        };
+    };
+    let record = outcome.record.encode();
+
+    match persist_grant(store, controller, &request.target, outcome).await {
+        Persisted::Written => {
+            match controller
+                .deliver_record(common::vid::Vid::new(owner), record)
+                .await
+            {
+                // Delivered. The client has the item and the store has the row.
+                Ok(true) => Granted::Delivered { id, cell },
+                // The row is written and the item is real, but the client was not told.
+                // Not a failure and not retried: re-granting would write a second row.
+                Ok(false) => Granted::Stored {
+                    id,
+                    cell,
+                    why: "the character has no connected client".to_owned(),
+                },
+                Err(error) => Granted::Stored {
+                    id,
+                    cell,
+                    why: format!("the world could not deliver the record: {error}"),
+                },
+            }
+        }
+        // The write was refused. The world has already been told to take the item back,
+        // so there is nothing to tell the client. Both `Undone` and `Diverged` land
+        // here, and they carry different text, because a `Diverged` is the one case
+        // where a player is holding something the store has no row for.
+        refused => Granted::Failed {
+            why: refused.to_string(),
         },
     }
 }

@@ -95,6 +95,26 @@ maps = [
 # it. The Rewrite puts the key under [game] because there is one process (ADR-0002), so the id
 # space belongs to the world rather than to a database peer. The last id is never handed out.
 item_id_range = [100000000, 200000000]
+# The Operator console: a named pipe the running server reads, so an Operator can give an
+# item to an online character. Leave this commented out and the console is off.
+#
+# It has to be a pipe inside this process rather than a `prodomo` subcommand: the world
+# exists only as `serve`'s memory (ADR-0002), and reaching it from another process would
+# need exactly the kind of inter-process protocol ADR-0001 retired. Legacy has no such
+# console at all -- `do_item` is registered in `cmd_info[]` but `interpret_command` has
+# only two call sites, neither of them a console -- so this is new, not a port.
+#
+# The pipe is created with mode 0600 and its mode is the console's only access control:
+# there is no password and no allowlist. Do not point this at a regular file; the server
+# refuses one, because the reader's tail loop would replay it and re-run every grant.
+#
+#   operator_console = "/run/prodomo/console"
+#
+# Then, with the server running:
+#
+#   printf 'item give Shaman 19\n' > /run/prodomo/console
+#
+# The answer is written to the server log and, when the pipe is still open, back to it.
 # Gameplay settings shared by every Channel. Omitted keys keep the legacy compiled-in default.
 # The values set here are the ones the owner's legacy CONFIG files set, identical on every Core.
 view_range = 10000

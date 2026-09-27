@@ -266,6 +266,21 @@ pub struct GameSettings {
     )]
     pub item_id_range: ItemIdSpan,
 
+    /// The path of the named pipe the Operator console reads, or `None` to leave the
+    /// console off.
+    ///
+    /// The console is how an Operator reaches a live world, and it has to run inside
+    /// `serve`: the world exists only as that process's memory (ADR-0002), so a
+    /// separate `prodomo` subcommand would need a channel between two processes, which
+    /// is the class of protocol ADR-0001 retired.
+    ///
+    /// It is **off unless this is set**. A console that is on by default is a console
+    /// that is listening before anyone has decided an Operator should be able to, and
+    /// its access control is the pipe's own mode, which is only meaningful once someone
+    /// chose the path.
+    #[serde(default)]
+    pub operator_console: Option<PathBuf>,
+
     /// Seconds between character saves. Legacy multiplied the configured value by
     /// `passes_per_sec` when parsing; here the value stays in seconds.
     pub save_event_second_cycle: u32,
@@ -409,6 +424,7 @@ impl Default for GameSettings {
         Self {
             adminpage_ips: Vec::new(),
             adminpage_password: Secret::default(),
+            operator_console: None,
             save_event_second_cycle: 120,
             ping_event_second_cycle: 60,
             test_server: true,

@@ -19828,3 +19828,192 @@ using, and the world can write a record to that client. What is missing is the r
 path calls `persist_grant` and then sends `GC_ITEM_SET`, and no Operator command reaches
 either. `sys.item.core` stays at `codec`.
 
+## 206. The grant's record is written to the client only after its row lands
+
+Ledger 205 put a live character in the world and gave the world a way to write to its
+client. What was still missing is the glue: nothing called `persist_grant` and then sent
+`GC_ITEM_SET`. This is that glue, and it is one function so the order cannot be got wrong
+by a caller.
+
+**The order is world, row, client, and each step depends on the one before it.** The world
+places the item because the world alone chooses the cell and the cell is part of the row.
+The row is written because a client told about an item with no row sees something the next
+login takes away. The client is told last, and only then. `grant_and_deliver` in
+`prodomo::item_persist` is all three, in that order, and there is no way to call two of
+them without the third.
+
+**The three outcomes are named, not merged.** `Granted::Delivered` is the only one where the
+client has the item. `Granted::Stored` is a row with no client told: the item is real, it
+will be there at relog, and **it must not be re-granted** -- a retry would write a second
+row and take a second cell for one Operator action. `Granted::Failed` is a grant the client
+never heard about, and its `why` carries the full `Persisted` text, so a `Diverged` -- where
+a player may be holding an item the store has no row for -- is visible in one log line
+rather than hidden behind a single word.
+
+**`GC_ITEM_SET` carries no item id, and the first draft of the test was wrong about that.**
+It pinned `dwID` at offset 1 and read back 16,777,217 for an item whose id is 1: bytes 1-3
+of the record are `ItemPos`, which is `window_type` followed by a little-endian `u16` cell,
+and the vnum follows. There is no `dwID` in the wire form at all. The item's identity on the
+wire is its **cell** -- the client re-reads a window and finds what is in each slot -- and
+the id is a server-side fact that never leaves the process. The test now builds the
+expected cell with the codec's own `ItemPos` rather than by decoding an offset by hand,
+which also keeps it honest if `ItemPos` ever changes. Legacy's `TItemData` does have a
+`dwID`, so the id is in the *load* path and not in this record; the two are different
+structures and the codec already says which is which.
+
+**`Store::connect` is the wrong way to build a dead store here.** It fails at connect with
+SQLSTATE `3D000`, which is not a transient class, so the setup would be an error rather
+than a refused write -- the test would have proved that a missing database is reported,
+which is ledger 179's claim and not this one. `Store::lazy` against a port nothing listens
+on defers the connection, so every query fails on connect, which is the case under test.
+
+**A refusal to find the character sends nothing at all.** A grant to a Name the world does
+not hold fails before a row exists, so there is nothing to write and nothing to tell. The
+test asserts the present client's queue is empty, because "the grant failed" and "the grant
+told a different client" are different bugs and only the queue tells them apart.
+
+**Receipt.** 4 new tests in `prodomo/tests/item_persist_db.rs`, each against a real store, a
+real game thread, and a real outbox the test reads back.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2325 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2325 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+The four new tests were confirmed to skip without `DATABASE_URL` (4 passed in 0.00s) and to
+run with it (4 passed in 0.93s). Leftover `prodomo\_%` databases after the run: 0.
+
+**Not measured.** `i686-linux-gnu-g++-12` is still not installed. This unit adds no width
+claim: the 72-byte width it asserts is the one ledger 199 already measured from the host
+`g++ -m32` probe.
+
+**Still not reachable.** The function exists and is tested, and no Operator command calls
+it: the Operator interface is still an open decision, and it is the only thing between this
+and a client a human can hand an item. `sys.item.core` stays at `codec`.
+
+## 207. The Operator console, and why it has to run inside `serve`
+
+Ledger 206 finished the grant's path but left it unreachable: nothing called
+`grant_and_deliver`, and the issue file for this unit recorded the interface as an open
+question for the owner. **The question is answered here, and it is answered from the ADRs
+rather than by preference.** See 207.1.
+
+**The console is a named pipe the serve process reads.** `[game] operator_console` takes
+a path; when it is set, the server creates a FIFO at that path and reads one command per
+write:
+
+```toml
+[game]
+operator_console = "/run/prodomo/console"
+```
+
+```sh
+printf 'item give Shaman 19\n' > /run/prodomo/console
+```
+
+The answer goes to the log and, while the pipe is still open, back to the pipe. The
+console is **off unless configured**, because a console that is on by default is one
+listening before anyone has decided an Operator should be able to. The pipe is created
+with mode `0600` and **its mode is the console's only access control** — no password, no
+allowlist. A password in a config file is a secret this process would then have to store,
+and an allowlist is a second source of truth next to the filesystem that already answers
+the question.
+
+**Three bugs were found by running a real server, not by any test.** They are recorded
+because each one is a class of mistake rather than a typo, and the first two were silent.
+
+1. **`OpenOptions::create_new` does not make a FIFO.** It makes a *regular file* with the
+   mode; there is no flag for a named pipe. `prepare` now runs `mkfifo -m 0600`, which
+   costs no `unsafe` — the workspace forbids it — and no dependency. Caught by `stat` on a
+   hand-started server.
+2. **A regular file made the tail loop replay every grant forever.** The reader sees
+   end-of-file when the writer closes, reopens, and reads the same line again; the first
+   run logged one refusal about fifty times in two seconds. The module had carried a
+   comment saying a non-pipe "would be refused" and no code did it. `prepare` now refuses
+   a non-pipe, naming the path, and `run` re-checks because `run` is public. The console
+   never deletes the file: the owner may have pointed the config at something else.
+3. **A failed `prepare` logged "the console will stay off" and started the reader anyway.**
+   The `None` return is the actual off switch. The server stays up either way, because
+   clients matter more than a console and refusing to start would trade a convenience for
+   an outage.
+
+**A refusal no longer borrows the full-inventory sentence.** The first draft wrapped every
+failure in `do_item`'s `"Not enough inventory space."`, and the first real run answered
+`item give Nobody 10500` with *"Not enough inventory space. (no item prototype with vnum
+10500)"* — telling an Operator to clear an inventory that was not the problem. The
+sentence now goes only where it is true, and the coupling on that text is pinned by
+`only_a_full_inventory_carries_the_full_inventory_sentence`, so an arm of
+`GrantRefusal`'s `Display` cannot start borrowing it.
+
+**The count is clamped in one place.** The console parses a `u32` and keeps an absent count
+absent, because `do_item`'s `iCount` is 1 by default and clamped only when a second
+argument was given (`cmd_gm.cpp:480-484`). The clamp itself is *not* repeated: the console
+narrows through the same `common::item_slots::ITEM_COUNT_LIMIT` the reducer uses, because
+two numbers to keep equal is one more thing to forget.
+
+**The console starts at the ready gate, not before.** The pipe is created and the reader
+started in the same `select!` arm that installs the item id allocator. A console that came
+up earlier would refuse every grant with `NoAllocator`, which looks exactly like a grant
+that failed. A broken pipe path is one error line and the console stays off.
+
+### 207.1 The owner's open question, answered from the ADRs
+
+The issue recorded: *"Either the grant runs inside the serve process (an in-process console
+reader, closest to legacy's console) or a control channel is built. This is called out
+rather than decided because both are real work and the legacy source does not point at
+one."*
+
+The legacy source does not point at one because **there is no console in legacy at all.**
+`do_item` is registered in `cmd_info[]` (`game/cmd.cpp:282`, `GM_GOD`), and
+`interpret_command` has exactly two call sites in the tree — `game/questlua_global.cpp:739`
+(the quest Lua hook) and `game/input_main.cpp:804` (a GM chat line). The survey was right,
+and because that is an absence claim it is now pinned by a test with both controls: a
+positive control that `item` really is registered in `cmd_info` (so a sweep returning
+nothing is known to be a broken sweep, not an empty tree) and a negative control that
+`cmd.cpp` is excluded because it is the definition. The test asserts the caller set
+*exactly* those two files, so a change to legacy's reachability fails it.
+
+So the interface cannot be derived from legacy and is **new, not a port.** The ADRs settle
+which of the two options to build:
+
+- **ADR-0002** puts the world in the serve process's memory, one world per Channel. A grant
+  needs a live character standing in it.
+- **ADR-0001** retired the DB-peer and P2P protocols because there is no C++ peer to
+  interoperate with. A channel from a second `prodomo` process into a running server is
+  that same class of protocol, rebuilt.
+
+That leaves the in-process reader, and it is the option that needs no new protocol. It is
+also consistent with the Operator as `CONTEXT.md` defines one: *"manages accounts, GMs, and
+item-shop currency from outside the game"* — which is why the target is a Name rather than
+the caller, and why no GM level is checked.
+
+**Receipt.** 20 unit tests in `prodomo/src/operator_console.rs` (15 parser, 4 pipe, 1
+refusal-text) and 3 end-to-end tests in `prodomo/tests/process.rs` that drive a real
+`prodomo serve`, a real FIFO, and a real `sh` write.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2348 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2348 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+`run_accept_loop` grew a parameter and `serve` grew a line, so both were refactored rather
+than allowed: the two readiness inputs became `WorldStartup`, and the console's startup
+became `start_operator_console`. No `#[allow]` was added.
+
+**Not measured.** `i686-linux-gnu-g++-12` is still not installed. This unit adds no width
+claim.
+
+**Still not reachable.** The console grants an item to an **online** character, which is
+decision D7. The create-and-destroy round trip is the last step of the issue's gate list,
+and it is a scripted-client scenario: an Operator grants, the client sees `GC_ITEM_SET`, the
+item survives a relog, and destroying it removes the row. `sys.item.core` stays at `codec`
+until that scenario passes.
+

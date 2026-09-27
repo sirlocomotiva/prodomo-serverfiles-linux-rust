@@ -131,9 +131,15 @@ impl Server {
         let log_dir = test_root.join("log");
         fs::create_dir_all(&log_dir).expect("temporary log directory should be creatable");
         write_config(&config_path, store_url);
+        Self::start_with(&test_root, &config_path, &log_dir)
+    }
+
+    /// Start against a config the caller wrote, so a test can add keys the default one
+    /// does not have.
+    fn start_with(test_root: &Path, config: &Path, log_dir: &Path) -> Self {
         let mut process = ProcessGuard {
-            child: Some(spawn_server(&test_root, &config_path, &log_dir)),
-            test_root,
+            child: Some(spawn_server(test_root, config, log_dir)),
+            test_root: test_root.to_path_buf(),
         };
         let stdout = process.child_mut().stdout.take().expect("stdout is piped");
         let (lines, reader) = read_lines(stdout);
@@ -142,8 +148,61 @@ impl Server {
             lines,
             reader,
             console: Vec::new(),
-            log_dir,
+            log_dir: log_dir.to_path_buf(),
         }
+    }
+
+    /// Every stdout line seen so far.
+    fn console_text(&self) -> String {
+        self.console.join("\n")
+    }
+
+    /// Collect stdout until a line contains `needle`, and return that line.
+    ///
+    /// The line is returned rather than just accepted because these tests read the
+    /// Operator's answer as text: which words it uses, and which of them it quotes, is
+    /// the whole point of a console an Operator has to read.
+    fn wait_for_console(&mut self, needle: &str) -> Option<String> {
+        let deadline = Instant::now() + PROCESS_TIMEOUT;
+        loop {
+            if let Some(found) = self.console.iter().find(|line| line.contains(needle)) {
+                return Some(found.clone());
+            }
+            match self.lines.recv_timeout(POLL_INTERVAL) {
+                Ok(line) => {
+                    let found = line.contains(needle);
+                    self.console.push(line);
+                    if found {
+                        return self.console.last().cloned();
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return None,
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the console never said {needle:?}:\n{}",
+                self.console_text()
+            );
+        }
+    }
+
+    /// Stop the server the way a test that does not check the exit status should:
+    /// SIGTERM, and the `ProcessGuard` cleans up whatever is left.
+    fn stop(mut self) {
+        let child_pid = self
+            .process
+            .child_mut()
+            .id()
+            .try_into()
+            .expect("child process ID should fit in pid_t");
+        let child_pid =
+            rustix::process::Pid::from_raw(child_pid).expect("child process ID should be non-zero");
+        let _ = rustix::process::kill_process(child_pid, rustix::process::Signal::TERM);
+        wait_until_exited(
+            self.process.child_mut(),
+            "prodomo did not exit after SIGTERM",
+        );
     }
 
     /// Collect stdout until a line contains `needle`.
@@ -587,4 +646,216 @@ fn serve_rejects_a_non_postgres_store_before_binding_anything() {
         "the password must never be printed:\n{console}"
     );
     assert!(!console.contains(LISTENING), "nothing is bound:\n{console}");
+}
+
+// ---------------------------------------------------------------------------
+// The Operator console, end to end, through a real `prodomo serve`.
+// ---------------------------------------------------------------------------
+
+/// A config that turns the console on at `pipe_path`.
+fn write_config_with_console(path: &Path, store_url: &str, pipe_path: &Path) {
+    let data_keys = data_keys();
+    let config = format!(
+        r#"bind_ip = "127.0.0.1"
+{data_keys}
+[store]
+url = "{store_url}"
+
+[game]
+operator_console = "{}"
+
+[auth]
+port = 0
+
+[[channel]]
+number = 1
+ports = [0, 0]
+maps = [1, 3]
+
+[[channel]]
+number = 99
+ports = [0]
+maps = [72]
+"#,
+        pipe_path.display()
+    );
+    fs::write(path, config).expect("temporary TOML config should be writable");
+}
+
+#[test]
+fn an_operator_can_grant_an_item_through_a_running_server() {
+    // Given: a real server, up to the point where it accepts clients.
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let test_root = unique_test_root();
+    let log_dir = test_root.join("log");
+    fs::create_dir_all(&log_dir).expect("temporary log directory should be creatable");
+    let config_path = test_root.join("prodomo.toml");
+    let pipe_path = test_root.join("console");
+    write_config_with_console(&config_path, database.url(), &pipe_path);
+
+    let mut server = Server::start_with(&test_root, &config_path, &log_dir);
+    server.wait_for(ACCEPTING);
+
+    // The pipe is created by the server, not by the test: an Operator does not make it
+    // either. The wait is a wait because the server creates it a moment after logging
+    // "Accepting clients", and a test that asserted at an arbitrary instant would be
+    // testing its own timing.
+    wait_for_path(&pipe_path, "the console pipe");
+
+    // And it is a named pipe, owner-only. Both halves are load-bearing: a regular file
+    // is replayed from the start by the tail loop, which re-runs every grant, and the
+    // mode is the console's only access control.
+    assert!(
+        is_a_fifo(&pipe_path),
+        "the console path must be a named pipe, not a regular file: {}",
+        pipe_path.display()
+    );
+    let mode = std::os::unix::fs::PermissionsExt::mode(
+        &fs::metadata(&pipe_path)
+            .expect("the pipe should have metadata")
+            .permissions(),
+    );
+    assert_eq!(
+        mode & 0o777,
+        0o600,
+        "the console's access control is the pipe's mode, so it must be owner-only, got {:o}",
+        mode & 0o777
+    );
+
+    // When: an Operator writes a command into the pipe for somebody who is not online.
+    send_command(&pipe_path, "item give Nobody 19");
+
+    // Then: the answer names the real reason. The first draft of this test waited for
+    // `do_item`'s "Not enough inventory space." and would have passed against a console
+    // that blames the inventory for every failure; a vnum that is not in the protos and
+    // a name that is not online are different problems and must read differently.
+    let answer = server
+        .wait_for_console("no character named Nobody")
+        .expect("the console should answer with the real reason");
+    assert!(
+        answer.contains("The grant did not happen:"),
+        "the refusal should say the grant did not happen, and not borrow the \
+         full-inventory sentence: {answer}"
+    );
+    assert!(
+        !answer.contains("Not enough inventory space"),
+        "an offline target is not a full inventory: {answer}"
+    );
+
+    server.stop();
+}
+
+#[test]
+fn a_typo_is_answered_rather_than_swallowed() {
+    // Given: the same server.
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let test_root = unique_test_root();
+    let log_dir = test_root.join("log");
+    fs::create_dir_all(&log_dir).expect("temporary log directory should be creatable");
+    let config_path = test_root.join("prodomo.toml");
+    let pipe_path = test_root.join("console");
+    write_config_with_console(&config_path, database.url(), &pipe_path);
+
+    let mut server = Server::start_with(&test_root, &config_path, &log_dir);
+    server.wait_for(ACCEPTING);
+    wait_for_path(&pipe_path, "the console pipe");
+
+    // When: the verb is wrong.
+    send_command(&pipe_path, "item gives Shaman 10500");
+
+    // Then: the console says what it has, and the line is echoed back whole. A typo
+    // that printed nothing is indistinguishable from a command that worked.
+    let answer = server
+        .wait_for_console("unknown item command")
+        .expect("the console should refuse a typo out loud");
+    assert!(
+        answer.contains("item gives Shaman 10500"),
+        "the refusal should quote the line: {answer}"
+    );
+    assert!(
+        answer.contains("item give <name> <vnum> [count]"),
+        "the refusal should teach the syntax: {answer}"
+    );
+
+    server.stop();
+}
+
+#[test]
+fn a_console_that_is_not_configured_never_appears() {
+    // Given: a server whose config has no `operator_console` key.
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let test_root = unique_test_root();
+    let log_dir = test_root.join("log");
+    fs::create_dir_all(&log_dir).expect("temporary log directory should be creatable");
+    let config_path = test_root.join("prodomo.toml");
+    let pipe_path = test_root.join("console");
+    write_config(&config_path, database.url());
+
+    let mut server = Server::start_with(&test_root, &config_path, &log_dir);
+    server.wait_for(ACCEPTING);
+
+    // Then: no pipe, and nothing in the log claiming a console. The wait is for the
+    // same reason the other tests wait: the absence has to be checked after the server
+    // has had the chance to create one, or the test proves nothing.
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !pipe_path.exists(),
+        "the console must stay off unless the owner configured a path"
+    );
+    assert!(
+        !server.console_text().contains("Operator console"),
+        "an unconfigured console must not announce itself: {}",
+        server.console_text()
+    );
+
+    server.stop();
+}
+
+/// Whether `path` is a named pipe.
+fn is_a_fifo(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    fs::metadata(path)
+        .map(|metadata| metadata.file_type().is_fifo())
+        .unwrap_or(false)
+}
+
+/// Wait for `path` to exist, so a test never checks a filesystem fact at a moment it
+/// happened to choose.
+fn wait_for_path(path: &Path, what: &str) {
+    let deadline = Instant::now() + PROCESS_TIMEOUT;
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "{what} never appeared at {}",
+            path.display()
+        );
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Write one command into the console pipe and close it, the way an Operator's shell does.
+fn send_command(pipe_path: &Path, line: &str) {
+    // `sh -c` is used rather than opening the pipe from Rust because a FIFO open for
+    // writing blocks until a reader is present, and the same block is what an Operator's
+    // shell does; going through the shell means the test exercises the real thing rather
+    // than a Rust-only way of writing to a pipe.
+    let quoted = line.replace('\'', "'\\''");
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "printf '%s\\n' '{quoted}' > '{}'",
+            pipe_path.display()
+        ))
+        .status()
+        .expect("sh should run");
+    assert!(
+        status.success(),
+        "writing to the console pipe should succeed"
+    );
 }

@@ -1,6 +1,6 @@
 # Ledger 198: the Operator item grant, and the first `GC_ITEM_SET`
 
-Status: ready-for-agent
+Status: needs-triage
 
 ## Why this unit
 
@@ -87,6 +87,21 @@ Three of the decisions above are now answered by the code rather than by argumen
 - **The log line is a warning, not a dependency.** The reducer logs a warning when the allocator
   repeats an id, but the refusal itself is a returned `Err`, never a log line a caller has to read.
 
+**Ledger 204-207 landed after this paragraph was written**, and the list below is updated
+in place. For the record, what each of them closed:
+
+- Ledger 204: the store half, including the refusal repair.
+- Ledger 205: a live client's character in the real world, entered from `enter_game` and
+  left before the final save, with the world writing to the client through a clone of the
+  descriptor's outbox.
+- Ledger 206: the order, as one function. `grant_and_deliver` is world, row, client, and
+  it names all three outcomes.
+- Ledger 207: the Operator interface, decided from the ADRs rather than deferred. The open
+  question at the end of this file is answered in ledger 207.1: the console runs inside
+  `serve`, because the world is only that process's memory (ADR-0002) and a second process
+  would need the protocol class ADR-0001 retired. Legacy has no console at all, so this is
+  new, not a port.
+
 Still to do, in the order the gates imply:
 
 1. ~~A game-thread command that carries a `GrantRequest` from an async task to the thread that
@@ -103,15 +118,22 @@ Still to do, in the order the gates imply:
    transaction, and only then send `GrantOutcome::record`. A client that sees an item it
    does not have on a relog is a divergence; a stored item nobody has seen yet is not.
    Legacy sends `GC_ITEM_SET` from `SetItem` and the save is a background flush, so this
-   is a recorded improvement rather than parity.
-3. The `GC_ITEM_SET` write to the descriptor, and the refusal replies (legacy answers with the
-   plain sentence, so a refusal is a chat line the operator sees).
-4. The Operator interface itself. The survey settled that this is **new**, not a port: legacy has
-   no adminpage item-give path, and the chat command is the only grant that exists.
-5. The create-and-destroy round trip as a scripted-client scenario: an Operator grants an
+   is a recorded improvement rather than parity. The same unit also does the write to the
+   descriptor, and the answer names the real reason rather than always blaming the
+   inventory.
+3. ~~The `GC_ITEM_SET` write to the descriptor, and the refusal replies.~~ **Done at ledger
+   206 and 207.**
+4. ~~The Operator interface itself.~~ **Done at ledger 207**, and it is new rather than a
+   port. The survey settled that legacy has no adminpage item-give path; ledger 207.1
+   establishes with controls that legacy has no console either, and the ADRs pick the
+   in-process reader.
+5. **The only thing left.** The create-and-destroy round trip as a scripted-client scenario: an Operator grants an
    item, the client receives `GC_ITEM_SET`, the item survives a relog, and destroying it
    removes the row. That scenario is what moves `sys.item.core` off `codec`, and nothing
    short of it counts.
+
+**Open question for the owner, recorded rather than assumed. ANSWERED at ledger 207.1.**
+The text as it stood, kept because the answer is easier to check against it:**
 
 **Open question for the owner, recorded rather than assumed.** Legacy's
 `ACMD(do_item)` is reachable from the game-server console (`cmd.cpp:282`) and from a GM
