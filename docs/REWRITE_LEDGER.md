@@ -18478,3 +18478,334 @@ declarations and confirmed by the arithmetic a value-only test would not catch
 (1370 fits a `WORD` and not a `BYTE`; 2 x 5 = 10 and not 8). The ledger-194 probe
 was corrected for the Dragon Soul stride and re-run for that constant only, so
 its own `sizeof` results stand.
+
+## 196. The item table, and the correction ledger 195 needs
+
+Ledger 195 gave `world::item::Item` a `limits: [ItemLimit; 2]` field, a
+`set_limit` accessor, and an `ItemLimit` type, all justified as
+"`TItemData::aLimits` (`tables.h:879`)". **That was wrong, and this section
+corrects it.** The field, the accessor, the type, and the error variant are gone.
+
+### 196.0 The correction: limits are on the prototype, not the instance
+
+`aLimits` is a member of `TItemTable` (`tables.h:879`) -- the **item
+prototype**. `TItemData` (`packet.h:2971-2985`) is the **instance** record and
+has no such member. Three independent confirmations, so this is not one bad
+citation:
+
+1. **The game never writes one.** `CItem` has no `SetLimit`. The only two
+   limit accessors are `GetLimitType` and `GetLimitValue`
+   (`item.h:110-111`), and both read through the prototype pointer:
+   `return m_pProto ? m_pProto->aLimits[idx].bType : 0;`. A limit is fixed by
+   the prototype and no instance can change it.
+2. **Nothing would store it.** Legacy's `player.item` table
+   (`player.sql:351-395`) has no limit columns at all -- no `limit0_type`, no
+   `limit0_value`, nothing. A per-instance limit had nowhere to be saved and
+   nowhere to be loaded from.
+3. **The Rewrite already had it, in the right place.** `gamedata::item_proto::
+   ItemProto::limits` is `item_proto.txt`'s `LIMIT_TYPE` / `LIMIT_VALUE` pair,
+   read as `[ItemValue; LIMITS]` (ledger 191). So the workspace had the limits
+   twice: once correctly on the prototype, and once wrongly on the instance.
+
+The *shape* claim in 195.3 was right and is kept: a `TItemLimit` is a `BYTE bType`
+and a `long lValue` (`tables.h:844-847`), five bytes on the 32-bit target, so the
+pair is ten bytes and not the eight an `[i32; 2]` would be. That mattered when
+195 believed the pair was per-instance; it matters now because it is what the
+prototype reader has to have read.
+
+The enumeration is not a counter-argument. `ITEM_LIMIT_MAX_NUM` is 2
+(`item_length.h:11`) and `ELimitTypes` (`item_length.h:427-450`) names ten types,
+`LIMIT_NONE` through `LIMIT_CHAMPION`, then `LIMIT_MAX_NUM` as an eleventh. Swept
+the whole tree with both controls:
+
+- **`ITEM_LIMIT_MAX_NUM` appears 14 times under `server/server/game/`,** and
+  every one of the ten `for` loops over the array's elements is bounded by it --
+  `item_manager.cpp:280`, `item.cpp:2073,2156,2431,2636,2650,2734,2747,2846`,
+  `char_item.cpp:2725`.
+- **`LIMIT_MAX_NUM` appears exactly once in all of `server/server`: its own
+  definition at `item_length.h:450`.** It is never read.
+
+So the sentinel is dead, the tenth type (`LIMIT_CHAMPION`) has nowhere to live,
+and widening the array to fit the enumeration would invent storage for a type
+that no loop can reach. The same sweep found 10 uses of `GetLimitType` and
+`GetLimitValue`, and `item_manager.cpp:280-318` is the most instructive of them:
+it reads both off the prototype at item-creation time and writes the result into
+socket 0, which is the one place where a limit becomes an instance's state -- and
+it is a **write to the socket, not to a limit**. Legacy has no per-instance limit
+because it has no per-instance limit to set.
+
+The module header of `world/src/item.rs` now carries a "What this is not"
+section, so the next reader learns it from the type rather than by re-deriving
+it, and a test named `an_instance_carries_no_limit_because_the_prototype_fixes_them`
+holds the place.
+
+### 196.1 The other half of the correction: the struct at `packet.h:1440`
+
+Ledger 195 cited `packet.h:1440-1446` for `TItemData`'s fields. Those lines are
+inside `TPacketGCItemSet` (`packet.h:1426-1444`), the 72-byte **wire** record.
+The two structs are near-identical, which is why the error survived a unit:
+
+| field | `TItemData` (instance, `packet.h`) | `TPacketGCItemSet` (wire, `packet.h`) |
+|---|---|---|
+| `vnum` | 2973 | 1431 |
+| `count` | 2974, a `WORD` | 1432, a `WORD` |
+| `dwRefineElement` | 2976 | 1434 |
+| `transmutation` | 2979 | 1437 |
+| `flags` | 2981 | 1439 |
+| `anti_flags` | 2982 | 1440 |
+| `highlight` | absent | 1441 |
+| `alSockets[6]` | 2983 | 1442 |
+| `aAttr[7]` | 2984 | 1443 |
+
+Every citation in `world/src/item.rs` and in the new migration now names the
+`TItemData` column. The lesson is the one the verification rules in `AGENTS.md`
+already state in a different form: a citation is a claim about a **line**, and
+two structs with the same field names 530 lines apart are two claims.
+
+### 196.2 The item table
+
+`db/migrations/0005_items.sql` is the first migration for an item, and it is the
+floor under every item system. It is deliberately the **shape** of legacy's
+`player.item`: six sibling `socketN` columns and seven sibling `attrtypeN` /
+`attrvalueN` pairs, because `world::character::items` addresses a socket and an
+attribute by index and a normalised child table would add a second set of
+ordinals to keep in step. The SQL schema is ours to redesign (ADR-0001) and this
+is the redesign: 32-bit `id` because the client sees it, `uuidv7()` nowhere
+because every row here is a game object, and the legacy `int(10) unsigned`
+sockets replaced with signed `integer`.
+
+Five things are deliberately **not** in it, and each is a decision rather than an
+omission:
+
+- **No limit columns.** See 196.0.
+- **No `bSize` column.** The grid footprint is the prototype's
+  (`CItem::GetSize()` is `m_pProto->bSize`, `item.h:69`), and `Item::size` carries
+  the value the load path already read. Legacy does not store it per instance
+  either.
+- **No `apply_path` / `apply_value` / `apply_type` columns.** Legacy's table has
+  them for attributes 0..3 only (`player.sql:367-378`); `ItemAttribute` here has
+  no apply triple, because the apply system is `sys.item.attr`, a later unit. A
+  later migration adds them. It must not edit this one.
+- **No `refine_element` range check.** `EItemElement` does not exist in the
+  frozen tree, swept with a positive control (`GetRefineElement`, which returns
+  nine files) and a negative control (`EItemElement`, which returns none), so the
+  element names live in the Game data tables and any range here would be a guess.
+  Only the field's own `DWORD` width is checked.
+- **No per-window `pos` range check.** Five windows name a cell of the flat
+  array, `DRAGON_SOUL_INVENTORY` a cell of the other, `ATTR67_ADD` and
+  `SWITCHBOT` their own one- and five-element windows, `SAFEBOX` a container this
+  table does not have yet, and `GROUND` a world position. One range check would
+  be wrong for two of them, so the rule stays in `common::item_slots` where it is
+  measured and tested, and the column only refuses a byte `EWindows` cannot hold
+  (0..10, the eleven-member enum at `length.h:657-677`).
+
+Two things **are** in it that legacy has no way to express:
+
+- `owner_id` is `NULL` for an item on the ground, not 0. Legacy uses 0 and
+  `CItem::GetOwner` walks the character manager looking for an owner with that
+  id, so "nobody owns this" is a value that has to be searched for. Here it is
+  absent, which is what makes the last constraint a real biconditional:
+  `CHECK ((window_type = 10) = (owner_id IS NULL))`.
+- `CREATE UNIQUE INDEX item_owner_cell_key ON item (owner_id, window_type, pos)
+  WHERE owner_id IS NOT NULL`. A cell holds one item, and without this two rows
+  can name one cell and the load path would silently keep whichever it read last
+  -- the exact "the grid says one thing and the id array says another" state that
+  ledger 195's `GridConflict` exists to refuse, arriving through the store
+  instead of through a bad move.
+
+### 196.3 `window` is a reserved word, and reading the migration did not find it
+
+The first draft named the column `window`. PostgreSQL rejects it unquoted --
+`42601 syntax error at or near "window"` -- because `WINDOW` is reserved for
+SQL:2011 window functions. The failure surfaced only when the migration was run
+against PostgreSQL 18; the file read correctly, the tests read correctly, and a
+reviewer reading it would not have caught it either, because `window` looks like
+an ordinary noun.
+
+It is `window_type`, matching `ItemPos::window_type` and
+`common::item_slots::stored_window` so the workspace says one word. The reason is
+in a comment on the column, because the next person to rename it will not think
+of SQL:2011.
+
+The same run is the receipt for the migration's validity: all 31 targets, 2,179
+tests, 0 failures, with `DATABASE_URL` set, and the scratch-database count back
+to zero afterwards.
+
+### 196.3b Four column widths the first draft got wrong, found by running it
+
+The first draft of this migration sized every column from the *legacy SQL type* rather than
+from the *C++ field it stores*. Reading it does not find this. Inserting the boundary values
+into PostgreSQL 18 does, and all four were wrong the same way -- a PostgreSQL type is signed
+and narrower than a legacy `DWORD`, `int unsigned` or `smallint unsigned` column:
+
+| column | first draft | legacy field | value the draft refused | why it is legal |
+|---|---|---|---|---|
+| `id` | `integer` | `DWORD` (`C/tables.h:434`) | 2 141 000 001 | a legal pool id; the ceiling is 4 290 000 000, which does not fit a *signed* 32-bit integer at all |
+| `vnum` | `integer` | `DWORD` (`C/tables.h:439`) | 3 000 000 000 | legacy's column is `int(11) unsigned` (`player.sql:357`) |
+| `refine_element` | `integer` | `DWORD` (`C/tables.h:445`) | 2 147 483 648 | same |
+| `flags`, `anti_flags` | `integer` | `DWORD` | 2 147 483 648 | and for a bitmap, bit 31 set is the **ordinary** case, not an edge |
+| `pos` | `smallint` | `WORD` (`C/tables.h:436`) | 32 768 and 65 535 | legacy's own column is `smallint(5) unsigned` (`player.sql:355`) |
+| `attrtypeN` | `smallint CHECK (-128..127)` | `BYTE` (`C/tables.h:428`) | 200 (a **legal** type) | the first draft matched legacy's signed `tinyint` column instead of the unsigned field |
+
+The fix is `bigint` for the five `DWORD` columns, `integer` for `pos`, and `0..255` for
+`attrtypeN`. All eight boundary values were re-probed after the change and all eight persist.
+
+`id` as `bigint` deserves a note because it reads like it breaks ADR-0003's "IDs the client see
+32-bit integers". It does not. That rule is the **unsigned** 32-bit space, which is what
+`TPacketGCItemSet::dwID` is on the wire and what the frozen 32-bit target's `DWORD` satisfied;
+`MAX_ITEM_ID = 4,290,000,000` (`D/ItemIDRangeManager.h:8`) simply does not fit a *signed* 32-bit
+integer, so `integer` was never a candidate. `world::item::ItemId` is `u32` and
+`db::item_id_range::MAX_ITEM_ID` is `u32`; the column is the only place that had to widen.
+
+The `attrtypeN` range is the one deliberate difference rather than a plain correction. Legacy's
+table can hold a negative type and legacy's field cannot, so a stored -1 arrives as 255. The
+Rewrite refuses the row instead, which turns a corrupt row into an error rather than into a real
+attribute. That is the same rule as the load: **fail loudly**.
+
+`0005` was edited in place rather than superseded by `0006`, and the reason is that it has never
+been applied anywhere that matters -- it is uncommitted and has only ever run in scratch
+databases that were dropped. Shipping a known-broken `0005` alongside a `0006` that repairs it
+would leave a broken schema in every store that ever applied version 5, and would buy nothing,
+because the checksum guard exists to protect stores and there are none.
+
+The whole table was then probed for behaviour, not just for width, on a scratch database:
+six positive controls across four windows plus the ground, a duplicate cell refused by
+`item_owner_cell_key`, the same cell in a different window and for a different owner both
+accepted, two ground rows sharing `pos = 0` both accepted (the index is partial on
+`owner_id IS NOT NULL`), and `DELETE FROM player` cascading to exactly the five rows of that
+character while leaving the other character's two and both ground rows. Every one of the twelve
+refusals behaved as intended, including the biconditional in both directions. The scratch
+database was dropped and `SELECT count(*) FROM pg_database WHERE datname LIKE 'prodomo\_%'`
+returned 0.
+
+### 196.3c Two rules the next unit will hit, written into the migration
+
+**Do not write this table with `REPLACE`.** Legacy's character save is `REPLACE INTO item`
+(`D/Cache.cpp:178`, and `D/ClientManager.cpp:1545-1579` for the safebox and mall). That was safe
+because legacy's only unique key is the id. This table has a second one, and MySQL's `REPLACE`
+answers a unique conflict by **deleting the conflicting row**: a save that moves an item onto an
+occupied cell would destroy the item it landed on. The save is
+`INSERT ... ON CONFLICT (id) DO UPDATE SET ...`.
+
+**Delete on `id` and `owner_id`, never on `id` alone.** Legacy's `QUERY_ITEM_DESTROY` is handed
+the owner's pid and uses it for the log line and to pick the async or sync branch, then deletes
+`WHERE id=%u`; the cached path issues the same id-only delete (`D/Cache.cpp:57-61`). The item id
+space is global across every character, safebox, the mall and the ground, so the predicate ignores
+the one guard it was handed. Not client-reachable -- items are addressed to the client by window
+and cell, never by id -- but there is no reason to copy a destructive predicate that discards
+its own ownership check.
+
+### 196.4 Out of scope
+
+- **No query is written.** `db/src/items.rs` does not exist yet; this unit is the
+  schema only, and nothing reads it. A migration with no reader is the same kind
+  of step as ledger 191's data reader: necessary, and not a system.
+
+The item path was surveyed read-only while this unit was written
+(`.scratch/survey196-itemdb.md`), and it corrects the premise this section started
+from: the item SQL is not in `game/input_db.cpp`, which is 74 kB of game-side
+parsing fed by rows the DB server already read. It is in `D/ClientManagerPlayer.cpp`
+(load and character delete) and `D/ClientManager.cpp` (safebox, mall, destroy,
+award), with the queries inlined in `snprintf` and the row walk in
+`CreateItemTableFromRes` (`D/ClientManagerPlayer.cpp:14-68`). Two names the survey
+looked for and did not find: `QUERY_LOAD_ITEM` and `QUERY_ITEM_SAVE` -- the
+identifiers are `QID_ITEM`, `QID_ITEM_SAVE` and `QID_ITEM_DESTROY`
+(`D/QID.h:16-17`).
+
+Three of its citations were re-checked here and two needed correcting, which is
+worth recording because the survey is checked in and someone will read it as
+settled: `cs_dwMaxItemID` is at `D/ItemIDRangeManager.h:8` and not `:7` (`:7` is
+`private :`), and the three query identifiers span `D/QID.h:15-17` and not
+`:16-17`. The third is a wording fix: the award insert's test is a disjunction
+(`D/ClientManager.cpp:1012`) whose `uiInsertID` term is dead, not a check that is
+*built* on a tautology -- the `uiAffectedRows == 0` term beside it is the
+meaningful one and it is there. Its defect 6 is real and is recorded in
+`docs/STATUS.md`, but it is dead code inside a correct check rather than a wrong
+one, and saying otherwise would have overstated it.
+
+What the survey found that this unit does **not** fix, listed so the next units
+inherit it rather than rediscover it:
+
+- **`SELECT MAX(id)` has no owner.** `D/ItemIDRangeManager.cpp:94,110` runs it over
+  `item` *and* `private_shop_item` to set `dwUsableItemIDMin` above every id already
+  in a block. `db/src/item_id_range.rs` implements the arithmetic of that rule
+  (`is_usable`) but not the query that detects it, and the survey confirms the
+  `SELECT` has no counterpart anywhere in the Rewrite.
+- **Refill has no owner.** Legacy asks the DB server for a spare mid-life
+  (`G/item_manager_idrange.cpp:38`, answered at `D/Peer.cpp:135-155`). In one
+  process (ADR-0002) the game thread has no peer to ask, so the pool needs a
+  refill that is not a request over a socket.
+- **Two types for one concept.** `db::item_id_range::ItemIdRange` and
+  `world::item::ItemIdRange` mean the same thing in the same interval semantics, and
+  the one with no consumer is the one modelled on the legacy wire record. The store
+  should produce `world::item::ItemIdRange` and `db::item_id_range` should go.
+- **`item_award` has no Rewrite equivalent** (`player.sql:462`), and it is how a
+  new character receives anything -- there is no starter-item code at all
+  (`G/input_db.cpp:270-274` declares a `TPlayerItem`, memsets it, and never uses it).
+- **`GROUND` and `SAFEBOX`/`MALL` are not in the character load**
+  (`D/ClientManagerPlayer.cpp:386`), so a ground item is not restored by a character
+  load. This table has room for one and nothing writes one.
+- **The load's placement `switch` has no `default` and no `case AURA_REFINE`**
+  (`G/input_db.cpp:1506-1532`) although the query selects it. Latent only: nothing
+  ever stores ordinal 7 (swept, with `case SWITCHBOT` as the positive control).
+- **No Operator command.** There is still no way to obtain a first item, so no
+  item scenario is reachable and `sys.item.core` stays `codec`.
+- **No ground item, no safebox, no shop, no transfer.** The table has room for
+  them and nothing writes them.
+- **No `apply_path` / `apply_value` / `apply_type`,** as 196.2 says.
+- **The prototype is not joined.** A row's `vnum` names a prototype and the
+  footprint and limits need that prototype; the join belongs to the reader, not
+  to the schema.
+
+### 196.5 Receipt
+
+- `cargo fmt --all -- --check`: clean.
+- `cargo build --workspace --locked --offline`: clean.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast`
+  (`env -u DATABASE_URL`): **31 targets, 2179 passed, 0 failed.**
+- The same command with `DATABASE_URL` pointed at PostgreSQL 18: **31 targets,
+  2179 passed, 0 failed**, with `0005_items.sql` applied, and
+  `SELECT count(*) FROM pg_database WHERE datname LIKE 'prodomo\_%'` returning 0
+  afterwards. (35 databases left by earlier sessions were dropped first; the
+  gate does not leak, which was checked by running one target, re-counting, and
+  finding the count unchanged.)
+- `cargo test --workspace --doc --locked --offline`: **9 targets, 1 passed, 0
+  failed, 15 ignored** (the ignored ones are the `no_run` examples, unchanged).
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`:
+  **0 diagnostics.**
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`:
+  **0 diagnostics.**
+
+Test counts are unchanged at 2,179. The one limits test in 195 was replaced by a
+test that holds the correction, so the net is zero. `world` stays at 72.
+
+**The behaviour probe is the receipt for the migration**, because a `CHECK` nobody
+executed is a comment. All of it ran against PostgreSQL 18 on
+`127.0.0.1:55432` in a scratch database named `probe196`, which was dropped; the
+count of `prodomo\_%` databases was 0 afterwards and still is.
+
+| probe | result |
+|---|---|
+| the eight boundary values of 196.3b in one row | inserted, and read back identical |
+| six positive controls across windows 1, 3, 5, 9, 10 and a second owner | inserted, 6 rows |
+| a second item in one cell for one owner | refused, `item_owner_cell_key` |
+| the same cell in a **different** window | inserted (positive control for the index) |
+| the same cell for a **different** owner | inserted (positive control for the index) |
+| two ground rows both at `pos = 0` | both inserted, because the index is partial on `owner_id IS NOT NULL` |
+| `id = 0`, `id = 4290000001` | refused, `item_id_check` |
+| `window_type = 11`, `window_type = -1` | refused |
+| `count = 0`, `count = 5001` | refused, `item_count_check` |
+| `attrtype0 = 256`, `attrtype0 = -1` | refused, `item_attrtype0_check` |
+| `vnum = -1`, `pos = -1` | refused, `item_vnum_check`, `item_pos_check` |
+| a ground row **with** an owner | refused, the biconditional |
+| a non-ground row **without** an owner | refused, the biconditional |
+| `DELETE FROM player WHERE id = 1` | cascaded to exactly that character's 5 rows; the other character's 2 and both ground rows survived |
+
+Twelve refusals, all correct, and no unexpected insert. `count = 5000` and
+`attrtype0 = 200` are in the positive controls, so the bounds are not merely
+refusing everything.
+
+**Not measured.** `i686-linux-gnu-g++-12` is still not installed on this machine,
+so no packed-width probe ran. The `TItemLimit` width claim in 196.0 (five bytes,
+ten for the pair) is a hand sum from `tables.h:844-847` on the 32-bit target and
+is not probe-confirmed. Nothing else in this unit turns on a width.

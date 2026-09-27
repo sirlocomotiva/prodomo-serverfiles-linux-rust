@@ -248,6 +248,30 @@ owner should know about (178.5):
 - `GetAttrVnum` returns a `DWORD` from the row's signed `int count`, so a negative count becomes a
   huge attribute vnum rather than 0 (`G/item_manager.h:206-218`). The Rewrite keeps the bits, as
   the type demands, and says so (ledger 192).
+- A character delete runs `DELETE FROM player` and checks its result, then a **second** statement
+  for the items whose result is discarded, so a failure on the second orphans every item while the
+  client is told the delete succeeded (`D/ClientManagerPlayer.cpp:1522-1532,1552`). The Rewrite
+  gets `ON DELETE CASCADE` from the foreign key, so the two are one statement (ledger 196).
+- A stored item whose vnum is not in the Game data is dropped by a bare `continue` with the
+  diagnostic **commented out**, and the row is never deleted, so the same silent drop repeats on
+  every login (`G/input_db.cpp:1474-1478`). The Rewrite fails the load loudly instead (ledger 196).
+- `QUERY_ITEM_DESTROY` is handed the owning pid, uses it for the log line and to choose the async
+  or sync branch, and then deletes on the item id alone -- as does the cached path -- even though
+  the id space is global across every character, safebox, the mall and the ground
+  (`D/ClientManager.cpp:1833-1846`; `D/Cache.cpp:57-61`). The item id is never client-supplied, so
+  this is not client-reachable. The Rewrite deletes on `id` **and** `owner_id` (ledger 196).
+- The item award path writes an **account** id into `player.item.owner_id` for a safebox or mall
+  row and a character id for everything else, with nothing in the schema telling the two apart
+  (`D/ClientManager.cpp:997-1008`). The Rewrite makes `owner_id` a typed reference to `player`, so
+  an awarded item has to belong to a safebox table instead (ledger 196).
+- The award insert's failure test is a disjunction, `uiAffectedRows == 0 || uiInsertID == 0 ||
+  uiAffectedRows == (uint32_t)-1`, and its `uiInsertID` term can never be true for a successful
+  insert into an `AUTO_INCREMENT` table, so it is dead weight inside a check that is otherwise
+  right (`D/ClientManager.cpp:1012`). The Rewrite tests the affected-row count alone (ledger 196).
+- `player.attrtypeN` is a MySQL `tinyint`, so the legacy table can hold a negative attribute type
+  that legacy's own `TPlayerItemAttribute::bType`, a `BYTE`, cannot; the load wraps it
+  (`D/ClientManagerPlayer.cpp:60`; `C/tables.h:428`). The Rewrite's `CHECK` is 0..255, so a corrupt
+  row is an error rather than a wrap (ledger 196).
 
 ## Environment
 

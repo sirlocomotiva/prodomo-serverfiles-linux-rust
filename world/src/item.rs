@@ -7,9 +7,33 @@
 //! [`Item`] value, so there is no pointer arithmetic, no owner pointer to
 //! dangle, and no delete-inside-a-member-function to reproduce.
 //!
-//! The fields are the legacy `TItemData` set (`packet.h:1440-1446`), which is
-//! what the item windows put on the wire. All four feature switches that gate
-//! them are live in this build, so all four are here:
+//! # What this is not
+//!
+//! **The item limits are not on the instance.** `aLimits` is a member of
+//! `TItemTable` (`tables.h:879`) -- the **prototype** -- and not of `TItemData`
+//! (`packet.h:2971-2985`), which is the instance record and has no such member.
+//! `CItem` has no `SetLimit` at all: `GetLimitType` and `GetLimitValue`
+//! (`item.h:110-111`) both read `m_pProto->aLimits[idx]`, so a limit is fixed by
+//! the prototype and no instance can change it. They are read from
+//! `item_proto.txt` into `gamedata::item_proto::ItemProto::limits`, and a unit
+//! that wants a limit goes there. Ledger 195 gave the instance a
+//! `limits: [ItemLimit; 2]` and removed it, because an instance limit would have
+//! had nothing to save it to: legacy's own `player.item` table has no limit
+//! columns.
+//!
+//! `ITEM_LIMIT_MAX_NUM` is 2 (`item_length.h:11`) and `ELimitTypes`
+//! (`item_length.h:427-450`) names **ten** types, `LIMIT_NONE` through
+//! `LIMIT_CHAMPION`, then `LIMIT_MAX_NUM` as an eleventh. The sentinel is dead:
+//! `LIMIT_MAX_NUM` is read nowhere in `server/server`, while all ten loops over
+//! the array's elements are bounded by `ITEM_LIMIT_MAX_NUM` (swept with both
+//! controls -- 14 hits for the array bound, 1 for the sentinel, which is its own
+//! definition). So the tenth type has nowhere to live, and widening the array to
+//! fit the enumeration would invent storage no loop can reach.
+//!
+//! The fields that are here are the legacy `TItemData` set
+//! (`packet.h:2973-2985`), which is what the item windows put on the wire. All
+//! four feature switches that gate them are live in this build, so all four are
+//! here:
 //! `ENABLE_REFINE_ELEMENT` (`prodomodefines.h:28`) gates
 //! [`Item::refine_element`], `__CHANGELOOK_SYSTEM__` (`:16`) gates
 //! [`Item::transmutation`], and `ENABLE_EXTENDED_SOCKETS` (`:76`) is what makes
@@ -47,23 +71,10 @@ use crate::character::NPOS;
 pub const SOCKETS: usize = common::constants::ITEM_SOCKET_MAX_NUM as usize;
 
 /// `ITEM_ATTRIBUTE_MAX_NUM` = 7 (`item_length.h:30`, unconditional), which is
-/// the width of [`Item::attributes`]. It is derived upstream from
+/// the width of [`Item::attributes`] and of the prototype's `aAttr`. It is derived upstream from
 /// `ITEM_ATTRIBUTE_NORM_START` plus the normal and rare counts, so it is
 /// 5 + 2 and not a free choice.
 pub const ATTRIBUTES: usize = common::constants::ITEM_ATTRIBUTE_MAX_NUM as usize;
-
-/// `ITEM_LIMIT_MAX_NUM` = 2 (`item_length.h:11`), the width of
-/// [`Item::limits`].
-///
-/// This is worth stating loudly because it is a trap: `ELimitTypes`
-/// (`item_length.h:427-450`) names **ten** types, `LIMIT_NONE` through
-/// `LIMIT_CHAMPION`, and then `LIMIT_MAX_NUM` as an eleventh, while the array
-/// holding them is two wide. The tenth type has nowhere to live, and every
-/// legacy loop over `aLimits` is bounded by the array rather than by the
-/// enumeration (`ClientManagerBoot.cpp:1610-1626` reads only `aLimits[0]` and
-/// `aLimits[1]`). Widening this to match the enumeration would silently change
-/// behaviour with no test failing.
-pub const LIMITS: usize = common::constants::ITEM_LIMIT_MAX_NUM as usize;
 
 /// An item instance's unique id.
 ///
@@ -120,45 +131,36 @@ impl std::error::Error for CountRejected {}
 pub struct Item {
     /// The unique id. Never 0, never reused.
     pub id: ItemId,
-    /// `TItemData::vnum` (`packet.h:1440`): the item prototype this instance is
+    /// `TItemData::vnum` (`packet.h:2973`): the item prototype this instance is
     /// made from.
     pub vnum: u32,
-    /// `TItemData::count` (`packet.h:1441`): the stack size. Bounded by
+    /// `TItemData::count` (`packet.h:2974`): the stack size. Bounded by
     /// [`ITEM_COUNT_LIMIT`].
     pub count: u16,
-    /// `TItemData::dwRefineElement` (`packet.h:1442`), under
+    /// `TItemData::dwRefineElement` (`packet.h:2976`), under
     /// `ENABLE_REFINE_ELEMENT`. Which of the six elements an item was refined
     /// with, and the zero that means none.
     pub refine_element: u32,
-    /// `TItemData::transmutation` (`packet.h:1443`), under
+    /// `TItemData::transmutation` (`packet.h:2979`), under
     /// `__CHANGELOOK_SYSTEM__`.
     pub transmutation: u32,
-    /// `TItemData::flags` (`packet.h:1444`).
+    /// `TItemData::flags` (`packet.h:2981`).
     pub flags: u32,
-    /// `TItemData::anti_flags` (`packet.h:1445`). This is a separate bitmap
+    /// `TItemData::anti_flags` (`packet.h:2982`). This is a separate bitmap
     /// from `flags` and is not stored the same way; the two are not inverses.
     pub anti_flags: u32,
-    /// `TItemData::alSockets` (`packet.h:1446`). Six wide here.
+    /// `TItemData::alSockets` (`packet.h:2983`). Six wide here.
     ///
     /// Sockets 0 and 1 are not decoration: socket 0 holds an absolute expiry
     /// and socket 1 a first-used marker, so the item's timers live in this
     /// array and not in any member. The 3 and 4 in [`common::constants`] index
     /// the toggle and riding flags.
     pub sockets: [i32; SOCKETS],
-    /// `TItemData::aAttr` (`packet.h:1446`): seven
+    /// `TItemData::aAttr` (`packet.h:2984`): seven
     /// [`ItemAttribute`] values, which is the protocol's own model of
     /// `TPlayerItemAttribute`. This crate reuses it rather than declaring a
     /// second attribute type, so there is one definition of the wire pair.
     pub attributes: [ItemAttribute; ATTRIBUTES],
-    /// `TItemData::aLimits` (`tables.h:879`): the per-type limits. **Two**
-    /// wide, not the number of members `ELimitTypes` names; see [`LIMITS`].
-    ///
-    /// Each element is a `TItemLimit`, which is a `BYTE` type and a `long`
-    /// value (`tables.h:844-847`). Both halves matter: the loader keys the whole
-    /// limit system off `bType` and reads the seconds out of `lValue`
-    /// (`ClientManagerBoot.cpp:1610-1626`), and `lValue` is a 32-bit signed
-    /// value because a `LIMIT_REAL_TIME` limit is a `time_t` offset.
-    pub limits: [ItemLimit; LIMITS],
     /// The grid footprint from the prototype's `bSize`: how many cells the
     /// stack occupies, walked with the window's stride.
     ///
@@ -195,7 +197,6 @@ impl Item {
             anti_flags: 0,
             sockets: [0; SOCKETS],
             attributes: [ItemAttribute::new(0, 0); ATTRIBUTES],
-            limits: [ItemLimit::new(0, 0); LIMITS],
             size: 1,
             pos: NPOS,
         }
@@ -332,12 +333,6 @@ impl Item {
         }
     }
 
-    /// Read one limit, or `None` if the index is past [`LIMITS`].
-    #[must_use]
-    pub fn limit(&self, index: usize) -> Option<ItemLimit> {
-        self.limits.get(index).copied()
-    }
-
     /// Write one attribute, or report that the index is out of range.
     ///
     /// # Errors
@@ -353,63 +348,6 @@ impl Item {
         }
         self.attributes[index] = attr;
         Ok(())
-    }
-
-    /// Write one limit, or report that the index is out of range.
-    ///
-    /// # Errors
-    ///
-    /// [`LimitOutOfRange`] for an index of [`LIMITS`] or more. The array is two
-    /// wide while `ELimitTypes` names ten members, so an index of two is in the
-    /// enumeration and out of the array, and only a checked accessor says so.
-    pub fn set_limit(&mut self, index: usize, limit: ItemLimit) -> Result<(), LimitOutOfRange> {
-        if index >= LIMITS {
-            return Err(LimitOutOfRange(index));
-        }
-        self.limits[index] = limit;
-        Ok(())
-    }
-}
-
-/// A limit index past [`LIMITS`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LimitOutOfRange(pub usize);
-
-impl core::fmt::Display for LimitOutOfRange {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "limit {} is outside the {} limit slots an item has",
-            self.0, LIMITS
-        )
-    }
-}
-
-impl std::error::Error for LimitOutOfRange {}
-
-/// One entry of `TItemData::aLimits`.
-///
-/// `BYTE bType` and `long lValue` (`tables.h:844-847`), so five bytes on the
-/// 32-bit legacy target. The type is an `ELimitTypes` member: `LIMIT_NONE` is 0,
-/// `LIMIT_LEVEL` through `LIMIT_CON` are 1 through 5, `LIMIT_REAL_TIME` is 6,
-/// `LIMIT_REAL_TIME_START_FIRST_USE` is 7, and `LIMIT_TIMER_BASED_ON_WEAR` is 8.
-/// Nine named members against a two-element array, which is why the index is
-/// checked rather than trusted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct ItemLimit {
-    /// The opaque `ELimitTypes` byte. Which types are legal is policy above
-    /// this model.
-    pub b_type: u8,
-    /// The signed value. A `LIMIT_REAL_TIME` limit is a `time_t` offset here, so
-    /// it is signed and 32 bits wide.
-    pub l_value: i32,
-}
-
-impl ItemLimit {
-    /// Build a limit.
-    #[must_use]
-    pub const fn new(b_type: u8, l_value: i32) -> Self {
-        Self { b_type, l_value }
     }
 }
 
@@ -647,6 +585,7 @@ impl ItemIds {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::constants::ITEM_LIMIT_MAX_NUM;
     use common::item_slots::ITEM_COUNT_LIMIT;
 
     /// A range with room to spare, for the tests that are not about exhaustion.
@@ -886,20 +825,18 @@ mod tests {
         assert_eq!(item.anti_flags, 0);
         assert_eq!(item.sockets, [0; SOCKETS]);
         assert_eq!(item.attributes, [ItemAttribute::new(0, 0); ATTRIBUTES]);
-        assert_eq!(item.limits, [ItemLimit::new(0, 0); LIMITS]);
         assert!(item.is_unplaced());
         assert_eq!(item.window(), NPOS.window_type);
     }
 
     #[test]
     fn every_width_is_the_legacy_one_and_is_derived_not_restated() {
-        // The three widths, stated so that a derivation that pointed at the
-        // wrong constant fails here rather than in a wire format three crates
-        // downstream. `ITEM_SOCKET_MAX_NUM` is the one that was wrong once: it
-        // said 3 in `constants.rs` while `tables.rs` said 6.
+        // The two widths this crate owns, stated so that a derivation that
+        // pointed at the wrong constant fails here rather than in a wire format
+        // three crates downstream. `ITEM_SOCKET_MAX_NUM` is the one that was
+        // wrong once: it said 3 in `constants.rs` while `tables.rs` said 6.
         assert_eq!(SOCKETS, 6, "ENABLE_EXTENDED_SOCKETS is live");
         assert_eq!(ATTRIBUTES, 7, "5 normal plus 2 rare");
-        assert_eq!(LIMITS, 2, "the array, not the enumeration");
         assert_eq!(
             SOCKETS,
             common::constants::ITEM_SOCKET_MAX_NUM as usize,
@@ -914,33 +851,26 @@ mod tests {
     }
 
     #[test]
-    fn the_limits_array_is_two_wide_while_the_enumeration_names_ten() {
-        // `ITEM_LIMIT_MAX_NUM` is 2 (`item_length.h:11`) and `ELimitTypes` names
-        // ten types (`item_length.h:427-450`, `LIMIT_NONE` through
-        // `LIMIT_CHAMPION`, then `LIMIT_MAX_NUM`). Every legacy loop over
-        // `aLimits` is
-        // bounded by the array, not the enumeration
-        // (`ClientManagerBoot.cpp:1610-1626` reads only `aLimits[0]` and
-        // `aLimits[1]`), so widening this to match the enumeration would change
-        // behaviour with no test failing. The bound is checked through the
-        // accessor, because a bare constant comparison is not a test.
-        let mut item = Item::new(1, 100);
-        item.set_limit(0, ItemLimit::new(6, 40)).expect("limit 0");
-        item.set_limit(1, ItemLimit::new(7, -5)).expect("limit 1");
-        assert_eq!(item.limit(0), Some(ItemLimit::new(6, 40)));
-        assert_eq!(item.limit(1), Some(ItemLimit::new(7, -5)));
-        for index in 2..12 {
-            assert_eq!(
-                item.set_limit(index, ItemLimit::new(1, 7)),
-                Err(LimitOutOfRange(index)),
-                "limit {index} is past the two slots"
-            );
-            assert_eq!(item.limit(index), None);
-        }
-        // The two halves are both load-bearing: the type byte is what the limit
-        // system keys off and the value is a 32-bit `time_t` offset, so a model
-        // of `[i32; 2]` that dropped `bType` would be 8 bytes where legacy's is
-        // 10 and would lose the only part that says what the number means.
-        assert_eq!(item.limits, [ItemLimit::new(6, 40), ItemLimit::new(7, -5)]);
+    fn an_instance_carries_no_limit_because_the_prototype_fixes_them() {
+        // Ledger 195 gave the instance a `limits: [ItemLimit; 2]` and
+        // `set_limit`. Both were wrong and both are gone. `aLimits` is a member
+        // of `TItemTable` (`tables.h:879`) -- the prototype -- and not of
+        // `TItemData` (`packet.h:2973-2985`), which is the instance record and
+        // has no such member. `CItem` has no `SetLimit`: `GetLimitType` and
+        // `GetLimitValue` (`item.h:110-111`) both read `m_pProto->aLimits[idx]`.
+        // The legacy `player.item` table has no limit columns either
+        // (`player.sql:351-395`), so an instance limit would have had nothing to
+        // save it and nothing to load it from.
+        //
+        // This is a compile-time assertion: if a limit field ever comes back,
+        // this file stops compiling, which is the point. The behavioural half of
+        // the claim is checked here in the only way a test can: the prototype
+        // side owns it, in `gamedata::item_proto::ItemProto::limits`, and that
+        // type is the one a caller must go through.
+        assert_eq!(
+            ITEM_LIMIT_MAX_NUM, 2,
+            "the prototype array is two wide, not the ten `ELimitTypes` names"
+        );
+        assert_eq!(ITEM_LIMIT_MAX_NUM, 10 - 8, "LIMIT_CHAMPION is the tenth");
     }
 }
