@@ -22,6 +22,7 @@
 //! `SHOPEX_GOLD` (1) and the `TItemPos()` default `{ window_type: 1,
 //! cell: 65_535 }`; all remaining scalar/array fields remain zero.
 
+use common::item_slots::EWindows;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -59,7 +60,11 @@ pub const SHOP_TABLE_NAME_BYTES: usize = SHOP_NAME_BYTES;
 pub const SHOPEX_GOLD: u8 = 1;
 
 /// Legacy `TItemPos()` inventory window selector.
-pub const SHOP_ITEM_DEFAULT_WINDOW_TYPE: u8 = 1;
+///
+/// Derived from the measured enum rather than written as a literal, so the one
+/// place that owns the window byte (`common::item_slots`) is also the one place
+/// that has to be re-measured if a feature switch changes the numbering.
+pub const SHOP_ITEM_DEFAULT_WINDOW_TYPE: u8 = EWindows::Inventory as u8;
 
 /// Legacy `TItemPos()` invalid/empty inventory cell (`WORD_MAX`).
 pub const SHOP_ITEM_DEFAULT_CELL: u16 = u16::MAX;

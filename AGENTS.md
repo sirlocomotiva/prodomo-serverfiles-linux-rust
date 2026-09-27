@@ -169,6 +169,12 @@ These rules exist because each one was broken at least once in this repository. 
 - **Every negative search needs a positive control and a negative control.** An absence claim
   without a control is not evidence. If the harness provides the `metin2-verify-absence-source-sweep`
   skill, use it before reporting an absence.
+- **A module's `//!` doc resolves intra-doc links in the crate root, not in its own module.**
+  On this toolchain a bare `EWindows` in the module doc of `common/src/item_slots.rs` fails
+  `RUSTDOCFLAGS="-D warnings"` even though the enum is declared in the same file 200 lines below,
+  while the same link inside an *item's* doc comment in that file resolves normally. Write
+  `crate::item_slots::EWindows` in a module's `//!` block. The asymmetry is what makes this look
+  like a typo rather than a scope rule.
 - **Search tooling traps.** If `grep` is a shell function or alias in your shell, call `command grep`.
   Pass `-a`, because GNU grep reports `server/server/common/VnumHelper.h` and some Game data files as
   binary and hides their lines. Never filter with `--include=*.h` alone; use both `*.h` and `*.H`, or

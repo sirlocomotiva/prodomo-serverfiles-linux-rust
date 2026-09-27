@@ -14,6 +14,7 @@
 //! Decoders reject short and overlong input. Fixed `char[N]` fields stay raw
 //! byte arrays.
 
+use common::item_slots::EWindows;
 use std::cmp::Ordering;
 use std::error::Error;
 use std::fmt;
@@ -404,7 +405,11 @@ pub const SHOP_TABLE_SHOP_NAME_OFFSET: usize =
 /// `SHOPEX_GOLD`, the legacy default price selector for a shop item.
 pub const SHOP_PRICE_TYPE_GOLD: u8 = 1;
 /// The active `EWindows::INVENTORY` value used by `TItemPos`'s default ctor.
-pub const SHOP_ITEM_DEFAULT_WINDOW_TYPE: u8 = 1;
+///
+/// Derived from the measured enum rather than written as a literal, so the one
+/// place that owns the window byte (`common::item_slots`) is also the one place
+/// that has to be re-measured if a feature switch changes the numbering.
+pub const SHOP_ITEM_DEFAULT_WINDOW_TYPE: u8 = EWindows::Inventory as u8;
 /// The active `TItemPos` default cell (`WORD_MAX`).
 pub const SHOP_ITEM_DEFAULT_CELL: u16 = u16::MAX;
 

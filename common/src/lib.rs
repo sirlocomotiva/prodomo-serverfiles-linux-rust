@@ -35,6 +35,9 @@ pub mod levels;
 /// The `EPointTypes` point-slot indices of the legacy `char.h`
 pub mod point_slot;
 
+/// The `EWindows` window byte and the flat item slot space of `length.h`
+pub mod item_slots;
+
 pub use tracing::{debug, error, info, trace, warn};
 
 /// Entity identifier type used throughout the server

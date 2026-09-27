@@ -190,6 +190,18 @@ Sections 163 through 167 establish the honest baseline and correct three method 
 
 ## Verification lessons
 
+- **A legacy name that appears in two scopes is two different functions, and the callers
+  decide which one you are porting.** `IsValidItemPosition` exists twice: `SItemPos::IsValidItemPosition`
+  (`length.h:973`) and `CHARACTER::IsValidItemPosition` (`char_item.cpp:10010`). `CHARACTER::GetItem`
+  calls the second; `exchange.cpp:191,327` and `DragonSoul.cpp:1163` call the first. They disagree on
+  three window bytes -- two where the first refuses and the second defers, and one (`BELT_INVENTORY`,
+  ledger 194) where the **first accepts and the second refuses**, because `length.h:981-982` has a
+  belt case and the `CHARACTER` switch has none and falls to its `default: return false`. Porting
+  either one alone silently changes which callers get the other. Sweep for the name across the
+  whole tree, resolve the receiver type of every call site, and then write a test that walks all 256
+  values and asserts the two transcribed versions agree everywhere except the bytes you have
+  written down. That test is what caught the "exactly two windows" claim in the first draft of
+  ledger 194; the belt row is the one a reader reasons their way past.
 - **A mutation sweep must be scoped to the function under test, and it must report the landing
   line.** A sweep that replaces the first textual occurrence of a pattern in a file can mutate a
   *different* function that happens to share the pattern, then report the mutant as a survivor. This

@@ -17887,3 +17887,299 @@ server name bytes 20 and 21 differently, which is 193.1. `TItemPos` is the
 opposite case. It is one struct in `length.h`, both directions embed it, and two
 Rust copies of it is a larger risk than one. The module doc in `item_pos.rs` now
 says this, so the next reader does not have to re-derive it.
+
+## 194. The item slot space, and the two validity functions that disagree about it
+
+Step 4 starts at items and inventory. Before an item can be an instance it has to
+have somewhere to be, and "where" in this server is a single flat array plus a
+second one for dragon souls, with a one-byte window that selects between them and
+a `WORD` that is a plain index with no per-window base. This unit measures that
+space from the compiler, puts it in `common::item_slots` as data, and puts
+legacy's `SItemPos` gameplay rules in `world::character::inventory` as policy.
+It ports no behaviour a client can reach, so no Parity row moves: `sys.item.core`
+stays `codec` and `sys.item.core` is not yet a running system.
+
+### 194.1 The space is one array, and the array is bigger than the numbers suggest
+
+A character owns four arrays (`char.h:458-461`): `pItems[INVENTORY_AND_EQUIP_SLOT_MAX]`,
+`bItemGrid[...]`, `pDSItems[DRAGON_SOUL_INVENTORY_MAX_NUM]`, and `wDSItemGrid[...]`.
+On the 32-bit target the four come to 15,132 bytes per character. The window byte
+chooses between the first pair and the second pair; it does not choose between
+seven inventories.
+
+Measured with `.scratch/probe194/slot_space.cpp` (194.9):
+
+| band | constant | cells |
+|---|---|---|
+| base inventory | `INVENTORY_RANGE` | `0..180` |
+| equipment | `EQUIPMENT_RANGE` | `180..244` |
+| dragon soul deck | `DRAGON_SOUL_EQUIP_RANGE` | `244..256` |
+| dragon soul reserved | `DRAGON_SOUL_RESERVED_RANGE` | `256..274` |
+| belt | `BELT_INVENTORY_RANGE` | `274..290` |
+| custom inventory, six categories | `CUSTOM_INVENTORY_RANGE` | `290..1370` |
+
+`INVENTORY_AND_EQUIP_SLOT_MAX` is 1370. The six ranges are contiguous, every start
+is the previous end, and the probe fails the build if that stops being true. The
+dragon soul box is a *second* array of 1152 cells reached through
+`EWindows::DragonSoulInventory`, which is why 1152 and 1370 both appear in the
+source and why a reader who sums them gets a wrong answer.
+
+The four `char.h:458-461` arrays are the only item storage on a character. There
+is no `GetInventory()`, no `INVENTORY_SECTION_*`, and no separate safebox array;
+the safebox is a different structure entirely, and `SItemPos::IsValidItemPosition`
+refuses a safebox position outright (`length.h:985-987`). The **absence** was
+checked with a positive and a negative control: a sweep for
+`INVENTORY_SECTION_`, `SAFEBOX_SECTION`, and `GetInventory(` over `server/server`
+returns `INVENTORY_SIZE` and `INVENTORY_SIZE_MAIN` and nothing else, while the
+same sweep for `INVENTORY_RANGE` (a term that does not exist) returns nothing at
+all, so the sweep can find a thing when there is one.
+
+### 194.2 The comments in `length.h` are stale, and two of them are stale in the direction that hurts
+
+The arithmetic in the legacy source is spelled out in comments, and the comments
+do not match the build. `length.h:917` reads
+
+    DRAGON_SOUL_EQUIP_SLOT_START = INVENTORY_MAX_NUM + WEAR_MAX_NUM, // 180 + 32 ( 212 )
+
+but `WEAR_MAX_NUM` is 64 at `length.h:89`, so the enumerator starts at 244, not
+212. `length.h:25` reads `INVENTORY_MAX_NUM = ... // 90 (default)` where
+`ENABLE_EXTEND_INVEN_SYSTEM` makes the page count 4, not the default 2, so it is
+180. Trusting either comment shifts every later range, which is the same trap that
+closed ledger 192's `MAX_APPLY_NUM` table. The module therefore carries the
+compiler's numbering and the probe, not the comments, and says so where a reader
+will see it.
+
+### 194.3 `EWindows` was materially wrong in the Rust tree, and has been replaced
+
+`common/src/enums.rs` carried an eight-member `EWindows` that stopped at
+`MALL = 4`. The live enum is eleven members. Three sit behind feature switches
+that are **all on** in this snapshot, so the compiler's enumerator reaches `GROUND`
+at 10:
+
+| byte | member | gate |
+|---|---|---|
+| 0 | `RESERVED_WINDOW` | -- |
+| 1 | `INVENTORY` | -- |
+| 2 | `EQUIPMENT` | -- |
+| 3 | `SAFEBOX` | -- |
+| 4 | `MALL` | -- |
+| 5 | `DRAGON_SOUL_INVENTORY` | -- |
+| 6 | `ATTR67_ADD` | `__ATTR_6TH_7TH__` |
+| 7 | `AURA_REFINE` | `__AURA_SYSTEM__` |
+| 8 | `SWITCHBOT` | `ENABLE_SWITCHBOT` |
+| 9 | `BELT_INVENTORY` | -- |
+| 10 | `GROUND` | -- |
+
+The eight-member version was not short by three but wrong from byte 6 onward: it
+had no `ATTR67_ADD`, so every window at or above 6 was unnamed. The enum has moved
+from `common::enums` to `common::item_slots` with the measured numbering, the
+`TryFrom<u8>` and `From<EWindows> for u8` conversions, and a test that pins all
+eleven against the compiler's output.
+
+**Belt cells are stored as `INVENTORY`.** `CHARACTER::SetCell`
+(`char_item.cpp:617-631`) relabels a held item `INVENTORY` when its cell is in the
+base inventory, the belt band, or a custom category, and `EQUIPMENT` for
+everything else in the flat space. So `EWindows::BeltInventory` names no cell a
+`GetItem` will find, and it survives only as the byte a belt item is persisted with
+before that relabelling. `world::character::inventory::stored_window` is the
+transcription, and it is what keeps the window byte a client sends and the window
+byte a row holds from being assumed to be the same field.
+
+### 194.4 Legacy has two `IsValidItemPosition`, and they disagree on three windows
+
+This is the finding that changed the most code. `SItemPos::IsValidItemPosition`
+(`length.h:973`) is a member of the struct. `CHARACTER::IsValidItemPosition`
+(`char_item.cpp:10010-10049`) is a method on the character. Both are called
+`IsValidItemPosition`, both are live, and `CHARACTER::GetItem` calls the **second**
+one (`char_item.cpp:256`) while `exchange.cpp:191,327` and `DragonSoul.cpp:1163`
+call the first.
+
+They agree everywhere except three windows, and the three differ in two different
+directions:
+
+| window | `SItemPos` | `CHARACTER` | why |
+|---|---|---|---|
+| `SAFEBOX` (3) | refused | deferred | the character defers to `m_pkSafebox->IsValidPosition` |
+| `MALL` (4) | refused | deferred | the same, to the mall |
+| `BELT_INVENTORY` (9) | **accepted**, `cell < 1370` | **refused** | `length.h:981-982` has the case; the `CHARACTER` switch has no belt arm and reaches `default: return false` |
+
+The belt row is the one that bites. A `{BeltInventory, 280}` passes the
+`SItemPos` check, so a trade or a Dragon Soul call accepts it, and then
+`CHARACTER::GetItem` refuses it and returns `NULL`. Both are transcribed:
+`common::item_slots::cell_bound` is the first, and
+`world::character::inventory::character_cell_bound` is the second, as a
+`CellBound` of `Bounded(n)`, `Deferred`, or `Never`. `Deferred` is not laziness:
+`CSafebox::IsValidPosition` (`safebox.cpp:251-260`) returns false when there is no
+grid and otherwise compares against the live grid size, so the bound is a runtime
+property and cannot be a constant. The Rewrite has no safebox yet, so only the
+false half is reachable, and that half is the one that keeps a character with no
+safebox from reading one.
+
+A test walks all 256 byte values and asserts the two tables agree on 253 of them
+and disagree on exactly these three. It found the belt row: the first draft of
+this ledger claimed "exactly two windows" and the test refused it.
+
+### 194.5 A safebox position can be valid and still retrieve nothing
+
+`CHARACTER::GetItem` validates with the `CHARACTER` check, which admits a safebox
+or mall position, and then has **no** `case SAFEBOX` or `case MALL` in its `switch`,
+so it falls through to `return NULL`. Legacy compiles because `default: return
+false` catches an unknown window byte in the check, but the retrieval side has no
+such default. A position that passed validation can name nothing.
+
+The Rewrite does not reproduce this. `character_cell_bound` is where the
+admission is decided, and the item-instance unit is where a safebox cell is
+resolved, so the two get written together or not at all.
+
+### 194.6 The custom inventory is reached through the inventory byte, and its category is a signed value that is never checked
+
+`CHARACTER::GetInventoryPageByPos` (`char_item.cpp:314`) takes an `int` category
+and never checks it against `CUSTOM_INVENTORY_CATEGORY_NUM` (6). Category `-1`
+therefore starts its page walk at `CUSTOM_INVENTORY_SLOT_START -
+CUSTOM_INVENTORY_MAX_NUM` = 110, which is inside the base inventory, and its pages
+land on 110, 155, 200, 245.
+
+Legacy's first arm absorbs a cell below `INVENTORY_MAX_NUM`, so the defect only
+bites at or above 180. Cell 200 is an *equipment* cell and legacy reports it as
+page 2 of a category that does not exist. `inventory_page_by_pos` refuses it, and
+the test demonstrates the defect by reproducing legacy's arithmetic in `i32` and
+asserting the Rewrite answers `None` where legacy's `int` arithmetic would not.
+
+Two further facts about the custom inventory are recorded in the module and are
+not Defects, because they are what legacy does with a valid category:
+
+- The category is selected **first match** in ascending order
+  (`char_item.cpp:283-295`), so a cell that falls in two categories' arithmetic
+  resolves to the lower one. The Rewrite reproduces the first match.
+- `RefineInformation` carries its position in a `BYTE` cell
+  (`item_length.h:196`), so a custom-inventory cell above 255 cannot be named in
+  that record. That is a Defect, recorded and not reproduced; the Rewrite widens
+  the field to the `WORD` the wire already has room for when a sender appears.
+
+### 194.7 `Inventory_Size()` is a stat, not a bound, and the two must not be confused
+
+`CHARACTER::Inventory_Size` (`char.h:1285`) is
+`INVENTORY_OPEN_PAGE_SIZE + INVENTORY_WIDTH * Inven_Point()` = `90 + 5 * stat`.
+It is a runtime count of how many base-inventory cells a character has been
+extended to cover. It is **not** the array length: the array is always 180 cells in
+the base inventory, whether or not the character has the stat.
+
+So a cell at or above the usable count and below 180 is inside the array, passes
+`cell_bound`, and is still not a cell the player's inventory covers. Legacy has
+one number where the game needs two. The Rewrite keeps them apart: `cell_bound` is
+the memory-safety bound, and `common::item_slots::usable_inventory_cells(stat)` is
+the gameplay count, with a test that pins `usable_inventory_cells(0) == 90`,
+`(18) == 180`, and that a cell past the count still passes the bound check -- which
+is exactly why conflating them would be a bug.
+
+The legacy expression is a bare sum with no clamp, so a stat above 18 would name
+cells past the base inventory. Legacy never reaches one, and the Rewrite does not
+clamp silently: the function is documented, and the test asserts the range it was
+measured over.
+
+### 194.8 What is in `common` and what is in `world`, and why
+
+`common::item_slots` is data: the measured constants, `SlotRange`, the six
+contiguous ranges, `EWindows`, `cell_bound`, and the category arithmetic. It makes
+no gameplay decision and knows nothing about a character.
+
+`world::character::inventory` is policy: `NPOS`, `INVENTORY_PLACEHOLDER`,
+`is_valid_item_position`, the `is_*_position` predicates, `inventory_type_by_pos`,
+`inventory_type_of_cell`, `inventory_page_by_pos`, `character_cell_bound`, and
+`stored_window`. These mirror `SItemPos` and `CHARACTER` and carry the Defect
+decisions above them, where a caller can see them.
+
+`ItemPos::default()` is unchanged and still `0`/`0`. Legacy's `SItemPos`
+constructor policy is `{INVENTORY, WORD_MAX}` and is represented by
+`INVENTORY_PLACEHOLDER`; a test asserts the codec default is a valid position and
+the placeholder is not, so the deliberate policy stays deliberate.
+
+### 194.9 The probe, and its controls
+
+`.scratch/probe194/slot_space.cpp` compiles the verbatim enum bodies from
+`length.h` and `item_length.h` under the switches `prodomodefines.h` defines in
+this snapshot, and prints the compiler's own numbering. The compiled binary is not
+kept; the source is, so the numbers can be re-measured.
+
+Every probe in this repository must re-measure something it already knows, and
+this one does: it re-measures each constant against an independently written hand
+sum (`check(name, measured, hand_sum)`), it asserts the six ranges are contiguous
+and end at 1370, it asserts the `CCharacter` array sizes on the 32-bit target, and
+it asserts all eleven `EWindows` values. It prints `all controls passed (0 control
+failures)`; a non-zero count is a failed probe, not a warning. A negative control
+is present as well: the same sweep for a name that does not exist returns nothing,
+so a sweep that found nothing cannot be mistaken for a sweep that looked.
+
+The constants also depend on seven feature switches, and a Rust test reads them
+from the `GATES` table so that turning one off fails the build with the name of
+the switch **and** the constants that have to be regenerated. That test reads the
+table in a loop rather than as seven `assert!(CONST, ..)` lines on purpose: a bare
+constant is folded away before the assertion runs, so such a test would pass
+whatever the flag said, and Clippy's `assertions_on_constants` is right to object.
+
+### 194.10 What this unit does not claim
+
+- **No item instance and no item storage.** `SetItem`, `GetItem`, `RemoveItem`,
+  and the safebox are not touched. An item instance needs a slot, and a slot needs
+  this, so this unit is the floor and the next one is the floor's tenant.
+- **No codec moves.** The four game-to-client item-window records stay codec-only
+  (193) and `sys.item.core` stays `codec`. Nothing sends them yet.
+- **No Parity row is `ported`.** A slot-space table is not a scenario.
+- **The safebox grid size is not a constant** and is not modelled as one.
+- **No `INVENTORY_PAGE_SIZE` semantics.** The 45-cell page is a UI grid
+  (`INVENTORY_WIDTH` 5 by `INVENTORY_HEIGHT` 9) and the same number also happens
+  to be a custom-inventory page. The coincidence is recorded; the reason is not
+  asserted, because the source does not say.
+
+### 194.11 Defects recorded and not reproduced
+
+| site | defect | handling |
+|---|---|---|
+| `char_item.cpp:314` | `GetInventoryPageByPos` takes a signed category and never range-checks it; category `-1` yields a page for an equipment cell | `inventory_page_by_pos` refuses a category at or above 6; the test reproduces legacy's arithmetic |
+| `item_length.h:196` | `RefineInformation` carries the cell in a `BYTE`, so a custom-inventory cell above 255 is unnameable | recorded; widen the field when a sender appears |
+| `char_item.cpp:256` | `GetItem` has no `SAFEBOX` or `MALL` case, so a position its own check admits retrieves `NULL` | admission and resolution are written together in the item-instance unit |
+| `char.h:1285` | `Inventory_Size()` is unclamped, so a stat above 18 would name cells past the base inventory | documented; the test pins the range it was measured over |
+| `safebox.cpp:251-260` | `IsValidPosition` is safe, but a caller may then use the position in a path with no grid check | the Rewrite resolves a safebox cell only where a safebox exists |
+
+### 194.12 A duplicated window constant in `gamedata`, and the fix
+
+`SHOP_ITEM_DEFAULT_WINDOW_TYPE` existed **twice**, as a literal `1`:
+`gamedata/src/records.rs:407` and `gamedata/src/shop.rs:62`. Both stand for the
+same measured legacy fact -- the value `TItemPos`'s default constructor selects --
+and both were written as a bare number with no way to notice if the enum ever
+moved.
+
+That is the same shape as ledger 193.12's two `TItemPos` structs: one legacy fact,
+two copies, no link between them. Now that `common::item_slots` owns the measured
+`EWindows`, both derive from it as `EWindows::Inventory as u8`, so the number is
+written once in the workspace and re-measured once.
+
+The rewrite is a const-to-const derivation, not a new dependency: `gamedata`
+already depends on `common`, and both call sites keep their public name, so no
+consumer changed.
+
+### 194.13 Receipt
+
+- `cargo fmt --all -- --check`: clean.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: clean.
+- `cargo build --workspace --locked --offline`: clean.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast`
+  (`env -u DATABASE_URL`): **PASSED=2130 FAILED=0** across 31 targets.
+- `cargo test --workspace --doc --locked --offline`: **DOC_PASSED=1 DOC_FAILED=0**.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: clean.
+- `git diff --check`: clean.
+- The i686 width probe was not needed for this unit: every width here comes from a
+  `WORD` and a `BYTE` in a counted array, and the array sizes were confirmed by
+  `sizeof` on the probe's own 32-bit-shaped layout rather than by a cross
+  compiler. The `CCharacter` array total in 194.1 is from the same probe.
+
+Test counts moved from 2,087 to 2,130, which is exactly the 43 new tests: 15 in
+`common/src/item_slots.rs` and 28 in `world/src/character/inventory.rs`. `common`
+gains the measured constants, the `GATES` table and its uniqueness check, the
+`is_empty` accessor, and the corrected `EWindows` pins; `world` gains the
+`CellBound` model, `stored_window`, and the tests that pin the three-window
+disagreement, the deferred bound, the never bound, the label normalisation round
+trip, the stat-derived usable count, and the corrected page Defect demonstration.
+`protocol` is unchanged at 1,167 unit and 66 wiring tests.
+
+No database was involved: this unit reads no SQL and writes no migration.

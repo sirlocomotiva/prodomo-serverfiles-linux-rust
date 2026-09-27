@@ -780,32 +780,6 @@ pub enum EOnIdleEvents {
 }
 
 // ============================================================================
-// EWindows - u8
-// ============================================================================
-
-/// Inventory/window types
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EWindows {
-    /// Reserved window
-    Reserved = 0,
-    /// Main inventory
-    Inventory = 1,
-    /// Equipment window
-    Equipment = 2,
-    /// Safebox
-    Safebox = 3,
-    /// Mall/Itemshop
-    Mall = 4,
-    /// Dragon soul inventory
-    DragonSoulInventory = 5,
-    /// Belt inventory
-    BeltInventory = 6,
-    /// Ground (dropped items)
-    Ground = 7,
-}
-
-// ============================================================================
 // EMobSizes - u8
 // ============================================================================
 
