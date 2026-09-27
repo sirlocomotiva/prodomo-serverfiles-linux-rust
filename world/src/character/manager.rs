@@ -13,6 +13,18 @@ pub enum CharacterManagerError {
     DuplicatePlayerId(CharacterId),
     /// A player with this ASCII case-insensitive name is already indexed.
     DuplicatePlayerName(String),
+    /// A character with this virtual identifier is already indexed.
+    ///
+    /// Separate from the other duplicates because a caller that supplies its own VID
+    /// can hit it, and "that number is taken" is a different repair from "that name
+    /// is taken": the first is two clients claiming one identity, the second is one
+    /// account logging in twice.
+    DuplicateVid(Vid),
+    /// A character cannot be indexed under the null VID.
+    ///
+    /// Legacy's `VID::NULL` is what a record with no target carries, so indexing a
+    /// character there would make a "broadcast to nobody" claim find someone.
+    NullVid,
     /// No character exists for this virtual identifier.
     UnknownVid(Vid),
     /// No player exists for this persistent identifier.
@@ -31,6 +43,10 @@ impl fmt::Display for CharacterManagerError {
             }
             Self::DuplicatePlayerName(name) => {
                 write!(formatter, "player name {name:?} is already indexed")
+            }
+            Self::DuplicateVid(vid) => write!(formatter, "character {vid} is already indexed"),
+            Self::NullVid => {
+                formatter.write_str("a character cannot be indexed under the null VID")
             }
             Self::UnknownVid(vid) => write!(formatter, "character {vid} was not found"),
             Self::UnknownPlayerId(player_id) => {
@@ -96,6 +112,42 @@ impl CharacterManager {
         player_id: CharacterId,
         name: &str,
     ) -> Result<Vid, CharacterManagerError> {
+        let vid = self.allocate_vid()?;
+        // The counter is known to be free because it came from `allocate_vid` and this
+        // manager is the only allocator, so a duplicate-VID refusal here would be a
+        // bug in that invariant rather than a state a caller can hit.
+        self.create_player_with_vid(player_id, name, vid)?;
+        Ok(vid)
+    }
+
+    /// Creates and indexes a player character under a caller-supplied VID.
+    ///
+    /// This is the entry point a live client uses, and the reason it exists is that
+    /// the caller already has a number on the wire. Legacy allocates the VID from a
+    /// process counter (`CHARACTER_MANAGER::AllocVID`) and pairs it with a server-local
+    /// CRC that never reaches the wire, so a live descriptor is free to keep using
+    /// whatever identity it published at enter-game. Handing the world a second
+    /// number for the same character would make every record it sends unaddressable.
+    ///
+    /// # Errors
+    ///
+    /// [`CharacterManagerError::DuplicateVid`] when that VID is taken,
+    /// [`CharacterManagerError::DuplicatePlayerId`], or
+    /// [`CharacterManagerError::DuplicatePlayerName`]. None of the three inserts
+    /// anything, and a null VID is refused because it is what a record with no target
+    /// carries.
+    pub fn create_player_with_vid(
+        &mut self,
+        player_id: CharacterId,
+        name: &str,
+        vid: Vid,
+    ) -> Result<(), CharacterManagerError> {
+        if vid.is_null() {
+            return Err(CharacterManagerError::NullVid);
+        }
+        if self.characters.contains_key(&vid) {
+            return Err(CharacterManagerError::DuplicateVid(vid));
+        }
         if self.by_player_id.contains_key(&player_id) {
             return Err(CharacterManagerError::DuplicatePlayerId(player_id));
         }
@@ -105,13 +157,12 @@ impl CharacterManager {
             return Err(CharacterManagerError::DuplicatePlayerName(name.to_owned()));
         }
 
-        let vid = self.allocate_vid()?;
         let character = Character::player(vid, player_id, name);
         let _previous_character = self.characters.insert(vid, character);
         let _previous_player = self.by_player_id.insert(player_id, vid);
         let _previous_name = self.by_player_name.insert(canonical_name, vid);
         self.active.insert(vid);
-        Ok(vid)
+        Ok(())
     }
 
     /// Finds a character by virtual identifier.

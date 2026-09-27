@@ -99,3 +99,76 @@ fn destruction_requested_during_iteration_is_deferred_until_pass_finishes() {
     );
     assert_eq!(manager.find_by_vid(survivor).unwrap().vid(), survivor);
 }
+
+/// A live client brings its own VID, which is the number its descriptor already
+/// published at enter-game. The manager must index it under exactly that number
+/// rather than allocating a second one, or every record the world writes is
+/// addressed to an identity the client has never seen.
+#[test]
+fn a_caller_supplied_vid_is_indexed_rather_than_a_fresh_counter_value() {
+    // Given: an empty manager, which has not issued its first counter value yet.
+    let mut manager = CharacterManager::new();
+
+    // When: a character is admitted under the store's own id.
+    let admitted = manager.create_player_with_vid(4_242, "Alice", Vid::new(4_242));
+
+    // Then: the VID is the one supplied, and no counter value was consumed, which
+    // is what a later `create_player` proves by still starting at one.
+    assert_eq!(admitted, Ok(()));
+    assert_eq!(
+        manager.find_by_vid(Vid::new(4_242)).map(Character::vid),
+        Ok(Vid::new(4_242))
+    );
+    assert_eq!(manager.create_player(1, "Mob").unwrap(), Vid::new(1));
+}
+
+#[test]
+fn a_caller_supplied_duplicate_vid_is_refused_and_indexes_nothing() {
+    // Given: one character already holding VID 7.
+    let mut manager = CharacterManager::new();
+    manager
+        .create_player_with_vid(7, "Alice", Vid::new(7))
+        .unwrap();
+
+    // When: a second character claims the same VID under a different name and id.
+    let refused = manager.create_player_with_vid(8, "Bob", Vid::new(7));
+
+    // Then: the refusal is its own typed variant, not a name or id duplicate, and
+    // the first character is still the one under that number.
+    assert_eq!(
+        refused,
+        Err(CharacterManagerError::DuplicateVid(Vid::new(7)))
+    );
+    assert_eq!(manager.len(), 1);
+    assert_eq!(
+        manager.find_by_vid(Vid::new(7)).map(Character::name),
+        Ok("Alice")
+    );
+    assert_eq!(
+        manager.find_player_by_name("Bob").map(Character::vid),
+        Err(CharacterManagerError::UnknownPlayerName("Bob".to_owned()))
+    );
+    assert_eq!(
+        manager.find_by_pid(8).map(Character::vid),
+        Err(CharacterManagerError::UnknownPlayerId(8))
+    );
+}
+
+#[test]
+fn a_null_vid_is_refused_because_it_is_what_a_record_with_no_target_carries() {
+    // `VID::NULL` is what legacy puts in a record that addresses nobody. Indexing a
+    // character there would make a "to nobody" claim find someone.
+    let mut manager = CharacterManager::new();
+    assert_eq!(
+        manager.create_player_with_vid(1, "Alice", Vid::NULL),
+        Err(CharacterManagerError::NullVid)
+    );
+    assert_eq!(manager.len(), 0);
+    assert_eq!(manager.active_len(), 0);
+    // And it indexes nothing at all, so the same character can still be admitted
+    // properly afterwards.
+    assert_eq!(
+        manager.create_player_with_vid(1, "Alice", Vid::new(1)),
+        Ok(())
+    );
+}

@@ -23,16 +23,18 @@
 //! steps nothing yet; it counts, and the count is what proves the thread is running
 //! this value rather than an empty closure.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use gamedata::item_proto::ItemProtos;
 use protocol::item_pos::ItemPos;
-use world::character::{CharacterManager, Rejected};
+use world::character::{CharacterManager, CharacterManagerError, Rejected};
 use world::item::{ItemIdRange, ItemIds};
 
-use tracing::warn;
+use tracing::{debug, warn};
 
+use crate::client_registry::ClientOutbox;
 use crate::game_loop::PulseProcessor;
 use crate::game_loop_messages::GameCommand;
 use crate::item_grant::{grant_item, GrantOutcome, GrantRefusal, GrantRequest};
@@ -120,9 +122,114 @@ impl std::fmt::Display for RevokeRefused {
 
 impl std::error::Error for RevokeRefused {}
 
+/// Why the world refused to admit a live client's character.
+///
+/// Every variant leaves the world unchanged, so the descriptor can close without the
+/// world and the client having disagreed about whether the character exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnterWorldRefused {
+    /// Another character is already indexed under that VID.
+    ///
+    /// A bug rather than a state to recover from: a second client with the same wire
+    /// VID would make every record the world sends go to whichever descriptor answered
+    /// last, and a grant would land on the wrong player.
+    DuplicateVid {
+        /// The VID the client arrived with.
+        vid: common::vid::Vid,
+    },
+    /// Another character is already indexed under that player id.
+    DuplicatePlayerId {
+        /// The player id the client arrived with.
+        player_id: u32,
+    },
+    /// Another character already holds that Name, compared case-insensitively.
+    DuplicateName {
+        /// The Name the client arrived with.
+        name: String,
+    },
+    /// The VID is zero, which is legacy's `VID::NULL`.
+    ///
+    /// Refused rather than stored, because a zero VID is what a record with no target
+    /// carries, so a world that indexed it would answer a "broadcast to nobody" claim
+    /// with a character.
+    NullVid,
+    /// The world could not be asked, because the manager refused for a reason the
+    /// world has no name of its own for.
+    ///
+    /// Kept apart from the duplicates above on purpose. Those are states a caller
+    /// could act on -- this name is taken, do not retry it -- and this one is a bug in
+    /// the crossing. Reporting it as a name duplicate would send an operator looking
+    /// at a player's Name when the real fault is in the world, and would hide the
+    /// exhaustion case entirely, which is the one that needs attention.
+    NotAdmitted {
+        /// The manager's own reason, verbatim, so nothing is lost in translation.
+        reason: String,
+    },
+}
+
+impl std::fmt::Display for EnterWorldRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateVid { vid } => {
+                write!(formatter, "the world already holds {vid}")
+            }
+            Self::DuplicatePlayerId { player_id } => {
+                write!(formatter, "the world already holds player {player_id}")
+            }
+            Self::DuplicateName { name } => {
+                write!(
+                    formatter,
+                    "the world already holds a character named {name}"
+                )
+            }
+            Self::NullVid => {
+                formatter.write_str("a character cannot enter the world with a null VID")
+            }
+            Self::NotAdmitted { reason } => {
+                write!(formatter, "the world refused this character: {reason}")
+            }
+        }
+    }
+}
+
+impl EnterWorldRefused {
+    /// Names the world-side reason in the caller's terms.
+    ///
+    /// The two null-VID checks are the same rule seen from two places, and both are
+    /// kept: the world checks before it calls the manager so a refusal costs no
+    /// counter value, and the manager checks because it is also reachable directly.
+    /// Mapping them onto one variant means a caller cannot tell which check fired,
+    /// which is fine, because the repair is the same in both cases.
+    fn from_manager(error: CharacterManagerError, name: &str) -> Self {
+        match error {
+            CharacterManagerError::DuplicateVid(vid) => Self::DuplicateVid { vid },
+            CharacterManagerError::DuplicatePlayerId(player_id) => {
+                Self::DuplicatePlayerId { player_id }
+            }
+            // The manager's variant carries the name it refused. The caller's copy is
+            // used instead so a caller that passed a different spelling sees its own,
+            // which is what the log line will print.
+            CharacterManagerError::DuplicatePlayerName(_) => Self::DuplicateName {
+                name: name.to_owned(),
+            },
+            CharacterManagerError::NullVid => Self::NullVid,
+            // The remaining variants are lookups and a counter exhaustion, none of
+            // which `create_player_with_vid` can produce. They are carried through by
+            // their own text rather than folded into a duplicate: `VidExhausted` in
+            // particular is the one case here an operator has to act on, and calling
+            // it a name duplicate would bury it and send the search to a player's
+            // Name instead of to the world.
+            other => Self::NotAdmitted {
+                reason: other.to_string(),
+            },
+        }
+    }
+}
+
+impl std::error::Error for EnterWorldRefused {}
+
 /// A grant was asked for before the world had an allocator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-
 pub struct NoItemIds;
 
 impl std::fmt::Display for NoItemIds {
@@ -162,6 +269,14 @@ pub struct GameState {
     protos: ItemProtos,
     metrics: Arc<GameStateMetrics>,
     last_pulse: u64,
+    /// Where each online character's records go, keyed by the VID it entered under.
+    ///
+    /// Separate from the [`CharacterManager`] on purpose. The manager owns gameplay
+    /// state that only the game thread touches; this map owns a **sender**, which is
+    /// the one thing here that is not world state and must not be walked as if it
+    /// were. Keeping them apart also means a departed client is removed from one map
+    /// and cannot leave a stale sender behind in the other.
+    outboxes: HashMap<common::vid::Vid, ClientOutbox>,
 }
 
 impl GameState {
@@ -191,6 +306,7 @@ impl GameState {
             protos,
             metrics: Arc::new(GameStateMetrics::default()),
             last_pulse: 0,
+            outboxes: HashMap::new(),
         }
     }
 
@@ -331,6 +447,51 @@ impl GameState {
                     );
                 }
             }
+            GameCommand::EnterWorld {
+                vid,
+                player_id,
+                name,
+                outbox,
+                reply,
+            } => {
+                let answer = self.enter_world(vid, player_id, &name, outbox);
+                // A dropped admit answer means the descriptor is already closing, and a
+                // character nobody will play is not a state worth warning about: the
+                // close path runs the leave, which finds nobody and says so at debug.
+                if reply.send(answer).is_err() {
+                    debug!(?vid, player_id, name = ?name.as_str(), "the world admitted a character nobody was left to hear about");
+                }
+            }
+            GameCommand::DeliverRecord { vid, record, reply } => {
+                // A `false` here means the character is not online or its descriptor
+                // is gone. It is not logged as a warning: a record that could not be
+                // delivered is a normal outcome for anything sent after a disconnect,
+                // and the caller is told in the answer.
+                if reply.send(self.write_to_client(vid, record)).is_err() {
+                    debug!(
+                        ?vid,
+                        "the world wrote a record nobody was left to hear about"
+                    );
+                }
+            }
+            GameCommand::LeaveWorld { vid, reply } => {
+                let removed = self.leave_world(vid);
+                // A leave that finds nobody is a double leave, not a failure: the
+                // descriptor is ending and the world already agrees the character is
+                // gone. Logging it at warn would make an ordinary reconnect noisy.
+                if !removed {
+                    debug!(
+                        ?vid,
+                        "the world was asked to remove a character it did not hold"
+                    );
+                }
+                if reply.send(removed).is_err() {
+                    debug!(
+                        ?vid,
+                        "the world removed a character nobody was left to hear about"
+                    );
+                }
+            }
             GameCommand::Stop => {
                 // The loop handles `Stop` itself, before a command ever reaches a
                 // processor. Reaching here would mean the loop and the state
@@ -365,6 +526,100 @@ impl GameState {
             .items_mut()
             .release(id)
             .map_err(|error| RevokeRefused::Rejected { id, error })
+    }
+
+    /// Puts a live client's character into the world under the VID it already uses.
+    ///
+    /// The VID is not allocated here and that is the whole point. Legacy allocates it
+    /// (`CHARACTER_MANAGER::AllocVID`) and adds a CRC that never reaches the wire,
+    /// but the Rewrite's live descriptor has been publishing the store's `player.id`
+    /// as the VID since the enter-game burst was written, and the client has been
+    /// treating it as that character's identity ever since. Allocating a second
+    /// number here would put one character in the world under a VID nothing else
+    /// knows, so a record the world sends would be addressed to a client that never
+    /// asked for it. So the caller supplies the number and this refuses a clash.
+    ///
+    /// # Errors
+    ///
+    /// [`EnterWorldRefused::NullVid`], [`EnterWorldRefused::DuplicateVid`],
+    /// [`EnterWorldRefused::DuplicatePlayerId`], or
+    /// [`EnterWorldRefused::DuplicateName`]. Every one leaves the world unchanged, so
+    /// the descriptor can close without the two sides disagreeing about who exists.
+    pub fn enter_world(
+        &mut self,
+        vid: common::vid::Vid,
+        player_id: u32,
+        name: &str,
+        outbox: ClientOutbox,
+    ) -> Result<(), EnterWorldRefused> {
+        if vid.is_null() {
+            return Err(EnterWorldRefused::NullVid);
+        }
+        // Checked before the create, because `CharacterManager::create_player` reports
+        // a duplicate player id or name but allocates a **fresh** VID, so a duplicate
+        // VID would otherwise slip past it and consume a counter value silently.
+        if self.characters.find_by_vid(vid).is_ok() {
+            return Err(EnterWorldRefused::DuplicateVid { vid });
+        }
+        // The manager is the authority on the indexes it owns. A clone of the outbox
+        // is taken only after both sides agree the character is new, so a refusal
+        // cannot leave a sender for a character that was never admitted.
+        match self.characters.create_player_with_vid(player_id, name, vid) {
+            Ok(()) => {
+                let _previous = self.outboxes.insert(vid, outbox);
+                Ok(())
+            }
+            Err(error) => Err(EnterWorldRefused::from_manager(error, name)),
+        }
+    }
+
+    /// Takes a live client's character out of the world.
+    ///
+    /// The sender is dropped **first**, so a record the world writes after this point
+    /// finds no client rather than a client whose character no longer exists. That is
+    /// the ordering the reverse case depends on too: a disconnect writes the row for
+    /// the last time after this returns, and anything the world still held would be
+    /// released by the destruction and the row would still name it.
+    ///
+    /// Returns `false` when the world did not hold that character, which is reported
+    /// rather than treated as fatal because a disconnect that finds nobody is
+    /// already ending.
+    pub fn leave_world(&mut self, vid: common::vid::Vid) -> bool {
+        let _outbox = self.outboxes.remove(&vid);
+        self.characters.destroy(vid).is_ok()
+    }
+
+    /// Whether a character is online under that VID.
+    ///
+    /// This is what decides whether a record the world is about to build has a
+    /// client to go to, so it is deliberately a world question and not a registry
+    /// one: the registry is keyed by lease and knows about broadcasts, while the
+    /// world is keyed by the VID a grant and a record both use.
+    #[must_use]
+    pub fn is_online(&self, vid: common::vid::Vid) -> bool {
+        self.characters.find_by_vid(vid).is_ok()
+    }
+
+    /// How many characters the world holds.
+    ///
+    /// Counts the characters, not the senders, so a test that joins and leaves sees
+    /// the same number on both sides of the round trip.
+    #[must_use]
+    pub fn online_count(&self) -> usize {
+        self.characters.len()
+    }
+
+    /// Writes one record to a character's client.
+    ///
+    /// The world owns no socket, so this is the only way a record the world produced
+    /// reaches a client (ADR-0002). A `false` means the client is gone; the caller
+    /// decides whether that matters, and for a grant it does not, because the row is
+    /// already written and the item is in the world either way -- it is the item
+    /// that must not be silently lost, not the notification.
+    pub fn write_to_client(&self, vid: common::vid::Vid, record: Vec<u8>) -> bool {
+        self.outboxes
+            .get(&vid)
+            .is_some_and(|outbox| outbox.send(record))
     }
 
     /// Run one grant against the world, taking the target's own `Inven_Point`.
@@ -413,6 +668,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use common::item_slots::{usable_inventory_cells, INVENTORY_MAX_EXTENDED, INVENTORY_MAX_NUM};
+    use common::vid::Vid;
     use world::character::Lookup;
 
     fn owners() -> ItemProtos {
@@ -432,6 +688,202 @@ mod tests {
             .install_item_ids(a_range())
             .expect("the first install");
         state
+    }
+
+    /// A sender nobody is draining, which is what a world write to a departed
+    /// client meets. Kept as a helper because three of the tests below need the
+    /// closed case and building it by dropping the receiver is the only honest way
+    /// to get one.
+    fn a_dropped_outbox() -> ClientOutbox {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        drop(rx);
+        ClientOutbox::new(tx)
+    }
+
+    /// A sender with a receiver the test keeps, so a write can be read back.
+    fn a_live_outbox() -> (ClientOutbox, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        (ClientOutbox::new(tx), rx)
+    }
+
+    #[test]
+    fn a_character_enters_the_world_under_the_vid_the_descriptor_is_using() {
+        let mut state = a_state();
+        let (outbox, _inbox) = a_live_outbox();
+        // The VID here is the store's `player.id`, which is the number the
+        // enter-game burst already put on the wire. A world that allocated its own
+        // would hold the character under an identity the client has never seen.
+        state
+            .enter_world(Vid::new(4_242), 4_242, "Shaman", outbox)
+            .expect("the character is admitted");
+        assert_eq!(state.online_count(), 1);
+        assert!(state.is_online(Vid::new(4_242)));
+        let character = state
+            .characters()
+            .find_by_vid(Vid::new(4_242))
+            .expect("the character is in the world");
+        assert_eq!(character.player_id(), 4_242);
+        assert_eq!(character.name(), "Shaman");
+    }
+
+    #[test]
+    fn a_second_client_on_the_same_vid_is_refused_and_changes_nothing() {
+        let mut state = a_state();
+        let (outbox, _first) = a_live_outbox();
+        state
+            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .expect("the first character is admitted");
+        let (second_outbox, _second) = a_live_outbox();
+        assert_eq!(
+            state.enter_world(Vid::new(7), 8, "Warrior", second_outbox),
+            Err(EnterWorldRefused::DuplicateVid { vid: Vid::new(7) })
+        );
+        // The refusal left one character, not two, and the one that is there is
+        // still the first one. A world that admitted both would send every record
+        // to whichever descriptor answered last.
+        assert_eq!(state.online_count(), 1);
+        let character = state
+            .characters()
+            .find_by_vid(Vid::new(7))
+            .expect("the first character is still the one there");
+        assert_eq!(character.name(), "Shaman");
+        assert_eq!(character.player_id(), 7);
+    }
+
+    #[test]
+    fn a_duplicate_name_is_refused_case_insensitively_because_names_are_case_insensitive() {
+        let mut state = a_state();
+        let (outbox, _inbox) = a_live_outbox();
+        state
+            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .expect("the first character is admitted");
+        let (other, _inbox) = a_live_outbox();
+        // Legacy lowercases into its name index (`str_lower` in
+        // `CHARACTER_MANAGER::CreateCharacter`), so a second login as `shaman` is the
+        // same character as far as the world is concerned.
+        assert_eq!(
+            state.enter_world(Vid::new(8), 8, "sHaMaN", other),
+            Err(EnterWorldRefused::DuplicateName {
+                name: "sHaMaN".to_owned()
+            })
+        );
+        assert_eq!(state.online_count(), 1);
+    }
+
+    #[test]
+    fn a_null_vid_is_refused_because_it_is_what_a_record_with_no_target_carries() {
+        let mut state = a_state();
+        let (outbox, _inbox) = a_live_outbox();
+        assert_eq!(
+            state.enter_world(Vid::NULL, 1, "Shaman", outbox),
+            Err(EnterWorldRefused::NullVid)
+        );
+        // Nothing was indexed, not even under the player id, so a later admission of
+        // the same character is not blocked by a half-made one.
+        assert_eq!(state.online_count(), 0);
+        let (retry, _inbox) = a_live_outbox();
+        assert!(state.enter_world(Vid::new(1), 1, "Shaman", retry).is_ok());
+    }
+
+    #[test]
+    fn a_refused_admission_leaves_no_sender_behind_for_a_character_that_never_existed() {
+        let mut state = a_state();
+        let (outbox, _inbox) = a_live_outbox();
+        state
+            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .expect("the first character is admitted");
+        let (second, _inbox) = a_live_outbox();
+        let _refused = state.enter_world(Vid::new(7), 8, "Warrior", second);
+        // The refused sender was never inserted, so leaving the real character is the
+        // only entry the map had and it leaves cleanly. A sender for a character that
+        // was never admitted would keep a record addressable to a client the world
+        // has no character for.
+        assert!(state.leave_world(Vid::new(7)));
+        assert_eq!(state.online_count(), 0);
+    }
+
+    #[test]
+    fn the_world_writes_a_record_to_the_client_that_joined_under_that_vid() {
+        let mut state = a_state();
+        let (outbox, mut inbox) = a_live_outbox();
+        state
+            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .expect("the character is admitted");
+        assert!(state.write_to_client(Vid::new(7), vec![0x2B, 0x01, 0x02]));
+        // Read it back, because a `true` from `write_to_client` only proves the
+        // channel accepted the record; what the client sees is the point.
+        assert_eq!(
+            inbox.try_recv().expect("the record is queued"),
+            vec![0x2B, 0x01, 0x02]
+        );
+    }
+
+    #[test]
+    fn a_write_to_a_departed_character_reports_failure_rather_than_queueing_nothing_silently() {
+        let mut state = a_state();
+        let (outbox, mut inbox) = a_live_outbox();
+        state
+            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .expect("the character is admitted");
+        state.leave_world(Vid::new(7));
+        assert!(!state.write_to_client(Vid::new(7), vec![0x2B]));
+        assert!(inbox.try_recv().is_err());
+    }
+
+    #[test]
+    fn leaving_removes_the_sender_before_the_character_so_a_later_write_fails() {
+        let mut state = a_state();
+        let (outbox, _inbox) = a_live_outbox();
+        state
+            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .expect("the character is admitted");
+        assert!(state.leave_world(Vid::new(7)));
+        // Both halves are gone together, which is what a grant checks before it
+        // builds a record for a character.
+        assert!(!state.is_online(Vid::new(7)));
+        assert!(!state.write_to_client(Vid::new(7), vec![0x2B]));
+        assert_eq!(state.online_count(), 0);
+    }
+
+    #[test]
+    fn leaving_a_character_the_world_never_had_reports_false_rather_than_panicking() {
+        let mut state = a_state();
+        // A descriptor that never entered the game still runs the close path, so a
+        // double leave is reachable and must not be a panic.
+        assert!(!state.leave_world(Vid::new(999)));
+    }
+
+    #[test]
+    fn a_character_in_the_world_is_reachable_by_the_name_a_grant_addresses() {
+        // This is the whole reason a live client has to be in the world: a grant
+        // addresses a character by Name, and before this the world held nothing a
+        // Name could find.
+        let mut state = a_state();
+        let (outbox, _inbox) = a_live_outbox();
+        state
+            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .expect("the character is admitted");
+        let request = GrantRequest {
+            target: "shaman".to_owned(),
+            vnum: 30_000,
+            count: None,
+        };
+        // The grant is asked for by a differently-cased spelling, which the world's
+        // index accepts, and it places rather than answering "no such character".
+        assert!(state.grant(&request).is_ok());
+    }
+
+    #[test]
+    fn a_write_to_a_dropped_client_is_reported_as_failed() {
+        let mut state = a_state();
+        state
+            .enter_world(Vid::new(7), 7, "Shaman", a_dropped_outbox())
+            .expect("the character is admitted even though its descriptor is gone");
+        // The world holds the character, so a grant would still place an item; the
+        // notification is what cannot be delivered. Reporting that separately is the
+        // point: the item is safe, the client will see it at relog.
+        assert!(state.is_online(Vid::new(7)));
+        assert!(!state.write_to_client(Vid::new(7), vec![0x2B]));
     }
 
     #[test]

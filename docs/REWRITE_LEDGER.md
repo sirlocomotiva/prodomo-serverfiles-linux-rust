@@ -19736,3 +19736,95 @@ claim.
 thread, and a refused write cannot overwrite somebody else's item. Nothing yet sends
 `GC_ITEM_SET` to a descriptor, and no Operator path calls this. `sys.item.core` stays at
 `codec`.
+
+## 205. A live client's character enters and leaves the game thread's world
+
+Ledger 204 wrote a row for a granted item. It could not be reached from a live client,
+because a live client's character was in two registries and neither of them was the world.
+`ChannelClients` answered broadcasts and `PositionTable` answered sync-position claims;
+neither held an inventory, a grant's target, or a client it could write to. So the game
+thread existed and stepped, and every character that entered the game through the real
+listener path stepped it as an empty room. `sys.item.core` stays at `codec`: the world now
+holds live characters, and nothing yet delivers `GC_ITEM_SET` to one.
+
+**The gap, stated as the test that would have caught it.** A scripted client completes the
+whole legacy order -- auth login, key, channel login, select, `ENTER_GAME` -- and then
+nothing in the process knows the character exists except two broadcast tables. Every unit
+test up to here passed, because each one built the world itself. The crossing was only ever
+proved from the side that already had the character in hand.
+
+**What changed.**
+
+- `ClientOutbox` is a cloneable handle on the descriptor's existing unbounded queue, and
+  `Lease::outbox()` hands one out. It is the same queue the broadcast path already uses and
+  the descriptor loop already drains, so there is no second delivery path to keep in step
+  with the first, and the world never touches a socket (ADR-0002).
+- `CharacterManager::create_player_with_vid` admits a character under a caller-supplied VID.
+  `create_player` delegates to it and is unchanged for its existing callers.
+- `GameState` holds a per-VID outbox beside the character, and gained `enter_world`,
+  `leave_world`, `is_online`, `online_count`, and `write_to_client`.
+- `GameCommand::{EnterWorld, LeaveWorld, DeliverRecord}` and their awaited controller
+  methods cross from a Tokio task to the thread that owns the world. `DeliverRecord` exists
+  because a caller writing to an outbox itself would need the sender map, and that map is
+  world state the game thread mutates.
+- `main.rs` admits the character in `enter_game` and leaves it in the close path.
+
+**The VID is the store's `player.id`, and that is a Divergence.** Legacy allocates wire VIDs
+from a process counter (`G/input_db.cpp`), so two servers restart their numbering and a
+crashed session's VID is reused for whoever connects next. The Rewrite uses the persisted id,
+which is stable, and hands the world the exact number the enter-game burst already published
+rather than letting the world allocate a second one. One character, one identity, and a
+record the world writes is addressed to a client that is already listening. Legacy's CRC
+component is a server-local anti-cheat tag and never reaches the wire, so nothing about the
+record layout changed.
+
+**The leave runs before the final save, and the order is the point.** `DESC::SetPlayer(NULL)`
+runs `PlayerDestroy` before `CHARACTER::Disconnect` writes the row. Leaving the world frees
+the cells that character's items hold, so a save that ran first would name a cell another
+character can already have been given, and a grant arriving between the two would be placed
+into an inventory the world is about to release. The disconnect now leaves the world, then
+saves.
+
+**A refusal closes the descriptor rather than letting it play.** A `DuplicateVid`,
+`DuplicatePlayerId`, or case-insensitive `DuplicateName` means two clients on one identity,
+and legacy refuses the same way when `PlayerLoad` finds a character already in game. The
+`held.world` field is separate from `held.presence` because the two claims do not fail
+together: a descriptor can hold a broadcast slot and not be in the world, and the close path
+must leave the world only when it actually joined.
+
+**One clippy finding was a real lie and one was not.** Clippy's `match_same_arms` wanted the
+manager's unexpected refusals folded into `DuplicateName`, which is what the first draft did.
+That would report `VidExhausted` -- the one case an Operator has to act on -- as a player's
+Name being taken, and send the search in the wrong direction. Those variants now carry their
+own text in a separate `NotAdmitted { reason }`. The `too_many_lines` finding was real only in
+that `enter_game` had grown past a hundred lines, so the admission moved into
+`join_the_world`, which returns the VID rather than storing it so the immutable borrow of
+`held.character` ends before `held.world` is written.
+
+**Receipt.** 17 new tests: 12 in `prodomo::game_state`, 3 in `world/tests/character_manager.rs`,
+4 in `prodomo/tests/game_loop_thread.rs`, and 1 scripted-client scenario in
+`prodomo/tests/parity.rs` that completes the whole legacy login order against the real
+binary and reads the console.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2324 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2324 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+Leftover `prodomo\_%` databases after the run: 0. The database-backed targets were confirmed
+to skip without `DATABASE_URL` and to run with it, by timing the two runs of
+`item_persist_db` (0.00s against 0.76s).
+
+**Not measured.** `i686-linux-gnu-g++-12` is still not installed. This unit adds no width
+claim: the world identity is a `u32` the store already owns, and the wire record is
+unchanged.
+
+**Still not a live item.** A live character is now in the world under the VID its client is
+using, and the world can write a record to that client. What is missing is the record: no
+path calls `persist_grant` and then sends `GC_ITEM_SET`, and no Operator command reaches
+either. `sys.item.core` stays at `codec`.
+

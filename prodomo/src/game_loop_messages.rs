@@ -7,6 +7,8 @@ use std::thread::Thread;
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::client_registry::ClientOutbox;
+use crate::game_state::EnterWorldRefused;
 use crate::item_grant::{GrantOutcome, GrantRefusal, GrantRequest};
 
 /// Default capacity of the Tokio-to-game command queue.
@@ -188,6 +190,77 @@ pub enum GameCommand {
         /// Where the game thread reports whether it removed the item.
         reply: oneshot::Sender<bool>,
     },
+    /// Puts a live client's character into the world.
+    ///
+    /// `DESC::SetPlayer` is the legacy step that makes a character visible to the
+    /// process (`input_db.cpp`, `PlayerLoad`), and until a client went through it the
+    /// world held nothing a grant could be addressed to. The client set and the
+    /// position table were stand-ins written before a world existed on a thread;
+    /// they still answer broadcasts, but they are not the world and they hold no
+    /// items.
+    ///
+    /// The VID is an argument, never allocated here. Legacy allocates one from a
+    /// process counter (`CHARACTER_MANAGER::AllocVID`) and adds a server-local CRC
+    /// that never reaches the wire (`vid.h` converts to `DWORD` by returning `m_id`
+    /// only), so the Rewrite has to be handed the number the descriptor is already
+    /// using. Inventing a second number for the same character would put two VIDs on
+    /// one client, which is the defect this command exists to prevent.
+    EnterWorld {
+        /// The wire VID the descriptor is already using, which is the store's
+        /// `player.id`.
+        vid: common::vid::Vid,
+        /// The persistent player id, which the world indexes separately from the VID.
+        player_id: u32,
+        /// The character Name, which the world indexes case-insensitively.
+        name: String,
+        /// Where the game thread writes records addressed to this client.
+        ///
+        /// The world has no socket. It holds this sender and the descriptor drains
+        /// it, which is the same shape as the existing per-client outbox in
+        /// [`crate::client_registry`] and is what lets a grant be delivered without
+        /// the game thread owning a file descriptor.
+        outbox: ClientOutbox,
+        /// Where the game thread reports whether it admitted the character.
+        ///
+        /// Closed, not sent, when the world could not act at all. The caller closes
+        /// the descriptor rather than entering the game with a character the world
+        /// does not hold, because a later grant would find nobody and the inventory
+        /// would silently diverge.
+        reply: oneshot::Sender<Result<(), EnterWorldRefused>>,
+    },
+    /// Takes a live client's character out of the world.
+    ///
+    /// `DESC::SetPlayer(NULL)` on a disconnect (`input_db.cpp`, `PlayerDestroy`).
+    /// The ordering is the load-bearing part: the world must drop the character
+    /// **before** the descriptor writes its row for the last time, or a save can
+    /// flush an item the world has already released and a relog can find an item
+    /// the world believes is free.
+    LeaveWorld {
+        /// The VID the character entered the world under.
+        vid: common::vid::Vid,
+        /// Where the game thread reports whether it removed the character.
+        ///
+        /// A `false` is not fatal to a disconnect: the descriptor is ending anyway,
+        /// and legacy logs the same "already gone" case rather than refusing the
+        /// close. It is still reported so a double leave is visible.
+        reply: oneshot::Sender<bool>,
+    },
+    /// Writes one record to a character's client from the thread that owns the world.
+    ///
+    /// The alternative -- a caller writing to the outbox itself -- would need a copy
+    /// of the sender map, and that map is world state the game thread mutates. So the
+    /// write is a crossing, and the answer says whether there was a client at all.
+    DeliverRecord {
+        /// The character the record is addressed to.
+        vid: common::vid::Vid,
+        /// The already-encoded record. Encoding stays on the caller's side so the
+        /// world never needs a codec, which is what keeps it free of `protocol`.
+        record: Vec<u8>,
+        /// Where the game thread reports whether a client received it.
+        ///
+        /// Closed, not sent, when the world could not act at all.
+        reply: oneshot::Sender<bool>,
+    },
     /// Requests terminal loop shutdown.
     Stop,
 }
@@ -280,6 +353,79 @@ impl std::fmt::Display for RevokeError {
 }
 
 impl std::error::Error for RevokeError {}
+
+/// Why a live client's character could not be put into the world, as distinct from
+/// why the command did not arrive.
+///
+/// A refusal is an **answer**: the world is healthy and said no. These two are the
+/// cases where there is no answer, and the descriptor has to treat both as "the world
+/// is not running" rather than as a reason to keep going.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnterWorldError {
+    /// The command never reached the game thread.
+    NotSent,
+    /// The command was sent and the thread dropped it without answering.
+    NoAnswer,
+}
+
+impl std::fmt::Display for EnterWorldError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSent => write!(formatter, "the world-entry command was not delivered"),
+            Self::NoAnswer => write!(formatter, "the game thread gave no world-entry answer"),
+        }
+    }
+}
+
+impl std::error::Error for EnterWorldError {}
+
+/// Why the world could not be asked to deliver a record.
+///
+/// A refusal is an answer, so these two are the cases where there is none. Both mean
+/// the game thread is not running the world, which is a different thing from "that
+/// character is offline".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliverError {
+    /// The command never reached the game thread.
+    NotSent,
+    /// The command was sent and the thread dropped it without answering.
+    NoAnswer,
+}
+
+impl std::fmt::Display for DeliverError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSent => write!(formatter, "the delivery command was not sent"),
+            Self::NoAnswer => write!(formatter, "the game thread gave no delivery answer"),
+        }
+    }
+}
+
+impl std::error::Error for DeliverError {}
+
+/// Why a live client's character could not be taken out of the world.
+///
+/// Distinct from [`EnterWorldError`] because the two are not symmetric: a leave that
+/// never happened is a leak, and a disconnect can end anyway, so this is reported for
+/// the log rather than to stop anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaveWorldError {
+    /// The command never reached the game thread.
+    NotSent,
+    /// The command was sent and the thread dropped it without answering.
+    NoAnswer,
+}
+
+impl std::fmt::Display for LeaveWorldError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSent => write!(formatter, "the world-exit command was not delivered"),
+            Self::NoAnswer => write!(formatter, "the game thread gave no world-exit answer"),
+        }
+    }
+}
+
+impl std::error::Error for LeaveWorldError {}
 
 /// Why installing the item id allocator did not succeed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -434,6 +580,89 @@ impl GameLoopController {
         } else {
             Err(RevokeError::NotThere { id })
         }
+    }
+
+    /// Puts a live client's character into the world, and waits for the answer.
+    ///
+    /// The caller must supply the VID the descriptor already publishes. A world that
+    /// allocated its own would be unreachable by the records it writes, and the
+    /// inventory the client shows and the inventory the world holds would be two
+    /// different sets that agree only by accident.
+    ///
+    /// # Errors
+    ///
+    /// [`EnterWorldError::NotSent`] when the game thread has closed its receiver and
+    /// [`EnterWorldError::NoAnswer`] when it closed the reply without sending. Both
+    /// mean the world holds nothing, and the descriptor must close rather than enter
+    /// the game: a client playing a character the world cannot see can be granted
+    /// nothing and will not know.
+    pub async fn enter_world(
+        &self,
+        vid: common::vid::Vid,
+        player_id: u32,
+        name: String,
+        outbox: ClientOutbox,
+    ) -> Result<Result<(), EnterWorldRefused>, EnterWorldError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::EnterWorld {
+            vid,
+            player_id,
+            name,
+            outbox,
+            reply,
+        })
+        .await
+        .map_err(|_| EnterWorldError::NotSent)?;
+        answer.await.map_err(|_| EnterWorldError::NoAnswer)
+    }
+
+    /// Takes a live client's character out of the world, and waits for the answer.
+    ///
+    /// The descriptor must call this **before** its final save. A character released
+    /// from the world frees the cells its items hold, and a save that runs afterwards
+    /// writes a row naming a cell the world has already offered to somebody else.
+    ///
+    /// # Errors
+    ///
+    /// [`LeaveWorldError::NotSent`] and [`LeaveWorldError::NoAnswer`]. Neither is
+    /// fatal to a disconnect -- the descriptor is ending and the process is losing the
+    /// world with it -- but both are reported so a leave that never happened is
+    /// visible rather than assumed.
+    pub async fn leave_world(&self, vid: common::vid::Vid) -> Result<bool, LeaveWorldError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::LeaveWorld { vid, reply })
+            .await
+            .map_err(|_| LeaveWorldError::NotSent)?;
+        answer.await.map_err(|_| LeaveWorldError::NoAnswer)
+    }
+
+    /// Asks the world to write one record to a character's client, and waits for the
+    /// answer.
+    ///
+    /// The world owns no socket, so this is the only way a record the world produced
+    /// reaches a client (ADR-0002). It is a command rather than a direct call because
+    /// the sender map is world state, and reading it from a Tokio task while the game
+    /// thread is mutating the world is exactly the race the dedicated thread exists
+    /// to prevent.
+    ///
+    /// The `bool` distinguishes "delivered" from "there was no client", which a grant
+    /// needs: the row is already written by then, so a `false` is a notification that
+    /// could not be sent rather than an item that was lost.
+    ///
+    /// # Errors
+    ///
+    /// [`DeliverError::NotSent`] when the game thread has closed its receiver and
+    /// [`DeliverError::NoAnswer`] when it closed the reply without sending.
+    pub async fn deliver_record(
+        &self,
+        vid: common::vid::Vid,
+        record: Vec<u8>,
+    ) -> Result<bool, DeliverError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::DeliverRecord { vid, record, reply })
+            .await
+            .map_err(|_| DeliverError::NotSent)?;
+        answer.await.map_err(|_| DeliverError::NoAnswer)
     }
 
     /// Attempts to send without waiting when the command queue is full.

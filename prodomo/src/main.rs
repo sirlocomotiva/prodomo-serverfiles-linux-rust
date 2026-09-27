@@ -55,7 +55,7 @@ use prodomo::client_live::{
 use prodomo::client_registry::{ChannelClients, ClientEntry, Lease, PositionTable};
 use prodomo::client_session::ClientPhase;
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
-use prodomo::game_loop_messages::GameLoopTerminal;
+use prodomo::game_loop_messages::{GameLoopController, GameLoopTerminal};
 use prodomo::game_state::{world_item_id_range, GameState};
 use prodomo::handshake::HandshakeServerKind;
 use prodomo::lifecycle::{LifecycleError, PostHandshakePhase};
@@ -218,6 +218,12 @@ struct ConnectionContext {
     block_char_creation: bool,
     /// `[game] player_delete_level_limit` and `player_delete_level_limit_lower`.
     delete_levels: (i32, i32),
+    /// The game thread that owns the world every live client is put into.
+    ///
+    /// Held by every descriptor because entering and leaving the world are both
+    /// crossings (ADR-0002), and a descriptor that could not reach the game thread
+    /// would be a descriptor whose character the world cannot see.
+    game: GameLoopController,
 }
 
 impl ConnectionContext {
@@ -263,6 +269,15 @@ struct Held {
     /// The registry entry this descriptor occupies on its map, taken when the game phase is
     /// entered and released when the descriptor ends.
     presence: Option<Lease>,
+    /// The world entry this character holds, taken when the game phase is entered and
+    /// released before the final save.
+    ///
+    /// Separate from `presence` because the two are not the same claim and do not
+    /// fail together. `presence` is this descriptor's slot in the broadcast set;
+    /// `world` says the game thread has a character here. A descriptor that is in
+    /// the first and not the second is a client the world cannot be given items for,
+    /// and the close path has to leave the world only when it actually joined.
+    world: Option<common::vid::Vid>,
     /// The save event, started when the character enters the game and stopped when the
     /// descriptor ends (legacy `StartSaveEvent` at `G/input_login.cpp:656`).
     save: Option<SaveEvent>,
@@ -396,6 +411,28 @@ async fn handle_connection(
         &mut held,
     )
     .await;
+    // `DESC::SetPlayer(NULL)` on a disconnect (`G/input_db.cpp`, `PlayerDestroy`) removes
+    // the character from the world, and it runs **before** the save below. That order
+    // is the one that matters: leaving the world frees the cells this character's
+    // items hold, so a save that ran first would name a cell another character can
+    // already have been given, and a grant that arrived between the two would be
+    // placed into an inventory the world is about to release.
+    if let Some(world_vid) = held.world.take() {
+        match context.game.leave_world(world_vid).await {
+            Ok(true) => info!(%addr, vid = world_vid.raw(), "Character left the world"),
+            // A leave that found nobody is a descriptor that never entered, which the
+            // `Option` already rules out, so this is a world that lost the character
+            // some other way. The disconnect continues either way.
+            Ok(false) => {
+                warn!(%addr, vid = world_vid.raw(), "The world did not hold this character at disconnect");
+            }
+            // A leave with no answer means the game thread is gone. The process is
+            // losing the world with it, so the descriptor still closes.
+            Err(error) => {
+                warn!(%addr, vid = world_vid.raw(), %error, "The world could not be told this character left");
+            }
+        }
+    }
     // `CHARACTER::Disconnect` flushes the queued save and, if the character was not queued,
     // calls `SaveReal` itself (`G/char.cpp:1786-1789`), then sets `m_bSkipSave` so nothing
     // writes after (`G/char.cpp:1800`). Both arms write the row, so the branch is the log line
@@ -1711,9 +1748,87 @@ where
             character.x,
             character.y,
         );
+        let outbox = lease.outbox();
         held.presence = Some(lease);
+        let Some(world_vid) = join_the_world(context, addr, character, vid, outbox).await else {
+            return false;
+        };
+        held.world = Some(world_vid);
     }
     true
+}
+
+/// Puts a live client's character into the game thread's world, and records the entry.
+///
+/// `DESC::SetPlayer` is the step that does this, and the world is where items live.
+/// The client set and the position table answer broadcasts; neither holds an
+/// inventory, so a grant would find nobody and a client that had been given an item
+/// would find it gone at relog (ADR-0002, which puts every world on one game thread).
+///
+/// The outbox is the same queue the broadcast path already uses, so the world writes
+/// into a queue this descriptor is already draining and there is no second delivery
+/// path to keep in step with the first. The world never touches the socket.
+///
+/// The VID is the store's `player.id`, which is the number `character_vid` already
+/// published in the enter-game burst. Handing the world the same number is what stops
+/// one character from having two identities; legacy's own counter is a divergence
+/// recorded in ledger 205.
+///
+/// Returns the entry's VID on success and `None` when the world refuses or cannot be
+/// reached, because in both cases this client must not go on playing in a world it is
+/// not part of.
+///
+/// The VID is returned rather than stored, so the caller records it after the
+/// immutable borrow of `held.character` this call needs has ended.
+async fn join_the_world(
+    context: &ConnectionContext,
+    addr: SocketAddr,
+    character: &db::players::Character,
+    vid: u32,
+    outbox: prodomo::client_registry::ClientOutbox,
+) -> Option<common::vid::Vid> {
+    let world_vid = common::vid::Vid::new(vid);
+    let entered = context
+        .game
+        .enter_world(world_vid, character.id, character.name.clone(), outbox)
+        .await;
+    match entered {
+        Ok(Ok(())) => {
+            info!(
+                %addr,
+                vid,
+                name = %character.name.as_str(),
+                "Character entered the world on the game thread"
+            );
+            Some(world_vid)
+        }
+        // A refusal means the world already holds this VID, player id, or Name.
+        // Continuing would put two clients on one identity, so the descriptor closes:
+        // legacy refuses the same way when `PlayerLoad` finds a character already in
+        // game (`G/input_db.cpp`, "already exist in game").
+        Ok(Err(error)) => {
+            error!(
+                %addr,
+                vid,
+                name = %character.name.as_str(),
+                %error,
+                "The world refused this character; closing"
+            );
+            None
+        }
+        // No answer at all means the game thread is gone. The world cannot be
+        // reached, so this client must not play in it.
+        Err(error) => {
+            error!(
+                %addr,
+                vid,
+                name = %character.name.as_str(),
+                %error,
+                "The world could not be reached; closing"
+            );
+            None
+        }
+    }
 }
 
 /// Write the character's row, the way `CHARACTER::SaveReal` does.
@@ -2428,6 +2543,7 @@ fn connection_context(
     listeners: &Listeners,
     atlas: MapAtlas,
     names: NameRules,
+    game: GameLoopController,
 ) -> ConnectionContext {
     // Every legacy game Core reported its own client port (`mother_port`) to the status list; the
     // auth server reported nothing (`G/desc_client.cpp:286-290`).
@@ -2468,6 +2584,7 @@ fn connection_context(
             config.game.player_delete_level_limit,
             config.game.player_delete_level_limit_lower,
         ),
+        game,
     }
 }
 
@@ -2569,7 +2686,15 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     let context = ServerContext {
         state: Arc::clone(&state),
         shutdown_tx,
-        connection: connection_context(&config, &state, &store, &listeners, atlas, names),
+        connection: connection_context(
+            &config,
+            &state,
+            &store,
+            &listeners,
+            atlas,
+            names,
+            controller.clone(),
+        ),
     };
     let exit = run_accept_loop(
         &mut listeners,

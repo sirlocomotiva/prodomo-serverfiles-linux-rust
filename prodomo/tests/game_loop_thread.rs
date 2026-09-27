@@ -538,3 +538,254 @@ async fn a_revoke_of_an_item_the_world_does_not_hold_is_refused() {
     let _ = controller.request_stop().await;
     let _ = game_loop.join().await;
 }
+
+/// A state with an allocator and one live character admitted under the store's own
+/// id, which is the shape every world-entry test below starts from.
+fn a_world_ready_to_be_entered() -> GameState {
+    let mut state = GameState::new(
+        gamedata::item_proto::ItemProtos::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto"),
+        )
+        .expect("the owner's item protos load"),
+    );
+    state
+        .install_item_ids(world::item::ItemIdRange::new(1, 1_000_000, 1).expect("a range"))
+        .expect("the first install");
+    state
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_admitted_from_tokio_lands_on_the_thread_that_owns_the_world() {
+    // Given: a real world on the real game thread, with no characters yet.
+    let game_loop =
+        spawn_game_loop(GameLoopConfig::default(), a_world_ready_to_be_entered()).unwrap();
+    let controller = game_loop.controller();
+    let (tx, mut inbox) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+
+    // When: a live descriptor asks the game thread to admit its character under the
+    // VID it is already publishing.
+    let admitted = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.enter_world(
+            common::vid::Vid::new(77),
+            77,
+            "Shaman".to_owned(),
+            prodomo::client_registry::ClientOutbox::new(tx),
+        ),
+    )
+    .await
+    .expect("the game thread answered within five seconds")
+    .expect("the answer crossed back");
+
+    // Then: the world holds the character, and a grant addressed to its Name finds
+    // it. That second half is the point of the whole unit: before this, nothing a
+    // client did could put a character where a grant could reach it.
+    assert_eq!(admitted, Ok(()));
+    let granted = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.request_grant(prodomo::item_grant::GrantRequest {
+            target: "Shaman".to_owned(),
+            vnum: a_plain_vnum(),
+            count: None,
+        }),
+    )
+    .await
+    .expect("the grant answered within five seconds")
+    .expect("the answer crossed back");
+    assert!(
+        granted.is_ok(),
+        "a grant to an admitted character must place, got {granted:?}"
+    );
+
+    // And: the outbox the descriptor handed over is the one the world writes to, so
+    // a record the world produces reaches the client that owns the character.
+    // Proved by writing through the world and reading the queue, which is the only
+    // thing a client will ever see.
+    //
+    // The write goes back across the thread rather than being done here, because the
+    // whole claim under test is that the world -- not this task -- can reach the
+    // descriptor. A write made on this side would prove nothing about it.
+    let written = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.deliver_record(common::vid::Vid::new(77), vec![0x2B, 0x14, 0x00, 0x00]),
+    )
+    .await
+    .expect("the game thread answered within five seconds")
+    .expect("the answer crossed back");
+    assert!(
+        written,
+        "the world must be able to reach an admitted client"
+    );
+    assert_eq!(
+        inbox
+            .try_recv()
+            .expect("the record reached the descriptor's queue"),
+        vec![0x2B, 0x14, 0x00, 0x00]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_that_enters_the_world_twice_is_refused_by_the_thread_that_owns_it() {
+    // Given: one character already in the world under VID 77.
+    let game_loop =
+        spawn_game_loop(GameLoopConfig::default(), a_world_ready_to_be_entered()).unwrap();
+    let controller = game_loop.controller();
+    let (tx, _inbox) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let outbox = prodomo::client_registry::ClientOutbox::new(tx);
+    assert_eq!(
+        controller
+            .enter_world(
+                common::vid::Vid::new(77),
+                77,
+                "Shaman".to_owned(),
+                outbox.clone()
+            )
+            .await
+            .expect("the answer crossed back"),
+        Ok(())
+    );
+
+    // When: a second descriptor claims the same VID.
+    let second = controller
+        .enter_world(common::vid::Vid::new(77), 78, "Warrior".to_owned(), outbox)
+        .await
+        .expect("the answer crossed back");
+
+    // Then: the world refuses it as a VID duplicate, and the character that is there
+    // is still the first one. A world that admitted both would send every record to
+    // whichever descriptor answered last, and a grant would land on the wrong player.
+    assert_eq!(
+        second,
+        Err(prodomo::game_state::EnterWorldRefused::DuplicateVid {
+            vid: common::vid::Vid::new(77)
+        })
+    );
+    let granted = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.request_grant(prodomo::item_grant::GrantRequest {
+            target: "Shaman".to_owned(),
+            vnum: a_plain_vnum(),
+            count: None,
+        }),
+    )
+    .await
+    .expect("the grant answered within five seconds")
+    .expect("the answer crossed back");
+    assert!(
+        granted.is_ok(),
+        "the first character is still the one in the world"
+    );
+    let refused = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.request_grant(prodomo::item_grant::GrantRequest {
+            target: "Warrior".to_owned(),
+            vnum: a_plain_vnum(),
+            count: None,
+        }),
+    )
+    .await
+    .expect("the grant answered within five seconds")
+    .expect("the answer crossed back");
+    assert!(
+        refused.is_err(),
+        "the refused second client must not be in the world, got {refused:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_that_leaves_the_world_frees_its_name_for_a_later_login() {
+    // Given: a character in the world, holding one granted item.
+    let game_loop =
+        spawn_game_loop(GameLoopConfig::default(), a_world_ready_to_be_entered()).unwrap();
+    let controller = game_loop.controller();
+    let (tx, _inbox) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    controller
+        .enter_world(
+            common::vid::Vid::new(77),
+            77,
+            "Shaman".to_owned(),
+            prodomo::client_registry::ClientOutbox::new(tx),
+        )
+        .await
+        .expect("the answer crossed back")
+        .expect("the character is admitted");
+    let cell = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.request_grant(prodomo::item_grant::GrantRequest {
+            target: "Shaman".to_owned(),
+            vnum: a_plain_vnum(),
+            count: None,
+        }),
+    )
+    .await
+    .expect("the grant answered within five seconds")
+    .expect("the answer crossed back")
+    .expect("a grant to an admitted character places")
+    .record
+    .cell
+    .cell;
+
+    // When: the descriptor disconnects and leaves the world.
+    let left = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.leave_world(common::vid::Vid::new(77)),
+    )
+    .await
+    .expect("the game thread answered within five seconds")
+    .expect("the answer crossed back");
+
+    // Then: the world really let the character go.
+    assert!(left);
+
+    // And: the name is free again, which is what a relog needs. Legacy reuses the
+    // name the instant `PlayerDestroy` runs, and a world that held the old character
+    // would refuse the new login with a duplicate.
+    let (tx, _inbox) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let readmitted = controller
+        .enter_world(
+            common::vid::Vid::new(77),
+            77,
+            "Shaman".to_owned(),
+            prodomo::client_registry::ClientOutbox::new(tx),
+        )
+        .await
+        .expect("the answer crossed back");
+    assert_eq!(readmitted, Ok(()));
+    // And the new session's inventory starts empty, so the first grant takes the
+    // same cell the departed session held. A world that kept the old character's
+    // items would hand the cell to somebody else and the player would see a hole.
+    let again = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.request_grant(prodomo::item_grant::GrantRequest {
+            target: "Shaman".to_owned(),
+            vnum: a_plain_vnum(),
+            count: None,
+        }),
+    )
+    .await
+    .expect("the grant answered within five seconds")
+    .expect("the answer crossed back")
+    .expect("the readmitted character is grantable");
+    assert_eq!(again.record.cell.cell, cell);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn leaving_a_character_the_thread_never_admitted_is_reported_rather_than_panicking() {
+    // A descriptor that never entered the game still runs the close path, so a leave
+    // for a VID the world never held is reachable in normal operation.
+    let game_loop =
+        spawn_game_loop(GameLoopConfig::default(), a_world_ready_to_be_entered()).unwrap();
+    let controller = game_loop.controller();
+
+    let left = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.leave_world(common::vid::Vid::new(4_242)),
+    )
+    .await
+    .expect("the game thread answered within five seconds")
+    .expect("the answer crossed back");
+
+    // Reported as `false` rather than refused: the descriptor is ending either way,
+    // and legacy logs the same already-gone case instead of blocking the close.
+    assert!(!left);
+}

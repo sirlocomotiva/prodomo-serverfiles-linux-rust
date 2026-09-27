@@ -2556,3 +2556,57 @@ fn the_save_cycle_writes_the_row_while_the_character_is_still_connected() {
     );
     drop(alice);
 }
+
+/// ADR-0002's "all worlds step on one game thread" is only true of a live client if the
+/// character actually reaches that world. Before ledger 205 a live client was in the
+/// broadcast set and the position table and nowhere else, so the game thread held no
+/// character and nothing addressed to one could reach it.
+///
+/// The log lines are the evidence rather than an internal handle, because the claim under
+/// test is that the live path crosses. An unlogged crossing would leave a client playing on
+/// a world that has no record of it, and a grant would find nobody.
+#[test]
+fn a_live_client_joins_and_leaves_the_game_threads_world() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+
+    // Entering: the world is told, and told once, before the client sees the game phase.
+    let (alice, alpha) = enter_world(&server, b"alice", 0);
+    server.wait_for("Character entered the world on the game thread");
+    assert!(
+        server.logged("Character entered the world on the game thread"),
+        "a live client must reach the game thread's world:\n{}",
+        server.console(),
+    );
+    assert!(
+        server.logged("vid=1 name=Alpha"),
+        "the world must be told which character it took, and under which VID:\n{}",
+        server.console(),
+    );
+
+    // The VID the world was given is the character's own id, which is the number the
+    // enter-game burst already published. A world that allocated its own would hold the
+    // character under an identity the client has never been told about, and a record the
+    // world wrote would reach a client that is not listening for it.
+    assert_eq!(alpha.id, 1, "the scenario's first character is player id 1");
+
+    // Leaving: the drop closes the socket, the server reads the EOF, and the descriptor
+    // takes the character out of the world before it writes the row.
+    drop(alice);
+    server.wait_for("Character left the world");
+
+    // And the name is free again, which is what makes a relog possible at all. Legacy
+    // reuses a name the instant `PlayerDestroy` runs; a world that held the departed
+    // character would refuse the new login as a duplicate, and a player who logged out
+    // could not log back in.
+    let (_again, _same) = enter_world(&server, b"alice", 0);
+    assert!(
+        server.logged("Character entered the world on the game thread"),
+        "the relogged character must reach the world too:\n{}",
+        server.console(),
+    );
+}

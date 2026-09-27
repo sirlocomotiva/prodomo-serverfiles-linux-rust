@@ -50,7 +50,49 @@ pub struct ClientEntry {
 struct Member {
     id: u64,
     entry: ClientEntry,
-    outbox: mpsc::UnboundedSender<Vec<u8>>,
+    outbox: ClientOutbox,
+}
+
+/// A sender the game thread writes records to for one client.
+///
+/// The world has no socket, and giving it one would put a file descriptor on a
+/// thread that must not block (ADR-0002). So the world holds this and the descriptor
+/// task drains it, which is the same arrangement the broadcast path already uses
+/// and needs no second delivery mechanism.
+///
+/// It is a separate type from a raw [`mpsc::UnboundedSender`] so that the world
+/// cannot be handed a **receiver**, and so a record addressed to a client that has
+/// gone is a reported `false` rather than a silent drop. `send` is unbounded for
+/// the same reason the broadcast outbox is: the game thread must never park on a
+/// slow client, and a dropped client is detected by the closed channel.
+#[derive(Clone, Debug)]
+pub struct ClientOutbox {
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+}
+
+impl ClientOutbox {
+    /// Wraps a sender half.
+    #[must_use]
+    pub const fn new(tx: mpsc::UnboundedSender<Vec<u8>>) -> Self {
+        Self { tx }
+    }
+
+    /// Hands one record to the client.
+    ///
+    /// Returns `false` when the descriptor is gone, which is the honest answer for a
+    /// world write to a departed client: the record was not delivered and cannot be.
+    /// A caller that needs to know the difference between "sent" and "sent and
+    /// buffered" cannot have it, and does not need to: the socket write is the
+    /// descriptor's, and it is the descriptor that will fail.
+    pub fn send(&self, record: Vec<u8>) -> bool {
+        self.tx.send(record).is_ok()
+    }
+
+    /// Whether the descriptor is still draining this queue.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        !self.tx.is_closed()
+    }
 }
 
 /// The per-Channel, per-map client set.
@@ -80,18 +122,20 @@ impl ChannelClients {
     /// The returned [`Lease`] removes the client when it drops, which is what
     /// `DESC_MANAGER` does when a descriptor is destroyed.
     pub fn join(self: &Arc<Self>, entry: ClientEntry) -> Lease {
-        let (outbox, inbox) = mpsc::unbounded_channel();
+        let (tx, inbox) = mpsc::unbounded_channel();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let channel = entry.channel;
         if let Ok(mut channels) = self.inner.lock() {
-            channels
-                .entry(channel)
-                .or_default()
-                .push(Member { id, entry, outbox });
+            channels.entry(channel).or_default().push(Member {
+                id,
+                entry,
+                outbox: ClientOutbox::new(tx.clone()),
+            });
         }
         Lease {
             id,
             channel,
+            outbox: ClientOutbox::new(tx),
             registry: Arc::clone(self),
             inbox: Some(inbox),
         }
@@ -188,7 +232,7 @@ impl ChannelClients {
             if except == Some(member.id) {
                 continue;
             }
-            if member.outbox.send(record.to_vec()).is_ok() {
+            if member.outbox.send(record.to_vec()) {
                 sent += 1;
             }
         }
@@ -214,6 +258,7 @@ impl ChannelClients {
 pub struct Lease {
     id: u64,
     channel: u8,
+    outbox: ClientOutbox,
     registry: Arc<ChannelClients>,
     inbox: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
 }
@@ -264,6 +309,17 @@ impl Lease {
     #[must_use]
     pub const fn id(&self) -> u64 {
         self.id
+    }
+
+    /// A sender for this client that the game thread can write through.
+    ///
+    /// This is what lets the world deliver a record to a real descriptor. The
+    /// descriptor keeps draining the same queue it already drains for broadcasts, so
+    /// a world write and a broadcast write are indistinguishable downstream and
+    /// cannot arrive out of order relative to each other.
+    #[must_use]
+    pub fn outbox(&self) -> ClientOutbox {
+        self.outbox.clone()
     }
 
     /// The Channel this lease joined.
