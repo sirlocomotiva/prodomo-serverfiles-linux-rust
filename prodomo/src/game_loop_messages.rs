@@ -170,6 +170,24 @@ pub enum GameCommand {
         /// Closed, not sent, when the world could not act on the request at all.
         reply: oneshot::Sender<bool>,
     },
+    /// Takes a granted item back out of the world after its row could not be written.
+    ///
+    /// The world is mutated before the row exists, because only the world can choose a
+    /// cell and the cell is part of the row. This command is the other half of that
+    /// arrangement: it runs on the thread that owns the world, so the cell is freed
+    /// where it was taken and nowhere else.
+    ///
+    /// The answer is a `bool` for the same reason [`GameCommand::InstallItemIdRange`]'s
+    /// is: a world that cannot take an item back is a bug, and the caller must be told
+    /// rather than left to assume the repair worked.
+    RevokeGrant {
+        /// The character the item was granted to.
+        target: String,
+        /// The id the grant took.
+        id: u32,
+        /// Where the game thread reports whether it removed the item.
+        reply: oneshot::Sender<bool>,
+    },
     /// Requests terminal loop shutdown.
     Stop,
 }
@@ -227,6 +245,41 @@ impl std::fmt::Display for GrantError {
 }
 
 impl std::error::Error for GrantError {}
+
+/// Why taking a granted item back out of the world did not succeed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RevokeError {
+    /// The command never reached the game thread.
+    NotSent,
+    /// The command was sent and the thread dropped it without answering.
+    NoAnswer,
+    /// The world did not hold that item for that character.
+    ///
+    /// A bug rather than a state to recover from: the id came from the grant that
+    /// mutated the world moments earlier, and only a pulse in between could have moved
+    /// it. A caller that gets this must not report a clean undo.
+    NotThere {
+        /// The id the revoke named.
+        id: u32,
+    },
+}
+
+impl std::fmt::Display for RevokeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSent => write!(formatter, "the revoke command was not delivered"),
+            Self::NoAnswer => write!(formatter, "the game thread gave no revoke answer"),
+            Self::NotThere { id } => {
+                write!(
+                    formatter,
+                    "the world does not hold item {id} for that character"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for RevokeError {}
 
 /// Why installing the item id allocator did not succeed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -355,6 +408,31 @@ impl GameLoopController {
             Ok(Ok(()))
         } else {
             Ok(Err(InstallError::AlreadyInstalled))
+        }
+    }
+
+    /// Takes a granted item back out of the world, and waits for the answer.
+    ///
+    /// # Errors
+    ///
+    /// [`RevokeError::NotSent`] when the game thread has closed its receiver,
+    /// [`RevokeError::NoAnswer`] when it closed the reply without sending, and
+    /// [`RevokeError::NotThere`] when the world does not hold the item. The caller must
+    /// treat all three as "the world is still wrong": a player holding an item with no
+    /// row sees it vanish at the next login.
+    pub async fn revoke_grant(&self, target: &str, id: u32) -> Result<(), RevokeError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::RevokeGrant {
+            target: target.to_owned(),
+            id,
+            reply,
+        })
+        .await
+        .map_err(|_| RevokeError::NotSent)?;
+        if answer.await.map_err(|_| RevokeError::NoAnswer)? {
+            Ok(())
+        } else {
+            Err(RevokeError::NotThere { id })
         }
     }
 

@@ -1,6 +1,13 @@
+#![allow(dead_code)]
+
 //! A PostgreSQL database for one test, for the tests that drive the real binary.
 //!
 //! `db/tests/accounts.rs` has the async twin of this helper; the process tests are synchronous.
+//!
+//! Every test binary that says `mod support;` compiles this file for itself and uses a
+//! different part of it, so a helper unused by one binary is a warning rather than a
+//! signal. `#![allow(dead_code)]` is the honest response: the items are used, just not
+//! everywhere.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -45,13 +52,85 @@ impl ScratchDatabase {
     pub fn url(&self) -> &str {
         &self.url
     }
+
+    /// Create an empty database from inside an async test, or `None` when
+    /// `DATABASE_URL` is unset.
+    ///
+    /// [`Self::create`] is synchronous because the process tests are synchronous, and
+    /// it starts a runtime with `block_on`. Doing that inside a `#[tokio::test]` panics,
+    /// so the async tests call this instead. The database name comes from the same
+    /// counter, so the two paths cannot collide.
+    pub async fn create_async() -> Option<Self> {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let admin_url = database_url()?;
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the clock should follow the Unix epoch")
+            .as_nanos();
+        let name = format!(
+            "prodomo_async_{}_{}_{nanos}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        sqlx::query(&format!("CREATE DATABASE {name}"))
+            .execute(
+                &mut PgConnection::connect(&admin_url)
+                    .await
+                    .expect("the admin connection"),
+            )
+            .await
+            .expect("the test role should be allowed to create databases");
+        let url = with_database(&admin_url, &name);
+        Some(Self {
+            admin_url,
+            name,
+            url,
+        })
+    }
+
+    /// A migrated [`db::store::Store`] for this database.
+    ///
+    /// The process tests above do not need this because the binary under test migrates
+    /// itself. A test that queries rows directly has nothing else to migrate for it, and
+    /// a missing table would otherwise be reported as a confusing constraint error rather
+    /// than as "the test never created the schema".
+    pub async fn store(&self) -> db::store::Store {
+        let store = db::store::Store::lazy(&db::store::StoreConfig {
+            url: self.url.clone(),
+            max_connections: db::store::StoreConfig::DEFAULT_MAX_CONNECTIONS,
+        })
+        .expect("a well-formed store configuration");
+        store.migrate().await.expect("the migrations apply");
+        store
+    }
 }
 
 impl Drop for ScratchDatabase {
+    /// Drop the database on a thread of its own.
+    ///
+    /// `Drop` cannot block the current thread when that thread is already driving a
+    /// runtime, and an async test is exactly that. Blocking it panics, and a panic in a
+    /// destructor while another panic is unwinding aborts the process, which loses the
+    /// real failure in the noise. Handing the work to a detached thread and joining it
+    /// works in both cases, because the new thread is not running the test's runtime.
     fn drop(&mut self) {
-        let statement = format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name);
-        if execute(&self.admin_url, &statement).is_err() {
-            eprintln!("could not drop scratch database {}", self.name);
+        let admin_url = self.admin_url.clone();
+        let name = self.name.clone();
+        let thread_name = name.clone();
+        let reported = name.clone();
+        let drop_statement = format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)");
+        let worker = std::thread::Builder::new()
+            .name(format!("drop-{thread_name}"))
+            .spawn(move || {
+                if execute(&admin_url, &drop_statement).is_err() {
+                    eprintln!("could not drop scratch database {thread_name}");
+                }
+            });
+        match worker {
+            Ok(worker) => {
+                let _ = worker.join();
+            }
+            Err(error) => eprintln!("could not start the drop thread for {reported}: {error}"),
         }
     }
 }

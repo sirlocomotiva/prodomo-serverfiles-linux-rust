@@ -683,6 +683,94 @@ impl CharacterItems {
         }
     }
 
+    /// Take the item with this id out of the storage, wherever it is.
+    ///
+    /// This is the undo for a placement, and it is deliberately not
+    /// [`Self::remove`]. That function takes an `&Item` because legacy reads the old
+    /// size at `char_item.cpp:420` to clear the right number of grid cells, and a caller
+    /// that has only an id would have to rebuild an item and guess a size. This one needs
+    /// nothing: the **grid already records the footprint**, because a cell's anchor is
+    /// set when the item is placed and cleared when it is removed. So the cells to free
+    /// are exactly the ones whose anchor is this item's, and the size is not consulted
+    /// at all.
+    ///
+    /// That is not merely convenient, it is safer. A footprint cleared with a *wrong*
+    /// size is how one item's removal frees a neighbour's cells, which is the bug
+    /// `remove_flat` guards against with its `pItems[p] != pOld` check. Reading the
+    /// coverage from the grid cannot guess.
+    ///
+    /// The scan is bounded by the window's length and by one stride past the anchor
+    /// rather than by the item's size, so a wider item than the stride allows still has
+    /// every one of its cells cleared: the grid is the record of what was placed, and the
+    /// bound is only there to stop the scan running off the end of the array.
+    ///
+    /// # Errors
+    ///
+    /// [`Rejected::NotThere`] when this storage does not hold the id. Nothing is
+    /// changed, so a caller may treat this as "it was already gone".
+    pub fn release(&mut self, id: ItemId) -> Result<ItemPos, Rejected> {
+        let Some(pos) = self.cell_of(id) else {
+            return Err(Rejected::NotThere {
+                window: EWindows::Inventory as u8,
+                cell: 0,
+            });
+        };
+        match window_of(pos.window_type) {
+            Some(EWindows::Inventory | EWindows::Equipment) => {
+                self.clear_flat_footprint(pos.cell);
+                if let Some(slot) = self.flat.get_mut(usize::from(pos.cell)) {
+                    *slot = NO_ITEM;
+                }
+            }
+            Some(EWindows::DragonSoulInventory) => {
+                self.clear_dragon_soul_footprint(pos.cell);
+                if let Some(slot) = self.dragon_soul.get_mut(usize::from(pos.cell)) {
+                    *slot = NO_ITEM;
+                }
+            }
+            Some(EWindows::Switchbot) => {
+                if let Some(slot) = self.switchbot.get_mut(usize::from(pos.cell)) {
+                    *slot = NO_ITEM;
+                }
+            }
+            // `cell_of` only answers for the windows above, so this arm is unreachable
+            // while that stays true, and it says so rather than guessing.
+            _ => return Err(Rejected::UnknownWindow(pos.window_type)),
+        }
+        Ok(pos)
+    }
+
+    /// Clear every flat cell whose anchor is this item's.
+    fn clear_flat_footprint(&mut self, cell: u16) {
+        let anchor = cell + 1;
+        let end = usize::from(INVENTORY_AND_EQUIP_SLOT_MAX)
+            .min(usize::from(anchor) + usize::from(FLAT_STACK_STRIDE));
+        for p in usize::from(cell)..end {
+            if self.grid.get(p).copied() == Some(anchor) {
+                if let Some(slot) = self.grid.get_mut(p) {
+                    *slot = 0;
+                }
+            }
+        }
+    }
+
+    /// Clear every dragon-soul cell whose anchor is this item's.
+    ///
+    /// The scan runs to the end of the window rather than by a stride, because a
+    /// dragon-soul box's width is not the flat stride and the grid is the record of what
+    /// was actually placed.
+    fn clear_dragon_soul_footprint(&mut self, cell: u16) {
+        let anchor = cell + 1;
+        let end = usize::from(DRAGON_SOUL_INVENTORY_MAX_NUM);
+        for p in usize::from(cell)..end {
+            if self.ds_grid.get(p).copied() == Some(anchor) {
+                if let Some(slot) = self.ds_grid.get_mut(p) {
+                    *slot = 0;
+                }
+            }
+        }
+    }
+
     /// Store an item, or say why it was not stored.
     ///
     /// # Errors

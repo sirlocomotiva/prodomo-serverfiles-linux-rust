@@ -225,6 +225,27 @@ pub enum ItemError {
         /// How many rows the count query found.
         count: i64,
     },
+    /// A row with this id already exists.
+    ///
+    /// Only [`insert_item`] reports it. `save_item` treats it as an update, which is
+    /// right for a background write and wrong for a grant.
+    ItemIdAlreadyStored {
+        /// The id that is already taken.
+        id: u32,
+    },
+    /// The cell this row names is already taken by another row.
+    ///
+    /// The second unique index, `(owner_id, window_type, pos)`, caught this. A grant that
+    /// lands on a cell somebody already holds is a different defect from a reissued id,
+    /// and it needs a different answer: the cell is the problem, and the id is fine.
+    CellAlreadyTaken {
+        /// The id the refused row wanted.
+        id: u32,
+        /// The window byte it wanted.
+        window_type: u8,
+        /// The cell it wanted.
+        pos: u32,
+    },
     /// A stored value breaks a rule the schema should have enforced.
     Corrupt(String),
     /// The server refused or failed a query.
@@ -261,6 +282,17 @@ impl fmt::Display for ItemError {
             } => write!(
                 f,
                 "item id range {first}..={last} has {count} item rows from {next} to {last}"
+            ),
+            Self::ItemIdAlreadyStored { id } => {
+                write!(f, "an item with id {id} is already stored")
+            }
+            Self::CellAlreadyTaken {
+                id,
+                window_type,
+                pos,
+            } => write!(
+                f,
+                "cell {window_type}:{pos} is already taken, so item {id} was not stored"
             ),
             Self::Corrupt(detail) => write!(f, "stored item data is invalid: {detail}"),
             Self::Database(error) => write!(f, "PostgreSQL error: {error}"),
@@ -604,6 +636,71 @@ pub async fn save_item(store: &Store, item: &ItemRow) -> Result<(), ItemError> {
         .execute(store.pool())
         .await?;
     Ok(())
+}
+
+/// Insert one new item row, and refuse if its id is already in the table.
+///
+/// # Errors
+///
+/// Returns [`ItemError::ItemIdAlreadyStored`] when a row with this `id` exists,
+/// [`ItemError::Corrupt`] when the row does not satisfy the Rust invariants, or
+/// [`ItemError::Database`].
+///
+/// This exists beside [`save_item`] because the two disagree on purpose, and the
+/// disagreement is the whole point of this function. `id` is the table's primary key
+/// across **all** owners, so `save_item`'s `ON CONFLICT (id) DO UPDATE` on a row whose id
+/// another character already holds would reassign that item: a new `owner_id`, a new cell,
+/// a new vnum, over the top of a row that belongs to someone else. For a background
+/// inventory write that is the right behaviour, because the caller is writing the state it
+/// believes is current. For a grant it is a way to lose another player's item without any
+/// error, so this has no conflict clause at all.
+///
+/// `CHECK ((window_type = 10) = (owner_id IS NULL))` and the signed socket and attribute
+/// bounds still apply, so a row this function refuses is refused for the same reasons
+/// [`save_item`] refuses one.
+pub async fn insert_item(store: &Store, item: &ItemRow) -> Result<(), ItemError> {
+    let count = check(item)?;
+    let sql = format!(
+        "INSERT INTO item ({}) VALUES ({})",
+        all_columns(),
+        placeholders(30, 1)
+    );
+    bind_item(sqlx::query(&sql), item, count)
+        .execute(store.pool())
+        .await
+        .map_err(|error| classify_insert(error, item))?;
+    Ok(())
+}
+
+/// Turn a unique violation into the refusal that names it.
+///
+/// There are two unique indexes on this table and they mean different things, so this
+/// checks the constraint's *name* and not only the SQLSTATE. The first draft matched
+/// `23505` on its own and reported every violation as `ItemIdAlreadyStored`, so a grant
+/// into a cell that was already taken was logged as "someone else has this id" -- an
+/// Operator would then go looking for the wrong collision. `23505` is the code both
+/// violations carry; the name is what separates them.
+///
+/// Anything else keeps its `ItemError::Database` shape, so a transport failure is never
+/// dressed up as a gameplay refusal.
+fn classify_insert(error: sqlx::Error, item: &ItemRow) -> ItemError {
+    if let sqlx::Error::Database(database) = &error {
+        if database.code().as_deref() == Some("23505") && database.constraint() == Some("item_pkey")
+        {
+            return ItemError::ItemIdAlreadyStored { id: item.id };
+        }
+        if database.code().as_deref() == Some("23505") {
+            // The other unique index is `(owner_id, window_type, pos)`, so this is a
+            // cell that is already taken. It carries both facts an Operator needs and
+            // neither one is guessable from the id alone.
+            return ItemError::CellAlreadyTaken {
+                id: item.id,
+                window_type: item.window_type,
+                pos: item.pos,
+            };
+        }
+    }
+    ItemError::Database(error)
 }
 
 /// Write a character's whole inventory in one transaction.

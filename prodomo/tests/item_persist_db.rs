@@ -1,0 +1,373 @@
+//! A granted item's row against a real store.
+//!
+//! [`prodomo::item_persist::persist_grant`] is a crossing between the world, the game
+//! thread, and PostgreSQL, so none of its three test homes can cover it. `item_persist.rs`
+//! holds the repair decisions with a recording revoker; `game_loop_thread.rs` holds the
+//! repair against the real game thread. This file holds the store, because the claim that
+//! matters most -- a refused write must not overwrite somebody else's row -- is only
+//! observable in the table.
+//!
+//! Every test is gated on `DATABASE_URL` and creates its own database, so the suite stays
+//! green without a server.
+
+mod support;
+
+use std::time::Duration;
+
+use prodomo::game_loop::spawn_game_loop;
+use prodomo::game_loop_messages::GameLoopConfig;
+use prodomo::game_state::GameState;
+use prodomo::item_persist::persist_grant;
+use support::ScratchDatabase;
+
+/// A vnum for a one-cell item outside every custom bank.
+fn a_plain_vnum() -> u32 {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
+    let protos =
+        gamedata::item_proto::ItemProtos::load(&dir).expect("the owner's item protos load");
+    protos
+        .rows()
+        .iter()
+        .find(|proto| {
+            proto.size == 1
+                && (0..6).all(|category| {
+                    !gamedata::item_custom_category::is_custom_category(proto, category)
+                })
+        })
+        .expect("a one-cell item outside every custom bank")
+        .vnum
+}
+
+/// The stored row for `id`, or a panic.
+///
+/// A panic is right here: a test that continues without knowing what is in the table is
+/// not testing anything.
+async fn first_row_for(store: &db::store::Store, id: u32) -> db::items::ItemRow {
+    db::items::load_item(store, id)
+        .await
+        .expect("the read")
+        .unwrap_or_else(|| panic!("row {id} is not stored"))
+}
+
+/// The stored player id for `name`, creating the account and the character.
+///
+/// `item.owner_id` has a foreign key to `player`, and the game thread's world knows a
+/// character the store has never heard of. That combination is not a defect: a world
+/// character is a live session and a stored character is a row, and the two meet at
+/// relog. A grant therefore cannot be stored for a world-only character, and this helper
+/// creates the row so the owner exists before the grant does. The first draft of this
+/// suite granted to a world-only character and read the failure as a bug in
+/// `persist_grant`; it was the foreign key doing its job.
+///
+/// It goes through the real `create_account` and `create_player` rather than raw SQL, so
+/// the test cannot drift from the schema's own constraints: a hand-written insert would
+/// keep passing if a column were renamed.
+async fn a_stored_player(store: &db::store::Store, name: &str) -> u32 {
+    let account = db::accounts::create_account(
+        store,
+        &db::accounts::NewAccount {
+            login: db::credentials::Login::new(name).expect("the character name is a valid login"),
+            // A PHC string the schema accepts and nobody can verify against, because no
+            // test here logs in. It is not a secret and it is not a credential.
+            password: db::credentials::PasswordDigest::from_stored(
+                "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHR2YWx1ZQ$\
+                 Rw5gFcg3nG1hU0l6mS7Q8b0J1wY0k2x3pQ4rS5tU6vWA"
+                    .to_owned(),
+            ),
+            delete_code: db::credentials::DeleteCode::new("1234567")
+                .expect("seven digits is a delete code"),
+        },
+    )
+    .await
+    .expect("the account is created");
+    let created = db::players::create_player(
+        store,
+        account,
+        &db::players::NewPlayer {
+            slot: 0,
+            name: db::accounts::Name::new(name).expect("the name is a valid character name"),
+            job: 1,
+            st: 6,
+            ht: 7,
+            dx: 5,
+            iq: 5,
+            hp: 500,
+            sp: 100,
+            stamina: 100,
+            part_base: 0,
+            x: 0,
+            y: 0,
+        },
+    )
+    .await
+    .expect("the character is created");
+    match created {
+        db::players::Created::Player(id) => id,
+        db::players::Created::Taken => panic!("a fresh account has a free slot and a free name"),
+    }
+}
+
+/// A `GrantOutcome` for a row that was not produced by this process's world.
+///
+/// Only the store behaviour is under test where this is used, not the placement, so the
+/// row is built directly and the record is derived from it. The store keeps `pos` as
+/// `u32` and the wire cell is a `WORD`; a real grant derives both from one number, so
+/// the narrowing here cannot be wrong for a row the world chose, and asserting it rather
+/// than casting keeps a hand-built row from describing a cell the client cannot address.
+fn outcome_for(row: db::items::ItemRow) -> prodomo::item_grant::GrantOutcome {
+    let cell = protocol::item_pos::ItemPos {
+        window_type: row.window_type,
+        cell: u16::try_from(row.pos).expect("a world-chosen cell is a WORD"),
+    };
+    prodomo::item_grant::GrantOutcome {
+        record: protocol::gc_item_window::GcItemSet {
+            cell,
+            vnum: row.vnum,
+            count: row.count,
+            refine_element: row.refine_element,
+            transmutation: row.transmutation,
+            flags: row.flags,
+            anti_flags: row.anti_flags,
+            highlight: 0,
+            sockets: row.sockets,
+            attributes: row
+                .attributes
+                .map(|attribute| protocol::gc_item_window::ItemAttribute {
+                    b_type: attribute.b_type,
+                    s_value: attribute.s_value,
+                }),
+        },
+        count: row.count,
+        row,
+        bank: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_written_row_is_in_the_table_and_the_world_is_untouched() {
+    // Given: a store with the schema up, and a real world on the real game thread.
+    let Some(database) = ScratchDatabase::create_async().await else {
+        return;
+    };
+    let store = database.store().await;
+    let owner = a_stored_player(&store, "Shaman").await;
+    let mut state = GameState::new(
+        gamedata::item_proto::ItemProtos::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto"),
+        )
+        .expect("the owner's item protos load"),
+    );
+    state
+        .install_item_ids(world::item::ItemIdRange::new(1, 1_000_000, 1).expect("a range"))
+        .expect("the first install");
+    state
+        .characters_mut()
+        .create_player(owner, "Shaman")
+        .expect("the name is free");
+    let game_loop = spawn_game_loop(GameLoopConfig::default(), state).unwrap();
+    let controller = game_loop.controller();
+
+    // When: a grant is made and its row is written.
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.request_grant(prodomo::item_grant::GrantRequest {
+            target: "Shaman".to_owned(),
+            vnum: a_plain_vnum(),
+            count: None,
+        }),
+    )
+    .await
+    .expect("the game thread answered within five seconds")
+    .expect("the answer crossed back")
+    .expect("a refusal is not expected");
+    let id = outcome.row.id;
+    let cell = outcome.row.pos;
+
+    let persisted = tokio::time::timeout(
+        Duration::from_secs(15),
+        persist_grant(&store, &controller, "Shaman", outcome),
+    )
+    .await
+    .expect("the write finished within fifteen seconds");
+
+    // Then: it is written, with the owner and cell the world chose.
+    assert!(
+        matches!(persisted, prodomo::item_persist::Persisted::Written),
+        "{persisted}"
+    );
+    let read = db::items::load_item(&store, id)
+        .await
+        .expect("the read")
+        .expect("the row is stored");
+    assert_eq!(
+        read.owner_id,
+        Some(owner),
+        "the row names the granting character"
+    );
+    assert_eq!(read.pos, cell, "the row names the cell the world chose");
+    assert_eq!(
+        read.window_type,
+        common::item_slots::EWindows::Inventory as u8
+    );
+    assert_eq!(read.count, 1);
+
+    // And: the world still holds it, because a successful write must not revoke. The
+    // probe is a revoke, not a question: `Ok` is the positive answer, and it is the only
+    // way to ask "does the world still hold this id" without a second query interface
+    // that does not exist yet. The revoke is undone immediately after, so the world is
+    // back where the test found it.
+    let revoked = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.revoke_grant("Shaman", id),
+    )
+    .await
+    .expect("the revoke answered");
+    assert_eq!(
+        revoked,
+        Ok(()),
+        "the world does not hold the item, so a successful write disturbed it"
+    );
+
+    let _ = controller.request_stop().await;
+    let _ = game_loop.join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_duplicate_id_is_refused_and_leaves_the_held_row_alone() {
+    // Given: a store where another character already holds an id, and a real world that
+    // has just been handed that same id by a fresh allocator.
+    let Some(database) = ScratchDatabase::create_async().await else {
+        return;
+    };
+    let store = database.store().await;
+    let owner = a_stored_player(&store, "Shaman").await;
+    let mut state = GameState::new(
+        gamedata::item_proto::ItemProtos::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto"),
+        )
+        .expect("the owner's item protos load"),
+    );
+    // The allocator does not know about stored rows, which is exactly the collision this
+    // test needs: a second write for the same id is what a restarted process with a
+    // fresh range would produce.
+    state
+        .install_item_ids(world::item::ItemIdRange::new(1, 1_000_000, 1).expect("a range"))
+        .expect("the first install");
+    state
+        .characters_mut()
+        .create_player(owner, "Shaman")
+        .expect("the name is free");
+    let game_loop = spawn_game_loop(GameLoopConfig::default(), state).unwrap();
+    let controller = game_loop.controller();
+
+    // When: the first grant is granted and written.
+    let first = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.request_grant(prodomo::item_grant::GrantRequest {
+            target: "Shaman".to_owned(),
+            vnum: a_plain_vnum(),
+            count: None,
+        }),
+    )
+    .await
+    .expect("the game thread answered")
+    .expect("the answer crossed back")
+    .expect("a refusal is not expected");
+    let held_id = first.row.id;
+    let held_vnum = first.row.vnum;
+    assert!(matches!(
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            persist_grant(&store, &controller, "Shaman", first)
+        )
+        .await
+        .expect("the write finished"),
+        prodomo::item_persist::Persisted::Written
+    ));
+
+    // And: a second grant is written under the *same* id, as a restarted process with a
+    // fresh allocator would do.
+    let mut collider = first_row_for(&store, held_id).await;
+    collider.owner_id = Some(owner);
+    collider.vnum = held_vnum.wrapping_add(1);
+    collider.count = 7;
+    let colliding = outcome_for(collider);
+    let persisted = tokio::time::timeout(
+        Duration::from_secs(15),
+        persist_grant(&store, &controller, "Shaman", colliding),
+    )
+    .await
+    .expect("the write finished within fifteen seconds");
+
+    // Then: the write is refused, and the error names the id.
+    match persisted {
+        prodomo::item_persist::Persisted::Undone {
+            error: db::items::ItemError::ItemIdAlreadyStored { id },
+        } => assert_eq!(id, held_id),
+        other => panic!("a duplicate id must be refused by id, got {other}"),
+    }
+
+    // And: the first row is untouched. This is the assertion that separates an insert
+    // from an upsert. `save_item`'s `ON CONFLICT (id) DO UPDATE` would have left the
+    // owner at 22, the count at 7, and reported success.
+    let read = db::items::load_item(&store, held_id)
+        .await
+        .expect("the read")
+        .expect("the row is still there");
+    assert_eq!(read.owner_id, Some(owner), "the held item changed hands");
+    assert_eq!(read.vnum, held_vnum, "the held item was overwritten");
+    assert_eq!(read.count, 1, "the held stack was changed");
+
+    let _ = controller.request_stop().await;
+    let _ = game_loop.join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_taken_cell_is_reported_as_a_taken_cell_and_not_as_a_taken_id() {
+    // Given: a store with a row already in a cell.
+    let Some(database) = ScratchDatabase::create_async().await else {
+        return;
+    };
+    let store = database.store().await;
+    let owner = a_stored_player(&store, "Shaman").await;
+    let mut held = db::items::ItemRow::on_ground(31_000, 0, 30_000, 1);
+    held.owner_id = Some(owner);
+    held.window_type = common::item_slots::EWindows::Inventory as u8;
+    held.pos = 0;
+    db::items::insert_item(&store, &held)
+        .await
+        .expect("the first row");
+
+    // When: a second item, with a fresh id, is written into that same cell.
+    let mut collider = held.clone();
+    collider.id = 31_001;
+    collider.vnum = 30_001;
+    let refused = db::items::insert_item(&store, &collider).await;
+
+    // Then: the refusal names the cell, and does not blame the id.
+    //
+    // The first draft of `classify_insert` matched the SQLSTATE alone and reported every
+    // unique violation as `ItemIdAlreadyStored`, so this exact write was logged as "an
+    // item with id 31001 is already stored" -- pointing an Operator at an id that nothing
+    // has ever used. The id is reported here only as the row that was refused.
+    match refused {
+        Err(db::items::ItemError::CellAlreadyTaken {
+            id,
+            window_type,
+            pos,
+        }) => {
+            assert_eq!(id, 31_001, "the refused row's id is reported, not blamed");
+            assert_eq!(window_type, common::item_slots::EWindows::Inventory as u8);
+            assert_eq!(pos, 0);
+        }
+        other => panic!("a taken cell must be its own error, got {other:?}"),
+    }
+
+    // And: the first row is still the one in that cell.
+    let read = db::items::load_item(&store, 31_000)
+        .await
+        .expect("the read")
+        .expect("the row is still there");
+    assert_eq!(read.vnum, 30_000, "the held item was replaced");
+    assert_eq!(read.count, 1);
+}

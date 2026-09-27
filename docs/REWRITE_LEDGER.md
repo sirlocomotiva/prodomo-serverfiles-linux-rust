@@ -19647,3 +19647,92 @@ width claim.
 **Still not a live item.** The world has an allocator and a grant reducer, and the
 range is real. Nothing yet writes the returned row, writes `GC_ITEM_SET` to a
 descriptor, or authorizes a caller. `sys.item.core` stays at `codec`.
+
+## 204. The grant's row is written before the client is told, and the world is put back if it cannot be
+
+Ledger 203 left the grant's row unwritten, and said so. This is the unit that writes it,
+and the one that decides what happens when the write does not land. `sys.item.core` stays
+at `codec`: nothing here delivers `GC_ITEM_SET` to a descriptor, and no Operator path calls
+this. The crossing is real, the delivery is not.
+
+**The order is world, then row, then client.** The world is mutated first because the world
+is the only thing that can choose a cell, and the cell is part of the row. So a failed write
+leaves an item in the world with no row, and the honest repair is to take it back rather than
+to leave a cell occupied by something the player will not see. The client record is the
+caller's to send, and only after `Persisted::Written`.
+
+`prodomo::item_persist` is that crossing:
+
+- `Persisted::{Written, Undone, Diverged}`. `Undone` is a refusal the world recovered from.
+  `Diverged` is a refusal the world did **not** recover from, which is the state a player ends
+  up holding: an item with no row, gone at the next login. Collapsing the two would hide it,
+  so the two carry different `Display` text and a test asserts they do not read alike.
+- `GrantRevoker` is desugared to a boxed `Send` future rather than an `async fn`. A native
+  `async fn` in a public trait cannot promise its future is `Send`, and this one has to be:
+  the real implementation awaits a oneshot across a thread boundary, so a non-`Send` future
+  would compile at the definition and fail at the spawn. Naming the bound moves that to a
+  compile error at the implementation.
+- `persist_grant` returns `Persisted`, not `Result`. A store failure is an outcome rather than
+  an error, because the caller has work to do either way -- send the record, or say the grant
+  failed -- and a `Result` would push that choice onto every caller.
+
+`GameCommand::RevokeGrant` and `GameLoopController::revoke_grant` are the repair's other
+half. `GameState::revoke_grant` refuses by name: `NoSuchCharacter` for an offline Name, and
+`NotThere { id }` for an id the world does not hold. A revoke that reported success for an id
+nobody holds would let `persist_grant` claim a repair it never performed.
+`CharacterItems::release` finds the item by id and clears its footprint from the storage
+grid's recorded anchors, so the repair does not have to rebuild an `Item` or guess its size.
+
+**Two findings, both from tests that failed.**
+
+*A unique violation was reported as the wrong defect.* `classify_insert` matched the SQLSTATE
+`23505` alone and returned `ItemIdAlreadyStored` for every violation, but this table has two
+unique indexes: `item_pkey` and `(owner_id, window_type, pos)`. A grant into a cell somebody
+already holds was therefore logged as "an item with id N is already stored", pointing an
+Operator at an id nothing had ever used. It now checks the constraint's *name*, and the
+`(owner_id, window_type, pos)` violation is a new `ItemError::CellAlreadyTaken { id, window_type,
+pos }` that names the cell and reports the id only as the row that was refused.
+
+*`Drop` cannot block an async test.* `ScratchDatabase::drop` called `execute`, which
+`block_on`s a fresh runtime. Inside a `#[tokio::test]` that panics, and a panic in a destructor
+while another panic unwinds aborts the process, so the real assertion failure was lost in the
+backtrace. The drop now runs on a thread of its own, which works in both the sync and the
+async case. Two leaked `prodomo_async_%` databases from the panicking runs were dropped by
+hand; the count is back to 0.
+
+**A grant cannot be stored for a world-only character.** `item.owner_id` references
+`player(id)`, and the game thread's world knows a character the store has never heard of.
+That is not a defect: a world character is a live session and a stored character is a row, and
+the two meet at relog. The first draft of the store suite granted to a world-only character
+and read the foreign-key refusal as a bug in `persist_grant`. The test now creates the
+account and the character through the real `create_account` and `create_player`, so it cannot
+drift from the schema's own constraints, and the interaction is written down here.
+
+**`StoreConfig::ACQUIRE_TIMEOUT` is five seconds, and that is not a bug.** sqlx retries a
+refused connection until the pool gives up, so a store that is merely *down* takes that long
+to be reported. A test that reaches a dead store has to allow for it: the first crossing test
+bounded the repair at five seconds and failed against a store that was answering correctly.
+`a_store_nothing_answers_actually_answers_something` exists so that a helper which never
+returns is a short readable failure rather than a pile of timeouts.
+
+**Receipt.** 9 new tests and 1 new target: 4 in `prodomo::item_persist`, 2 in
+`prodomo/tests/game_loop_thread.rs`, 3 in the new `prodomo/tests/item_persist_db.rs`.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2296 to 2305 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2305 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+Leftover `prodomo\_%` databases after the run: 0.
+
+**Not measured.** `i686-linux-gnu-g++-12` is still not installed. This unit adds no width
+claim.
+
+**Still not a live item.** The row is written, the repair is tested against a real game
+thread, and a refused write cannot overwrite somebody else's item. Nothing yet sends
+`GC_ITEM_SET` to a descriptor, and no Operator path calls this. `sys.item.core` stays at
+`codec`.

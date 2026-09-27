@@ -27,7 +27,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use gamedata::item_proto::ItemProtos;
-use world::character::CharacterManager;
+use protocol::item_pos::ItemPos;
+use world::character::{CharacterManager, Rejected};
 use world::item::{ItemIdRange, ItemIds};
 
 use tracing::warn;
@@ -73,8 +74,55 @@ impl std::fmt::Display for AlreadyInstalled {
 
 impl std::error::Error for AlreadyInstalled {}
 
+/// Why taking a granted item back out of the world did not succeed.
+///
+/// Every variant leaves the world unchanged, so a caller that gets one may retry or
+/// report. [`RevokeRefused::Rejected`] is the one that matters most: it means the
+/// storage named a cell and then refused to release it, which is a bug in the storage
+/// rather than a state a caller can wait out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevokeRefused {
+    /// The character is not online, so the world holds nothing of theirs.
+    NoSuchCharacter {
+        /// The name the revoke named.
+        name: String,
+    },
+    /// The world does not hold that item for that character.
+    ///
+    /// A bug rather than a state to recover from: the id came from a grant that mutated
+    /// the world moments earlier, and only a pulse in between could have moved it.
+    NotThere {
+        /// The id the revoke named.
+        id: u32,
+    },
+    /// The storage named a cell and would not release it.
+    Rejected {
+        /// The id the revoke named.
+        id: u32,
+        /// What the storage reported.
+        error: Rejected,
+    },
+}
+
+impl std::fmt::Display for RevokeRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSuchCharacter { name } => {
+                write!(formatter, "no online character named {name}")
+            }
+            Self::NotThere { id } => write!(formatter, "the world does not hold item {id}"),
+            Self::Rejected { id, error } => {
+                write!(formatter, "item {id} could not be released: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RevokeRefused {}
+
 /// A grant was asked for before the world had an allocator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+
 pub struct NoItemIds;
 
 impl std::fmt::Display for NoItemIds {
@@ -261,6 +309,28 @@ impl GameState {
                     );
                 }
             }
+            GameCommand::RevokeGrant { target, id, reply } => {
+                let removed = match self.revoke_grant(&target, id) {
+                    Ok(_) => true,
+                    Err(error) => {
+                        // A revoke that could not happen is the state a player can end up
+                        // holding, so it is logged at warn with both ids rather than being
+                        // folded into the boolean the reply carries.
+                        warn!(target = ?target, id, %error, "a granted item could not be taken back");
+                        false
+                    }
+                };
+                // A dropped revoke answer leaves the world in the state the caller is
+                // about to report as wrong, so the log line has to say which id and who
+                // it belonged to: this is the state a player can be holding.
+                if reply.send(removed).is_err() {
+                    warn!(
+                        target = ?target,
+                        id,
+                        "a granted item was taken back but nobody was left to hear about it"
+                    );
+                }
+            }
             GameCommand::Stop => {
                 // The loop handles `Stop` itself, before a command ever reaches a
                 // processor. Reaching here would mean the loop and the state
@@ -269,6 +339,32 @@ impl GameState {
                 debug_assert!(false, "the game loop must handle Stop itself");
             }
         }
+    }
+
+    /// Take a granted item back out of the world.
+    ///
+    /// This is the undo for the grant, and it exists because the grant mutates the world
+    /// before its row can be written: the world is the only thing that can choose a cell,
+    /// and the cell is part of the row. The id is enough to find the item again, because
+    /// [`world::character::CharacterItems::release`] answers from the storage rather than being
+    /// handed a cell the caller might have stale.
+    ///
+    /// # Errors
+    ///
+    /// [`RevokeRefused::NoSuchCharacter`] when the target is not online, and
+    /// [`RevokeRefused::NotThere`] when the world does not hold the id, or
+    /// [`RevokeRefused::Rejected`] when the storage named a cell it then would not
+    /// release. None of the three changes anything.
+    pub fn revoke_grant(&mut self, target: &str, id: u32) -> Result<ItemPos, RevokeRefused> {
+        let character = self.characters.find_player_mut(target).ok_or_else(|| {
+            RevokeRefused::NoSuchCharacter {
+                name: target.to_owned(),
+            }
+        })?;
+        character
+            .items_mut()
+            .release(id)
+            .map_err(|error| RevokeRefused::Rejected { id, error })
     }
 
     /// Run one grant against the world, taking the target's own `Inven_Point`.

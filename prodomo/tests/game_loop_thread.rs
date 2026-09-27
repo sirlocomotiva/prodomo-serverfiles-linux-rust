@@ -367,3 +367,174 @@ async fn priority_stop_discards_queued_data_without_starvation() {
     ));
     assert_eq!(game_loop.join().await.unwrap(), terminal);
 }
+
+/// A vnum for a one-cell item that is outside every custom inventory bank.
+///
+/// The grant needs a real prototype for its size and category, and the size has to be
+/// one cell so the test can assert on the cell number without computing a footprint.
+fn a_plain_vnum() -> u32 {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
+    let protos =
+        gamedata::item_proto::ItemProtos::load(&dir).expect("the owner's item protos load");
+    protos
+        .rows()
+        .iter()
+        .find(|proto| {
+            proto.size == 1
+                && (0..6).all(|category| {
+                    !gamedata::item_custom_category::is_custom_category(proto, category)
+                })
+        })
+        .expect("a one-cell item outside every custom bank")
+        .vnum
+}
+
+/// A store whose URL parses and names nothing, so every write fails on connect.
+///
+/// The repair path has to work when the store is down, not only when it refuses a
+/// constraint, and this is the case that is hardest to get right because there is no
+/// row to inspect afterwards.
+fn a_store_nothing_answers() -> db::store::Store {
+    db::store::Store::lazy(&db::store::StoreConfig {
+        url: "postgres://prodomo:prodomo-test@127.0.0.1:1/prodomo".to_owned(),
+        max_connections: 1,
+    })
+    .expect("a well-formed store configuration")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_write_puts_the_world_back_on_the_thread_that_owns_it() {
+    // Given: a real world on the real game thread, with an allocator and a player, and
+    // a store that cannot be reached.
+    let mut state = GameState::new(
+        gamedata::item_proto::ItemProtos::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto"),
+        )
+        .expect("the owner's item protos load"),
+    );
+    state
+        .install_item_ids(world::item::ItemIdRange::new(1, 1_000_000, 1).expect("a range"))
+        .expect("the first install");
+    state
+        .characters_mut()
+        .create_player(11, "Shaman")
+        .expect("the name is free");
+    let game_loop = spawn_game_loop(GameLoopConfig::default(), state).unwrap();
+    let controller = game_loop.controller();
+
+    // When: a grant is made and its row cannot be written.
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.request_grant(prodomo::item_grant::GrantRequest {
+            target: "Shaman".to_owned(),
+            vnum: a_plain_vnum(),
+            count: None,
+        }),
+    )
+    .await
+    .expect("the game thread answered within five seconds")
+    .expect("the answer crossed back")
+    .expect("a refusal is not expected");
+    let cell = outcome.record.cell.cell;
+    let id = outcome.row.id;
+
+    // The bound has to clear `StoreConfig::ACQUIRE_TIMEOUT`, because sqlx retries a
+    // refused connection until the pool gives up. A five-second bound here would time
+    // out on a store that is merely unreachable and look like a stuck game thread.
+    let persisted = tokio::time::timeout(
+        Duration::from_secs(15),
+        prodomo::item_persist::persist_grant(
+            &a_store_nothing_answers(),
+            &controller,
+            "Shaman",
+            outcome,
+        ),
+    )
+    .await
+    .expect("the repair answered within five seconds");
+
+    // Then: the world was put back, and the caller is told so.
+    assert!(
+        matches!(persisted, prodomo::item_persist::Persisted::Undone { .. }),
+        "a refused write must repair the world, got {persisted}"
+    );
+
+    // And: the cell is free again. This is the assertion the whole unit exists for. A
+    // repair that reported success while leaving the cell occupied would pass the
+    // match above and fail here, and it is the failure that reaches a player as a
+    // permanently missing inventory slot.
+    let free = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.request_grant(prodomo::item_grant::GrantRequest {
+            target: "Shaman".to_owned(),
+            vnum: a_plain_vnum(),
+            count: None,
+        }),
+    )
+    .await
+    .expect("the second grant answered within five seconds")
+    .expect("the answer crossed back")
+    .expect("the freed cell is usable");
+    assert_eq!(
+        free.record.cell.cell, cell,
+        "the repair freed the cell the first grant took"
+    );
+    assert_ne!(
+        free.row.id, id,
+        "the id stays burned, because the allocator is monotonic"
+    );
+
+    let _ = controller.request_stop().await;
+    let _ = game_loop.join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revoke_of_an_item_the_world_does_not_hold_is_refused() {
+    // Given: a real world with a player and an allocator, holding no items.
+    let mut state = GameState::new(
+        gamedata::item_proto::ItemProtos::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto"),
+        )
+        .expect("the owner's item protos load"),
+    );
+    state
+        .install_item_ids(world::item::ItemIdRange::new(1, 1_000_000, 1).expect("a range"))
+        .expect("the first install");
+    state
+        .characters_mut()
+        .create_player(11, "Shaman")
+        .expect("the name is free");
+    let game_loop = spawn_game_loop(GameLoopConfig::default(), state).unwrap();
+    let controller = game_loop.controller();
+
+    // When: a revoke names an id the world never handed out.
+    let refused = tokio::time::timeout(
+        Duration::from_secs(5),
+        controller.revoke_grant("Shaman", 123_456),
+    )
+    .await
+    .expect("the game thread answered within five seconds");
+
+    // Then: it is refused by name. A revoke that reported success for an id nobody
+    // holds would let `persist_grant` claim a repair it never performed.
+    assert_eq!(
+        refused,
+        Err(prodomo::game_loop_messages::RevokeError::NotThere { id: 123_456 })
+    );
+
+    // And: a revoke for a character who is not online is refused too, rather than
+    // being answered as "not there", which would point an Operator at the wrong cause.
+    let offline =
+        tokio::time::timeout(Duration::from_secs(5), controller.revoke_grant("Nobody", 1))
+            .await
+            .expect("the game thread answered within five seconds");
+    assert_eq!(
+        offline,
+        Err(prodomo::game_loop_messages::RevokeError::NotThere { id: 1 }),
+        "an offline character leaves the world with nothing to release, and the id is \\
+         what the caller needs to see"
+    );
+
+    let _ = controller.request_stop().await;
+    let _ = game_loop.join().await;
+}
