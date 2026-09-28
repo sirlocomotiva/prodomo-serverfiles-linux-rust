@@ -20348,3 +20348,205 @@ the working tree of this section, with no other change in it:
 run, and no `*.core` file is outside `target/`. The workspace has 191 Rust files and 128,974
 lines. The 209.2 decision is still open, and so is the load path of 209.1: 209.3's list is
 unchanged apart from its first paragraph about the draft test.
+
+## 210. A relogged character is sent its items before the game is entered
+
+209.1 found that the inventory load hangs off `CG_CHARACTER_SELECT` and lands in the loading
+phase. This section ports it for the windows this build can hold: the base inventory, the belt,
+and the dragon soul window. Until now a relog put nothing back in the client's window, and the
+world admitted the character with an empty inventory, so the next grant could be offered a cell
+a stored item already held.
+
+### 210.1 What landed
+
+- **`prodomo/src/item_load.rs`** (new): `plan_item_load`, a transport-free reducer that places a
+  character's rows the way `CInputDB::ItemLoad` does (`G/input_db.cpp:1451-1567`). Each row
+  becomes an item with its prototype's size, flags and anti-flags (`G/item.cpp:221-226`,
+  `G/item.h:78`) and the row's count, refine element, transmutation, sockets and attributes. A
+  `BELT_INVENTORY` row is placed as `INVENTORY` at `274 + pos` (`:1491-1495`). An `INVENTORY`
+  item whose cell is taken is set aside and placed after every other item at the first free
+  base-inventory cell (`:1541-1561`). `ItemLoad::moved_rows` gives the rows of the moved items at
+  their new cell, which is the only write the load makes: legacy places with saving off
+  (`:1480`) and turns it back on before the set-aside items (`:1538`), whose `AddToCharacter`
+  ends in `Save()` (`G/item.cpp:529`). A belt row that stays put keeps window 9 in the store.
+  The highlight byte of every record is 0, because the load has just made the owner the last
+  owner (`:1483`, `G/item.cpp:475-476`).
+- **`prodomo/src/main.rs`**: after the loading burst, `load_items` reads the rows
+  (`db::items::load_owner_items`, no longer without a caller), plans the load with an
+  `Inven_Point` of 0, logs each refusal (`An item was not loaded; its row is kept`), writes each
+  moved row, and sends one `GC_ITEM_SET` (byte 21, 72 bytes) per placed item and then the gold
+  and points records. A store error closes the descriptor; a failed moved-row write is logged,
+  because the client and the world already hold the new cell and the next load sets the item
+  aside again. The placed items are held on the descriptor and handed to the world at
+  enter-game. The item prototypes are now one `Arc<ItemProtos>` shared by the connection
+  context and the game thread, read by `load_item_protos`, which takes the read out of `serve`
+  the way `load_atlas` does.
+- **`prodomo/src/loading_phase.rs`**: `points_packet` is `CHARACTER::PointsPacket`, the gold
+  record then the points record (`G/char.cpp:2078-2085`, under `ENABLE_REMOVE_LIMIT_GOLD` at
+  `prodomodefines.h:157`). The loading burst sends it once and the load sends it again as its
+  last step (`input_db.cpp:1564`), whether or not the character owns an item.
+- **`prodomo/src/game_state.rs`** and **`game_loop_messages.rs`**: the enter-world message
+  carries the loaded items, and `GameState::enter_world_with_items` sets them in load order
+  into the character it creates. If one is refused (`EnterWorldRefused::ItemRefused`), the
+  character is taken back out, so the world never holds a character with an inventory the
+  client was not shown.
+- **`prodomo/src/item_grant.rs`**: a grant's record and row now carry the prototype's flags and
+  anti-flags. **Before this section both were 0**, so every granted item reached the client
+  without its flags; the load exposed it, because the load reads the flags from the prototype
+  and the relog scenario compared the two.
+- **`db/src/items.rs`**: the doc of `load_owner_items` names the seven windows of
+  `ClientManagerPlayer.cpp:386` and `:522`, fixing the doc defect 209 recorded.
+
+### 210.2 Divergences
+
+Each refusal below leaves the row in the store as it is, so nothing a player owns is lost by
+being refused. `STATUS.md` has the first two in its Divergences table.
+
+| Divergence | legacy |
+|---|---|
+| A row the load cannot place is refused with a warning naming it, and kept: an unknown vnum, a cell outside its window, a count the item cannot have, or no free cell for an item set aside. | An unknown vnum is skipped with its diagnostic commented out (`G/input_db.cpp:1474-1478`); an item set aside with no room goes on the ground with a 180-second ownership and a destroy timer (`:1547-1558`). |
+| Rows are read `ORDER BY window_type, pos, id`. | No `ORDER BY` (`D/ClientManagerPlayer.cpp:386`, `:522`); on a cache hit, `unordered_set` order. Every record carries its cell, so no client can see either (209.1). |
+| An `INVENTORY` row in the equipment range (cells 180 to 273) is refused. | `AddToCharacter` means to refuse it but tests the new item's `m_wCell`, which is still 0 (`G/item.cpp:447-453`), so the test never fires. The Rewrite applies the test it meant. |
+| Any overlap with an item already placed sets the new item aside. | Only an occupied anchor cell does (`:1497-1502`); an item whose footprint overlaps a neighbour is placed over it, and its grid marks overwrite the neighbour's (ledger 195). |
+| A dragon soul row whose cell is taken is refused and kept. | Only `INVENTORY` and `EQUIPMENT` rows are set aside (`:1497-1498`). A dragon soul row goes to `SetItem`, which clears the occupant's marks and writes the new item over it (`G/char_item.cpp:471-519`), so the occupant stays owned but leaves the window. |
+
+The unknown-vnum Defect in `STATUS.md` said "The Rewrite fails the load loudly instead
+(ledger 196)". It now says what the Rewrite does: that one row is refused and logged, and the
+rest load. Failing the whole load would lock the player out over one row an Operator can repair.
+
+### 210.3 Not ported yet
+
+- **`EQUIPMENT`, `SWITCHBOT`, `ATTR67_ADD` and `AURA_REFINE` rows** are refused as
+  `WindowNotPorted` and kept. An equipment row goes through `EquipTo`, which applies bonuses
+  and checks the level; the switchbot and the attribute window register with systems that do
+  not exist yet. This is a gap and not a Divergence.
+- **`CheckMaximumPoints`** (`input_db.cpp:1563`), which clamps HP and SP to maxima the
+  equipment raises. Without equipment the maxima do not move.
+- **The ground.** A set-aside item with no room is refused (above), not dropped.
+- **The dragon soul window** passes through at its stored cell, with no dragon soul rules.
+
+### 210.4 Two cell keys can collide, and both cases are handled
+
+The store's unique key is `(owner_id, window_type, pos)`, and a refused row keeps its key. A
+later grant that the world places in a refused row's cell fails its insert and is undone, the
+way ledger 204 undoes any grant whose row cannot be written. A moved row whose new cell is a
+refused row's key fails its save, which is logged (210.1). Neither can lose an item.
+
+### 210.5 For the future item save
+
+`ITEM_MANAGER::SaveSingleItem` writes an `INVENTORY` cell in 274..290 back as window 9 at
+`cell - 274`, and an `EQUIPMENT` cell as `cell - INVENTORY_MAX_NUM` (`G/item_manager.cpp:504-521`,
+under `ENABLE_BELT_INVENTORY_EX`). A background save that writes the in-memory window and cell
+as they are would move every belt item into the base inventory's key space. `PROTOCOL_NOTES.md`
+section 210 has the account. `common/src/constants.rs` still carries `INVENTORY_MAX_NUM = 90`
+and the other slot constants of a build without `ENABLE_EXTEND_INVEN_SYSTEM` and
+`ENABLE_CUSTOM_INVENTORY`; nothing reads them, and `STATUS.md`'s code-quality backlog asks
+for them to go before that save is written.
+
+### 210.6 Scenario and Parity inventory
+
+`a_relogged_character_is_sent_its_items_before_the_game_is_entered` grants vnum 19 (two cells,
+both flag words set), disconnects, and writes three rows by hand: a belt row at belt cell 3 with
+a count of 2 and every relayed field set with distinct byte halves, an equipment row, and an
+inventory row at cell 5, which the granted item's footprint covers. On the next select it
+asserts:
+
+- exactly three records between the loading burst and the gold and points records: the granted
+  item at cell 0 with the prototype's flags; the belt item compared **whole** with 72 bytes built
+  in `TPacketGCItemSet`'s field order (`G/packet.h:1427-1444`); and the set-aside item at
+  cell 1;
+- the moved row is rewritten at cell 1, the equipment row's refusal is logged and the row is
+  unchanged, and the belt row keeps window 9;
+- after enter-game, a second grant is placed at cell 2, the first cell the world does not hold,
+  and its row is written there.
+
+`parity.rs`'s `enter_world` helper now reads the item records and the tail through
+`load_character`, and the legacy-order scenario asserts the gold and points pair that follows the
+skill levels. The relayed values and the expected record live in `RelayedFields`, whose
+`item_set` builds the 72 bytes from the fields and the prototype and asserts the width, and the
+granted item's checks in `assert_the_granted_record`.
+
+- `gc.item_set2` (byte 21) moves from `codec` to `ported`, naming this scenario. It has been sent
+  live since ledger 206, and this is the first scenario to compare the whole record.
+- `sys.item.core` stays `partial`: equipment, move, stack, use, drop and pick up are not ported.
+  Its note names this scenario.
+
+`.scratch/ledger209-item-load-research.md` gets a correction at the top: its tail omits the gold
+record, and it places `CheckMaximumPoints` after `PointsPacket`, where the source has it before.
+
+### 210.7 Mutation sweep
+
+28 mutants, each applied to the pristine file with the change asserted to be in executable code,
+and every file restored and checked against its pre-sweep SHA-256.
+
+| group | mutants | result |
+|---|---|---|
+| `item_load.rs`: highlight, belt offset, both flag words, unported window, wear range, moved filter, set-aside window test, `moved_from`, the moved row's window and cell, belt bound, sockets | 13 | 13 killed |
+| `main.rs`: items handed to the world, the gold and points tail, moved-row writes, rows planned, items taken at enter-game | 5 | 5 killed |
+| `game_state.rs`: the take-back on refusal, the items placed, the items passed from the message | 3 | 3 killed |
+| `game_loop_messages.rs`: the items carried by the message | 1 | 1 killed |
+| `loading_phase.rs`: gold and points swapped | 1 | 1 killed |
+| `item_grant.rs`: the grant's flags | 1 | 1 killed |
+| scenario only, after the whole-record check: sockets zeroed, refine element zeroed, transmutation from the refine column, attribute types reversed | 4 | 4 killed |
+
+Every kill was semantic: no mutant failed to compile. Before this section's last unit test, the
+moved row's window mutant (taking the window from the row rather than from where the item was
+placed) survived for rows that start in `INVENTORY`, where the two agree. A belt row that is set
+aside is the case where they differ, and
+`a_belt_row_set_aside_is_rewritten_in_the_inventory_window` now pins it. It is the only mutant that
+kills through that test alone.
+
+After the sweep, the first full gate run failed Clippy and rustdoc, and the fixes changed code the
+sweep had mutated:
+
+- Clippy's `needless_pass_by_value`: `GameState::enter_world_with_items` took the loaded items
+  as a `Vec` and only read them. It takes a slice now; the message handler lends its `Vec`.
+- Clippy's `too_many_lines`, twice: `serve` was at 102 lines, and the item prototypes' read moved
+  into `load_item_protos`; the relog scenario was at 150 lines, and its relayed values and
+  expected record moved into `RelayedFields` and `assert_the_granted_record` (210.6).
+- Clippy's `type_complexity` on one test's local, now the test alias `PlacedAt`.
+- rustdoc refused five intra-doc links in `item_load.rs`'s `//!` block. They are qualified now
+  (`crate::item_load::...`, `world::character::...`), because a module's `//!` resolves in the
+  crate root.
+- Three comments cited `SetProto` at `G/item.cpp:220-225`. It is `:221-226`, and all three
+  (`item_load.rs`, `item_grant.rs`, and the scenario) now say so.
+
+None of these changes behaviour. The first four are refactors, and the last two change only
+comments. The three `game_state.rs` mutants (the new signature changed two of their lines) and
+the four scenario-only mutants (the scenario changed shape) were run again on the final tree:
+
+| mutant | killed by |
+|---|---|
+| the take-back on refusal removed | `an_item_the_inventory_refuses_takes_the_character_back_out` |
+| no loaded item placed (`&items[..0]`) | both `game_state.rs` tests and the scenario |
+| the message handler lends no items | the scenario |
+| sockets zeroed | the scenario |
+| refine element zeroed | the scenario |
+| transmutation from the refine column | the scenario |
+| attribute types reversed | the scenario |
+
+All seven were killed again, every kill was semantic, and both files matched their pre-sweep
+SHA-256 afterwards.
+
+### 210.8 Receipt
+
+Eleven new tests: seven in `prodomo/src/item_load.rs`, two in `game_state.rs`
+(`the_admitted_character_holds_the_items_its_load_placed`,
+`an_item_the_inventory_refuses_takes_the_character_back_out`), one in `item_grant.rs`
+(`the_flags_and_anti_flags_are_the_prototypes`), and the scenario in `prodomo/tests/parity.rs`.
+The gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2373 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2373 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+`SELECT datname FROM pg_database WHERE datname LIKE 'prodomo\_%'` returns nothing after the
+run, and no `*.core` file is outside `target/`. The workspace has 192 Rust files and 130,178
+lines. No width is claimed in this section: `GC_ITEM_SET`'s 72 bytes, the gold record's 9 and
+the points record's 2041 are the widths the codecs already pin, and the i686 probe was not run.

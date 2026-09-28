@@ -550,12 +550,13 @@ fn read_i16(row: &PgRow, column: &str) -> Result<i16, ItemError> {
 
 /// Load every item of one character.
 ///
-/// Legacy loads the same set (`db/ClientManagerPlayer.cpp:386`, the six `INVENTORY`
-/// windows). It filters in the query (`row[0] = 0` and the switch) and **silently drops**
-/// a row it does not recognise, so a character that owns an item in a window this build
-/// does not have loses it at the next login. This function does not repeat that: the only
-/// filter is the owner, and a row this build cannot decode is an [`ItemError::Corrupt`]
-/// rather than a missing item.
+/// Legacy loads the same set (`db/ClientManagerPlayer.cpp:386`, the seven windows its
+/// query names: `INVENTORY`, `EQUIPMENT`, `DRAGON_SOUL_INVENTORY`, `ATTR67_ADD`,
+/// `SWITCHBOT`, `AURA_REFINE` and `BELT_INVENTORY`). It filters in the query (`row[0] = 0`
+/// and the switch) and **silently drops** a row it does not recognise, so a character that
+/// owns an item in a window this build does not have loses it at the next login. This
+/// function does not repeat that: the only filter is the owner, and a row this build cannot
+/// decode is an [`ItemError::Corrupt`] rather than a missing item.
 ///
 /// Ground items are not returned, and that is not a filter: the migration's biconditional
 /// makes a row with an owner never a ground row. The ground load is `sys.item.ground`, a

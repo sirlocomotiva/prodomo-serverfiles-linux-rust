@@ -1312,6 +1312,7 @@ fn game_len(header: u8) -> usize {
         GC_CHARACTER_POSITION => CHARACTER_POSITION_LEN,
         GC_SYNC_POSITION => usize::MAX,
         GC_OWNERSHIP => OWNERSHIP_LEN,
+        ITEM_SET => ITEM_SET_LEN,
         other => panic!("unexpected loading or enter-game header {other}"),
     }
 }
@@ -1387,6 +1388,20 @@ fn client_sync_position(elements: &[(u32, i32, i32)]) -> Vec<u8> {
 /// Log `login` in, select slot `slot`, and enter the game, leaving the connection in the game
 /// phase with every loading and enter-game record already read.
 fn enter_world(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed) {
+    let (mut keyed, character, _items) = load_character(server, login, slot);
+    enter_game_burst(&mut keyed);
+    (keyed, character)
+}
+
+/// Log `login` in and select slot `slot`, reading the loading burst and the item load behind
+/// it, and answer with the `GC_ITEM_SET` records in the order they arrived. The connection is
+/// left in the loading phase.
+///
+/// `CInputDB::ItemLoad` writes one `GC_ITEM_SET` per placed item and ends with a second
+/// `PointsPacket` (`G/input_db.cpp:1564`), so the gold and points records arrive twice: once
+/// before the skill levels and once after the items. Nothing between the two changes a point,
+/// so the second pair is the first pair's bytes.
+fn load_character(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed, Vec<Vec<u8>>) {
     let (mut keyed, _empire, list) = select_screen(server, login);
     let character = listed(&list, usize::from(slot));
     keyed.send_record(&client_select(slot));
@@ -1394,9 +1409,27 @@ fn enter_world(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed) {
     assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
     let main = keyed.read_game();
     assert_eq!(main[0], GC_MAIN_CHARACTER2_EMPIRE);
-    assert_eq!(keyed.read_game()[0], GC_CHARACTER_GOLD);
-    assert_eq!(keyed.read_game()[0], GC_PLAYER_POINTS);
+    let gold = keyed.read_game();
+    assert_eq!(gold[0], GC_CHARACTER_GOLD);
+    let points = keyed.read_game();
+    assert_eq!(points[0], GC_PLAYER_POINTS);
     assert_eq!(keyed.read_game()[0], GC_SKILL_LEVEL_NEW);
+    let mut items = Vec::new();
+    let tail = loop {
+        let record = keyed.read_game();
+        if record[0] != ITEM_SET {
+            break record;
+        }
+        items.push(record);
+    };
+    assert_eq!(tail, gold, "the item load ends with the gold record");
+    assert_eq!(keyed.read_game(), points, "then the points record");
+    (keyed, character, items)
+}
+
+/// Send `CG_ENTER_GAME` from the loading phase and read the enter-game burst, leaving the
+/// connection in the game phase with nothing unread.
+fn enter_game_burst(keyed: &mut Keyed) {
     keyed.send_record(&client_enter_game());
     assert_eq!(keyed.read_game()[0], GC_CHARACTER_ADD);
     assert_eq!(keyed.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
@@ -1407,7 +1440,6 @@ fn enter_world(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed) {
     let notice = keyed.read_game();
     assert_eq!(notice[0], GC_CHAT);
     assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
-    (keyed, character)
 }
 
 /// A 25-byte Name field holding `name`, NUL-padded.
@@ -2041,6 +2073,10 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
     let levels = keyed.read_game();
     assert_eq!(levels.len(), SKILL_LEVEL_LEN);
     assert_eq!(levels[0], GC_SKILL_LEVEL_NEW);
+    // `ItemLoad` comes next. Alpha owns no rows, so there is no `GC_ITEM_SET`, but the load still
+    // ends with `PointsPacket` (`G/input_db.cpp:1564`): the same gold and points records again.
+    assert_eq!(keyed.read_game(), gold, "the item load's gold record");
+    assert_eq!(keyed.read_game(), points, "the item load's points record");
     assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
 
     // `CG_ENTER_GAME`. `Entergame` writes the own-character pair, then the revive-invisible
@@ -2717,10 +2753,7 @@ fn the_vnum_this_section_grants_is_in_the_owners_prototypes() {
     // and a test that only worked for UTF-8 Game data would be a test that stops working
     // the day this file is checked properly. `ItemProtos::load` is what the server asks,
     // so this asserts the server can grant this vnum rather than that a file parses.
-    let directory =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
-    let protos = gamedata::item_proto::ItemProtos::load(&directory)
-        .expect("the owner's item prototypes should load");
+    let protos = owners_protos();
     assert!(
         protos.get(a_plain_vnum()).is_some(),
         "vnum {GRANTED_VNUM} should be in the owner's item prototypes, or this section \
@@ -2733,6 +2766,14 @@ fn the_vnum_this_section_grants_is_in_the_owners_prototypes() {
         "vnum 0 is not a prototype, so a reader that answered `true` for everything would \
          be caught here"
     );
+}
+
+/// The owner's item prototypes, read by the reader the server uses.
+fn owners_protos() -> gamedata::item_proto::ItemProtos {
+    let directory =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
+    gamedata::item_proto::ItemProtos::load(&directory)
+        .expect("the owner's item prototypes should load")
 }
 
 /// An item vnum the owner's protos really carry, so the grant is not refused for the wrong
@@ -2937,4 +2978,239 @@ fn an_operator_destroy_takes_the_item_out_of_the_world_and_deletes_its_row() {
         Quiet::Open,
         "the client is still connected after the destroy"
     );
+}
+
+/// A relogged character is sent its stored items in the loading phase, and the world holds
+/// them once the game is entered.
+///
+/// This is the load half of the round trip: the only way a player sees an item a second
+/// time. The rows come from two writers on purpose. One is the Operator's grant, the Rewrite's
+/// own insert; two are written by hand, which is what a row from any other writer looks like.
+/// The belt row checks legacy's window translation (`G/input_db.cpp:1491-1495`). The
+/// overlapping row checks the set-aside path and its save: legacy moves an item whose cell is
+/// taken to the first free cell and writes the new cell (`G/item.cpp:529`). The equipment row
+/// is the negative control: equipment is not loaded by this build, so its row must produce no
+/// record and must still be in the store afterwards, and a load that sent a record for every
+/// row would fail on the record count.
+#[test]
+fn a_relogged_character_is_sent_its_items_before_the_game_is_entered() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+
+    // Given: one granted item, and its client gone again.
+    let (mut alpha, _character) = enter_world(&server, b"alice", 0);
+    Server::write_console(&console, &format!("item give Alpha {}", a_plain_vnum()));
+    server.wait_for("the client has it");
+    let _ = alpha.drain_game(Duration::from_millis(500), an_item_window_record);
+    drop(alpha);
+    server.wait_for("Character left the world");
+
+    // And: three rows written by hand, with ids below the grant range. Row 7 is at the fourth
+    // cell of the belt window with a count of 2; row 8 is an equipment row; row 9 is at cell 5
+    // of the inventory, which the granted two-cell item's footprint already covers.
+    let protos = owners_protos();
+    let small = protos
+        .rows()
+        .iter()
+        .find(|proto| proto.size == 1)
+        .map(|proto| proto.vnum)
+        .expect("the owner's data has a one-cell item");
+    for (id, window, pos, count) in [(7, 9, 3, 2), (8, 2, 4, 1), (9, 1, 5, 1)] {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 {window}, {pos}, {count}, {small} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    // Row 7 also carries every stored field the record relays.
+    let relayed = RelayedFields::distinct();
+    relayed.store(&database, 7);
+
+    // When: the character is selected again.
+    let (mut alpha, _character, items) = load_character(&server, b"alice", 0);
+
+    // Then: one `GC_ITEM_SET` for the granted item and one for the belt item, in the store's
+    // window order, then one for the item that was set aside, and none for the equipment row.
+    assert_eq!(
+        items.len(),
+        3,
+        "the granted, belt, and moved items, and nothing for the equipment row: {items:02x?}"
+    );
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    assert_the_granted_record(&items[0], &protos);
+    // The belt item's record, whole. 277 is `BELT_INVENTORY_SLOT_START` plus 3.
+    let small_proto = protos.get(small).expect("found above");
+    let expected = relayed.item_set(small_proto, 277, 2);
+    assert_eq!(
+        items[1], expected,
+        "the belt item, shown in the inventory window at 274 plus its cell, every stored \
+         field relayed, the prototype's flags, and no highlight"
+    );
+    // The overlapping row is sent last, at the first free cell. The Rewrite sets aside any
+    // overlap, where legacy tests only the anchor cell (ledger 210).
+    let moved = &items[2];
+    assert_eq!(moved[1], inventory, "the base inventory");
+    assert_eq!(&moved[2..4], &1_u16.to_le_bytes(), "the first free cell");
+    assert_eq!(&moved[4..8], &small.to_le_bytes(), "vnum");
+
+    // And: the moved row was rewritten at its new cell before its record was sent, the
+    // refused row is reported and kept as it was, and the belt row keeps its own window,
+    // because legacy places it with saving off (`G/input_db.cpp:1480`).
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 9 AND window_type = 1 AND pos = 1)",
+    );
+    server.wait_for("An item was not loaded; its row is kept");
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 8 AND window_type = 2 AND pos = 4)",
+    );
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 7 AND window_type = 9 AND pos = 3)",
+    );
+
+    // When: the game is entered and the Operator grants the same vnum again.
+    enter_game_burst(&mut alpha);
+    Server::write_console(&console, &format!("item give Alpha {}", a_plain_vnum()));
+    server.wait_for("id 100000001; the client has it");
+
+    // Then: the new item goes to cell 2, because the world holds the loaded items on cells 0
+    // and 1. A world admitted without its items would choose cell 0 again, and the store's
+    // one-item-per-cell key would refuse the row.
+    let (records, state) = alpha.drain_game(Duration::from_millis(500), an_item_window_record);
+    let record = the_item_set(&records)
+        .unwrap_or_else(|| panic!("the client must receive a GC_ITEM_SET, got {records:02x?}"));
+    assert_eq!(
+        &record[2..4],
+        &2_u16.to_le_bytes(),
+        "the first free cell beside the loaded items"
+    );
+    check(&database, "(SELECT pos FROM item WHERE id = 100000001) = 2");
+    assert_eq!(state, Quiet::Open, "the client is still connected");
+}
+
+/// Checks the relogged character's granted item: vnum 19 at the cell the grant chose, with the
+/// prototype's flags and no highlight.
+fn assert_the_granted_record(granted: &[u8], protos: &gamedata::item_proto::ItemProtos) {
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    assert_eq!(granted.len(), ITEM_SET_LEN);
+    assert_eq!(granted[1], inventory, "the granted item's window");
+    assert_eq!(
+        &granted[2..4],
+        &0_u16.to_le_bytes(),
+        "the cell the grant chose"
+    );
+    assert_eq!(&granted[4..8], &a_plain_vnum().to_le_bytes(), "vnum");
+    assert_eq!(&granted[8..10], &1_u16.to_le_bytes(), "count");
+    // The flags are the prototype's, because the store keeps none (`G/item.cpp:221-226`,
+    // `G/item.h:78`). Vnum 19 carries both kinds, so a record of zeros fails here.
+    let proto = protos
+        .get(a_plain_vnum())
+        .expect("checked by the section's first test");
+    assert_ne!(
+        (proto.flags, proto.anti_flags),
+        (0, 0),
+        "a prototype with flags"
+    );
+    assert_eq!(&granted[18..22], &proto.flags.to_le_bytes(), "flags");
+    assert_eq!(
+        &granted[22..26],
+        &proto.anti_flags.to_le_bytes(),
+        "anti_flags"
+    );
+    assert_eq!(
+        granted[26], 0,
+        "the last owner is the owner, so no highlight"
+    );
+}
+
+/// The stored fields a `GC_ITEM_SET` relays from an item row. Each value has distinct byte
+/// halves, so a field sent from the wrong column or at the wrong offset cannot pass.
+struct RelayedFields {
+    refine_element: u32,
+    transmutation: u32,
+    sockets: [i32; 6],
+    attributes: [(u8, i16); 7],
+}
+
+impl RelayedFields {
+    fn distinct() -> Self {
+        Self {
+            refine_element: 0x0a0b_0c0d,
+            transmutation: 0x0102_0304,
+            sockets: [0x1122_3344, -2, 0x0506_0708, 0, 0x0a0b, -0x0102_0304],
+            attributes: [
+                (1, 0x0203),
+                (0, 0),
+                (0x7f, -0x0405),
+                (4, 0x0607),
+                (0, 0),
+                (0x10, 0x0809),
+                (0x21, -0x0102),
+            ],
+        }
+    }
+
+    /// Writes these fields into item row `id`.
+    fn store(&self, database: &ScratchDatabase, id: u32) {
+        let socket_columns = self
+            .sockets
+            .iter()
+            .enumerate()
+            .map(|(index, socket)| format!("socket{index} = {socket}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let attribute_columns = self
+            .attributes
+            .iter()
+            .enumerate()
+            .map(|(index, (kind, value))| {
+                format!("attrtype{index} = {kind}, attrvalue{index} = {value}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql(
+            database,
+            &format!(
+                "UPDATE item SET refine_element = {}, transmutation = {}, {socket_columns}, \
+                 {attribute_columns} WHERE id = {id}",
+                self.refine_element, self.transmutation
+            ),
+        );
+    }
+
+    /// The whole record for an item of `proto` that carries these fields, in the base
+    /// inventory at `cell` with `count`, built in `TPacketGCItemSet`'s field order
+    /// (`G/packet.h:1427-1444`): the header, the cell (window byte, then a `WORD` cell), vnum,
+    /// count, refine element, transmutation, flags, anti-flags, highlight, six `long` sockets,
+    /// and seven attributes of a `BYTE` type and a `short` value. The highlight is 0, because
+    /// the load makes the owner the last owner.
+    fn item_set(&self, proto: &gamedata::item_proto::ItemProto, cell: u16, count: u16) -> Vec<u8> {
+        let mut expected = vec![ITEM_SET, common::item_slots::EWindows::Inventory as u8];
+        expected.extend_from_slice(&cell.to_le_bytes());
+        expected.extend_from_slice(&proto.vnum.to_le_bytes());
+        expected.extend_from_slice(&count.to_le_bytes());
+        expected.extend_from_slice(&self.refine_element.to_le_bytes());
+        expected.extend_from_slice(&self.transmutation.to_le_bytes());
+        expected.extend_from_slice(&proto.flags.to_le_bytes());
+        expected.extend_from_slice(&proto.anti_flags.to_le_bytes());
+        expected.push(0);
+        for socket in self.sockets {
+            expected.extend_from_slice(&socket.to_le_bytes());
+        }
+        for (kind, value) in self.attributes {
+            expected.push(kind);
+            expected.extend_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(expected.len(), ITEM_SET_LEN, "the expectation itself");
+        expected
+    }
 }

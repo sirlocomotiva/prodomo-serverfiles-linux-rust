@@ -164,6 +164,18 @@ pub enum EnterWorldRefused {
         /// The manager's own reason, verbatim, so nothing is lost in translation.
         reason: String,
     },
+    /// A loaded item would not go where the load placed it.
+    ///
+    /// The load placed the same items in the same order into an empty inventory, so
+    /// this is a bug in the crossing rather than a state a player can reach. The
+    /// character is taken back out, because a world holding it without that item
+    /// would offer the item's cell to the next grant.
+    ItemRefused {
+        /// The item's id.
+        id: u32,
+        /// Why the inventory would not take it.
+        reason: Rejected,
+    },
 }
 
 impl std::fmt::Display for EnterWorldRefused {
@@ -186,6 +198,9 @@ impl std::fmt::Display for EnterWorldRefused {
             }
             Self::NotAdmitted { reason } => {
                 write!(formatter, "the world refused this character: {reason}")
+            }
+            Self::ItemRefused { id, reason } => {
+                write!(formatter, "the world refused loaded item {id}: {reason}")
             }
         }
     }
@@ -265,7 +280,7 @@ pub fn world_item_id_range(
 pub struct GameState {
     characters: CharacterManager,
     item_ids: Option<ItemIds>,
-    protos: ItemProtos,
+    protos: Arc<ItemProtos>,
     metrics: Arc<GameStateMetrics>,
     last_pulse: u64,
     /// Where each online character's records go, keyed by the VID it entered under.
@@ -313,12 +328,16 @@ impl GameState {
     /// to put there: any fixed start would either reissue an id a stored item holds
     /// or leave a gap. An `Option` that is honestly absent is the only state that
     /// does not invent one.
+    ///
+    /// The prototypes may arrive shared. The item load at character select reads the
+    /// same table on the descriptor's task before the world is asked, and one table in
+    /// two places cannot disagree about an item's size or flags.
     #[must_use]
-    pub fn new(protos: ItemProtos) -> Self {
+    pub fn new(protos: impl Into<Arc<ItemProtos>>) -> Self {
         Self {
             characters: CharacterManager::new(),
             item_ids: None,
-            protos,
+            protos: protos.into(),
             metrics: Arc::new(GameStateMetrics::default()),
             last_pulse: 0,
             outboxes: HashMap::new(),
@@ -483,10 +502,11 @@ impl GameState {
                 vid,
                 player_id,
                 name,
+                items,
                 outbox,
                 reply,
             } => {
-                let answer = self.enter_world(vid, player_id, &name, outbox);
+                let answer = self.enter_world_with_items(vid, player_id, &name, &items, outbox);
                 // A dropped admit answer means the descriptor is already closing, and a
                 // character nobody will play is not a state worth warning about: the
                 // close path runs the leave, which finds nobody and says so at debug.
@@ -588,6 +608,27 @@ impl GameState {
         name: &str,
         outbox: ClientOutbox,
     ) -> Result<(), EnterWorldRefused> {
+        self.enter_world_with_items(vid, player_id, name, &[], outbox)
+    }
+
+    /// Puts a live client's character into the world holding the items its load placed.
+    ///
+    /// The items are set in the order given, which is the order the load placed them in
+    /// its own empty inventory, so each one lands where the client was told it is.
+    ///
+    /// # Errors
+    ///
+    /// As [`GameState::enter_world`], and [`EnterWorldRefused::ItemRefused`] when an
+    /// item would not go where the load put it. The character is taken back out in that
+    /// case, so every refusal still leaves the world unchanged.
+    pub fn enter_world_with_items(
+        &mut self,
+        vid: common::vid::Vid,
+        player_id: u32,
+        name: &str,
+        items: &[(protocol::item_pos::ItemPos, world::item::Item)],
+        outbox: ClientOutbox,
+    ) -> Result<(), EnterWorldRefused> {
         if vid.is_null() {
             return Err(EnterWorldRefused::NullVid);
         }
@@ -600,13 +641,37 @@ impl GameState {
         // The manager is the authority on the indexes it owns. A clone of the outbox
         // is taken only after both sides agree the character is new, so a refusal
         // cannot leave a sender for a character that was never admitted.
-        match self.characters.create_player_with_vid(player_id, name, vid) {
-            Ok(()) => {
-                let _previous = self.outboxes.insert(vid, outbox);
-                Ok(())
-            }
-            Err(error) => Err(EnterWorldRefused::from_manager(error, name)),
+        self.characters
+            .create_player_with_vid(player_id, name, vid)
+            .map_err(|error| EnterWorldRefused::from_manager(error, name))?;
+        if let Err(refused) = self.place_loaded_items(name, items) {
+            let _destroyed = self.characters.destroy(vid);
+            return Err(refused);
         }
+        let _previous = self.outboxes.insert(vid, outbox);
+        Ok(())
+    }
+
+    /// Sets each loaded item into the character just created under `name`.
+    fn place_loaded_items(
+        &mut self,
+        name: &str,
+        items: &[(protocol::item_pos::ItemPos, world::item::Item)],
+    ) -> Result<(), EnterWorldRefused> {
+        let Some(character) = self.characters.find_player_mut(name) else {
+            return Err(EnterWorldRefused::NotAdmitted {
+                reason: format!("the character named {name} was created and then not found"),
+            });
+        };
+        for (pos, item) in items {
+            character.items_mut().set(*pos, item).map_err(|reason| {
+                EnterWorldRefused::ItemRefused {
+                    id: item.id,
+                    reason,
+                }
+            })?;
+        }
+        Ok(())
     }
 
     /// Takes a live client's character out of the world.
@@ -705,6 +770,7 @@ mod tests {
 
     use common::item_slots::{usable_inventory_cells, INVENTORY_MAX_EXTENDED, INVENTORY_MAX_NUM};
     use common::vid::Vid;
+    use protocol::item_pos::ItemPos;
     use world::character::Lookup;
 
     fn owners() -> ItemProtos {
@@ -836,6 +902,80 @@ mod tests {
         // has no character for.
         assert!(state.leave_world(Vid::new(7)));
         assert_eq!(state.online_count(), 0);
+    }
+
+    /// An item of `size` cells, the way the load builds one before it is placed.
+    fn a_loaded_item(id: u32, size: u8) -> world::item::Item {
+        let mut item = world::item::Item::new(id, 19);
+        item.set_size(size).expect("a positive footprint");
+        item
+    }
+
+    #[test]
+    fn the_admitted_character_holds_the_items_its_load_placed() {
+        let mut state = a_state();
+        let (outbox, _inbox) = a_live_outbox();
+        let inventory = common::item_slots::EWindows::Inventory as u8;
+        let items = vec![
+            (ItemPos::new(inventory, 0), a_loaded_item(11, 2)),
+            (ItemPos::new(inventory, 277), a_loaded_item(12, 1)),
+        ];
+        state
+            .enter_world_with_items(Vid::new(7), 7, "Shaman", &items, outbox)
+            .expect("the character is admitted with its items");
+        let character = state
+            .characters()
+            .find_by_vid(Vid::new(7))
+            .expect("the character is in the world");
+        assert_eq!(
+            character.items().get(ItemPos::new(inventory, 0)),
+            Lookup::Occupied(11)
+        );
+        assert_eq!(
+            character.items().get(ItemPos::new(inventory, 277)),
+            Lookup::Occupied(12)
+        );
+        // The next grant is offered the first cell the loaded items leave free. A world that
+        // admitted the character empty would offer cell 0, which the client already shows
+        // as taken and the store's cell key already holds.
+        let request = GrantRequest {
+            target: "Shaman".to_owned(),
+            vnum: 19,
+            count: None,
+        };
+        let outcome = state.grant(&request).expect("the grant is placed");
+        assert_eq!(outcome.row.pos, 1);
+    }
+
+    #[test]
+    fn an_item_the_inventory_refuses_takes_the_character_back_out() {
+        let mut state = a_state();
+        let (outbox, _inbox) = a_live_outbox();
+        let inventory = common::item_slots::EWindows::Inventory as u8;
+        let items = vec![
+            (ItemPos::new(inventory, 0), a_loaded_item(11, 2)),
+            (ItemPos::new(inventory, 0), a_loaded_item(12, 1)),
+        ];
+        assert_eq!(
+            state.enter_world_with_items(Vid::new(7), 7, "Shaman", &items, outbox),
+            Err(EnterWorldRefused::ItemRefused {
+                id: 12,
+                reason: Rejected::AlreadyOccupied {
+                    window: inventory,
+                    cell: 0,
+                    present: 11,
+                },
+            })
+        );
+        // Nothing is left behind: no character, no sender, and no index under the VID or the
+        // Name, so the same character can be admitted again.
+        assert_eq!(state.online_count(), 0);
+        assert_eq!(state.characters().len(), 0);
+        assert!(!state.write_to_client(Vid::new(7), vec![0x2B]));
+        let (retry, _inbox) = a_live_outbox();
+        state
+            .enter_world(Vid::new(7), 7, "Shaman", retry)
+            .expect("the same character is admitted afterwards");
     }
 
     #[test]

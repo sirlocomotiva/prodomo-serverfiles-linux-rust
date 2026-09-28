@@ -58,11 +58,12 @@ use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
 use prodomo::game_loop_messages::{GameLoopController, GameLoopTerminal};
 use prodomo::game_state::{world_item_id_range, GameState};
 use prodomo::handshake::HandshakeServerKind;
+use prodomo::item_load::plan_item_load;
 use prodomo::lifecycle::{LifecycleError, PostHandshakePhase};
 use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::loading_phase::{
     enter_game_burst, judge_enter_game, judge_select, loading_burst, map_is_allowed, points,
-    public_map_index, EnterGameVerdict, Neighbourhood, SelectVerdict,
+    points_packet, public_map_index, EnterGameVerdict, Neighbourhood, SelectVerdict,
 };
 use prodomo::movement::{
     judge_move, judge_pose, MoveContext, MoveDisposition, MoveOutcome, MoveRefusal, PoseOutcome,
@@ -98,10 +99,12 @@ use protocol::cg_wire::ClientFrame;
 use protocol::gc::{GcAuthSuccess, GcLoginFailure};
 use protocol::gc_inventory::HEADER_GC_EMPIRE;
 use protocol::gc_small::GcHeaderAndByte;
+use protocol::item_pos::ItemPos;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::signal;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
+use world::item::Item;
 
 /// The command line.
 #[derive(Debug, Parser)]
@@ -198,6 +201,9 @@ struct ConnectionContext {
     logons: Arc<LogonRegistry>,
     /// The map regions of the legacy Game data.
     atlas: Arc<MapAtlas>,
+    /// The item prototypes, shared with the game thread, which the item load at character
+    /// select reads for each item's size and flags.
+    protos: Arc<ItemProtos>,
     /// The address clients are told to reconnect to.
     public_ip: Ipv4Addr,
     /// The maps each Channel hosts, and the Shared Channel's.
@@ -281,6 +287,9 @@ struct Held {
     /// The save event, started when the character enters the game and stopped when the
     /// descriptor ends (legacy `StartSaveEvent` at `G/input_login.cpp:656`).
     save: Option<SaveEvent>,
+    /// The items the load placed at character select, each at the cell the client was
+    /// told, held until the world admits the character and taken with it.
+    items: Vec<(ItemPos, Item)>,
 }
 
 /// The per-descriptor half of legacy's save cycle.
@@ -1556,11 +1565,98 @@ where
         warn!(%addr, %error, "Client session stopped");
         return false;
     }
+    // Legacy's DB process answers the player row and then the item rows, so `ItemLoad` runs
+    // after `PlayerLoad` has sent the loading burst, while the descriptor is still loading.
+    let Some(items) = load_items(session, addr, context, &character).await else {
+        return false;
+    };
+    held.items = items;
     // `PlayerLoad` leaves the character on the map its saved position belongs to, so the index
     // the map test just resolved is the character's map. It is held here because the first
     // thing the game phase does with it is join the client set.
     held.map = context.atlas.index_at(character.x, character.y);
     true
+}
+
+/// The item load at character select, the way `CInputDB::ItemLoad` places a character's
+/// items (`G/input_db.cpp:1451-1567`).
+///
+/// One `GC_ITEM_SET` per placed item, then `PointsPacket`'s gold and points records, which
+/// legacy sends even for a character with no item. A row the load refuses is logged and
+/// left in the store; `prodomo::item_load` lists why a row is refused and where that
+/// differs from legacy.
+///
+/// Returns the placed items for the world, or `None` when the descriptor must close: the
+/// store could not be read, or the client stopped.
+async fn load_items<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    character: &db::players::Character,
+) -> Option<Vec<(ItemPos, Item)>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let player = character.id;
+    let rows = match db::items::load_owner_items(&context.store, player).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(%addr, player, %error, "Item load failed; closing");
+            return None;
+        }
+    };
+    // `Inven_Point` is 0: the store keeps no value for it yet, and the world's character
+    // starts at 0, so a set-aside item and a later grant search the same cells.
+    let load = plan_item_load(&rows, &context.protos, 0);
+    for refusal in &load.refused {
+        warn!(
+            %addr,
+            player,
+            item = refusal.id,
+            window = refusal.window,
+            pos = refusal.pos,
+            why = %refusal.why,
+            "An item was not loaded; its row is kept",
+        );
+    }
+    for row in load.moved_rows(&rows) {
+        // The client is told the new cell either way, and the world holds the item there.
+        // A row that keeps its old cell is set aside again at the next load, so a failed
+        // write is reported rather than fatal.
+        if let Err(error) = db::items::save_item(&context.store, &row).await {
+            warn!(
+                %addr,
+                player,
+                item = row.id,
+                pos = row.pos,
+                %error,
+                "A moved item's new cell was not written; its row keeps the old one",
+            );
+        }
+    }
+    let mut records: Vec<Vec<u8>> = load
+        .placed
+        .iter()
+        .map(|placed| placed.record().encode())
+        .collect();
+    records.extend(points_packet(character));
+    if let Err(error) = send_all(session, &records).await {
+        warn!(%addr, %error, "Client session stopped");
+        return None;
+    }
+    info!(
+        %addr,
+        player,
+        placed = load.placed.len(),
+        refused = load.refused.len(),
+        "Items loaded",
+    );
+    Some(
+        load.placed
+            .into_iter()
+            .map(|placed| (placed.pos, placed.item))
+            .collect(),
+    )
 }
 
 /// The loading map test failed: move the character home in the store and close, the way
@@ -1750,7 +1846,9 @@ where
         );
         let outbox = lease.outbox();
         held.presence = Some(lease);
-        let Some(world_vid) = join_the_world(context, addr, character, vid, outbox).await else {
+        let items = std::mem::take(&mut held.items);
+        let Some(world_vid) = join_the_world(context, addr, character, vid, items, outbox).await
+        else {
             return false;
         };
         held.world = Some(world_vid);
@@ -1780,17 +1878,28 @@ where
 ///
 /// The VID is returned rather than stored, so the caller records it after the
 /// immutable borrow of `held.character` this call needs has ended.
+///
+/// `items` are the ones the load placed at character select. The world places them as it
+/// admits the character, so it never holds this character with an inventory the client
+/// has not been shown.
 async fn join_the_world(
     context: &ConnectionContext,
     addr: SocketAddr,
     character: &db::players::Character,
     vid: u32,
+    items: Vec<(ItemPos, Item)>,
     outbox: prodomo::client_registry::ClientOutbox,
 ) -> Option<common::vid::Vid> {
     let world_vid = common::vid::Vid::new(vid);
     let entered = context
         .game
-        .enter_world(world_vid, character.id, character.name.clone(), outbox)
+        .enter_world_with_items(
+            world_vid,
+            character.id,
+            character.name.clone(),
+            items,
+            outbox,
+        )
         .await;
     match entered {
         Ok(Ok(())) => {
@@ -2592,6 +2701,24 @@ fn load_atlas(config: &ServerConfig) -> Result<MapAtlas, String> {
     Ok(atlas)
 }
 
+/// Load the item prototypes, which the grant path and the item load need.
+///
+/// They are read before any port opens, for the same reason as the atlas: a missing or
+/// malformed file is a startup failure rather than a grant that fails a minute later. The
+/// one table is shared by the game thread, for a grant, and by a descriptor, for the item
+/// load at character select.
+fn load_item_protos(config: &ServerConfig) -> Result<Arc<ItemProtos>, String> {
+    let proto_dir = config.proto_dir();
+    let protos = ItemProtos::load(&proto_dir).map_err(|error| {
+        format!(
+            "Item prototypes are unusable in {}: {error}",
+            proto_dir.display()
+        )
+    })?;
+    info!(prototypes = protos.rows().len(), "Item prototypes loaded");
+    Ok(Arc::new(protos))
+}
+
 /// Load the Name rules: the banned words of the Game data tables and the mob names of the protos.
 fn load_name_rules(config: &ServerConfig) -> Result<NameRules, String> {
     let dump_path = config.game_tables.join("player.sql");
@@ -2636,14 +2763,23 @@ fn map_routes(config: &ServerConfig, listeners: &Listeners) -> MapRoutes {
     }
 }
 
+/// The Game data a connection reads, loaded before any port opens.
+struct GameData {
+    /// The map regions.
+    atlas: MapAtlas,
+    /// The Names a character may not take.
+    names: NameRules,
+    /// The item prototypes, the same table the game thread holds.
+    protos: Arc<ItemProtos>,
+}
+
 /// What every connection shares, built once the listeners are bound and the Game data loaded.
 fn connection_context(
     config: &ServerConfig,
     state: &Arc<ServerState>,
     store: &Store,
     listeners: &Listeners,
-    atlas: MapAtlas,
-    names: NameRules,
+    data: GameData,
     game: GameLoopController,
 ) -> ConnectionContext {
     // Every legacy game Core reported its own client port (`mother_port`) to the status list; the
@@ -2672,11 +2808,12 @@ fn connection_context(
         block_login: Arc::from(config.game.block_login.as_str()),
         user_limit: config.game.user_limit,
         logons: LogonRegistry::new(),
-        atlas: Arc::new(atlas),
+        atlas: Arc::new(data.atlas),
+        protos: data.protos,
         public_ip: config.public_ip,
         routes: Arc::new(map_routes(config, listeners)),
         handles: Arc::new(AtomicU32::new(0)),
-        names: Arc::new(names),
+        names: Arc::new(data.names),
         clients: Arc::new(ChannelClients::new()),
         positions: Arc::new(PositionTable::new()),
         creates: Arc::new(CreateCooldown::default()),
@@ -2747,18 +2884,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     let atlas = load_atlas(&config)?;
     let names = load_name_rules(&config)?;
 
-    // The item prototypes are Game data the grant path needs. They are read here,
-    // for the same reason as the atlas: a missing or malformed file stops the server
-    // before any port opens, so a broken Game data tree is a startup failure rather
-    // than a grant that fails for a minute later.
-    let proto_dir = config.proto_dir();
-    let protos = ItemProtos::load(&proto_dir).map_err(|error| {
-        format!(
-            "Item prototypes are unusable in {}: {error}",
-            proto_dir.display()
-        )
-    })?;
-    info!(prototypes = protos.rows().len(), "Item prototypes loaded");
+    let protos = load_item_protos(&config)?;
 
     let mut listeners = Listeners::bind(&listener_plan(&config)).await?;
     for listener in listeners.iter() {
@@ -2778,7 +2904,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     // item id allocator on purpose: the start id is `MAX(id)` over the item table, and
     // that table is only readable once the store has migrated, which happens inside
     // the accept loop below. The allocator arrives as a command from there.
-    let game_state = GameState::new(protos);
+    let game_state = GameState::new(Arc::clone(&protos));
     let mut game_loop = spawn_game_loop(GameLoopConfig::default(), game_state)?;
     let controller = game_loop.controller();
     info!(thread_id = ?game_loop.thread_id(), "Dedicated game loop started");
@@ -2792,8 +2918,11 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
             &state,
             &store,
             &listeners,
-            atlas,
-            names,
+            GameData {
+                atlas,
+                names,
+                protos,
+            },
             controller.clone(),
         ),
     };

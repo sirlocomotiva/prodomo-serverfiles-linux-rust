@@ -508,21 +508,37 @@ pub fn loading_burst(character: &Character, vid: u32, view: &Neighbourhood) -> L
             "the own-character record",
         ),
     ];
-    let after_map_test = vec![
-        encoded(&mut GcGold::new(gold(character)), "the gold record"),
-        encoded(&mut GcPoints::new(points(character)), "the points record"),
-        encoded(
-            &mut GcSkillLevelNew {
-                header: GcSkillLevelNew::header(),
-                skills: skill_levels(),
-            },
-            "the skill-level record",
-        ),
-    ];
+    let mut after_map_test = points_packet(character);
+    after_map_test.push(encoded(
+        &mut GcSkillLevelNew {
+            header: GcSkillLevelNew::header(),
+            skills: skill_levels(),
+        },
+        "the skill-level record",
+    ));
     LoadingBurst {
         before_map_test,
         after_map_test,
     }
+}
+
+/// The records `CHARACTER::PointsPacket` writes: the gold record, then the points record.
+///
+/// `ENABLE_REMOVE_LIMIT_GOLD` is on, so `PointsPacket` writes `GC_CHARACTER_GOLD` before
+/// `GC_CHARACTER_POINTS` (`G/char.cpp:2078-2085`). The loading burst sends the pair once
+/// from `PlayerLoad`, and the item load sends it again as its last step
+/// (`G/input_db.cpp:1564`), whether or not the character owns an item.
+///
+/// # Panics
+///
+/// Panics when a record does not encode; both are fixed layouts, so that would be a bug in
+/// this module.
+#[must_use]
+pub fn points_packet(character: &Character) -> Vec<Vec<u8>> {
+    vec![
+        encoded(&mut GcGold::new(gold(character)), "the gold record"),
+        encoded(&mut GcPoints::new(points(character)), "the points record"),
+    ]
 }
 
 /// The gold as the record carries it.

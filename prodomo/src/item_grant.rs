@@ -220,6 +220,11 @@ pub fn grant_item(
         .clamp(1, common::item_slots::ITEM_COUNT_LIMIT);
     item.set_count(u32::from(count))
         .map_err(|_| GrantRefusal::NoRoom { size: item.size() })?;
+    // `CreateItem` ends in `CItem::SetProto`, which copies `dwFlags` into `m_lFlag`
+    // (`G/item.cpp:221-226`), and `GetAntiFlag` reads the prototype (`G/item.h:78`), so
+    // both travel from the prototype and not from anything the grant chose.
+    item.flags = proto.flags;
+    item.anti_flags = proto.anti_flags;
 
     let placed =
         place(character.items_mut(), &mut item, &banks, inven_point).map_err(
@@ -390,6 +395,27 @@ mod tests {
         assert_eq!(outcome.row.count, outcome.record.count);
         assert_eq!(outcome.row.sockets, outcome.record.sockets);
         assert_eq!(outcome.record.highlight, 1, "a fresh grant is highlighted");
+    }
+
+    #[test]
+    fn the_flags_and_anti_flags_are_the_prototypes() {
+        let protos = owners();
+        let mut world = world_with_shaman();
+        let mut ids = fresh_ids();
+        let proto = protos
+            .rows()
+            .iter()
+            .find(|proto| proto.size == 1 && proto.flags != 0 && proto.anti_flags != 0)
+            .expect("the owner's data has a one-cell prototype with both flag words set");
+        let outcome = grant_item(&mut world, &protos, &mut ids, &request(proto.vnum, None), 0)
+            .expect("an empty inventory has room");
+        assert_eq!(outcome.record.flags, proto.flags);
+        assert_eq!(outcome.record.anti_flags, proto.anti_flags);
+        assert_eq!(
+            outcome.row.flags, proto.flags,
+            "the row stores what the client saw"
+        );
+        assert_eq!(outcome.row.anti_flags, proto.anti_flags);
     }
 
     #[test]

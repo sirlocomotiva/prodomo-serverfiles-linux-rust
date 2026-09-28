@@ -6,6 +6,14 @@ and the feature gates that select those fields are quoted with it. Where this do
 something is absent, a positive control and a negative control for the same search are recorded
 in section 9.
 
+**Correction (ledger 210).** Two statements about the tail below are wrong; the body is kept as
+written. `PointsPacket` sends `GC_CHARACTER_GOLD` (byte 224, 9 bytes) **before**
+`GC_CHARACTER_POINTS`, under `ENABLE_REMOVE_LIMIT_GOLD` (`char.cpp:2078-2085`,
+`prodomodefines.h:157`), so the tail is gold then points, not points alone (the
+`GC_CHARACTER_POINTS` paragraph and step 4 of the send order). And `CheckMaximumPoints` is at `input_db.cpp:1563`, **before**
+`PointsPacket` at `:1564`, so a byte-17 point change it sends comes before the gold and points
+records, not after them. `docs/PROTOCOL_NOTES.md` section 210 has the corrected account.
+
 **Read first, because it changes the shape of the task:** there is no `CG_ITEM_LOAD` packet in
 this legacy build. The name belongs to a DB-peer record. The inventory load is driven by the
 DB server as a side effect of character select, and it lands on the client between the loading

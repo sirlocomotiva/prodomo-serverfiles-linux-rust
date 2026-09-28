@@ -67,6 +67,9 @@ pub mod loading_phase;
 pub mod listeners;
 
 pub mod item_grant;
+
+/// Placing a character's stored items at character select.
+pub mod item_load;
 pub mod item_persist;
 pub mod operator;
 pub mod operator_console;

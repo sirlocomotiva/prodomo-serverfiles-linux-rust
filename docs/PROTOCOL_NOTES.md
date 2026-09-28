@@ -1274,4 +1274,45 @@ a `std::unordered_set<CItemCache *>` (`ClientManager.h:47`,
 invisible on the wire. A port may fix an order; it is not reproducing one.
 
 **`db/src/items.rs:553` names six windows where legacy names seven.** A doc defect, not a
-code defect, and worth fixing in the same change as the load.
+code defect, and worth fixing in the same change as the load. Fixed in ledger 210: the doc now
+names all seven windows of `ClientManagerPlayer.cpp:386` and `:522`.
+
+## The load ends with the gold and points records, and a belt row is saved back as a belt row (section 210)
+
+**`PointsPacket` is two records, not one.** `CHARACTER::PointsPacket` (`char.cpp:2031-2087`)
+fills `TPacketGCPoints` and then, under `ENABLE_REMOVE_LIMIT_GOLD` (defined at
+`prodomodefines.h:157`), sends `GC_CHARACTER_GOLD` (byte 224, 9 bytes) **before** it sends the
+points record (byte 16, 2041 bytes) (`char.cpp:2078-2085`). A reader who stops at the points
+array misses the first record. `CInputDB::ItemLoad` calls `CheckMaximumPoints` at
+`input_db.cpp:1563` and `PointsPacket` at `:1564`, in that order, and it calls them after the
+placement loop **whether or not** any row arrived, so a character with no items still gets both
+records again after the loading burst.
+
+**The load queries seven windows.** `ClientManagerPlayer.cpp:386` and `:522` select
+`INVENTORY`, `EQUIPMENT`, `DRAGON_SOUL_INVENTORY`, `ATTR67_ADD`, `SWITCHBOT`, `AURA_REFINE` and
+`BELT_INVENTORY`, and neither query has an `ORDER BY`. The Rewrite reads the same seven and
+orders by window, cell and item ID (a Divergence no client can see, per section 209).
+
+**A belt row is placed as `INVENTORY` but saved as `BELT_INVENTORY`.** `ItemLoad` rewrites a
+window-9 row to window 1 at cell `274 + pos` (`input_db.cpp:1491-1495`), and
+`ITEM_MANAGER::SaveSingleItem` reverses that under the same `ENABLE_BELT_INVENTORY_EX`
+(`prodomodefines.h:13`): an `INVENTORY` cell in the belt range is written back as window 9 at
+`cell - 274`, and an `EQUIPMENT` cell as `cell - 180` (`item_manager.cpp:504-521`). The
+constants' comments in `length.h:921-922` say 242 and 258; the measured values are 274 and 290
+(ledger 194). A background item save that writes the in-memory window and cell straight to the
+store would move every belt item into the base inventory's key space on the next save. Nothing
+in the Rewrite saves a loaded item's position yet except the one case below, so this is a note
+for that save, not a defect today.
+
+**An item set aside is saved at once; one that stays put is not.** `ItemLoad` places each row
+with `SetSkipSave(true)` (`input_db.cpp:1480`) and clears it at `:1538`, so an item that stays
+at its stored cell causes no write. An item set aside because its cell is taken goes through
+`GetEmptyInventory` and `AddToCharacter`, which ends in `Save()` (`item.cpp:529`), so its new
+cell is written. The Rewrite writes the moved row before it sends the record, and writes
+nothing for a row that stays put, including a belt row, which keeps window 9 in the store.
+
+**The byte-21 record carries every stored field but the id.** The load's records are the
+72-byte `TPacketGCItemSet` of section 193 (`packet.h:1427-1444`): window, cell, vnum, count,
+refine element, transmutation, the **prototype's** flags and anti-flags (`item.cpp:221-226` and `item.h:78`; the
+row's own flag columns are not read), highlight, six sockets, and seven attributes. Highlight is
+the `SetItem` parameter, and the load passes none, so it is 0 for every loaded item.

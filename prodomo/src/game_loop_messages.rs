@@ -7,6 +7,9 @@ use std::thread::Thread;
 
 use tokio::sync::{mpsc, oneshot};
 
+use protocol::item_pos::ItemPos;
+use world::item::Item;
+
 use crate::client_registry::ClientOutbox;
 use crate::game_state::{EnterWorldRefused, Released, RevokeRefused};
 use crate::item_grant::{GrantOutcome, GrantRefusal, GrantRequest};
@@ -235,6 +238,14 @@ pub enum GameCommand {
         player_id: u32,
         /// The character Name, which the world indexes case-insensitively.
         name: String,
+        /// The items the load placed, in the order it placed them, each at the cell the
+        /// client was told.
+        ///
+        /// They travel with the admission, not after it, so there is no pulse in which
+        /// the world holds the character with an empty inventory while the client
+        /// already shows its items: a grant in that gap would be offered a cell a loaded
+        /// item holds.
+        items: Vec<(ItemPos, Item)>,
         /// Where the game thread writes records addressed to this client.
         ///
         /// The world has no socket. It holds this sender and the descriptor drains
@@ -692,11 +703,32 @@ impl GameLoopController {
         name: String,
         outbox: ClientOutbox,
     ) -> Result<Result<(), EnterWorldRefused>, EnterWorldError> {
+        self.enter_world_with_items(vid, player_id, name, Vec::new(), outbox)
+            .await
+    }
+
+    /// Puts a live client's character into the world holding the items its load placed.
+    ///
+    /// `items` is [`crate::item_load::ItemLoad::placed`] in its own order. The world
+    /// places them before it answers, so the admission and the inventory are one step.
+    ///
+    /// # Errors
+    ///
+    /// As [`GameLoopController::enter_world`].
+    pub async fn enter_world_with_items(
+        &self,
+        vid: common::vid::Vid,
+        player_id: u32,
+        name: String,
+        items: Vec<(ItemPos, Item)>,
+        outbox: ClientOutbox,
+    ) -> Result<Result<(), EnterWorldRefused>, EnterWorldError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::EnterWorld {
             vid,
             player_id,
             name,
+            items,
             outbox,
             reply,
         })
