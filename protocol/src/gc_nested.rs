@@ -405,8 +405,9 @@ impl GcAffectAdd {
 /// `HEADER_GC_PLAYER_POINT_CHANGE` (17), 25 packed bytes.
 ///
 /// The first field is a C++ **`int`**, not a `BYTE`, so the record is 25 bytes
-/// and not 22. Only the client names this byte; the server tree has no
-/// enumerator for it.
+/// and not 22. The server names the byte `HEADER_GC_CHARACTER_POINT_CHANGE`
+/// (`server/server/game/packet.h:117`) and the struct `TPacketGCPointChange`
+/// (`packet.h:1064-1071`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GcPointChange {
     /// The legacy `int header` field, a full 4-byte signed word.

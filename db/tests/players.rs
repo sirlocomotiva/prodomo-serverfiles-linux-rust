@@ -149,6 +149,15 @@ async fn load_character_reads_every_field_and_never_another_accounts_character()
     assert_eq!(found.dx, 0x13);
     assert_eq!(found.iq, 0x14);
     assert_eq!(found.conqueror_level, 0x21);
+    assert_eq!(
+        [
+            found.sungma_str,
+            found.sungma_hp,
+            found.sungma_move,
+            found.sungma_immune
+        ],
+        [0x22, 0x23, 0x24, 0x25]
+    );
     assert_eq!(found.main_part, 0xa1b2);
     assert_eq!(found.hair_part, 0xc3d4);
     assert_eq!(found.sash_part, 0xe5f6);

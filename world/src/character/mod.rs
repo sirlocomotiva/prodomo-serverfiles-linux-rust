@@ -7,6 +7,7 @@ mod item_move;
 mod items;
 mod manager;
 mod model;
+mod points;
 mod state;
 
 pub use combat::{
@@ -32,4 +33,8 @@ pub use items::{
 };
 pub use manager::{CharacterManager, CharacterManagerError, UpdateReport};
 pub use model::{Character, CharacterKind};
+pub use points::{
+    race_to_job, sungma_will, PassiveBonuses, PointChangeRefused, PointRecord, Points, PointsRow,
+    SungmaWill, IMMUNE_FALL, IMMUNE_SLOW, IMMUNE_STUN, SUNGMA_WILL_MAPS,
+};
 pub use state::{Activity, CoreState, Posture};

@@ -1292,6 +1292,11 @@ const AFFECT_ADD_LEN: usize = 1 + 21;
 const TIME_LEN: usize = 1 + 4;
 /// `GC_CHANNEL`: header and one byte.
 const CHANNEL_LEN: usize = 1 + 1;
+/// `HEADER_GC_CHARACTER_POINT_CHANGE`, the first byte of its four-byte `int` header.
+const GC_POINT_CHANGE: u8 = 17;
+/// `TPacketGCPointChange`: an `int` header, `dwVID`, `type`, and two `long long`
+/// (`G/packet.h:1064-1071`).
+const POINT_CHANGE_LEN: usize = 4 + 4 + 1 + 8 + 8;
 
 /// The length of each loading and enter-game record. A variable record reports `usize::MAX`, and
 /// the caller sizes it from its own `WORD wSize`.
@@ -1308,6 +1313,7 @@ fn game_len(header: u8) -> usize {
         GC_AFFECT_ADD => AFFECT_ADD_LEN,
         GC_TIME => TIME_LEN,
         GC_CHANNEL => CHANNEL_LEN,
+        GC_POINT_CHANGE => POINT_CHANGE_LEN,
         GC_MOVE => GC_MOVE_LEN,
         GC_CHARACTER_POSITION => CHARACTER_POSITION_LEN,
         GC_SYNC_POSITION => usize::MAX,
@@ -1429,10 +1435,12 @@ fn load_character(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed, Ve
 }
 
 /// Send `CG_ENTER_GAME` from the loading phase and read the enter-game burst, leaving the
-/// connection in the game phase with nothing unread.
-fn enter_game_burst(keyed: &mut Keyed) {
+/// connection in the game phase with nothing unread. Answers the character's own
+/// `GC_CHARACTER_ADD`.
+fn enter_game_burst(keyed: &mut Keyed) -> Vec<u8> {
     keyed.send_record(&client_enter_game());
-    assert_eq!(keyed.read_game()[0], GC_CHARACTER_ADD);
+    let add = keyed.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD);
     assert_eq!(keyed.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
     assert_eq!(keyed.read_game()[0], GC_AFFECT_ADD);
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
@@ -1441,6 +1449,7 @@ fn enter_game_burst(keyed: &mut Keyed) {
     let notice = keyed.read_game();
     assert_eq!(notice[0], GC_CHAT);
     assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    add
 }
 
 /// A 25-byte Name field holding `name`, NUL-padded.
@@ -2135,6 +2144,193 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
     assert_eq!(chat[9], 1, "bCanFormat");
     assert_eq!(&chat[10..], b"letters_event 0");
     assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+}
+
+/// Point slot `slot` of a `GC_CHARACTER_POINTS` record: the slots start one byte after the
+/// header, eight bytes each.
+fn point_slot(points: &[u8], slot: usize) -> i64 {
+    let at = 1 + 8 * slot;
+    i64::from_le_bytes(points[at..at + 8].try_into().expect("eight bytes"))
+}
+
+/// `points` with point slot `slot` set to `value`.
+fn with_point_slot(points: &[u8], slot: usize, value: i64) -> Vec<u8> {
+    let mut changed = points.to_vec();
+    let at = 1 + 8 * slot;
+    changed[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    changed
+}
+
+/// A `GC_CHARACTER_POINT_CHANGE` in `TPacketGCPointChange` field order.
+fn point_change(vid: u32, kind: u8, amount: i64, value: i64) -> Vec<u8> {
+    let mut record = i32::from(GC_POINT_CHANGE).to_le_bytes().to_vec();
+    record.extend_from_slice(&vid.to_le_bytes());
+    record.push(kind);
+    record.extend_from_slice(&amount.to_le_bytes());
+    record.extend_from_slice(&value.to_le_bytes());
+    assert_eq!(record.len(), POINT_CHANGE_LEN);
+    record
+}
+
+/// `sys.char.points`, `gc.player_point_change`: the loading burst's points record carries the
+/// points `SetPlayerProto` computes for the stored row, and the item load's
+/// `CheckMaximumPoints` clamps the stored pools with one `GC_CHARACTER_POINT_CHANGE` each
+/// before `PointsPacket` sends the pair again (`G/input_db.cpp:1563-1564`).
+///
+/// Alpha is a level-154 shaman with 17, 18, 19 and 20 in the four attributes, standing on
+/// map 1, which demands no conqueror will. Every expected value is a hand sum of the
+/// `JobInitialPoints` shaman row or of `ComputeBattlePoints` (`G/char.cpp`), not the engine's
+/// output: the attack grade is 2 x 154 + (4 x 17 + 2 x 20) / 3, the defence grade
+/// 154 + 18 x 4 / 5, the shown defence grade 154 + 18, the magic attack grade 2 x 154 + 2 x 20,
+/// and the magic defence grade 154 + (3 x 20 + 18) / 3. The stored hit and spell points are
+/// above their maxima; stamina is too, and `CheckMaximumPoints` leaves it, as legacy does. The
+/// logout save writes the clamped pools.
+#[test]
+fn the_points_are_computed_at_load_and_the_item_load_clamps_the_pools() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET hp = 100000, sp = 70000, stamina = 12345 WHERE name = 'Alpha'",
+    );
+
+    let (mut keyed, _empire, list) = select_screen(&server, b"alice");
+    let alpha = listed(&list, 0);
+    keyed.send_record(&client_select(0));
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
+    assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
+    assert_eq!(keyed.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
+    let gold = keyed.read_game();
+    assert_eq!(gold[0], GC_CHARACTER_GOLD);
+    let loaded = keyed.read_game();
+    assert_eq!(loaded[0], GC_PLAYER_POINTS);
+    for (slot, value, what) in [
+        (5, 100_000, "POINT_HP, as stored: the load does not clamp"),
+        (6, 1420, "POINT_MAX_HP: 700 + 18 x 40"),
+        (7, 70_000, "POINT_SP, as stored"),
+        (8, 600, "POINT_MAX_SP: 200 + 20 x 20"),
+        (9, 12_345, "POINT_STAMINA, as stored"),
+        (10, 890, "POINT_MAX_STAMINA: 800 + 18 x 5"),
+        (12, 17, "POINT_ST"),
+        (13, 18, "POINT_HT"),
+        (14, 19, "POINT_DX"),
+        (15, 20, "POINT_IQ"),
+        (16, 168, "POINT_DEF_GRADE"),
+        (17, 100, "POINT_ATT_SPEED"),
+        (18, 344, "POINT_ATT_GRADE"),
+        (19, 100, "POINT_MOV_SPEED"),
+        (20, 172, "POINT_CLIENT_DEF_GRADE"),
+        (21, 100, "POINT_CASTING_SPEED"),
+        (22, 348, "POINT_MAGIC_ATT_GRADE"),
+        (23, 180, "POINT_MAGIC_DEF_GRADE"),
+        (169, 34, "POINT_SUNGMA_STR"),
+        (170, 35, "POINT_SUNGMA_HP"),
+        (171, 36, "POINT_SUNGMA_MOVE"),
+        (172, 37, "POINT_SUNGMA_IMMUNE"),
+        (173, 33, "POINT_CONQUEROR_LEVEL"),
+    ] {
+        assert_eq!(point_slot(&loaded, slot), value, "{what}");
+    }
+    assert_eq!(keyed.read_game()[0], GC_SKILL_LEVEL_NEW);
+
+    // `ItemLoad` ends with `CheckMaximumPoints`: `PointChange(POINT_HP, max - hp)` and the same
+    // for spell points, each with `bAmount` false, so the amount is 0 and the value is the new
+    // pool. Only then does `PointsPacket` write the pair, with the clamped pools in it.
+    assert_eq!(keyed.read_game(), point_change(alpha.id, 5, 0, 1420));
+    assert_eq!(keyed.read_game(), point_change(alpha.id, 7, 0, 600));
+    assert_eq!(keyed.read_game(), gold, "the item load's gold record");
+    let clamped = with_point_slot(&with_point_slot(&loaded, 5, 1420), 7, 600);
+    assert_eq!(
+        keyed.read_game(),
+        clamped,
+        "the item load's points record differs only in the two clamped pools"
+    );
+    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+
+    enter_game_burst(&mut keyed);
+    drop(keyed);
+    wait_for(
+        &database,
+        "(SELECT (hp, sp, stamina) = (1420, 600, 12345) FROM player WHERE name = 'Alpha')",
+    );
+}
+
+/// `sys.char.points`: a conqueror whose map demands more will than it has is sent half its
+/// movement speed and half its maximum hit points, and the item load clamps the stored hit
+/// points to that half.
+///
+/// Map 373 (`metin2_map_eastplain_01`) demands a hit-point will of 10 and a movement will of
+/// 15 (`GetSungMaWill`, `G/char.cpp:11717-11743`). Gamma is a level-90 warrior with conqueror
+/// level 1, 9 hit-point sungma and 14 movement sungma, so `GetMaxHP` halves 600 + 4 x 40 to
+/// 380 and `GetLimitPoint(POINT_MOV_SPEED)` halves 100 to 50. The attack speed has no will and
+/// stays 100. Legacy computes both at `SetPlayerProto` with the map the saved position is on,
+/// so the Channel must host map 373 for the position to be kept.
+#[test]
+fn a_conqueror_below_the_map_will_is_sent_half_its_speed_and_hit_points() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut channels = default_channels();
+    channels[0].maps.push(373);
+    let server = Server::start_with(binary(), database.url(), &channels);
+    create_account(&server, "bob");
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, st, ht, dx, iq, \
+         conqueror_level, sungma_hp, sungma_move, hp, sp, stamina, x, y) SELECT id, 0, 'Gamma', \
+         0, 90, 6, 4, 3, 3, 1, 9, 14, 700, 100, 820, 1100000, 500000 FROM account \
+         WHERE login = 'bob'",
+    );
+
+    let (mut keyed, _empire, list) = select_screen(&server, b"bob");
+    let gamma = listed(&list, 0);
+    assert_eq!(
+        (gamma.x, gamma.y),
+        (1_100_000, 500_000),
+        "Channel 1 hosts map 373"
+    );
+    keyed.send_record(&client_select(0));
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
+    assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
+    assert_eq!(keyed.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
+    let gold = keyed.read_game();
+    assert_eq!(gold[0], GC_CHARACTER_GOLD);
+    let loaded = keyed.read_game();
+    assert_eq!(loaded[0], GC_PLAYER_POINTS);
+    for (slot, value, what) in [
+        (5, 700, "POINT_HP, as stored"),
+        (6, 380, "POINT_MAX_HP, halved under the hit-point will"),
+        (8, 260, "POINT_MAX_SP, which has no will"),
+        (17, 100, "POINT_ATT_SPEED, which has no will"),
+        (19, 50, "POINT_MOV_SPEED, halved under the movement will"),
+    ] {
+        assert_eq!(point_slot(&loaded, slot), value, "{what}");
+    }
+    assert_eq!(keyed.read_game()[0], GC_SKILL_LEVEL_NEW);
+    assert_eq!(keyed.read_game(), point_change(gamma.id, 5, 0, 380));
+    assert_eq!(keyed.read_game(), gold, "the item load's gold record");
+    assert_eq!(keyed.read_game(), with_point_slot(&loaded, 5, 380));
+    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+
+    // `EncodeInsertPacket` writes `GetLimitPoint` of both speeds (`G/char.cpp:1089-1091`).
+    let add = enter_game_burst(&mut keyed);
+    assert_eq!(add.len(), CHARACTER_ADD_LEN);
+    // The header, `dwVID`, `angle`, `x`, `y`, `z`, `bType` and `wRaceNum` come first.
+    assert_eq!(add[24], 50, "bMovingSpeed");
+    assert_eq!(add[25], 100, "bAttackSpeed");
+    drop(keyed);
+    wait_for(
+        &database,
+        "(SELECT (hp, sp, stamina) = (380, 100, 820) FROM player WHERE name = 'Gamma')",
+    );
 }
 
 /// `cg.login.character_select`: an empty slot is `SetPhase(PHASE_CLOSE)`, and an index past the

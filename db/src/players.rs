@@ -561,9 +561,11 @@ pub async fn change_name(
 ///
 /// # Values the Rewrite computes, not stores
 ///
-/// The next-level cost, the maximum hit points, spell points and stamina are derived from
-/// `common::levels` at the point of use, exactly as `CHARACTER::Init` does. Storing a
-/// derived maximum would let a row written by hand disagree with the level and the race.
+/// The next-level cost, the maximum hit points, spell points and stamina, and every battle
+/// grade are derived at the point of use by the points engine
+/// (`world::character::Points`), exactly as `CHARACTER::ComputePoints` does. Storing a derived
+/// value would let a row written by hand disagree with the level, the race and the
+/// attributes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Character {
     /// The character ID, the 32-bit value the client sees.
@@ -601,6 +603,14 @@ pub struct Character {
     pub gold: i64,
     /// Conqueror experience banked towards the next conqueror level.
     pub conqueror_exp: i64,
+    /// `POINT_SUNGMA_STR`, the conqueror strength measured against a map's will.
+    pub sungma_str: u8,
+    /// `POINT_SUNGMA_HP`.
+    pub sungma_hp: u8,
+    /// `POINT_SUNGMA_MOVE`.
+    pub sungma_move: u8,
+    /// `POINT_SUNGMA_IMMUNE`.
+    pub sungma_immune: u8,
     /// `POINT_VOICE`, which legacy leaves uninitialised in the points record.
     pub voice: u8,
     /// The body shape, a `BYTE` (`part_base`).
@@ -640,7 +650,8 @@ pub async fn load_character(
     let player_id = i32::try_from(player).map_err(|_| AccountError::NoSuchPlayer(player))?;
     let row = sqlx::query(
         "SELECT p.slot, p.id, p.name, p.job, p.level, p.exp, p.conqueror_level, p.conqueror_exp, p.st, p.ht, \
-         p.dx, p.iq, p.hp, p.sp, p.stamina, p.gold, p.voice, p.part_base, p.part_main, \
+         p.dx, p.iq, p.sungma_str, p.sungma_hp, p.sungma_move, p.sungma_immune, \
+         p.hp, p.sp, p.stamina, p.gold, p.voice, p.part_base, p.part_main, \
          p.part_hair, p.part_sash, p.x, p.y, p.skill_group, p.playtime_minutes, p.change_name, a.empire \
          FROM player AS p JOIN account AS a ON a.id = p.account_id \
          WHERE p.account_id = $1 AND p.id = $2",
@@ -660,6 +671,10 @@ pub async fn load_character(
         exp: row.try_get("exp")?,
         conqueror_level: narrow(row.try_get::<i16, _>("conqueror_level")?, "conqueror")?,
         conqueror_exp: row.try_get("conqueror_exp")?,
+        sungma_str: narrow(row.try_get::<i16, _>("sungma_str")?, "sungma_str")?,
+        sungma_hp: narrow(row.try_get::<i16, _>("sungma_hp")?, "sungma_hp")?,
+        sungma_move: narrow(row.try_get::<i16, _>("sungma_move")?, "sungma_move")?,
+        sungma_immune: narrow(row.try_get::<i16, _>("sungma_immune")?, "sungma_immune")?,
         st: narrow(row.try_get::<i16, _>("st")?, "st")?,
         ht: narrow(row.try_get::<i16, _>("ht")?, "ht")?,
         dx: narrow(row.try_get::<i16, _>("dx")?, "dx")?,

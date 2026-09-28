@@ -310,6 +310,54 @@ mod tests {
         assert_eq!(table.rows[114], [text("whoring")]);
     }
 
+    /// `world::character::Points` takes the four passive-skill bonuses of `ComputePoints` as
+    /// inputs and defaults them to 0. That is exact only while each formula is a multiple of
+    /// `k` and the skill power at level 0 is 0, which is what the owner's rows say.
+    #[test]
+    fn the_passive_skill_formulas_are_zero_at_skill_level_zero() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../legacy/sql/gamedata/");
+        let player = std::fs::read(format!("{root}player.sql")).unwrap();
+        let skills = read_table(&player, "skill_proto").unwrap();
+        let vnum = skills.column("dwVnum").unwrap();
+        let poly = skills.column("szPointPoly").unwrap();
+        let formula = |wanted: &[u8]| {
+            let row = skills
+                .rows
+                .iter()
+                .find(|row| row[vnum] == SqlValue::Bare(wanted.to_vec()))
+                .unwrap();
+            row[poly].clone()
+        };
+        assert_eq!(formula(b"141"), text("1333.3*k"));
+        for bonus in [&b"164"[..], b"165", b"166"] {
+            assert_eq!(formula(bonus), text("10 * k"));
+        }
+
+        let common = std::fs::read(format!("{root}common.sql")).unwrap();
+        let locale = read_table(&common, "locale").unwrap();
+        let key = locale.column("mKey").unwrap();
+        let value = locale.column("mValue").unwrap();
+        let powers: Vec<_> = locale
+            .rows
+            .iter()
+            .filter(|row| {
+                matches!(&row[key], SqlValue::Text(name) if name.starts_with(b"SKILL_POWER_BY_LEVEL"))
+            })
+            .map(|row| row[value].clone())
+            .collect();
+        assert!(!powers.is_empty());
+        for power in powers {
+            let SqlValue::Text(levels) = power else {
+                panic!("{power:?}");
+            };
+            assert!(
+                levels.starts_with(b"0 5 "),
+                "{}",
+                String::from_utf8_lossy(&levels)
+            );
+        }
+    }
+
     #[test]
     fn every_owner_table_reads() {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../legacy/sql/gamedata/");

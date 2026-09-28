@@ -92,13 +92,15 @@ use protocol::gc_actors::{
 use protocol::gc_chat::{GcChat, CHAT_TYPE_COMMAND};
 use protocol::gc_entity::{GcEntity, GcEntityInfo, ENTITY_PART_NUM};
 use protocol::gc_fields::{GcGold, GcPoints, GC_POINT_SLOT_COUNT};
-use protocol::gc_inventory::{HEADER_GC_CHANNEL, HEADER_GC_TIME};
+use protocol::gc_inventory::{HEADER_GC_CHANNEL, HEADER_GC_PLAYER_POINT_CHANGE, HEADER_GC_TIME};
 use protocol::gc_nested::{
-    GcAffectAdd, GcAffectElement, GcSkill, GcSkillLevelNew, GC_SKILL_SLOT_COUNT,
+    GcAffectAdd, GcAffectElement, GcPointChange, GcSkill, GcSkillLevelNew,
+    GC_POINT_CHANGE_WIRE_SIZE, GC_SKILL_SLOT_COUNT,
 };
 use protocol::gc_npc_position::{GcNpcPosition, GcNpcPositionEntry};
 use protocol::gc_small::GcHeaderAndByte;
 use protocol::gc_vid::GcHeaderAndDword;
+use world::character::{PointRecord, Points, PointsRow};
 
 /// The legacy `PHASE_LOADING` byte (`EPhase`, `G/packet.h:796`).
 pub const PHASE_LOADING: u8 = 4;
@@ -130,6 +132,10 @@ pub const IDLE_ANGLE_BITS: u32 = 0;
 /// The `bMovingSpeed` and `bAttackSpeed` a character has with no affect on it:
 /// `SetPoint(POINT_MOV_SPEED, 100)` and `SetPoint(POINT_ATT_SPEED, 100)` plus the haste
 /// bonus, which is 0 with no party (`G/char.cpp:2969-2972`).
+///
+/// The entering character's own insert record reads its speeds from its points. A
+/// [`VisibleCharacter`] is described with these, because the Rewrite does not hold another
+/// character's points yet.
 pub const BASE_SPEED: u8 = 100;
 
 /// `CHARACTER_BIRTH` is 1, the only `bType` a PC ever gets.
@@ -320,16 +326,51 @@ pub struct Neighbourhood {
     pub npcs: Vec<GcNpcPositionEntry>,
 }
 
+/// The points engine of a loaded character, as the points half of `CHARACTER::SetPlayerProto`
+/// fills it (`G/char.cpp:2233-2420`).
+///
+/// `map_index` is the atlas index of the saved position, which is `GetMapIndex()` for the
+/// loaded character and which decides the conqueror will of the map. The store keeps no
+/// inventory unlock count, so `POINT_INVEN` starts at 0, the same value the item load searches
+/// with.
+#[must_use]
+pub fn load_points(character: &Character, map_index: i32) -> Points {
+    Points::load(&PointsRow {
+        race: character.job,
+        level: character.level,
+        conqueror_level: character.conqueror_level,
+        st: character.st,
+        ht: character.ht,
+        dx: character.dx,
+        iq: character.iq,
+        sungma: [
+            character.sungma_str,
+            character.sungma_hp,
+            character.sungma_move,
+            character.sungma_immune,
+        ],
+        hp: character.hp,
+        sp: character.sp,
+        stamina: character.stamina,
+        inven_point: 0,
+        map_index,
+    })
+}
+
 /// The 255 point slots of `GC_CHARACTER_POINTS`, as `CHARACTER::PointsPacket` fills them
 /// (`G/char.cpp:2031-2087`).
 ///
 /// # How each slot is decided
 ///
-/// Legacy writes nine named slots, then loops `POINT_ST` to `POINT_MAX_NUM` writing
-/// `GetPoint(i)`, then overwrites the five slots that live above that range. A fresh character
-/// with no affect, no item and no quickslot has: its own level, experience, next-level cost,
-/// hit points, spell points, stamina, gold and voice; its four attributes; the three base
-/// speeds of 100; and zero everywhere else. That is what this builds.
+/// Legacy writes the named slots below `POINT_ST` from the character, then loops `POINT_ST` to
+/// `POINT_MAX_NUM` writing `GetPoint(i)`, then overwrites the conqueror slots and
+/// `POINT_MOV_SPEED`, which carries `GetLimitPoint` rather than `GetPoint`. The level,
+/// experience, gold and voice come from the row; every other slot comes from `state`.
+///
+/// `POINT_INVEN` and `POINT_GAYA` are written before the loop and then overwritten by it,
+/// because both sit above `POINT_ST`. The biologist and protected-inventory slots are written
+/// after the loop from state the Rewrite does not store, so they stay at what `GetPoint`
+/// answers, which is 0.
 ///
 /// # The two slots legacy leaves alone
 ///
@@ -337,31 +378,52 @@ pub struct Neighbourhood {
 /// of uninitialised stack reach the client. The Rewrite writes zero into slot 0 and the
 /// character's stored voice into slot 2. See the module note.
 #[must_use]
-pub fn points(character: &Character) -> [i64; GC_POINT_SLOT_COUNT] {
+pub fn points(character: &Character, state: &Points) -> [i64; GC_POINT_SLOT_COUNT] {
     let mut slots = [0i64; GC_POINT_SLOT_COUNT];
     slots[point::POINT_LEVEL] = i64::from(character.level);
     slots[point::POINT_VOICE] = i64::from(character.voice);
     slots[point::POINT_EXP] = character.exp;
     slots[point::POINT_NEXT_EXP] = levels::next_exp(character.level);
-    slots[point::POINT_HP] = i64::from(character.hp);
-    slots[point::POINT_MAX_HP] = i64::from(levels::max_hp(character.job, i64::from(character.ht)));
-    slots[point::POINT_SP] = i64::from(character.sp);
-    slots[point::POINT_MAX_SP] = i64::from(levels::max_sp(character.job, i64::from(character.iq)));
-    slots[point::POINT_STAMINA] = i64::from(character.stamina);
-    slots[point::POINT_MAX_STAMINA] =
-        i64::from(levels::max_stamina(character.job, i64::from(character.ht)));
+    slots[point::POINT_HP] = i64::from(state.hp());
+    slots[point::POINT_MAX_HP] = i64::from(state.max_hp());
+    slots[point::POINT_SP] = i64::from(state.sp());
+    slots[point::POINT_MAX_SP] = i64::from(state.max_sp());
     slots[point::POINT_GOLD] = character.gold;
-    slots[point::POINT_ST] = i64::from(character.st);
-    slots[point::POINT_HT] = i64::from(character.ht);
-    slots[point::POINT_DX] = i64::from(character.dx);
-    slots[point::POINT_IQ] = i64::from(character.iq);
-    slots[point::POINT_ATT_SPEED] = i64::from(BASE_SPEED);
-    slots[point::POINT_MOV_SPEED] = i64::from(BASE_SPEED);
-    slots[point::POINT_CASTING_SPEED] = i64::from(BASE_SPEED);
+    slots[point::POINT_STAMINA] = i64::from(state.stamina());
+    slots[point::POINT_MAX_STAMINA] = i64::from(state.max_stamina());
+    for (kind, slot) in slots.iter_mut().enumerate().skip(point::POINT_ST) {
+        *slot = i64::from(state.get_point(kind));
+    }
     slots[point::POINT_CONQUEROR_LEVEL] = i64::from(character.conqueror_level);
     slots[point::POINT_CONQUEROR_EXP] = character.conqueror_exp;
     slots[point::POINT_CONQUEROR_NEXT_EXP] = levels::conqueror_next_exp(character.conqueror_level);
+    slots[point::POINT_MOV_SPEED] = i64::from(state.limit_point(point::POINT_MOV_SPEED));
     slots
+}
+
+/// The `GC_CHARACTER_POINT_CHANGE` records for the changes `state` reports, in order.
+///
+/// Legacy writes each record with its own `DESC::Packet` call from `UpdatePointsPacket`
+/// (`G/char.cpp:2089-2118`), so each is its own frame. A broadcast record goes to every
+/// descriptor that sees the character, and the character's own descriptor is one of them; no
+/// other character can see it yet, so every record is written to the descriptor.
+#[must_use]
+pub fn point_changes(records: &[PointRecord], vid: u32) -> Vec<Vec<u8>> {
+    records
+        .iter()
+        .map(|record| {
+            let mut bytes = Vec::with_capacity(GC_POINT_CHANGE_WIRE_SIZE);
+            GcPointChange {
+                header: i32::from(HEADER_GC_PLAYER_POINT_CHANGE.value()),
+                vid,
+                change_type: record.kind,
+                amount: record.amount,
+                value: record.value,
+            }
+            .encode_into(&mut bytes);
+            bytes
+        })
+        .collect()
 }
 
 /// The 255 skill slots of `GC_SKILL_LEVEL`, all empty: the Rewrite has no skill table yet.
@@ -422,8 +484,12 @@ pub fn main_character(character: &Character, vid: u32) -> GcMainCharacter2Empire
 }
 
 /// The `GC_CHARACTER_ADD` for the character that is entering, standing still.
+///
+/// The two speeds are `GetLimitPoint(POINT_MOV_SPEED)` and `GetLimitPoint(POINT_ATT_SPEED)`
+/// (`G/char.cpp:1089-1091`), which the limit holds to 0..200 and 0..170, so each fits the
+/// record's byte.
 #[must_use]
-pub fn character_add(character: &Character, vid: u32) -> GcCharacterAdd {
+pub fn character_add(character: &Character, state: &Points, vid: u32) -> GcCharacterAdd {
     GcCharacterAdd::new(
         vid,
         f32::from_bits(IDLE_ANGLE_BITS),
@@ -432,11 +498,17 @@ pub fn character_add(character: &Character, vid: u32) -> GcCharacterAdd {
         0,
         BIRTH,
         u16::from(character.job),
-        BASE_SPEED,
-        BASE_SPEED,
+        speed_byte(state.limit_point(point::POINT_MOV_SPEED)),
+        speed_byte(state.limit_point(point::POINT_ATT_SPEED)),
         0,
         [0, 0],
     )
+}
+
+/// A limited speed as the record's byte. [`Points::limit_point`] holds both speeds inside a
+/// byte, so the fall-back is never taken.
+fn speed_byte(speed: i32) -> u8 {
+    u8::try_from(speed).unwrap_or(u8::MAX)
 }
 
 /// The `GC_CHAR_ADDITIONAL_INFO` for the character that is entering, with no guild, mount or
@@ -492,7 +564,12 @@ pub struct LoadingBurst {
 /// produces it (`G/input_db.cpp:414`). Returning it as content as well would put two
 /// `GC_PHASE` records on the wire.
 #[must_use]
-pub fn loading_burst(character: &Character, vid: u32, view: &Neighbourhood) -> LoadingBurst {
+pub fn loading_burst(
+    character: &Character,
+    state: &Points,
+    vid: u32,
+    view: &Neighbourhood,
+) -> LoadingBurst {
     let entities: Vec<GcEntityInfo> = view
         .characters
         .iter()
@@ -508,7 +585,7 @@ pub fn loading_burst(character: &Character, vid: u32, view: &Neighbourhood) -> L
             "the own-character record",
         ),
     ];
-    let mut after_map_test = points_packet(character);
+    let mut after_map_test = points_packet(character, state);
     after_map_test.push(encoded(
         &mut GcSkillLevelNew {
             header: GcSkillLevelNew::header(),
@@ -534,11 +611,28 @@ pub fn loading_burst(character: &Character, vid: u32, view: &Neighbourhood) -> L
 /// Panics when a record does not encode; both are fixed layouts, so that would be a bug in
 /// this module.
 #[must_use]
-pub fn points_packet(character: &Character) -> Vec<Vec<u8>> {
+pub fn points_packet(character: &Character, state: &Points) -> Vec<Vec<u8>> {
     vec![
         encoded(&mut GcGold::new(gold(character)), "the gold record"),
-        encoded(&mut GcPoints::new(points(character)), "the points record"),
+        encoded(
+            &mut GcPoints::new(points(character, state)),
+            "the points record",
+        ),
     ]
+}
+
+/// The records the item load ends with: `CheckMaximumPoints`, then `PointsPacket`
+/// (`G/input_db.cpp:1563-1564`).
+///
+/// A stored hit or spell point total above the maximum the load computed is brought down to
+/// it, with one `GC_CHARACTER_POINT_CHANGE` each, and the gold and points records that
+/// follow carry the clamped values. `state` keeps the clamp, so the caller's next save writes
+/// it.
+#[must_use]
+pub fn item_load_points(character: &Character, state: &mut Points, vid: u32) -> Vec<Vec<u8>> {
+    let mut frames = point_changes(&state.check_maximum_points(), vid);
+    frames.extend(points_packet(character, state));
+    frames
 }
 
 /// The gold as the record carries it.
@@ -567,6 +661,7 @@ pub struct EnterGameBurst {
 
 /// The records the enter-game burst sends, in legacy order.
 ///
+/// `state` is the character's points, which give its own insert record its two speeds.
 /// `channel` is `g_bChannel`, and `now` is `get_global_time()`, which is `time(0)` plus a gap
 /// the Rewrite does not yet carry. The time and channel records are unconditional; every other
 /// record here is about the character or about a list that is empty today.
@@ -579,6 +674,7 @@ pub struct EnterGameBurst {
 #[must_use]
 pub fn enter_game_burst(
     character: &Character,
+    state: &Points,
     vid: u32,
     view: &Neighbourhood,
     channel: u8,
@@ -589,7 +685,7 @@ pub fn enter_game_burst(
     // that can see it (`G/char.cpp:1905`, `G/entity_view.cpp:137`).
     let mut before = Vec::with_capacity(7);
     before.push(encoded(
-        &mut character_add(character, vid),
+        &mut character_add(character, state, vid),
         "the own-character insert",
     ));
     before.push(encoded(
@@ -770,6 +866,10 @@ mod tests {
             level: 9,
             exp: 0x0102_0304_0506,
             conqueror_level: 3,
+            sungma_str: 21,
+            sungma_hp: 22,
+            sungma_move: 23,
+            sungma_immune: 24,
             st: 11,
             ht: 13,
             dx: 17,
@@ -790,6 +890,11 @@ mod tests {
             playtime_minutes: 0x0a0b_0c0d,
             change_name: false,
         }
+    }
+
+    /// The hero's points on a map with no conqueror will.
+    fn hero_points() -> Points {
+        load_points(&hero(), 0)
     }
 
     fn empty_view() -> Neighbourhood {
@@ -886,7 +991,7 @@ mod tests {
     /// them. `GC_PHASE` is the descriptor's own phase transition and is not in either half.
     #[test]
     fn loading_burst_headers_are_in_legacy_order() {
-        let burst = loading_burst(&hero(), 0x1122_3344, &empty_view());
+        let burst = loading_burst(&hero(), &hero_points(), 0x1122_3344, &empty_view());
         assert_eq!(
             headers(&burst.before_map_test),
             vec![249, 113],
@@ -901,7 +1006,7 @@ mod tests {
 
     #[test]
     fn loading_burst_frame_widths_are_the_legacy_widths() {
-        let burst = loading_burst(&hero(), 0x1122_3344, &empty_view());
+        let burst = loading_burst(&hero(), &hero_points(), 0x1122_3344, &empty_view());
         let widths = |frames: &[Vec<u8>]| -> Vec<usize> { frames.iter().map(Vec::len).collect() };
         assert_eq!(
             widths(&burst.before_map_test),
@@ -919,7 +1024,7 @@ mod tests {
     /// `SetPhase(PHASE_LOADING)`, so a caller that also wrote one would put two on the wire.
     #[test]
     fn no_loading_burst_half_carries_a_phase_record() {
-        let burst = loading_burst(&hero(), 7, &empty_view());
+        let burst = loading_burst(&hero(), &hero_points(), 7, &empty_view());
         for frame in burst
             .before_map_test
             .iter()
@@ -1011,7 +1116,7 @@ mod tests {
     #[test]
     fn points_record_is_2041_bytes_of_little_endian_slots() {
         let mut bytes = Vec::new();
-        GcPoints::new(points(&hero())).encode_into(&mut bytes);
+        GcPoints::new(points(&hero(), &hero_points())).encode_into(&mut bytes);
         assert_eq!(bytes.len(), 2041, "1 header byte plus 255 eight-byte slots");
         assert_eq!(bytes[0], 16, "GC_CHARACTER_POINTS");
         assert_eq!(&bytes[9..17], &9i64.to_le_bytes(), "slot 1 is POINT_LEVEL");
@@ -1020,7 +1125,7 @@ mod tests {
     /// The two slots legacy leaves uninitialised, pinned so the Defect cannot creep back in.
     #[test]
     fn points_writes_the_two_slots_legacy_leaves_uninitialised() {
-        let slots = points(&hero());
+        let slots = points(&hero(), &hero_points());
         assert_eq!(
             slots[0], 0,
             "POINT_NONE is written as zero, not stack garbage"
@@ -1034,10 +1139,12 @@ mod tests {
     #[test]
     fn points_carry_the_stored_and_the_derived_values() {
         let hero = hero();
-        let slots = points(&hero);
+        let slots = points(&hero, &hero_points());
         assert_eq!(slots[point::POINT_EXP], hero.exp);
         assert_eq!(slots[point::POINT_NEXT_EXP], levels::next_exp(hero.level));
         assert_eq!(slots[point::POINT_HP], i64::from(hero.hp));
+        assert_eq!(slots[point::POINT_SP], i64::from(hero.sp));
+        assert_eq!(slots[point::POINT_STAMINA], i64::from(hero.stamina));
         assert_eq!(slots[point::POINT_GOLD], hero.gold);
         assert_eq!(slots[point::POINT_CONQUEROR_LEVEL], 3);
         assert_eq!(slots[point::POINT_CONQUEROR_EXP], hero.conqueror_exp);
@@ -1049,73 +1156,169 @@ mod tests {
         assert_eq!(slots[point::POINT_HT], 13);
         assert_eq!(slots[point::POINT_DX], 17);
         assert_eq!(slots[point::POINT_IQ], 19);
+        assert_eq!(slots[point::POINT_SUNGMA_STR], 21);
+        assert_eq!(slots[point::POINT_SUNGMA_HP], 22);
+        assert_eq!(slots[point::POINT_SUNGMA_MOVE], 23);
+        assert_eq!(slots[point::POINT_SUNGMA_IMMUNE], 24);
     }
 
     /// The three base speeds are 100, which is `SetPoint` in `CHARACTER::Init` plus the haste
     /// bonus that is 0 with no party.
     #[test]
     fn points_carry_the_three_base_speeds() {
-        let slots = points(&hero());
+        let slots = points(&hero(), &hero_points());
         assert_eq!(slots[point::POINT_MOV_SPEED], 100);
         assert_eq!(slots[point::POINT_ATT_SPEED], 100);
         assert_eq!(slots[point::POINT_CASTING_SPEED], 100);
     }
 
-    /// Every other slot is zero, which is what `GetPoint` returns for a character with no
-    /// affect, no item and no quickslot.
+    /// From `POINT_ST` on, every slot is `GetPoint`, except the three conqueror slots, which
+    /// come from the row, and the movement speed, which is `GetLimitPoint`.
     #[test]
-    fn every_other_point_slot_is_zero() {
+    fn every_slot_from_point_st_is_the_engine_value() {
         let hero = hero();
-        let slots = points(&hero);
-        let named = [
-            point::POINT_LEVEL,
-            point::POINT_VOICE,
-            point::POINT_EXP,
-            point::POINT_NEXT_EXP,
-            point::POINT_HP,
-            point::POINT_MAX_HP,
-            point::POINT_SP,
-            point::POINT_MAX_SP,
-            point::POINT_STAMINA,
-            point::POINT_MAX_STAMINA,
-            point::POINT_GOLD,
-            point::POINT_ST,
-            point::POINT_HT,
-            point::POINT_DX,
-            point::POINT_IQ,
-            point::POINT_ATT_SPEED,
-            point::POINT_MOV_SPEED,
-            point::POINT_CASTING_SPEED,
+        let state = hero_points();
+        let slots = points(&hero, &state);
+        let overwritten = [
             point::POINT_CONQUEROR_LEVEL,
             point::POINT_CONQUEROR_EXP,
             point::POINT_CONQUEROR_NEXT_EXP,
+            point::POINT_MOV_SPEED,
         ];
-        for (index, slot) in slots.iter().enumerate() {
-            if named.contains(&index) {
+        for (kind, slot) in slots.iter().enumerate().skip(point::POINT_ST) {
+            if overwritten.contains(&kind) {
                 continue;
             }
-            assert_eq!(*slot, 0, "point slot {index} must be zero");
+            assert_eq!(*slot, i64::from(state.get_point(kind)), "point slot {kind}");
+        }
+        assert_eq!(
+            slots[point::POINT_MOV_SPEED],
+            i64::from(state.limit_point(point::POINT_MOV_SPEED)),
+        );
+    }
+
+    /// A level-1 warrior with the creation attributes 6, 4, 3 and 3: the five grades
+    /// `ComputeBattlePoints` gives it, and the three maxima of `ComputePoints`, each a hand sum
+    /// of the warrior row (600 + 4 x 40, 200 + 3 x 20, 800 + 4 x 5).
+    #[test]
+    fn a_fresh_warrior_is_sent_its_grades_and_maxima() {
+        let warrior = Character {
+            job: 0,
+            level: 1,
+            conqueror_level: 0,
+            st: 6,
+            ht: 4,
+            dx: 3,
+            iq: 3,
+            ..hero()
+        };
+        let slots = points(&warrior, &load_points(&warrior, 0));
+        assert_eq!(slots[point::POINT_ATT_GRADE], 14);
+        assert_eq!(slots[point::POINT_DEF_GRADE], 4);
+        assert_eq!(slots[point::POINT_CLIENT_DEF_GRADE], 5);
+        assert_eq!(slots[point::POINT_MAGIC_ATT_GRADE], 8);
+        assert_eq!(slots[point::POINT_MAGIC_DEF_GRADE], 5);
+        assert_eq!(slots[point::POINT_MAX_HP], 760);
+        assert_eq!(slots[point::POINT_MAX_SP], 260);
+        assert_eq!(slots[point::POINT_MAX_STAMINA], 820);
+    }
+
+    /// The slots whose state the Rewrite does not store are what `GetPoint` answers for them,
+    /// which is 0: the inventory unlocks, the Gaya, the biologist and the protected inventory.
+    #[test]
+    fn the_slots_of_unstored_state_are_zero() {
+        let slots = points(&hero(), &hero_points());
+        for kind in [
+            point::POINT_INVEN,
+            point::POINT_GAYA,
+            point::POINT_BIOLOGIST_STATE,
+            point::POINT_BIOLOGIST_ITEMS_TAKEN,
+            point::POINT_BIOLOGIST_COMPLETED,
+            point::POINT_SECURED_STATE,
+            point::POINT_SECURED_PASSWORD,
+        ] {
+            assert_eq!(slots[kind], 0, "point slot {kind}");
         }
     }
 
-    /// The maxima are derived at the point of use, never stored, so a hand-written row cannot
-    /// disagree with its level and race.
+    /// The maxima are the engine's, from the assassin row: 650 + 13 x 40 hit points,
+    /// 200 + 19 x 20 spell points and 800 + 13 x 5 stamina. The stored hit points are far
+    /// above the maximum, and the loading burst sends them unclamped, as legacy does.
     #[test]
     fn point_maxima_are_derived_from_the_attributes() {
         let hero = hero();
-        let slots = points(&hero);
+        let slots = points(&hero, &hero_points());
+        assert_eq!(slots[point::POINT_MAX_HP], 1170);
+        assert_eq!(slots[point::POINT_MAX_SP], 580);
+        assert_eq!(slots[point::POINT_MAX_STAMINA], 865);
+        assert_eq!(slots[point::POINT_HP], 0x0012_3456);
+    }
+
+    /// Map 384 wants a movement will of 65 and a hit-point will of 60. The hero is a conqueror
+    /// with 23 and 22, so the client is told half its speed and half its maximum hit points,
+    /// in the points record and in its own insert record.
+    #[test]
+    fn a_weak_conqueror_is_sent_half_its_speed_and_hit_points() {
+        let hero = hero();
+        let state = load_points(&hero, 384);
+        let slots = points(&hero, &state);
+        assert_eq!(slots[point::POINT_MOV_SPEED], 50);
+        assert_eq!(slots[point::POINT_MAX_HP], 585);
+        let mut bytes = Vec::new();
+        character_add(&hero, &state, 1).encode_into(&mut bytes);
+        assert_eq!(bytes[24], 50, "bMovingSpeed");
+        assert_eq!(bytes[25], 100, "bAttackSpeed");
+    }
+
+    /// `TPacketGCPointChange` (`G/packet.h:1064-1071`): a four-byte `int` header, the VID, the
+    /// type byte, then the amount and the value as `long long`.
+    #[test]
+    fn a_point_change_is_25_bytes_in_legacy_field_order() {
+        let record = PointRecord {
+            kind: 0x05,
+            amount: -0x0102_0304_0506_0708,
+            value: 0x1112_1314_1516_1718,
+            broadcast: false,
+        };
+        let frames = point_changes(&[record], 0x2122_2324);
+        assert_eq!(frames.len(), 1);
+        let mut expected = vec![0x11, 0, 0, 0, 0x24, 0x23, 0x22, 0x21, 0x05];
+        expected.extend_from_slice(&(-0x0102_0304_0506_0708i64).to_le_bytes());
+        expected.extend_from_slice(&[0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11]);
+        assert_eq!(frames[0], expected);
+    }
+
+    /// The item load's tail: `CheckMaximumPoints` clamps the stored hit and spell points, one
+    /// record each, and only then `PointsPacket` sends the gold and the clamped points.
+    #[test]
+    fn the_item_load_clamps_the_pools_before_the_points_packet() {
+        let hero = hero();
+        let mut state = hero_points();
+        let frames = item_load_points(&hero, &mut state, 0x0a0b_0c0d);
+        assert_eq!(headers(&frames), vec![0x11, 0x11, 224, 16]);
+        let hp = GcPointChange::decode(&frames[0]).expect("a point change");
         assert_eq!(
-            slots[point::POINT_MAX_HP],
-            i64::from(levels::max_hp(hero.job, 13)),
+            (hp.vid, hp.change_type, hp.amount, hp.value),
+            (0x0a0b_0c0d, 5, 0, 1170),
         );
-        assert_eq!(
-            slots[point::POINT_MAX_SP],
-            i64::from(levels::max_sp(hero.job, 19)),
-        );
-        assert_eq!(
-            slots[point::POINT_MAX_STAMINA],
-            i64::from(levels::max_stamina(hero.job, 13)),
-        );
+        let sp = GcPointChange::decode(&frames[1]).expect("a point change");
+        assert_eq!((sp.change_type, sp.amount, sp.value), (7, 0, 580));
+        assert_eq!((state.hp(), state.sp()), (1170, 580));
+        let hp_slot = 1 + 8 * point::POINT_HP;
+        assert_eq!(&frames[3][hp_slot..hp_slot + 8], &1170i64.to_le_bytes());
+    }
+
+    /// A character inside its maxima is not clamped, so the item load sends only the pair.
+    #[test]
+    fn the_item_load_sends_no_change_for_pools_inside_their_maxima() {
+        let hero = Character {
+            hp: 1170,
+            sp: 1,
+            ..hero()
+        };
+        let mut state = load_points(&hero, 0);
+        let frames = item_load_points(&hero, &mut state, 1);
+        assert_eq!(headers(&frames), vec![224, 16]);
     }
 
     #[test]
@@ -1154,7 +1357,7 @@ mod tests {
     fn character_add_is_35_bytes_under_byte_one() {
         let hero = hero();
         let mut bytes = Vec::new();
-        character_add(&hero, 0x1122_3344).encode_into(&mut bytes);
+        character_add(&hero, &hero_points(), 0x1122_3344).encode_into(&mut bytes);
         assert_eq!(bytes.len(), 35, "1 header byte plus the 34-byte payload");
         assert_eq!(bytes[0], 1, "HEADER_GC_CHARACTER_ADD is byte 1");
         assert_ne!(bytes[0], 68, "byte 68 is GC_CHARACTER_POSITION");
@@ -1216,7 +1419,15 @@ mod tests {
     /// descriptor's own `SetPhase(PHASE_GAME)`.
     #[test]
     fn enter_game_burst_headers_are_in_legacy_order() {
-        let burst = enter_game_burst(&hero(), 0x1122_3344, &empty_view(), 1, 1_600_000_000, 3);
+        let burst = enter_game_burst(
+            &hero(),
+            &hero_points(),
+            0x1122_3344,
+            &empty_view(),
+            1,
+            1_600_000_000,
+            3,
+        );
         assert_eq!(
             headers(&burst.before_phase),
             vec![1, 136, 126],
@@ -1233,7 +1444,7 @@ mod tests {
     /// and writing it as content as well would put two on the wire.
     #[test]
     fn no_enter_game_half_carries_a_phase_record() {
-        let burst = enter_game_burst(&hero(), 1, &empty_view(), 1, 0, 0);
+        let burst = enter_game_burst(&hero(), &hero_points(), 1, &empty_view(), 1, 0, 0);
         for frame in all(&burst.before_phase, &burst.after_phase) {
             assert_ne!(
                 frame[0], 253,
@@ -1304,7 +1515,7 @@ mod tests {
     /// after the NPC records and before `SetPhase(PHASE_GAME)`.
     #[test]
     fn the_revive_invisible_affect_is_sent_once_with_five_seconds() {
-        let burst = enter_game_burst(&hero(), 1, &empty_view(), 1, 0, 0);
+        let burst = enter_game_burst(&hero(), &hero_points(), 1, &empty_view(), 1, 0, 0);
         let affects: Vec<&Vec<u8>> = all(&burst.before_phase, &burst.after_phase)
             .into_iter()
             .filter(|f| f[0] == 126)
@@ -1333,7 +1544,7 @@ mod tests {
     /// after it.
     #[test]
     fn the_affect_is_the_last_record_before_the_phase_change() {
-        let burst = enter_game_burst(&hero(), 1, &empty_view(), 1, 0, 0);
+        let burst = enter_game_burst(&hero(), &hero_points(), 1, &empty_view(), 1, 0, 0);
         assert_eq!(
             burst.before_phase.last().map(|f| f[0]),
             Some(126),
@@ -1348,7 +1559,15 @@ mod tests {
 
     #[test]
     fn time_then_channel_carry_their_whole_values() {
-        let burst = enter_game_burst(&hero(), 1, &empty_view(), 4, 1_600_000_000, 0);
+        let burst = enter_game_burst(
+            &hero(),
+            &hero_points(),
+            1,
+            &empty_view(),
+            4,
+            1_600_000_000,
+            0,
+        );
         let frames = all(&burst.before_phase, &burst.after_phase);
         let time_at = frames.iter().position(|f| f[0] == 106).unwrap();
         let channel_at = frames.iter().position(|f| f[0] == 121).unwrap();
@@ -1365,7 +1584,7 @@ mod tests {
     /// command line, and the text is the unterminated tail.
     #[test]
     fn the_letters_event_line_is_the_last_record() {
-        let burst = enter_game_burst(&hero(), 1, &empty_view(), 1, 0, 0);
+        let burst = enter_game_burst(&hero(), &hero_points(), 1, &empty_view(), 1, 0, 0);
         let last = burst.after_phase.last().unwrap();
         assert_eq!(last[0], 4, "GC_CHAT is byte 4");
         assert_eq!(
@@ -1391,7 +1610,7 @@ mod tests {
     /// `SEventLetters` writes; the sent bytes must keep the space.
     #[test]
     fn the_letters_event_line_keeps_its_space() {
-        let burst = enter_game_burst(&hero(), 1, &empty_view(), 1, 0, 0);
+        let burst = enter_game_burst(&hero(), &hero_points(), 1, &empty_view(), 1, 0, 0);
         let last = burst.after_phase.last().unwrap();
         let text = &last[10..];
         assert_eq!(text, b"letters_event 0");
@@ -1401,7 +1620,7 @@ mod tests {
     /// An empty NPC list sends nothing at all: `SendNPCPosition` returns before it writes.
     #[test]
     fn an_empty_npc_list_sends_no_record() {
-        let burst = enter_game_burst(&hero(), 1, &empty_view(), 1, 0, 0);
+        let burst = enter_game_burst(&hero(), &hero_points(), 1, &empty_view(), 1, 0, 0);
         assert!(
             !all(&burst.before_phase, &burst.after_phase)
                 .into_iter()
@@ -1414,7 +1633,7 @@ mod tests {
     /// entering character's own pair.
     #[test]
     fn a_visible_character_adds_its_pair_after_the_own_pair() {
-        let burst = enter_game_burst(&hero(), 1, &with_neighbour(), 1, 0, 3);
+        let burst = enter_game_burst(&hero(), &hero_points(), 1, &with_neighbour(), 1, 0, 3);
         assert_eq!(
             headers(&burst.before_phase),
             vec![1, 136, 1, 136, 126],
@@ -1433,7 +1652,7 @@ mod tests {
     /// holding the whole record, and each `TPacketEntityInfo` is 28 bytes.
     #[test]
     fn a_visible_character_reaches_the_loading_burst() {
-        let burst = loading_burst(&hero(), 1, &with_neighbour());
+        let burst = loading_burst(&hero(), &hero_points(), 1, &with_neighbour());
         let entity = &burst.before_map_test[0];
         assert_eq!(entity[0], 249, "GC_ENTITY is byte 249");
         assert_eq!(entity.len(), 31, "3 header bytes plus one 28-byte entry");
@@ -1457,7 +1676,7 @@ mod tests {
     /// legacy writes it with a size of 3 and no entries.
     #[test]
     fn an_empty_view_still_sends_the_entity_record() {
-        let burst = loading_burst(&hero(), 1, &empty_view());
+        let burst = loading_burst(&hero(), &hero_points(), 1, &empty_view());
         assert_eq!(
             burst.before_map_test[0],
             vec![249, 3, 0],
@@ -1469,7 +1688,7 @@ mod tests {
     /// character with no stored quickslot is what legacy's `SetQuickslot` skips too.
     #[test]
     fn no_quickslot_record_is_sent() {
-        let burst = loading_burst(&hero(), 1, &empty_view());
+        let burst = loading_burst(&hero(), &hero_points(), 1, &empty_view());
         assert!(
             !all(&burst.before_map_test, &burst.after_map_test)
                 .into_iter()
@@ -1482,8 +1701,8 @@ mod tests {
     /// `package_info.txt`, so legacy sends it for no map. It must be absent from both bursts.
     #[test]
     fn the_package_sdb_is_absent_from_both_bursts() {
-        let loading = loading_burst(&hero(), 1, &with_neighbour());
-        let entering = enter_game_burst(&hero(), 1, &with_neighbour(), 1, 0, 0);
+        let loading = loading_burst(&hero(), &hero_points(), 1, &with_neighbour());
+        let entering = enter_game_burst(&hero(), &hero_points(), 1, &with_neighbour(), 1, 0, 0);
         assert!(
             !all(&loading.before_map_test, &loading.after_map_test)
                 .into_iter()
@@ -1501,7 +1720,7 @@ mod tests {
     /// A hard-coded welcome would be a Divergence: the snapshot has no `GREET` row.
     #[test]
     fn no_hard_coded_greeting_is_sent() {
-        let burst = enter_game_burst(&hero(), 1, &empty_view(), 1, 0, 0);
+        let burst = enter_game_burst(&hero(), &hero_points(), 1, &empty_view(), 1, 0, 0);
         let lines: Vec<&Vec<u8>> = all(&burst.before_phase, &burst.after_phase)
             .into_iter()
             .filter(|f| f[0] == 4)
@@ -1514,8 +1733,8 @@ mod tests {
     /// where legacy hands it several.
     #[test]
     fn every_record_is_its_own_frame() {
-        let loading = loading_burst(&hero(), 1, &with_neighbour());
-        let entering = enter_game_burst(&hero(), 1, &with_neighbour(), 1, 0, 0);
+        let loading = loading_burst(&hero(), &hero_points(), 1, &with_neighbour());
+        let entering = enter_game_burst(&hero(), &hero_points(), 1, &with_neighbour(), 1, 0, 0);
         for half in [
             &loading.before_map_test,
             &loading.after_map_test,

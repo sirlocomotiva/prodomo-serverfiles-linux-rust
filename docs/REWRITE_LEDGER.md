@@ -20831,3 +20831,240 @@ run, and no `*.core` file is outside `target/`. The workspace has 195 Rust files
 lines. No width is claimed in this section: `GC_ITEM_SET`'s 72 bytes, `CG_ITEM_MOVE`'s and the
 chat record's widths are the ones the codecs already pin, and the i686 probe was not run
 (`i686-linux-gnu-g++-12` is not installed on this machine).
+
+## 212. The points are computed when a character loads, and the item load clamps the pools
+
+Before this section the loading burst's `GC_CHARACTER_POINTS` was filled from the stored row: the
+pools as stored, the maxima from `common::levels`, the four attributes, the three base speeds of
+100, and zero in every other slot. Ledger 187 said that was what legacy sends a fresh character.
+It is not. `SetPlayerProto` runs `ComputePoints` before the burst is written, and that fills the
+battle grades too, so a level-1 warrior is sent an attack grade of 14, a defence grade of 4, a
+shown defence grade of 5, a magic attack grade of 8 and a magic defence grade of 5, not zeros.
+The row also carried a stored pool above its maximum to the client unchanged, and nothing ever
+brought it down. Both are now legacy's: the points are computed by a port of legacy's points
+engine, and the item load ends with `CheckMaximumPoints` (`G/input_db.cpp:1563-1564`).
+
+### 212.1 What landed
+
+- **`world/src/character/points.rs`** (new): `Points`, the two 255-slot point arrays of
+  `CHARACTER` (`m_points.points` and `m_pointsInstant.points`), the three pools and their maxima.
+  It ports these functions:
+
+  | legacy | here |
+  |---|---|
+  | `PointChange` (`G/char.cpp:3872-4822`) | `point_change` |
+  | `ComputeBattlePoints` (`:2686-2860`) | `compute_battle_points` |
+  | `ComputePoints` (`:2862-3160`) | `compute_points` |
+  | `CheckMaximumPoints` (`:3863-3870`) | `check_maximum_points` |
+  | `GetLimitPoint` (`:3730-3799`) | `limit_point` |
+  | `GetMaxHP` (`:8430-8436`) | `max_hp` |
+  | `GetSungMaWill` (`:11717-11743`) | `will` |
+  | the points half of `SetPlayerProto` (`:2233-2420`) | `Points::load` |
+
+  Every method answers with the `GC_CHARACTER_POINT_CHANGE` records legacy writes, as
+  `PointRecord`s in legacy's order. A change that makes an inner change first (a defence grade
+  also changes the shown defence grade, and an attribute recomputes the battle points) returns the
+  inner record before its own, because legacy's inner call reaches its send first. The caller owns
+  the descriptor and the VID, so it encodes them. `SUNGMA_WILL_MAPS` is `SungMaWillMap`
+  (`G/constants.cpp:1351-1372`), and `race_to_job` is `RaceToJob`. `PointChange` refuses an arm
+  the Rewrite has not ported with `PointChangeRefused::NotPorted` and changes nothing (212.5).
+- **`prodomo/src/loading_phase.rs`**: `load_points` builds the engine from the stored row and the
+  atlas index of the saved position, which is `GetMapIndex()` when `SetPlayerProto` runs and which
+  decides the map's conqueror will. `points` fills the 255 slots of `GC_CHARACTER_POINTS` the way
+  `PointsPacket` does (`G/char.cpp:2031-2087`): the named slots below `POINT_ST` from the row and
+  the pools, `GetPoint(i)` from `POINT_ST` up, then the conqueror slots and `POINT_MOV_SPEED`,
+  which carries `GetLimitPoint` rather than `GetPoint`. `character_add` takes the two speeds of
+  `GC_CHARACTER_ADD` from `GetLimitPoint` (`:1089-1091`). `item_load_points` is the item load's
+  last step: `CheckMaximumPoints`, one `GC_CHARACTER_POINT_CHANGE` per pool it lowers, and then
+  `PointsPacket`'s gold and points records carrying the clamped values.
+- **`prodomo/src/main.rs`**: `select_character` resolves the map before it builds the points,
+  sends the loading burst from them, and hands them to the item load. After the load the held row
+  takes the clamped pools, so the save writes what the client was told, and the descriptor holds
+  the engine (`Held.points`) for the game phase. `enter_game` answers from the held points, and
+  the movement gate's speed is `GetLimitPoint(POINT_MOV_SPEED)`, the value the client was sent.
+- **`db/src/players.rs`**: `Character` gains `sungma_str`, `sungma_hp`, `sungma_move` and
+  `sungma_immune`, which `load_character` now reads. The columns and their `CHECK`s already
+  existed, so there is no migration. The struct's note now says every battle grade is derived,
+  as the maxima already were.
+- **`gamedata/src/sql_dump.rs`**: `the_passive_skill_formulas_are_zero_at_skill_level_zero` pins
+  why the engine may default its passive-skill bonuses to 0 (212.5): in the owner's `skill_proto`,
+  vnum 141 is `1333.3*k` and vnums 164 to 166 are `10 * k`, and every `SKILL_POWER_BY_LEVEL` row in
+  `common.locale` starts with a power of 0 at level 0.
+- **`protocol/src/gc_nested.rs`**: `GcPointChange`'s doc said the server tree has no enumerator for
+  byte 17. It has one: `HEADER_GC_CHARACTER_POINT_CHANGE` (`packet.h:117`), and the struct
+  `TPacketGCPointChange` (`packet.h:1064-1071`), as ledger 151.6 already recorded.
+
+### 212.2 The order the load keeps
+
+| step | legacy | records |
+|---|---|---|
+| `SetPlayerProto` | copies the attributes and the sungma points into both arrays, runs `ComputePoints`, and only then copies the stored pools in, unclamped (`G/char.cpp:2296-2356`) | none from the Rewrite (212.3) |
+| the loading burst | `PointsPacket` from `PlayerLoad` | the points record carries the stored pools, even above their maxima |
+| the item load | `ItemLoad` places the items, then `CheckMaximumPoints`, then `PointsPacket` | one `GC_ITEM_SET` per item, one point change per pool above its maximum, then gold and points with the clamped pools |
+| enter game | `GC_CHARACTER_ADD` | the limited movement and attack speeds |
+
+`CheckMaximumPoints` lowers the hit and spell points only. Stamina above its maximum survives the
+load, as it does in legacy, and the save writes it back unchanged.
+
+Under a map's conqueror will, `GetMaxHP` halves the maximum hit points when the character's
+`POINT_SUNGMA_HP` is below the map's `hp` will, and `GetLimitPoint(POINT_MOV_SPEED)` halves the
+movement speed when `POINT_SUNGMA_MOVE` is below its `move` will. Both need a conqueror level
+above 0 (`GetSungMaWill`). So a weak conqueror loaded on such a map is sent half its maximum,
+has its stored hit points clamped to that half, and is inserted at half its speed.
+
+### 212.3 Divergences
+
+| Divergence | legacy |
+|---|---|
+| The records `ComputePoints` writes inside `SetPlayerProto` are not sent. | `ch->BindDesc(d)` comes before `SetPlayerProto` (`G/input_db.cpp:385-386`), so each `PointChange` writes a `GC_CHARACTER_POINT_CHANGE` while the descriptor is still in the select phase; `PHASE_LOADING` is set at `:414`. |
+
+The client's select phase reads byte 17 (`PythonNetworkStreamPhaseSelect.cpp:146`, ledger 151.6),
+but what that reader does with the record was not recorded before the client source left the
+repository. Every slot those records set is one of the 255 slots the loading burst's
+`GC_CHARACTER_POINTS` sets again, with the values the load ends on, so the client leaves the load
+with the same points either way. The play test calibrates it, and `STATUS.md`'s Divergences table
+carries it.
+
+Slots 0 and 2 of the points record stay as ledger 187 recorded them: zero and the stored voice,
+where legacy sends uninitialised stack.
+
+### 212.4 Defects not reproduced
+
+1. **Every point change is written twice.** `PointChange` writes its record (`G/char.cpp:4803-4820`)
+   and then calls `UpdatePointsPacket` (`:4822`), which writes the same record again
+   (`:2089-2118`). The copies differ only for `POINT_MOV_SPEED`, which the second halves under the
+   map's movement will, so a weak conqueror is first told a speed it does not have. The Rewrite
+   writes one record, carrying the value the client ends on in legacy: the second one.
+2. **The base maxima are stored only when they differ from the old total.** `ComputePoints` stores
+   the base maximum hit points in the real array only `if (iMaxHP != GetMaxHP())`
+   (`G/char.cpp:3050-3062`), comparing the new base with the old *total*, and the same for spell
+   points. When the old total happens to equal the new base, the previous base is kept and every
+   bonus is then added to the wrong base. The Rewrite always stores the new base.
+3. **Point arithmetic wraps.** Legacy sums in `int`. The Rewrite sums in 64 bits and saturates on
+   the narrowing. No value a client can reach today comes near either bound, so this is recorded
+   for the reader who meets the saturation, not as a client-visible difference.
+
+`STATUS.md`'s Defects list carries all three.
+
+### 212.5 Not ported yet
+
+- **The level-up chain**: `POINT_LEVEL`, `POINT_EXP`, `POINT_LEVEL_STEP` and their three conqueror
+  arms, with the quest trigger, the guild and party updates and the save. `PointChange` refuses
+  them, so no caller can believe a level-up happened.
+- **The random hit and spell points** (`iRandomHP`, `iRandomSP`). They grow only at a level-up, so
+  both are 0; the store gains their columns when the level-up is ported.
+- **The currencies and the inventory unlocks** (`POINT_GOLD`, `POINT_GAYA`, `POINT_INVEN`), and the
+  arms that drive their own system: polymorph, mount, energy, the costume attribute bonus, the
+  three biologist arms and the two protected-inventory arms. All are refused.
+- **Equipment, affects and skills.** Every part of `ComputePoints` that reads them is absent. The
+  worn-armour sum and the passive-skill bonuses are inputs (`set_armour`, `set_passive_bonuses`)
+  so those systems can supply them; both are 0 today, which is exact for a character with no worn
+  armour and no skill level (212.1's pin). The equipment load is the next section.
+- **The `IsDead() || IsStun()` guard** on the three pools (the Rewrite has no death yet), the
+  target and party broadcasts after a hit-point change, the walking switch when stamina empties,
+  and the polymorph and mount branches of the battle points.
+- **Status allocation** (`POINT_STAT` through `CG_STATE_CHECKER`) and **regeneration**.
+
+### 212.6 Scenarios and Parity inventory
+
+`the_points_are_computed_at_load_and_the_item_load_clamps_the_pools` loads Alpha, a level-154
+shaman with 17, 18, 19 and 20 in the four attributes, on map 1, with 100000 hit points, 70000 spell
+points and 12345 stamina stored. Every expected value is a hand sum of the shaman row of
+`JobInitialPoints` or of `ComputeBattlePoints`, not the engine's output:
+
+| slot | value | from |
+|---|---|---|
+| hit points, maximum | 100000, 1420 | stored; 700 + 18 x 40 |
+| spell points, maximum | 70000, 600 | stored; 200 + 20 x 20 |
+| stamina, maximum | 12345, 890 | stored; 800 + 18 x 5 |
+| defence grade | 168 | 154 + 18 x 4 / 5 |
+| attack grade | 344 | 2 x 154 + (4 x 17 + 2 x 20) / 3 |
+| shown defence grade | 172 | 154 + 18 |
+| magic attack grade | 348 | 2 x 154 + 2 x 20 |
+| magic defence grade | 180 | 154 + (3 x 20 + 18) / 3 |
+| the three speeds | 100 | the base speed |
+| the four sungma points, the conqueror level | 34 to 37, 33 | stored |
+
+The item load then sends the point changes (5, 0, 1420) and (7, 0, 600), then gold, then the
+points record with only the two pools changed, and the logout save writes 1420, 600 and 12345.
+
+`a_conqueror_below_the_map_will_is_sent_half_its_speed_and_hit_points` adds map 373
+(`metin2_map_eastplain_01`, will 15, 10, 15, 20) to Channel 1 and loads Gamma, a level-90 warrior
+with conqueror level 1, 9 hit-point sungma and 14 movement sungma, standing on it with 700 stored
+hit points. The points record carries 700 hit points, a maximum of 380 (half of 600 + 4 x 40), a
+spell point maximum of 260, an attack speed of 100 and a movement speed of 50. The item load sends
+(5, 0, 380), the insert record's speeds are 50 and 100, and the save writes 380 hit points.
+
+- `sys.char.points` moves from `missing` to `partial`. Its note names both scenarios and lists
+  what is left: the level-up and experience, status allocation, the equipment and affect bonuses,
+  the passive skills and regeneration. The scenario cell stays empty, because the inventory check
+  lets only a `ported` row name a scenario.
+- `gc.player_point_change` moves from `codec` to `ported`, naming the first scenario.
+
+### 212.7 Mutation sweep
+
+74 mutants, each applied to the pristine file with the change asserted to be in executable code,
+and every file restored and checked against its pre-sweep SHA-256. Each mutant ran its crate's
+tests (`world`'s library, or `db`'s `players` test), then `prodomo`'s library, then the points,
+conqueror, load, logout, relog and item scenarios, all with `DATABASE_URL` set, and stopped at the
+first failing run.
+
+| group | mutants | result |
+|---|---|---|
+| `world/src/character/points.rs`: the load's order, the sungma copy and the attribute slots; both movement and attack limits; the will's halving of the speed, the maximum and its positive guard, its conqueror guard, the movement comparison and the map lookup; `RaceToJob`; both pools' `CheckMaximumPoints` comparisons and the halved maximum it reads; the next-experience amount, the battle recompute, the zero hit point return, the three pool bounds, the stamina guard, the percent cap, the shown defence grade, the speed floor, the immune bit and the shown amount; the points packet's two real slots; the four attack formulas, the defence, shown defence and both magic grades, the haste and the mall bonus; the three per-attribute maxima, the two base speeds and the inventory slot; the `@fixme118` restores; the narrowing and the default slot | 48 | 46 killed, 2 survived |
+| `prodomo/src/loading_phase.rs`: the slots read from `GetPoint`, the limited movement speed, the pools and the hit point maximum, stamina, the conqueror level, the spell point maximum; the item load's order and clamp; the point change's header and amount; `GC_CHARACTER_ADD`'s two speeds and the byte fallback; the row's sungma order, pools, map and conqueror level | 18 | 17 killed, 1 survived |
+| `prodomo/src/main.rs`: the map the points are built on, the three pools the held row takes, the movement gate's speed, and the engine the item load clamps | 6 | 4 killed, 2 survived |
+| `db/src/players.rs`: the sungma hit point column and the immune column | 2 | 2 killed |
+
+Every kill was semantic: no mutant failed to compile. Of the five survivors, one was a real gap and
+now has a test:
+
+| survivor | the test that kills it |
+|---|---|
+| the hit point bound reading the base maximum (`self.max_hp`) instead of `GetMaxHP()` | `a_weak_conqueror_s_heal_stops_at_the_halved_maximum`: a weak conqueror on map 376 with 300 of a halved 380 is healed by 200, gains 80, and is told 380 |
+
+The other four are equivalent today:
+
+| survivor | why it cannot be told apart |
+|---|---|
+| the `@fixme118` hit point restore removed (`if self.hp != hp_before` made `if false`) | Without affects the restore only meets `ComputePoints`' own clamp, so it asks for a positive change at the maximum. That is bounded to 0 (`G/char.cpp:4254`), and a zero hit point change returns before its record (`:4800-4801`). The spell point restore has no such return, and its mutant was killed. The class of defect it hides, an affect's hit points not coming back, needs affects. |
+| `speed_byte`'s fallback of 255 made 0 | `GetLimitPoint` bounds the movement speed to 0 to 200 and the attack speed to 0 to 170, so the conversion never fails. |
+| the held row's stamina not taking the engine's | `CheckMaximumPoints` lowers only the hit and spell points, so the engine's stamina is the stored one at the end of every load. |
+| the movement gate's speed fixed at 100 | The gate reads the speed only as `== 0` (`prodomo/src/movement.rs:247`), and no loaded character can reach a speed of 0 before affects exist. The zero-speed refusal is pinned by `movement.rs`'s own tests. |
+
+The real survivor was re-run against the finished test with the same sweep and was killed
+semantically, and every file matched its checksum afterwards.
+
+### 212.8 Receipt
+
+Fifty-two new tests and one retired:
+
+- `world/src/character/points.rs`: 42, including
+  `a_weak_conqueror_s_heal_stops_at_the_halved_maximum` from the sweep (212.7);
+- `prodomo/src/loading_phase.rs`: 7 new, and `every_other_point_slot_is_zero`, which pinned
+  ledger 187's zeros, retired for `every_slot_from_point_st_is_the_engine_value` and
+  `the_slots_of_unstored_state_are_zero`;
+- `gamedata/src/sql_dump.rs`: 1 (`the_passive_skill_formulas_are_zero_at_skill_level_zero`);
+- `prodomo/tests/parity.rs`: the two scenarios of 212.6.
+
+The net change is 51, from 2443 to 2494. The gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2494 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2494 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+The first run of the two test gates failed `inventory_rows_keep_the_rules`: `sys.char.points` named
+its scenarios while `partial`, which only a `ported` row may do. The names moved into the note
+(212.6) and every gate was run again; the table is the second run.
+
+`SELECT datname FROM pg_database WHERE datname LIKE 'prodomo\_%'` returns nothing after the
+run, and no `*.core` file is outside `target/`. The workspace has 196 Rust files and 136,239
+lines. No width is claimed in this section: `GC_CHARACTER_POINT_CHANGE`'s 25 bytes and
+`GC_CHARACTER_POINTS`' 2041 are the ones the codecs already pin, and the i686 probe was not run
+(`i686-linux-gnu-g++-12` is not installed on this machine).

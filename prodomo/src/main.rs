@@ -63,8 +63,8 @@ use prodomo::item_move::MoveItemRefused;
 use prodomo::lifecycle::{LifecycleError, PostHandshakePhase};
 use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::loading_phase::{
-    enter_game_burst, judge_enter_game, judge_select, loading_burst, map_is_allowed, points,
-    points_packet, public_map_index, EnterGameVerdict, Neighbourhood, SelectVerdict,
+    enter_game_burst, item_load_points, judge_enter_game, judge_select, load_points, loading_burst,
+    map_is_allowed, public_map_index, EnterGameVerdict, Neighbourhood, SelectVerdict,
 };
 use prodomo::movement::{
     judge_move, judge_pose, MoveContext, MoveDisposition, MoveOutcome, MoveRefusal, PoseOutcome,
@@ -260,6 +260,9 @@ struct Held {
     /// The character the client selected, once the load answered
     /// (legacy `DESC::m_pCharacter`).
     character: Option<db::players::Character>,
+    /// The points of that character (legacy `CHARACTER::m_points` and `m_pointsInstant`),
+    /// computed when the load answered.
+    points: Option<world::character::Points>,
     /// The channel the client logged in through, which is `g_bChannel` on the descriptor.
     ///
     /// It is held from the Channel login rather than read from the listener, because a
@@ -323,7 +326,7 @@ struct SaveEvent {
 ///
 /// `map` is the atlas lookup of the loaded x and y, `x` and `y` are the saved columns,
 /// `sitting` starts false because a loaded character is always standing, and
-/// `move_speed` is `POINT_MOV_SPEED` from the same [`points`] array the loading burst
+/// `move_speed` is `GetLimitPoint(POINT_MOV_SPEED)` from the same points the loading burst
 /// sends, so the movement gate and the record the client shows cannot disagree.
 #[derive(Debug, Clone, PartialEq)]
 struct Avatar {
@@ -1612,10 +1615,15 @@ where
     }
     let vid = character_vid(&character);
     let view = empty_view();
+    // `PlayerLoad` leaves the character on the map its saved position belongs to, and
+    // `SetPlayerProto` computes the points there, because the map's conqueror will is part of
+    // them.
+    let map_index = context.atlas.index_at(character.x, character.y);
+    let mut points = load_points(&character, map_index.unwrap_or(0));
     // `d->BindCharacter(ch)` is the step that makes the character the descriptor's own, and it
     // is what `CInputLogin::Entergame` later reads. Without it `CG_ENTER_GAME` has nothing to
     // answer, so the loaded row is held here and kept for the descriptor's life.
-    let burst = loading_burst(&character, vid, &view);
+    let burst = loading_burst(&character, &points, vid, &view);
     held.character = Some(character.clone());
     held.channel = seat.number;
     info!(
@@ -1632,7 +1640,6 @@ where
         session.set_phase(PostHandshakePhase::Loading).await?;
         send_all(session, &burst.before_map_test).await?;
         // The map test. `PlayerLoad` folds an instance map onto its base map first.
-        let map_index = context.atlas.index_at(character.x, character.y);
         let allowed = map_index.is_some_and(|index| {
             map_is_allowed(
                 public_map_index(index),
@@ -1654,22 +1661,31 @@ where
     }
     // Legacy's DB process answers the player row and then the item rows, so `ItemLoad` runs
     // after `PlayerLoad` has sent the loading burst, while the descriptor is still loading.
-    let Some(items) = load_items(session, addr, context, &character).await else {
+    let Some(items) = load_items(session, addr, context, &character, &mut points, vid).await else {
         return false;
     };
     held.items = items;
-    // `PlayerLoad` leaves the character on the map its saved position belongs to, so the index
-    // the map test just resolved is the character's map. It is held here because the first
-    // thing the game phase does with it is join the client set.
-    held.map = context.atlas.index_at(character.x, character.y);
+    // The item load's `CheckMaximumPoints` may have brought the pools down, and the save
+    // writes them from the held row.
+    if let Some(held_character) = held.character.as_mut() {
+        held_character.hp = points.hp();
+        held_character.sp = points.sp();
+        held_character.stamina = points.stamina();
+    }
+    held.points = Some(points);
+    // The index the map test resolved is the character's map. It is held here because the
+    // first thing the game phase does with it is join the client set.
+    held.map = map_index;
     true
 }
 
 /// The item load at character select, the way `CInputDB::ItemLoad` places a character's
 /// items (`G/input_db.cpp:1451-1567`).
 ///
-/// One `GC_ITEM_SET` per placed item, then `PointsPacket`'s gold and points records, which
-/// legacy sends even for a character with no item. A row the load refuses is logged and
+/// One `GC_ITEM_SET` per placed item, then `CheckMaximumPoints`, which clamps the stored pools
+/// to the maxima the load computed with one `GC_CHARACTER_POINT_CHANGE` each, then
+/// `PointsPacket`'s gold and points records, which legacy sends even for a character with no
+/// item. A row the load refuses is logged and
 /// left in the store; `prodomo::item_load` lists why a row is refused and where that
 /// differs from legacy.
 ///
@@ -1680,6 +1696,8 @@ async fn load_items<S>(
     addr: SocketAddr,
     context: &ConnectionContext,
     character: &db::players::Character,
+    points: &mut world::character::Points,
+    vid: u32,
 ) -> Option<Vec<(ItemPos, Item)>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -1726,7 +1744,7 @@ where
         .iter()
         .map(|placed| placed.record().encode())
         .collect();
-    records.extend(points_packet(character));
+    records.extend(item_load_points(character, points, vid));
     if let Err(error) = send_all(session, &records).await {
         warn!(%addr, %error, "Client session stopped");
         return None;
@@ -1851,9 +1869,13 @@ where
     let Some(character) = held.character.as_ref() else {
         return false;
     };
+    let Some(points) = held.points.as_ref() else {
+        return false;
+    };
     let vid = character_vid(character);
     let burst = enter_game_burst(
         character,
+        points,
         vid,
         &empty_view(),
         seat.number,
@@ -1881,8 +1903,7 @@ where
     // descriptor that never received `GC_PHASE(5)` never gets a lease and so never appears
     // in another client's broadcast. `DESC::SetPlayer` is the legacy step that makes a
     // descriptor visible to the others, and it happens at this same moment.
-    let slots = points(character);
-    let speed = i32::try_from(slots[common::point_slot::POINT_MOV_SPEED]).unwrap_or(0);
+    let speed = points.limit_point(common::point_slot::POINT_MOV_SPEED);
     let map = held.map.unwrap_or_default();
     held.avatar = Some(Avatar {
         map,
