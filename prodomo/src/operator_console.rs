@@ -493,20 +493,22 @@ async fn run_grant(request: &GrantRequest, context: &ConsoleContext) -> String {
 /// Destroy, and describe what happened in one sentence an Operator can act on.
 ///
 /// The answer says whether the **row** is gone, because that is the fact an Operator
-/// needs and the one the store is authoritative about. It does not claim the client was
-/// told, because nothing was: see the note on
-/// [`destroy_and_delete`](crate::item_persist::destroy_and_delete) for why, which is an
-/// open question for the owner and not a choice this console made.
+/// needs and the one the store is authoritative about, and then whether the client was
+/// told, because a client that was not keeps drawing the item until its next login.
 async fn run_destroy(target: &str, id: u32, context: &ConsoleContext) -> String {
     match crate::item_persist::destroy_and_delete(&context.store, &context.controller, target, id)
         .await
     {
-        crate::item_persist::Destroyed::Gone { id, cell } => {
+        crate::item_persist::Destroyed::Gone { id, cell, told } => {
             let (window_type, pos) = cell;
+            let client = if told {
+                "and cleared the cell on the client."
+            } else {
+                "but no client was told, so the cell stays drawn until the next login."
+            };
             format!(
-                "Destroyed item {id} from {target}, freed window {window_type} cell {pos}, and \
-                 deleted its row. The client was not told, so the cell stays drawn until the \
-                 next login."
+                "Destroyed item {id} from {target}, freed window {window_type} cell {pos}, \
+                 deleted its row, {client}"
             )
         }
         crate::item_persist::Destroyed::StillStored { id, error } => {

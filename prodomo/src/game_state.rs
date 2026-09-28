@@ -27,16 +27,21 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use common::item_slots::usable_inventory_cells;
 use gamedata::item_proto::ItemProtos;
-use world::character::{CharacterManager, CharacterManagerError, Rejected};
+use world::character::{
+    move_item, CharacterManager, CharacterManagerError, MoveRequest, MoveRules, Rejected,
+};
 use world::item::{ItemIdRange, ItemIds};
 
+use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
 use crate::client_registry::ClientOutbox;
 use crate::game_loop::PulseProcessor;
 use crate::game_loop_messages::GameCommand;
 use crate::item_grant::{grant_item, GrantOutcome, GrantRefusal, GrantRequest};
+use crate::item_move::{belt_grade, move_facts, MoveItemRefused, MovedItems};
 
 /// Counters the owning side can read while the game thread is running.
 ///
@@ -291,6 +296,8 @@ pub struct GameState {
     /// were. Keeping them apart also means a departed client is removed from one map
     /// and cannot leave a stale sender behind in the other.
     outboxes: HashMap<common::vid::Vid, ClientOutbox>,
+    /// `g_bItemCountLimit`: the largest stack a merge may build.
+    item_count_limit: u16,
 }
 /// An item the world has taken back, together with whose it was.
 ///
@@ -341,7 +348,19 @@ impl GameState {
             metrics: Arc::new(GameStateMetrics::default()),
             last_pulse: 0,
             outboxes: HashMap::new(),
+            item_count_limit: common::item_slots::ITEM_COUNT_LIMIT,
         }
+    }
+
+    /// Set `g_bItemCountLimit`, the largest stack a merge may build.
+    ///
+    /// The configured `game.item_count_limit`, which `ServerConfig::validate` has already
+    /// held to 1 through 5000. Until this is called the limit is legacy's compiled-in 5000
+    /// (`G/config.cpp:41`).
+    #[must_use]
+    pub const fn with_item_count_limit(mut self, limit: u16) -> Self {
+        self.item_count_limit = limit;
+        self
     }
 
     /// A handle to the counters, which stays readable after the state is moved into
@@ -460,43 +479,10 @@ impl GameState {
                 }
             }
             GameCommand::RevokeGrant { target, id, reply } => {
-                let removed = match self.revoke_grant(&target, id) {
-                    Ok(_) => true,
-                    Err(error) => {
-                        // A revoke that could not happen is the state a player can end up
-                        // holding, so it is logged at warn with both ids rather than being
-                        // folded into the boolean the reply carries.
-                        warn!(target = ?target, id, %error, "a granted item could not be taken back");
-                        false
-                    }
-                };
-                // A dropped revoke answer leaves the world in the state the caller is
-                // about to report as wrong, so the log line has to say which id and who
-                // it belonged to: this is the state a player can be holding.
-                if reply.send(removed).is_err() {
-                    warn!(
-                        target = ?target,
-                        id,
-                        "a granted item was taken back but nobody was left to hear about it"
-                    );
-                }
+                self.answer_revoke(&target, id, reply);
             }
             GameCommand::ReleaseItem { target, id, reply } => {
-                let answer = self.revoke_grant(&target, id);
-                // The same answer as the revoke, and for the same reason, but the
-                // consequence is different: a refused release here means a row that is
-                // about to be deleted is still held by the world, so it is logged with
-                // both names rather than folded into a boolean the caller cannot act on.
-                if let Err(error) = &answer {
-                    warn!(target = ?target, id, %error, "an item could not be released from the world");
-                }
-                if reply.send(answer).is_err() {
-                    warn!(
-                        target = ?target,
-                        id,
-                        "an item was released but nobody was left to hear about it"
-                    );
-                }
+                self.answer_release(&target, id, reply);
             }
             GameCommand::EnterWorld {
                 vid,
@@ -544,6 +530,22 @@ impl GameState {
                     );
                 }
             }
+            GameCommand::MoveItem {
+                vid,
+                request,
+                reply,
+            } => {
+                let answer = self.move_item(vid, request);
+                // A dropped move answer means the descriptor is closing. The world has
+                // moved the item, and the store has not, so the next login loads the old
+                // cell; that is the same outcome as a write that failed, and it is logged.
+                if reply.send(answer).is_err() {
+                    warn!(
+                        ?vid,
+                        "an item moved in the world and nobody was left to store it"
+                    );
+                }
+            }
             GameCommand::Stop => {
                 // The loop handles `Stop` itself, before a command ever reaches a
                 // processor. Reaching here would mean the loop and the state
@@ -551,6 +553,54 @@ impl GameState {
                 // hide exactly that.
                 debug_assert!(false, "the game loop must handle Stop itself");
             }
+        }
+    }
+
+    /// Take a granted item back and tell the caller whether it came out.
+    fn answer_revoke(&mut self, target: &str, id: u32, reply: oneshot::Sender<bool>) {
+        let removed = match self.revoke_grant(target, id) {
+            Ok(_) => true,
+            Err(error) => {
+                // A revoke that could not happen is the state a player can end up
+                // holding, so it is logged at warn with both ids rather than being
+                // folded into the boolean the reply carries.
+                warn!(target = ?target, id, %error, "a granted item could not be taken back");
+                false
+            }
+        };
+        // A dropped revoke answer leaves the world in the state the caller is
+        // about to report as wrong, so the log line has to say which id and who
+        // it belonged to: this is the state a player can be holding.
+        if reply.send(removed).is_err() {
+            warn!(
+                target = ?target,
+                id,
+                "a granted item was taken back but nobody was left to hear about it"
+            );
+        }
+    }
+
+    /// Release an item from the world and tell the caller which cell it freed.
+    fn answer_release(
+        &mut self,
+        target: &str,
+        id: u32,
+        reply: oneshot::Sender<Result<Released, RevokeRefused>>,
+    ) {
+        let answer = self.revoke_grant(target, id);
+        // The same answer as the revoke, and for the same reason, but the
+        // consequence is different: a refused release here means a row that is
+        // about to be deleted is still held by the world, so it is logged with
+        // both names rather than folded into a boolean the caller cannot act on.
+        if let Err(error) = &answer {
+            warn!(target = ?target, id, %error, "an item could not be released from the world");
+        }
+        if reply.send(answer).is_err() {
+            warn!(
+                target = ?target,
+                id,
+                "an item was released but nobody was left to hear about it"
+            );
         }
     }
 
@@ -723,6 +773,43 @@ impl GameState {
             .is_some_and(|outbox| outbox.send(record))
     }
 
+    /// Run one `CG_ITEM_MOVE` for the character online under `vid`.
+    ///
+    /// The rules are the character's: its own `Inven_Point`, its worn belt, and the
+    /// configured stack limit. A split takes its id from the world's allocator.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is online under `vid`, and
+    /// [`MoveItemRefused::Refused`] with the world's reason otherwise. Neither changes
+    /// anything.
+    pub fn move_item(
+        &mut self,
+        vid: common::vid::Vid,
+        request: MoveRequest,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let character = self
+            .characters
+            .find_by_vid_mut(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let owner_id = character.player_id();
+        let rules = MoveRules {
+            count_limit: self.item_count_limit,
+            usable_cells: usable_inventory_cells(character.inven_point()),
+            belt_grade: belt_grade(character.items(), &self.protos),
+        };
+        let protos = &self.protos;
+        let done = move_item(
+            character.items_mut(),
+            self.item_ids.as_mut(),
+            request,
+            &rules,
+            |vnum| move_facts(protos, vnum),
+        )
+        .map_err(MoveItemRefused::Refused)?;
+        Ok(MovedItems::new(owner_id, done))
+    }
+
     /// Run one grant against the world, taking the target's own `Inven_Point`.
     fn grant(&mut self, request: &GrantRequest) -> Result<GrantOutcome, GrantRefusal> {
         let Some(item_ids) = self.item_ids.as_mut() else {
@@ -770,8 +857,9 @@ mod tests {
 
     use common::item_slots::{usable_inventory_cells, INVENTORY_MAX_EXTENDED, INVENTORY_MAX_NUM};
     use common::vid::Vid;
+    use db::items::RowChange;
     use protocol::item_pos::ItemPos;
-    use world::character::Lookup;
+    use world::character::{Lookup, MoveRefused};
 
     fn owners() -> ItemProtos {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
@@ -1527,6 +1615,271 @@ mod tests {
             },
         );
         assert!(answer.blocking_recv().unwrap().is_ok());
+    }
+
+    /// A character at VID 7 holding `items`, in a state whose allocator is installed or not.
+    fn a_holder(items: &[(ItemPos, world::item::Item)], ids: bool) -> GameState {
+        let mut state = if ids {
+            a_state()
+        } else {
+            GameState::new(owners())
+        };
+        let (outbox, _inbox) = a_live_outbox();
+        state
+            .enter_world_with_items(Vid::new(7), 7, "Shaman", items, outbox)
+            .expect("the character is admitted with its items");
+        state
+    }
+
+    /// A one-cell item of a real vnum, so the move finds its prototype.
+    fn a_plain_item(id: u32, vnum: u32) -> world::item::Item {
+        let mut item = world::item::Item::new(id, vnum);
+        item.set_size(1).expect("a positive footprint");
+        item
+    }
+
+    /// A stack of `count` small red potions, which the owner's table makes stackable.
+    fn a_potion_stack(id: u32, count: u16) -> world::item::Item {
+        let mut item = a_plain_item(id, 27_001);
+        item.flags = world::item::ITEM_FLAG_STACKABLE;
+        item.count = count;
+        item
+    }
+
+    fn inventory(cell: u16) -> ItemPos {
+        ItemPos::new(common::item_slots::EWindows::Inventory as u8, cell)
+    }
+
+    fn a_move(from: u16, to: u16, count: u16) -> MoveRequest {
+        MoveRequest {
+            from: inventory(from),
+            to: inventory(to),
+            count,
+        }
+    }
+
+    fn held_at(state: &GameState, pos: ItemPos) -> Lookup {
+        state
+            .characters()
+            .find_by_vid(Vid::new(7))
+            .expect("the character is in the world")
+            .items()
+            .get(pos)
+    }
+
+    fn encoded(record: world::character::ItemRecord) -> Vec<u8> {
+        let mut frame = Vec::new();
+        record.encode_into(&mut frame);
+        frame
+    }
+
+    #[test]
+    fn a_move_command_moves_the_item_and_answers_with_its_records_and_row() {
+        let vnum = a_plain_vnum();
+        let mut state = a_holder(&[(inventory(0), a_plain_item(11, vnum))], true);
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        state.apply(GameCommand::MoveItem {
+            vid: Vid::new(7),
+            request: a_move(0, 5, 0),
+            reply,
+        });
+        let moved = answer
+            .blocking_recv()
+            .expect("the game thread answered")
+            .expect("the move happened");
+        assert_eq!(moved.kind, world::character::MoveKind::Moved);
+        assert_eq!(
+            moved.owner_id, 7,
+            "the row owner is the store id, not the VID"
+        );
+        let stored = state
+            .characters()
+            .find_by_vid(Vid::new(7))
+            .unwrap()
+            .items()
+            .item(11)
+            .expect("the item is still held")
+            .clone();
+        assert_eq!(
+            moved.records,
+            vec![
+                encoded(world::character::ItemRecord::Set(
+                    world::item::gc_item_clear(inventory(0))
+                )),
+                encoded(world::character::ItemRecord::Set(
+                    stored.gc_item_set(inventory(5), 0)
+                )),
+            ],
+            "the old cell is cleared first, then the new one is set"
+        );
+        assert_eq!(
+            moved.changes,
+            vec![RowChange::Moved {
+                id: 11,
+                window_type: 1,
+                pos: 5,
+            }]
+        );
+        assert_eq!(held_at(&state, inventory(5)), Lookup::Occupied(11));
+        assert_eq!(held_at(&state, inventory(0)), Lookup::Empty);
+    }
+
+    #[test]
+    fn a_move_for_a_vid_nobody_holds_is_refused_by_name() {
+        let mut state = a_holder(&[(inventory(0), a_plain_item(11, a_plain_vnum()))], true);
+        assert_eq!(
+            state.move_item(Vid::new(8), a_move(0, 5, 0)),
+            Err(MoveItemRefused::NoSuchCharacter { vid: Vid::new(8) })
+        );
+        assert_eq!(held_at(&state, inventory(0)), Lookup::Occupied(11));
+    }
+
+    #[test]
+    fn a_refused_move_answers_why_and_leaves_the_world_alone() {
+        let vnum = a_plain_vnum();
+        let mut state = a_holder(
+            &[
+                (inventory(0), a_plain_item(11, vnum)),
+                (inventory(1), a_plain_item(12, vnum)),
+            ],
+            true,
+        );
+        // Cell 90 is the first one a character with no extra pages has not unlocked.
+        assert_eq!(
+            state.move_item(Vid::new(7), a_move(0, 90, 0)),
+            Err(MoveItemRefused::Refused(MoveRefused::NoRoom))
+        );
+        assert_eq!(
+            state.move_item(Vid::new(7), a_move(4, 5, 0)),
+            Err(MoveItemRefused::Refused(MoveRefused::Empty))
+        );
+        assert_eq!(held_at(&state, inventory(0)), Lookup::Occupied(11));
+        assert_eq!(held_at(&state, inventory(1)), Lookup::Occupied(12));
+        assert_eq!(held_at(&state, inventory(90)), Lookup::Empty);
+    }
+
+    #[test]
+    fn the_characters_unlocked_pages_bound_the_destination() {
+        let mut state = a_holder(&[(inventory(0), a_plain_item(11, a_plain_vnum()))], true);
+        state
+            .characters_mut()
+            .find_by_vid_mut(Vid::new(7))
+            .unwrap()
+            .set_inven_point(1);
+        // One point unlocks one more row of five, so cell 94 is open and 95 is not.
+        assert_eq!(
+            state.move_item(Vid::new(7), a_move(0, 95, 0)),
+            Err(MoveItemRefused::Refused(MoveRefused::NoRoom))
+        );
+        assert!(state.move_item(Vid::new(7), a_move(0, 94, 0)).is_ok());
+        assert_eq!(held_at(&state, inventory(94)), Lookup::Occupied(11));
+    }
+
+    #[test]
+    fn a_split_needs_the_allocator_and_stores_the_new_item_whole() {
+        let items = [(inventory(0), a_potion_stack(11, 10))];
+        let mut without = a_holder(&items, false);
+        assert_eq!(
+            without.move_item(Vid::new(7), a_move(0, 3, 4)),
+            Err(MoveItemRefused::Refused(MoveRefused::NoItemIds))
+        );
+        assert_eq!(held_at(&without, inventory(3)), Lookup::Empty);
+
+        let mut state = a_holder(&items, true);
+        let moved = state
+            .move_item(Vid::new(7), a_move(0, 3, 4))
+            .expect("the split happens");
+        assert_eq!(moved.kind, world::character::MoveKind::Split);
+        let Lookup::Occupied(piece) = held_at(&state, inventory(3)) else {
+            panic!("the new stack is at the destination");
+        };
+        assert_ne!(piece, 11, "the new stack has an id of its own");
+        let [RowChange::Count { id: 11, count: 6 }, RowChange::Created(row)] =
+            moved.changes.as_slice()
+        else {
+            panic!("the source count and then the new row: {:?}", moved.changes);
+        };
+        assert_eq!(row.id, piece);
+        assert_eq!(row.count, 4);
+        assert_eq!(row.vnum, 27_001);
+        assert_eq!(row.owner_id, Some(7));
+        assert_eq!((row.window_type, row.pos), (1, 3));
+    }
+
+    #[test]
+    fn the_configured_count_limit_caps_a_merge() {
+        let items = [
+            (inventory(0), a_potion_stack(11, 8)),
+            (inventory(1), a_potion_stack(12, 5)),
+        ];
+        let mut state = a_holder(&items, true).with_item_count_limit(10);
+        let moved = state
+            .move_item(Vid::new(7), a_move(0, 1, 0))
+            .expect("the merge happens");
+        assert_eq!(moved.kind, world::character::MoveKind::Merged);
+        assert_eq!(
+            moved.changes,
+            vec![
+                RowChange::Count { id: 11, count: 3 },
+                RowChange::Count { id: 12, count: 10 },
+            ],
+            "only five fit under a limit of ten"
+        );
+
+        // The default is the compiled-in 5000, so the same merge moves every potion.
+        let mut state = a_holder(&items, true);
+        let moved = state
+            .move_item(Vid::new(7), a_move(0, 1, 0))
+            .expect("the merge happens");
+        assert_eq!(
+            moved.changes,
+            vec![
+                RowChange::Destroyed { id: 11 },
+                RowChange::Count { id: 12, count: 13 },
+            ]
+        );
+        assert_eq!(held_at(&state, inventory(0)), Lookup::Empty);
+    }
+
+    /// The owner's belt with the highest grade, which opens every belt cell.
+    fn the_widest_belt() -> (u32, i32) {
+        let protos = owners();
+        let belt = gamedata::item_proto_value::type_value(b"ITEM_BELT").expect("a belt type");
+        protos
+            .rows()
+            .iter()
+            .filter(|proto| proto.item_type == belt)
+            .map(|proto| (proto.vnum, proto.values[0]))
+            .max_by_key(|&(_, grade)| grade)
+            .expect("the owner's table has a belt")
+    }
+
+    #[test]
+    fn a_belt_cell_opens_only_under_a_worn_belt_and_is_stored_in_the_belt_window() {
+        let potion = [(inventory(0), a_potion_stack(11, 3))];
+        let mut bare = a_holder(&potion, true);
+        assert_eq!(
+            bare.move_item(Vid::new(7), a_move(0, 274, 0)),
+            Err(MoveItemRefused::Refused(MoveRefused::NoRoom)),
+            "no belt is worn, so no belt cell is open"
+        );
+
+        let (belt, grade) = the_widest_belt();
+        assert!(grade > 0, "the widest belt opens at least one cell");
+        let worn = inventory(crate::item_move::BELT_WEAR_CELL);
+        let mut state = a_holder(&[potion[0].clone(), (worn, a_plain_item(20, belt))], true);
+        let moved = state
+            .move_item(Vid::new(7), a_move(0, 274, 0))
+            .expect("the worn belt opens its first cell");
+        assert_eq!(
+            moved.changes,
+            vec![RowChange::Moved {
+                id: 11,
+                window_type: common::item_slots::EWindows::BeltInventory as u8,
+                pos: 0,
+            }]
+        );
+        assert_eq!(held_at(&state, inventory(274)), Lookup::Occupied(11));
     }
 
     #[test]

@@ -9,10 +9,12 @@
 //! sash materials and the costume materials -- belong to their own windows and
 //! are reached through their own accessors, so they are out of scope here.
 //!
-//! This type holds **ids**, not items. The items live in an
-//! [`ItemIds`](crate::item::ItemIds)'s view, keyed by id, which is what makes
-//! two of legacy's worst defects unrepresentable rather than merely avoided:
-//! there is no owner pointer to dangle, and a removed id is never reused.
+//! The arrays hold **ids**, and the items themselves are kept beside them in a map
+//! keyed by the same id. That is what makes two of legacy's worst defects
+//! unrepresentable rather than merely avoided: there is no owner pointer to
+//! dangle, and a removed id is never reused. The map is written by the same three
+//! operations that write the arrays, so an id in a cell always has its item and an
+//! item never outlives its cell.
 //!
 //! # The grid is a one-based anchor
 //!
@@ -46,16 +48,21 @@
 //! a per-cell identity. Those are behaviour, not bugs, and the client can see
 //! them.
 
+use std::collections::BTreeMap;
+
 use common::item_slots::{
-    usable_inventory_cells, EWindows, CUSTOM_INVENTORY_CATEGORY_NUM, CUSTOM_INVENTORY_MAX_NUM,
-    CUSTOM_INVENTORY_SLOT_START, DRAGON_SOUL_BOX_COLUMN_NUM, DRAGON_SOUL_INVENTORY_MAX_NUM,
-    FLAT_STACK_STRIDE, INVENTORY_AND_EQUIP_SLOT_MAX, INVENTORY_MAX_NUM, INVENTORY_PAGE_SIZE,
-    SWITCHBOT_SLOT_COUNT,
+    usable_inventory_cells, EWindows, BELT_INVENTORY_SLOT_START, CUSTOM_INVENTORY_CATEGORY_NUM,
+    CUSTOM_INVENTORY_MAX_NUM, CUSTOM_INVENTORY_SLOT_START, DRAGON_SOUL_BOX_COLUMN_NUM,
+    DRAGON_SOUL_INVENTORY_MAX_NUM, FLAT_STACK_STRIDE, INVENTORY_AND_EQUIP_SLOT_MAX,
+    INVENTORY_MAX_NUM, INVENTORY_PAGE_SIZE, SWITCHBOT_SLOT_COUNT,
 };
 use protocol::item_pos::ItemPos;
 
-use super::inventory::{custom_inventory_category_of, is_custom_inventory_position};
-use crate::item::{Item, ItemId, NO_ITEM};
+use super::inventory::{
+    custom_inventory_category_of, inventory_page_by_pos, is_belt_inventory_position,
+    is_custom_inventory_position, stored_window,
+};
+use crate::item::{CountRejected, Item, ItemId, NO_ITEM};
 
 /// `ATTR67_ADD_SLOT_MAX` = 1 (`length.h`): the attribute 67 window holds exactly
 /// one cell, so it is a single slot and not an array.
@@ -270,11 +277,12 @@ impl WalkBounds {
     }
 }
 
-/// A character's item storage: two arrays, two grids, and two small windows.
+/// A character's item storage: two arrays, two grids, two small windows, and the
+/// items they name.
 ///
-/// Ids, not items. The items themselves live in whatever owns them, keyed by
-/// these ids, which is what makes a removed id safe to leave in a log and makes
-/// the "no owner pointer to dangle" claim structural rather than a promise.
+/// The arrays hold ids and the items are kept beside them, keyed by the same id,
+/// which is what makes a removed id safe to leave in a log and makes the "no owner
+/// pointer to dangle" claim structural rather than a promise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CharacterItems {
     /// `pItems` (`char.h:458`): 1370 flat cells.
@@ -289,6 +297,49 @@ pub struct CharacterItems {
     attr67: [ItemId; ATTR67_SLOTS as usize],
     /// `pSwitchbotItems` (`char.h:478`): five slots.
     switchbot: [ItemId; SWITCHBOT_SLOT_COUNT as usize],
+    /// The item each stored id names, with its `pos` set to where it is stored.
+    ///
+    /// Legacy reaches an item through the `CItem *` in the cell. Here the cell holds
+    /// the id and this map holds the item, so a move, a split and a stack merge can
+    /// read an item's count and sockets from the character that holds it. Only
+    /// [`Self::set`], [`Self::remove`], [`Self::release`] and [`Self::set_count`] write
+    /// it, and the first three are the only writers of the arrays too.
+    bodies: BTreeMap<ItemId, Item>,
+}
+
+/// Why a stack count was not changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CountRefused {
+    /// This storage does not hold the id.
+    NotHeld(ItemId),
+    /// The item refused the count.
+    Count(CountRejected),
+}
+
+impl core::fmt::Display for CountRefused {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotHeld(id) => write!(f, "item {id} is not held here"),
+            Self::Count(reason) => reason.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for CountRefused {}
+
+/// `CBeltInventoryHelper::GetAvailableRuleTableByGrade` (`belt_inventory_helper.h:53-58`):
+/// the belt grade a belt cell needs before it may hold an item, in cell order.
+const BELT_RULE_BY_CELL: [i32; 16] = [1, 2, 4, 6, 3, 3, 4, 6, 5, 5, 5, 6, 7, 7, 7, 7];
+
+/// `CBeltInventoryHelper::IsAvailableCell` (`belt_inventory_helper.h:63-70`).
+///
+/// `cell` is counted from the belt band's first cell. Legacy indexes its table with
+/// it unchecked; here a cell past the table is not available.
+#[must_use]
+pub fn belt_cell_is_available(cell: u16, belt_grade: i32) -> bool {
+    BELT_RULE_BY_CELL
+        .get(usize::from(cell))
+        .is_some_and(|&rule| rule <= belt_grade)
 }
 
 impl Default for CharacterItems {
@@ -311,7 +362,39 @@ impl CharacterItems {
             ds_grid: vec![0; usize::from(DRAGON_SOUL_INVENTORY_MAX_NUM)],
             attr67: [NO_ITEM; ATTR67_SLOTS as usize],
             switchbot: [NO_ITEM; SWITCHBOT_SLOT_COUNT as usize],
+            bodies: BTreeMap::new(),
         }
+    }
+
+    /// The item stored under this id, with its `pos` set to where it is stored.
+    #[must_use]
+    pub fn item(&self, id: ItemId) -> Option<&Item> {
+        self.bodies.get(&id)
+    }
+
+    /// The item anchored at a position, as [`Self::get`] finds it.
+    ///
+    /// Only the anchor answers. A cell that another item's footprint covers is free
+    /// as far as this is concerned, which is what legacy's `GetItem` returns for it
+    /// too (`char_item.cpp:260-268` reads `pItems[wCell]`, never the grid).
+    #[must_use]
+    pub fn item_at(&self, pos: ItemPos) -> Option<&Item> {
+        match self.get(pos) {
+            Lookup::Occupied(id) => self.bodies.get(&id),
+            _ => None,
+        }
+    }
+
+    /// Change a stored item's stack size.
+    ///
+    /// # Errors
+    ///
+    /// [`CountRefused::NotHeld`] when this storage does not hold the id, and
+    /// [`CountRefused::Count`] for a zero or over-limit count. Nothing changes on
+    /// either.
+    pub fn set_count(&mut self, id: ItemId, count: u32) -> Result<u16, CountRefused> {
+        let body = self.bodies.get_mut(&id).ok_or(CountRefused::NotHeld(id))?;
+        body.set_count(count).map_err(CountRefused::Count)
     }
 
     /// How many cells the flat array has.
@@ -523,16 +606,16 @@ impl CharacterItems {
 
     /// Could a `size`-cell item be anchored at `cell`?
     ///
-    /// This is `CHARACTER::IsEmptyItemGrid` (`char_item.cpp:737-859`) with three things left
-    /// out, all deliberate, and each one noted where it is left out:
+    /// This is `CHARACTER::IsEmptyItemGrid` (`char_item.cpp:737-859`) as the free-cell
+    /// searches call it, with three things left out, all deliberate, and each one noted where
+    /// it is left out. [`Self::is_empty_item_grid`] is the whole function, for a move.
     ///
     /// * the **belt** arm (`char_item.cpp:764-778`), which is gated on the character wearing a
-    ///   belt and reads the belt item's own values. [`CharacterItems`] holds no worn items, so
-    ///   there is no belt to consult, and the page scan never reaches the belt band anyway.
+    ///   belt and reads the belt item's own values. No search reaches the belt band: the page
+    ///   scan stops at the base inventory and at each custom bank.
     /// * the **exception cell** (`iExceptionCell`, `char_item.cpp:762`), which lets a caller
-    ///   ask about a cell while ignoring one specific item. The only legacy caller is
-    ///   `GetEmptyDragonSoulInventoryWithExceptions` (`char_item.cpp:1291`), a dragon-soul path
-    ///   and not this one.
+    ///   ask about a cell while ignoring one specific item. A search passes none; `MoveItem`
+    ///   passes its source cell, and that is [`Self::is_empty_item_grid`]'s job.
     /// * the **occupied-slot** check. Legacy reads only `bItemGrid` and never `pItems`, so a
     ///   slot holding an item whose grid is empty reads as free here and is then refused by
     ///   `set` as `AlreadyOccupied`. That asymmetry is legacy's; this matches it rather than
@@ -558,6 +641,86 @@ impl CharacterItems {
             // The same read `set_flat` does before it writes, so a cell this call calls clear
             // is a cell `set` will not refuse for a grid conflict.
             Self::page_of(p) == Some(page) && self.grid_owner_flat(p).is_none()
+        })
+    }
+
+    /// Could a `size`-cell item be anchored at `dest`, ignoring the item anchored at
+    /// `exception_cell`?
+    ///
+    /// This is `CHARACTER::IsEmptyItemGrid` (`char_item.cpp:737-859`) for the
+    /// `INVENTORY` window, which is the arm `MoveItem` reaches for the base inventory,
+    /// the custom banks and the belt. Every other window answers `false`: legacy's
+    /// switch has no `EQUIPMENT` arm, so an item can never be *placed* through window
+    /// 2, and the dragon-soul and switchbot arms belong to moves this storage does not
+    /// run yet.
+    ///
+    /// `exception_cell` is the source cell of a move. Legacy passes `Cell.cell` and
+    /// increments it (`:762`), so it matches the grid's one-based anchor of the item
+    /// being moved, which is what lets a two-cell item step one row down onto its own
+    /// lower cell. `None` is legacy's default of `-1`, which increments to 0 and so
+    /// never matches a marked cell.
+    ///
+    /// `belt_grade` is the worn belt's `value0`, or `None` when no belt is worn.
+    /// Legacy reads it from `GetWear(WEAR_BELT)` (`:766-770`); this storage holds no
+    /// worn-item view, so the caller that knows passes it.
+    ///
+    /// One Divergence: in the base inventory the walk ends at `usable_cells` rather
+    /// than at [`INVENTORY_MAX_NUM`]. Legacy's non-custom build checks
+    /// `Inventory_Size()` at both places (`:783`, `:842`); the custom-inventory build
+    /// replaced that with the category end, which for the base inventory is 180, so an
+    /// item can be moved into a page the player has not unlocked and the client will
+    /// not draw it. The bound is the one the grant path uses.
+    #[must_use]
+    pub fn is_empty_item_grid(
+        &self,
+        dest: ItemPos,
+        size: u8,
+        exception_cell: Option<u16>,
+        usable_cells: u16,
+        belt_grade: Option<i32>,
+    ) -> bool {
+        if dest.window_type != EWindows::Inventory as u8 || size == 0 {
+            return false;
+        }
+        let cell = dest.cell;
+        let category = if is_custom_inventory_position(dest) {
+            custom_inventory_category_of(dest)
+        } else {
+            None
+        };
+        let end = category.map_or(usable_cells.min(INVENTORY_MAX_NUM), |cat| {
+            CUSTOM_INVENTORY_SLOT_START + (u16::from(cat) + 1) * CUSTOM_INVENTORY_MAX_NUM
+        });
+        let exception = exception_cell.and_then(|source| source.checked_add(1));
+        let anchor_at = |p: u16| self.grid.get(usize::from(p)).copied().unwrap_or(0);
+        let free = |p: u16| {
+            let anchor = anchor_at(p);
+            anchor == 0 || Some(anchor) == exception
+        };
+        if is_belt_inventory_position(dest) {
+            let Some(grade) = belt_grade else {
+                return false;
+            };
+            if !belt_cell_is_available(cell - BELT_INVENTORY_SLOT_START, grade) {
+                return false;
+            }
+            // Legacy answers an occupied belt cell here, whatever the size, and a free
+            // one of size 1; a larger item falls through to the walk, whose first step
+            // (`cell + 5`) is past the base inventory's end, so it is refused.
+            return match anchor_at(cell) {
+                0 => size == 1,
+                anchor => Some(anchor) == exception,
+            };
+        }
+        if cell >= end || !free(cell) {
+            return false;
+        }
+        let page = inventory_page_by_pos(category, dest);
+        (1..u16::from(size)).all(|j| {
+            let p = cell.saturating_add(j * FLAT_STACK_STRIDE);
+            p < end
+                && inventory_page_by_pos(category, ItemPos { cell: p, ..dest }) == page
+                && free(p)
         })
     }
 
@@ -737,6 +900,7 @@ impl CharacterItems {
             // while that stays true, and it says so rather than guessing.
             _ => return Err(Rejected::UnknownWindow(pos.window_type)),
         }
+        let _body = self.bodies.remove(&id);
         Ok(pos)
     }
 
@@ -813,7 +977,18 @@ impl CharacterItems {
             Some(EWindows::Attr67Add) => self.set_attr67(pos, item),
             Some(EWindows::Switchbot) => self.set_switchbot(pos, item),
             _ => Err(Rejected::UnknownWindow(pos.window_type)),
-        }
+        }?;
+        // The stored copy says where it is in legacy's own terms: `SetItem` records the
+        // cell and then the window **the band decides**, not the one the caller sent
+        // (`char_item.cpp:616-630`), and that pair is what `UpdatePacket` and
+        // `RemoveFromCharacter` address the client with afterwards.
+        let mut body = item.clone();
+        body.pos = ItemPos {
+            window_type: stored_window(pos.window_type, pos.cell) as u8,
+            cell: pos.cell,
+        };
+        let _previous = self.bodies.insert(item.id, body);
+        Ok(())
     }
 
     fn set_flat(&mut self, pos: ItemPos, item: &Item) -> Result<(), Rejected> {
@@ -1128,7 +1303,9 @@ impl CharacterItems {
                 Err(Rejected::UnknownWindow(pos.window_type))
             }
             _ => Err(Rejected::UnknownWindow(pos.window_type)),
-        }
+        }?;
+        let _body = self.bodies.remove(&item.id);
+        Ok(())
     }
 
     fn remove_flat(&mut self, pos: ItemPos, item: &Item) -> Result<(), Rejected> {
@@ -2104,5 +2281,134 @@ mod tests {
         assert_eq!(items.grid_anchor(pos(SWITCH, 0)), 0);
         assert_eq!(items.grid_anchor(pos(SAFEBOX, 0)), 0);
         assert_eq!(items.grid_anchor(pos(200, 0)), 0);
+    }
+
+    #[test]
+    fn the_belt_rule_table_is_legacys_in_cell_order() {
+        // `belt_inventory_helper.h:53-58`, row by row.
+        let needed: Vec<i32> = (0..16)
+            .map(|cell| {
+                (0..=7)
+                    .find(|&grade| belt_cell_is_available(cell, grade))
+                    .expect("grade 7 opens every cell")
+            })
+            .collect();
+        assert_eq!(needed, [1, 2, 4, 6, 3, 3, 4, 6, 5, 5, 5, 6, 7, 7, 7, 7]);
+        assert!(!belt_cell_is_available(0, 0));
+        assert!(!belt_cell_is_available(16, i32::MAX), "past the table");
+    }
+
+    #[test]
+    fn the_grid_check_ignores_the_moving_items_own_cells() {
+        let mut items = CharacterItems::new();
+        items.set(pos(INV, 3), &sized(7, 2)).expect("cells 3 and 8");
+        // Cell 8 is the item's own lower cell: free for its own move, not for another.
+        assert!(!items.is_empty_item_grid(pos(INV, 8), 2, None, 90, None));
+        assert!(items.is_empty_item_grid(pos(INV, 8), 2, Some(3), 90, None));
+        // An exception naming another cell frees nothing.
+        assert!(!items.is_empty_item_grid(pos(INV, 8), 2, Some(4), 90, None));
+        assert!(items.is_empty_item_grid(pos(INV, 4), 2, None, 90, None));
+    }
+
+    #[test]
+    fn the_grid_check_stops_at_the_page_the_usable_cells_and_the_bank() {
+        let items = CharacterItems::new();
+        // Page one is cells 0-44: a two-cell item at 40 would reach 45.
+        assert!(!items.is_empty_item_grid(pos(INV, 40), 2, None, 90, None));
+        assert!(items.is_empty_item_grid(pos(INV, 35), 2, None, 90, None));
+        // The usable cells bound the base inventory, not the 180 legacy uses.
+        assert!(items.is_empty_item_grid(pos(INV, 89), 1, None, 90, None));
+        assert!(!items.is_empty_item_grid(pos(INV, 90), 1, None, 90, None));
+        assert!(!items.is_empty_item_grid(pos(INV, 180), 1, None, u16::MAX, None));
+        // A bank's last cell takes a one-cell item and not a two-cell one.
+        let last = CUSTOM_INVENTORY_SLOT_START + CUSTOM_INVENTORY_MAX_NUM - 1;
+        assert!(items.is_empty_item_grid(pos(INV, last), 1, None, 90, None));
+        assert!(!items.is_empty_item_grid(pos(INV, last), 2, None, 90, None));
+    }
+
+    #[test]
+    fn the_grid_check_answers_only_for_the_inventory_window() {
+        let items = CharacterItems::new();
+        for window in [EQUIP, DS, SWITCH, A67, SAFEBOX, MALL, BELT] {
+            assert!(!items.is_empty_item_grid(pos(window, 3), 1, None, 90, None));
+        }
+        assert!(!items.is_empty_item_grid(pos(INV, 3), 0, None, 90, None));
+    }
+
+    #[test]
+    fn a_belt_cell_needs_a_belt_its_grade_and_one_cell() {
+        let first = BELT_INVENTORY_SLOT_START;
+        let mut items = CharacterItems::new();
+        assert!(!items.is_empty_item_grid(pos(INV, first), 1, None, 90, None));
+        assert!(items.is_empty_item_grid(pos(INV, first), 1, None, 90, Some(1)));
+        assert!(!items.is_empty_item_grid(pos(INV, first + 1), 1, None, 90, Some(1)));
+        assert!(!items.is_empty_item_grid(pos(INV, first), 2, None, 90, Some(7)));
+        items
+            .set(pos(INV, first), &one_cell(7))
+            .expect("the belt cell");
+        assert!(!items.is_empty_item_grid(pos(INV, first), 1, None, 90, Some(1)));
+        // Legacy answers an occupied belt cell by the exception alone, whatever the size.
+        assert!(items.is_empty_item_grid(pos(INV, first), 2, Some(first), 90, Some(1)));
+    }
+
+    #[test]
+    fn a_stored_item_is_found_by_id_and_by_its_anchor_only() {
+        let mut items = CharacterItems::new();
+        items
+            .set(pos(EQUIP, 3), &sized(7, 2))
+            .expect("cells 3 and 8");
+        let body = items.item(7).expect("held");
+        assert_eq!(
+            body.pos,
+            pos(INV, 3),
+            "stored in window 1 whatever window named it"
+        );
+        assert_eq!(items.item_at(pos(INV, 3)).map(|i| i.id), Some(7));
+        assert_eq!(items.item_at(pos(EQUIP, 3)).map(|i| i.id), Some(7));
+        assert!(
+            items.item_at(pos(INV, 8)).is_none(),
+            "a covered cell has no item"
+        );
+        assert!(items.item(8).is_none());
+    }
+
+    #[test]
+    fn a_count_change_reaches_the_stored_item() {
+        let mut items = CharacterItems::new();
+        items.set(pos(INV, 3), &one_cell(7)).expect("cell 3");
+        assert_eq!(items.set_count(7, 42), Ok(42));
+        assert_eq!(items.item(7).map(|i| i.count), Some(42));
+        assert_eq!(items.set_count(8, 42), Err(CountRefused::NotHeld(8)));
+        assert!(matches!(items.set_count(7, 0), Err(CountRefused::Count(_))));
+        assert_eq!(
+            items.item(7).map(|i| i.count),
+            Some(42),
+            "a refusal changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_release_answers_the_stored_position_and_forgets_the_item() {
+        let mut items = CharacterItems::new();
+        items
+            .set(pos(EQUIP, 3), &sized(7, 2))
+            .expect("cells 3 and 8");
+        assert_eq!(items.release(7), Ok(pos(INV, 3)));
+        assert!(items.item(7).is_none());
+        assert_eq!(items, CharacterItems::new());
+        assert!(items.release(7).is_err());
+    }
+
+    #[test]
+    fn a_move_carries_the_body_to_its_new_position() {
+        let mut items = CharacterItems::new();
+        let item = one_cell(7);
+        items.set(pos(INV, 3), &item).expect("cell 3");
+        items
+            .move_item(pos(INV, 3), pos(INV, 9), &item)
+            .expect("moves");
+        assert_eq!(items.item(7).map(|i| i.pos), Some(pos(INV, 9)));
+        let _ = items.remove(pos(INV, 9), &item);
+        assert!(items.item(7).is_none());
     }
 }

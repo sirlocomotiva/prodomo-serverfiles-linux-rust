@@ -70,6 +70,8 @@ pub mod item_grant;
 
 /// Placing a character's stored items at character select.
 pub mod item_load;
+/// `CG_ITEM_MOVE` around the world's move: prototype facts, row changes, and notices.
+pub mod item_move;
 pub mod item_persist;
 pub mod operator;
 pub mod operator_console;

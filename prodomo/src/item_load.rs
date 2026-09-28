@@ -297,6 +297,26 @@ fn load_position(row: &ItemRow) -> Result<ItemPos, Refused> {
     }
 }
 
+/// The window and position a stored row gives an item the world holds at `pos`.
+///
+/// The inverse of the load's belt translation, and `CItemManager::SaveSingleItem`'s
+/// (`G/item_manager.cpp:503-520`): an `INVENTORY` cell in the belt range is stored as
+/// `BELT_INVENTORY` at `cell - BELT_INVENTORY_SLOT_START`, because `ENABLE_BELT_INVENTORY_EX`
+/// is defined. Every other position is stored as the world holds it. The `EQUIPMENT` arm
+/// (`pos = cell - INVENTORY_MAX_NUM`) is not here, because no item reaches a wear cell until
+/// equipping is ported, and the load refuses one.
+#[must_use]
+pub fn stored_row_position(pos: ItemPos) -> (u8, u32) {
+    let belt = BELT_INVENTORY_SLOT_START..BELT_INVENTORY_SLOT_START + BELT_INVENTORY_SLOT_COUNT;
+    if pos.window_type == EWindows::Inventory as u8 && belt.contains(&pos.cell) {
+        return (
+            EWindows::BeltInventory as u8,
+            u32::from(pos.cell - BELT_INVENTORY_SLOT_START),
+        );
+    }
+    (pos.window_type, u32::from(pos.cell))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,5 +597,55 @@ mod tests {
             )
         ));
         assert_eq!(refused.len(), 11);
+    }
+
+    #[test]
+    fn a_belt_cell_is_stored_in_the_belt_window_and_loads_back_to_the_same_cell() {
+        // The first and last belt cells, and the cells either side of the range, which
+        // must stay in the INVENTORY window as the world holds them.
+        let belt = EWindows::BeltInventory as u8;
+        let end = BELT_INVENTORY_SLOT_START + BELT_INVENTORY_SLOT_COUNT;
+        assert_eq!(
+            stored_row_position(ItemPos::new(INVENTORY, BELT_INVENTORY_SLOT_START)),
+            (belt, 0)
+        );
+        assert_eq!(
+            stored_row_position(ItemPos::new(INVENTORY, end - 1)),
+            (belt, u32::from(BELT_INVENTORY_SLOT_COUNT - 1))
+        );
+        assert_eq!(
+            stored_row_position(ItemPos::new(INVENTORY, BELT_INVENTORY_SLOT_START - 1)),
+            (INVENTORY, u32::from(BELT_INVENTORY_SLOT_START - 1))
+        );
+        assert_eq!(
+            stored_row_position(ItemPos::new(INVENTORY, end)),
+            (INVENTORY, u32::from(end))
+        );
+        // The hand values: 274 is cell 0 of the belt and 289 is cell 15.
+        assert_eq!(stored_row_position(ItemPos::new(1, 289)), (9, 15));
+        assert_eq!(stored_row_position(ItemPos::new(1, 290)), (1, 290));
+    }
+
+    #[test]
+    fn every_position_a_move_can_store_loads_back_where_it_was() {
+        let vnum = a_vnum(&owners(), 1, false);
+        let cells = (0..INVENTORY_MAX_NUM)
+            .chain(BELT_INVENTORY_SLOT_START..BELT_INVENTORY_SLOT_START + BELT_INVENTORY_SLOT_COUNT)
+            .chain(CUSTOM_INVENTORY_SLOT_START..common::item_slots::CUSTOM_INVENTORY_SLOT_END);
+        for cell in cells {
+            let pos = ItemPos::new(INVENTORY, cell);
+            let (window, stored) = stored_row_position(pos);
+            assert_eq!(
+                load_position(&row(1, window, stored, vnum)),
+                Ok(pos),
+                "cell {cell} did not survive the store"
+            );
+        }
+        // A window the world holds under its own number is stored under it too.
+        let dragon_soul = ItemPos::new(EWindows::DragonSoulInventory as u8, 3);
+        assert_eq!(
+            stored_row_position(dragon_soul),
+            (EWindows::DragonSoulInventory as u8, 3)
+        );
     }
 }

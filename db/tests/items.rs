@@ -14,8 +14,9 @@ use db::accounts::create_account;
 use db::credentials::{DeleteCode, Login, NewPassword};
 use db::item_id_range::MINIMUM_REMAIN_COUNT;
 use db::items::{
-    destroy_item, load_item, load_owner_items, max_id_in_range, resolve_item_id_range, save_item,
-    save_owner_items, set_count, Attribute, ItemError, ItemRow, GROUND, MAX_ITEM_ID, SOCKETS,
+    apply_row_changes, destroy_item, load_item, load_owner_items, max_id_in_range,
+    resolve_item_id_range, save_item, save_owner_items, set_count, Attribute, ItemError, ItemRow,
+    RowChange, GROUND, MAX_ITEM_ID, SOCKETS,
 };
 use db::players::{create_player, Created, NewPlayer};
 use db::store::Store;
@@ -760,4 +761,218 @@ async fn a_span_whose_first_id_is_not_below_its_last_is_refused() {
             "span [{first}, {last}] gave {error:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_moves_row_changes_commit_together_in_order() {
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &db.store;
+    let owner = player(store, "acctmove", "MoveOne").await;
+    save_owner_items(
+        store,
+        &[
+            row(1_000_200, owner, 1, 3),
+            row(1_000_201, owner, 1, 4),
+            row(1_000_202, owner, 1, 5),
+        ],
+    )
+    .await
+    .unwrap();
+    let piece = row(1_000_203, owner, 7, 2);
+    apply_row_changes(
+        store,
+        owner,
+        &[
+            // The move frees cell 3, and the split's new row takes a belt cell.
+            RowChange::Moved {
+                id: 1_000_200,
+                window_type: 1,
+                pos: 40,
+            },
+            RowChange::Destroyed { id: 1_000_201 },
+            RowChange::Count {
+                id: 1_000_202,
+                count: 0x0123,
+            },
+            RowChange::Created(piece.clone()),
+        ],
+    )
+    .await
+    .unwrap();
+    let got = load_owner_items(store, owner).await.unwrap();
+    let cells: Vec<(u32, u8, u32, u16)> = got
+        .iter()
+        .map(|item| (item.id, item.window_type, item.pos, item.count))
+        .collect();
+    assert_eq!(
+        cells,
+        vec![
+            (1_000_202, 1, 5, 0x0123),
+            (1_000_200, 1, 40, 7),
+            (1_000_203, 7, 2, 7),
+        ]
+    );
+    assert_eq!(got[2], piece, "the created row is stored whole");
+    // An empty list touches nothing.
+    apply_row_changes(store, owner, &[]).await.unwrap();
+    assert_eq!(load_owner_items(store, owner).await.unwrap(), got);
+}
+
+#[tokio::test]
+async fn a_change_the_owner_cannot_make_rolls_back_the_whole_move() {
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &db.store;
+    let one = player(store, "acctmv1", "MvOne").await;
+    let two = player(store, "acctmv2", "MvTwo").await;
+    save_owner_items(
+        store,
+        &[row(1_000_210, one, 1, 3), row(1_000_212, one, 1, 4)],
+    )
+    .await
+    .unwrap();
+    save_item(store, &row(1_000_211, two, 1, 3)).await.unwrap();
+    let before_one = load_owner_items(store, one).await.unwrap();
+    let before_two = load_owner_items(store, two).await.unwrap();
+    let moved = RowChange::Moved {
+        id: 1_000_210,
+        window_type: 1,
+        pos: 40,
+    };
+
+    // Each of the three statements names the owner, so each is refused for the other
+    // character's row.
+    for theirs in [
+        RowChange::Moved {
+            id: 1_000_211,
+            window_type: 1,
+            pos: 41,
+        },
+        RowChange::Count {
+            id: 1_000_211,
+            count: 3,
+        },
+        RowChange::Destroyed { id: 1_000_211 },
+    ] {
+        let refused = apply_row_changes(store, one, &[moved.clone(), theirs.clone()]).await;
+        assert!(
+            matches!(
+                refused,
+                Err(ItemError::NotOwned {
+                    id: 1_000_211,
+                    owner_id: Some(owner)
+                }) if owner == two
+            ),
+            "{theirs:?} gave {refused:?}"
+        );
+    }
+    let refused = apply_row_changes(
+        store,
+        one,
+        &[
+            moved.clone(),
+            RowChange::Count {
+                id: 1_000_999,
+                count: 3,
+            },
+        ],
+    )
+    .await;
+    assert!(matches!(refused, Err(ItemError::NoSuchItem(1_000_999))));
+    // A moved row onto a cell another row holds is the cell's refusal.
+    let refused = apply_row_changes(
+        store,
+        one,
+        &[
+            moved,
+            RowChange::Moved {
+                id: 1_000_212,
+                window_type: 1,
+                pos: 40,
+            },
+        ],
+    )
+    .await;
+    assert!(matches!(
+        refused,
+        Err(ItemError::CellAlreadyTaken {
+            id: 1_000_212,
+            window_type: 1,
+            pos: 40
+        })
+    ));
+    assert_eq!(load_owner_items(store, one).await.unwrap(), before_one);
+    assert_eq!(load_owner_items(store, two).await.unwrap(), before_two);
+}
+
+#[tokio::test]
+async fn a_change_that_cannot_be_stored_is_refused_before_the_store() {
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &db.store;
+    let owner = player(store, "acctmvbad", "MvBad").await;
+    let other = player(store, "acctmvoth", "MvOther").await;
+    save_item(store, &row(1_000_220, owner, 1, 3))
+        .await
+        .unwrap();
+    let before = load_owner_items(store, owner).await.unwrap();
+    let first = RowChange::Moved {
+        id: 1_000_220,
+        window_type: 1,
+        pos: 40,
+    };
+    let bad = [
+        RowChange::Count {
+            id: 1_000_220,
+            count: 0,
+        },
+        RowChange::Count {
+            id: 1_000_220,
+            count: 5001,
+        },
+        RowChange::Moved {
+            id: 1_000_220,
+            window_type: 11,
+            pos: 0,
+        },
+        RowChange::Moved {
+            id: 1_000_220,
+            window_type: GROUND,
+            pos: 0,
+        },
+        RowChange::Created(row(1_000_221, other, 1, 9)),
+        RowChange::Created(ItemRow {
+            count: 0,
+            ..row(1_000_221, owner, 1, 9)
+        }),
+    ];
+    for change in bad {
+        let refused = apply_row_changes(store, owner, &[first.clone(), change.clone()]).await;
+        assert!(
+            matches!(
+                refused,
+                Err(ItemError::CountOutOfRange(_)
+                    | ItemError::WindowOutOfRange(11)
+                    | ItemError::Corrupt(_))
+            ),
+            "{change:?} gave {refused:?}"
+        );
+        assert_eq!(load_owner_items(store, owner).await.unwrap(), before);
+    }
+    // A created id that is already stored is the insert's refusal.
+    let refused = apply_row_changes(
+        store,
+        owner,
+        &[first, RowChange::Created(row(1_000_220, owner, 1, 9))],
+    )
+    .await;
+    assert!(matches!(
+        refused,
+        Err(ItemError::ItemIdAlreadyStored { id: 1_000_220 })
+    ));
+    assert_eq!(load_owner_items(store, owner).await.unwrap(), before);
 }

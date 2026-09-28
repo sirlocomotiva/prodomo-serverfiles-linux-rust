@@ -3,6 +3,7 @@
 mod combat;
 mod grant;
 mod inventory;
+mod item_move;
 mod items;
 mod manager;
 mod model;
@@ -22,7 +23,13 @@ pub use inventory::{
     is_valid_item_position, placeholder, stored_window, CellBound, FLAT_RANGES,
     INVENTORY_PLACEHOLDER, NPOS,
 };
-pub use items::{CharacterItems, Lookup, Rejected, ATTR67_SLOTS};
+pub use item_move::{
+    move_item, ItemChange, ItemRecord, MoveDone, MoveFacts, MoveKind, MoveRefused, MoveRequest,
+    MoveRules, Unported, AUTO_FIND_CELL,
+};
+pub use items::{
+    belt_cell_is_available, CharacterItems, CountRefused, Lookup, Rejected, ATTR67_SLOTS,
+};
 pub use manager::{CharacterManager, CharacterManagerError, UpdateReport};
 pub use model::{Character, CharacterKind};
 pub use state::{Activity, CoreState, Posture};

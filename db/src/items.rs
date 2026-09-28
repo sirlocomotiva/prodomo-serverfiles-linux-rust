@@ -818,6 +818,188 @@ pub async fn set_count(store: &Store, id: u32, owner_id: u32, count: u16) -> Res
     }
 }
 
+/// One change a move, a stack merge or a split makes to a character's rows.
+///
+/// The world answers a `CG_ITEM_MOVE` with these, in the order they happened, and
+/// [`apply_row_changes`] writes them as one transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowChange {
+    /// The item now sits in this window and cell, in stored terms.
+    Moved {
+        /// The item.
+        id: u32,
+        /// The window byte the row is stored under.
+        window_type: u8,
+        /// The cell the row is stored under.
+        pos: u32,
+    },
+    /// The item's stack size changed.
+    Count {
+        /// The item.
+        id: u32,
+        /// Its new count.
+        count: u16,
+    },
+    /// A split made this item.
+    Created(ItemRow),
+    /// A stack merge used this item up.
+    Destroyed {
+        /// The item.
+        id: u32,
+    },
+}
+
+/// Write one move's row changes as one transaction, under the owner.
+///
+/// Every value is checked before the store is reached, so a change this refuses was never
+/// sent. Every statement names the owner, as [`destroy_item`] and [`set_count`] do, and a
+/// statement that touches no row rolls the whole call back: a move whose rows disagree with
+/// the character that made it has to be seen, not half-written.
+///
+/// # Errors
+///
+/// [`ItemError::CountOutOfRange`], [`ItemError::WindowOutOfRange`] or
+/// [`ItemError::Corrupt`] for a change that cannot be stored, and the [`insert_item`] errors
+/// for a created row. [`ItemError::NoSuchItem`] or [`ItemError::NotOwned`] when a change
+/// names an id the owner does not hold, [`ItemError::CellAlreadyTaken`] when a moved row
+/// lands on another row's cell, and [`ItemError::Database`].
+pub async fn apply_row_changes(
+    store: &Store,
+    owner_id: u32,
+    changes: &[RowChange],
+) -> Result<(), ItemError> {
+    for change in changes {
+        check_change(owner_id, change)?;
+    }
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let insert = format!(
+        "INSERT INTO item ({}) VALUES ({})",
+        all_columns(),
+        placeholders(30, 1)
+    );
+    let mut transaction = store.pool().begin().await?;
+    for change in changes {
+        let (id, touched) = match change {
+            RowChange::Moved {
+                id,
+                window_type,
+                pos,
+            } => {
+                let touched = sqlx::query(
+                    "UPDATE item SET window_type = $3, pos = $4 WHERE id = $1 AND owner_id = $2",
+                )
+                .bind(i64::from(*id))
+                .bind(i64::from(owner_id))
+                .bind(i16::from(*window_type))
+                .bind(i64::from(*pos))
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| classify_move(error, *id, *window_type, *pos))?
+                .rows_affected();
+                (*id, touched)
+            }
+            RowChange::Count { id, count } => {
+                let column =
+                    i16::try_from(*count).map_err(|_| ItemError::CountOutOfRange(*count))?;
+                let touched =
+                    sqlx::query("UPDATE item SET count = $3 WHERE id = $1 AND owner_id = $2")
+                        .bind(i64::from(*id))
+                        .bind(i64::from(owner_id))
+                        .bind(column)
+                        .execute(&mut *transaction)
+                        .await?
+                        .rows_affected();
+                (*id, touched)
+            }
+            RowChange::Destroyed { id } => {
+                let touched = sqlx::query("DELETE FROM item WHERE id = $1 AND owner_id = $2")
+                    .bind(i64::from(*id))
+                    .bind(i64::from(owner_id))
+                    .execute(&mut *transaction)
+                    .await?
+                    .rows_affected();
+                (*id, touched)
+            }
+            RowChange::Created(row) => {
+                let count = check(row)?;
+                bind_item(sqlx::query(&insert), row, count)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| classify_insert(error, row))?;
+                (row.id, 1)
+            }
+        };
+        if touched == 0 {
+            transaction.rollback().await?;
+            return Err(missing(store, id).await);
+        }
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// The checks [`apply_row_changes`] makes before it reaches the store.
+fn check_change(owner_id: u32, change: &RowChange) -> Result<(), ItemError> {
+    match change {
+        RowChange::Moved {
+            id, window_type, ..
+        } => {
+            if *window_type > GROUND {
+                return Err(ItemError::WindowOutOfRange(*window_type));
+            }
+            if *window_type == GROUND {
+                return Err(ItemError::Corrupt(format!(
+                    "item {id} would be moved to the ground window through its owner"
+                )));
+            }
+        }
+        RowChange::Count { count, .. } => {
+            if *count == 0 || u32::from(*count) > ITEM_MAX_COUNT {
+                return Err(ItemError::CountOutOfRange(*count));
+            }
+        }
+        RowChange::Created(row) => {
+            let _count = check(row)?;
+            if row.owner_id != Some(owner_id) {
+                return Err(ItemError::Corrupt(format!(
+                    "item {} was created for {:?} by character {owner_id}",
+                    row.id, row.owner_id
+                )));
+            }
+        }
+        RowChange::Destroyed { .. } => {}
+    }
+    Ok(())
+}
+
+/// Why a change touched no row: the id is not stored, or somebody else holds it.
+async fn missing(store: &Store, id: u32) -> ItemError {
+    match load_item(store, id).await {
+        Ok(None) => ItemError::NoSuchItem(id),
+        Ok(Some(item)) => ItemError::NotOwned {
+            id,
+            owner_id: item.owner_id,
+        },
+        Err(error) => error,
+    }
+}
+
+/// Turn a unique violation on a moved row into the cell it wanted.
+fn classify_move(error: sqlx::Error, id: u32, window_type: u8, pos: u32) -> ItemError {
+    if let sqlx::Error::Database(database) = &error {
+        if database.code().as_deref() == Some("23505") {
+            return ItemError::CellAlreadyTaken {
+                id,
+                window_type,
+                pos,
+            };
+        }
+    }
+    ItemError::Database(error)
+}
+
 /// The highest allocated id in a range, or `None` when the range holds nothing.
 ///
 /// Legacy answers this with `SELECT MAX(id) FROM item%s WHERE id >= %u and id <= %u`

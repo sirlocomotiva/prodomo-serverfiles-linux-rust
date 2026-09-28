@@ -545,8 +545,13 @@ async fn a_destroyed_item_leaves_the_world_and_takes_its_row_with_it() {
     let Some(database) = ScratchDatabase::create_async().await else {
         return;
     };
+    // The receiver is kept, because a dropped one is a client that went away and the
+    // destroy would then rightly report that nobody was told.
     let AWorld {
-        store, controller, ..
+        store,
+        controller,
+        inbox: _inbox,
+        ..
     } = a_world_with_a_client(&database, "Shaman").await;
 
     // Given: a granted, delivered, stored item.
@@ -570,8 +575,13 @@ async fn a_destroyed_item_leaves_the_world_and_takes_its_row_with_it() {
     // Then: both halves are gone, and the answer says which cell was freed so an
     // Operator is not left guessing.
     let cell = match destroyed {
-        prodomo::item_persist::Destroyed::Gone { id: gone, cell } => {
+        prodomo::item_persist::Destroyed::Gone {
+            id: gone,
+            cell,
+            told,
+        } => {
             assert_eq!(gone, id, "the answer names the item that was destroyed");
+            assert!(told, "the client is connected, so it was told");
             cell
         }
         other => panic!("the item and its row should both be gone, got {other:?}"),
@@ -667,12 +677,10 @@ async fn a_destroy_for_a_character_that_is_not_online_never_asks_the_store() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_destroy_sends_nothing_to_the_client_and_says_so() {
-    // The byte-20 question is open, so this pins the current behaviour rather than
-    // blessing it: no record goes out, and the console's own answer tells the Operator
-    // the cell stays drawn until the next login. When the owner answers the question and
-    // a record is added, this test is the one that must change, and it must change on
-    // purpose.
+async fn a_destroy_clears_the_cell_on_the_client_after_the_row_is_gone() {
+    // Ledger 211.3: the clear is a byte-21 `GC_ITEM_SET` with vnum 0 and every field zero,
+    // naming the cell the world freed. Legacy's byte-20 record is not sent, because the
+    // Reference client frames byte 20 at another width and drops it.
     let Some(database) = ScratchDatabase::create_async().await else {
         return;
     };
@@ -683,27 +691,74 @@ async fn a_destroy_sends_nothing_to_the_client_and_says_so() {
         ..
     } = a_world_with_a_client(&database, "Shaman").await;
 
-    // Drain the grant's `GC_ITEM_SET` so this test is looking at what the destroy adds.
+    // Two grants, so the destroyed item is not in cell 0 and a clear that always named cell
+    // 0 would fail. Each grant's `GC_ITEM_SET` is drained so the test reads only what the
+    // destroy adds.
     let _ = grant_one(&store, &controller, "Shaman").await;
-    while inbox.try_recv().is_ok() {}
-
     let id = grant_one(&store, &controller, "Shaman").await;
-    // Drained again, because this grant delivered a record of its own. The first draft
-    // of this test drained only once, and then failed on the *grant's* `GC_ITEM_SET`
-    // rather than on anything the destroy sent -- which would have let a destroy that
-    // sent a record pass, if the assertion had been written a little more loosely.
     while inbox.try_recv().is_ok() {}
 
-    let _ = tokio::time::timeout(
+    let destroyed = tokio::time::timeout(
         Duration::from_secs(15),
         prodomo::item_persist::destroy_and_delete(&store, &controller, "Shaman", id),
     )
     .await
     .expect("the destroy finished");
-
+    let prodomo::item_persist::Destroyed::Gone { cell, told, .. } = destroyed else {
+        panic!("the destroy should succeed, got {destroyed:?}");
+    };
+    assert!(told, "the answer says the client was told");
+    assert_eq!(cell, (1, 1), "the second grant took cell 1");
     assert!(
-        inbox.try_recv().is_err(),
-        "no record may reach the client: the only record that clears a window slot is \
-         byte 20, which the stock client drops, and sending it would reproduce a Defect"
+        db::items::load_item(&store, id)
+            .await
+            .expect("the read")
+            .is_none(),
+        "the row went first"
+    );
+
+    let record = inbox.try_recv().expect("the destroy sent one record");
+    let mut expected = vec![21, 1, 1, 0];
+    expected.resize(protocol::gc_item_window::GC_ITEM_SET_WIRE_SIZE, 0);
+    assert_eq!(
+        record, expected,
+        "byte 21 naming inventory cell 1, then vnum 0 and every other field zero"
+    );
+    assert!(inbox.try_recv().is_err(), "and nothing else");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_destroy_whose_client_is_gone_takes_the_row_and_says_nobody_was_told() {
+    // The console's second answer (ledger 211.3): the world still holds the character, but
+    // its client queue is closed, so the clear reaches nobody and the answer must say so
+    // rather than claim the cell was cleared.
+    let Some(database) = ScratchDatabase::create_async().await else {
+        return;
+    };
+    let AWorld {
+        store,
+        controller,
+        inbox,
+        ..
+    } = a_world_with_a_client(&database, "Shaman").await;
+    let id = grant_one(&store, &controller, "Shaman").await;
+    drop(inbox);
+
+    let destroyed = tokio::time::timeout(
+        Duration::from_secs(15),
+        prodomo::item_persist::destroy_and_delete(&store, &controller, "Shaman", id),
+    )
+    .await
+    .expect("the destroy finished");
+    let prodomo::item_persist::Destroyed::Gone { told, .. } = destroyed else {
+        panic!("the destroy should succeed, got {destroyed:?}");
+    };
+    assert!(!told, "the client queue is closed, so nobody was told");
+    assert!(
+        db::items::load_item(&store, id)
+            .await
+            .expect("the read")
+            .is_none(),
+        "the row goes whether or not a client was told"
     );
 }

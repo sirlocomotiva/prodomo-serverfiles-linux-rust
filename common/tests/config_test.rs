@@ -434,6 +434,19 @@ fn an_item_id_span_that_is_not_ascending_is_refused_before_anything_binds() {
 }
 
 #[test]
+fn the_item_count_limit_is_1_to_the_largest_storable_stack() {
+    for limit in [0u16, 5001, u16::MAX] {
+        let text = with_channels(&format!("[game]\nitem_count_limit = {limit}\n{CHANNEL}"));
+        assert_eq!(invalid(&text), TopologyError::ItemCountLimit(limit));
+    }
+    // Controls: both ends are accepted.
+    for limit in [1u16, 5000] {
+        let text = with_channels(&format!("[game]\nitem_count_limit = {limit}\n{CHANNEL}"));
+        assert_eq!(parse(&text).expect("accepted").game.item_count_limit, limit);
+    }
+}
+
+#[test]
 fn the_item_id_span_pair_must_have_exactly_two_numbers() {
     for value in ["[7]", "[7, 9, 11]", "7", "\"7 9\""] {
         let text = with_channels(&format!("[game]\nitem_id_range = {value}\n{CHANNEL}"));

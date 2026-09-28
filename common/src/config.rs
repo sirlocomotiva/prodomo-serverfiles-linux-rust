@@ -578,6 +578,13 @@ pub enum TopologyError {
         /// The configured last id.
         last: u32,
     },
+    /// `game.item_count_limit` is 0, or above the largest stack the store and the client's
+    /// stack count hold ([`crate::item_slots::ITEM_COUNT_LIMIT`]).
+    ///
+    /// Legacy reads any `WORD` (`config.cpp:976`). A limit of 0 makes every stack merge
+    /// move nothing, and one above 5000 builds a stack the store refuses to write, so a
+    /// merge would succeed on the client and fail at the save.
+    ItemCountLimit(u16),
     /// A Shared Channel map is also hosted by another Channel, so a Warp to it is ambiguous.
     SharedMapElsewhere {
         /// The map index.
@@ -611,6 +618,11 @@ impl fmt::Display for TopologyError {
                 f,
                 "game.item_id_range is [{first}, {last}]; the first id must be below the last"
             ),
+            Self::ItemCountLimit(limit) => write!(
+                f,
+                "game.item_count_limit is {limit}; it must be 1 to {}",
+                crate::item_slots::ITEM_COUNT_LIMIT
+            ),
             Self::SharedMapElsewhere { map, channel } => write!(
                 f,
                 "map {map} is on the shared channel and also on channel {channel}"
@@ -640,6 +652,10 @@ impl ServerConfig {
                 first: span.first,
                 last: span.last,
             });
+        }
+        let limit = self.game.item_count_limit;
+        if limit == 0 || limit > crate::item_slots::ITEM_COUNT_LIMIT {
+            return Err(TopologyError::ItemCountLimit(limit));
         }
         let mut numbers = BTreeSet::new();
         let mut ports = BTreeSet::new();

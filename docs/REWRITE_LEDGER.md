@@ -20550,3 +20550,284 @@ The gates ran on the final working tree:
 run, and no `*.core` file is outside `target/`. The workspace has 192 Rust files and 130,178
 lines. No width is claimed in this section: `GC_ITEM_SET`'s 72 bytes, the gold record's 9 and
 the points record's 2041 are the widths the codecs already pin, and the i686 probe was not run.
+
+## 211. An item moves, splits and merges, and the store has it before the client is told
+
+`CG_ITEM_MOVE` (byte 13) is the first inventory operation a client can start. Before this section
+the Game phase closed on it as an unknown frame, so a player could not drag an item from one cell
+to the next. It is now `CHARACTER::MoveItem` (`G/char_item.cpp:7602-7850`) for every window this
+build holds: the base inventory, the six custom banks, and the belt. Equipping, the dragon soul
+window and the switchbot are refused as not ported, with a log line and no record (211.4).
+
+### 211.1 What landed
+
+- **`world/src/character/item_move.rs`** (new): `move_item`, a transport-free reducer over a
+  character's storage. It runs legacy's checks in legacy's order: the source position, the item,
+  the count, `ITEM_FLAG_IRREMOVABLE`, the auto-find (`DestCell.cell == USHRT_MAX`), the
+  destination position, the custom bank, the belt, the switchbot, equipment and dragon soul, the
+  merge (same vnum, stackable, same sockets), `IsEmptyItemGrid` with the source cell as its
+  exception, and then a whole move or a split (`:7612-7846`). It answers with the records to send
+  and the row changes to make, or with a `MoveRefused` that changed nothing. `MoveRefused::notice`
+  gives the chat line legacy sends for four refusals: the two auto-find notices (`:7651`, `:7665`),
+  the wrong bank (`:7691`) and the belt (`:7698`, `[LS;1097]`).
+- **`world/src/character/items.rs`**: the storage steps the reducer needs. `item_at` answers by the
+  anchor cell only, `item` by id, `set_count` changes a stored count, `release` answers the stored
+  position, `move_item` carries the body to its new cell, and `is_empty_item_grid` is legacy's
+  check, taking the moving item's own cell as the exception and stopping at the unlocked page, the
+  usable cells, the bank and the worn belt's grade. `find_free_inventory_cell` and
+  `find_free_custom_cell` are the two auto-find searches.
+- **`gamedata/src/belt_inventory.rs`** (new): `CBeltInventoryHelper::CanMoveIntoBeltInventory`
+  (`G/belt_inventory_helper.h`): five `ITEM_USE` sub-types and every blend item, with the sub-type
+  numbers resolved from the proto names and pinned.
+- **`prodomo/src/item_move.rs`** (new): the game thread's half. `move_facts` reads the prototype
+  (the banks in ascending order, belt eligibility, `ITEM_DS`), `belt_grade` is the worn belt's
+  `value0` at flat cell 207 (`GetWear(WEAR_BELT)->GetValue(0)`, `:766-770`), `row_changes` turns the
+  world's changes into the store's terms, and `refusal_notice` encodes the chat line.
+- **`prodomo/src/item_load.rs`**: `stored_row_position`, the `SaveSingleItem` mapping 210.5 asked
+  for (`G/item_manager.cpp:504-521`). A base-inventory cell in 274..290 is stored as window 9 at
+  `cell - 274`, and every other position as it is. A test walks every position a move can store
+  and loads it back to the same cell.
+- **`prodomo/src/game_loop_messages.rs`** and **`game_state.rs`**: `GameCommand::MoveItem` and
+  `GameState::move_item`, which finds the character by VID (`CharacterManager::find_by_vid_mut`,
+  new) and takes the rules from the character: the configured count limit, its own
+  `Inven_Point`, and its worn belt.
+- **`db/src/items.rs`**: `RowChange` and `apply_row_changes`. Every change is checked before the
+  store is reached (a window past the ground, a move to the ground, a count of 0 or above 5000,
+  a created row for another owner). Then every change runs in one transaction, each scoped to
+  the owner, and a change that touches no row rolls the whole move back and says whether the id
+  is missing or belongs to someone else.
+- **`common/src/config.rs`**: `game.item_count_limit` is refused at startup outside 1 to 5000
+  (211.3).
+- **`prodomo/src/main.rs`**: the Game phase handles byte 13. The frame is decoded, the world
+  moves the item, the rows are written, and only then are the records sent (211.2).
+
+### 211.2 The order a move keeps, and what closes the descriptor
+
+The world changes first, on the game thread, and answers with the encoded records and the row
+changes. The descriptor writes the rows in one transaction and then sends the records, so a client
+is never told of a move the store did not take. Legacy sends the records at once and saves the
+items later through `ITEM_MANAGER`'s delayed save. No client can tell the two orders apart, because
+it waits for neither, and ADR-0003 asks that item state be written at most a few seconds late.
+
+| outcome | what the descriptor does |
+|---|---|
+| moved, split or merged | stores the rows, then sends the records, each its own frame, in legacy's order |
+| refused | sends the refusal's notice if legacy sends one, and stays open |
+| a malformed frame | closes (ledger 160.5) |
+| the world does not hold the descriptor's character, or did not answer | closes |
+| the rows could not be stored | closes; the next login loads what the store holds |
+
+The records follow legacy's send order:
+
+- a whole move clears the old cell and then sets the new one (`RemoveFromCharacter`, then
+  `SetItem`, `:7810-7824`);
+- a split updates the source and then sets the new item (`:7825-7846`);
+- a merge updates the source, or clears it when it is used up, and then updates the target
+  (`:7786-7805`).
+
+A merge onto a full stack still sends both updates and stores nothing, as legacy's two
+`SetCount` calls do.
+
+### 211.3 Divergences
+
+| Divergence | legacy |
+|---|---|
+| A cell is cleared with a byte-21 `GC_ITEM_SET` whose vnum and every other field is 0 (`world::item::gc_item_clear`). This supersedes 208.2, which sent nothing, and applies to a move, a merge that uses up its source, and an Operator destroy. | `SetItem(pos, NULL)` sends byte 20 in the 62-byte `TPacketGCItemDelDeprecated` layout, every field zero (`G/char_item.cpp:596-611`). The Reference client frames byte 20 at its own item-set width, 72, so it drops that frame (ledger 193). |
+| The rows are stored before the records are sent, and a failed write closes the descriptor. | The records go at once and the save follows later (211.2). |
+| `game.item_count_limit` is refused at startup unless it is 1 to 5000. | Any `WORD` is read (`G/config.cpp:976`). A limit of 0 makes every merge move nothing, and a limit above 5000 builds a stack the store refuses to write, so a merge would succeed on the client and fail at the save. |
+| The auto-find's base search stops at the character's usable cells. | `GetEmptyInventory` searches to `INVENTORY_MAX_NUM` and relies on the grid check to refuse a locked page. The answer is the same cell, and the Rewrite's search stops sooner. |
+
+The merge is parity, not a Divergence. Legacy's room is `g_bItemCountLimit - item2->GetCount()`
+(`:7800`), and `CItem::GetCount` answers `MIN(m_dwCount, g_bItemCountLimit)` (`G/item.cpp:278-286`),
+so the room is never negative. The Rewrite's room is `min(limit, 5000)` less the target's stored
+count, saturating at 0, which is the same number for every count the store can hold.
+
+On 208.2's objection: it said a vnum-0 set "tells a client there is an item here" and is not a
+clear. The record legacy itself sends to clear a cell is set-shaped.
+`TPacketGCItemDelDeprecated` (`G/packet.h:1085-1099`) carries the cell, the vnum, the count, the
+refine element, the transmutation, the sockets and the attributes of `TPacketGCItemSet`, with a
+`BYTE` count where the set has a `WORD`, and without the flags, the anti-flags and the highlight.
+Legacy fills it with vnum 0 and every other field 0. The client has no item-delete record at all:
+its only byte 20 is its own item set, dispatched to the item-set handler
+(`PythonNetworkStreamPhaseGame.cpp:342`, recorded in `PROTOCOL_NOTES.md`'s collision taxonomy
+while the client source was in the repository). So the only clear legacy ever meant a client to
+read is an item set of vnum 0. The Rewrite sends that content on byte 21, the byte and the layout
+of every item set legacy sends. The client's handling of a vnum-0 set was not read before its
+source left the repository, so the play test calibrates it, and `STATUS.md`'s Divergences table
+carries it.
+
+The console's destroy answer now says `and cleared the cell on the client.` when the record was
+delivered, and `but no client was told, so the cell stays drawn until the next login.` when the
+character had no descriptor to write to.
+
+### 211.4 Defects not reproduced
+
+1. **The auto-find notice is never sent.** `wFindCell` is a `WORD`, so `wFindCell != -1` compares
+   65535 with -1 and is always true (`:7645`, `:7659`). A full inventory writes 65535 into the
+   destination, which then fails `IsValidItemPosition` with no notice. Here the search's answer
+   is read, and the notice legacy wrote for it is sent.
+2. **An item in two banks can be refused from its own bank.** `GetEmptyInventory` places an item
+   in the first of its banks with room (`:1214-1225`), but the move check compares the
+   destination with `GetItemCategory`, which answers only the first bank that matches
+   (`G/item.cpp:3149-3158`). Five of the owner's items are in two banks, and one placed in its
+   second bank cannot then be moved inside it. Here a destination bank is accepted when the item
+   belongs to it.
+3. **A split can land on its own stack.** The grid check passes the source cell as the exception
+   (`:7807`), which is right for a move and wrong for a split, because the source stays where it
+   is. Here a split is checked a second time without the exception.
+4. **`ITEM_FLAG_IRREMOVABLE` is tested only for window 1** (`:7625`), so the same flat cell
+   addressed through window 2 moves an irremovable item out. Here both windows are tested.
+
+`STATUS.md`'s Defects list carries all four.
+
+### 211.5 The chat lines legacy answers itself were never sent
+
+The scenario's belt refusal expected its `[LS;1097]` line and found nothing. The chat path had the
+same gap: `chat::talking_record` builds only the map-wide line, and the descriptor dropped every
+`ChatEffect::InfoToSender`, so the party line with no party (`[LS;655]`, `G/input_main.cpp:960`)
+and the guild line with no guild (`[LS;656]`, `:977`) never reached their sender.
+`ChatEffect::ShoutBelowLevel` was "not yet wired". Both now go through `chat::info_line`, which is
+`CHARACTER::ChatPacket` (`G/char.cpp:5140-5187`): `CHAT_TYPE_INFO`, id 0, the descriptor's empire,
+and `bCanFormat` at its constructor value of 1. The shout refusal is formatted with the limit,
+`Shout can only be used at level 15 or higher.` (`G/input_main.cpp:888`, `g_iShoutLimitLevel`).
+
+`__MULTI_LANGUAGE_SYSTEM__` is defined, so legacy looks every `LC_TEXT` up in the player's
+language table first and sends the text unchanged when the table has no entry
+(`G/locale.cpp:71-88`). The Rewrite loads no language table yet, so every line is sent unchanged,
+which is legacy's answer for a text its table lacks. The same holds for the move notices.
+
+`ChatEffect::ShoutOnCooldown` is logged at info and sends nothing, which is what legacy sends
+(`:893-894`). The shout broadcast itself is not ported, so a shout at or above level 15 is
+dropped with that log line. The `other =>` arm that hid the unhandled effects is gone, so a new
+effect is a compile error.
+
+### 211.6 Not ported yet
+
+- **Equipment, the dragon soul window and the switchbot.** Each is `MoveRefused::NotPorted` and
+  logged, so a caller can tell "legacy refuses this" from "this build cannot do it yet". The
+  equipment path is `EquipItem` and `UnequipItem`, which need the equipment load of 210.3.
+- **Five guards with nothing to test yet:** `IsExchanging`, `isLocked`, `CanHandleItem` (an open
+  dragon soul refine or aura window, `:7677-7686`), `IsSecured`, and the observer mode. Each
+  lands with the system that can make it true: trade, the dragon soul refine window and the aura
+  window.
+- **The quickslot follow-up** (`SyncQuickslot` after a move, `:7822-7823`) and the `ITEM_SPLIT`
+  log line (`:7843-7845`).
+- **`CItem::GetCount`'s cap.** Legacy answers every caller with the stored count capped at the
+  configured limit, so a stack stored above a lowered limit is shown and merged as the limit. The
+  Rewrite sends and stores the stored count. Only an Operator grant can build such a stack today,
+  and the grant clamps at 5000, not at the configured limit.
+- **The language table** (211.5).
+- **The shout broadcast** (211.5).
+
+### 211.7 Scenarios and Parity inventory
+
+`an_item_is_moved_split_and_merged_and_a_relog_finds_it_there` grants vnum 19 to cell 0 and a
+stack of 10 of the first stackable prototype to cell 1, and then asserts each step's records and
+rows:
+
+1. a move from 0 to 2 sends the clear of cell 0 and then the set at cell 2, and the row is at 2;
+2. a split of 4 from 1 to 3 sends the update of cell 1 to 6 and then the set at cell 3 with 4,
+   and a row 100000002 is written;
+3. a merge from 3 back to 1 sends the clear of cell 3 and then the update of cell 1 to 10, and
+   row 100000002 is gone;
+4. a move of the vnum-19 item to belt cell 274 sends the `[LS;1097]` info line with empire 1;
+5. a move from an empty cell 40 is answered with nothing, and the connection stays open;
+6. after a relog, the loaded items are exactly the stack of 10 at cell 1 and vnum 19 at cell 2.
+
+`a_line_legacy_answers_itself_comes_back_to_the_sender_alone` sends a party line and a guild line
+from Alpha (empire 1), and a shout from a level-1 character of empire 2 standing next to Alpha.
+Each sender gets its own info line with its own empire, and neither client receives anything
+else.
+
+`an_operator_destroy_takes_the_item_out_of_the_world_and_deletes_its_row` now expects the clear
+record for the destroyed cell, and the console line saying the client was told.
+`item_persist_db`'s pinned test for "nothing is sent" became
+`a_destroy_clears_the_cell_on_the_client_after_the_row_is_gone`.
+
+- `cg.game.item_move` moves from `missing` to `ported`, naming the first scenario, with a note
+  listing the unported paths.
+- The `cg.game.chat` note records the info lines and names the second scenario.
+- `sys.item.core` stays `partial`: equipment, use, drop and pick up are still unhandled.
+
+### 211.8 Mutation sweep
+
+77 mutants, each applied to the pristine file with the change asserted to be in executable code,
+and every file restored and checked against its pre-sweep SHA-256. Each mutant ran its crate's
+tests, then `prodomo`'s library and `item_persist_db` tests, then the item, Operator, chat and
+relog scenarios, all with `DATABASE_URL` set, and stopped at the first failing run.
+
+| group | mutants | result |
+|---|---|---|
+| `world/src/character/item_move.rs`: the count check, the irremovable range and flag, the auto-find trigger, both searches and their notices, the bank, belt, switchbot, equipment and dragon soul checks, the source window, the merge filter, sockets, count, room and records, the grid exception, the whole move's records, and the split's copy, records and changes | 39 | 36 killed, 3 survived |
+| `prodomo/src/item_move.rs`: the banks, belt eligibility, `ITEM_DS`, the belt grade and its cell, each row change's fields, and the notice's empire | 10 | 10 killed |
+| `prodomo/src/item_load.rs`: `stored_row_position`'s belt range, offset and bound | 3 | 3 killed |
+| `prodomo/src/chat.rs`: the info line's empire, the shout text, the shout arm, the info text | 4 | 4 killed |
+| `prodomo/src/main.rs`: the notice's empire, the rows stored, the refusal notice, the chat info line, the records sent | 5 | 5 killed |
+| `prodomo/src/game_state.rs`: the usable cells, the count limit, the belt grade | 3 | 3 killed |
+| `prodomo/src/item_persist.rs`: the destroy's clear cell and its `told` answer | 2 | 1 killed, 1 survived |
+| `db/src/items.rs`: the owner in each of the three statements, the untouched-row rollback, the count, owner and ground checks, the commit | 8 | 6 killed, 2 survived |
+| `common/src/config.rs`: both bounds of `item_count_limit` | 2 | 2 killed |
+| `world/src/item.rs`: the clear's vnum | 1 | 1 killed |
+
+Every kill was semantic: no mutant failed to compile. Of the six survivors, five were real gaps,
+and each now has a test:
+
+| survivor | the test that kills it |
+|---|---|
+| the irremovable range starting at 181 instead of 180 | `an_irremovable_item_in_the_first_equipment_cell_is_refused_before_the_equipment` |
+| the merge filter without `target.id != item.id` | `a_stack_moved_onto_its_own_cell_is_a_whole_move_and_not_a_merge` (legacy's `item != item2`, `:7786`) |
+| the destroy's `told` always true | `a_destroy_whose_client_is_gone_takes_the_row_and_says_nobody_was_told` |
+| the move's `UPDATE` without its owner | `a_change_the_owner_cannot_make_rolls_back_the_whole_move`, which now sends a move, a count and a destroy for the other character's row |
+| the count's `UPDATE` without its owner | the same test |
+
+The sixth, `from.cell >= CUSTOM_INVENTORY_SLOT_END` weakened to `>`, is equivalent: the two differ
+only at cell 1370, which `is_valid_item_position` refuses as `InvalidSource` before the flag is
+read, so the disjunct cannot be reached from any valid flat cell. It is kept because it is
+legacy's `:7627` word for word. The class of defect it would hide, the flag being read before the
+source is validated, is pinned by `the_source_checks_come_first_and_change_nothing`.
+
+The survivors were re-run against the finished tests with the same sweep: all five real gaps were
+killed semantically (the two `UPDATE` mutants by the widened ownership test, the rest by the test
+named above), the equivalent mutant survived again, and every file matched its pre-sweep checksum
+afterwards.
+
+### 211.9 Receipt
+
+Seventy-one new tests, one retired, and one widened:
+
+- `world/src/character/item_move.rs`: 31 new tests;
+- `world/src/character/items.rs`: 9;
+- `world/tests/character_manager.rs`: 1
+  (`the_mutable_vid_lookup_reaches_the_character_the_vid_names_and_no_other`);
+- `gamedata/src/belt_inventory.rs`: 4;
+- `prodomo/src/item_move.rs`: 6;
+- `prodomo/src/game_state.rs`: 7;
+- `prodomo/src/item_load.rs`: 2;
+- `prodomo/src/chat.rs`: 3;
+- `common/tests/config_test.rs`: 1;
+- `db/tests/items.rs`: 3;
+- `prodomo/tests/item_persist_db.rs`: 2 new,
+  `a_destroy_clears_the_cell_on_the_client_after_the_row_is_gone` and
+  `a_destroy_whose_client_is_gone_takes_the_row_and_says_nobody_was_told`, replacing
+  `a_destroy_sends_nothing_to_the_client_and_says_so`;
+- `prodomo/tests/parity.rs`: the two scenarios of 211.7.
+
+`a_change_the_owner_cannot_make_rolls_back_the_whole_move` was widened by the sweep (211.8) to
+send all three changes for the other character's row. The net change is 70, from 2373 to 2443.
+The gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2443 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2443 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+`SELECT datname FROM pg_database WHERE datname LIKE 'prodomo\_%'` returns nothing after the
+run, and no `*.core` file is outside `target/`. The workspace has 195 Rust files and 133,784
+lines. No width is claimed in this section: `GC_ITEM_SET`'s 72 bytes, `CG_ITEM_MOVE`'s and the
+chat record's widths are the ones the codecs already pin, and the i686 probe was not run
+(`i686-linux-gnu-g++-12` is not installed on this machine).

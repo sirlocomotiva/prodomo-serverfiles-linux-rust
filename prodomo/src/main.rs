@@ -59,6 +59,7 @@ use prodomo::game_loop_messages::{GameLoopController, GameLoopTerminal};
 use prodomo::game_state::{world_item_id_range, GameState};
 use prodomo::handshake::HandshakeServerKind;
 use prodomo::item_load::plan_item_load;
+use prodomo::item_move::MoveItemRefused;
 use prodomo::lifecycle::{LifecycleError, PostHandshakePhase};
 use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::loading_phase::{
@@ -87,9 +88,10 @@ use protocol::cg_chat::CgChat;
 use protocol::cg_inventory::{
     HEADER_CG_CHANGE_NAME, HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE,
     HEADER_CG_CHARACTER_POSITION, HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_EMPIRE,
-    HEADER_CG_ENTERGAME, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_MOVE,
+    HEADER_CG_ENTERGAME, HEADER_CG_ITEM_MOVE, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_MOVE,
     HEADER_CG_STATE_CHECKER, HEADER_CG_SYNC_POSITION,
 };
+use protocol::cg_item_move::CgItemMove;
 use protocol::cg_login::CgEmpire;
 use protocol::cg_login3::CgLogin3;
 use protocol::cg_move::CgMove;
@@ -104,6 +106,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::signal;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
+use world::character::MoveRequest;
 use world::item::Item;
 
 /// The command line.
@@ -620,6 +623,81 @@ async fn pump_descriptor<S>(
     }
 }
 
+/// `CG_ITEM_MOVE` (13) in the game phase: `CHARACTER::MoveItem` (`G/char_item.cpp:7602`).
+///
+/// The world moves the item, the rows are written in one transaction, and only then are the
+/// records sent, so the client is never told of a move the store did not take. A refusal
+/// sends the notice legacy sends for it, if any, and keeps the connection. A frame that does
+/// not decode, a world that does not answer, and a write that fails each close the
+/// descriptor; the close takes the character out of the world, and the next login loads what
+/// the store holds.
+async fn move_an_item<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgItemMove::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed ITEM_MOVE; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        // `if (ch)`: legacy does nothing for a descriptor with no character, and so does this.
+        info!(%addr, "ITEM_MOVE without a character in the world; ignoring");
+        return true;
+    };
+    let request = MoveRequest {
+        from: record.from,
+        to: record.to,
+        count: record.count,
+    };
+    let moved = match context.game.move_item(vid, request).await {
+        Ok(Ok(moved)) => moved,
+        Ok(Err(MoveItemRefused::Refused(reason))) => {
+            info!(%addr, %reason, "Item move refused");
+            // `ChatPacket` takes the empire from the descriptor, which is the character's.
+            let empire = held
+                .character
+                .as_ref()
+                .map_or(0, |character| character.empire);
+            if let Some(line) = prodomo::item_move::refusal_notice(&reason, empire) {
+                if let Err(error) = send_all(session, &[line]).await {
+                    warn!(%addr, %error, "Client session stopped");
+                    return false;
+                }
+            }
+            return true;
+        }
+        Ok(Err(refused)) => {
+            warn!(%addr, %refused, "The world does not hold this descriptor's character; closing");
+            return false;
+        }
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked to move an item; closing");
+            return false;
+        }
+    };
+    if let Err(error) =
+        db::items::apply_row_changes(&context.store, moved.owner_id, &moved.changes).await
+    {
+        warn!(%addr, %error, kind = ?moved.kind, "The item move could not be stored; closing");
+        return false;
+    }
+    if let Err(error) = send_all(session, &moved.records).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    info!(%addr, kind = ?moved.kind, rows = moved.changes.len(), "Item moved");
+    true
+}
+
 /// Wait for the next record another character caused this descriptor's map to receive.
 ///
 /// A descriptor with no lease has no queue to wait on, so its future never completes and
@@ -697,17 +775,15 @@ where
                 info!(%addr, "Chat counter reached the disconnect line; closing");
                 return false;
             }
-            ChatEffect::InfoToSender { text } => {
-                let notice = prodomo::chat::talking_record(&ChatEffect::InfoToSender { text });
-                if let Some(notice) = notice {
-                    let Ok(bytes) = notice.encode() else {
-                        warn!(%addr, "Info line did not fit the record; closing");
-                        return false;
-                    };
-                    if let Err(error) = send_all(session, &[bytes]).await {
-                        warn!(%addr, %error, "Client session stopped");
-                        return false;
-                    }
+            ChatEffect::InfoToSender { .. } | ChatEffect::ShoutBelowLevel { .. } => {
+                // `ChatPacket` takes the empire from the descriptor, which is the speaker's.
+                let Some(bytes) = prodomo::chat::info_line(effect, character.empire) else {
+                    warn!(%addr, "Info effect built no line; closing");
+                    return false;
+                };
+                if let Err(error) = send_all(session, &[bytes]).await {
+                    warn!(%addr, %error, "Client session stopped");
+                    return false;
                 }
             }
             ChatEffect::TalkingToMap { vid, empire, text } => {
@@ -728,8 +804,11 @@ where
                 // The legacy default arm only logs. Nothing reaches the client.
                 info!(%addr, chat_type, "Unknown chat type; nothing sent");
             }
-            other => {
-                warn!(%addr, effect = ?other, "Chat effect not yet wired");
+            ChatEffect::ShoutOnCooldown => {
+                // `return (iExtraLen)` with no line (`input_main.cpp:893-894`). The shout's
+                // own broadcast is not ported, so every shout at or above the level lands
+                // here.
+                info!(%addr, "Shout dropped; the shout broadcast is not ported");
             }
         }
     }
@@ -1221,6 +1300,14 @@ where
             if phase == ClientPhase::Game && frame.header == HEADER_CG_CHAT.value() =>
         {
             chat_line(session, addr, context, held, &frame).await
+        }
+        // `CG_ITEM_MOVE` (13) in the game phase: `CInputMain::ItemMove`
+        // (`G/input_main.cpp:1060-1066`), reached when the character is not an observer
+        // (`:3707-3710`). The Rewrite has no observer mode, so every character is reached.
+        LiveStep::Record { phase, frame }
+            if phase == ClientPhase::Game && frame.header == HEADER_CG_ITEM_MOVE.value() =>
+        {
+            move_an_item(session, addr, context, held, &frame).await
         }
         // `CG_MOVE` (7) in the game phase: `CInputMain::Move` (`G/input_main.cpp:1757`).
         LiveStep::Record { phase, frame }
@@ -2904,7 +2991,8 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     // item id allocator on purpose: the start id is `MAX(id)` over the item table, and
     // that table is only readable once the store has migrated, which happens inside
     // the accept loop below. The allocator arrives as a command from there.
-    let game_state = GameState::new(Arc::clone(&protos));
+    let game_state =
+        GameState::new(Arc::clone(&protos)).with_item_count_limit(config.game.item_count_limit);
     let mut game_loop = spawn_game_loop(GameLoopConfig::default(), game_state)?;
     let controller = game_loop.controller();
     info!(thread_id = ?game_loop.thread_id(), "Dedicated game loop started");

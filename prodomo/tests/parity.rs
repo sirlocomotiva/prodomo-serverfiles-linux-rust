@@ -1313,6 +1313,7 @@ fn game_len(header: u8) -> usize {
         GC_SYNC_POSITION => usize::MAX,
         GC_OWNERSHIP => OWNERSHIP_LEN,
         ITEM_SET => ITEM_SET_LEN,
+        ITEM_UPDATE => ITEM_UPDATE_LEN,
         other => panic!("unexpected loading or enter-game header {other}"),
     }
 }
@@ -2298,6 +2299,53 @@ fn a_talking_line_reaches_the_map_including_its_sender() {
     alice.closed_by(&short);
 }
 
+/// A chat line legacy answers with `CHARACTER::ChatPacket` comes back to the sender alone, as a
+/// `CHAT_TYPE_INFO` line with `id` 0 and the sender's empire: a party line with no party, a
+/// guild line with no guild, and a shout below the level limit (`G/input_main.cpp:888`, `:960`,
+/// `:977`). The neighbour on the same map hears none of them.
+#[test]
+fn a_line_legacy_answers_itself_comes_back_to_the_sender_alone() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    // Bob's character stands beside Alice's, in another empire, and at level 1.
+    sql(
+        &database,
+        "UPDATE account SET empire = 2 WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    let (mut yankee, _) = enter_world(&server, b"bob", 0);
+
+    let info = |empire: u8, text: &[u8]| {
+        let mut line = vec![GC_CHAT];
+        line.extend_from_slice(&u16::try_from(10 + text.len()).unwrap().to_le_bytes());
+        line.extend_from_slice(&[prodomo::chat::CHAT_INFO, 0, 0, 0, 0, empire, 1]);
+        line.extend_from_slice(text);
+        line
+    };
+    alice.send_record(&client_chat(prodomo::chat::CHAT_PARTY, b"hi"));
+    assert_eq!(alice.read_game(), info(1, b"[LS;655]"), "no party");
+    alice.send_record(&client_chat(prodomo::chat::CHAT_GUILD, b"hi"));
+    assert_eq!(alice.read_game(), info(1, b"[LS;656]"), "no guild");
+    yankee.send_record(&client_chat(prodomo::chat::CHAT_SHOUT, b"hi"));
+    assert_eq!(
+        yankee.read_game(),
+        info(2, b"Shout can only be used at level 15 or higher."),
+        "the limit is formatted into the line, and the empire is the speaker's"
+    );
+    yankee.quiet("the neighbour hears neither of Alice's lines");
+    alice.quiet("and Alice does not hear Yankee's refusal");
+}
+
 /// `cg.world.move`: an accepted move reaches the clients around the mover and never the mover,
 /// and a move past the legacy distance limit is refused without a record. The moved position is
 /// the client's own bytes, so the broadcast relays `lX` and `lY` unchanged and carries the
@@ -2704,10 +2752,14 @@ fn a_live_client_joins_and_leaves_the_game_threads_world() {
 /// A 72-byte `GC_ITEM_SET` and its header byte, as the client sees them.
 ///
 /// Byte 21 is the 72-byte record. Byte 20 is the byte legacy calls `GC_ITEM_DEL` and
-/// the client calls `HEADER_GC_ITEM_SET`, which is why a destroy cannot clear a window
-/// slot and does not try. `protocol::gc_item_window` has the full rename and the widths.
+/// the client calls `HEADER_GC_ITEM_SET`, so the Rewrite clears a cell with a byte-21
+/// record whose vnum is 0 (ledger 211.3). `protocol::gc_item_window` has the full rename
+/// and the widths.
 const ITEM_SET_LEN: usize = 72;
 const ITEM_SET: u8 = 21;
+/// `GC_ITEM_UPDATE` (byte 25, 59 bytes): a stack that changed in place.
+const ITEM_UPDATE_LEN: usize = 59;
+const ITEM_UPDATE: u8 = 25;
 
 /// The width of a record an Operator's item work puts in a client's window.
 ///
@@ -2964,19 +3016,182 @@ fn an_operator_destroy_takes_the_item_out_of_the_world_and_deletes_its_row() {
     );
     assert_eq!(items_of(&database, "Alpha"), "none", "still no row");
 
-    // And the client is still connected and still holding a drawn cell, because the only
-    // record that clears a window slot is byte 20 and the stock client drops a 62-byte
-    // frame there. The console's answer says so rather than leaving an Operator to think
-    // the character is looking at an up-to-date window.
+    // And the client was told once, with the byte-21 clear for the freed cell and not
+    // legacy's byte 20, which the stock client frames at another width and drops. The
+    // refused second destroy sent nothing.
     let (records, state) = alpha.drain_game(Duration::from_millis(300), an_item_window_record);
+    assert_eq!(
+        records,
+        vec![a_clear_record(0)],
+        "one clear for cell 0, and nothing for the refused destroy"
+    );
     assert!(
-        the_item_set(&records).is_none(),
-        "a destroy must not send a GC_ITEM_SET: {records:02x?}"
+        server.console().contains("cleared the cell on the client"),
+        "the console says the client was told"
     );
     assert_eq!(
         state,
         Quiet::Open,
         "the client is still connected after the destroy"
+    );
+}
+
+/// The byte-21 record that tells the client inventory `cell` is empty: vnum 0 and every
+/// other field zero (ledger 211.3).
+fn a_clear_record(cell: u16) -> Vec<u8> {
+    let mut record = vec![ITEM_SET, common::item_slots::EWindows::Inventory as u8];
+    record.extend_from_slice(&cell.to_le_bytes());
+    record.resize(ITEM_SET_LEN, 0);
+    record
+}
+
+/// A `CG_ITEM_MOVE` between two base-inventory cells.
+fn client_item_move(from: u16, to: u16, count: u16) -> Vec<u8> {
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    protocol::cg_item_move::CgItemMove::new(
+        protocol::item_pos::ItemPos::new(inventory, from),
+        protocol::item_pos::ItemPos::new(inventory, to),
+        count,
+    )
+    .encode()
+}
+
+/// A one-cell stackable vnum in no custom bank, so a grant of it lands in the base inventory
+/// and a move of it can split and merge.
+fn a_stackable_vnum(protos: &gamedata::item_proto::ItemProtos) -> u32 {
+    protos
+        .rows()
+        .iter()
+        .find(|proto| {
+            proto.size == 1
+                && proto.flags & world::item::ITEM_FLAG_STACKABLE != 0
+                && proto.anti_flags & world::item::ITEM_ANTIFLAG_STACK == 0
+                && (0..6).all(|category| {
+                    !gamedata::item_custom_category::is_custom_category(proto, category)
+                })
+        })
+        .map(|proto| proto.vnum)
+        .expect("the owner's data has a stackable one-cell item outside every bank")
+}
+
+/// The window byte, cell, vnum and count of a `GC_ITEM_SET`.
+fn set_fields(record: &[u8]) -> (u8, u16, u32, u16) {
+    assert_eq!(record.len(), ITEM_SET_LEN);
+    assert_eq!(record[0], ITEM_SET);
+    (
+        record[1],
+        u16::from_le_bytes([record[2], record[3]]),
+        u32::from_le_bytes([record[4], record[5], record[6], record[7]]),
+        u16::from_le_bytes([record[8], record[9]]),
+    )
+}
+
+/// The window byte, cell and count of a `GC_ITEM_UPDATE`.
+fn update_fields(record: &[u8]) -> (u8, u16, u16) {
+    assert_eq!(record.len(), ITEM_UPDATE_LEN);
+    assert_eq!(record[0], ITEM_UPDATE);
+    (
+        record[1],
+        u16::from_le_bytes([record[2], record[3]]),
+        u16::from_le_bytes([record[4], record[5]]),
+    )
+}
+
+/// `cg.game.item_move`: a move, a split and a merge reach the client and the store, a refused
+/// move is told why when legacy says why, and a relog finds every item where it was moved.
+///
+/// Each answer is read off the client's own socket, and the store is checked as soon as the
+/// records arrive, because the descriptor commits the rows before it sends the records.
+#[test]
+fn an_item_is_moved_split_and_merged_and_a_relog_finds_it_there() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+    let protos = owners_protos();
+    let stackable = a_stackable_vnum(&protos);
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+
+    // Given: the two-cell vnum 19 at cell 0, which also covers cell 5, and ten of a stackable
+    // item at cell 1.
+    let (mut alpha, _character) = enter_world(&server, b"alice", 0);
+    Server::write_console(&console, &format!("item give Alpha {}", a_plain_vnum()));
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()).1, 0, "the grant took cell 0");
+    Server::write_console(&console, &format!("item give Alpha {stackable} 10"));
+    server.wait_for("id 100000001; the client has it");
+    assert_eq!(
+        set_fields(&alpha.read_game()),
+        (inventory, 1, stackable, 10)
+    );
+
+    // When: the two-cell item is moved from cell 0 to cell 2.
+    alpha.send_record(&client_item_move(0, 2, 0));
+    // Then: the old cell is cleared first, then the new one is set, and the row is already
+    // at cell 2.
+    assert_eq!(alpha.read_game(), a_clear_record(0));
+    assert_eq!(
+        set_fields(&alpha.read_game()),
+        (inventory, 2, a_plain_vnum(), 1)
+    );
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 100000000 AND window_type = 1 AND pos = 2)",
+    );
+
+    // When: four of the stack are split off onto cell 3.
+    alpha.send_record(&client_item_move(1, 3, 4));
+    // Then: the source is updated to six, then the new stack of four is set, and both rows
+    // are stored: the source's new count and a new row under the next id.
+    assert_eq!(update_fields(&alpha.read_game()), (inventory, 1, 6));
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 3, stackable, 4));
+    check(
+        &database,
+        "(SELECT count FROM item WHERE id = 100000001) = 6 AND EXISTS (SELECT 1 FROM item          WHERE id = 100000002 AND window_type = 1 AND pos = 3 AND count = 4)",
+    );
+
+    // When: the four are merged back onto the six.
+    alpha.send_record(&client_item_move(3, 1, 0));
+    // Then: the used-up stack is cleared, the target is updated to ten, and the used-up row
+    // is gone.
+    assert_eq!(alpha.read_game(), a_clear_record(3));
+    assert_eq!(update_fields(&alpha.read_game()), (inventory, 1, 10));
+    check(
+        &database,
+        "(SELECT count FROM item WHERE id = 100000001) = 10 AND NOT EXISTS (SELECT 1 FROM item          WHERE id = 100000002)",
+    );
+
+    // When: a sword is moved into a belt cell.
+    alpha.send_record(&client_item_move(2, 274, 0));
+    // Then: legacy's info line comes back (`G/char_item.cpp:7698`) with the character's
+    // empire, and nothing moved.
+    let mut notice = vec![GC_CHAT, 19, 0, 1, 0, 0, 0, 0, 1, 1];
+    notice.extend_from_slice(b"[LS;1097]");
+    assert_eq!(alpha.read_game(), notice);
+    // And: a move from an empty cell is refused with no record, as legacy's is.
+    alpha.unanswered(&client_item_move(40, 41, 0));
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 100000000 AND window_type = 1 AND pos = 2)",
+    );
+
+    // When: the character is selected again.
+    drop(alpha);
+    server.wait_for("Character left the world");
+    let (_alpha, _character, items) = load_character(&server, b"alice", 0);
+    // Then: both items come back where they were moved, and the merged stack is whole.
+    let mut loaded: Vec<(u8, u16, u32, u16)> =
+        items.iter().map(|record| set_fields(record)).collect();
+    loaded.sort_unstable();
+    assert_eq!(
+        loaded,
+        vec![
+            (inventory, 1, stackable, 10),
+            (inventory, 2, a_plain_vnum(), 1),
+        ]
     );
 }
 

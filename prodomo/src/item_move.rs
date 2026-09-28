@@ -1,0 +1,391 @@
+//! `CG_ITEM_MOVE` (13) between the descriptor, the world, and the store.
+//!
+//! The move itself is [`world::character::move_item`], which changes a character's storage and
+//! answers with the records to send and the row changes to make. This module holds what the
+//! game thread needs around it that the world does not: the prototype facts the move reads,
+//! the worn belt's grade, the stored form of each row change, and the chat line a refusal
+//! sends.
+//!
+//! # The order the descriptor keeps
+//!
+//! The world changes first, on the game thread. The descriptor then writes the rows in one
+//! transaction and sends the records only once the rows are stored, so a client is never told
+//! of a move the store did not take. A write that fails closes the descriptor, which takes the
+//! character out of the world; the next login loads what the store holds. Legacy sends the
+//! records at once and saves the items later (`CHARACTER::MoveItem`, then `ITEM_MANAGER`'s
+//! delayed save), so the order is the Rewrite's, and a client cannot tell the two apart
+//! because it waits for neither.
+
+use common::enums::EWearPositions;
+use common::item_slots::{EWindows, INVENTORY_MAX_NUM};
+use common::vid::Vid;
+use db::items::{Attribute, ItemRow, RowChange};
+use gamedata::belt_inventory::can_move_into_belt_inventory;
+use gamedata::item_custom_category::{is_custom_category, CATEGORY_NUM};
+use gamedata::item_proto::ItemProtos;
+use gamedata::item_proto_value::type_value;
+use protocol::gc_chat::{GcChat, CHAT_TYPE_INFO};
+use protocol::item_pos::ItemPos;
+use world::character::{CharacterItems, ItemChange, MoveDone, MoveFacts, MoveKind, MoveRefused};
+use world::item::Item;
+
+use crate::item_load::stored_row_position;
+
+/// The flat cell of the worn belt: `INVENTORY_MAX_NUM + WEAR_BELT`, 180 + 27.
+pub const BELT_WEAR_CELL: u16 = INVENTORY_MAX_NUM + EWearPositions::Belt as u16;
+
+/// What a move the world made has left for the descriptor to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MovedItems {
+    /// Which outcome the move had, for the log line.
+    pub kind: MoveKind,
+    /// The store `player.id` of the character whose items moved.
+    pub owner_id: u32,
+    /// The records the client is sent, each its own frame, in the order legacy sends them.
+    pub records: Vec<Vec<u8>>,
+    /// The row changes, in the order they are applied.
+    pub changes: Vec<RowChange>,
+}
+
+impl MovedItems {
+    /// The descriptor's half of a move the world made for `owner_id`.
+    #[must_use]
+    pub fn new(owner_id: u32, done: MoveDone) -> Self {
+        let records = done
+            .records
+            .into_iter()
+            .map(|record| {
+                let mut frame = Vec::new();
+                record.encode_into(&mut frame);
+                frame
+            })
+            .collect();
+        Self {
+            kind: done.kind,
+            owner_id,
+            records,
+            changes: row_changes(owner_id, &done.changes),
+        }
+    }
+}
+
+/// Why the world made no move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveItemRefused {
+    /// No character is online under that VID.
+    ///
+    /// A descriptor only sends a move once its character has joined the world, so this is
+    /// a descriptor that outlived its character, not a state a player can reach.
+    NoSuchCharacter {
+        /// The VID the move named.
+        vid: Vid,
+    },
+    /// The move was refused, and the storage is as it was.
+    Refused(MoveRefused),
+}
+
+impl std::fmt::Display for MoveItemRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSuchCharacter { vid } => write!(formatter, "no character is online as {vid}"),
+            Self::Refused(reason) => write!(formatter, "the move was refused: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for MoveItemRefused {}
+
+/// The prototype facts a move reads for `vnum`, or `None` when it has no prototype.
+///
+/// The banks are walked in ascending order, the order `GetEmptyInventory` searches them in;
+/// `IsDragonSoul` is `GetType() == ITEM_DS` (`G/item.h`).
+#[must_use]
+pub fn move_facts(protos: &ItemProtos, vnum: u32) -> Option<MoveFacts> {
+    let proto = protos.get(vnum)?;
+    Some(MoveFacts {
+        categories: (0..CATEGORY_NUM)
+            .filter(|category| is_custom_category(proto, *category))
+            .collect(),
+        belt_eligible: can_move_into_belt_inventory(proto),
+        dragon_soul: type_value(b"ITEM_DS") == Some(proto.item_type),
+    })
+}
+
+/// The worn belt's `value0`, or `None` when no belt is worn.
+///
+/// `GetWear(WEAR_BELT)->GetValue(0)` (`G/char_item.cpp:766-770`), and `GetValue` reads the
+/// prototype's `alValues`. An item whose vnum has no prototype cannot be worn in legacy,
+/// because `CreateItem` refuses it, so it answers as no belt.
+#[must_use]
+pub fn belt_grade(items: &CharacterItems, protos: &ItemProtos) -> Option<i32> {
+    let belt = items.item_at(ItemPos::new(EWindows::Inventory as u8, BELT_WEAR_CELL))?;
+    protos.get(belt.vnum).map(|proto| proto.values[0])
+}
+
+/// The store's form of the world's changes, for the character whose store id is `owner_id`.
+#[must_use]
+pub fn row_changes(owner_id: u32, changes: &[ItemChange]) -> Vec<RowChange> {
+    changes
+        .iter()
+        .map(|change| match change {
+            ItemChange::Moved { id, pos } => {
+                let (window_type, pos) = stored_row_position(*pos);
+                RowChange::Moved {
+                    id: *id,
+                    window_type,
+                    pos,
+                }
+            }
+            ItemChange::Count { id, count } => RowChange::Count {
+                id: *id,
+                count: *count,
+            },
+            ItemChange::Created(item) => RowChange::Created(item_row(owner_id, item)),
+            ItemChange::Destroyed { id } => RowChange::Destroyed { id: *id },
+        })
+        .collect()
+}
+
+/// The row a split's new item is stored as.
+fn item_row(owner_id: u32, item: &Item) -> ItemRow {
+    let (window_type, pos) = stored_row_position(item.pos);
+    ItemRow {
+        id: item.id,
+        owner_id: Some(owner_id),
+        window_type,
+        pos,
+        vnum: item.vnum,
+        count: item.count,
+        refine_element: item.refine_element,
+        transmutation: item.transmutation,
+        flags: item.flags,
+        anti_flags: item.anti_flags,
+        sockets: item.sockets,
+        attributes: std::array::from_fn(|index| Attribute {
+            b_type: item.attributes[index].b_type,
+            s_value: item.attributes[index].s_value,
+        }),
+    }
+}
+
+/// The `CHAT_TYPE_INFO` line a refusal sends, encoded, or `None` when legacy sends nothing.
+///
+/// `CHARACTER::ChatPacket` (`G/char.cpp:5140-5187`): `id` 0, the descriptor's empire, and
+/// `bCanFormat` left at its constructor value. `__MULTI_LANGUAGE_SYSTEM__` is defined, so
+/// legacy first looks the text up in the player's language table and sends it unchanged when
+/// the table has no entry; the Rewrite loads no language table yet, so every line is sent
+/// unchanged, which is what legacy does for a text its table lacks.
+///
+/// # Panics
+///
+/// Never: each notice is one of four short constants from [`MoveRefused::notice`], far under
+/// `CHAT_MAX_LEN`, so the record builds and encodes.
+#[must_use]
+pub fn refusal_notice(refused: &MoveRefused, empire: u8) -> Option<Vec<u8>> {
+    let text = refused.notice()?;
+    // Each notice is a short constant, far under `CHAT_MAX_LEN`, so neither step can fail.
+    let line = GcChat::notice(CHAT_TYPE_INFO, empire, text.as_bytes())
+        .expect("a move notice is shorter than the chat length limit");
+    Some(
+        line.encode()
+            .expect("a move notice always fits the record's size field"),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::item_slots::{BELT_INVENTORY_SLOT_START, CUSTOM_INVENTORY_SLOT_START};
+    use protocol::gc_inventory::HEADER_GC_CHAT;
+    use world::character::{ItemRecord, Unported};
+
+    fn owners() -> ItemProtos {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
+        ItemProtos::load(&dir).expect("the owner's item protos load")
+    }
+
+    const INVENTORY: u8 = EWindows::Inventory as u8;
+
+    #[test]
+    fn the_worn_belt_is_flat_cell_207() {
+        // `WEAR_BELT` is the 28th wear position (`length.h:240`), after nothing gated.
+        assert_eq!(BELT_WEAR_CELL, 207);
+    }
+
+    #[test]
+    fn the_facts_come_from_the_prototype() {
+        let protos = owners();
+        // Hand-checked in the owner's data: 27001 is a red potion (`ITEM_USE`, `USE_POTION`),
+        // which a belt cell accepts, and 11 is a sword, which it does not.
+        let potion = move_facts(&protos, 27001).expect("27001 is in the owner's data");
+        assert!(potion.belt_eligible);
+        assert!(!potion.dragon_soul);
+        let sword = move_facts(&protos, 11).expect("11 is in the owner's data");
+        assert!(!sword.belt_eligible);
+        assert!(!sword.dragon_soul);
+        assert_eq!(move_facts(&protos, 0), None);
+        // An item in two banks lists both, ascending (ledger 199.2 names 27987).
+        let two_banks = move_facts(&protos, 27987).expect("27987 is in the owner's data");
+        assert_eq!(two_banks.categories, vec![2, 3]);
+        // A dragon-soul stone is `ITEM_DS`.
+        let stone = protos
+            .rows()
+            .iter()
+            .find(|proto| Some(proto.item_type) == type_value(b"ITEM_DS"))
+            .expect("the owner's data has a dragon-soul item");
+        assert!(move_facts(&protos, stone.vnum).is_some_and(|facts| facts.dragon_soul));
+    }
+
+    #[test]
+    fn the_belt_grade_is_the_worn_belts_value0_and_nothing_else_counts() {
+        let protos = owners();
+        let belt_proto = protos
+            .rows()
+            .iter()
+            .find(|proto| proto.size == 1 && proto.values[0] != 0)
+            .expect("the owner's data has a one-cell item with a value0");
+        let mut items = CharacterItems::default();
+        assert_eq!(belt_grade(&items, &protos), None);
+        let mut belt = Item::new(5, belt_proto.vnum);
+        belt.set_size(1).expect("one cell");
+        // An item next to the belt cell is not the belt.
+        items
+            .set(ItemPos::new(INVENTORY, BELT_WEAR_CELL + 1), &belt)
+            .expect("the cell after the belt is free");
+        assert_eq!(belt_grade(&items, &protos), None);
+        let _ = items.release(5).expect("just placed");
+        items
+            .set(ItemPos::new(INVENTORY, BELT_WEAR_CELL), &belt)
+            .expect("the belt cell is free");
+        assert_eq!(belt_grade(&items, &protos), Some(belt_proto.values[0]));
+    }
+
+    #[test]
+    fn each_change_is_stored_in_the_stores_terms() {
+        let mut piece = Item::new(0x0102_0304, 27001);
+        piece.count = 0x0203;
+        piece.flags = 0x0405_0607;
+        piece.anti_flags = 0x0809_0A0B;
+        piece.refine_element = 0x0C0D_0E0F;
+        piece.transmutation = 0x1011_1213;
+        piece.sockets = [1, 2, 3, 4, 5, 6];
+        piece.pos = ItemPos::new(INVENTORY, BELT_INVENTORY_SLOT_START + 3);
+        piece.attributes[6] = protocol::gc_item_window::ItemAttribute::new(7, 0x0708);
+        let changes = [
+            ItemChange::Moved {
+                id: 1,
+                pos: ItemPos::new(INVENTORY, BELT_INVENTORY_SLOT_START + 15),
+            },
+            ItemChange::Moved {
+                id: 2,
+                pos: ItemPos::new(INVENTORY, CUSTOM_INVENTORY_SLOT_START),
+            },
+            ItemChange::Count {
+                id: 3,
+                count: 0x0506,
+            },
+            ItemChange::Created(piece.clone()),
+            ItemChange::Destroyed { id: 4 },
+        ];
+        let rows = row_changes(0x0A0B_0C0D, &changes);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(
+            rows[0],
+            RowChange::Moved {
+                id: 1,
+                window_type: EWindows::BeltInventory as u8,
+                pos: 15
+            }
+        );
+        assert_eq!(
+            rows[1],
+            RowChange::Moved {
+                id: 2,
+                window_type: INVENTORY,
+                pos: u32::from(CUSTOM_INVENTORY_SLOT_START)
+            }
+        );
+        assert_eq!(
+            rows[2],
+            RowChange::Count {
+                id: 3,
+                count: 0x0506
+            }
+        );
+        let RowChange::Created(row) = &rows[3] else {
+            panic!("the split's item is a created row");
+        };
+        assert_eq!(row.id, piece.id);
+        assert_eq!(row.owner_id, Some(0x0A0B_0C0D));
+        assert_eq!(
+            (row.window_type, row.pos),
+            (EWindows::BeltInventory as u8, 3)
+        );
+        assert_eq!(row.vnum, 27001);
+        assert_eq!(row.count, 0x0203);
+        assert_eq!(row.flags, piece.flags);
+        assert_eq!(row.anti_flags, piece.anti_flags);
+        assert_eq!(row.refine_element, piece.refine_element);
+        assert_eq!(row.transmutation, piece.transmutation);
+        assert_eq!(row.sockets, piece.sockets);
+        assert_eq!(
+            (row.attributes[6].b_type, row.attributes[6].s_value),
+            (7, 0x0708)
+        );
+        assert_eq!(
+            (row.attributes[0].b_type, row.attributes[0].s_value),
+            (0, 0)
+        );
+        assert_eq!(rows[4], RowChange::Destroyed { id: 4 });
+    }
+
+    #[test]
+    fn the_records_are_one_frame_each_in_order() {
+        let mut item = Item::new(9, 27001);
+        item.set_size(1).expect("one cell");
+        let from = ItemPos::new(INVENTORY, 1);
+        let to = ItemPos::new(INVENTORY, 2);
+        let done = MoveDone {
+            kind: MoveKind::Moved,
+            records: vec![
+                ItemRecord::Set(world::item::gc_item_clear(from)),
+                ItemRecord::Set(item.gc_item_set(to, 0)),
+            ],
+            changes: vec![ItemChange::Moved { id: 9, pos: to }],
+        };
+        let moved = MovedItems::new(7, done.clone());
+        assert_eq!(moved.kind, MoveKind::Moved);
+        assert_eq!(moved.owner_id, 7);
+        assert_eq!(moved.records.len(), 2);
+        for (frame, record) in moved.records.iter().zip(done.records) {
+            let mut expected = Vec::new();
+            record.encode_into(&mut expected);
+            assert_eq!(frame, &expected);
+            assert_eq!(frame.len(), 72, "an item set is the measured 72 bytes");
+        }
+        assert_eq!(
+            moved.changes,
+            vec![RowChange::Moved {
+                id: 9,
+                window_type: INVENTORY,
+                pos: 2
+            }]
+        );
+    }
+
+    #[test]
+    fn a_refusal_with_a_notice_sends_one_info_line_and_the_rest_send_nothing() {
+        let line = refusal_notice(&MoveRefused::NotForBelt, 3).expect("the belt refusal speaks");
+        // header 4, size 10 + 9, type 1 (INFO), id 0, empire 3, bCanFormat 1, "[LS;1097]".
+        let mut expected = vec![HEADER_GC_CHAT.value(), 19, 0, 1, 0, 0, 0, 0, 3, 1];
+        expected.extend_from_slice(b"[LS;1097]");
+        assert_eq!(line, expected);
+        let room = refusal_notice(&MoveRefused::NoRoomInInventory, 1).expect("it speaks");
+        assert_eq!(&room[10..], b"Nu ai spatiu suficient in inventar.");
+        assert_eq!(refusal_notice(&MoveRefused::NoRoom, 1), None);
+        assert_eq!(
+            refusal_notice(&MoveRefused::NotPorted(Unported::Equipment), 1),
+            None
+        );
+    }
+}

@@ -189,7 +189,8 @@ pub enum ChatEffect {
         /// The `type` byte the client sent, which legacy never range-checks.
         chat_type: u8,
     },
-    /// The shout is below `SHOUT_LIMIT_LEVEL` (`:886-890`).
+    /// The shout is below `SHOUT_LIMIT_LEVEL` (`:886-890`): an info line to the sender that
+    /// names the limit.
     ShoutBelowLevel {
         /// The configured limit, which the message names.
         limit: u8,
@@ -208,7 +209,10 @@ impl ChatEffect {
     pub const fn reaches_client(&self) -> bool {
         matches!(
             self,
-            Self::DelayedDisconnect | Self::InfoToSender { .. } | Self::TalkingToMap { .. }
+            Self::DelayedDisconnect
+                | Self::InfoToSender { .. }
+                | Self::TalkingToMap { .. }
+                | Self::ShoutBelowLevel { .. }
         )
     }
 }
@@ -343,6 +347,40 @@ pub fn talking_record(effect: &ChatEffect) -> Option<GcChat> {
         can_format: false,
         text: text.clone(),
     })
+}
+
+/// The encoded `GC_CHAT` line for an effect that `CHARACTER::ChatPacket` answers, or `None`
+/// for every other effect.
+///
+/// `id` is 0, `bEmpire` is the descriptor's empire (`char.cpp:5179`), and `bCanFormat` keeps
+/// its constructor value of `true`. `__MULTI_LANGUAGE_SYSTEM__` is defined, so legacy first
+/// looks the text up in the player's language table and sends it unchanged when the table has
+/// no entry (`locale.cpp:71-88`); no language table is loaded yet, so every line is sent
+/// unchanged. The text is then a `vsnprintf` format: the one info text with an argument is the
+/// shout level refusal (`input_main.cpp:888`), which is formatted here, and no other info
+/// text holds a `%`.
+///
+/// # Panics
+///
+/// Never for the texts this module builds: every info text is a short constant, far under
+/// `CHAT_MAX_LEN`, so the record builds and encodes. A panic would mean a new info text
+/// longer than a chat line, which is a defect in this module.
+#[must_use]
+pub fn info_line(effect: &ChatEffect, empire: u8) -> Option<Vec<u8>> {
+    let text = match effect {
+        ChatEffect::InfoToSender { text } => text.as_bytes().to_vec(),
+        ChatEffect::ShoutBelowLevel { limit } => {
+            format!("Shout can only be used at level {limit} or higher.").into_bytes()
+        }
+        _ => return None,
+    };
+    // Every info text is a short constant, far under `CHAT_MAX_LEN`, so neither step fails.
+    let line = GcChat::notice(CHAT_INFO, empire, &text)
+        .expect("an info text is shorter than the chat length limit");
+    Some(
+        line.encode()
+            .expect("an info line always fits the record's size field"),
+    )
 }
 
 /// Replace every banned word with `'*'`, as `CBanwordManager::ConvertString` does.
@@ -797,6 +835,43 @@ mod tests {
                 text: b"Ayla : anything at all".to_vec(),
             }],
         );
+    }
+
+    #[test]
+    fn an_info_line_is_the_legacy_chat_packet_with_the_speakers_empire() {
+        // `GC_CHAT` (byte 4), `size` 19 as a little-endian `WORD`, `CHAT_TYPE_INFO`, `id` 0,
+        // `bEmpire` 3, `bCanFormat` 1, then the text with no terminator.
+        let effect = ChatEffect::InfoToSender { text: "[LS;655]" };
+        let mut expected = vec![4, 18, 0, 1, 0, 0, 0, 0, 3, 1];
+        expected.extend_from_slice(b"[LS;655]");
+        assert_eq!(info_line(&effect, 3), Some(expected));
+        let other = info_line(&effect, 1).expect("an info line");
+        assert_eq!(other[8], 1, "the empire byte follows the descriptor");
+    }
+
+    #[test]
+    fn the_shout_level_refusal_is_an_info_line_that_names_the_limit() {
+        let line = info_line(&ChatEffect::ShoutBelowLevel { limit: 15 }, 2).expect("a line");
+        let text = b"Shout can only be used at level 15 or higher.";
+        let mut expected = vec![4, 10 + 45, 0, 1, 0, 0, 0, 0, 2, 1];
+        expected.extend_from_slice(text);
+        assert_eq!(text.len(), 45);
+        assert_eq!(line, expected);
+        assert!(ChatEffect::ShoutBelowLevel { limit: 15 }.reaches_client());
+    }
+
+    #[test]
+    fn only_an_info_effect_builds_an_info_line() {
+        assert!(info_line(&ChatEffect::Close, 1).is_none());
+        assert!(info_line(&ChatEffect::DelayedDisconnect, 1).is_none());
+        assert!(info_line(&ChatEffect::ShoutOnCooldown, 1).is_none());
+        assert!(!ChatEffect::ShoutOnCooldown.reaches_client());
+        let talking = ChatEffect::TalkingToMap {
+            vid: 1,
+            empire: 1,
+            text: b"Ayla : hi".to_vec(),
+        };
+        assert!(info_line(&talking, 1).is_none());
     }
 
     #[test]

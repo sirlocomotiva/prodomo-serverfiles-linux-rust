@@ -56,7 +56,7 @@
 //!    exhaustible rather than pretending the ids are free.
 
 use common::item_slots::ITEM_COUNT_LIMIT;
-use protocol::gc_item_window::{GcItemSet, ItemAttribute};
+use protocol::gc_item_window::{GcItemSet, GcItemUpdate, ItemAttribute};
 use protocol::item_pos::ItemPos;
 
 use crate::character::NPOS;
@@ -76,6 +76,18 @@ pub const SOCKETS: usize = common::constants::ITEM_SOCKET_MAX_NUM as usize;
 /// 5 + 2 and not a free choice.
 pub const ATTRIBUTES: usize = common::constants::ITEM_ATTRIBUTE_MAX_NUM as usize;
 
+/// `ITEM_FLAG_STACKABLE` (`item_length.h:361`): the proto flag that lets two stacks of one
+/// vnum merge and one stack split. Legacy's `CItem::IsStackable` (`item.h:38`) reads it.
+pub const ITEM_FLAG_STACKABLE: u32 = 1 << 2;
+
+/// `ITEM_FLAG_IRREMOVABLE` (`item_length.h:367`): an item that may not be moved out of the
+/// band between the base inventory and the custom banks (`char_item.cpp:7625-7629`).
+pub const ITEM_FLAG_IRREMOVABLE: u32 = 1 << 8;
+
+/// `ITEM_ANTIFLAG_STACK` (`item_length.h:393`): the anti-flag that forbids a stack merge
+/// or split even on a stackable item.
+pub const ITEM_ANTIFLAG_STACK: u32 = 1 << 15;
+
 /// An item instance's unique id.
 ///
 /// Legacy's is a `DWORD` from a monotonic counter that is never rewound, so a
@@ -86,6 +98,30 @@ pub type ItemId = u32;
 
 /// The id of an item that does not exist. `0` is unreachable for a real id.
 pub const NO_ITEM: ItemId = 0;
+
+/// The record that tells a client a cell is empty again.
+///
+/// Legacy clears a cell with `SetItem(pos, NULL)`, which sends `HEADER_GC_ITEM_DEL` (20) in
+/// the deprecated `TPacketGCItemDelDeprecated` layout, every field zero
+/// (`char_item.cpp:596-611`). The Reference client frames byte 20 at the current
+/// `TPacketGCItemDel` width, which the deprecated layout does not match, so the record it
+/// can read is a `GC_ITEM_SET` (21) with vnum 0 and every other field zero. That is a
+/// recorded Divergence (ledger 211.3), and the play test calibrates it.
+#[must_use]
+pub const fn gc_item_clear(pos: ItemPos) -> GcItemSet {
+    GcItemSet {
+        cell: pos,
+        vnum: 0,
+        count: 0,
+        refine_element: 0,
+        transmutation: 0,
+        flags: 0,
+        anti_flags: 0,
+        highlight: 0,
+        sockets: [0; SOCKETS],
+        attributes: [ItemAttribute::new(0, 0); ATTRIBUTES],
+    }
+}
 
 /// Why a count was refused.
 ///
@@ -214,6 +250,13 @@ impl Item {
         self.count
     }
 
+    /// Whether this item stacks: `CItem::IsStackable` (`item.h:38`) and not
+    /// `ITEM_ANTIFLAG_STACK`, which is the pair every merge and split in `MoveItem` tests.
+    #[must_use]
+    pub const fn stacks(&self) -> bool {
+        self.flags & ITEM_FLAG_STACKABLE != 0 && self.anti_flags & ITEM_ANTIFLAG_STACK == 0
+    }
+
     /// How many grid cells the stack occupies.
     ///
     /// A size of zero is representable because legacy's `GetSize()` returns it
@@ -265,6 +308,23 @@ impl Item {
             flags: self.flags,
             anti_flags: self.anti_flags,
             highlight,
+            sockets: self.sockets,
+            attributes: self.attributes,
+        }
+    }
+
+    /// The `GC_ITEM_UPDATE` record for this item where it is stored.
+    ///
+    /// `CItem::UpdatePacket` (`item.cpp:249-276`) addresses the client with the item's own
+    /// window and cell, not with whatever position a caller asked about, so this reads
+    /// [`Item::pos`], which [`crate::character::CharacterItems::set`] keeps in legacy's terms.
+    #[must_use]
+    pub const fn gc_item_update(&self) -> GcItemUpdate {
+        GcItemUpdate {
+            cell: self.pos,
+            count: self.count,
+            refine_element: self.refine_element,
+            transmutation: self.transmutation,
             sockets: self.sockets,
             attributes: self.attributes,
         }

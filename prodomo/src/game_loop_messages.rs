@@ -13,6 +13,7 @@ use world::item::Item;
 use crate::client_registry::ClientOutbox;
 use crate::game_state::{EnterWorldRefused, Released, RevokeRefused};
 use crate::item_grant::{GrantOutcome, GrantRefusal, GrantRequest};
+use crate::item_move::{MoveItemRefused, MovedItems};
 
 /// Default capacity of the Tokio-to-game command queue.
 pub const DEFAULT_COMMAND_CAPACITY: usize = 256;
@@ -294,6 +295,20 @@ pub enum GameCommand {
         /// Closed, not sent, when the world could not act at all.
         reply: oneshot::Sender<bool>,
     },
+    /// Runs one `CG_ITEM_MOVE` for the character online under `vid`.
+    ///
+    /// The world changes before the answer is sent, and the answer carries the records and
+    /// the row changes, because the descriptor writes the rows and only then the records:
+    /// the world is the only thing that can say where an item went, and the store is the
+    /// only thing that can say whether that survives.
+    MoveItem {
+        /// The VID of the character whose client sent the move.
+        vid: common::vid::Vid,
+        /// The move as the client sent it.
+        request: world::character::MoveRequest,
+        /// Where the game thread reports what the move did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Requests terminal loop shutdown.
     Stop,
 }
@@ -472,6 +487,29 @@ impl std::fmt::Display for DeliverError {
 }
 
 impl std::error::Error for DeliverError {}
+
+/// Why the world could not be asked to move an item.
+///
+/// A refusal is an answer, so these two are the cases where there is none, and both mean
+/// the game thread is not running the world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveItemError {
+    /// The command never reached the game thread.
+    NotSent,
+    /// The command was sent and the thread dropped it without answering.
+    NoAnswer,
+}
+
+impl std::fmt::Display for MoveItemError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSent => write!(formatter, "the item-move command was not sent"),
+            Self::NoAnswer => write!(formatter, "the game thread gave no item-move answer"),
+        }
+    }
+}
+
+impl std::error::Error for MoveItemError {}
 
 /// Why a live client's character could not be taken out of the world.
 ///
@@ -784,6 +822,28 @@ impl GameLoopController {
             .await
             .map_err(|_| DeliverError::NotSent)?;
         answer.await.map_err(|_| DeliverError::NoAnswer)
+    }
+
+    /// Asks the world to run one `CG_ITEM_MOVE`, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver and
+    /// [`MoveItemError::NoAnswer`] when it closed the reply without sending.
+    pub async fn move_item(
+        &self,
+        vid: common::vid::Vid,
+        request: world::character::MoveRequest,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::MoveItem {
+            vid,
+            request,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 
     /// Attempts to send without waiting when the command queue is full.

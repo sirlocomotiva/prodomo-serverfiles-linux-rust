@@ -326,6 +326,12 @@ pub enum Destroyed {
         /// Kept so the caller can log or answer with the same numbers the world used,
         /// rather than with a cell it guessed.
         cell: (u8, u32),
+        /// Whether the client was sent the record that empties the cell.
+        ///
+        /// `false` means the character has no connected client, or the game thread did
+        /// not answer. Neither undoes the destroy: the row is already gone, so the next
+        /// login draws the cell empty.
+        told: bool,
     },
     /// The world released the item but the row is still there.
     ///
@@ -366,21 +372,16 @@ pub enum Destroyed {
 /// prevent, which is why [`Destroyed::StillStored`] is a separate variant and not a
 /// successful destroy with a note.
 ///
-/// **Nothing is sent to the client, and that is the open question, not an oversight.**
-/// The legacy record for clearing a window slot is `HEADER_GC_ITEM_DEL` (byte 20, 62
-/// bytes). The stock client has no such record: its byte 20 is `HEADER_GC_ITEM_SET`,
-/// registered at `PythonNetworkStream.cpp:71` and dispatched to the item-**set** handler
-/// at `PythonNetworkStreamPhaseGame.cpp:342`, and its registered width is 72 at six
-/// sockets or 60 at three. 62 matches neither, so `CheckPacket` drops the frame
-/// (`PythonNetworkStream.cpp:537-543`). Sending it would reproduce a Defect the ledger
-/// recorded at section 193.8 and explicitly does not reproduce.
+/// Once the row is gone, the client is sent the record that empties the cell, which is
+/// the order a move keeps too: the store first, the client second, so a client is never
+/// shown a change the store could still refuse.
 ///
-/// What the Rewrite should send instead is a design question for the owner and the play
-/// test, not a choice this function makes. `docs/PROTOCOL_NOTES.md` records the mismatch
-/// under "The item-window records"; ledger 208.2 carries the decision to the owner. Until it is answered, an Operator destroy removes the item
-/// from the world and the store, and the client keeps drawing the item until its next
-/// login, at which point the cell is empty. That is recorded as a Divergence rather than
-/// passed off as parity.
+/// Legacy clears a cell with `HEADER_GC_ITEM_DEL` (byte 20) in its deprecated 62-byte
+/// layout. The Reference client frames byte 20 at the width of its own item-set record, so
+/// it drops that frame, and sending it would reproduce the Defect ledger 193.8 records. The
+/// Rewrite sends a `GC_ITEM_SET` (byte 21) with vnum 0 instead, which the client reads as
+/// an empty cell ([`world::item::gc_item_clear`]). Ledger 211.3 records it as a Divergence
+/// and supersedes 208.2, which sent nothing; the play test calibrates it.
 ///
 /// # Errors
 ///
@@ -408,7 +409,15 @@ pub async fn destroy_and_delete(
     let owner = released.owner_id;
 
     match db::items::destroy_item(store, id, owner).await {
-        Ok(true) => Destroyed::Gone { id, cell },
+        Ok(true) => {
+            let mut record = Vec::new();
+            world::item::gc_item_clear(released.pos).encode_into(&mut record);
+            let told = controller
+                .deliver_record(common::vid::Vid::new(owner), record)
+                .await
+                .unwrap_or(false);
+            Destroyed::Gone { id, cell, told }
+        }
         // `destroy_item` answers `false` only when the id does not exist at all, which
         // cannot be true here: the world held it and the world is the only thing that
         // grants ids. It is reported rather than assumed away.

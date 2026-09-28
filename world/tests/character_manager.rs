@@ -172,3 +172,34 @@ fn a_null_vid_is_refused_because_it_is_what_a_record_with_no_target_carries() {
         Ok(())
     );
 }
+
+#[test]
+fn the_mutable_vid_lookup_reaches_the_character_the_vid_names_and_no_other() {
+    // Given: two characters, so a lookup that ignored its key would be caught picking one.
+    let mut manager = CharacterManager::new();
+    manager
+        .create_player_with_vid(7, "Alice", Vid::new(0x0102_0304))
+        .unwrap();
+    manager
+        .create_player_with_vid(8, "Bob", Vid::new(0x0506_0708))
+        .unwrap();
+
+    // When: the second is changed through its VID.
+    manager
+        .find_by_vid_mut(Vid::new(0x0506_0708))
+        .unwrap()
+        .set_inven_point(3);
+
+    // Then: that character changed, the other did not, and an unknown VID is named.
+    assert_eq!(manager.find_player_by_name("bob").unwrap().inven_point(), 3);
+    assert_eq!(
+        manager.find_player_by_name("alice").unwrap().inven_point(),
+        0
+    );
+    assert_eq!(
+        manager
+            .find_by_vid_mut(Vid::new(9))
+            .map(|found| found.player_id()),
+        Err(CharacterManagerError::UnknownVid(Vid::new(9)))
+    );
+}

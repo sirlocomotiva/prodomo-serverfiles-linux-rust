@@ -175,6 +175,20 @@ impl CharacterManager {
             .ok_or(CharacterManagerError::UnknownVid(vid))
     }
 
+    /// Finds a character by virtual identifier for mutation.
+    ///
+    /// The write-side twin of [`CharacterManager::find_by_vid`]. A record a client sends
+    /// names no character, so the descriptor's own VID is the only key a client-driven
+    /// change can use.
+    ///
+    /// # Errors
+    /// Returns `UnknownVid` when no character is indexed by the supplied VID.
+    pub fn find_by_vid_mut(&mut self, vid: Vid) -> Result<&mut Character, CharacterManagerError> {
+        self.characters
+            .get_mut(&vid)
+            .ok_or(CharacterManagerError::UnknownVid(vid))
+    }
+
     /// Finds a player by persistent identifier.
     ///
     /// # Errors
