@@ -1238,3 +1238,40 @@ not the inventory delete. Searches for it find the wrong thing.
 fixed-size, 16 dynamic). Bytes 20, 21, 25 and 26 moved to implemented. Byte 6 moved the
 other way, for the reason above. `AGENTS.md` said 96 of 134 and 38 missing; all three of
 its numbers were wrong.
+
+## The record that loads an inventory is character select, not an item load (section 209)
+
+**`CG_ITEM_LOAD` is not a client record in this build.** `ITEM_LOAD` against
+`server/server/game/packet.h` finds the name **zero** times, `CG_ITEM` finds **11**, and a
+deliberately bogus name finds **0** — the zero is an absence, not a broken search. The same
+sweep over `packet_info.cpp:117-161` gives 8 `CG_ITEM*`, 0 `ITEM_LOAD` and 44 `HEADER_CG`,
+and `protocol/src/cg_inventory.rs` agrees. The name on disk is the **DB-peer** record
+`HEADER_DG_ITEM_LOAD = 42` (`server/server/common/tables.h:196`), handled on a DB
+descriptor. ADR-0001 retired that protocol, so the name never had a client-side meaning and
+a search for it finds only the peer tree.
+
+**The trigger is `CG_CHARACTER_SELECT`, client byte 6** (`packet.h:17`, dispatched at
+`input_login.cpp:1185-1187`). The sequence has no client request in it: `CharacterSelect`
+answers with a DB request (`input_login.cpp:298-304`), `CInputDB::PlayerLoad` sets
+`PHASE_LOADING` (`input_db.cpp:414`), the item rows arrive and `CInputDB::ItemLoad` runs
+**inside that phase**, and the client's `CG_ENTERGAME` (byte 10, `packet.h:20`) ends it
+(`input_login.cpp:608`). So the inventory is a server send in the loading phase, and a port
+needs no new inbound handler — only the send at the right point.
+
+**No window-open record exists.** `WINDOW` against `packet.h` is **0**. The window is a
+field of the item record, which is why the four records of section 193 are the whole
+vocabulary.
+
+**Two placements move window, and a vnum-only check will miss both.** An equipped item
+travels as window **1**, not 2, because `SetWear` translates it (`char_item.cpp:667`), so it
+arrives at cell `180 + wearCell`; a belt row also travels as window 1
+(`input_db.cpp:1491-1495`, `+274`).
+
+**Legacy's load order is not deterministic, and no client can see that.** A cache hit walks
+a `std::unordered_set<CItemCache *>` (`ClientManager.h:47`,
+`ClientManagerPlayer.cpp:331-341`) and a miss runs a query with **no `ORDER BY`**
+(`ClientManagerPlayer.cpp:364-387`). Every record carries an explicit cell, so the order is
+invisible on the wire. A port may fix an order; it is not reproducing one.
+
+**`db/src/items.rs:553` names six windows where legacy names seven.** A doc defect, not a
+code defect, and worth fixing in the same change as the load.

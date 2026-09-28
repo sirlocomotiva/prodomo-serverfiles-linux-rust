@@ -20149,3 +20149,202 @@ the run. Two Clippy findings were fixed by refactoring (`match_same_arms` and
 **Not measured.** `i686-linux-gnu-g++-12` is still not installed. This unit adds no width
 claim: the 72 and 62 byte figures are the ones `protocol/src/gc_item_window.rs` already
 carries and pins against `gc_inventory`.
+
+## 209. The item load hangs off character select, and a console answer that never arrived
+
+Two findings from this unit. One corrects ledger 208.3, and one is a defect the Rewrite
+already had, that its own log reported as a success.
+
+### 209.1 `CG_ITEM_LOAD` does not exist in this build, and the trigger is `CG_CHARACTER_SELECT`
+
+Ledger 208.3 says the client "asks with `CG_ITEM_LOAD`". **That name does not exist on the
+client wire**, and the wrong name came from the DB-peer tree, which ADR-0001 retired.
+
+**The controls.** `ITEM_LOAD` against `server/server/game/packet.h` finds the name **zero**
+times, `CG_ITEM` finds **11**, and a deliberately bogus name finds **0** — so the zero is a
+real absence and not a broken search. The same sweep over `packet_info.cpp:117-161` gives 8
+`CG_ITEM*`, 0 `ITEM_LOAD` and 44 `HEADER_CG`; `protocol/src/cg_inventory.rs` agrees. The
+name on disk belongs to the peer protocol: `HEADER_DG_ITEM_LOAD = 42`
+(`server/server/common/tables.h:196`), handled by `CInputDB::ItemLoad` on a **DB-server
+descriptor**. It never had a client-side meaning to port.
+
+**The real path.** `CG_CHARACTER_SELECT` is client wire byte 6 (`packet.h:17`), dispatched
+at `input_login.cpp:1185-1187`. `CharacterSelect` answers with a DB request
+(`input_login.cpp:298-304`); `CInputDB::PlayerLoad` sets `PHASE_LOADING` (`input_db.cpp:414`);
+the item rows arrive and `CInputDB::ItemLoad` runs **inside that phase**; the client then
+sends `CG_ENTERGAME` (byte 10, `packet.h:20`), which ends it (`input_login.cpp:608`).
+
+Read the other way, that is the useful half: **the inventory is the server's decision, taken
+in the loading phase.** There is no client request to hang a load off, so the Rewrite needs
+no new inbound handler — it needs the outbound send to happen where legacy puts it. Ledger
+208.3's "the client asks" was wrong on both the record and the direction.
+
+Four facts a vnum-only load would get wrong, recorded here so the port does not have to
+re-derive them:
+
+- An equipped item travels as **window 1, not window 2**: `SetWear` translates the cell
+  (`char_item.cpp:667`), so it arrives as window 1 at cell `180 + wearCell`.
+- A belt row also travels as window 1 (`input_db.cpp:1491-1495`, `+274`).
+- **No window-open record exists.** `WINDOW` against `packet.h` is **0**; the window is a
+  field of the item record, which is why ledger 193's four codecs are the whole vocabulary.
+- The order is neither window-, slot- nor id-ordered and is **not deterministic**: a cache
+  hit walks a `std::unordered_set<CItemCache *>` (`ClientManager.h:47`,
+  `ClientManagerPlayer.cpp:331-341`) and a miss runs a query with **no `ORDER BY`**
+  (`ClientManagerPlayer.cpp:364-387`). The client carries an explicit cell in every record,
+  so no legacy order is observable. The Rewrite's deterministic order is therefore a choice
+  legacy never made, not a difference a client can see.
+
+**Where the hook goes.** `prodomo/src/main.rs:1467` `select_character`, after `after_map_test`
+at `:1553` — **not** `enter_world` and not `enter_game`. `db::items::load_owner_items`
+(`db/src/items.rs:568`) is written, tested and deterministic, and still has **no production
+caller**; `prodomo/src/game_state.rs:584` `enter_world` does not touch items. **The load is
+not ported**, so `sys.item.core` stays `partial` and this ledger does not call it otherwise.
+
+**A doc defect to fix with the load.** `db/src/items.rs:553` says "the six `INVENTORY`
+windows". Legacy names **seven**.
+
+### 209.2 The console logged an answer that never reached the pipe
+
+`operator_console::run` promises, in its own doc comment, that an answer goes to the log
+**and back to the pipe**. It does not go back to the pipe. The server writes it at
+`prodomo/src/operator_console.rs:286` through `reader.get_mut()`, and `reader` comes from
+`tokio::fs::File::open` (`:331`), which is `O_RDONLY`.
+
+The failure is invisible, and that is the part worth recording. Measured on a real server
+with a `0600` pipe and one command written into it:
+
+| what to look for | what happened |
+|---|---|
+| `Operator console:` answer lines in the log | **1** |
+| `could not echo its answer` lines in the log | **0** |
+| bytes a second reader holding the pipe open received | **0** (`b''`) |
+
+And the write is genuinely rejected: `write` on an `O_RDONLY` FIFO descriptor returns
+`[Errno 9] Bad file descriptor`. So the answer is logged, the error is not, and the pipe
+stays empty.
+
+The reason is a property of Tokio, read in `tokio-1.50.0/src/fs/file.rs`:
+`File::poll_write` copies the caller's bytes into an internal buffer, spawns the blocking
+`write(2)`, and returns `Ok(n)` — **the count it copied, before the write has run**. A
+stashed `last_write_err` is returned by a *later* call. `write_all` is therefore satisfied
+by the copy alone and never asks again, so the `EBADF` is never observed by this code path.
+The function reports success for a write the kernel rejected.
+
+**What this means for the console, and the decision it is waiting on.** The console is
+log-only in practice, and was documented as if it were not. Two honest resolutions exist and
+the owner picks one:
+
+1. **Log-only, and say so.** Delete the echo write, correct the doc comment and the startup
+   line, and record that the Operator reads the answer from the log. No protocol risk, and
+   the process tests already assert exactly this.
+2. **Make the echo real.** Open the pipe read-write so the descriptor may write. That makes
+   the answer arrive, and it creates the opposite hazard: the console's own reader then
+   reads its own answer back as the next command, which answers that, forever. A correct
+   form has to skip exactly the bytes it wrote, and must not block when a second reader
+   (an Operator holding the pipe open) takes them first. That is real work, and the 207
+   ledger's reason for choosing "the console is off unless configured" does not require it.
+
+This unit does **not** pick. It records the measurement, so that whoever changes it next
+knows the write is not a one-line fix and that a test asserting "the answer came back" would
+have passed against a lie. A test pinning the finding is in
+`prodomo/src/operator_console.rs` (`a_write_to_the_read_only_end_of_a_pipe_reports_success_and_sends_nothing`),
+with a writable-descriptor control so "nothing arrived" cannot be confused with a broken
+reader.
+
+### 209.3 The state of the tree, and what is not verified
+
+This section is a receipt for a unit that was **stopped mid-flight**, so it separates what
+was measured from what was not. Nothing in 209.1 or 209.2 is a completed port.
+
+**Committed and pushed.** Ledger 208 is commit `b41f1223`, and every gate in its table passed
+at that commit. That is still the head of `main`.
+
+**Uncommitted when this was written.** Two modified files and two untracked paths:
+
+| path | state |
+|---|---|
+| `prodomo/src/item_persist.rs` | a doc-comment correction only: it now says the byte-20 mismatch is recorded in `PROTOCOL_NOTES.md` and the owner's decision is in 208.2, instead of claiming more |
+| `prodomo/src/operator_console.rs` | the test named in 209.2. **Its compile and run were never observed** — the command was started and abandoned. Treat it as an unverified draft, not as a passing test. Run it before anything else in this section; if it does not compile, **delete it** and keep 209.2's measurement, which is the finding and does not depend on the test |
+| `.scratch/ledger209-item-load-research.md` | the research behind 209.1, with a `path:line` and a quoted line on every claim and a control table for its twelve absence claims |
+| `.scratch/tmp/` | scratch server runs used for the 209.2 measurement. Disposable |
+
+**Gates for the uncommitted work: not run.** No `fmt`, no Clippy, no test run, and no
+rustdoc run covers the two modified files. The gate table in 208 applies to `b41f1223` and
+**not** to the working tree, so a later session must run the full set before committing this
+work rather than citing 208's numbers.
+
+**The ADRs were checked and left alone.** `docs/adr/0001`-`0004` mention no console, no
+Operator interface, no FIFO and no item-load record, so neither finding touches a decision:
+209.1 is a behaviour fact about which record triggers a send, and 209.2 is a defect in the
+Rewrite's own console. No ADR is superseded and none needs a new one. A separate audit of
+every ADR requirement against the tested implementation was started but **its report was not
+captured**, so this ledger does not claim that audit passed.
+
+**Still open, in the order they were left.**
+
+1. The load path of 209.1, in `select_character`, with a scenario that grants an item,
+   disconnects, selects the character and reads the record back off the client's socket.
+2. The console decision in 209.2 — the current code's promise and its behaviour disagree,
+   and that is the only thing 209.2 says for certain.
+3. Every stale `CG_ITEM_LOAD` / `CInputDB::ItemLoad` reference in the tree, which 209.1
+   shows is a name from the retired peer protocol: `docs/STATUS.md` build-order row 4,
+   `.scratch/parity/systems.md`'s `sys.item.core` note, and 208.3 itself (this ledger is
+   append-only, so 208.3 stands corrected by 209.1 rather than edited).
+4. The item-clear record for a destroy, which is the owner's call under 208.2 and is
+   unchanged by this unit.
+
+**Not measured.** `i686-linux-gnu-g++-12` is still not installed. This unit adds no width
+claim of its own: the 72-byte `GC_ITEM_SET` is the one `protocol/src/gc_item_window.rs`
+already carries and pins against `gc_inventory`. The widths 209.1 quotes for legacy records
+are sums from `server/server/game/packet.h` quoted by the research report, which is the same
+source 193 used, and are **not** a new packed-struct measurement.
+
+### 209.4 Receipt: the draft test hung, was rewritten, and the gates ran
+
+209.3 asked for the draft test to be run before anything else. It was, and it **hung**: it
+never compiled wrong and never failed, it simply ran past sixty seconds with no end. The cause
+is the first line that touches the pipe. `tokio::fs::File::open` is `open(2)` with `O_RDONLY`,
+and on a FIFO that call waits until some descriptor has the other end open for writing. The
+draft opened the read-only end first, with no writer anywhere in the process, so it waited
+forever. That is a property of FIFOs and not of the finding in 209.2, which stands.
+
+The test was rewritten rather than deleted, because it pins a fact the owner's 209.2 choice
+depends on:
+
+- the **read-write end is opened first**. Linux never makes `O_RDWR` on a FIFO wait, and with
+  it open the read-only `open` has its writer and returns at once;
+- the write through the read-only end reports `Ok`, and the **next call on that descriptor**
+  (`flush`) returns the deferred error, which is the second half of 209.2's claim and was not
+  asserted before: the write did fail, the caller was just not told;
+- the **control** writes through the read-write end and reads once. A FIFO is first in, first
+  out, so a leaked answer would come out ahead of the control's bytes in the same read; the
+  test asserts the read is exactly the control's line;
+- the whole body runs under a ten-second `tokio::time::timeout`, so a wait this reasoning
+  missed fails the test instead of hanging the suite.
+
+The draft's own "is anything waiting" step was also unsafe in a second way: a timed-out
+`read` on a Tokio `File` leaves the blocking `read(2)` running on the pool, and the next
+operation on that `File` waits for it, so the control write would have queued behind a read
+that needed the control write to finish. The rewrite never reads a pipe that could be empty.
+
+`.scratch/ledger198-operator-item-grant.md` called the test an unobserved draft; it now says
+the test runs and passes.
+
+**Receipt.** One new test, `prodomo/src/operator_console.rs`
+(`a_write_to_the_read_only_end_of_a_pipe_reports_success_and_sends_nothing`). The gates ran on
+the working tree of this section, with no other change in it:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2362 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2362 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+`SELECT datname FROM pg_database WHERE datname LIKE 'prodomo\_%'` returns nothing after the
+run, and no `*.core` file is outside `target/`. The workspace has 191 Rust files and 128,974
+lines. The 209.2 decision is still open, and so is the load path of 209.1: 209.3's list is
+unchanged apart from its first paragraph about the draft test.

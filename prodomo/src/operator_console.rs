@@ -857,6 +857,76 @@ mod pipe_tests {
     }
 
     #[tokio::test]
+    async fn a_write_to_the_read_only_end_of_a_pipe_reports_success_and_sends_nothing() {
+        // This is the whole reason the console does not echo its answer, and it is a
+        // property of Tokio rather than of this crate, so it is pinned here where a
+        // future reader will look when someone tries to add the echo back.
+        //
+        // `File::poll_write` copies the bytes into an internal buffer and returns the
+        // count it copied, before the blocking `write(2)` has run. `write_all` is
+        // therefore satisfied by the copy alone and never asks a second time, so the
+        // `EBADF` a read-only descriptor earns sits in a field Tokio keeps for the *next*
+        // call. A console that echoed its answer this way would log a successful write,
+        // log no error, and put nothing in the pipe.
+        //
+        // The first draft of this test opened the read-only end first, and that open
+        // waits for a writer that never came: the test hung instead of failing. The
+        // read-write end is opened first here, because on Linux `O_RDWR` on a FIFO never
+        // waits, and nothing below reads a pipe that could be empty. The timeout turns any
+        // wait this reasoning missed into a failure rather than a hang.
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let path = a_scratch_path("echo");
+        let _ = std::fs::remove_file(&path);
+        prepare(&path).await.expect("the pipe should be created");
+        let seen = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut both = tokio::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .await
+                .expect("a read-write end should open");
+            // One end, read-only: this is exactly what `open` hands the console's reader.
+            let mut read_only = tokio::fs::File::open(&path)
+                .await
+                .expect("the read end should open while a writer exists");
+            let reported = read_only.write_all(b"an answer nobody receives\n").await;
+            assert!(
+                reported.is_ok(),
+                "this test is about a write that *reports* success, so if Tokio ever \
+                 fixed the optimistic return the test has to be rewritten rather than \
+                 quietly start passing for the wrong reason: {reported:?}"
+            );
+            // The deferred error is still there for the next call: the write did fail.
+            let deferred = read_only.flush().await;
+            assert!(
+                deferred.is_err(),
+                "the read-only descriptor's write must fail somewhere, got {deferred:?}"
+            );
+
+            // The control: the same pipe, written through a descriptor that may write,
+            // delivers. A pipe is first in, first out, so if the rejected write had put
+            // its bytes in, they would come out ahead of these in the same read.
+            both.write_all(b"an answer somebody receives\n")
+                .await
+                .expect("a read-write end should accept bytes");
+            both.flush()
+                .await
+                .expect("the control write should complete");
+            let mut buffer = [0_u8; 128];
+            let count = both.read(&mut buffer).await.expect("the pipe should read");
+            String::from_utf8_lossy(&buffer[..count]).into_owned()
+        })
+        .await
+        .expect("no step of this test should wait");
+        assert_eq!(
+            seen, "an answer somebody receives\n",
+            "only the control's bytes may be in the pipe"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
     async fn prepare_makes_a_named_pipe_and_not_a_regular_file() {
         // The first draft opened the path with `OpenOptions::create_new`, which makes a
         // **regular file** with the mode -- there is no flag for a FIFO. The end-to-end

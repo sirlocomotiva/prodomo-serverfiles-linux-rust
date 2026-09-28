@@ -376,9 +376,8 @@ pub enum Destroyed {
 /// recorded at section 193.8 and explicitly does not reproduce.
 ///
 /// What the Rewrite should send instead is a design question for the owner and the play
-/// test. The candidates and the cost of guessing are written down in
-/// `docs/PROTOCOL_NOTES.md` under the byte-20 section; this function deliberately does not
-/// choose between them. Until it is answered, an Operator destroy removes the item
+/// test, not a choice this function makes. `docs/PROTOCOL_NOTES.md` records the mismatch
+/// under "The item-window records"; ledger 208.2 carries the decision to the owner. Until it is answered, an Operator destroy removes the item
 /// from the world and the store, and the client keeps drawing the item until its next
 /// login, at which point the cell is empty. That is recorded as a Divergence rather than
 /// passed off as parity.

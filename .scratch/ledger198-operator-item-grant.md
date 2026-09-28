@@ -144,14 +144,17 @@ FIFO. The status is now `partial`, not `ported` — see the two gaps at the end.
 
 **Two gaps, both recorded rather than closed:**
 
-1. **A relog does not put the item back in the client's window.** `CG_ITEM_LOAD` is not
+1. **A relog does not put the item back in the client's window.** The inventory load is not
    handled. The scenario proves the *row* survives; it does not prove the item is drawn
    again, and it should not be read that way. Legacy does not send items on enter-game
-   either — `CInputDB::PlayerLoad` (`input_db.cpp:328`) sends no items, and the client asks
-   with `CG_ITEM_LOAD`, which `CInputDB::ItemLoad` (`input_db.cpp:1451`) answers.
-   `db::items::load_owner_items` has no caller, exactly as `grant_and_deliver` had none at
-   206. **This is the next step-4 item**, and it is the half of the round trip this unit
-   did not do.
+   either — `CInputDB::PlayerLoad` (`input_db.cpp:328`) sends no items — and the send it
+   does make runs inside the loading phase that `CG_CHARACTER_SELECT` starts
+   (`CInputDB::ItemLoad`, `input_db.cpp:1451`). Ledger 209.1 corrected an earlier draft of
+   this item, which named a `CG_ITEM_LOAD` that **does not exist on the client wire**: the
+   name is the retired DB-peer `HEADER_DG_ITEM_LOAD`. The hook is `select_character`
+   (`prodomo/src/main.rs:1467`), not `enter_world`. `db::items::load_owner_items` has no
+   caller, exactly as `grant_and_deliver` had none at 206. **This is the next step-4 item**,
+   and it is the half of the round trip this unit did not do.
 2. **A destroy sends no client record, and cannot.** The only record legacy has that clears
    a window cell is `GC_ITEM_DEL`, and the two trees disagree about it: legacy writes 62
    bytes into wire byte 20 while the client reads byte 20 as `HEADER_GC_ITEM_SET` and sizes
@@ -181,3 +184,36 @@ no channel from it to a running `prodomo serve`. Either the grant runs *inside* 
 process (an in-process console reader, closest to legacy's console) or a control channel
 is built. This is called out rather than decided because both are real work and the
 legacy source does not point at one.
+
+## Ledger 209: the load trigger, and a console answer that never arrived
+
+Two findings, both recorded in `docs/REWRITE_LEDGER.md` section 209.
+
+**The reload trigger was named wrong, twice in this document.** There is no `CG_ITEM_LOAD` on
+the client wire. `ITEM_LOAD` against `server/server/game/packet.h` is **0** where `CG_ITEM` is
+**11** and a bogus name is **0**, and the name belongs to the retired DB peer
+(`HEADER_DG_ITEM_LOAD = 42`, `tables.h:196`). The real trigger is `CG_CHARACTER_SELECT` (byte
+6), and `CInputDB::ItemLoad` runs inside the loading phase `PlayerLoad` sets — so the
+inventory is the server's send, with no client request to answer. The hook is
+`select_character` (`prodomo/src/main.rs:1467`). This is now stated correctly above.
+
+**The console's answer never reaches its pipe, and the log says it did.** `run` documents
+that an answer goes to the log *and back to the pipe*. Measured on a real server with a
+`0600` pipe and one command: **1** answer line in the log, **0** echo-failure warnings, and
+**0** bytes at a second reader holding the pipe open. The write at
+`prodomo/src/operator_console.rs:286` goes through `reader.get_mut()`, and `reader` comes from
+`tokio::fs::File::open` (`:331`), which is `O_RDONLY` — a write that the kernel rejects with
+`EBADF`. Tokio's `File::poll_write` returns the count it **copied into its own buffer** before
+the blocking `write(2)` runs, so `write_all` is satisfied by the copy and the error is never
+observed by this code path.
+
+So the console is log-only in practice. Two honest fixes exist and **the owner picks one**:
+delete the echo and document log-only, or open the pipe read-write and skip exactly the bytes
+the console wrote, so it does not read its own answer back as the next command. Ledger 209.2
+has both, and this unit did not pick. A test pinning the measurement is in
+`prodomo/src/operator_console.rs`. The first draft hung (a read-only `open` of a FIFO waits
+for a writer); ledger 209.4 rewrote it, and it runs and passes.
+
+**The gates in this document's own table are ledger 208's.** They apply to commit `b41f1223`.
+The working tree carries two modified files after it, so the numbers must not be cited for
+the tree.
