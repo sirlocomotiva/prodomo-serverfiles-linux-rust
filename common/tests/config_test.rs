@@ -451,6 +451,22 @@ fn the_item_count_limit_is_1_to_the_largest_storable_stack() {
 }
 
 #[test]
+fn the_shout_limit_level_is_at_least_1() {
+    for level in [0, -1, i32::MIN] {
+        let text = with_channels(&format!("[game]\nshout_limit_level = {level}\n{CHANNEL}"));
+        assert_eq!(invalid(&text), TopologyError::ShoutLimitLevel(level));
+    }
+    // Controls: 1 and a limit above every level are accepted.
+    for level in [1, 256] {
+        let text = with_channels(&format!("[game]\nshout_limit_level = {level}\n{CHANNEL}"));
+        assert_eq!(
+            parse(&text).expect("accepted").game.shout_limit_level,
+            level
+        );
+    }
+}
+
+#[test]
 fn the_item_id_span_pair_must_have_exactly_two_numbers() {
     for value in ["[7]", "[7, 9, 11]", "7", "\"7 9\""] {
         let text = with_channels(&format!("[game]\nitem_id_range = {value}\n{CHANNEL}"));

@@ -136,6 +136,7 @@ enable_global_shout = true
 item_count_limit = 2000
 status_point_get_level_limit = 120
 status_point_set_max_value = 90
+# At least 1. Legacy skipped 0 or less and kept 15; the Rewrite refuses it at start-up.
 shout_limit_level = 15
 db_log_level = 1
 # EMPIRE_LANGUAGE_CHECK: 0

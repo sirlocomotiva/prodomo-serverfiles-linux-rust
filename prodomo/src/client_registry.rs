@@ -20,6 +20,16 @@
 //! [`ChannelClients::broadcast_on_map`] delivers to every member of the map. Movement is
 //! the opposite: `PacketAround` passes the moving character as `except`
 //! (`input_main.cpp:1891`), so [`ChannelClients::broadcast_excluding`] is what a move needs.
+//!
+//! # The shout crosses every Channel
+//!
+//! A shout is the one line that leaves its process in legacy: `GG_SHOUT` carries it to every
+//! other core over P2P, and each core's `FuncShout` sends it to its own clients
+//! (`input_main.cpp:903-911`, `input_p2p.cpp:215-240`). Every Channel is in this registry, so
+//! [`ChannelClients::deliver_everywhere`] is that whole walk, and the in-process registry is
+//! the bus ADR-0002 puts in P2P's place. `FuncShout` sends each client a line of its own,
+//! because `ChatPacket` looks the text up in the client's language and writes the client's
+//! empire, which is why a [`ClientEntry`] carries both.
 
 #![warn(missing_docs)]
 
@@ -44,6 +54,11 @@ pub struct ClientEntry {
     pub name: String,
     /// The character's VID, for log lines and for the world work that comes next.
     pub vid: u32,
+    /// The character's empire: the `bEmpire` of every line `ChatPacket` sends the client,
+    /// and what `FuncShout` compares with the shouter's.
+    pub empire: u8,
+    /// The descriptor's language, which `ChatPacket` looks every line up in.
+    pub language: u8,
 }
 
 #[derive(Debug)]
@@ -207,12 +222,25 @@ impl ChannelClients {
         self.deliver(channel, Some(map), Some(except), record)
     }
 
-    /// Deliver one record to every client on the Channel, whatever its map.
+    /// Deliver a line built for each client to every client on every Channel, and answer how
+    /// many were sent one.
     ///
-    /// This is the shout scope: `SendShout` walks the whole process client set
-    /// (`server/server/game/input_p2p.cpp:237-241`).
-    pub fn broadcast_on_channel(&self, channel: u8, record: &[u8]) -> usize {
-        self.deliver(channel, None, None, record)
+    /// This is the shout scope: `FuncShout` on every core, over every descriptor with a
+    /// character (`input_p2p.cpp:215-240`). `line` builds the client's own line, or answers
+    /// `None` for a client that must not hear it.
+    pub fn deliver_everywhere(&self, line: impl Fn(&ClientEntry) -> Option<Vec<u8>>) -> usize {
+        let Ok(channels) = self.inner.lock() else {
+            return 0;
+        };
+        let mut sent = 0;
+        for member in channels.values().flatten() {
+            if let Some(record) = line(&member.entry) {
+                if member.outbox.send(record) {
+                    sent += 1;
+                }
+            }
+        }
+        sent
     }
 
     fn deliver(&self, channel: u8, map: Option<i32>, except: Option<u64>, record: &[u8]) -> usize {
@@ -490,6 +518,8 @@ mod tests {
             map,
             name: name.to_string(),
             vid: u32::try_from(name.len()).expect("a short Name fits a VID"),
+            empire: 1,
+            language: 1,
         }
     }
 
@@ -544,16 +574,44 @@ mod tests {
     }
 
     #[test]
-    fn a_channel_broadcast_reaches_every_map() {
+    fn a_shout_reaches_every_channel_and_map_with_a_line_built_for_each_client() {
         let registry = Arc::new(ChannelClients::new());
         let mut here = registry.join(entry(1, 100, "Here"));
-        let mut elsewhere = registry.join(entry(1, 200, "Elsewhere"));
-        let mut other = registry.join(entry(2, 100, "Other"));
+        let mut elsewhere = registry.join(ClientEntry {
+            empire: 2,
+            language: 5,
+            ..entry(1, 200, "Elsewhere")
+        });
+        let mut other = registry.join(ClientEntry {
+            empire: 3,
+            ..entry(99, 72, "Other")
+        });
+        let mut skipped = registry.join(entry(2, 100, "Skipped"));
 
-        assert_eq!(registry.broadcast_on_channel(1, b"shout"), 2);
-        assert_eq!(drained(&mut here), vec!["shout".to_string()]);
-        assert_eq!(drained(&mut elsewhere), vec!["shout".to_string()]);
-        assert!(drained(&mut other).is_empty());
+        let sent = registry.deliver_everywhere(|client| {
+            (client.name != "Skipped").then(|| {
+                format!("{} {} {}", client.name, client.empire, client.language).into_bytes()
+            })
+        });
+
+        assert_eq!(sent, 3, "a client the line skips is not counted");
+        assert_eq!(drained(&mut here), vec!["Here 1 1".to_string()]);
+        assert_eq!(drained(&mut elsewhere), vec!["Elsewhere 2 5".to_string()]);
+        assert_eq!(drained(&mut other), vec!["Other 3 1".to_string()]);
+        assert!(drained(&mut skipped).is_empty());
+    }
+
+    #[test]
+    fn a_shout_does_not_count_a_client_whose_queue_is_gone() {
+        let registry = Arc::new(ChannelClients::new());
+        let mut here = registry.join(entry(1, 100, "Here"));
+        let mut gone = registry.join(entry(2, 100, "Gone"));
+        drop(gone.take_receiver());
+
+        let sent = registry.deliver_everywhere(|_| Some(b"line".to_vec()));
+
+        assert_eq!(sent, 1, "a line nobody can read was not sent");
+        assert_eq!(drained(&mut here), vec!["line".to_string()]);
     }
 
     #[test]
@@ -576,7 +634,7 @@ mod tests {
         let registry = ChannelClients::new();
         assert_eq!(registry.count_on_map(9, 100), 0);
         assert_eq!(registry.broadcast_on_map(9, 100, b"line"), 0);
-        assert_eq!(registry.broadcast_on_channel(9, b"line"), 0);
+        assert_eq!(registry.deliver_everywhere(|_| Some(b"line".to_vec())), 0);
         assert!(registry.on_map(9, 100).is_empty());
     }
 

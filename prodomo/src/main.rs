@@ -242,6 +242,10 @@ struct ConnectionContext {
     block_char_creation: bool,
     /// `[game] player_delete_level_limit` and `player_delete_level_limit_lower`.
     delete_levels: (i32, i32),
+    /// `[game] shout_limit_level`: the level a character needs to shout.
+    shout_limit_level: i32,
+    /// `[game] enable_global_shout`: every empire hears a shout, not only the shouter's.
+    global_shout: bool,
     /// The game thread that owns the world every live client is put into.
     ///
     /// Held by every descriptor because entering and leaving the world are both
@@ -1128,10 +1132,11 @@ async fn next_broadcast(outbox: &mut Option<mpsc::UnboundedReceiver<Vec<u8>>>) -
 
 /// `CG_CHAT` (3) in the game phase: `CInputMain::Chat` (`input_main.cpp:781-991`).
 ///
-/// The judge owns the legacy order, so this function only applies the effects. The two
-/// broadcasts are the ones the judge asks for: an info line to the sender, and a talking
-/// line to every client on the sender's map including the sender. The registry lease is
-/// what makes the sender one of its own recipients.
+/// The judge owns the legacy order, so this function only applies the effects. The three
+/// broadcasts are the ones the judge asks for: an info line to the sender, a talking line to
+/// every client on the sender's map, and a shout to every client on every Channel. The last
+/// two include the sender, because the registry lease makes the sender one of its own
+/// recipients.
 async fn chat_line<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -1172,6 +1177,9 @@ where
         // The Rewrite has no way to set `AFFECT_BLOCK_CHAT` yet, so it is always absent,
         // which is the legacy state for a character that was never silenced.
         block_chat_seconds: None,
+        language: to.language,
+        pulse: context.game.pulse(),
+        shout_limit_level: context.shout_limit_level,
     };
     let outcome = judge_chat(&record, &mut held.chat, &chat_context);
     let ChatOutcome::Judged { effects } = outcome else {
@@ -1226,14 +1234,30 @@ where
                 info!(%addr, chat_type, "Unknown chat type; nothing sent");
             }
             ChatEffect::ShoutOnCooldown => {
-                // `return (iExtraLen)` with no line (`input_main.cpp:893-894`). The shout's
-                // own broadcast is not ported, so every shout at or above the level lands
-                // here.
-                info!(%addr, "Shout dropped; the shout broadcast is not ported");
+                // `return (iExtraLen)` with no line (`input_main.cpp:893-894`).
+                info!(%addr, "Shout refused; the last shout's cooldown has not run out");
+            }
+            ChatEffect::Shout { empire, text } => {
+                let sent = shout(context, *empire, text);
+                info!(%addr, empire, recipients = sent, "Shout sent to every Channel");
             }
         }
     }
     true
+}
+
+/// Sends a shout line to every client on every Channel that hears it, and returns how many
+/// were sent.
+///
+/// Legacy sends the line to its own Core's clients and relays it as `GG_SHOUT` to every other
+/// Core, whose `FuncShout` builds the same line for each of its clients
+/// (`input_main.cpp:903-911`, `input_p2p.cpp:215-240`). With one process there is no relay:
+/// the registry holds every Channel's clients, and each gets the line in its own language and
+/// with its own empire, as `ChatPacket` builds it from the recipient's descriptor.
+fn shout(context: &ConnectionContext, empire: u8, text: &[u8]) -> usize {
+    context.clients.deliver_everywhere(|entry| {
+        prodomo::chat::shout_for(entry, &context.locale, context.global_shout, empire, text)
+    })
 }
 
 /// `CG_MOVE` (7) in the game phase: `CInputMain::Move` (`input_main.cpp:1757-1915`).
@@ -2376,6 +2400,8 @@ where
             map,
             name: character.name.clone(),
             vid,
+            empire: character.empire,
+            language: descriptor_language(held.account.as_ref()),
         });
         info!(
             %addr,
@@ -3440,6 +3466,8 @@ fn connection_context(
             config.game.player_delete_level_limit,
             config.game.player_delete_level_limit_lower,
         ),
+        shout_limit_level: config.game.shout_limit_level,
+        global_shout: config.game.enable_global_shout,
         game,
     }
 }

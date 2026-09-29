@@ -2505,6 +2505,8 @@ mod tests {
             map,
             name: "Watcher".to_owned(),
             vid: 9,
+            empire: 1,
+            language: 1,
         };
         let mut here = clients.join(entry(41));
         let mut elsewhere = clients.join(entry(42));

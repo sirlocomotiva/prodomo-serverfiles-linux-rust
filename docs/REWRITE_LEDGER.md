@@ -22834,3 +22834,242 @@ After the run, no `prodomo_%` database remains, and no `*.core` file is outside 
 The workspace has 211 Rust files and 148,732 lines, outside `server/` and `.scratch/`. No
 crate was fetched, and `Cargo.lock` is unchanged. This section claims no width, and the i686
 probe was not run.
+
+## 222. The shout: `GG_SHOUT` and `FuncShout`
+
+A shout now reaches every Channel. In legacy, `CInputMain::Chat`'s shout block
+(`G/input_main.cpp:882-913`) checks the level and a fifteen-second cooldown and writes the line.
+It sends the line to its own Core's clients through `SendShout` and relays it to every other
+Core as `GG_SHOUT`, whose `CInputP2P::Shout` calls the same `SendShout`. `FuncShout`
+(`G/input_p2p.cpp:215-235`, called by `SendShout` at `:237-241`) sends it to each descriptor
+with a character, of the shouter's empire unless global shouting is on. Until this section, the
+Rewrite refused every shout at or above level 15 as if its cooldown were running, and logged
+that the broadcast was not ported.
+
+This section also corrects a Rewrite defect from ledger 188: the chat counter was never reset
+(222.3).
+
+### 222.1 What landed
+
+- **The shout block.** `prodomo::chat::judge_shout` runs in `judge_chat`'s type switch, in
+  legacy's order:
+  - A character below `[game] shout_limit_level` gets the info line naming the limit
+    (`:886-890`). `ShoutBelowLevel` carries the configured limit, and the limit is no longer
+    the constant 15.
+  - A shout less than `SHOUT_COOLDOWN_PULSES` (375, `passes_per_sec * 15`) after the last one
+    is dropped with no line (`:893-894`). The comparison is in Pulses, as legacy's is.
+  - Otherwise the Pulse is kept as the last shout (`:902`), and `ChatEffect::Shout` carries the
+    shouter's empire and the text `shout_text` builds. That is the `snprintf` at `:897`,
+    `"|L%s|l %s : %s"` with the shouter's country code (`LC_LOCALE`), Name and line, cut to
+    `CHAT_MAX_LEN`.
+- **The Pulse.** `ChatState` holds the last shout's Pulse. `ChatContext` gained `language`,
+  `pulse` and `shout_limit_level`. A descriptor reads the Pulse from
+  `GameLoopController::pulse`, which the game thread stores before it processes each Pulse.
+  That is the value `thecore_heart->pulse` has while legacy's input handlers run. It is 0
+  before the first Pulse.
+- **The listeners.** `ClientEntry` gained the character's `empire` and the descriptor's
+  `language`. `ChannelClients::deliver_everywhere` replaces `broadcast_on_channel`, which
+  nothing called. It walks every client on every Channel, and a closure builds each client's
+  own line or answers that the client does not hear it. `chat::shout_for` is that closure's
+  rule. `hears_shout` is `FuncShout`'s filter (`:227`), and `shout_line` is
+  `ChatPacket(CHAT_TYPE_SHOUT, "%s", m_str)` (`:233`), built from the listener's
+  `Recipient`. So `"%s"` is looked up in the listener's language, and the record carries the
+  listener's empire.
+- **The configuration.** `ConnectionContext` carries `[game] shout_limit_level` and
+  `[game] enable_global_shout`. Both keys existed since ledger 178, and nothing read them.
+  Their defaults are legacy's compiled-in 15 and `false` (`G/config.cpp:52`, `:38`). The
+  owner's example sets 15 and `true` (`GLOBAL_SHOUT: 1` in every `CONFIG`).
+  `game.shout_limit_level` below 1 is now refused at start-up with
+  `TopologyError::ShoutLimitLevel` (222.4), and the example says so above the key.
+- **The counter reset.** `ChatState::reset_chat_counter_at` runs before the counter on each line
+  (222.3).
+- **`serve`.** `main.rs` sends `ChatEffect::Shout` through `shout`, which is
+  `deliver_everywhere` with `shout_for`, and logs "Shout sent to every Channel" with the number
+  of recipients. The cooldown's log line now says the cooldown refused the shout.
+
+`[game] enable_shout_addon` stays unread. Legacy sets `g_bShoutAddonEnable`
+(`G/config.cpp:998-1000`) and reads it nowhere. The only matches in `server/server` are its
+definition (`config.cpp:37`), that `TOKEN` and its `extern` (`config.h:38`).
+
+### 222.2 What the client sees
+
+- A shout at or above the level limit reaches every client of the shouter's empire on every
+  Channel, the Shared Channel and the shouter included. Each gets `GC_CHAT` with
+  `CHAT_TYPE_SHOUT` (6), `id` 0, its own empire and `bCanFormat` 1. The text is
+  `|L<code>|l <Name> : <line>`. With `[game] enable_global_shout`, every client on every
+  Channel gets it.
+- No client hears a shout that comes within fifteen seconds of the shouter's last, and the
+  shouter gets no line.
+- The line is looked up in each listener's language. None of the owner's eleven tables has
+  a `"%s"` key (757 pairs each parsed, and 758 in `pt`), so every listener reads the text as
+  written.
+- A player can talk again. From ledger 188 until now, a session's fourth line was dropped, and
+  so was every line after it. The tenth line disconnected the client (222.3).
+
+### 222.3 A Rewrite defect: the chat counter was never reset
+
+Ledger 188 ported `IncreaseChatCounter` and the `ENABLE_CHAT_SPAMLIMIT` check
+(`G/input_main.cpp:808-813`): a line with the counter at 4 or more is dropped, and at 10 the
+descriptor is disconnected. It did not port the reset. `CHARACTER_MANAGER::Update` runs
+`FuncUpdateAndResetChatCounter` on every character on each Pulse that is a multiple of
+`PASSES_PER_SEC(5)` (`G/char_manager.cpp:700-704`, `:669-676`), before that Pulse's input is
+read. HEAD before this section had no reset anywhere: `ResetChatCounter` and `reset_chat` match
+nothing in `prodomo`, `world` or `docs`, and the control `increase_chat_counter` matches 5
+times. So every session could say three lines, and its tenth line closed it.
+
+`reset_chat_counter_at` resets the counter when a line arrives in a later 125-Pulse window
+than the last line. That is legacy's reset for a Pulse that only grows: a reset happens between
+two lines exactly when a multiple of 125 lies after the first line's Pulse and at or before the
+second's. It runs before the counter, as the reset runs before the input. The unit test
+`the_counter_resets_when_a_line_arrives_in_a_later_window` pins the window edges, and
+`the_chat_counter_is_reset_every_five_seconds_of_pulses` proves it on a live client.
+
+### 222.4 Divergences
+
+- **A client still loading does not hear a shout.** `FuncShout` sends to every descriptor with
+  a character (`G/input_p2p.cpp:227`), and `PlayerLoad` binds the character before it sets
+  the loading phase (`G/input_db.cpp:389`, `:414`). The registry holds a client once it
+  enters the game, so a client in the loading phase misses a shout that legacy would send it.
+- **`game.shout_limit_level` below 1 stops the server at start-up.** Legacy skips a value of 0
+  or less and keeps 15 (`G/config.cpp:1113-1121`). The Rewrite refuses such a value instead of
+  running with a limit other than the one written, as ledger 211 did for
+  `game.item_count_limit`.
+
+One legacy Defect is not reproduced:
+
+- **No shout in the first fifteen seconds of uptime.** `CHARACTER`'s constructor zeroes
+  `m_pointsInstant` (`G/char.cpp:252`), so every character's last shout Pulse starts at 0. The
+  cooldown compares it with the Core's Pulse (`G/input_main.cpp:893`), so until the Core has
+  run 375 Pulses every shout is dropped with no line. `ChatState` starts with no last shout,
+  and the first shout of a session is never refused.
+  `the_first_shout_after_boot_is_not_refused` tests it.
+
+### 222.5 Not ported yet
+
+- **The GM clause of `FuncShout`'s filter.** A GM hears every empire's shout
+  (`G/input_p2p.cpp:227`). No character has a GM level in the Rewrite yet, so every listener is
+  `GM_PLAYER`, which is what the filter assumes. With the owner's global shout it changes
+  nothing.
+- **`ShoutLog`** and **the battle pass `MISSION_TYPE_MESSAGES`** (`G/input_main.cpp:871-877`).
+  They run for every shout line before the level and the cooldown are checked, so a refused
+  shout is logged and counted too. They land with the logs and the battle pass.
+- `Whisper`, the banword conversion, `SpamBlockCheck`, the prism check and
+  `interpret_command`, as before.
+
+### 222.6 Scenario and Parity inventory
+
+Four scenarios were added. `shout_cast` puts three clients in the world: alice's Alpha (level
+154, empire 1, map 1 on Channel 1, English), bob's Yankee (level 1, empire 2, map 3 on Channel
+1, German) and carol's Charlie (map 72 on the Shared Channel 99, English).
+
+- `a_shout_reaches_its_empire_on_every_channel` runs the default configuration, with Charlie in
+  empire 1. Alpha's shout reaches Alpha and Charlie as `|Len|l Alpha : hello` with empire 1,
+  and Yankee hears nothing. A second shout at once reaches nobody, and Alpha gets no line.
+- `a_shout_from_another_empire_stays_in_that_empire` runs with `shout_limit_level = 1`, with
+  Charlie in empire 2. Level 1 Yankee's shout reaches Yankee and Charlie as
+  `|Lde|l Yankee : hallo` with empire 2, and Alpha hears nothing. The mutation sweep asked for
+  it (222.7).
+- `a_global_shout_reaches_every_empire_on_every_channel` runs with
+  `enable_global_shout = true` and `shout_limit_level = 1`, with Charlie in empire 3. Alpha's
+  shout, then level 1 Yankee's, reach all three, each with its own empire byte. Yankee's line
+  opens with `|Lde|l`: the country code is the shouter's. Each shout is read by every client
+  before the next is sent, because two shouters' lines have no order between them.
+- `the_chat_counter_is_reset_every_five_seconds_of_pulses` sends party lines, each answered
+  with `[LS;655]`, until one is dropped. That takes fewer than 7, because at most one reset
+  falls inside them. It then tries every two seconds until a line is answered again, in fewer
+  than 4 tries.
+
+`Keyed` gained `channel_number`, so `enter_game_records` checks the `GC_CHANNEL` byte of a
+Shared Channel login. `enter_world_on` and `select_screen_on` log in on any Channel.
+
+In the Parity inventory:
+
+- `cg.game.chat` stays `ported`, and its note names the four scenarios.
+- `sys.char.chat` stays `partial`. Its note adds the shout, the counter reset and what is not
+  ported, and drops "the GG shout relay" from what is absent.
+- `sys.bus` stays `missing`. Its note says the shout crosses Channels through the registry and
+  needs no relay.
+- `sys.char.multi_language`'s note adds the shout's lookup in each listener's language.
+
+### 222.7 Mutation sweep
+
+40 mutants. `mutate222.py` applied and restored each of them as in 215.7:
+
+- Each prodomo mutant ran `prodomo`'s library.
+- Mutants in `main.rs`, `chat.rs`, `game_loop.rs`, `game_loop_messages.rs` and
+  `client_registry.rs` also ran every Parity scenario, with `DATABASE_URL` set.
+- Mutants in `main.rs` also ran `process.rs`'s start-up test.
+- The common mutants ran `common`'s library and `config_test`.
+
+| group | mutants | result |
+|---|---|---|
+| `prodomo/src/chat.rs`: the counter window's division, comparison and store, the counter's reset and its call; the cooldown's `<`, a shout with no last shout, the start with no last shout, the last shout's store; the level's `<` and the refusal's limit; the shout's empire and language, the text's cut and country code; `hears_shout`'s `\|\|` and its global term; the shout line's type and its `"%s"`; `shout_for`'s language, empire and filter; the shout's reach; the shout arm | 24 | 24 killed |
+| `prodomo/src/game_loop.rs` and `game_loop_messages.rs`: the Pulse's store, the store after the processing, the read | 3 | 3 killed |
+| `prodomo/src/client_registry.rs`: counting a record the client's queue refused | 1 | killed on the rerun |
+| `prodomo/src/main.rs`: the global shout off and on, the limit as 15, the chat's Pulse and language, the registry's empire and language, the shouter's empire, the call to `shout` | 9 | 7 killed, 1 killed on the rerun, 1 survived |
+| `common/src/config.rs`: the limit check removed, `< 0`, `<= 1` | 3 | 3 killed |
+
+The first run, of the 37 mutants written before the configuration check, left three
+survivors. Two were test gaps, and a new test killed each on the rerun:
+
+- `m_shout_empire` passed empire 1 to `shout_for` as the shouter's. Every shout in the
+  scenarios came from empire 1 or was global, so none could tell.
+  `a_shout_from_another_empire_stays_in_that_empire` shouts from empire 2 with global shouting
+  off.
+- `cr_skip_none` counted a record whose queue was gone. Only the log line reads the count, and
+  no test closed a queue. `client_registry`'s
+  `a_shout_does_not_count_a_client_whose_queue_is_gone` drops one.
+
+`m_join_lang` gave every client in the registry language 1. It is not equivalent, but the
+owner's data cannot show it: the listener's language only picks the table `"%s"` is looked up
+in, and no owner table has a `"%s"` key (222.2). `chat`'s
+`each_listener_gets_the_shout_in_its_own_language_and_empire` tests the class one level down,
+with a German table that translates `"%s"`, and it killed `ch_for_lang`. The value the registry
+stores is `descriptor_language`'s, the call that also fills the enter-game burst's language
+byte, which every scenario checks (221.5), and the shouter's country code, which `m_ctx_lang`
+showed a scenario reads.
+
+### 222.8 Receipt
+
+20 new tests, and 2 removed:
+
+- `prodomo/src/chat.rs`: 12, for the counter's reset window and its place before the shout
+  block, a shout at level 15, the level limit from the configuration, a refused shout not
+  starting the cooldown, the cooldown, the first shout after boot, the shout text,
+  `hears_shout`, the shout line, each listener's own line, and the shout's reach. They replace
+  `a_shout_at_level_fifteen_passes_the_level_gate`, which expected the cooldown to refuse the
+  shout.
+- `prodomo/src/client_registry.rs`: 2, for `deliver_everywhere`'s line built for each client
+  and a client whose queue is gone. They replace `a_channel_broadcast_reaches_every_map`, whose
+  `broadcast_on_channel` is gone.
+- `prodomo/src/game_loop/tests.rs`: 1, for the Pulse published before it is processed.
+- `common/tests/config_test.rs`: 1, for the limit of at least 1.
+- `prodomo/tests/parity.rs`: the four scenarios in 222.6.
+
+These tests changed:
+
+- every `chat` test's context, which now carries a language, a Pulse and the limit;
+- `client_registry`'s and `game_state`'s test entries, which now carry an empire and a
+  language, and `the_registry_reports_an_unknown_channel_as_empty`, which now asks
+  `deliver_everywhere`;
+- the `game_loop` tests that build a controller or run the loop, which now pass the Pulse
+  counter;
+- every scenario's enter-game burst, which now checks the `GC_CHANNEL` byte against the Channel
+  it logged in on, where it expected 1.
+
+The count went from 2664 to 2682. These gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2682 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2682 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+After the run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`.
+The workspace has 211 Rust files and 149,574 lines, outside `server/` and `.scratch/`. No
+crate was fetched, and `Cargo.lock` is unchanged. This section claims no width, and the i686
+probe was not run.

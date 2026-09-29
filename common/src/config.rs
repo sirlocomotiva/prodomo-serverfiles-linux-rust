@@ -592,6 +592,11 @@ pub enum TopologyError {
     /// move nothing, and one above 5000 builds a stack the store refuses to write, so a
     /// merge would succeed on the client and fail at the save.
     ItemCountLimit(u16),
+    /// `game.shout_limit_level` is below 1.
+    ///
+    /// Legacy skips a value of 0 or less and keeps its compiled-in 15 (`config.cpp:1117`), so
+    /// the level written would not be the level used.
+    ShoutLimitLevel(i32),
     /// A Shared Channel map is also hosted by another Channel, so a Warp to it is ambiguous.
     SharedMapElsewhere {
         /// The map index.
@@ -630,6 +635,12 @@ impl fmt::Display for TopologyError {
                 "game.item_count_limit is {limit}; it must be 1 to {}",
                 crate::item_slots::ITEM_COUNT_LIMIT
             ),
+            Self::ShoutLimitLevel(level) => {
+                write!(
+                    f,
+                    "game.shout_limit_level is {level}; it must be at least 1"
+                )
+            }
             Self::SharedMapElsewhere { map, channel } => write!(
                 f,
                 "map {map} is on the shared channel and also on channel {channel}"
@@ -663,6 +674,9 @@ impl ServerConfig {
         let limit = self.game.item_count_limit;
         if limit == 0 || limit > crate::item_slots::ITEM_COUNT_LIMIT {
             return Err(TopologyError::ItemCountLimit(limit));
+        }
+        if self.game.shout_limit_level < 1 {
+            return Err(TopologyError::ShoutLimitLevel(self.game.shout_limit_level));
         }
         let mut numbers = BTreeSet::new();
         let mut ports = BTreeSet::new();

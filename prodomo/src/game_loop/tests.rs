@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -28,8 +28,14 @@ async fn join_reaps_the_os_thread_when_acknowledgement_is_lost() {
         finished_tx.send(()).unwrap();
     });
     let stop_requested = Arc::new(AtomicBool::new(false));
+    let pulse = Arc::new(AtomicU64::new(0));
     let handle = GameLoopHandle {
-        controller: GameLoopController::new(command_tx, stop_requested, thread.thread().clone()),
+        controller: GameLoopController::new(
+            command_tx,
+            stop_requested,
+            pulse,
+            thread.thread().clone(),
+        ),
         effect_rx,
         terminal_rx,
         terminal: None,
@@ -80,7 +86,13 @@ async fn closed_effect_receiver_becomes_a_typed_terminal_failure() {
 
     // When: the game thread attempts nonblocking effect delivery.
     let thread = thread::spawn(move || {
-        run_guarded(thread_ends, one, stop_requested, |_| {});
+        run_guarded(
+            thread_ends,
+            one,
+            stop_requested,
+            Arc::new(AtomicU64::new(0)),
+            |_| {},
+        );
     });
     let terminal = terminal_rx.await.unwrap();
     thread.join().unwrap();
@@ -107,7 +119,13 @@ async fn closed_command_channel_becomes_a_typed_terminal_failure() {
 
     // When: the first pulse attempts to drain commands.
     let thread = thread::spawn(move || {
-        run_guarded(thread_ends, one, stop_requested, |_| {});
+        run_guarded(
+            thread_ends,
+            one,
+            stop_requested,
+            Arc::new(AtomicU64::new(0)),
+            |_| {},
+        );
     });
     let terminal = terminal_rx.await.unwrap();
     thread.join().unwrap();
@@ -120,4 +138,52 @@ async fn closed_command_channel_becomes_a_typed_terminal_failure() {
             ..
         }
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_pulse_is_published_before_it_is_processed() {
+    // Given: a running loop whose processor reads the published Pulse back, and a controller
+    // on the same counter.
+    let one = NonZeroUsize::MIN;
+    let (tokio_ends, thread_ends) = bounded_channels(one, one);
+    let terminal_rx = tokio_ends.terminal_rx;
+    // The effect receiver stays open for the whole run, as the descriptor side keeps it.
+    let effects = tokio_ends.effect_rx;
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let pulse = Arc::new(AtomicU64::new(0));
+    let controller = GameLoopController::new(
+        tokio_ends.command_tx,
+        Arc::clone(&stop_requested),
+        Arc::clone(&pulse),
+        thread::current(),
+    );
+    assert_eq!(
+        controller.pulse(),
+        0,
+        "nothing is published before the first Pulse"
+    );
+    let (seen_tx, seen_rx) = std_mpsc::channel();
+    let read_back = Arc::clone(&pulse);
+    let stop = Arc::clone(&stop_requested);
+
+    // When: the loop runs three Pulses and is stopped.
+    let thread = thread::spawn(move || {
+        run_guarded(thread_ends, one, stop_requested, pulse, move |current| {
+            seen_tx
+                .send((current, read_back.load(Ordering::Acquire)))
+                .unwrap();
+            if current == 3 {
+                stop.store(true, Ordering::SeqCst);
+            }
+        });
+    });
+    let terminal = terminal_rx.await.unwrap();
+    thread.join().unwrap();
+
+    // Then: each Pulse was readable while it was processed, and the controller reads the last.
+    assert!(matches!(terminal, GameLoopTerminal::Stopped(_)));
+    let seen: Vec<(u64, u64)> = seen_rx.try_iter().collect();
+    assert_eq!(seen, [(1, 1), (2, 2), (3, 3)]);
+    assert_eq!(controller.pulse(), 3);
+    drop(effects);
 }

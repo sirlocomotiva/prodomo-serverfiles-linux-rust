@@ -5,7 +5,7 @@ use std::fmt;
 use std::io;
 use std::num::NonZeroUsize;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::Instant;
@@ -166,6 +166,8 @@ where
     } = tokio_ends;
     let stop_requested = Arc::new(AtomicBool::new(false));
     let thread_stop_requested = Arc::clone(&stop_requested);
+    let pulse = Arc::new(AtomicU64::new(0));
+    let thread_pulse = Arc::clone(&pulse);
     let thread = thread::Builder::new()
         .name("game-loop".to_owned())
         .spawn(move || {
@@ -173,10 +175,12 @@ where
                 thread_ends,
                 config.max_commands_per_pulse(),
                 thread_stop_requested,
+                thread_pulse,
                 processor,
             );
         })?;
-    let controller = GameLoopController::new(command_tx, stop_requested, thread.thread().clone());
+    let controller =
+        GameLoopController::new(command_tx, stop_requested, pulse, thread.thread().clone());
     Ok(GameLoopHandle {
         controller,
         effect_rx,
@@ -215,6 +219,8 @@ struct LoopRuntime {
     effect_tx: mpsc::Sender<GameEffect>,
     max_commands_per_pulse: NonZeroUsize,
     stop_requested: Arc<AtomicBool>,
+    /// Where [`GameLoopController::pulse`] reads the Pulse from.
+    published_pulse: Arc<AtomicU64>,
 }
 
 enum LoopControl {
@@ -248,6 +254,8 @@ impl LoopRuntime {
                     LoopControl::Fail(reason) => return self.failed(reason),
                 }
                 self.state.pulse = self.state.pulse.saturating_add(1);
+                self.published_pulse
+                    .store(self.state.pulse, Ordering::Release);
                 processor.process_pulse(self.state.pulse);
             }
         }
@@ -298,6 +306,7 @@ fn run_guarded<P: PulseProcessor>(
     ends: GameThreadChannelEnds,
     max_commands_per_pulse: NonZeroUsize,
     stop_requested: Arc<AtomicBool>,
+    published_pulse: Arc<AtomicU64>,
     mut processor: P,
 ) {
     let GameThreadChannelEnds {
@@ -311,6 +320,7 @@ fn run_guarded<P: PulseProcessor>(
         effect_tx,
         max_commands_per_pulse,
         stop_requested,
+        published_pulse,
     };
     let terminal = match catch_unwind(AssertUnwindSafe(|| runtime.run(&mut processor))) {
         Ok(terminal) => terminal,

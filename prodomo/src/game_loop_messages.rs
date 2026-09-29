@@ -1,7 +1,7 @@
 //! Typed messages crossing between Tokio and the synchronous game loop.
 
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::Thread;
 
@@ -676,6 +676,7 @@ impl std::error::Error for InstallError {}
 pub struct GameLoopController {
     command_tx: mpsc::Sender<GameCommand>,
     stop_requested: Arc<AtomicBool>,
+    pulse: Arc<AtomicU64>,
     game_thread: Thread,
 }
 
@@ -683,13 +684,25 @@ impl GameLoopController {
     pub(crate) fn new(
         command_tx: mpsc::Sender<GameCommand>,
         stop_requested: Arc<AtomicBool>,
+        pulse: Arc<AtomicU64>,
         game_thread: Thread,
     ) -> Self {
         Self {
             command_tx,
             stop_requested,
+            pulse,
             game_thread,
         }
+    }
+
+    /// The Pulse the game thread is on: the one it last started, or 0 before the first.
+    ///
+    /// This is legacy's `thecore_heart->pulse`, which a descriptor's input handler read on the
+    /// same thread. A descriptor task here reads the value the game thread published, which is
+    /// the Pulse the game thread is processing or has just finished.
+    #[must_use]
+    pub fn pulse(&self) -> u64 {
+        self.pulse.load(Ordering::Acquire)
     }
 
     fn signal_stop(&self) {
@@ -1215,7 +1228,7 @@ mod tests {
         GameLoopController, DEFAULT_MAX_COMMANDS_PER_PULSE,
     };
     use std::num::NonZeroUsize;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::Arc;
     use std::thread;
 
@@ -1246,6 +1259,7 @@ mod tests {
         let controller = GameLoopController::new(
             tokio_ends.command_tx,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU64::new(0)),
             thread::current(),
         );
 

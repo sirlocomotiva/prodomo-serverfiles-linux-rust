@@ -785,6 +785,8 @@ struct Keyed {
     output: TeaKey,
     /// The language the account's auth login chose, which the descriptor's records carry.
     language: u8,
+    /// The number of the Channel the connection is on, which `GC_CHANNEL` carries.
+    channel_number: u8,
 }
 
 impl Keyed {
@@ -797,6 +799,7 @@ impl Keyed {
             input: SETUP_KEY,
             output: SETUP_KEY,
             language: ENGLISH,
+            channel_number: 1,
         }
     }
 
@@ -1424,8 +1427,19 @@ fn enter_world(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed) {
 
 /// [`enter_world`] for an auth login in `language`.
 fn enter_world_in(server: &Server, login: &[u8], slot: u8, language: u8) -> (Keyed, Listed) {
+    enter_world_on(server, 1, login, slot, language)
+}
+
+/// [`enter_world_in`] on Channel `channel`.
+fn enter_world_on(
+    server: &Server,
+    channel: u8,
+    login: &[u8],
+    slot: u8,
+    language: u8,
+) -> (Keyed, Listed) {
     let (mut keyed, character, quickslots, _items) =
-        load_with_quickslots_in(server, login, slot, language);
+        load_with_quickslots_on(server, channel, login, slot, language);
     assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
     enter_game_burst(&mut keyed);
     (keyed, character)
@@ -1463,7 +1477,18 @@ fn load_with_quickslots_in(
     slot: u8,
     language: u8,
 ) -> (Keyed, Listed, Vec<Vec<u8>>, Vec<Vec<u8>>) {
-    let (mut keyed, _empire, list) = select_screen_in(server, login, language);
+    load_with_quickslots_on(server, 1, login, slot, language)
+}
+
+/// [`load_with_quickslots_in`] on Channel `channel`.
+fn load_with_quickslots_on(
+    server: &Server,
+    channel: u8,
+    login: &[u8],
+    slot: u8,
+    language: u8,
+) -> (Keyed, Listed, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let (mut keyed, _empire, list) = select_screen_on(server, channel, login, language);
     let character = listed(&list, usize::from(slot));
     keyed.send_record(&client_select(slot));
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
@@ -1518,7 +1543,7 @@ fn enter_game_records(keyed: &mut Keyed) -> Vec<u8> {
     assert_eq!(keyed.read_game()[0], GC_AFFECT_ADD);
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
     assert_eq!(keyed.read_game()[0], GC_TIME);
-    assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
+    assert_eq!(keyed.read_game(), [GC_CHANNEL, keyed.channel_number]);
     let notice = keyed.read_game();
     assert_eq!(notice[0], GC_CHAT);
     add
@@ -1762,9 +1787,20 @@ fn select_screen(server: &Server, login: &[u8]) -> (Keyed, u8, Vec<u8>) {
 
 /// [`select_screen`] for an auth login in `language`.
 fn select_screen_in(server: &Server, login: &[u8], language: u8) -> (Keyed, u8, Vec<u8>) {
+    select_screen_on(server, 1, login, language)
+}
+
+/// [`select_screen_in`] on Channel `channel`.
+fn select_screen_on(
+    server: &Server,
+    channel: u8,
+    login: &[u8],
+    language: u8,
+) -> (Keyed, u8, Vec<u8>) {
     let (_auth, key) = login_key_in(server, login, language);
-    let mut keyed = Keyed::channel(server.channel(1));
+    let mut keyed = Keyed::channel(server.channel(channel));
     keyed.language = language;
+    keyed.channel_number = channel;
     let (empire, list) = login_by_key_when_free(&mut keyed, login, key).expect("logs in");
     (keyed, empire, list)
 }
@@ -2625,6 +2661,207 @@ fn a_line_legacy_answers_itself_comes_back_to_the_sender_alone() {
     );
     yankee.quiet("the neighbour hears neither of Alice's lines");
     alice.quiet("and Alice does not hear Yankee's refusal");
+}
+
+/// A `GC_CHAT` line as `CHARACTER::ChatPacket` builds it (`G/char.cpp:5140-5189`): `id` 0, the
+/// recipient's empire, `bCanFormat` 1, and the text with no terminator.
+fn chat_packet(chat_type: u8, empire: u8, text: &[u8]) -> Vec<u8> {
+    let mut line = vec![GC_CHAT];
+    line.extend_from_slice(&u16::try_from(10 + text.len()).unwrap().to_le_bytes());
+    line.extend_from_slice(&[chat_type, 0, 0, 0, 0, empire, 1]);
+    line.extend_from_slice(text);
+    line
+}
+
+/// Three clients in the world for a shout: alice's Alpha, level 154 in empire 1 on map 1 of
+/// Channel 1, in English; bob's Yankee, level 1 in empire 2 on map 3 of Channel 1, in German;
+/// and carol's Charlie, in `carol_empire` on the Shared Channel's map 72.
+fn shout_cast(
+    server: &Server,
+    database: &ScratchDatabase,
+    carol_empire: u8,
+) -> (Keyed, Keyed, Keyed) {
+    for login in ["alice", "bob", "carol"] {
+        create_account(server, login);
+    }
+    add_characters(database);
+    sql(
+        database,
+        "UPDATE account SET empire = 2 WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         350000, 870000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        &format!("UPDATE account SET empire = {carol_empire} WHERE login = 'carol'"),
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         10000, 1210000 FROM account WHERE login = 'carol'",
+    );
+    let (alice, _) = enter_world(server, b"alice", 0);
+    let (yankee, _) = enter_world_in(server, b"bob", 0, GERMAN);
+    let (charlie, _) = enter_world_on(server, 99, b"carol", 0, ENGLISH);
+    (alice, yankee, charlie)
+}
+
+/// `sys.char.chat` (shout): a shout at or above the level limit reaches every client of the
+/// shouter's empire on every Channel, the shouter included, and no client of another empire
+/// (`G/input_main.cpp:882-913`, `G/input_p2p.cpp:215-240`). It arrives as a `CHAT_TYPE_SHOUT` line
+/// whose text opens with the shouter's country code. A second shout inside fifteen seconds of
+/// Pulses reaches nobody.
+///
+/// Legacy refuses every shout in the first fifteen seconds of uptime, because the last shout
+/// starts at Pulse 0. The Rewrite does not reproduce that Defect, so this scenario shouts at once.
+#[test]
+fn a_shout_reaches_its_empire_on_every_channel() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    let (mut alice, mut yankee, mut charlie) = shout_cast(&server, &database, 1);
+
+    alice.send_record(&client_chat(prodomo::chat::CHAT_SHOUT, b"hello"));
+    let line = chat_packet(prodomo::chat::CHAT_SHOUT, 1, b"|Len|l Alpha : hello");
+    assert_eq!(alice.read_game(), line, "the shouter hears itself");
+    assert_eq!(
+        charlie.read_game(),
+        line,
+        "the Shared Channel hears the shouter's empire"
+    );
+    yankee.quiet("another empire hears nothing");
+
+    alice.send_record(&client_chat(prodomo::chat::CHAT_SHOUT, b"again"));
+    alice.quiet("the cooldown refuses without a line");
+    charlie.quiet("and nobody hears the refused shout");
+    yankee.quiet("not even the other empire");
+}
+
+/// `sys.char.chat` (shout), with `shout_limit_level` at 1 and global shouting off: a shout from
+/// empire 2 reaches empire 2 on every Channel and nobody in empire 1. The empire `FuncShout`
+/// compares is the shouter's (`G/input_p2p.cpp:227`), and the country code is the shouter's
+/// language.
+#[test]
+fn a_shout_from_another_empire_stays_in_that_empire() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "shout_limit_level = 1",
+    );
+    let (mut alice, mut yankee, mut charlie) = shout_cast(&server, &database, 2);
+
+    yankee.send_record(&client_chat(prodomo::chat::CHAT_SHOUT, b"hallo"));
+    let line = chat_packet(prodomo::chat::CHAT_SHOUT, 2, b"|Lde|l Yankee : hallo");
+    assert_eq!(yankee.read_game(), line, "the shouter hears itself");
+    assert_eq!(
+        charlie.read_game(),
+        line,
+        "the Shared Channel hears the shouter's empire"
+    );
+    alice.quiet("empire 1 hears nothing");
+    yankee.quiet("one line per shout");
+}
+
+/// `sys.char.chat` (shout), with `[game] enable_global_shout` on and `shout_limit_level` at 1:
+/// every client on every Channel hears every shout, each with its own empire byte, and a level 1
+/// character may shout. The country code is the shouter's language, not the listener's.
+#[test]
+fn a_global_shout_reaches_every_empire_on_every_channel() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "enable_global_shout = true\nshout_limit_level = 1",
+    );
+    let (mut alice, mut yankee, mut charlie) = shout_cast(&server, &database, 3);
+
+    // Two shouters' lines have no order between them, so each shout is heard before the next.
+    for (shouter, line, text) in [
+        (0, &b"hello"[..], &b"|Len|l Alpha : hello"[..]),
+        (1, b"hallo", b"|Lde|l Yankee : hallo"),
+    ] {
+        let record = client_chat(prodomo::chat::CHAT_SHOUT, line);
+        [&mut alice, &mut yankee][shouter].send_record(&record);
+        for (keyed, empire) in [(&mut alice, 1), (&mut yankee, 2), (&mut charlie, 3)] {
+            assert_eq!(
+                keyed.read_game(),
+                chat_packet(prodomo::chat::CHAT_SHOUT, empire, text),
+                "empire {empire} hears {}",
+                String::from_utf8_lossy(text),
+            );
+        }
+    }
+    for keyed in [&mut alice, &mut yankee, &mut charlie] {
+        keyed.quiet("one line per shout");
+    }
+}
+
+/// `sys.char.chat` (counter): the fourth line inside one counter window is dropped without a
+/// record, and `CHARACTER_MANAGER::Update` resets every counter on each Pulse that is a multiple
+/// of `PASSES_PER_SEC(5)` (`G/char_manager.cpp:700-704`), so a line is answered again once one of
+/// those Pulses has passed.
+#[test]
+fn the_chat_counter_is_reset_every_five_seconds_of_pulses() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    let party = client_chat(prodomo::chat::CHAT_PARTY, b"hi");
+    let answer = chat_packet(prodomo::chat::CHAT_INFO, 1, b"[LS;655]");
+    let heard = |alice: &mut Keyed| {
+        alice.send_record(&party);
+        let (records, quiet) = alice.drain_game(QUIET_WINDOW, |header| match header {
+            GC_CHAT => answer.len(),
+            GC_PING => 1,
+            other => panic!("unexpected record {other}"),
+        });
+        assert_eq!(quiet, Quiet::Open, "a dropped line never closes before ten");
+        let lines: Vec<Vec<u8>> = records
+            .into_iter()
+            .filter(|record| record[0] != GC_PING)
+            .collect();
+        assert!(
+            lines.is_empty() || lines == [answer.clone()],
+            "{lines:02x?}"
+        );
+        !lines.is_empty()
+    };
+
+    // A reset can fall between any two lines and restart the count, so lines go out until one
+    // is dropped. Seven lines take about two seconds, which holds at most one reset.
+    let mut answered = 0;
+    while heard(&mut alice) {
+        answered += 1;
+        assert!(
+            answered < 7,
+            "a fourth line inside one window must be dropped"
+        );
+    }
+    // The counter is 4, and it disconnects at 10. A reset Pulse comes every 125 Pulses, so
+    // three tries two seconds apart cross one, and the counter never passes 7.
+    let mut dropped = 0;
+    loop {
+        std::thread::sleep(Duration::from_secs(2));
+        if heard(&mut alice) {
+            break;
+        }
+        dropped += 1;
+        assert!(dropped < 4, "the counter was never reset");
+    }
 }
 
 /// `cg.world.move`: an accepted move reaches the clients around the mover and never the mover,
