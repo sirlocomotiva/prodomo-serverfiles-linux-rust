@@ -90,16 +90,12 @@ use common::item_slots::{
     EWindows, BELT_INVENTORY_SLOT_COUNT, BELT_INVENTORY_SLOT_START, INVENTORY_MAX_NUM, WEAR_MAX_NUM,
 };
 use db::items::ItemRow;
-use gamedata::item_kind::{
-    COSTUME_AURA, COSTUME_MOUNT, COSTUME_PET, ITEM_COSTUME, ITEM_DS, ITEM_UNIQUE, LIMIT_LEVEL,
-    LIMIT_REAL_TIME, LIMIT_REAL_TIME_START_FIRST_USE,
-};
+use gamedata::item_kind::{ITEM_DS, LIMIT_LEVEL};
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use protocol::gc_item_window::{GcItemSet, ItemAttribute};
 use protocol::item_pos::ItemPos;
-use world::character::{
-    accessory_socket_grade, apply_is_ported, item_applies, CharacterItems, Rejected,
-};
+pub use world::character::WornSystem;
+use world::character::{worn_system_not_ported, CharacterItems, Rejected};
 use world::item::{CountRejected, Item};
 
 /// The highlight byte of a loaded item's record: the last owner is the owner.
@@ -145,47 +141,6 @@ pub enum Refused {
     NoRoom,
     /// Wearing the item starts a system this build has not ported.
     WornNotPorted(WornSystem),
-}
-
-/// A system that wearing an item starts, which this build has not ported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WornSystem {
-    /// A dragon soul stone: `EquipTo` activates it in the dragon soul deck.
-    DragonSoul,
-    /// An aura costume: its drain, its armour and its booster timer.
-    Aura,
-    /// A mount costume: `EquipTo` summons the mount.
-    Mount,
-    /// A pet costume: `EquipTo` summons the pet.
-    Pet,
-    /// An `ITEM_UNIQUE` item: its expiry timer, and the alignment title it can hide.
-    Unique,
-    /// An item whose time runs: a real-time limit, a real-time limit from first use, or a
-    /// timer that runs while it is worn.
-    Timer,
-    /// An accessory with stones in its sockets, which lose one on a timer while it is worn.
-    AccessoryTimer,
-    /// A bonus type whose point is not ported (`world::character::apply_is_ported`).
-    Apply(u8),
-    /// A prototype with immunity flags, which the Rewrite does not grant (see
-    /// `world::character::Points`).
-    Immunity,
-}
-
-impl std::fmt::Display for WornSystem {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DragonSoul => formatter.write_str("the dragon soul deck"),
-            Self::Aura => formatter.write_str("the aura costume"),
-            Self::Mount => formatter.write_str("the mount costume"),
-            Self::Pet => formatter.write_str("the pet costume"),
-            Self::Unique => formatter.write_str("the unique item expiry"),
-            Self::Timer => formatter.write_str("the item timers"),
-            Self::AccessoryTimer => formatter.write_str("the accessory stone timer"),
-            Self::Apply(apply) => write!(formatter, "the bonus type {apply}"),
-            Self::Immunity => formatter.write_str("the item immunities"),
-        }
-    }
 }
 
 impl std::fmt::Display for Refused {
@@ -417,48 +372,6 @@ fn meets_level_limit(proto: &ItemProto, level: u8) -> bool {
         .is_none_or(|limit| limit.value <= i32::from(level))
 }
 
-/// The first system `EquipTo` would start for this item that the Rewrite has not ported.
-///
-/// `EquipTo` activates a dragon soul stone, applies the item's bonuses (`ModifyPoints`), starts
-/// the unique, wear-timer, accessory and aura-booster timers, and summons a mount or pet
-/// costume (`G/item.cpp:1458-1487`); `OnAfterCreatedItem` starts the real-time timer
-/// (`:2775-2781`). `BuffOnAttr_AddBuffsFromItem` does nothing, because only the two bonus types
-/// this build refuses fill its table.
-fn worn_system_not_ported(
-    item: &Item,
-    proto: &ItemProto,
-    protos: &ItemProtos,
-) -> Option<WornSystem> {
-    if proto.item_type == ITEM_COSTUME {
-        match proto.sub_type {
-            COSTUME_AURA => return Some(WornSystem::Aura),
-            COSTUME_MOUNT => return Some(WornSystem::Mount),
-            COSTUME_PET => return Some(WornSystem::Pet),
-            _ => {}
-        }
-    }
-    if proto.item_type == ITEM_UNIQUE {
-        return Some(WornSystem::Unique);
-    }
-    let timed = proto
-        .limits
-        .iter()
-        .any(|limit| [LIMIT_REAL_TIME, LIMIT_REAL_TIME_START_FIRST_USE].contains(&limit.kind));
-    if timed || proto.timer_based_on_wear.is_some() {
-        return Some(WornSystem::Timer);
-    }
-    if accessory_socket_grade(item, proto) > 0 {
-        return Some(WornSystem::AccessoryTimer);
-    }
-    if proto.immune_flags != 0 {
-        return Some(WornSystem::Immunity);
-    }
-    item_applies(item, proto, protos)
-        .into_iter()
-        .find(|(apply, _)| !apply_is_ported(*apply))
-        .map(|(apply, _)| WornSystem::Apply(apply))
-}
-
 /// Where a row's item goes, after legacy's belt translation.
 fn load_position(row: &ItemRow) -> Result<ItemPos, Refused> {
     let cell = |pos: u32| u16::try_from(pos).map_err(|_| Refused::WindowNotPorted);
@@ -526,8 +439,9 @@ mod tests {
     use super::*;
     use common::item_slots::CUSTOM_INVENTORY_SLOT_START;
     use gamedata::item_kind::{
-        ARMOR_NECK, COSTUME_BODY, ITEM_ARMOR, ITEM_SPECIAL_DS, ITEM_WEAPON,
-        LIMIT_TIMER_BASED_ON_WEAR,
+        ARMOR_NECK, COSTUME_AURA, COSTUME_BODY, COSTUME_MOUNT, COSTUME_PET, ITEM_ARMOR,
+        ITEM_COSTUME, ITEM_SPECIAL_DS, ITEM_UNIQUE, ITEM_WEAPON, LIMIT_REAL_TIME,
+        LIMIT_REAL_TIME_START_FIRST_USE, LIMIT_TIMER_BASED_ON_WEAR,
     };
     use gamedata::item_proto::ItemValue;
     use world::character::APPLY_ENERGY;

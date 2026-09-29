@@ -13,7 +13,7 @@ use world::item::Item;
 use crate::client_registry::ClientOutbox;
 use crate::game_state::{EnterWorldRefused, Released, RevokeRefused};
 use crate::item_grant::{GrantOutcome, GrantRefusal, GrantRequest};
-use crate::item_move::{MoveItemRefused, MovedItems};
+use crate::item_move::{MoveItemRefused, MovedItems, Mover};
 
 /// Default capacity of the Tokio-to-game command queue.
 pub const DEFAULT_COMMAND_CAPACITY: usize = 256;
@@ -247,6 +247,9 @@ pub enum GameCommand {
         /// already shows its items: a grant in that gap would be offered a cell a loaded
         /// item holds.
         items: Vec<(ItemPos, Item)>,
+        /// The points the load computed with those items worn, which wearing and taking off
+        /// change.
+        points: Option<world::character::Points>,
         /// Where the game thread writes records addressed to this client.
         ///
         /// The world has no socket. It holds this sender and the descriptor drains
@@ -306,6 +309,8 @@ pub enum GameCommand {
         vid: common::vid::Vid,
         /// The move as the client sent it.
         request: world::character::MoveRequest,
+        /// What the descriptor knows of the character that the move reads.
+        mover: Mover,
         /// Where the game thread reports what the move did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
@@ -741,7 +746,7 @@ impl GameLoopController {
         name: String,
         outbox: ClientOutbox,
     ) -> Result<Result<(), EnterWorldRefused>, EnterWorldError> {
-        self.enter_world_with_items(vid, player_id, name, Vec::new(), outbox)
+        self.enter_world_with_items(vid, player_id, name, Vec::new(), None, outbox)
             .await
     }
 
@@ -759,6 +764,7 @@ impl GameLoopController {
         player_id: u32,
         name: String,
         items: Vec<(ItemPos, Item)>,
+        points: Option<world::character::Points>,
         outbox: ClientOutbox,
     ) -> Result<Result<(), EnterWorldRefused>, EnterWorldError> {
         let (reply, answer) = oneshot::channel();
@@ -767,6 +773,7 @@ impl GameLoopController {
             player_id,
             name,
             items,
+            points,
             outbox,
             reply,
         })
@@ -834,11 +841,13 @@ impl GameLoopController {
         &self,
         vid: common::vid::Vid,
         request: world::character::MoveRequest,
+        mover: Mover,
     ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::MoveItem {
             vid,
             request,
+            mover,
             reply,
         })
         .await

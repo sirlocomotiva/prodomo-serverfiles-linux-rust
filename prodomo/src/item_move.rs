@@ -16,7 +16,7 @@
 //! delayed save), so the order is the Rewrite's, and a client cannot tell the two apart
 //! because it waits for neither.
 
-use common::enums::EWearPositions;
+use common::enums::{ELocale, EWearPositions};
 use common::item_slots::{EWindows, INVENTORY_MAX_NUM};
 use common::vid::Vid;
 use db::items::{Attribute, ItemRow, RowChange};
@@ -24,15 +24,33 @@ use gamedata::belt_inventory::can_move_into_belt_inventory;
 use gamedata::item_custom_category::{is_custom_category, CATEGORY_NUM};
 use gamedata::item_proto::ItemProtos;
 use gamedata::item_proto_value::type_value;
+use protocol::gc_actors::GcCharacterUpdate;
 use protocol::gc_chat::{GcChat, CHAT_TYPE_INFO};
+use protocol::gc_vid::GcSpecialEffect;
 use protocol::item_pos::ItemPos;
-use world::character::{CharacterItems, ItemChange, MoveDone, MoveFacts, MoveKind, MoveRefused};
+use world::character::{
+    CharacterItems, CharacterLook, ItemChange, MoveDone, MoveFacts, MoveKind, MoveRecord,
+    MoveRefused, Points,
+};
 use world::item::Item;
 
 use crate::item_load::stored_row_position;
+use crate::loading_phase::point_changes;
 
 /// The flat cell of the worn belt: `INVENTORY_MAX_NUM + WEAR_BELT`, 180 + 27.
 pub const BELT_WEAR_CELL: u16 = INVENTORY_MAX_NUM + EWearPositions::Belt as u16;
+
+/// `LANGUAGE_EUROPE`, the language byte `UpdatePacket` sends (`ELocale::Ymir`).
+const LANGUAGE_EUROPE: u8 = ELocale::Ymir as u8;
+
+/// What the descriptor knows of the moving character that the move reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mover {
+    /// Whether the character attacked, or was selected, in the last 1.5 s.
+    pub recently_fought: bool,
+    /// The character's empire, which a chat line carries.
+    pub empire: u8,
+}
 
 /// What a move the world made has left for the descriptor to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,29 +61,89 @@ pub struct MovedItems {
     pub owner_id: u32,
     /// The records the client is sent, each its own frame, in the order legacy sends them.
     pub records: Vec<Vec<u8>>,
+    /// The records the characters that see the mover are sent too (`PacketAround`), in
+    /// order: the look, the effects and the broadcast points.
+    pub around: Vec<Vec<u8>>,
     /// The row changes, in the order they are applied.
     pub changes: Vec<RowChange>,
+    /// The mover's points after the move, which the descriptor saves.
+    pub points: Option<Points>,
 }
 
 impl MovedItems {
-    /// The descriptor's half of a move the world made for `owner_id`.
+    /// The descriptor's half of a move the world made for `owner_id`, whose VID is `vid`.
+    ///
+    /// # Panics
+    ///
+    /// Never: each notice is a short constant from [`MoveRefused::notice`], far under
+    /// `CHAT_MAX_LEN`.
     #[must_use]
-    pub fn new(owner_id: u32, done: MoveDone) -> Self {
-        let records = done
-            .records
-            .into_iter()
-            .map(|record| {
-                let mut frame = Vec::new();
-                record.encode_into(&mut frame);
-                frame
-            })
-            .collect();
+    pub fn new(owner_id: u32, vid: u32, done: MoveDone, mover: Mover) -> Self {
+        let mut records = Vec::with_capacity(done.records.len());
+        let mut around = Vec::new();
+        for record in done.records {
+            let mut frame = Vec::new();
+            let shared = match record {
+                MoveRecord::Item(record) => {
+                    record.encode_into(&mut frame);
+                    false
+                }
+                MoveRecord::Point(record) => {
+                    frame = point_changes(&[record], vid).concat();
+                    record.broadcast
+                }
+                MoveRecord::Look(look) => {
+                    character_update(vid, &look).encode_into(&mut frame);
+                    true
+                }
+                MoveRecord::Effect(effect_type) => {
+                    GcSpecialEffect { effect_type, vid }.encode_into(&mut frame);
+                    true
+                }
+                MoveRecord::Notice(text) => {
+                    frame = notice(text, mover.empire);
+                    false
+                }
+            };
+            if shared {
+                around.push(frame.clone());
+            }
+            records.push(frame);
+        }
         Self {
             kind: done.kind,
             owner_id,
             records,
+            around,
             changes: row_changes(owner_id, &done.changes),
+            points: None,
         }
+    }
+}
+
+/// `CHARACTER::UpdatePacket` (`G/char.cpp:1277-1340`) for the look a move left.
+///
+/// The state flags, the affects, the guild, the alignment, the PK mode, the mount and the
+/// premium come from systems this build does not have, and are 0.
+fn character_update(vid: u32, look: &CharacterLook) -> GcCharacterUpdate {
+    GcCharacterUpdate {
+        dw_vid: vid,
+        aw_part: look.parts,
+        b_moving_speed: look.moving_speed,
+        b_attack_speed: look.attack_speed,
+        b_state_flag: 0,
+        dw_affect_flag: [0; 2],
+        dw_guild_id: 0,
+        s_alignment: 0,
+        dw_level: look.level,
+        dw_conqueror_level: look.conqueror_level,
+        b_pk_mode: 0,
+        dw_mount_vnum: 0,
+        b_refine_element_type: look.refine_element_type,
+        dw_new_is_guild_name: 0,
+        by_premium: 0,
+        i_premium_time: 0,
+        b_language: LANGUAGE_EUROPE,
     }
 }
 
@@ -142,6 +220,10 @@ pub fn row_changes(owner_id: u32, changes: &[ItemChange]) -> Vec<RowChange> {
             },
             ItemChange::Created(item) => RowChange::Created(item_row(owner_id, item)),
             ItemChange::Destroyed { id } => RowChange::Destroyed { id: *id },
+            ItemChange::Sockets { id, sockets } => RowChange::Sockets {
+                id: *id,
+                sockets: *sockets,
+            },
         })
         .collect()
 }
@@ -182,14 +264,16 @@ fn item_row(owner_id: u32, item: &Item) -> ItemRow {
 /// `CHAT_MAX_LEN`, so the record builds and encodes.
 #[must_use]
 pub fn refusal_notice(refused: &MoveRefused, empire: u8) -> Option<Vec<u8>> {
-    let text = refused.notice()?;
+    refused.notice().map(|text| notice(text, empire))
+}
+
+/// A `CHAT_TYPE_INFO` line, encoded.
+fn notice(text: &str, empire: u8) -> Vec<u8> {
     // Each notice is a short constant, far under `CHAT_MAX_LEN`, so neither step can fail.
     let line = GcChat::notice(CHAT_TYPE_INFO, empire, text.as_bytes())
         .expect("a move notice is shorter than the chat length limit");
-    Some(
-        line.encode()
-            .expect("a move notice always fits the record's size field"),
-    )
+    line.encode()
+        .expect("a move notice always fits the record's size field")
 }
 
 #[cfg(test)]
@@ -348,16 +432,24 @@ mod tests {
         let done = MoveDone {
             kind: MoveKind::Moved,
             records: vec![
-                ItemRecord::Set(world::item::gc_item_clear(from)),
-                ItemRecord::Set(item.gc_item_set(to, 0)),
+                MoveRecord::Item(ItemRecord::Set(world::item::gc_item_clear(from))),
+                MoveRecord::Item(ItemRecord::Set(item.gc_item_set(to, 0))),
             ],
             changes: vec![ItemChange::Moved { id: 9, pos: to }],
         };
-        let moved = MovedItems::new(7, done.clone());
+        let actor = Mover {
+            recently_fought: false,
+            empire: 1,
+        };
+        let moved = MovedItems::new(7, 7, done.clone(), actor);
         assert_eq!(moved.kind, MoveKind::Moved);
         assert_eq!(moved.owner_id, 7);
         assert_eq!(moved.records.len(), 2);
+        assert!(moved.around.is_empty(), "an item record is the mover's own");
         for (frame, record) in moved.records.iter().zip(done.records) {
+            let MoveRecord::Item(record) = record else {
+                panic!("only item records were made");
+            };
             let mut expected = Vec::new();
             record.encode_into(&mut expected);
             assert_eq!(frame, &expected);

@@ -3647,6 +3647,224 @@ fn a_relogged_character_wears_its_equipment_and_its_points_count_it() {
     assert_eq!(listed(&list, 0).main_part, part(WORN_ARMOUR));
 }
 
+/// `GC_CHARACTER_UPDATE` (byte 19, 55 bytes): a character whose look changed (`G/char.cpp:1277`).
+const GC_CHARACTER_UPDATE: u8 = 19;
+const CHARACTER_UPDATE_LEN: usize = protocol::gc_actors::GC_CHARACTER_UPDATE_WIRE_SIZE;
+/// `GC_SEPCIAL_EFFECT` (byte 114): a `BYTE` type and a `DWORD` VID.
+const GC_SPECIAL_EFFECT: u8 = 114;
+const SPECIAL_EFFECT_LEN: usize = 6;
+
+/// A plain body armour of the owner's data: `LEVEL 0`, `value1` 12, `value5` 18.
+const SWAPPED_ARMOUR: u32 = 11_806;
+/// A grade-1 sash, whose absorption legacy fixes at 1.
+const SASH: u32 = 85_001;
+
+/// One record of a move, as the scenario reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Seen {
+    /// A `GC_ITEM_SET` of the base window: the cell and vnum, vnum 0 for a clear.
+    Set(u16, u32),
+    /// A `GC_CHARACTER_POINT_CHANGE`: the kind and the new value.
+    Point(u8, i64),
+    /// A `GC_CHARACTER_UPDATE`: the six parts and the two speeds.
+    Look([u16; 6], u8, u8),
+    /// A `GC_SEPCIAL_EFFECT`: the type.
+    Effect(u8),
+}
+
+/// Every record a move sends within a quiet window, each checked against the mover's VID.
+fn read_a_move(keyed: &mut Keyed, vid: u32) -> Vec<Seen> {
+    let (records, quiet) = keyed.drain_game(Duration::from_millis(700), |header| match header {
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
+        other => game_len(other),
+    });
+    assert_eq!(quiet, Quiet::Open);
+    records
+        .iter()
+        .map(|record| match record.first().copied().unwrap_or_default() {
+            ITEM_SET => {
+                let (window, cell, vnum, _count) = set_fields(record);
+                assert_eq!(window, common::item_slots::EWindows::Inventory as u8);
+                Seen::Set(cell, vnum)
+            }
+            GC_POINT_CHANGE => {
+                assert_eq!(&record[4..8], &vid.to_le_bytes(), "the mover's VID");
+                let value = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
+                Seen::Point(record[8], value)
+            }
+            GC_CHARACTER_UPDATE => {
+                assert_eq!(&record[1..5], &vid.to_le_bytes(), "the mover's VID");
+                let parts = std::array::from_fn(|index| {
+                    let at = 5 + 2 * index;
+                    u16::from_le_bytes([record[at], record[at + 1]])
+                });
+                Seen::Look(parts, record[17], record[18])
+            }
+            GC_SPECIAL_EFFECT => {
+                assert_eq!(&record[2..6], &vid.to_le_bytes(), "the mover's VID");
+                Seen::Effect(record[1])
+            }
+            other => panic!("a record nobody accounted for in a move: header {other}"),
+        })
+        .collect()
+}
+
+/// Give Alpha three `INVENTORY` rows, ids 30 to 32: the level-9 armour at cell 0, the level-0
+/// armour at cell 1 and the grade-1 sash at cell 2. The prototype fields the scenario's hand
+/// sums read are checked against the owner's data first.
+fn give_alpha_wearables(database: &ScratchDatabase) {
+    let protos = owners_protos();
+    let proto = |vnum| protos.get(vnum).expect("the owner's data has it");
+    assert_eq!(
+        (proto(WORN_ARMOUR).values[1], proto(WORN_ARMOUR).values[5]),
+        (21, 0)
+    );
+    assert_eq!(
+        (
+            proto(SWAPPED_ARMOUR).values[1],
+            proto(SWAPPED_ARMOUR).values[5]
+        ),
+        (12, 18)
+    );
+    assert_eq!(proto(SWAPPED_ARMOUR).limits[0].value, 0);
+    assert_eq!(
+        (proto(SASH).item_type, proto(SASH).values[0]),
+        (gamedata::item_kind::ITEM_COSTUME, 1),
+        "a grade-1 sash"
+    );
+    for (id, pos, vnum) in [(30, 0, WORN_ARMOUR), (31, 1, SWAPPED_ARMOUR), (32, 2, SASH)] {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 1, {pos}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+}
+
+/// `sys.item.core`: an armour is worn, swapped for another and taken off, and a sash is worn,
+/// through `CG_ITEM_MOVE`, and the client, the points and the store follow each step.
+///
+/// Alpha is given three `INVENTORY` rows, ids 30 to 32: the level-9 armour at cell 0, the
+/// level-0 armour at cell 1 and a grade-1 sash at cell 2. `EquipItem` refuses a wear within
+/// 1.5 s of the last attack or of the select (`G/char_item.cpp:8471-8477`), so the scenario
+/// waits that out first. Every expected point is a hand sum of `ComputeBattlePoints`
+/// (`G/char.cpp:2769-2846`) over Alpha's level 154 and 18 in the defence attribute: the
+/// defence grade is 154 + 18 x 4 / 5 plus the armour's `value1` and twice its `value5`, the
+/// shown grade 154 + 18 plus the same, and the magic defence grade 154 + (3 x 20 + 18) / 3 plus
+/// half the armour's.
+#[test]
+fn an_armour_is_worn_swapped_and_taken_off_and_the_store_follows() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    give_alpha_wearables(&database);
+    let (mut alpha, _character, items) = load_character(&server, b"alice", 0);
+    let waited = std::time::Instant::now();
+    assert_eq!(items.len(), 3);
+    let add = enter_game_burst(&mut alpha);
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    std::thread::sleep(Duration::from_millis(1600).saturating_sub(waited.elapsed()));
+
+    // When: the level-9 armour is moved onto the body cell.
+    alpha.send_record(&client_item_move(0, 180, 0));
+    // Then: the cell is cleared and the wear cell set, the prototype's speed is taken, the
+    // battle points are recomputed from 0 in legacy's order (a defence grade change carries
+    // the shown grade with it, `G/char.cpp:4436-4441`), and the look is sent with the armour
+    // as the main part. The row is in the body wear cell.
+    let (hair, stored_sash) = (0xc3d4, 0xe5f6);
+    let battle = |armour: i64| {
+        vec![
+            Seen::Point(18, 344),
+            Seen::Point(20, 168 + armour),
+            Seen::Point(16, 168 + armour),
+            Seen::Point(20, 172 + armour),
+            Seen::Point(22, 348),
+            Seen::Point(23, 180 + armour / 2),
+        ]
+    };
+    let look = |main: u32, sash: u16, speed: u8| {
+        let main = u16::try_from(main).expect("a part is a WORD");
+        Seen::Look([main, 0, 0, hair, sash, 0], speed, 100)
+    };
+    let mut expected = vec![
+        Seen::Set(0, 0),
+        Seen::Set(180, WORN_ARMOUR),
+        Seen::Point(19, 98),
+    ];
+    expected.extend(battle(21));
+    expected.push(look(WORN_ARMOUR, stored_sash, 98));
+    assert_eq!(read_a_move(&mut alpha, vid), expected);
+    check(
+        &database,
+        "(SELECT (window_type, pos) = (2, 0) FROM item WHERE id = 30)",
+    );
+
+    // When: the other armour is moved onto the free head cell.
+    alpha.send_record(&client_item_move(1, 181, 0));
+    // Then: `EquipItem` finds the body cell taken and swaps: the worn armour is taken off
+    // (its speed back first, then its cell cleared and the points and look recomputed), the
+    // new one is worn at the body cell, and the old one is set where the new one was.
+    let mut expected = vec![Seen::Point(19, 100), Seen::Set(180, 0)];
+    expected.extend(battle(0));
+    expected.extend([look(0, stored_sash, 100), Seen::Set(1, 0)]);
+    expected.extend([Seen::Set(180, SWAPPED_ARMOUR), Seen::Point(19, 100)]);
+    expected.extend(battle(12 + 2 * 18));
+    expected.extend([
+        look(SWAPPED_ARMOUR, stored_sash, 100),
+        Seen::Set(1, WORN_ARMOUR),
+    ]);
+    assert_eq!(read_a_move(&mut alpha, vid), expected);
+    check(
+        &database,
+        "(SELECT array_agg((window_type, pos) ORDER BY id)::text FROM item WHERE id IN (30, 31)) \
+         = '{\"(1,1)\",\"(2,0)\"}'",
+    );
+
+    // When: the sash is moved onto the sash wear cell.
+    alpha.send_record(&client_item_move(2, 203, 0));
+    // Then: it is worn, the sash part (the vnum less 85000, `G/item.cpp:1294`) is sent at once
+    // and again after the recompute, and the sash effect follows (`G/char_item.cpp:8574-8578`). The row is in the sash wear cell.
+    let mut expected = vec![
+        Seen::Set(2, 0),
+        Seen::Set(203, SASH),
+        look(SWAPPED_ARMOUR, 1, 100),
+    ];
+    expected.extend(battle(48));
+    expected.extend([look(SWAPPED_ARMOUR, 1, 100), Seen::Effect(26)]);
+    assert_eq!(read_a_move(&mut alpha, vid), expected);
+    check(
+        &database,
+        "(SELECT (window_type, pos) = (2, 23) FROM item WHERE id = 32)",
+    );
+
+    // When: the body armour is moved onto a free inventory cell.
+    alpha.send_record(&client_item_move(180, 10, 0));
+    // Then: it is taken off, the defence grades fall back to the bare ones, and it is set at
+    // the cell asked for. The row follows it.
+    let mut expected = vec![Seen::Point(19, 100), Seen::Set(180, 0)];
+    expected.extend(battle(0));
+    expected.extend([look(0, 1, 100), Seen::Set(10, SWAPPED_ARMOUR)]);
+    assert_eq!(read_a_move(&mut alpha, vid), expected);
+    check(
+        &database,
+        "(SELECT array_agg((window_type, pos) ORDER BY id)::text FROM item WHERE id BETWEEN 30 \
+         AND 32) = '{\"(1,1)\",\"(1,10)\",\"(2,23)\"}'",
+    );
+
+    // And: the logout save stores the parts the moves left, bare body and the sash's part.
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT (part_main, part_sash) = (0, 1) FROM player WHERE name = 'Alpha')",
+    );
+}
+
 /// Lower Alpha to level 9 with 1500 hit points and 70000 spell points, and give it five
 /// `EQUIPMENT` rows, ids 20 to 24: the armour at cell 0 with a 500-point maximum hit point
 /// attribute, the bell at cell 1, the fan at cell 4, the spare armour at cell 64, and the stone

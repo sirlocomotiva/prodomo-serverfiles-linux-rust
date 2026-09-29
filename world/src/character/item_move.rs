@@ -14,10 +14,17 @@
 //!
 //! # What is refused as not ported
 //!
-//! A move out of or into the equipment and the dragon-soul equipment (legacy's
-//! `EquipItem` and `UnequipItem` paths), a dragon-soul item, a switchbot slot, and a source
-//! window other than the inventory and the equipment. Each is [`MoveRefused::NotPorted`],
-//! so a caller can tell "legacy would refuse this" from "this build cannot do it yet".
+//! A dragon-soul item or equipment cell, a switchbot slot, a source window other than the
+//! inventory and the equipment, and, when the caller passes no [`Gear`], a move out of or into
+//! a wear cell. Each is [`MoveRefused::NotPorted`], so a caller can tell "legacy would refuse
+//! this" from "this build cannot do it yet".
+//!
+//! # Wear cells
+//!
+//! With the character's [`Gear`], a move out of or into a wear cell runs legacy's
+//! `EquipItem`, `UnequipItem` and `SwapItem` paths ([`super::equip`]). Those change the points
+//! and the look too, so a [`MoveDone`] carries [`MoveRecord`]s, not only item records. A path
+//! that changes something and then fails ends [`MoveKind::Declined`], with what it did.
 //!
 //! Five legacy checks have nothing to test yet and are left out: `IsExchanging`,
 //! `isLocked`, `CanHandleItem`, `IsSecured`, and the observer mode. The quickslot sync and
@@ -54,13 +61,16 @@ use common::item_slots::{
 use protocol::gc_item_window::{GcItemSet, GcItemUpdate};
 use protocol::item_pos::ItemPos;
 
+use super::equip::{find_equip_cell, CharacterLook, Equipper, Gear, Trail, WornSystem};
 use super::inventory::{
     custom_inventory_category_of, is_belt_inventory_position, is_custom_inventory_position,
-    is_default_inventory_position, is_equip_position, is_switchbot_position,
-    is_valid_item_position,
+    is_default_inventory_position, is_dragon_soul_equip_position, is_equip_position,
+    is_switchbot_position, is_valid_item_position,
 };
 use super::items::{CharacterItems, CountRefused, Rejected};
+use super::points::PointRecord;
 use crate::item::{gc_item_clear, Item, ItemId, ItemIds, ITEM_FLAG_IRREMOVABLE};
+use common::enums::EWearPositions;
 
 /// The destination cell a client sends to ask the server to choose one.
 ///
@@ -109,6 +119,14 @@ pub enum MoveKind {
     Merged,
     /// Part of the stack became a new item at the destination.
     Split,
+    /// The item went on in an empty wear cell.
+    Equipped,
+    /// The item went on in place of the worn one, which went to the item's cell.
+    Swapped,
+    /// The worn item went to the first free inventory cell (`UnequipItem`).
+    Unequipped,
+    /// A wear-cell path changed something and then refused; the records end with its notice.
+    Declined,
 }
 
 /// A record the client is sent, in the order legacy sends it.
@@ -128,6 +146,21 @@ impl ItemRecord {
             Self::Update(record) => record.encode_into(out),
         }
     }
+}
+
+/// A record the client is sent by a move, in the order legacy sends it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveRecord {
+    /// An item record.
+    Item(ItemRecord),
+    /// A `GC_CHARACTER_POINT_CHANGE`.
+    Point(PointRecord),
+    /// A `GC_CHARACTER_UPDATE` (`UpdatePacket`), which the viewers are sent too.
+    Look(CharacterLook),
+    /// A `GC_SPECIAL_EFFECT` on the character, which the viewers are sent too.
+    Effect(u8),
+    /// A `CHAT_TYPE_INFO` line.
+    Notice(&'static str),
 }
 
 /// A change the store has to make for the move to survive a restart.
@@ -154,6 +187,13 @@ pub enum ItemChange {
         /// The item.
         id: ItemId,
     },
+    /// The item's sockets changed: a sash rolled its absorption.
+    Sockets {
+        /// The item.
+        id: ItemId,
+        /// Its sockets now.
+        sockets: [i32; crate::item::SOCKETS],
+    },
 }
 
 /// What a move did.
@@ -162,7 +202,7 @@ pub struct MoveDone {
     /// Which outcome it was.
     pub kind: MoveKind,
     /// What the client is sent, in order.
-    pub records: Vec<ItemRecord>,
+    pub records: Vec<MoveRecord>,
     /// What the store has to change, in order.
     pub changes: Vec<ItemChange>,
 }
@@ -180,6 +220,8 @@ pub enum Unported {
     DragonSoul,
     /// A switchbot slot.
     Switchbot,
+    /// Wearing this item starts a system this build does not have.
+    Worn(WornSystem),
 }
 
 /// Why a move changed nothing.
@@ -226,6 +268,50 @@ pub enum MoveRefused {
     Count(CountRefused),
     /// A path this build does not port yet.
     NotPorted(Unported),
+    /// `CanEquipNow`: the item's anti-flags refuse the character's job.
+    JobAntiFlag,
+    /// `CanEquipNow`: the level limit.
+    LevelTooLow,
+    /// `CanEquipNow`: the conqueror level limit.
+    ChampionTooLow,
+    /// `CanEquipNow`: the strength limit.
+    StrTooLow,
+    /// `CanEquipNow`: the intelligence limit.
+    IntTooLow,
+    /// `CanEquipNow`: the dexterity limit.
+    DexTooLow,
+    /// `CanEquipNow`: the vitality limit.
+    ConTooLow,
+    /// `CanEquipNow`: the same ring is already worn.
+    RingTwice,
+    /// `CanUnequipNow`: the belt's inventory holds an item.
+    BeltNotEmpty,
+    /// `CanUnequipNow`: no inventory cell has room for the worn item.
+    NoRoomToUnequip,
+    /// `IsEquipable` is false.
+    NotEquipable,
+    /// `FindEquipCell` found no cell.
+    NoEquipCell,
+    /// A costume body onto a wedding armour.
+    WeddingCostume,
+    /// A wedding armour under a costume body.
+    WeddingArmour,
+    /// The item's anti-flags refuse the character's sex.
+    WrongSex,
+    /// The character attacked in the last 1.5 s.
+    RecentlyFought,
+    /// The worn costume weapon could not be taken off (`UnequipItem`, `EquipItem`).
+    CostumeWeaponStuck,
+    /// The worn costume weapon could not be taken off (`MoveItem`).
+    CostumeWeaponStuckOnMove,
+    /// A costume weapon onto a missing or mismatched weapon.
+    WrongWeaponForCostume,
+    /// A talent item onto a taken talent cell.
+    AbilityOccupied,
+    /// `SwapItem` refused.
+    SwapRefused,
+    /// The wear cell the client named is taken.
+    WearCellTaken,
 }
 
 impl MoveRefused {
@@ -246,6 +332,49 @@ impl MoveRefused {
             }
             // `char_item.cpp:7698`.
             Self::NotForBelt => Some("[LS;1097]"),
+            // `char_item.cpp:10097-10139`.
+            Self::LevelTooLow => Some("[LS;462]"),
+            Self::ChampionTooLow => {
+                Some("Nivelul tau campion este prea mic pentru a putea purta acest item!")
+            }
+            Self::StrTooLow => Some("[LS;463]"),
+            Self::IntTooLow => Some("[LS;464]"),
+            Self::DexTooLow => Some("[LS;465]"),
+            Self::ConTooLow => Some("[LS;466]"),
+            // `char_item.cpp:10175`.
+            Self::RingTwice => Some("You cannot equip this item twice"),
+            // `char_item.cpp:10199`.
+            Self::BeltNotEmpty => Some(
+                "[1095]You can only discard the belt when there are no longer any items in its \
+                 inventory.",
+            ),
+            // `char_item.cpp:10210`.
+            Self::NoRoomToUnequip => Some("[1130]There isn't enough space in your inventory."),
+            // `char_item.cpp:8371`.
+            Self::WeddingCostume => {
+                Some("Non puoi usare un Costume con uno Smoking o Abito da Sposa.")
+            }
+            // `char_item.cpp:8381`.
+            Self::WeddingArmour => Some("Devi rimuovere il Costume per usarlo."),
+            // `char_item.cpp:8390`.
+            Self::WrongSex => Some("[LS;1005]"),
+            // `char_item.cpp:8421`.
+            Self::RecentlyFought => Some("[LS;451]"),
+            // `char_item.cpp:8275`, `:8465`, `:8474`.
+            Self::CostumeWeaponStuck => {
+                Some("You cannot unequip the costume weapon because there is not enough space")
+            }
+            // `char_item.cpp:7740`.
+            Self::CostumeWeaponStuckOnMove => Some(
+                "@@(char_item.cpp)tradus:You cannot unequip the costume weapon because there is \
+                 not enough space",
+            ),
+            // `char_item.cpp:8486`.
+            Self::WrongWeaponForCostume => Some(
+                "You cannot equip the costume weapon, because you have the wrong weapon equipped",
+            ),
+            // `char_item.cpp:7754`.
+            Self::WearCellTaken => Some("[LS;1092]"),
             _ => None,
         }
     }
@@ -274,6 +403,29 @@ impl core::fmt::Display for MoveRefused {
             Self::Storage(reason) => write!(f, "the storage refused: {reason}"),
             Self::Count(reason) => write!(f, "the storage refused a count: {reason}"),
             Self::NotPorted(what) => write!(f, "not ported yet: {what:?}"),
+            Self::JobAntiFlag => f.write_str("the item refuses this job"),
+            Self::LevelTooLow => f.write_str("the level is below the item's limit"),
+            Self::ChampionTooLow => f.write_str("the conqueror level is below the item's limit"),
+            Self::StrTooLow => f.write_str("the strength is below the item's limit"),
+            Self::IntTooLow => f.write_str("the intelligence is below the item's limit"),
+            Self::DexTooLow => f.write_str("the dexterity is below the item's limit"),
+            Self::ConTooLow => f.write_str("the vitality is below the item's limit"),
+            Self::RingTwice => f.write_str("the same ring is already worn"),
+            Self::BeltNotEmpty => f.write_str("the belt's inventory is not empty"),
+            Self::NoRoomToUnequip => f.write_str("no inventory cell has room for the worn item"),
+            Self::NotEquipable => f.write_str("the item is not equipable"),
+            Self::NoEquipCell => f.write_str("the item has no wear cell"),
+            Self::WeddingCostume => f.write_str("a costume body may not cover a wedding armour"),
+            Self::WeddingArmour => f.write_str("a wedding armour may not go under a costume"),
+            Self::WrongSex => f.write_str("the item refuses this sex"),
+            Self::RecentlyFought => f.write_str("the character fought in the last 1.5 s"),
+            Self::CostumeWeaponStuck | Self::CostumeWeaponStuckOnMove => {
+                f.write_str("the costume weapon could not be taken off")
+            }
+            Self::WrongWeaponForCostume => f.write_str("the worn weapon does not fit the costume"),
+            Self::AbilityOccupied => f.write_str("the talent cell is taken"),
+            Self::SwapRefused => f.write_str("the swap was refused"),
+            Self::WearCellTaken => f.write_str("the wear cell is taken"),
         }
     }
 }
@@ -290,6 +442,7 @@ fn is_flat_window(window_type: u8) -> bool {
 /// Run one `CG_ITEM_MOVE` against a character's storage.
 ///
 /// `ids` is needed only by a split, and `facts` is asked once, for the moved item's vnum.
+/// `gear` lets a move reach a wear cell; without it, one is [`Unported::Equipment`].
 ///
 /// # Errors
 ///
@@ -300,6 +453,7 @@ pub fn move_item(
     ids: Option<&mut ItemIds>,
     request: MoveRequest,
     rules: &MoveRules,
+    gear: Option<&mut Gear<'_>>,
     facts: impl FnOnce(u32) -> Option<MoveFacts>,
 ) -> Result<MoveDone, MoveRefused> {
     let MoveRequest {
@@ -334,36 +488,107 @@ pub fn move_item(
     {
         to.cell = auto_find(items, &item, from, &facts, rules)?;
     }
-    check_destination(from, to, &facts)?;
-    if let Some(target) = items
-        .item_at(to)
-        .filter(|target| target.id != item.id && target.stacks() && target.vnum == item.vnum)
-        .cloned()
-    {
-        if target.sockets != item.sockets {
-            return Err(MoveRefused::SocketsDiffer);
+    check_destination(to, &facts)?;
+    let Some(gear) = gear.filter(|_| is_equip_position(from) || is_equip_position(to)) else {
+        if is_equip_position(from) || is_equip_position(to) {
+            return Err(MoveRefused::NotPorted(Unported::Equipment));
         }
-        return merge(items, &item, &target, count, rules.count_limit);
-    }
-    let fits = |exception: Option<u16>| {
-        items.is_empty_item_grid(
+        check_placement(to, &facts)?;
+        let place = Place {
+            item: &item,
+            from,
             to,
-            item.size,
-            exception,
-            rules.usable_cells,
-            rules.belt_grade,
-        )
+            count,
+        };
+        return grid_move(items, ids, place, rules, None);
     };
-    if !fits(Some(from.cell)) {
-        return Err(MoveRefused::NoRoom);
+    if is_dragon_soul_equip_position(from) || is_dragon_soul_equip_position(to) || facts.dragon_soul
+    {
+        return Err(MoveRefused::NotPorted(Unported::DragonSoul));
     }
-    if count == 0 || count >= item.count || !item.stacks() {
-        return whole_move(items, &item, from, to);
+    let mut equipper = Equipper::new(items, &mut *gear, rules.usable_cells);
+    let outcome = wear_move(&mut equipper, &item, from, to);
+    let trail = equipper.into_trail();
+    let worn = match outcome {
+        Ok(Some(kind)) => return Ok(done(kind, trail)),
+        Ok(None) => from.cell - INVENTORY_MAX_NUM,
+        Err(refused) => return declined(refused, trail),
+    };
+    let place = Place {
+        item: &item,
+        from,
+        to,
+        count,
+    };
+    let moved = check_placement(to, &facts)
+        .and_then(|()| grid_move(items, ids, place, rules, Some((worn, gear))));
+    match moved {
+        Ok(mut moved) => {
+            let mut records = trail.records;
+            records.append(&mut moved.records);
+            let mut changes = trail.changes;
+            changes.append(&mut moved.changes);
+            Ok(MoveDone {
+                kind: moved.kind,
+                records,
+                changes,
+            })
+        }
+        Err(refused) => declined(refused, trail),
     }
-    if !fits(None) {
-        return Err(MoveRefused::NoRoom);
+}
+
+/// A finished wear-cell path.
+fn done(kind: MoveKind, trail: Trail) -> MoveDone {
+    MoveDone {
+        kind,
+        records: trail.records,
+        changes: trail.changes,
     }
-    split(items, ids, &item, to, count)
+}
+
+/// A wear-cell path that refused: nothing to answer but the refusal when it had not changed
+/// anything or sent anything, else what it did, with the refusal's notice last.
+fn declined(refused: MoveRefused, mut trail: Trail) -> Result<MoveDone, MoveRefused> {
+    if trail.records.is_empty() && trail.changes.is_empty() {
+        return Err(refused);
+    }
+    if let Some(text) = refused.notice() {
+        trail.records.push(MoveRecord::Notice(text));
+    }
+    Ok(done(MoveKind::Declined, trail))
+}
+
+/// The wear-cell branches of `MoveItem` (`char_item.cpp:7725-7757`). `None` sends a worn item
+/// on to the grid path, which takes it off.
+fn wear_move(
+    equipper: &mut Equipper<'_, '_>,
+    item: &Item,
+    from: ItemPos,
+    to: ItemPos,
+) -> Result<Option<MoveKind>, MoveRefused> {
+    if is_equip_position(from) {
+        let proto = equipper.proto(item.vnum)?;
+        equipper.can_unequip_now(item, proto)?;
+        if find_equip_cell(equipper.items(), proto) == Some(EWearPositions::Weapon as u16) {
+            equipper.free_costume_weapon(MoveRefused::CostumeWeaponStuckOnMove)?;
+            if !equipper.is_empty_grid(to, item.size, Some(from.cell)) {
+                equipper.unequip_item(item)?;
+                return Ok(Some(MoveKind::Unequipped));
+            }
+        }
+    }
+    if !is_equip_position(to) {
+        return Ok(None);
+    }
+    if equipper.items().item_at(to).is_some() {
+        return Err(MoveRefused::WearCellTaken);
+    }
+    Ok(Some(if equipper.equip_item(item)? {
+        MoveKind::Swapped
+    } else {
+        MoveKind::Equipped
+    }))
 }
 
 /// The destination the server chooses when the client sends [`AUTO_FIND_CELL`].
@@ -394,8 +619,9 @@ fn auto_find(
     Ok(AUTO_FIND_CELL)
 }
 
-/// The destination checks, in legacy's order (`char_item.cpp:7672-7782`).
-fn check_destination(from: ItemPos, to: ItemPos, facts: &MoveFacts) -> Result<(), MoveRefused> {
+/// The destination checks before the wear-cell branches, in legacy's order
+/// (`char_item.cpp:7672-7717`).
+fn check_destination(to: ItemPos, facts: &MoveFacts) -> Result<(), MoveRefused> {
     if !is_valid_item_position(to) {
         return Err(MoveRefused::InvalidDestination);
     }
@@ -410,9 +636,11 @@ fn check_destination(from: ItemPos, to: ItemPos, facts: &MoveFacts) -> Result<()
     if is_switchbot_position(to) {
         return Err(MoveRefused::NotPorted(Unported::Switchbot));
     }
-    if is_equip_position(from) || is_equip_position(to) {
-        return Err(MoveRefused::NotPorted(Unported::Equipment));
-    }
+    Ok(())
+}
+
+/// The destination checks after the wear-cell branches (`char_item.cpp:7758-7782`).
+fn check_placement(to: ItemPos, facts: &MoveFacts) -> Result<(), MoveRefused> {
     if facts.dragon_soul {
         return Err(MoveRefused::NotPorted(Unported::DragonSoul));
     }
@@ -425,6 +653,96 @@ fn check_destination(from: ItemPos, to: ItemPos, facts: &MoveFacts) -> Result<()
         )));
     }
     Ok(())
+}
+
+/// What a grid move moves, and from where to where.
+#[derive(Debug, Clone, Copy)]
+struct Place<'a> {
+    item: &'a Item,
+    from: ItemPos,
+    to: ItemPos,
+    count: u16,
+}
+
+/// The wear cell a worn item leaves, with the gear its taking off changes.
+type Worn<'a, 'g> = Option<(u16, &'a mut Gear<'g>)>;
+
+/// The grid path of `MoveItem` (`char_item.cpp:7760-7846`): a merge, a whole move or a split.
+fn grid_move(
+    items: &mut CharacterItems,
+    ids: Option<&mut ItemIds>,
+    place: Place<'_>,
+    rules: &MoveRules,
+    worn: Worn<'_, '_>,
+) -> Result<MoveDone, MoveRefused> {
+    let Place {
+        item,
+        from,
+        to,
+        count,
+    } = place;
+    if let Some(target) = items
+        .item_at(to)
+        .filter(|target| target.id != item.id && target.stacks() && target.vnum == item.vnum)
+        .cloned()
+    {
+        if target.sockets != item.sockets {
+            return Err(MoveRefused::SocketsDiffer);
+        }
+        let usable_cells = rules.usable_cells;
+        return merge(
+            items,
+            item,
+            &target,
+            count,
+            rules.count_limit,
+            (worn, usable_cells),
+        );
+    }
+    let fits = |exception: Option<u16>| {
+        items.is_empty_item_grid(
+            to,
+            item.size,
+            exception,
+            rules.usable_cells,
+            rules.belt_grade,
+        )
+    };
+    if !fits(Some(from.cell)) {
+        return Err(MoveRefused::NoRoom);
+    }
+    if count == 0 || count >= item.count || !item.stacks() {
+        return match worn {
+            Some((wear, gear)) => {
+                let mut trail = take_off(items, gear, rules.usable_cells, wear, item)?;
+                items.set(to, item).map_err(MoveRefused::Storage)?;
+                trail
+                    .records
+                    .push(MoveRecord::Item(ItemRecord::Set(item.gc_item_set(to, 0))));
+                let pos = stored(items, item.id)?.pos;
+                trail.changes.push(ItemChange::Moved { id: item.id, pos });
+                Ok(done(MoveKind::Moved, trail))
+            }
+            None => whole_move(items, item, from, to),
+        };
+    }
+    if !fits(None) {
+        return Err(MoveRefused::NoRoom);
+    }
+    split(items, ids, item, to, count)
+}
+
+/// `RemoveFromCharacter` of a worn item: `Unequip`, with what it sends.
+fn take_off(
+    items: &mut CharacterItems,
+    gear: &mut Gear<'_>,
+    usable_cells: u16,
+    wear: u16,
+    item: &Item,
+) -> Result<Trail, MoveRefused> {
+    let mut equipper = Equipper::new(items, gear, usable_cells);
+    equipper.take_off(wear, item)?;
+    Ok(equipper.into_trail())
 }
 
 /// The stored copy of an item, which is what every record after a change describes.
@@ -448,6 +766,7 @@ fn merge(
     target: &Item,
     count: u16,
     count_limit: u16,
+    (worn, usable_cells): (Worn<'_, '_>, u16),
 ) -> Result<MoveDone, MoveRefused> {
     let asked = if count == 0 { item.count } else { count };
     let room = count_limit
@@ -462,14 +781,22 @@ fn merge(
     let mut records = Vec::with_capacity(2);
     let mut changes = Vec::with_capacity(2);
     if left == 0 {
-        let pos = items.release(item.id).map_err(MoveRefused::Storage)?;
-        records.push(ItemRecord::Set(gc_item_clear(pos)));
+        if let Some((wear, gear)) = worn {
+            let trail = take_off(items, gear, usable_cells, wear, item)?;
+            records = trail.records;
+            changes = trail.changes;
+        } else {
+            let pos = items.release(item.id).map_err(MoveRefused::Storage)?;
+            records.push(MoveRecord::Item(ItemRecord::Set(gc_item_clear(pos))));
+        }
         changes.push(ItemChange::Destroyed { id: item.id });
     } else {
         let _ = items
             .set_count(item.id, u32::from(left))
             .map_err(MoveRefused::Count)?;
-        records.push(ItemRecord::Update(stored(items, item.id)?.gc_item_update()));
+        records.push(MoveRecord::Item(ItemRecord::Update(
+            stored(items, item.id)?.gc_item_update(),
+        )));
         if moved > 0 {
             changes.push(ItemChange::Count {
                 id: item.id,
@@ -477,9 +804,9 @@ fn merge(
             });
         }
     }
-    records.push(ItemRecord::Update(
+    records.push(MoveRecord::Item(ItemRecord::Update(
         stored(items, target.id)?.gc_item_update(),
-    ));
+    )));
     if moved > 0 {
         changes.push(ItemChange::Count {
             id: target.id,
@@ -513,8 +840,8 @@ fn whole_move(
     Ok(MoveDone {
         kind: MoveKind::Moved,
         records: vec![
-            ItemRecord::Set(gc_item_clear(old)),
-            ItemRecord::Set(item.gc_item_set(to, 0)),
+            MoveRecord::Item(ItemRecord::Set(gc_item_clear(old))),
+            MoveRecord::Item(ItemRecord::Set(item.gc_item_set(to, 0))),
         ],
         changes: vec![ItemChange::Moved { id: item.id, pos }],
     })
@@ -553,8 +880,8 @@ fn split(
     Ok(MoveDone {
         kind: MoveKind::Split,
         records: vec![
-            ItemRecord::Update(stored(items, item.id)?.gc_item_update()),
-            ItemRecord::Set(piece.gc_item_set(to, 0)),
+            MoveRecord::Item(ItemRecord::Update(stored(items, item.id)?.gc_item_update())),
+            MoveRecord::Item(ItemRecord::Set(piece.gc_item_set(to, 0))),
         ],
         changes: vec![
             ItemChange::Count {
@@ -573,6 +900,17 @@ mod tests {
 
     const INV: u8 = EWindows::Inventory as u8;
     const EQUIP: u8 = EWindows::Equipment as u8;
+
+    /// The item records a move sends, in order.
+    fn item_records(done: &MoveDone) -> Vec<ItemRecord> {
+        done.records
+            .iter()
+            .filter_map(|record| match record {
+                MoveRecord::Item(record) => Some(*record),
+                _ => None,
+            })
+            .collect()
+    }
     const DS: u8 = EWindows::DragonSoulInventory as u8;
     const BANK_2: u16 = CUSTOM_INVENTORY_SLOT_START + 2 * 180;
     const BANK_3: u16 = CUSTOM_INVENTORY_SLOT_START + 3 * 180;
@@ -629,7 +967,9 @@ mod tests {
     ) -> Result<MoveDone, MoveRefused> {
         let mut ids = ids();
         let request = MoveRequest { from, to, count };
-        move_item(items, Some(&mut ids), request, &RULES, |_| Some(known))
+        move_item(items, Some(&mut ids), request, &RULES, None, |_| {
+            Some(known)
+        })
     }
 
     /// Run a move that must be refused and check it changed nothing.
@@ -653,7 +993,7 @@ mod tests {
         let done = run(&mut items, at(INV, 3), at(INV, 40), 0, facts(&[])).expect("moves");
         assert_eq!(done.kind, MoveKind::Moved);
         assert_eq!(
-            done.records,
+            item_records(&done),
             vec![
                 ItemRecord::Set(gc_item_clear(at(INV, 3))),
                 ItemRecord::Set(sword.gc_item_set(at(INV, 40), 0)),
@@ -688,7 +1028,10 @@ mod tests {
         let sword = plain(7, 19);
         let mut items = holding(&[(at(INV, 3), sword)]);
         let done = run(&mut items, at(EQUIP, 3), at(INV, 4), 0, facts(&[])).expect("moves");
-        assert_eq!(done.records[0], ItemRecord::Set(gc_item_clear(at(INV, 3))));
+        assert_eq!(
+            item_records(&done)[0],
+            ItemRecord::Set(gc_item_clear(at(INV, 3)))
+        );
     }
 
     #[test]
@@ -734,7 +1077,7 @@ mod tests {
             count: 0,
         };
         assert_eq!(
-            move_item(&mut items, Some(&mut ids), request, &RULES, |_| None),
+            move_item(&mut items, Some(&mut ids), request, &RULES, None, |_| None),
             Err(MoveRefused::UnknownVnum(27001))
         );
     }
@@ -999,14 +1342,24 @@ mod tests {
         };
         // Grade 1 opens the first belt cell and not the second, which needs grade 2.
         assert_eq!(
-            move_item(&mut items, Some(&mut ids), into(BELT + 1), &graded, |_| {
-                Some(potion.clone())
-            }),
+            move_item(
+                &mut items,
+                Some(&mut ids),
+                into(BELT + 1),
+                &graded,
+                None,
+                |_| { Some(potion.clone()) }
+            ),
             Err(MoveRefused::NoRoom)
         );
-        let done = move_item(&mut items, Some(&mut ids), into(BELT), &graded, |_| {
-            Some(potion.clone())
-        })
+        let done = move_item(
+            &mut items,
+            Some(&mut ids),
+            into(BELT),
+            &graded,
+            None,
+            |_| Some(potion.clone()),
+        )
         .expect("moves into the belt");
         assert_eq!(
             done.changes,
@@ -1029,7 +1382,7 @@ mod tests {
         let target = items.item(8).expect("still held").clone();
         assert_eq!((source.count, target.count), (18, 112));
         assert_eq!(
-            done.records,
+            item_records(&done),
             vec![
                 ItemRecord::Update(source.gc_item_update()),
                 ItemRecord::Update(target.gc_item_update()),
@@ -1056,7 +1409,7 @@ mod tests {
         assert!(items.item(7).is_none());
         assert!(items.item_at(at(INV, 3)).is_none());
         assert_eq!(
-            done.records,
+            item_records(&done),
             vec![
                 ItemRecord::Set(gc_item_clear(at(INV, 3))),
                 ItemRecord::Update(target.gc_item_update()),
@@ -1126,7 +1479,7 @@ mod tests {
             to: at(INV, 4),
             count: 0,
         };
-        let done = move_item(&mut items, Some(&mut ids), request, &rules, |_| {
+        let done = move_item(&mut items, Some(&mut ids), request, &rules, None, |_| {
             Some(facts(&[]))
         })
         .expect("merges");
@@ -1151,7 +1504,7 @@ mod tests {
         let done = run(&mut items, at(INV, 3), at(INV, 3), 0, facts(&[])).expect("moves");
         assert_eq!(done.kind, MoveKind::Moved);
         assert_eq!(
-            done.records,
+            item_records(&done),
             vec![
                 ItemRecord::Set(gc_item_clear(at(INV, 3))),
                 ItemRecord::Set(potions.gc_item_set(at(INV, 3), 0)),
@@ -1209,7 +1562,7 @@ mod tests {
         assert_eq!(piece.attributes, plain(9, 1).attributes);
         assert_eq!(piece.refine_element, 0);
         assert_eq!(
-            done.records,
+            item_records(&done),
             vec![
                 ItemRecord::Update(left.gc_item_update()),
                 ItemRecord::Set(piece.gc_item_set(at(INV, 40), 0)),
@@ -1247,13 +1600,15 @@ mod tests {
             count: 12,
         };
         assert_eq!(
-            move_item(&mut items, None, request, &RULES, |_| Some(facts(&[]))),
+            move_item(&mut items, None, request, &RULES, None, |_| Some(
+                facts(&[])
+            )),
             Err(MoveRefused::NoItemIds)
         );
         let mut spent = ItemIds::new(ItemIdRange::new(1000, 1001, 1000).expect("a valid range"));
         let _ = spent.allocate().expect("the one id");
         assert_eq!(
-            move_item(&mut items, Some(&mut spent), request, &RULES, |_| {
+            move_item(&mut items, Some(&mut spent), request, &RULES, None, |_| {
                 Some(facts(&[]))
             }),
             Err(MoveRefused::IdsExhausted)

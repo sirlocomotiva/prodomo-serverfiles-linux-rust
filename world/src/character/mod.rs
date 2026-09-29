@@ -3,6 +3,7 @@
 mod apply;
 mod combat;
 mod dice;
+mod equip;
 mod equipment;
 mod grant;
 mod inventory;
@@ -28,6 +29,10 @@ pub use combat::{
     PkMode, Vitality,
 };
 pub use dice::{number, Dice, Pcg32};
+pub use equip::{
+    find_equip_cell, is_equipable, is_female, wear_pos, worn_system_not_ported, CharacterLook,
+    Gear, WornSystem,
+};
 pub use equipment::{
     accessory_socket_grade, is_set_item, item_applies, removal_applies, Equipment, PartChange,
     Worn, PARTS,
@@ -42,8 +47,8 @@ pub use inventory::{
     INVENTORY_PLACEHOLDER, NPOS,
 };
 pub use item_move::{
-    move_item, ItemChange, ItemRecord, MoveDone, MoveFacts, MoveKind, MoveRefused, MoveRequest,
-    MoveRules, Unported, AUTO_FIND_CELL,
+    move_item, ItemChange, ItemRecord, MoveDone, MoveFacts, MoveKind, MoveRecord, MoveRefused,
+    MoveRequest, MoveRules, Unported, AUTO_FIND_CELL,
 };
 pub use items::{
     belt_cell_is_available, CharacterItems, CountRefused, Lookup, Rejected, ATTR67_SLOTS,

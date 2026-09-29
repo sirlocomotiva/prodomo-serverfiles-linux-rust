@@ -59,7 +59,7 @@ use prodomo::game_loop_messages::{GameLoopController, GameLoopTerminal};
 use prodomo::game_state::{world_item_id_range, GameState};
 use prodomo::handshake::HandshakeServerKind;
 use prodomo::item_load::plan_item_load;
-use prodomo::item_move::MoveItemRefused;
+use prodomo::item_move::{MoveItemRefused, Mover};
 use prodomo::lifecycle::{LifecycleError, PostHandshakePhase};
 use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::loading_phase::{
@@ -296,6 +296,11 @@ struct Held {
     /// The items the load placed at character select, each at the cell the client was
     /// told, held until the world admits the character and taken with it.
     items: Vec<(ItemPos, Item)>,
+    /// When the character was selected, which legacy's `m_dwLastSkillTime` starts at.
+    selected_at: Option<tokio::time::Instant>,
+    /// When a `CG_MOVE` with an attack or combo function was last accepted
+    /// (`CHARACTER::OnMove(true)`, `G/char.cpp:6154`).
+    last_attack: Option<tokio::time::Instant>,
 }
 
 /// The per-descriptor half of legacy's save cycle.
@@ -626,6 +631,34 @@ async fn pump_descriptor<S>(
     }
 }
 
+/// Hold a character's points, and the pools and parts the save writes from the held row.
+fn hold_points(held: &mut Held, points: world::character::Points) {
+    if let Some(held_character) = held.character.as_mut() {
+        held_character.hp = points.hp();
+        held_character.sp = points.sp();
+        held_character.stamina = points.stamina();
+        let parts = points.parts();
+        held_character.main_part = parts[EParts::Main as usize];
+        held_character.hair_part = parts[EParts::Hair as usize];
+        held_character.sash_part = parts[EParts::Sash as usize];
+    }
+    held.points = Some(points);
+}
+
+/// How long after an attack, or after the select, an item may not be worn: 1.5 s
+/// (`G/char_item.cpp:8418-8419`).
+const EQUIP_AFTER_FIGHT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Whether the character attacked, or was selected, within the last 1.5 s: `GetLastAttackTime`
+/// or `m_dwLastSkillTime` (`G/char_item.cpp:8418-8419`). The Rewrite has no skills yet, so
+/// the skill time is only ever the select's.
+fn recently_fought(held: &Held) -> bool {
+    [held.selected_at, held.last_attack]
+        .into_iter()
+        .flatten()
+        .any(|at| at.elapsed() <= EQUIP_AFTER_FIGHT)
+}
+
 /// `CG_ITEM_MOVE` (13) in the game phase: `CHARACTER::MoveItem` (`G/char_item.cpp:7602`).
 ///
 /// The world moves the item, the rows are written in one transaction, and only then are the
@@ -638,7 +671,7 @@ async fn move_an_item<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
     context: &ConnectionContext,
-    held: &Held,
+    held: &mut Held,
     frame: &ClientFrame,
 ) -> bool
 where
@@ -661,15 +694,19 @@ where
         to: record.to,
         count: record.count,
     };
-    let moved = match context.game.move_item(vid, request).await {
+    // `ChatPacket` takes the empire from the descriptor, which is the character's.
+    let empire = held
+        .character
+        .as_ref()
+        .map_or(0, |character| character.empire);
+    let actor = Mover {
+        recently_fought: recently_fought(held),
+        empire,
+    };
+    let moved = match context.game.move_item(vid, request, actor).await {
         Ok(Ok(moved)) => moved,
         Ok(Err(MoveItemRefused::Refused(reason))) => {
             info!(%addr, %reason, "Item move refused");
-            // `ChatPacket` takes the empire from the descriptor, which is the character's.
-            let empire = held
-                .character
-                .as_ref()
-                .map_or(0, |character| character.empire);
             if let Some(line) = prodomo::item_move::refusal_notice(&reason, empire) {
                 if let Err(error) = send_all(session, &[line]).await {
                     warn!(%addr, %error, "Client session stopped");
@@ -693,9 +730,22 @@ where
         warn!(%addr, %error, kind = ?moved.kind, "The item move could not be stored; closing");
         return false;
     }
+    if let Some(points) = moved.points {
+        hold_points(held, points);
+    }
     if let Err(error) = send_all(session, &moved.records).await {
         warn!(%addr, %error, "Client session stopped");
         return false;
+    }
+    // `PacketAround`: the look, the effects and the broadcast points reach the characters that
+    // see this one too.
+    if let (Some(lease), Some(avatar)) = (held.presence.as_ref(), held.avatar.as_ref()) {
+        for record in &moved.around {
+            let _recipients =
+                context
+                    .clients
+                    .broadcast_excluding(held.channel, avatar.map, lease.id(), record);
+        }
     }
     info!(%addr, kind = ?moved.kind, rows = moved.changes.len(), "Item moved");
     true
@@ -881,6 +931,11 @@ where
             }
         }
         MoveOutcome::Accept(accepted) => {
+            // `FUNC_ATTACK` (2) and `FUNC_COMBO` (3) call `OnMove(true)`, which sets the last
+            // attack time (`G/input_main.cpp:1839-1840`).
+            if matches!(record.function, 2 | 3) {
+                held.last_attack = Some(tokio::time::Instant::now());
+            }
             avatar.rotation = accepted.rotation;
             match accepted.disposition {
                 MoveDisposition::Goto { x, y } => {
@@ -1667,16 +1722,10 @@ where
     held.items = items;
     // The item load's `CheckMaximumPoints` may have brought the pools down, and the worn items
     // set the parts; the save writes both from the held row (`G/char.cpp:1606`).
-    if let Some(held_character) = held.character.as_mut() {
-        held_character.hp = points.hp();
-        held_character.sp = points.sp();
-        held_character.stamina = points.stamina();
-        let parts = points.parts();
-        held_character.main_part = parts[EParts::Main as usize];
-        held_character.hair_part = parts[EParts::Hair as usize];
-        held_character.sash_part = parts[EParts::Sash as usize];
-    }
-    held.points = Some(points);
+    hold_points(held, points);
+    // `CHARACTER::Initialize` sets `m_dwLastSkillTime` when the character is created
+    // (`G/char.cpp:380`), which is the select.
+    held.selected_at = Some(tokio::time::Instant::now());
     // The index the map test resolved is the character's map. It is held here because the
     // first thing the game phase does with it is join the client set.
     held.map = map_index;
@@ -1962,7 +2011,9 @@ where
         let outbox = lease.outbox();
         held.presence = Some(lease);
         let items = std::mem::take(&mut held.items);
-        let Some(world_vid) = join_the_world(context, addr, character, vid, items, outbox).await
+        let points = held.points.clone();
+        let Some(world_vid) =
+            join_the_world(context, addr, character, vid, (items, points), outbox).await
         else {
             return false;
         };
@@ -2002,7 +2053,7 @@ async fn join_the_world(
     addr: SocketAddr,
     character: &db::players::Character,
     vid: u32,
-    items: Vec<(ItemPos, Item)>,
+    (items, points): (Vec<(ItemPos, Item)>, Option<world::character::Points>),
     outbox: prodomo::client_registry::ClientOutbox,
 ) -> Option<common::vid::Vid> {
     let world_vid = common::vid::Vid::new(vid);
@@ -2013,6 +2064,7 @@ async fn join_the_world(
             character.id,
             character.name.clone(),
             items,
+            points,
             outbox,
         )
         .await;

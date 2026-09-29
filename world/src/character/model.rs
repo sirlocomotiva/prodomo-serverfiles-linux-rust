@@ -3,6 +3,7 @@ use common::{vid::Vid, CharacterId};
 
 use super::combat::{Damage, DamageOutcome, Vitality};
 use super::items::CharacterItems;
+use super::points::Points;
 use super::state::{Activity, CharacterState, CoreState, Posture};
 
 /// Runtime category used to distinguish players from non-player characters.
@@ -29,6 +30,7 @@ pub struct Character {
     destruction_requested: bool,
     items: CharacterItems,
     envanter: u16,
+    points: Option<Points>,
 }
 
 impl Character {
@@ -47,6 +49,7 @@ impl Character {
             destruction_requested: false,
             items: CharacterItems::new(),
             envanter: 0,
+            points: None,
         }
     }
 
@@ -64,6 +67,7 @@ impl Character {
             destruction_requested: false,
             items: CharacterItems::new(),
             envanter: 0,
+            points: None,
         }
     }
 
@@ -199,6 +203,22 @@ impl Character {
     /// This character's item windows, mutably.
     pub fn items_mut(&mut self) -> &mut CharacterItems {
         &mut self.items
+    }
+
+    /// The player's points (`m_points` and `m_pointsInstant`), or `None` for a character that
+    /// was admitted without them.
+    pub const fn points(&self) -> Option<&Points> {
+        self.points.as_ref()
+    }
+
+    /// Sets the player's points.
+    pub fn set_points(&mut self, points: Option<Points>) {
+        self.points = points;
+    }
+
+    /// The item windows and the points together, which wearing an item changes both of.
+    pub fn items_and_points_mut(&mut self) -> (&mut CharacterItems, Option<&mut Points>) {
+        (&mut self.items, self.points.as_mut())
     }
 
     /// Returns the character's `Inven_Point`, the `m_points.envanter` that

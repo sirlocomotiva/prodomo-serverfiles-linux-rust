@@ -24,13 +24,15 @@
 //! this value rather than an empty closure.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasher, RandomState};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use common::item_slots::usable_inventory_cells;
 use gamedata::item_proto::ItemProtos;
 use world::character::{
-    move_item, CharacterManager, CharacterManagerError, MoveRequest, MoveRules, Rejected,
+    move_item, CharacterManager, CharacterManagerError, Gear, MoveRequest, MoveRules, Pcg32,
+    Rejected,
 };
 use world::item::{ItemIdRange, ItemIds};
 
@@ -41,7 +43,7 @@ use crate::client_registry::ClientOutbox;
 use crate::game_loop::PulseProcessor;
 use crate::game_loop_messages::GameCommand;
 use crate::item_grant::{grant_item, GrantOutcome, GrantRefusal, GrantRequest};
-use crate::item_move::{belt_grade, move_facts, MoveItemRefused, MovedItems};
+use crate::item_move::{belt_grade, move_facts, MoveItemRefused, MovedItems, Mover};
 
 /// Counters the owning side can read while the game thread is running.
 ///
@@ -298,6 +300,13 @@ pub struct GameState {
     outboxes: HashMap<common::vid::Vid, ClientOutbox>,
     /// `g_bItemCountLimit`: the largest stack a merge may build.
     item_count_limit: u16,
+    /// The draw a sash rolls its absorption from.
+    ///
+    /// Legacy's `number()` draws from the process-wide `thecore_random`, which `srandom`
+    /// seeds with the boot time; this one is seeded from the standard library's per-process
+    /// hash keys. Either way a player cannot predict the draw, and the Rewrite does not
+    /// reproduce legacy's sequence (a Divergence).
+    dice: Pcg32,
 }
 /// An item the world has taken back, together with whose it was.
 ///
@@ -349,6 +358,7 @@ impl GameState {
             last_pulse: 0,
             outboxes: HashMap::new(),
             item_count_limit: common::item_slots::ITEM_COUNT_LIMIT,
+            dice: Pcg32::new(RandomState::new().hash_one(0_u8), 0),
         }
     }
 
@@ -489,10 +499,16 @@ impl GameState {
                 player_id,
                 name,
                 items,
+                points,
                 outbox,
                 reply,
             } => {
                 let answer = self.enter_world_with_items(vid, player_id, &name, &items, outbox);
+                if answer.is_ok() {
+                    if let Some(character) = self.characters.find_player_mut(&name) {
+                        character.set_points(points);
+                    }
+                }
                 // A dropped admit answer means the descriptor is already closing, and a
                 // character nobody will play is not a state worth warning about: the
                 // close path runs the leave, which finds nobody and says so at debug.
@@ -533,9 +549,10 @@ impl GameState {
             GameCommand::MoveItem {
                 vid,
                 request,
+                mover,
                 reply,
             } => {
-                let answer = self.move_item(vid, request);
+                let answer = self.move_item(vid, request, mover);
                 // A dropped move answer means the descriptor is closing. The world has
                 // moved the item, and the store has not, so the next login loads the old
                 // cell; that is the same outcome as a write that failed, and it is logged.
@@ -787,6 +804,7 @@ impl GameState {
         &mut self,
         vid: common::vid::Vid,
         request: MoveRequest,
+        actor: Mover,
     ) -> Result<MovedItems, MoveItemRefused> {
         let character = self
             .characters
@@ -799,15 +817,25 @@ impl GameState {
             belt_grade: belt_grade(character.items(), &self.protos),
         };
         let protos = &self.protos;
+        let (items, points) = character.items_and_points_mut();
+        let mut gear = points.map(|points| Gear {
+            points,
+            protos,
+            dice: &mut self.dice,
+            recently_fought: actor.recently_fought,
+        });
         let done = move_item(
-            character.items_mut(),
+            items,
             self.item_ids.as_mut(),
             request,
             &rules,
+            gear.as_mut(),
             |vnum| move_facts(protos, vnum),
         )
         .map_err(MoveItemRefused::Refused)?;
-        Ok(MovedItems::new(owner_id, done))
+        let mut moved = MovedItems::new(owner_id, vid.raw(), done, actor);
+        moved.points = character.points().cloned();
+        Ok(moved)
     }
 
     /// Run one grant against the world, taking the target's own `Inven_Point`.
@@ -1658,6 +1686,13 @@ mod tests {
         }
     }
 
+    fn a_mover() -> Mover {
+        Mover {
+            recently_fought: false,
+            empire: 1,
+        }
+    }
+
     fn held_at(state: &GameState, pos: ItemPos) -> Lookup {
         state
             .characters()
@@ -1681,6 +1716,7 @@ mod tests {
         state.apply(GameCommand::MoveItem {
             vid: Vid::new(7),
             request: a_move(0, 5, 0),
+            mover: a_mover(),
             reply,
         });
         let moved = answer
@@ -1728,7 +1764,7 @@ mod tests {
     fn a_move_for_a_vid_nobody_holds_is_refused_by_name() {
         let mut state = a_holder(&[(inventory(0), a_plain_item(11, a_plain_vnum()))], true);
         assert_eq!(
-            state.move_item(Vid::new(8), a_move(0, 5, 0)),
+            state.move_item(Vid::new(8), a_move(0, 5, 0), a_mover()),
             Err(MoveItemRefused::NoSuchCharacter { vid: Vid::new(8) })
         );
         assert_eq!(held_at(&state, inventory(0)), Lookup::Occupied(11));
@@ -1746,11 +1782,11 @@ mod tests {
         );
         // Cell 90 is the first one a character with no extra pages has not unlocked.
         assert_eq!(
-            state.move_item(Vid::new(7), a_move(0, 90, 0)),
+            state.move_item(Vid::new(7), a_move(0, 90, 0), a_mover()),
             Err(MoveItemRefused::Refused(MoveRefused::NoRoom))
         );
         assert_eq!(
-            state.move_item(Vid::new(7), a_move(4, 5, 0)),
+            state.move_item(Vid::new(7), a_move(4, 5, 0), a_mover()),
             Err(MoveItemRefused::Refused(MoveRefused::Empty))
         );
         assert_eq!(held_at(&state, inventory(0)), Lookup::Occupied(11));
@@ -1768,10 +1804,12 @@ mod tests {
             .set_inven_point(1);
         // One point unlocks one more row of five, so cell 94 is open and 95 is not.
         assert_eq!(
-            state.move_item(Vid::new(7), a_move(0, 95, 0)),
+            state.move_item(Vid::new(7), a_move(0, 95, 0), a_mover()),
             Err(MoveItemRefused::Refused(MoveRefused::NoRoom))
         );
-        assert!(state.move_item(Vid::new(7), a_move(0, 94, 0)).is_ok());
+        assert!(state
+            .move_item(Vid::new(7), a_move(0, 94, 0), a_mover())
+            .is_ok());
         assert_eq!(held_at(&state, inventory(94)), Lookup::Occupied(11));
     }
 
@@ -1780,14 +1818,14 @@ mod tests {
         let items = [(inventory(0), a_potion_stack(11, 10))];
         let mut without = a_holder(&items, false);
         assert_eq!(
-            without.move_item(Vid::new(7), a_move(0, 3, 4)),
+            without.move_item(Vid::new(7), a_move(0, 3, 4), a_mover()),
             Err(MoveItemRefused::Refused(MoveRefused::NoItemIds))
         );
         assert_eq!(held_at(&without, inventory(3)), Lookup::Empty);
 
         let mut state = a_holder(&items, true);
         let moved = state
-            .move_item(Vid::new(7), a_move(0, 3, 4))
+            .move_item(Vid::new(7), a_move(0, 3, 4), a_mover())
             .expect("the split happens");
         assert_eq!(moved.kind, world::character::MoveKind::Split);
         let Lookup::Occupied(piece) = held_at(&state, inventory(3)) else {
@@ -1814,7 +1852,7 @@ mod tests {
         ];
         let mut state = a_holder(&items, true).with_item_count_limit(10);
         let moved = state
-            .move_item(Vid::new(7), a_move(0, 1, 0))
+            .move_item(Vid::new(7), a_move(0, 1, 0), a_mover())
             .expect("the merge happens");
         assert_eq!(moved.kind, world::character::MoveKind::Merged);
         assert_eq!(
@@ -1829,7 +1867,7 @@ mod tests {
         // The default is the compiled-in 5000, so the same merge moves every potion.
         let mut state = a_holder(&items, true);
         let moved = state
-            .move_item(Vid::new(7), a_move(0, 1, 0))
+            .move_item(Vid::new(7), a_move(0, 1, 0), a_mover())
             .expect("the merge happens");
         assert_eq!(
             moved.changes,
@@ -1859,7 +1897,7 @@ mod tests {
         let potion = [(inventory(0), a_potion_stack(11, 3))];
         let mut bare = a_holder(&potion, true);
         assert_eq!(
-            bare.move_item(Vid::new(7), a_move(0, 274, 0)),
+            bare.move_item(Vid::new(7), a_move(0, 274, 0), a_mover()),
             Err(MoveItemRefused::Refused(MoveRefused::NoRoom)),
             "no belt is worn, so no belt cell is open"
         );
@@ -1869,7 +1907,7 @@ mod tests {
         let worn = inventory(crate::item_move::BELT_WEAR_CELL);
         let mut state = a_holder(&[potion[0].clone(), (worn, a_plain_item(20, belt))], true);
         let moved = state
-            .move_item(Vid::new(7), a_move(0, 274, 0))
+            .move_item(Vid::new(7), a_move(0, 274, 0), a_mover())
             .expect("the worn belt opens its first cell");
         assert_eq!(
             moved.changes,

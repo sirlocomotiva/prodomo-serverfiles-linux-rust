@@ -21520,3 +21520,213 @@ constant after a statement, so it moved to the module's other wear-cell constant
 run, and no `*.core` file is outside `target/`. The workspace has 202 Rust files and 140,599 lines. No crate was fetched
 and `Cargo.lock` is unchanged. No width is claimed in this section; the i686 probe was not run
 (`i686-linux-gnu-g++-12` is not installed on this machine).
+
+## 215. Equipping in the game: the equip reducer and its `CG_ITEM_MOVE` wiring
+
+A `CG_ITEM_MOVE` onto or off a wear cell now puts the item on, swaps it with the worn one, or
+takes it off, as `CHARACTER::MoveItem`, `EquipItem`, `UnequipItem` and `SwapItem` do
+(`G/char_item.cpp:8164-8600`), with `EquipTo`, `Unequip` and `AddToCharacter` under them
+(`G/item.cpp:437-530`, `:1402-1597`). Until this section each such move was refused with the
+`NotPorted(Equipment)` of ledger 211. `CG_ITEM_USE` on an equippable item still is not ported;
+it is the next section.
+
+### 215.1 What landed
+
+- **The reducer.** `world::character::equip` holds the port of `CanEquipNow`, `CanUnequipNow`,
+  `FindEquipCell`, `IsEquipable`, `EquipItem`, `UnequipItem`, `SwapItem`, `EquipTo` and
+  `Unequip`, and the sash roll of `AddToCharacter`. A `Gear` carries what the reducer reads and
+  writes beside the items: the character's `Points`, the item prototypes, the `Dice`, and
+  whether the character fought within the last 1.5 s. `move_item` takes an
+  `Option<&mut Gear>`. With `None` a wear move keeps the old `NotPorted(Equipment)` refusal, so
+  callers that hold no points (the tests of ledgers 211 to 213) are unchanged.
+- **What a move sends.** `MoveDone.records` is now a list of `MoveRecord`s in legacy's order:
+  item records, points records (`ApplyPoint` and the battle point computation), a
+  `CharacterLook` wherever `UpdatePacket` runs, a special effect, or a chat notice. A step that
+  fails with nothing appended changed nothing. A step that fails after a change keeps the change,
+  as legacy's does (`declined`).
+- **The checks, in legacy's order.** `EquipItem` checks, in turn:
+  - the job anti-flags, then the level, champion level, STR, INT, DEX and CON limits, each
+    with its `[LS;…]` notice;
+  - the two wedding checks;
+  - the sex check (`[LS;1005]`);
+  - the 1.5-second fight rule (`[LS;451]`), at every cell but the arrow;
+  - the costume weapon's match with the weapon;
+  - the swap or the `EquipTo`.
+
+  `UnequipItem` checks the belt window, then `IRREMOVABLE` (silent), then the room for the item
+  (`[1130]`).
+- **The equip cell.** `find_equip_cell` covers `FindEquipCell`'s DS, talisman and costume
+  cells, the second ring, the belt, the ordered wear flags, the second unique cell and the first
+  free ability cell.
+- **The effects.** 71135, 71136, 71143 and 71145 send effects 21 to 24. A costume sash put on
+  sends effect 26 (`SashEquip`), unless a wedding armour is worn.
+- **The sash roll.** A costume sash taken off with socket 0 still 0 draws its absorption: grade
+  2 gets 5, grade 3 gets 10, grade 4 gets `number(11, 19)`, and any other grade gets 1. The
+  store takes the draw as a `RowChange::Sockets`.
+- **The swap.** `SwapItem` refuses DS cells, the same cell, and two wear cells. The carried item
+  must fit the worn item's grid, and the target must be `FindEquipCell` of the carried item.
+  The worn item is taken off, the carried item is put on, and the worn item lands in the
+  carried item's old cell. Every check runs before the first change (215.4).
+- **Not-ported equips.** `WornSystem` and `worn_system_not_ported` moved from
+  `prodomo::item_load` into `world::character::equip`. An equip of an item whose wearing starts
+  a system this build lacks is refused with `NotPorted(Worn(system))` before any change. Those
+  systems are:
+  - dragon soul stones;
+  - the aura, mount and pet costumes;
+  - `ITEM_UNIQUE` items, and `WEARABLE_UNIQUE` items of any type;
+  - timed items;
+  - accessories with stones;
+  - items with immunities;
+  - bonus types whose point is not ported.
+
+  The item load refuses the same items in a wear cell, so everything worn can be taken off.
+- **The model.** The world character now holds its `Points`, which arrive in
+  `EnterWorld.points`. `items_and_points_mut` lends the items and the points together.
+- **The game thread.** `GameState` owns a `Pcg32` (215.3), and `move_item` takes a `Mover`:
+  `recently_fought` and the empire the notices are sent under. `MovedItems` separates:
+  - the records for the mover;
+  - the records `PacketAround` also sends to the viewers (`around`): the look as
+    `GC_CHARACTER_UPDATE`, the effect as `GC_SPECIAL_EFFECT`, and the broadcast points records;
+  - the new `Points`.
+- **The session.** `Held` records `selected_at` (legacy sets `m_dwLastSkillTime` when the
+  character is created, `G/char.cpp:380`) and `last_attack` (an accepted `CG_MOVE` with
+  function 2 or 3, `G/input_main.cpp:1839-1840`). `recently_fought` is either one within
+  1500 ms. After a move the session holds the new points, and with them the hit, spell and
+  stamina pools and the main, hair and sash parts the logout save writes. It also broadcasts
+  `around` to the characters that see this one.
+
+### 215.2 What the client sees
+
+- Moving an armour, a weapon or another equippable item onto its wear cell puts it on, in this
+  order:
+  1. the carried cell is cleared and the item is set in the wear cell;
+  2. the applies' points records are sent;
+  3. the battle points are sent (`ATT_GRADE`, `CLIENT_DEF_GRADE`, `DEF_GRADE`,
+     `CLIENT_DEF_GRADE`, `MAGIC_ATT_GRADE` and `MAGIC_DEF_GRADE`, as `ComputeBattlePoints`
+     writes them);
+  4. a `GC_CHARACTER_UPDATE` with the new parts and speeds is sent.
+
+  The viewers get the update and the broadcast points too.
+- Moving an item onto a wear cell that holds a removable item of the same equip cell swaps the
+  two. Moving a worn item off, onto a free cell, takes it off there. Moving it onto an occupied
+  cell takes it off to the first free cell.
+- A costume sash shows its part (the vnum less 85000, `G/item.cpp:1294`) and plays effect 26.
+- The refusals send legacy's notices, and the store is unchanged.
+- In `GC_CHARACTER_UPDATE`, the state flags, affects, guild, alignment, PK mode, mount and
+  premium are 0: those systems are not ported.
+
+### 215.3 Divergences
+
+- **The dice's seed.** `GameState` seeds its `Pcg32` from `RandomState`, the standard library's
+  per-process hash keys. Legacy's `random()` sequence depends on how the process was seeded
+  and on every earlier draw. No player can predict either sequence, and the client sees only
+  the numbers drawn.
+
+### 215.4 Defects not reproduced
+
+- **A half-done swap.** `SwapItem` takes the worn item off before `EquipTo` and
+  `AddToCharacter` run, and neither reports a failure it can meet (`G/char_item.cpp:8237-8250`).
+  The Rewrite checks every condition first, so a swap happens whole or not at all.
+
+### 215.5 Not ported yet
+
+- `CG_ITEM_USE` on an equippable item (the next section).
+- Wearing a dragon soul stone, an aura, mount or pet costume, a unique item, a timed item, an
+  accessory with stones, or an item with immunities (215.1).
+- These paths cannot be reached in this build, so they are not written:
+  - riding and polymorph;
+  - the unique unstack;
+  - the wedding checks the `__FIX_COSTUM_NUNTA_PESTE_COSTUM_NORMAL__` block repeats;
+  - the special item group effect;
+  - `REAL_TIME_FIRST_USE`;
+  - the mount quest and summon;
+  - the aura window;
+  - `IsSecured` and `IsExchanging`;
+  - the quickslot sync.
+- The skill time is only ever the select's, because skills are not ported.
+
+### 215.6 Scenarios and Parity inventory
+
+`an_armour_is_worn_swapped_and_taken_off_and_the_store_follows` (`prodomo/tests/parity.rs`)
+gives Alpha the owner's armours 11810 and 11806 and the sash 85001. It waits 1.6 s after the
+select, then:
+
+1. **Wears 11810.** It checks the item records, the `MOV_SPEED` apply (98), the six battle
+   points records, and a `GC_CHARACTER_UPDATE` with the armour part and speed 98. The row is
+   stored at `(2, 0)`.
+2. **Swaps in 11806.** It checks the take-off (speed back to 100, bare defence, look), the
+   put-on (defence 48, look), and 11810 set in 11806's old cell. The rows follow.
+3. **Wears the sash.** The sash part 1 is sent before and after the recompute, then effect 26.
+   The row is stored at `(2, 23)`.
+4. **Takes 11806 off onto cell 10.** Defence falls back to bare and the main part to 0. The
+   row follows.
+5. **Logs out.** The save stores `part_main` 0 and `part_sash` 1.
+
+Each points, look and effect record carries Alpha's vid.
+
+In the Parity inventory:
+
+- `gc.character_update` and `gc.sepcial_effect` are `ported`, with this scenario.
+- `cg.game.item_move` lists this scenario, and equipping and unequipping leave its not-ported
+  list.
+- `sys.item.core` stays `partial`, because item use, drop and pickup are still to come, and
+  notes this section.
+
+### 215.7 Mutation sweep
+
+35 mutants were each applied to the pristine file, with the change asserted to be in
+executable code. Every file was restored and checked against its pre-sweep SHA-256. Each world
+mutant ran `world`'s library tests. Each prodomo mutant ran `prodomo`'s library and the parity
+scenarios for armour, item moves and relogs, with `DATABASE_URL` set.
+
+| group | mutants | result |
+|---|---|---|
+| `world/src/character/equip.rs`: the female races; `IsEquipable`; the wear position; the second ring; the sash cell; the level limit's comparison; the unique refusal; both wedding checks; the sex check; the fight rule; the four sash roll arms, the unrolled-only rule and the socket change; the sash effect; the put-on's recompute, removal and store; the take-off's applies and clear; the look's recompute and speed; the swap's return cell, grid and `IRREMOVABLE`; the unequip's room | 27 | 20 killed, 7 survived |
+| `world/src/character/item_move.rs`: the taken wear cell; the swapped item's kind; the weapon's unequip | 3 | 3 killed |
+| `prodomo/src/main.rs`: the 1.5 s window; holding the new points | 2 | 1 killed, 1 survived |
+| `prodomo/src/item_move.rs`: every record going around; the update's vid and speed | 3 | 3 killed |
+
+All eight survivors were test gaps, not equivalent mutants:
+
+- `level_cmp` refused a level limit equal to the level. A sword with a level-10 limit now goes on
+  at level 10.
+- `unique_refuse` only refused `ITEM_UNIQUE`. An `ITEM_ARMOR` with `WEARABLE_UNIQUE` is now
+  refused too.
+- `sash_roll_4` changed the top of `number(11, 19)`. The roll test now draws 8 as well, which
+  gives 19.
+- `take_off_add` and `look_speed` changed the take-off's applies and the look's moving speed.
+  The test armour now carries `APPLY_MOV_SPEED -2`. The test checks the speed point and the
+  look's speed and main part after it goes on (98, the armour) and after it comes off (100, 0).
+- `swap_irremovable` swapped out an `IRREMOVABLE` worn item. The new test
+  `an_irremovable_worn_item_is_not_swapped` checks that it is refused.
+- `hold_points_off` dropped the new points after a move. The scenario now logs out and checks
+  the saved parts.
+
+All eight were rerun against the strengthened tests, and all were killed. No mutant was a
+compile kill.
+
+### 215.8 Receipt
+
+Fifteen new tests:
+
+- `world/src/character/equip.rs`: 14, four of them strengthened by the sweep and one,
+  `an_irremovable_worn_item_is_not_swapped`, added by it (215.7);
+- `prodomo/tests/parity.rs`: 1, `an_armour_is_worn_swapped_and_taken_off_and_the_store_follows`,
+  which runs only with `DATABASE_URL` set.
+
+The existing move tests now read the item records through `item_records` and pass no gear. The
+net change is 15, from 2562 to 2577. The gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2577 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2577 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+After the run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`. The
+workspace has 205 Rust files and 142,924 lines. No crate was fetched, and `Cargo.lock` is
+unchanged. This section claims no width; the i686 probe was not run.
