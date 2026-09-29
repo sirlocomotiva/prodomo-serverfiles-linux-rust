@@ -22,6 +22,8 @@ pub const ITEM_WEAPON: i32 = 1;
 pub const ITEM_ARMOR: i32 = 2;
 /// `ITEM_USE`, an item used up by `CG_ITEM_USE`: potions among others.
 pub const ITEM_USE: i32 = 3;
+/// `ITEM_ELK`, gold as an item, which `CreateItem` neither numbers nor counts.
+pub const ITEM_ELK: i32 = 9;
 /// `ITEM_METIN`, a stone that sits in another item's socket.
 pub const ITEM_METIN: i32 = 10;
 /// `ITEM_ROD`, a fishing rod.
@@ -32,6 +34,8 @@ pub const ITEM_UNIQUE: i32 = 16;
 pub const ITEM_PICK: i32 = 24;
 /// `ITEM_TOTEM`, which `FindEquipCell` refuses whatever its wear flags say.
 pub const ITEM_TOTEM: i32 = 26;
+/// `ITEM_BLEND`, a potion `CreateItem` gives a bonus from the blend table.
+pub const ITEM_BLEND: i32 = 27;
 /// `ITEM_COSTUME`.
 pub const ITEM_COSTUME: i32 = 28;
 /// `ITEM_DS`, a dragon soul stone.
@@ -194,11 +198,13 @@ mod tests {
             (ITEM_WEAPON, "ITEM_WEAPON"),
             (ITEM_ARMOR, "ITEM_ARMOR"),
             (ITEM_USE, "ITEM_USE"),
+            (ITEM_ELK, "ITEM_ELK"),
             (ITEM_METIN, "ITEM_METIN"),
             (ITEM_ROD, "ITEM_ROD"),
             (ITEM_UNIQUE, "ITEM_UNIQUE"),
             (ITEM_PICK, "ITEM_PICK"),
             (ITEM_TOTEM, "ITEM_TOTEM"),
+            (ITEM_BLEND, "ITEM_BLEND"),
             (ITEM_COSTUME, "ITEM_COSTUME"),
             (ITEM_DS, "ITEM_DS"),
             (ITEM_SPECIAL_DS, "ITEM_SPECIAL_DS"),

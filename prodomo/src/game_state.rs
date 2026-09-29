@@ -18,9 +18,9 @@
 //! # What is deliberately absent
 //!
 //! There is no Channel map set and no script VM. The NPCs the regen files stand up at boot
-//! are here, but they never move, respawn or answer a click. This holds the pieces the item
-//! path and the map view need and nothing more, because each of the rest is a separate unit
-//! with its own decision to record. [`PulseProcessor::process_pulse`](crate::game_loop::PulseProcessor::process_pulse) therefore
+//! are here, but they never move or respawn, and a click reaches only a keeper's shop. This
+//! holds the pieces the item path, the shops and the map view need and nothing more, because
+//! each of the rest is a separate unit with its own decision to record. [`PulseProcessor::process_pulse`](crate::game_loop::PulseProcessor::process_pulse) therefore
 //! steps nothing yet; it counts, and the count is what proves the thread is running
 //! this value rather than an empty closure.
 
@@ -55,6 +55,10 @@ use crate::quickslot::{QuickslotAnswer, QuickslotStep};
 use crate::save::PASSES_PER_SEC;
 use crate::sync_position::distance_approx;
 use world::character::{add_from_client, sync_quickslots};
+
+mod shop;
+
+pub use shop::{ShopAnswer, ShopDeclined, ShopStep};
 
 /// `PickupItem`'s `DistanceValid` bound (`G/item.cpp:593`), checked at `G/char_item.cpp:7982`.
 const PICKUP_DISTANCE: i32 = 300;
@@ -356,6 +360,12 @@ pub struct GameState {
     /// Shared with the descriptor that shows them, because they never change once boot has
     /// stood them up: nothing moves, respawns or removes an NPC yet.
     npcs: BTreeMap<(u8, i32), Arc<MapNpcs>>,
+    /// The NPC shops, by keeper vnum.
+    shops: Arc<gamedata::npc_shop::NpcShops>,
+    /// `g_bEmpireShopPriceTripleDisable`: a stranger's prices are not tripled.
+    shop_price_3x_disabled: bool,
+    /// The keeper each character browses, keyed by its VID.
+    browsing: HashMap<common::vid::Vid, shop::Browsing>,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -416,6 +426,9 @@ impl GameState {
             clients: None,
             recovering: HashMap::new(),
             npcs: BTreeMap::new(),
+            shops: Arc::default(),
+            shop_price_3x_disabled: false,
+            browsing: HashMap::new(),
         }
     }
 
@@ -614,6 +627,7 @@ impl GameState {
                     if let Some(character) = self.characters.find_player_mut(&name) {
                         character.set_points(loaded.points);
                         character.set_quickslots(loaded.quickslots);
+                        character.set_gold(loaded.gold);
                     }
                 }
                 // A dropped admit answer means the descriptor is already closing, and a
@@ -651,18 +665,9 @@ impl GameState {
                     debug!(?vid, "nobody was left to hear a character's points");
                 }
             }
-            GameCommand::MoveItem {
-                vid,
-                request,
-                mover,
-                reply,
-            } => answer_item_step(vid, reply, self.move_item(vid, request, mover)),
-            GameCommand::UseItem {
-                vid,
-                at,
-                mover,
-                reply,
-            } => answer_item_step(vid, reply, self.use_item(vid, at, mover)),
+            command @ (GameCommand::MoveItem { .. }
+            | GameCommand::UseItem { .. }
+            | GameCommand::Shop { .. }) => self.apply_item_step(command),
             command @ (GameCommand::DropItem { .. }
             | GameCommand::PickupItem { .. }
             | GameCommand::GroundItemsOn { .. }
@@ -864,6 +869,7 @@ impl GameState {
     pub fn leave_world(&mut self, vid: common::vid::Vid) -> Option<Departed> {
         let _outbox = self.outboxes.remove(&vid);
         let _event = self.recovering.remove(&vid);
+        self.stop_browsing(vid);
         let points = self.characters.find_by_vid(vid).ok()?.points().cloned();
         self.characters.destroy(vid).ok()?;
         Some(Departed { points })
@@ -995,6 +1001,42 @@ impl GameState {
             let _running = self.recovering.entry(vid).or_insert(due);
         }
         Ok(moved)
+    }
+
+    /// Apply one of the steps a character takes with its own items: a move, a use, or a shop
+    /// step.
+    fn apply_item_step(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::MoveItem {
+                vid,
+                request,
+                mover,
+                reply,
+            } => answer_item_step(vid, reply, self.move_item(vid, request, mover)),
+            GameCommand::UseItem {
+                vid,
+                at,
+                mover,
+                reply,
+            } => answer_item_step(vid, reply, self.use_item(vid, at, mover)),
+            GameCommand::Shop {
+                vid,
+                step,
+                place,
+                mover,
+                reply,
+            } => {
+                // As with a move, a dropped answer leaves the world ahead of the store.
+                if reply.send(self.shop(vid, step, place, mover)).is_err() {
+                    warn!(
+                        ?vid,
+                        ?step,
+                        "a shop step ran and nobody was left to store it"
+                    );
+                }
+            }
+            _ => debug_assert!(false, "only item steps reach apply_item_step"),
+        }
     }
 
     /// Apply one of the ground commands: a drop, a pick-up, or the lists a client entering a
@@ -2810,7 +2852,7 @@ mod tests {
     }
 
     #[test]
-    fn the_world_starts_from_the_quickslots_the_load_set() {
+    fn the_world_starts_from_the_quickslots_and_the_gold_the_load_set() {
         let mut state = a_state();
         let (outbox, _inbox) = a_live_outbox();
         let mut quickslots = world::character::Quickslots::default();
@@ -2825,11 +2867,14 @@ mod tests {
             loaded: crate::game_loop_messages::Loaded {
                 points: None,
                 quickslots,
+                gold: 1_200_000_000_000_000_000 - 1,
             },
             outbox,
             reply,
         });
         assert_eq!(answer.blocking_recv().unwrap(), Ok(()));
+        let character = state.characters().find_by_vid(Vid::new(7)).unwrap();
+        assert_eq!(character.gold(), 1_200_000_000_000_000_000 - 1);
         let swapped = slot_answer(&mut state, QuickslotStep::Swap { slot: 6, with: 0 });
         assert_eq!(swapped.quickslots.get(0), Some(skill));
     }

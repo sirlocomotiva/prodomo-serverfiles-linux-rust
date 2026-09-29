@@ -42,6 +42,7 @@ use gamedata::map_atlas::{MapAtlas, MapRegion};
 use gamedata::mob_locale_names::MobLocaleNames;
 use gamedata::mob_names::MobNames;
 use gamedata::mob_proto::MobProtos;
+use gamedata::npc_shop::{shops_from_dump, NpcShops};
 use gamedata::regen::{self, RegenEntry};
 use prodomo::auth_login::{
     judge_account, judge_credentials, login_from_field, password_candidate, AuthClaim, AuthRefusal,
@@ -61,7 +62,7 @@ use prodomo::client_registry::{ChannelClients, ClientEntry, Lease, PositionTable
 use prodomo::client_session::ClientPhase;
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
 use prodomo::game_loop_messages::{GameLoopController, GameLoopTerminal, GroundPlace};
-use prodomo::game_state::{world_item_id_range, GameState};
+use prodomo::game_state::{world_item_id_range, GameState, ShopAnswer, ShopStep};
 use prodomo::handshake::HandshakeServerKind;
 use prodomo::item_load::plan_item_load;
 use prodomo::item_move::{MoveItemRefused, Mover};
@@ -98,7 +99,7 @@ use protocol::cg_inventory::{
     HEADER_CG_ENTERGAME, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_MOVE,
     HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_MOVE,
     HEADER_CG_ON_CLICK, HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP,
-    HEADER_CG_STATE_CHECKER, HEADER_CG_SYNC_POSITION,
+    HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYNC_POSITION,
 };
 use protocol::cg_item_drop::CgItemDrop;
 use protocol::cg_item_drop2::CgItemDrop2;
@@ -113,6 +114,7 @@ use protocol::cg_position::CgCharacterPosition;
 use protocol::cg_quickslot_add::CgQuickslotAdd;
 use protocol::cg_quickslot_del::CgQuickslotDel;
 use protocol::cg_quickslot_swap::CgQuickslotSwap;
+use protocol::cg_shop::CgShop;
 use protocol::cg_vid::CgOnClick;
 use protocol::cg_wire::ClientFrame;
 use protocol::gc::{GcAuthSuccess, GcLoginFailure};
@@ -1092,8 +1094,8 @@ fn descriptor_language(account: Option<&SelectAccount>) -> u8 {
 
 /// Store, send and broadcast what one item step did, or send the notice for its refusal.
 ///
-/// The rows are written in one transaction before any record is sent. The result is whether
-/// the descriptor stays open.
+/// The rows are written in one transaction before any record is sent, with the gold a buy or a
+/// sale left. The result is whether the descriptor stays open.
 async fn finish_item_step<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -1130,11 +1132,22 @@ where
             return false;
         }
     };
-    if let Err(error) =
-        db::items::apply_row_changes(&context.store, moved.owner_id, &moved.changes).await
-    {
+    let stored = match moved.gold {
+        Some(gold) => {
+            db::items::apply_transfer(&context.store, moved.owner_id, &moved.changes, gold).await
+        }
+        None => db::items::apply_row_changes(&context.store, moved.owner_id, &moved.changes).await,
+    };
+    if let Err(error) = stored {
         warn!(%addr, %error, kind = ?moved.kind, "The item step could not be stored; closing");
         return false;
+    }
+    if let Some(gold) = moved.gold {
+        // The save writes the gold the descriptor holds, so it holds what the store now has.
+        // `apply_transfer` refused anything past `i64::MAX`, so this always converts.
+        if let (Some(character), Ok(gold)) = (held.character.as_mut(), i64::try_from(gold)) {
+            character.gold = gold;
+        }
     }
     if let Some(points) = moved.points {
         hold_points(held, points);
@@ -1829,34 +1842,95 @@ where
         {
             sync_positions(session, addr, context, held, &frame)
         }
-        // `CG_ON_CLICK` (26) in the game phase: `CInputMain::OnClick`
-        // (`G/input_main.cpp:1305-1316`), reached at `:3769-3771`.
+        // `CG_ON_CLICK` (26) and `CG_SHOP` (50) in the game phase.
         LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && frame.header == HEADER_CG_ON_CLICK.value() =>
+            if phase == ClientPhase::Game && is_shop_step(frame.header) =>
         {
-            click(addr, &frame)
+            shop_step(session, addr, context, held, &frame).await
         }
         step => report_step(addr, step),
     }
 }
 
-/// `CG_ON_CLICK`: answer nothing and keep the connection; `false` only for a malformed record.
+/// Whether `header` is `CG_ON_CLICK` or `CG_SHOP`, the two records a shop is used through.
+fn is_shop_step(header: u8) -> bool {
+    header == HEADER_CG_ON_CLICK.value() || header == HEADER_CG_SHOP.value()
+}
+
+/// `CG_ON_CLICK` (26) and `CG_SHOP` (50) in the game phase: `CInputMain::OnClick` and
+/// `CInputMain::Shop` (`G/input_main.cpp:1241-1316`), which no observer check guards
+/// (`:3756-3771`).
 ///
-/// `CInputMain::OnClick` finds the clicked VID and calls its `CHARACTER::OnClick`
-/// (`G/char.cpp:6181-6352`), which runs the quest click and then the NPC's click trigger, the one
-/// that opens a shop. A VID that names nothing is ignored. Neither the quests nor the shops are
-/// ported yet, so every click is what a click on nothing is in legacy: logged and ignored.
-fn click(addr: SocketAddr, frame: &ClientFrame) -> bool {
-    match CgOnClick::decode_frame(frame) {
-        Ok(record) => {
-            info!(%addr, vid = record.vid, "Client clicked; nothing answers a click yet");
-            true
+/// `CHARACTER::OnClick` (`G/char.cpp:6181-6352`) runs the quest click and then the NPC's click
+/// trigger. Only the trigger that opens a shop is ported, so a click on anything but a keeper is
+/// logged and ignored, as a click on nothing is in legacy. A buy or a sale is stored and sent as
+/// a move is, with the gold it left; a malformed record closes the connection.
+async fn shop_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let decoded = if frame.header == HEADER_CG_ON_CLICK.value() {
+        CgOnClick::decode_frame(frame)
+            .map(|record| Some(ShopStep::Click { target: record.vid }))
+            .map_err(|error| format!("{error:?}"))
+    } else {
+        CgShop::decode_frame(frame)
+            .map(ShopStep::requested)
+            .map_err(|error| error.to_string())
+    };
+    let step = match decoded {
+        Ok(Some(step)) => step,
+        Ok(None) => {
+            let subheader = frame.payload.first();
+            info!(%addr, ?subheader, "Client sent an unknown SHOP subheader; ignoring");
+            return true;
         }
         Err(error) => {
-            warn!(%addr, ?error, "Client sent a malformed ON_CLICK; closing");
-            false
+            warn!(%addr, %error, "Client sent a malformed shop record; closing");
+            return false;
         }
+    };
+    let (Some(vid), Some(place)) = (held.world, ground_place(held)) else {
+        info!(%addr, ?step, "Shop step without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = match context.game.shop(vid, step, place, actor).await {
+        Ok(Ok(ShopAnswer::Moved(moved))) => Ok(Ok(moved)),
+        Ok(Ok(ShopAnswer::Sent(records))) => {
+            info!(%addr, ?step, "Shop step answered");
+            return send_shop_records(session, addr, &records).await;
+        }
+        Ok(Ok(ShopAnswer::Declined { reason, records })) => {
+            info!(%addr, ?step, ?reason, "Shop step declined");
+            return send_shop_records(session, addr, &records).await;
+        }
+        Ok(Err(refused)) => Ok(Err(refused)),
+        Err(error) => Err(error),
+    };
+    finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// Send the records a shop step that stored nothing answers; `false` when the session stopped.
+async fn send_shop_records<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    records: &[Vec<u8>],
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if let Err(error) = send_all(session, records).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
     }
+    true
 }
 
 /// What a Channel descriptor knows about its seat: where each map is served from its port, and
@@ -2499,11 +2573,19 @@ where
     true
 }
 
-/// What the load left for the world besides the items: the points and the quickslots.
+/// What the load left for the world besides the items: the points, the quickslots and the
+/// gold.
+///
+/// The store's `CHECK` keeps `player.gold` from being negative, so the fall-back to 0 is not
+/// a path a row can reach.
 fn loaded_state(held: &Held) -> prodomo::game_loop_messages::Loaded {
     prodomo::game_loop_messages::Loaded {
         points: held.points.clone(),
         quickslots: held.quickslots.clone(),
+        gold: held
+            .character
+            .as_ref()
+            .map_or(0, |character| u64::try_from(character.gold).unwrap_or(0)),
     }
 }
 
@@ -3271,9 +3353,17 @@ async fn run_accept_loop(
                 Ok((stream, addr)) => {
                     let connection_shutdown = context.shutdown_tx.clone();
                     let connection = context.connection.clone();
+                    // A connection's state is larger than a future is kept on the stack for,
+                    // so it lives on the heap from the start.
                     tokio::spawn(async move {
-                        handle_connection(stream, addr, role, connection, &connection_shutdown)
-                            .await;
+                        Box::pin(handle_connection(
+                            stream,
+                            addr,
+                            role,
+                            connection,
+                            &connection_shutdown,
+                        ))
+                        .await;
                     });
                 }
                 Err(error) => error!(%error, %role, "Failed to accept connection"),
@@ -3461,6 +3551,8 @@ struct GameData {
     locale: Arc<LocaleStrings>,
     /// What the game thread stands the NPCs up from before it starts.
     npcs: NpcData,
+    /// The shops a keeper opens, which the game thread holds.
+    shops: Arc<NpcShops>,
 }
 
 /// What boot stands the NPCs up from: the mob prototypes, the names a client is sent, and the
@@ -3481,13 +3573,47 @@ fn load_game_data(config: &ServerConfig) -> Result<GameData, String> {
     let protos = load_item_protos(config)?;
     let locale = load_locale_strings(config)?;
     let npcs = load_npc_data(config, &atlas)?;
+    let shops = load_npc_shops(config, &protos)?;
     Ok(GameData {
         atlas,
         names,
         protos,
         locale,
         npcs,
+        shops,
     })
+}
+
+/// Load the NPC shops: the `shop` and `shop_item` rows of the Game data tables, laid out as
+/// `CShopManager::Initialize` lays them out (`G/shop_manager.cpp:39-69`).
+///
+/// An item that cannot be laid out is left out of its shop and warned about; legacy loses it and
+/// every item after it (a Divergence).
+fn load_npc_shops(config: &ServerConfig, protos: &ItemProtos) -> Result<Arc<NpcShops>, String> {
+    let dump_path = config.game_tables.join("player.sql");
+    let dump = std::fs::read(&dump_path)
+        .map_err(|error| format!("Failed to read {}: {error}", dump_path.display()))?;
+    let table = shops_from_dump(&dump).map_err(|error| {
+        format!(
+            "Failed to read the shops in {}: {error}",
+            dump_path.display()
+        )
+    })?;
+    let shops = NpcShops::lay_out(&table, protos);
+    for skipped in shops.skipped() {
+        warn!(
+            shop = skipped.shop_vnum,
+            vnum = skipped.vnum,
+            skip = ?skipped.skip,
+            "A shop item cannot be laid out; it is left out of its shop"
+        );
+    }
+    info!(
+        shops = shops.shops().len(),
+        skipped = shops.skipped().len(),
+        "NPC shops loaded"
+    );
+    Ok(Arc::new(shops))
 }
 
 /// Load what the NPCs are stood up from: `mob_proto.txt` with its names, the `LOCALE_YMIR` mob
@@ -3697,6 +3823,8 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     let clients = Arc::new(ChannelClients::new());
     let mut game_state = GameState::new(Arc::clone(&data.protos))
         .with_item_count_limit(config.game.item_count_limit)
+        .with_npc_shops(Arc::clone(&data.shops))
+        .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
         .with_drop_lifetime(config.game.item_destroy_time_dropitem)
         .with_clients(Arc::clone(&clients))
         .with_locale_strings(Arc::clone(&data.locale));

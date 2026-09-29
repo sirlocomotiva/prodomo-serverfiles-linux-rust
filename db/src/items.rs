@@ -246,6 +246,8 @@ pub enum ItemError {
         /// The cell it wanted.
         pos: u32,
     },
+    /// The gold is above the `bigint` `player.gold` is stored in.
+    GoldOutOfRange(u64),
     /// A stored value breaks a rule the schema should have enforced.
     Corrupt(String),
     /// The server refused or failed a query.
@@ -294,6 +296,7 @@ impl fmt::Display for ItemError {
                 f,
                 "cell {window_type}:{pos} is already taken, so item {id} was not stored"
             ),
+            Self::GoldOutOfRange(gold) => write!(f, "gold {gold} is above {}", i64::MAX),
             Self::Corrupt(detail) => write!(f, "stored item data is invalid: {detail}"),
             Self::Database(error) => write!(f, "PostgreSQL error: {error}"),
         }
@@ -883,10 +886,49 @@ pub async fn apply_row_changes(
     owner_id: u32,
     changes: &[RowChange],
 ) -> Result<(), ItemError> {
+    apply_changes(store, owner_id, changes, None).await
+}
+
+/// Write one Transfer: a step's row changes and the owner's gold, as one transaction
+/// (ADR-0003).
+///
+/// A shop's buy or sale changes a character's items and its gold together, and one stored
+/// without the other is an item lost or gold made. The rows are written as
+/// [`apply_row_changes`] writes them, under the same checks, and `player.gold` is set to
+/// `gold` in the same transaction.
+///
+/// # Errors
+///
+/// As [`apply_row_changes`]; [`ItemError::GoldOutOfRange`] for gold the column cannot hold,
+/// refused before the store is reached, and [`ItemError::NoSuchOwner`] when no character has
+/// the id, which rolls the rows back too.
+pub async fn apply_transfer(
+    store: &Store,
+    owner_id: u32,
+    changes: &[RowChange],
+    gold: u64,
+) -> Result<(), ItemError> {
+    apply_changes(store, owner_id, changes, Some(gold)).await
+}
+
+/// [`apply_row_changes`], and with `gold` the owner's `player.gold` in the same transaction.
+async fn apply_changes(
+    store: &Store,
+    owner_id: u32,
+    changes: &[RowChange],
+    gold: Option<u64>,
+) -> Result<(), ItemError> {
     for change in changes {
         check_change(owner_id, change)?;
     }
-    if changes.is_empty() {
+    let gold = match gold {
+        Some(gold) => Some((
+            i32::try_from(owner_id).map_err(|_| ItemError::NoSuchOwner(owner_id))?,
+            i64::try_from(gold).map_err(|_| ItemError::GoldOutOfRange(gold))?,
+        )),
+        None => None,
+    };
+    if changes.is_empty() && gold.is_none() {
         return Ok(());
     }
     let insert = format!(
@@ -900,67 +942,23 @@ pub async fn apply_row_changes(
         .execute(&mut *transaction)
         .await?;
     for change in changes {
-        let (id, touched) = match change {
-            RowChange::Moved {
-                id,
-                window_type,
-                pos,
-            } => {
-                let touched = sqlx::query(
-                    "UPDATE item SET window_type = $3, pos = $4 WHERE id = $1 AND owner_id = $2",
-                )
-                .bind(i64::from(*id))
-                .bind(i64::from(owner_id))
-                .bind(i16::from(*window_type))
-                .bind(i64::from(*pos))
-                .execute(&mut *transaction)
-                .await?
-                .rows_affected();
-                (*id, touched)
-            }
-            RowChange::Count { id, count } => {
-                let column =
-                    i16::try_from(*count).map_err(|_| ItemError::CountOutOfRange(*count))?;
-                let touched =
-                    sqlx::query("UPDATE item SET count = $3 WHERE id = $1 AND owner_id = $2")
-                        .bind(i64::from(*id))
-                        .bind(i64::from(owner_id))
-                        .bind(column)
-                        .execute(&mut *transaction)
-                        .await?
-                        .rows_affected();
-                (*id, touched)
-            }
-            RowChange::Destroyed { id } => {
-                let touched = sqlx::query("DELETE FROM item WHERE id = $1 AND owner_id = $2")
-                    .bind(i64::from(*id))
-                    .bind(i64::from(owner_id))
-                    .execute(&mut *transaction)
-                    .await?
-                    .rows_affected();
-                (*id, touched)
-            }
-            RowChange::Created(row) => {
-                let count = check(row)?;
-                bind_item(sqlx::query(&insert), row, count)
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(|error| classify_insert(error, row))?;
-                (row.id, 1)
-            }
-            RowChange::Sockets { id, sockets } => {
-                let mut query = sqlx::query(&set_sockets)
-                    .bind(i64::from(*id))
-                    .bind(i64::from(owner_id));
-                for socket in sockets {
-                    query = query.bind(*socket);
-                }
-                (*id, query.execute(&mut *transaction).await?.rows_affected())
-            }
-        };
+        let (id, touched) =
+            write_change(&mut transaction, owner_id, change, &insert, &set_sockets).await?;
         if touched == 0 {
             transaction.rollback().await?;
             return Err(missing(store, id).await);
+        }
+    }
+    if let Some((player, gold)) = gold {
+        let touched = sqlx::query("UPDATE player SET gold = $2 WHERE id = $1")
+            .bind(player)
+            .bind(gold)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+        if touched == 0 {
+            transaction.rollback().await?;
+            return Err(ItemError::NoSuchOwner(owner_id));
         }
     }
     let shared: Vec<(i16, i64)> = sqlx::query_as(
@@ -976,6 +974,73 @@ pub async fn apply_row_changes(
     }
     transaction.commit().await?;
     Ok(())
+}
+
+/// Run one change's statement inside the move's transaction: the id it names, and how many
+/// rows it touched.
+async fn write_change(
+    connection: &mut sqlx::PgConnection,
+    owner_id: u32,
+    change: &RowChange,
+    insert: &str,
+    set_sockets: &str,
+) -> Result<(u32, u64), ItemError> {
+    Ok(match change {
+        RowChange::Moved {
+            id,
+            window_type,
+            pos,
+        } => {
+            let touched = sqlx::query(
+                "UPDATE item SET window_type = $3, pos = $4 WHERE id = $1 AND owner_id = $2",
+            )
+            .bind(i64::from(*id))
+            .bind(i64::from(owner_id))
+            .bind(i16::from(*window_type))
+            .bind(i64::from(*pos))
+            .execute(&mut *connection)
+            .await?
+            .rows_affected();
+            (*id, touched)
+        }
+        RowChange::Count { id, count } => {
+            let column = i16::try_from(*count).map_err(|_| ItemError::CountOutOfRange(*count))?;
+            let touched = sqlx::query("UPDATE item SET count = $3 WHERE id = $1 AND owner_id = $2")
+                .bind(i64::from(*id))
+                .bind(i64::from(owner_id))
+                .bind(column)
+                .execute(&mut *connection)
+                .await?
+                .rows_affected();
+            (*id, touched)
+        }
+        RowChange::Destroyed { id } => {
+            let touched = sqlx::query("DELETE FROM item WHERE id = $1 AND owner_id = $2")
+                .bind(i64::from(*id))
+                .bind(i64::from(owner_id))
+                .execute(&mut *connection)
+                .await?
+                .rows_affected();
+            (*id, touched)
+        }
+        RowChange::Created(row) => {
+            let count = check(row)?;
+            bind_item(sqlx::query(insert), row, count)
+                .execute(&mut *connection)
+                .await
+                .map_err(|error| classify_insert(error, row))?;
+            (row.id, 1)
+        }
+        RowChange::Sockets { id, sockets } => {
+            let mut query = sqlx::query(set_sockets)
+                .bind(i64::from(*id))
+                .bind(i64::from(owner_id));
+            for socket in sockets {
+                query = query.bind(*socket);
+            }
+            (*id, query.execute(&mut *connection).await?.rows_affected())
+        }
+    })
 }
 
 /// The statement a [`RowChange::Sockets`] runs: every socket column of one owned row, bound

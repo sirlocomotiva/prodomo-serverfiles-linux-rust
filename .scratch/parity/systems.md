@@ -64,7 +64,7 @@ in `G/main.cpp:345-404`, so none of them is dead code; a feature switch that tur
 | `sys.item.pickup_effect` | `__BL_ENABLE_PICKUP_ITEM_EFFECT__`, `RENEWAL_PICKUP_AFFECT` | Pickup slot effect | `sys.item.core` | missing | | |
 | `sys.item.skin` | `__SKIN_SYSTEM__` | Skins | `sys.item.core` | missing | | |
 | `sys.item.id_range` | `D/ClientManager.cpp`, `db::item_id_range` | Item ID allocation | | partial | | `db::item_id_range` exists. |
-| `sys.npc.shop` | `G/shop.cpp`, `G/shop_manager.cpp`, `G/shopEx.cpp`, `ENABLE_RENEWAL_SHOPEX` | NPC shops, buy, sell | `sys.item.core` | missing | | `gamedata::shop` and `renewal_shop` rules exist. |
+| `sys.npc.shop` | `G/shop.cpp`, `G/shop_manager.cpp`, `G/shopEx.cpp`, `ENABLE_RENEWAL_SHOPEX` | NPC shops, buy, sell | `sys.item.core` | partial | | `gamedata::shop` and `renewal_shop` rules exist. Scenario `a_keeper_opens_its_shop_and_a_buy_and_a_sale_are_stored`. Ledger 224: the shops load from `player.sql`, a click on a keeper whose trigger is the shop's opens its window, and a buy, a sale of a whole stack or of a count, and the close follow `CShopManager` and `CShop`, each buy and sale one Transfer (ADR-0003). The renewal `shopex` (`G/shopEx.cpp`) is not ported. The Divergences are ledger 224's. |
 | `sys.npc.safebox` | `G/safebox.cpp`, `__EXTENDED_SAFEBOX__` | Safebox and mall, password | `sys.item.core` | missing | | Transfer. |
 | `sys.trade.exchange` | `G/exchange.cpp`, `__NEW_EXCHANGE_WINDOW__` | Player trade | `sys.item.core` | missing | | Transfer. |
 | `sys.trade.private_shop` | `G/private_shop*.cpp`, `__PREMIUM_PRIVATE_SHOP__` | Offline private shops, search, market prices, premium time, locked slots | `sys.item.core` | missing | | Transfer. |

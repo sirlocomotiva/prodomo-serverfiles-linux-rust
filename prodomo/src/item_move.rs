@@ -25,7 +25,7 @@ use gamedata::item_custom_category::{is_custom_category, CATEGORY_NUM};
 use gamedata::item_proto::ItemProtos;
 use gamedata::item_proto_value::type_value;
 use gamedata::locale_string::LocaleStrings;
-use protocol::gc_actors::GcCharacterUpdate;
+use protocol::gc_actors::{GcCharacterGoldChange, GcCharacterUpdate};
 use protocol::gc_chat::CHAT_TYPE_INFO;
 use protocol::gc_item_window::GcItemGroundAdd;
 use protocol::gc_vid::{GcHeaderAndDword, GcSpecialEffect, HEADER_GC_ITEM_GROUND_DEL};
@@ -85,6 +85,9 @@ pub struct MovedItems {
     pub points: Option<Points>,
     /// The mover's quickslots after the step's syncs, which the descriptor saves.
     pub quickslots: Option<Quickslots>,
+    /// The mover's gold after a step that paid or was paid, which the row changes' transaction
+    /// stores with them.
+    pub gold: Option<u64>,
 }
 
 impl MovedItems {
@@ -140,6 +143,10 @@ impl MovedItems {
                 }
                 // The world runs every sync before it answers; one left here sends nothing.
                 MoveRecord::QuickslotSync(_) => continue,
+                MoveRecord::Gold { amount, value } => {
+                    GcCharacterGoldChange::new(vid, amount, value).encode_into(&mut frame);
+                    false
+                }
             };
             if shared {
                 around.push(frame.clone());
@@ -154,6 +161,7 @@ impl MovedItems {
             changes: row_changes(owner_id, &done.changes),
             points: None,
             quickslots: None,
+            gold: None,
         }
     }
 }

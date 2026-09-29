@@ -79,6 +79,9 @@ pub struct Npc {
     pub race: u16,
     /// Its proto's `CHAR_TYPE_*`.
     pub char_type: u8,
+    /// Its proto's `ON_CLICK_*`: which `m_triggerOnClick` a click on it runs
+    /// (`char.cpp:6341-6350`).
+    pub on_click: u8,
     /// Its x position.
     pub x: i32,
     /// Its y position.
@@ -395,6 +398,7 @@ impl<'a> NpcSpawner<'a> {
             vnum: proto.vnum,
             race,
             char_type: proto.mob_type,
+            on_click: proto.on_click_type,
             x: spot.x,
             y: spot.y,
             z: spot.z,
@@ -476,8 +480,10 @@ mod tests {
     }
 
     fn protos() -> MobProtos {
+        let mut smith = proto(20_016, CHAR_TYPE_NPC, 0);
+        smith.table.on_click_type = 2;
         MobProtos::from_rows(vec![
-            proto(20_016, CHAR_TYPE_NPC, 0),
+            smith,
             proto(20_017, CHAR_TYPE_NPC, 3),
             proto(20_018, CHAR_TYPE_WARP, 0),
             proto(20_019, CHAR_TYPE_GOTO, 0),
@@ -575,6 +581,7 @@ mod tests {
                 vnum: 20_016,
                 race: 20_016,
                 char_type: CHAR_TYPE_NPC,
+                on_click: 2,
                 x: 10_500,
                 y: 20_700,
                 z: 7,

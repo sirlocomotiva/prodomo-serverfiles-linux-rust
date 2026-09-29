@@ -14,9 +14,9 @@ use db::accounts::create_account;
 use db::credentials::{DeleteCode, Login, NewPassword};
 use db::item_id_range::MINIMUM_REMAIN_COUNT;
 use db::items::{
-    apply_row_changes, destroy_item, insert_item, load_item, load_owner_items, max_id_in_range,
-    resolve_item_id_range, save_item, save_owner_items, set_count, Attribute, ItemError, ItemRow,
-    RowChange, GROUND, MAX_ITEM_ID, SOCKETS,
+    apply_row_changes, apply_transfer, destroy_item, insert_item, load_item, load_owner_items,
+    max_id_in_range, resolve_item_id_range, save_item, save_owner_items, set_count, Attribute,
+    ItemError, ItemRow, RowChange, GROUND, MAX_ITEM_ID, SOCKETS,
 };
 use db::players::{create_player, Created, NewPlayer};
 use db::store::Store;
@@ -818,6 +818,92 @@ async fn a_moves_row_changes_commit_together_in_order() {
     // An empty list touches nothing.
     apply_row_changes(store, owner, &[]).await.unwrap();
     assert_eq!(load_owner_items(store, owner).await.unwrap(), got);
+}
+
+/// The gold `player.gold` holds for one character.
+async fn gold_of(store: &Store, owner: u32) -> i64 {
+    db::sqlx::query_scalar("SELECT gold FROM player WHERE id = $1")
+        .bind(i32::try_from(owner).unwrap())
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
+}
+
+/// A shop's buy or sale is one Transfer (ADR-0003): its rows and the owner's gold commit
+/// together, and a refusal found after the gold was written takes the gold back with it.
+#[tokio::test]
+async fn a_transfer_stores_the_rows_and_the_gold_together() {
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &db.store;
+    let owner = player(store, "acctshop", "ShopOne").await;
+    save_owner_items(store, &[row(1_000_240, owner, 1, 3)])
+        .await
+        .unwrap();
+    let bought = row(1_000_241, owner, 1, 4);
+    apply_transfer(
+        store,
+        owner,
+        &[RowChange::Created(bought.clone())],
+        1_000_000_000_000_000_007,
+    )
+    .await
+    .unwrap();
+    assert_eq!(gold_of(store, owner).await, 1_000_000_000_000_000_007);
+    assert_eq!(load_item(store, 1_000_241).await.unwrap(), Some(bought));
+
+    // The cells are checked after the gold is written, so this refusal rolls the gold back.
+    let refused = apply_transfer(
+        store,
+        owner,
+        &[RowChange::Created(row(1_000_242, owner, 1, 3))],
+        5,
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(ItemError::CellAlreadyTaken {
+                id: 1_000_242,
+                window_type: 1,
+                pos: 3
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(gold_of(store, owner).await, 1_000_000_000_000_000_007);
+    let refused = apply_transfer(store, owner, &[RowChange::Destroyed { id: 1_000_299 }], 5).await;
+    assert!(
+        matches!(refused, Err(ItemError::NoSuchItem(1_000_299))),
+        "{refused:?}"
+    );
+    assert_eq!(gold_of(store, owner).await, 1_000_000_000_000_000_007);
+
+    // Gold the column cannot hold is refused before the store is reached.
+    let sale = [RowChange::Destroyed { id: 1_000_240 }];
+    let largest = u64::try_from(i64::MAX).unwrap();
+    let refused = apply_transfer(store, owner, &sale, largest + 1).await;
+    assert!(
+        matches!(refused, Err(ItemError::GoldOutOfRange(gold)) if gold == largest + 1),
+        "{refused:?}"
+    );
+    assert!(load_item(store, 1_000_240).await.unwrap().is_some());
+    apply_transfer(store, owner, &sale, largest).await.unwrap();
+    assert_eq!(gold_of(store, owner).await, i64::MAX);
+    assert_eq!(load_item(store, 1_000_240).await.unwrap(), None);
+
+    // Gold alone is still written, and an owner with no row is refused.
+    apply_transfer(store, owner, &[], 0).await.unwrap();
+    assert_eq!(gold_of(store, owner).await, 0);
+    for nobody in [owner + 1_000, u32::MAX] {
+        let refused = apply_transfer(store, nobody, &[], 7).await;
+        assert!(
+            matches!(refused, Err(ItemError::NoSuchOwner(id)) if id == nobody),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(gold_of(store, owner).await, 0);
 }
 
 /// Equipping onto a worn item is a swap (`char_item.cpp:8164-8264`): the carried item takes

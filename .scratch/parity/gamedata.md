@@ -49,6 +49,6 @@ byte-exact and a scenario exercises the system that uses it.
 | `table.land` | `player.land` | `D/ClientManagerBoot.cpp` | `sys.world.objects` | partial | | `gamedata::land` rule. |
 | `table.object_proto` | `player.object_proto` | `D/ClientManagerBoot.cpp` | `sys.world.objects` | partial | | `gamedata::object_proto` rule. |
 | `table.refine_proto` | `player.refine_proto` | `D/ClientManagerBoot.cpp` | `sys.item.refine` | partial | | `gamedata::refine` rule. |
-| `table.shop` | `player.shop`, `player.shop_item` | `D/ClientManagerBoot.cpp` | `sys.npc.shop` | partial | | `gamedata::shop` rule. |
+| `table.shop` | `player.shop`, `player.shop_item` | `D/ClientManagerBoot.cpp` | `sys.npc.shop` | ported | `a_keeper_opens_its_shop_and_a_buy_and_a_sale_are_stored` | `gamedata::shop` rule. Ledger 224: `gamedata::npc_shop` reads both tables from the owner's `player.sql` dump and lays each shop out as `CShop::SetShopItems` does, and the server loads them at boot. An item that cannot be laid out is left out of its shop with a warning. |
 | `table.shopex` | `player.shopex`, `player.shopex_item` | `D/ClientManagerBoot.cpp` | `sys.npc.shop` | partial | | `gamedata::renewal_shop` rule. |
 | `table.skill_proto` | `player.skill_proto` | `D/ClientManagerBoot.cpp` | `sys.skill.core` | partial | | `gamedata::skill` rule; `szName` is UTF-8. |

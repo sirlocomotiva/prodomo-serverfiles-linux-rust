@@ -1727,6 +1727,7 @@ mod tests {
             vnum: 0x1_4e30,
             race: 0x4e30,
             char_type: CHAR_TYPE_NPC,
+            on_click: 1,
             x: 12_345,
             y: 23_456,
             z: 7,

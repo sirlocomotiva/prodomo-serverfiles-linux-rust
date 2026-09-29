@@ -17,6 +17,7 @@ mod model;
 mod points;
 mod potion;
 mod quickslot;
+mod shop;
 mod state;
 
 pub use apply::{
@@ -67,5 +68,9 @@ pub use potion::{is_recovering, update_recovery, SE_HPUP_RED, SE_SPUP_BLUE};
 pub use quickslot::{
     add_from_client, chains_when_used_up, find_specify_item, sync_quickslots, Quickslot,
     QuickslotRecord, QuickslotSync, Quickslots, SyncTo, QUICKSLOT_MAX_NUM,
+};
+pub use shop::{
+    buy_item, sale_price, sell_item, unported_creation, ShopRefused, UnportedCreation,
+    GOLD_MAX_MAX, SALE_TAX_NOTICE, WORN_NOTICE,
 };
 pub use state::{Activity, CoreState, Posture};

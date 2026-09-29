@@ -1254,7 +1254,8 @@ fn dynamic_len(header: u8) -> usize {
         | GC_CHAT
         | GC_ENTITY
         | GC_SYNC_POSITION
-        | GC_NPC_POSITION => usize::MAX,
+        | GC_NPC_POSITION
+        | GC_SHOP => usize::MAX,
         other => panic!("{other} is a fixed-width loading or enter-game record"),
     }
 }
@@ -1265,7 +1266,7 @@ fn word_sized(record: &[u8]) -> Option<usize> {
     let header = record[0];
     if matches!(
         header,
-        GC_CHAT | GC_ENTITY | GC_SYNC_POSITION | GC_NPC_POSITION
+        GC_CHAT | GC_ENTITY | GC_SYNC_POSITION | GC_NPC_POSITION | GC_SHOP
     ) {
         Some(usize::from(record[1]) | (usize::from(record[2]) << 8))
     } else {
@@ -1342,11 +1343,12 @@ fn game_len(header: u8) -> usize {
         GC_SKILL_LEVEL_NEW => SKILL_LEVEL_LEN,
         GC_CHARACTER_ADD => CHARACTER_ADD_LEN,
         GC_CHAR_ADDITIONAL_INFO => CHAR_ADDITIONAL_INFO_LEN,
-        GC_ENTITY | GC_CHAT | GC_NPC_POSITION => dynamic_len(header),
+        GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP => dynamic_len(header),
         GC_AFFECT_ADD => AFFECT_ADD_LEN,
         GC_TIME => TIME_LEN,
         GC_CHANNEL => CHANNEL_LEN,
         GC_POINT_CHANGE => POINT_CHANGE_LEN,
+        GC_GOLD_CHANGE => GOLD_CHANGE_LEN,
         GC_MOVE => GC_MOVE_LEN,
         GC_CHARACTER_POSITION => CHARACTER_POSITION_LEN,
         GC_SYNC_POSITION => usize::MAX,
@@ -1370,6 +1372,8 @@ const CG_SYNC_POSITION: u8 = 0x08;
 const CG_CHARACTER_POSITION: u8 = 0x1c;
 /// `HEADER_CG_ON_CLICK`.
 const CG_ON_CLICK: u8 = 0x1a;
+/// `HEADER_CG_SHOP`: the header, then the subheader and its body.
+const CG_SHOP: u8 = 50;
 const GC_MOVE: u8 = 0x03;
 const GC_SYNC_POSITION: u8 = 0x05;
 const GC_CHARACTER_POSITION: u8 = 0x2b;
@@ -2348,8 +2352,10 @@ fn client_click(vid: u32) -> Vec<u8> {
 /// and listed like an NPC, with no summary.
 ///
 /// A click on an NPC, or on a VID nobody holds, answers nothing and keeps the connection
-/// (`G/input_main.cpp:1305-1316`). The quest click and the shop an NPC opens
-/// (`G/char.cpp:6181-6352`) are not ported yet, and the Rewrite logs the click.
+/// (`G/input_main.cpp:1305-1316`). Only a keeper whose click trigger is the shop's opens a window
+/// (`G/char.cpp:6181-6352`), and vnum 20300 is not one; the keeper's scenario is
+/// [`a_keeper_opens_its_shop_and_a_buy_and_a_sale_are_stored`]. The quest click is not ported
+/// yet.
 ///
 /// Each Channel stands up the maps it hosts, so a character entering map 72 on the Shared
 /// Channel is shown map 72's NPCs and none of Channel 1's.
@@ -2496,6 +2502,189 @@ fn map_72_is_shown_on_the_shared_channel(server: &Server, database: &ScratchData
     assert_eq!(shown.records.len(), 9 + 7, "a summary for each NPC alone");
     let list = shown.list.expect("map 72 lists its NPCs");
     assert_eq!(&list[3..5], &9u16.to_le_bytes(), "count");
+}
+
+/// `npc.txt`'s keeper on map 3, vnum 20042, whose click trigger is the shop's. Its shop, 9,
+/// sells vnums 11901, 11903 and 50201, one of each.
+const KEEPER_VNUM: u16 = 20_042;
+
+/// `HEADER_GC_SHOP`: a `WORD wSize` covering the whole record, then the subheader.
+const GC_SHOP: u8 = 38;
+/// `TPacketGCShopStart`'s items start after the header, the size, the subheader and the
+/// keeper's VID, 73 bytes each (`G/packet.h`).
+const SHOP_ITEMS_AT: usize = 1 + 2 + 1 + 4;
+const SHOP_ITEM_LEN: usize = 73;
+/// `HEADER_GC_CHARACTER_GOLD_CHANGE`, the first byte of its four-byte `int` header.
+const GC_GOLD_CHANGE: u8 = 225;
+/// `TPacketGCGoldChange`: an `int` header, `dwVID`, `long long amount`, `unsigned long long
+/// value`.
+const GOLD_CHANGE_LEN: usize = 4 + 4 + 8 + 8;
+
+/// A `GC_SHOP` that carries its subheader alone.
+fn shop_answer(subheader: u8) -> Vec<u8> {
+    vec![GC_SHOP, 4, 0, subheader]
+}
+
+/// A `GC_CHARACTER_GOLD_CHANGE` in `TPacketGCGoldChange` field order.
+fn gold_change(vid: u32, amount: i64, value: u64) -> Vec<u8> {
+    let mut record = i32::from(GC_GOLD_CHANGE).to_le_bytes().to_vec();
+    record.extend_from_slice(&vid.to_le_bytes());
+    record.extend_from_slice(&amount.to_le_bytes());
+    record.extend_from_slice(&value.to_le_bytes());
+    assert_eq!(record.len(), GOLD_CHANGE_LEN);
+    record
+}
+
+/// The vnum, price and count of slot `slot` of a `GC_SHOP` window.
+fn shop_slot(start: &[u8], slot: usize) -> (u32, u64, u16) {
+    let at = SHOP_ITEMS_AT + slot * SHOP_ITEM_LEN;
+    (
+        u32::from_le_bytes(start[at..at + 4].try_into().expect("four bytes")),
+        u64::from_le_bytes(start[at + 4..at + 12].try_into().expect("eight bytes")),
+        u16::from_le_bytes([start[at + 12], start[at + 13]]),
+    )
+}
+
+/// `cg.game.on_click`, `cg.game.shop`, `sys.npc.shop`, `table.shop`, `gc.shop`,
+/// `gc.character_gold_change`, and the four `CInputMain::Shop` arms: a click on a shop keeper
+/// opens its shop's window (`CShopManager::StartShopping`, `G/shop_manager.cpp:115-161`), a buy
+/// takes the price and gives the item (`CShop::Buy`, `G/shop.cpp:411-690`), a sale takes the item
+/// and pays a fifth of its shop price less the 3% tax (`CShopManager::Sell`,
+/// `G/shop_manager.cpp:456-594`), and closing the window answers `SHOP_SUBHEADER_GC_END`.
+///
+/// Every buy and sale stores the item and the gold in one transaction before the records are
+/// sent, so the store is checked as soon as they arrive, and the save that follows the
+/// disconnect writes the gold the sale left.
+#[test]
+fn a_keeper_opens_its_shop_and_a_buy_and_a_sale_are_stored() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    // Given: Alpha on map 3, its own empire's, a few steps from the keeper at (325200, 879200),
+    // with five million gold.
+    sql(
+        &database,
+        "UPDATE player SET x = 325500, y = 879400, gold = 5000000 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, items) = load_character(&server, b"alice", 0);
+    assert_eq!(items, Vec::<Vec<u8>>::new(), "Alpha carries nothing");
+    alice.send_record(&client_enter_game());
+    let own = alice.read_game();
+    assert_eq!(own[0], GC_CHARACTER_ADD);
+    let vid = u32::from_le_bytes(own[1..5].try_into().expect("four bytes"));
+    assert_eq!(alice.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    let (shown, affect) = read_shown(&mut alice);
+    assert_eq!(affect[0], GC_AFFECT_ADD);
+    let keepers: Vec<u32> = shown
+        .inserts()
+        .iter()
+        .filter(|insert| insert[22..24] == KEEPER_VNUM.to_le_bytes())
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+        .collect();
+    let [keeper] = keepers[..] else {
+        panic!("map 3 shows one keeper 20042, not {keepers:?}");
+    };
+    assert_eq!(alice.read_game(), [GC_PHASE, PHASE_GAME]);
+    assert_eq!(alice.read_game()[0], GC_TIME);
+    assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
+    assert_eq!(alice.read_game()[0], GC_CHAT);
+    alice.quiet("the burst is over");
+
+    // When: nobody's window is open, a buy and a close are ignored.
+    alice.unanswered(&[CG_SHOP, 1, 0, 2]);
+    alice.unanswered(&[CG_SHOP, 0]);
+
+    // When: Alpha clicks the keeper. Then: its window opens, owned by the keeper, with shop 9's
+    // three items at their `item_proto` prices, untripled for its own empire, and nothing else.
+    alice.send_record(&client_click(keeper));
+    let start = alice.read_game();
+    assert_eq!(start.len(), 2928);
+    assert_eq!(&start[..4], &[GC_SHOP, 0x70, 0x0b, 0], "wSize and START");
+    assert_eq!(&start[4..8], &keeper.to_le_bytes());
+    assert_eq!(shop_slot(&start, 0), (11_901, 2_000_000, 1));
+    assert_eq!(shop_slot(&start, 1), (11_903, 2_500_000, 1));
+    assert_eq!(shop_slot(&start, 2), (50_201, 100_000, 1));
+    for slot in 3..40 {
+        assert_eq!(shop_slot(&start, slot), (0, 0, 0), "slot {slot} is empty");
+    }
+    // And: a second click on the keeper whose window is open is ignored.
+    alice.unanswered(&client_click(keeper));
+
+    // When: slot 2 is bought. Then: the gold goes, then the item lands in the first free cell,
+    // and the store holds both before either record arrives.
+    alice.send_record(&[CG_SHOP, 1, 0, 2]);
+    assert_eq!(alice.read_game(), gold_change(vid, 0, 4_900_000));
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    assert_eq!(set_fields(&alice.read_game()), (inventory, 0, 50_201, 1));
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Alpha') = 4900000 AND EXISTS (SELECT 1 FROM item \
+         WHERE id = 100000000 AND vnum = 50201 AND window_type = 1 AND pos = 0 AND count = 1)",
+    );
+
+    // When: an empty slot or a slot past the window is bought. Then: the empty slot costs
+    // nothing, which `CShop::Buy` answers as too little gold, and the slot past the window is
+    // an invalid position. Nothing is stored.
+    alice.send_record(&[CG_SHOP, 1, 0, 3]);
+    assert_eq!(alice.read_game(), shop_answer(5), "NOT_ENOUGH_MONEY");
+    alice.send_record(&[CG_SHOP, 1, 0, 40]);
+    assert_eq!(alice.read_game(), shop_answer(8), "INVALID_POS");
+    // And: an unknown subheader is logged and ignored.
+    alice.unanswered(&[CG_SHOP, 9]);
+
+    // When: the whole stack at cell 0 is sold. Then: the tax line, the cleared cell, and the
+    // payment: 100000 / 5 = 20000, less 3%, is 19400.
+    alice.send_record(&[CG_SHOP, 2, 0]);
+    assert_eq!(alice.read_game(), an_info_line(b"[LS;881;3]"));
+    assert_eq!(alice.read_game(), a_clear_record(0));
+    assert_eq!(alice.read_game(), gold_change(vid, 19_400, 4_919_400));
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Alpha') = 4919400 AND NOT EXISTS (SELECT 1 FROM \
+         item WHERE id = 100000000)",
+    );
+    // And: selling the now-empty cell answers nothing.
+    alice.unanswered(&[CG_SHOP, 2, 0]);
+
+    // When: slot 2 is bought again, under the next id, and sold with `SELL2`, which carries a
+    // count after an alignment byte the server never reads. Then: the same answers.
+    alice.send_record(&[CG_SHOP, 1, 0, 2]);
+    assert_eq!(alice.read_game(), gold_change(vid, 0, 4_819_400));
+    assert_eq!(set_fields(&alice.read_game()), (inventory, 0, 50_201, 1));
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 100000001 AND pos = 0)",
+    );
+    alice.send_record(&[CG_SHOP, 3, 0, 0xcc, 1, 0]);
+    assert_eq!(alice.read_game(), an_info_line(b"[LS;881;3]"));
+    assert_eq!(alice.read_game(), a_clear_record(0));
+    assert_eq!(alice.read_game(), gold_change(vid, 19_400, 4_838_800));
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Alpha') = 4838800 AND NOT EXISTS (SELECT 1 FROM \
+         item)",
+    );
+
+    // When: the window is closed. Then: `SHOP_SUBHEADER_GC_END`, and a buy after it is
+    // ignored.
+    alice.send_record(&[CG_SHOP, 0]);
+    assert_eq!(alice.read_game(), shop_answer(1), "END");
+    alice.unanswered(&[CG_SHOP, 1, 0, 2]);
+
+    // When: Alpha disconnects. Then: the save writes the gold the sale left, and a relog finds
+    // no item.
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Alpha') = 4838800",
+    );
+    let (_alice, _alpha, items) = load_character(&server, b"alice", 0);
+    assert_eq!(items, Vec::<Vec<u8>>::new(), "the sold item stays sold");
+    assert_eq!(items_of(&database, "Alpha"), "none");
 }
 
 /// Point slot `slot` of a `GC_CHARACTER_POINTS` record: the slots start one byte after the

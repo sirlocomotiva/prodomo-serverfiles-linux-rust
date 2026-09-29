@@ -91,6 +91,10 @@ pub const ITEM_ANTIFLAG_STACK: u32 = 1 << 15;
 /// `ITEM_ANTIFLAG_DROP` (`item_length.h:385`): the item may not be dropped.
 pub const ITEM_ANTIFLAG_DROP: u32 = 1 << 7;
 
+/// `ITEM_ANTIFLAG_SELL` (`item_length.h:386`): no shop buys the item back
+/// (`shop_manager.cpp:524`).
+pub const ITEM_ANTIFLAG_SELL: u32 = 1 << 8;
+
 /// `ITEM_ANTIFLAG_GIVE` (`item_length.h:391`): the item may not be given, and so not dropped
 /// either (`char_item.cpp:7481`).
 pub const ITEM_ANTIFLAG_GIVE: u32 = 1 << 13;

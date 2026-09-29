@@ -13,7 +13,7 @@ use world::item::Item;
 use world::npc::MapNpcs;
 
 use crate::client_registry::ClientOutbox;
-use crate::game_state::{EnterWorldRefused, Released, RevokeRefused};
+use crate::game_state::{EnterWorldRefused, Released, RevokeRefused, ShopAnswer, ShopStep};
 use crate::item_grant::{GrantOutcome, GrantRefusal, GrantRequest};
 use crate::item_move::{MoveItemRefused, MovedItems, Mover};
 use crate::quickslot::{QuickslotAnswer, QuickslotStep};
@@ -396,6 +396,20 @@ pub enum GameCommand {
         /// Where the game thread sends the map's NPCs.
         reply: oneshot::Sender<Arc<MapNpcs>>,
     },
+    /// Runs one shop step for the character online under `vid`: a click on a keeper, a buy, a
+    /// sale or a close.
+    Shop {
+        /// The VID of the character whose client sent the step.
+        vid: common::vid::Vid,
+        /// The step.
+        step: ShopStep,
+        /// Where the character stands.
+        place: GroundPlace,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the step did.
+        reply: oneshot::Sender<Result<ShopAnswer, MoveItemRefused>>,
+    },
     /// Requests terminal loop shutdown.
     Stop,
 }
@@ -644,6 +658,8 @@ pub struct Loaded {
     pub points: Option<Points>,
     /// The quickslots the load set.
     pub quickslots: Quickslots,
+    /// The gold the load read, `player.gold`, which a shop spends and pays.
+    pub gold: u64,
 }
 
 /// What the world hands back when a character leaves it.
@@ -1107,6 +1123,31 @@ impl GameLoopController {
         self.send_command(GameCommand::GroundItemsOn {
             channel,
             map,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one shop step, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn shop(
+        &self,
+        vid: common::vid::Vid,
+        step: ShopStep,
+        place: GroundPlace,
+        mover: Mover,
+    ) -> Result<Result<ShopAnswer, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Shop {
+            vid,
+            step,
+            place,
+            mover,
             reply,
         })
         .await

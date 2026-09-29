@@ -23364,3 +23364,335 @@ After the run, no `prodomo_%` database remains, and no `*.core` file is outside 
 The workspace has 215 Rust files and 153,474 lines, outside `server/` and `.scratch/`. No
 crate was fetched, and `Cargo.lock` is unchanged. This section claims no width, and the i686
 probe was not run.
+
+## 224. The NPC shops: `CShopManager`, `CShop::Buy` and the shop Transfer
+
+A click on a shop keeper now opens its shop, and the window buys, sells and closes. In legacy,
+the DB server reads the `shop` and `shop_item` tables at boot (`InitializeShopTable`,
+`D/ClientManagerBoot.cpp:299-379`), and the game lays each shop out on a grid 5 cells wide and 9
+high (`CShopManager::Initialize`, `G/shop_manager.cpp:39-69`, with `CShop::SetShopItems`,
+`G/shop.cpp:66-196`). A click on an NPC runs `CHARACTER::OnClick` (`G/char.cpp:6181-6352`),
+whose last step is the NPC's click trigger. For `ON_CLICK_SHOP` that is `OnClickShop`
+(`G/trigger.cpp:21-25`), which calls `CShopManager::StartShopping`
+(`G/shop_manager.cpp:115-161`). `CG_SHOP` (50) then carries the close, a buy and two kinds of
+sale (`CInputMain::Shop`, `G/input_main.cpp:1241-1303`). Until this section the Rewrite logged a
+click and answered nothing, read no shop, and kept no gold in the world.
+
+### 224.1 What landed
+
+- **The shops.** `gamedata::npc_shop::shops_from_dump` answers legacy's boot query from the
+  `shop` and `shop_item` rows of the owner's `player.sql` dump. It joins `shop` to `shop_item`
+  as a `LEFT JOIN`, sorts by shop vnum and then item vnum as numbers, keeps the dump's order
+  between equal keys, and hands the rows to `build_shop_table_legacy`.
+  `NpcShops::lay_out` is `CShopManager::Initialize` with `CShop::SetShopItems`. Each item takes
+  one column of as many cells as its size, at the first cell `CGrid::FindBlank` finds, and that
+  cell is its slot. Its price is `shop_price`: the proto's `dwGold` times the count, or the count
+  over `dwGold` under `ITEM_FLAG_COUNT_PER_1GOLD`. A keeper opens the first shop that names its
+  vnum. The owner's dump has 29 shops and 262 items. Shops 1 and 11 have six item rows between
+  them and no shop row, so the join drops them. Every item is laid out, and nothing is skipped.
+  `serve` loads the shops at start-up after the item protos and logs each item it leaves out. A
+  missing or unreadable dump stops the server, as an empty shop table stops legacy's DB server
+  (`D/ClientManagerBoot.cpp:54-58`, `:319-323`).
+- **The records.** `protocol::cg_shop` decodes `CG_SHOP` as `CInputMain::Shop` reads it: `END`,
+  `BUY` with the count byte the server reads past, `SELL` with a cell, and `SELL2` with a slot,
+  the alignment byte of `TfckOFF` and a `WORD` count. An unknown subheader decodes as itself.
+  `protocol::gc_shop` writes `GC_SHOP` (38). The window is the four header bytes, the keeper's
+  VID and forty 73-byte `packet_shop_item`s, 2928 bytes in all. Every other answer is the four
+  header bytes alone. `GC_SHOP` joins the codec inventory, which goes from 102 to 103 of 134
+  game-to-client records.
+- **The buy and the sale.** `world::character::shop` holds `CShop::Buy` for a shop no player
+  keeps, and `CShopManager::Sell`, each over one character's storage and gold.
+  - `buy_item` checks the price and then makes the item as `CreateItem` makes it with no magic
+    (`G/item_manager.cpp:160-455`). A stackable item takes the slot's count, held between 1 and
+    the stack limit, and anything else takes 1. The proto's `bGainSocketPct` opens that many
+    sockets, at most six. The item goes whole to the first free cell of the unlocked base
+    inventory tall enough for it (`GetEmptyInventory(BYTE)`, `G/char_item.cpp:1258-1268`),
+    never onto a stack. The records are the gold's, then the cell's.
+  - `sell_item` refuses an empty cell, a worn item (`[LS;1059]`), an item with no proto and one
+    whose anti-flags forbid the sale. A count of 0 or more than the stack sells the whole item.
+    The price is `sale_price`: the proto's `dwShopBuyPrice` for each one, or so many for one
+    gold under `ITEM_FLAG_COUNT_PER_1GOLD`, then a fifth of that, less the 3% tax. The records
+    are the tax line `[LS;881;3]`, the cell's, then the gold's. A whole sale syncs the item's
+    quickslots as `RemoveItem` does, and a part sale updates the stack.
+  - `Character` now holds its gold: the load sets it, and a buy or a sale changes it.
+- **The manager.** `prodomo::game_state::shop` is `CShopManager` around those two. It keeps the
+  keeper each character browses, as `m_pkShop` and `m_pkChrShopOwner` are kept.
+  - **The click.** It is ignored when the VID names no NPC on the character's own Channel and
+    map, when the NPC's click trigger is not `ON_CLICK_SHOP`, and when the character already
+    browses that keeper. It is also ignored when the keeper is `SHOP_MAX_DISTANCE` (1000) or
+    farther, when no shop names the keeper's vnum, and when the character browses another
+    keeper. Otherwise the window opens. A keeper of another empire shows each price tripled,
+    unless `[game] disable_shop_price_3x` is set (`G/shop.cpp:863-873`).
+  - **A buy or a sale** is ignored with no window open, and refused with `[LS;877]` from more
+    than 2000 away (`G/shop_manager.cpp:405`, `:482`). A buy of a position past the window
+    answers `SHOP_SUBHEADER_GC_INVALID_POS`. Every other refusal of a buy answers the subheader
+    `CShop::Buy` returns: `NOT_ENOUGH_MONEY` for an empty slot or too little gold, `SOLD_OUT` for
+    an item that cannot be made, and `INVENTORY_FULL`. A refused sale answers nothing, except
+    the worn item's line.
+  - **Closing** answers `SHOP_SUBHEADER_GC_END` when a window is open, and nothing when none is.
+    Leaving the world ends the browsing, as `Destroy` and `Disconnect` call `RemoveGuest`
+    (`G/char.cpp:646`, `:1731`).
+- **The Transfer.** `db::items::apply_transfer` writes a step's row changes and the owner's
+  `player.gold` in one transaction (ADR-0003). A buy or a sale is stored this way before any
+  record is sent, and the descriptor then holds the stored gold, so the save after a disconnect
+  writes it. Gold past `i64::MAX` and an owner with no row are refused, and the rows roll back
+  with the gold. `apply_row_changes` is now the same path with no gold. `write_change` was split
+  out of it to keep the function under clippy's line limit.
+- **The wiring.** `main.rs` routes `CG_ON_CLICK` and `CG_SHOP` in the game phase to
+  `GameCommand::Shop`, which the game thread answers with the records to send, or with the
+  move to store and send as an item move is. `ShopStep::requested` reads the step a `CG_SHOP`
+  asks for, and `SELL` asks for the whole stack. A store that fails closes the connection, as an
+  item move's does. `handle_connection`'s future is boxed (`Box::pin`) for clippy's
+  `large_futures`, and `GameState::apply_item_step` was split out of the step dispatch for
+  `too_many_lines`.
+
+### 224.2 What the client sees
+
+- A click on the keeper 20042 on map 3, from within 1000, opens shop 9's window. The client is
+  sent the 2928-byte `GC_SHOP` with `wSize` 2928, `START` and the keeper's VID. Slots 0 to 2
+  hold vnums 11901, 11903 and 50201 at 2,000,000, 2,500,000 and 100,000 gold, one of each. The
+  other 37 slots are vnum 0, price 0, count 0, each with the gold price type legacy writes into
+  every slot. A second click on the same keeper answers nothing.
+- A buy of slot 2 sends `GC_CHARACTER_GOLD_CHANGE` with amount 0 and the gold left, then the
+  item's `GC_ITEM_SET` at inventory cell 0 with the new-item highlight. A buy of an empty slot
+  answers `NOT_ENOUGH_MONEY` (5), and a slot past the window `INVALID_POS` (8).
+- A sale sends `[LS;881;3]`, the cleared cell or the updated stack, and then
+  `GC_CHARACTER_GOLD_CHANGE` with the amount paid. Slot 2's item, bought for 100,000, sells for
+  100,000 / 5 = 20,000 less 3%, which is 19,400.
+- `END` answers `GC_SHOP` `END` (1). With no window open, a buy, a sale and a close answer
+  nothing, and so does an unknown subheader. The connection stays open.
+- From more than 2000 away, a buy or a sale answers `[LS;877]` and changes nothing.
+- A relog finds the gold and the items as the last buy or sale left them.
+
+### 224.3 Divergences and Defects
+
+Six Divergences, each a row in `docs/STATUS.md`:
+
+- **The tripled price is what a stranger pays.** `CShop::AddGuest` shows a keeper of another
+  empire each price tripled, but `CShop::Buy` charges the price untripled: the tripling is
+  commented out (`G/shop.cpp:658-659`). The Rewrite charges the price it showed.
+- **A refused second window changes nothing.** `CShop::AddGuest` refuses a character that
+  already browses a shop, but `StartShopping` then makes the new keeper its shop owner anyway
+  (`G/shop_manager.cpp:157-158`). The next buy then measures the distance to one keeper and buys
+  from the other's shop. The Rewrite ignores the second click, and the first window stays the
+  one that buys and sells.
+- **An item `CreateItem` makes by an unported path is not sold.** `buy_item` refuses, as
+  `SOLD_OUT`, an item that `CreateItem` would give sockets, attributes or timers the Rewrite does
+  not keep yet: `ITEM_ELK`, `ITEM_UNIQUE`, `ITEM_DS`, `ITEM_BLEND`, an aura costume, a
+  `LIMIT_REAL_TIME` or `LIMIT_TIMER_BASED_ON_WEAR` limit, `sAddonType`, a
+  `bAlterToMagicItemPct` of 100, and the fifteen auto potions and skill books whose socket
+  `CreateItem` fills by vnum. It does not make a different item. No shop in the owner's data
+  sells one. The mask table `ori_to_new_table.txt` is not read either, and no owner shop item is
+  in it.
+- **A bought item is numbered once it has a cell.** Legacy numbers the item before it looks
+  for a cell, so a full inventory uses up an id. No client sees an id.
+- **The gates of unported systems never refuse.** `StartShopping` refuses while a trade,
+  safebox, personal shop, cube or aura window is open (`[LS;876]`, `G/shop_manager.cpp:123-133`).
+  Buy and Sell also check `IsSecured`, the inventory protection, and Sell checks
+  `CanHandleItem` and a locked item. None of those windows, states or locks exists in the
+  Rewrite, so none of these checks refuses. The throttle `ENABLE_NEWSTUFF` puts on buys and
+  sales is also not ported. It is off unless `g_BuySellTimeLimitValue` is set, which is 0 at
+  start-up (`G/questmanager.cpp:37`), and only a quest function sets it (`:1613`).
+- **The quest click is not run.** `OnClick` runs `quest::CQuestManager::Click` before the
+  click trigger, and a keeper with a quest `click` or `chat` would show the quest instead of the
+  shop (`G/questmanager.cpp:918-990`). The owner's Game data gives no keeper one (224.4).
+
+Seven legacy Defects are not reproduced:
+
+- **A keeper on another map.** `CHARACTER_MANAGER::Find` looks a VID up on every map of the
+  process, and `DISTANCE_APPROX` ignores the map. A client that names a keeper on another map
+  standing at the same coordinates therefore opens its shop. Only a modified client names one.
+  The Rewrite looks only on the character's own Channel and map.
+- **A sale past the gold cap loses the item.** `CShopManager::Sell` removes the item first
+  and then calls `ChangeGold`, which pays nothing if the gold would reach `GOLD_MAX_MAX`. The
+  Rewrite refuses the sale before anything changes.
+- **The sale tax wraps in a `DWORD`.** A sale worth more than about 143 billion before the tax
+  pays too much (`G/shop_manager.cpp:544-552`). The Rewrite keeps the tax in 64 bits.
+- **The shop price wraps in 32 bits.** `SetShopItems` multiplies a `DWORD` by a `WORD` before
+  storing the price in a 64-bit field (`G/shop.cpp:176-188`). The Rewrite multiplies in 64 bits.
+- **An item the layout cannot place loses every later item.** `SetShopItems` answers it with
+  `continue`, which skips `++pTable`, so every later pass tries the same item and fails again.
+  The Rewrite leaves out only that item and logs it.
+- **An item of size 0 overwrites slot 0.** `FindBlank(1, 0)` answers cell 0 and nothing is
+  marked. The Rewrite leaves the item out.
+- **A cell past the 40 slots is written past the slot vector.** The grid has 45 cells and the
+  window 40 slots. The Rewrite leaves out an item whose cell is past slot 39 and still marks its
+  cells.
+
+No owner shop comes near any of the last five.
+
+### 224.4 The quest click, searched
+
+A keeper whose race has a quest `click` or `chat` trigger would open the quest in legacy, not
+the shop. The Rewrite does not run quests, so this was searched before the click was routed to
+the shop:
+
+- **The keepers.** The owner's `player.sql` names nine keepers: 9004, 9005, 9007, 9008, 20015,
+  20042, 20086, 20087 and 20094. Four shops name 20094, and the first of them is the one it
+  opens. The other seventeen shops name no keeper (`npc_vnum` 0).
+- **The compiled objects.** `CQuestManager` loads the races under
+  `locale/europe/quest/object/`. They are 9009, 20005, 20011 and 20016, each with a `chat`
+  trigger alone, plus `notarget/` and `state/`. The intersection with the keepers is empty.
+  Positive control: the same intersection of the object races with themselves answers all four,
+  and `{20042, 9009}` answers 9009. Negative control: 20042 is not among them.
+- **The quest sources.** None of the 61 `.quest` and `.lua` files has `when <keeper>.click` or
+  `when <keeper>.chat` for any of the nine vnums, or for the `questnpc.txt` names of the two
+  keepers that have one (9005 `warehouse_keeper`, 20015 `deokbae`). Positive controls: the same
+  pattern finds 9009 in two files and 20005, 20011 and 20016 in one each, and a name such as
+  `guild_man1` is found as a trigger. Negative control: 99999 is found nowhere.
+
+The quest click therefore changes nothing for any keeper in the owner's data. It stays a
+Divergence, because a Game data change could give a keeper a quest before the quest runtime
+lands.
+
+### 224.5 Not ported yet
+
+- **The renewal shop** `shopex` (`G/shopEx.cpp`, `ENABLE_RENEWAL_SHOPEX`), its keepers and its
+  prices in items. `GC_SHOP`'s `UPDATE_ITEM`, `UPDATE_PRICE` and `shopex` subheaders are codec
+  only.
+- **The personal shop** of a PC and the `GetMyShop` and exchange checks of `OnClick`.
+- **The logs and missions.** `ItemLog`, `SendMoneyLog` and `GoldBarLog`, the Monarch's cut of
+  the tax (`CMonarch::SendtoDBAddMoney`), the `hivalue_item_sell` flag (`G/shop.cpp:681`), and
+  the battle pass and reward missions a sale counts toward.
+- **`SetMyShopTime`**, which a buy sets. Only the speed-hack check (`IsHack`,
+  `G/char.cpp:8277`, `:8799`) and the Scroll of the Location (`G/char_item.cpp:7279`) read it,
+  and neither is ported.
+- **The other paths an open shop blocks**: the cube, the inventory sort, a refine
+  (`G/input_main.cpp:3320`), and opening a personal shop (`:1457`, `:3301`). None is ported.
+- **The gates, the throttle and the quest click** in 224.3.
+
+### 224.6 Scenario and Parity inventory
+
+`a_keeper_opens_its_shop_and_a_buy_and_a_sale_are_stored` puts alice's Alpha on map 3, a few
+steps from the keeper 20042, with five million gold and nothing carried.
+- It finds the keeper's VID among the enter-game inserts. A buy and a close with no window open
+  are each answered with nothing.
+- The click opens the 2928-byte window with shop 9's three items at their proto prices,
+  untripled for Alpha's own empire, and 37 empty slots. A second click answers nothing.
+- A buy of slot 2 sends the gold change and then the item at cell 0. The store holds the gold
+  and the row before either record is read.
+- An empty slot answers `NOT_ENOUGH_MONEY`, a slot past the window `INVALID_POS`, and an
+  unknown subheader nothing.
+- `SELL` of the whole stack sends the tax line, the cleared cell and a payment of 19,400, and
+  the store drops the row. Selling the empty cell again answers nothing.
+- The slot is bought again under the next id and sold with `SELL2`, whose alignment byte is
+  `0xcc`, with the same answers.
+- `END` answers `END`, and a buy after it answers nothing.
+- After the disconnect the save writes 4,838,800, and a relog loads no item.
+
+The Parity harness reads `GC_SHOP` as a word-sized record and `GC_CHARACTER_GOLD_CHANGE` as 24
+bytes. The click scenario of 223 now says that vnum 20300's trigger is not the shop's.
+
+In the Parity inventory:
+
+- `cg.game.shop`, `table.shop`, `gc.shop`, `gc.character_gold_change` and the four
+  `sub.Shop.SHOP_SUBHEADER_CG_*` arms are `ported`, and each names the scenario.
+- `sys.npc.shop` is `partial` and names the scenario, because `shopex` is not ported.
+- `cg.game.on_click` stays `partial`, and its note now names the shop trigger as ported.
+
+### 224.7 Mutation sweep
+
+104 mutants. `mutate224.py` applied and restored each of them as in 215.7:
+
+- The `world`, `gamedata` and `protocol` mutants ran their crate's library, and the `db`
+  mutants ran `db`'s `items` tests with `DATABASE_URL` set.
+- Each prodomo mutant ran `prodomo`'s library.
+- Mutants in `world/src/character/shop.rs`, `world/src/npc.rs`, `gamedata/src/npc_shop.rs`,
+  `db/src/items.rs`, `game_state.rs`, `game_state/shop.rs`, `item_move.rs` and `main.rs` also ran
+  every Parity scenario, with `DATABASE_URL` set.
+- Mutants in `main.rs` also ran `process.rs`'s start-up test.
+
+| group | mutants | result |
+|---|---|---|
+| `world/src/character/shop.rs`: the buy's empty price and gold bound, the size 0, the count's limit and floor, the stack flag, the sockets' value and number, the item's size, anti-flags and flags, the gold left, the gold record's amount and order, the sale price's flag, product, zero case and quotient, the fifth, the tax and its percent and line, the sale's position, worn and anti-flag checks, the count's 0 and ceiling, the gold cap's bound and check, the whole sale, the count left, the amount paid, the quickslot sync, the tax line's place, the refusals' subheaders and the worn line, and the creation paths: magic, the addon's high byte, the wear timer, the aura's sub-type, the last socketed vnum, the elk and the blend | 45 | 42 killed, 2 killed on the rerun, 1 removed as equivalent |
+| `world/src/npc.rs`: the click trigger an NPC carries | 1 | 1 killed |
+| `prodomo/src/game_state/shop.rs`: the open distance, the trade distance and its bound, the click trigger and its value, the keeper already browsed, another keeper's window, the tripled price's setting, empire and factor, the tripled charge and window price, the window's slot bound, the close, the leave, the gold kept and stored, the quickslots stored, the sale's distance check, the too-far line, the keeper's y in both distances, and a refusal's line | 24 | 24 killed |
+| `prodomo/src/game_state.rs`: the browsing a leave ends, and the loaded gold | 2 | 2 killed |
+| `prodomo/src/item_move.rs`: the gold change's amount | 1 | 1 killed |
+| `gamedata/src/npc_shop.rs`: the first empty vnum, the first shop per keeper, the size 0, the slot bound, the column's fit, the cells marked and the cells checked, the price's product, quotient, zero case and flag, the sort and its item key, the shop with no items, the join key and the empty table | 16 | 15 killed, 1 killed on the rerun |
+| `prodomo/src/main.rs`: the click's route, `SELL`'s and `SELL2`'s counts, the gold held and the Transfer | 5 | 3 killed, 2 killed on the rerun |
+| `db/src/items.rs`: the gold update, a Transfer of gold alone, the owner check and the gold's range | 4 | 3 killed, 1 did not compile |
+| `protocol`: `BUY`'s and `SELL2`'s widths, `BUY`'s fields, `SELL2`'s count's high byte, the price type and the keeper's VID | 6 | 5 killed, 1 killed on the rerun |
+
+The first run left 7 survivors. One guarded nothing, and its check was removed. Each of the
+other six was a test gap, and a new or extended test killed each on the rerun:
+
+- **The sale's position check.** `ws_sell_valid` dropped `sell_item`'s `IsValidItemPosition`
+  check, and nothing changed. `item_at` finds nothing at a cell past
+  `INVENTORY_AND_EQUIP_SLOT_MAX`, as `GetItem` finds nothing (`G/char_item.cpp:249-256`), so the
+  check repeated the lookup's own bound. It was removed.
+  `a_sale_that_cannot_be_made_changes_nothing` now sells cells 3,
+  `INVENTORY_AND_EQUIP_SLOT_MAX` and 65535, and each is refused as empty.
+- **The addon's high byte and the last socketed vnum.** `ws_addon_high` read only the low byte
+  of `addon_type`, and `ws_socketed_last` dropped 70055 from the socketed vnums. The test set
+  `addon_type` to -1, whose low byte is not 0. It also walked `SOCKETED_VNUMS` itself, so a vnum
+  dropped from the table was dropped from the test too. `each_unported_creation_path_is_named`
+  now sets `addon_type` to `0x0100`, whose low byte is 0, and lists the 15 vnums itself.
+- **A blank's lower cells.** `ns_blank_rows` checked only the top cell of a column. The layout
+  fills each column from the top, so it never leaves a free cell above a taken one, and no shop
+  can tell the two apart. `find_blank` still checks every cell, as `CGrid::FindBlank` does
+  (`grid.cpp:87-112`). `a_blank_needs_every_cell_of_its_column_free` builds a grid by hand with
+  a free cell above a taken one.
+- **The sale counts.** `m_sell_whole` read `SELL` as a sale of one, and `m_sell2_count` read
+  `SELL2` as a sale of the whole stack. The scenario sells stacks of one, where both counts sell
+  the same. The mapping moved from `main.rs` to `ShopStep::requested` in `game_state/shop.rs`,
+  and both mutants moved with it. `each_shop_record_asks_for_its_step` checks every arm, with a
+  `SELL2` count that no stack of one could hide.
+- **`BUY`'s fields.** `cg_buy_fields` read the count and the position from each other's bytes.
+  The round trip used equal values, and the encoding test does not decode.
+  `each_field_is_read_from_its_own_byte` decodes a `BUY`, a `SELL` and a `SELL2` whose fields all
+  differ.
+
+### 224.8 Receipt
+
+62 new tests:
+
+- `gamedata/src/npc_shop.rs`: 13, for the owner's shops and keepers, the first shop per keeper,
+  the join, the sort, a value that is not a number, a missing column, an empty table and a bad
+  dump, the price, an item skipped alone, a column's fit, a cell past the slots, a blank's
+  cells and the first empty vnum.
+- `world/src/character/shop.rs`: 11, for a buy's cell and gold, a new stack and its limit, the
+  sockets, the price, a refused buy, each unported creation path, an unported item, the sale's
+  price, a whole sale, a part sale and a refused sale.
+- `prodomo/src/game_state/shop.rs`: 21, for the step each record asks for, a click in reach, the
+  open distance, the tripled price, the Channel and map, the click's order, a buy, the trade
+  distance, no window, a position past the window and an empty slot, the price, the free cell,
+  the item ids, the count limit, the sale's price, a count of 0, a refused sale, the close, the
+  leave, a step for nobody online and the game thread's answer.
+- `protocol/src/cg_shop.rs`: 7, for the header and subheaders, the encoding, each field's byte,
+  the round trip, the framing, a wrong width or header and the errors.
+- `protocol/src/gc_shop.rs`: 8, for the widths and subheaders, an answer, a refused answer, a
+  slot's field order, an empty slot, the window, a refused window and the errors.
+- `db/tests/items.rs`: 1, for a Transfer's rows and gold committed together.
+- `prodomo/tests/parity.rs`: the scenario in 224.6.
+
+These tests changed:
+
+- `game_state`'s `the_world_starts_from_the_quickslots_the_load_set`, now
+  `the_world_starts_from_the_quickslots_and_the_gold_the_load_set`, which also checks the gold;
+- `npc`'s spawn test, whose smith now carries click trigger 2, and the `loading_phase` NPC
+  that now carries 1;
+- `item_kind`'s name table, which now names `ITEM_ELK` and `ITEM_BLEND`;
+- the game-to-client inventory counts in `gc_inventory` and `cg_wiring`, which go from 102 and
+  32 to 103 and 31. `the_game_to_client_inventory_and_the_small_codec_agree_on_thirty_two_records`
+  is now `the_game_to_client_inventory_and_the_small_codec_agree`;
+- the 223 click scenario's comment, which now says that vnum 20300's trigger is not the
+  shop's.
+
+The count went from 2749 to 2811. These gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2811 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2811 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 16 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+The 16th ignored doc block is `gc_shop`'s wire layout, written as `gc_npc_position`'s is. After
+the run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`. The
+workspace has 220 Rust files and 157,878 lines, outside `server/` and `.scratch/`. No crate was
+fetched, and `Cargo.lock` is unchanged. This section claims no width, and the i686 probe was
+not run.

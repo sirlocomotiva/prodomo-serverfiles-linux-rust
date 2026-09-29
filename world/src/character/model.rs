@@ -33,6 +33,7 @@ pub struct Character {
     envanter: u16,
     points: Option<Points>,
     quickslots: Quickslots,
+    gold: u64,
 }
 
 impl Character {
@@ -53,6 +54,7 @@ impl Character {
             envanter: 0,
             points: None,
             quickslots: Quickslots::default(),
+            gold: 0,
         }
     }
 
@@ -72,6 +74,7 @@ impl Character {
             envanter: 0,
             points: None,
             quickslots: Quickslots::default(),
+            gold: 0,
         }
     }
 
@@ -266,6 +269,16 @@ impl Character {
     /// draw.
     pub fn set_inven_point(&mut self, value: u16) {
         self.envanter = value.min(INVENTORY_MAX_EXTENDED);
+    }
+
+    /// Returns the character's gold: `GetGold`, the `player.gold` column.
+    pub const fn gold(&self) -> u64 {
+        self.gold
+    }
+
+    /// Sets the character's gold, as the store loaded it or a trade left it.
+    pub fn set_gold(&mut self, gold: u64) {
+        self.gold = gold;
     }
 }
 

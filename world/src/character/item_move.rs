@@ -137,6 +137,10 @@ pub enum MoveKind {
     PickedUp,
     /// A potion changed the points and one of its stack was used up (`UseItemEx`).
     Used,
+    /// A shop's item went into a free cell for gold (`CShop::Buy`).
+    Bought,
+    /// An item, or part of its stack, went to a shop for gold (`CShopManager::Sell`).
+    Sold,
 }
 
 /// A record the client is sent, in the order legacy sends it.
@@ -183,6 +187,13 @@ pub enum MoveRecord {
     /// A sync of the item slots, which [`super::quickslot::sync_quickslots`] turns into the
     /// [`MoveRecord::Quickslot`] records it sends before the answer leaves the world.
     QuickslotSync(QuickslotSync),
+    /// A `GC_CHARACTER_GOLD_CHANGE` (`CHARACTER::ChangeGold`, `G/char.cpp:3823-3850`).
+    Gold {
+        /// The gold gained, or 0 for gold spent.
+        amount: i64,
+        /// The gold held now.
+        value: u64,
+    },
 }
 
 /// A record about a ground item (`CItem::EncodeInsertPacket`, `EncodeRemovePacket`,
