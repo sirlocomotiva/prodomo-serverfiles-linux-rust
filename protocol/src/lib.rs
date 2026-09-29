@@ -65,6 +65,7 @@ pub mod gc_actors;
 pub mod gc_channel_status;
 pub mod gc_chat;
 pub mod gc_entity;
+pub mod gc_exchange;
 pub mod gc_fields;
 pub mod gc_inventory;
 pub mod gc_item_window;

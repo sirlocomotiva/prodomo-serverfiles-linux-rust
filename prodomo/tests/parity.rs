@@ -1360,6 +1360,7 @@ fn game_len(header: u8) -> usize {
         GC_QUICKSLOT_ADD => 1 + 1 + 2,
         GC_QUICKSLOT_DEL => 1 + 1,
         GC_QUICKSLOT_SWAP => 1 + 2,
+        GC_EXCHANGE => EXCHANGE_LEN,
         other => panic!("unexpected loading or enter-game header {other}"),
     }
 }
@@ -2553,8 +2554,8 @@ fn shop_slot(start: &[u8], slot: usize) -> (u32, u64, u16) {
 /// `G/shop_manager.cpp:456-594`), and closing the window answers `SHOP_SUBHEADER_GC_END`.
 ///
 /// Every buy and sale stores the item and the gold in one transaction before the records are
-/// sent, so the store is checked as soon as they arrive, and the save that follows the
-/// disconnect writes the gold the sale left.
+/// sent, so the store is checked as soon as they arrive; the save that follows the disconnect
+/// leaves the gold alone, because only a Transfer writes it (ledger 225).
 #[test]
 fn a_keeper_opens_its_shop_and_a_buy_and_a_sale_are_stored() {
     let Some(database) = ScratchDatabase::create() else {
@@ -2674,8 +2675,8 @@ fn a_keeper_opens_its_shop_and_a_buy_and_a_sale_are_stored() {
     assert_eq!(alice.read_game(), shop_answer(1), "END");
     alice.unanswered(&[CG_SHOP, 1, 0, 2]);
 
-    // When: Alpha disconnects. Then: the save writes the gold the sale left, and a relog finds
-    // no item.
+    // When: Alpha disconnects. Then: the gold the sale left is still stored after the save,
+    // and a relog finds no item.
     drop(alice);
     server.wait_for("Character disconnected; wrote the row");
     check(
@@ -4017,16 +4018,31 @@ fn a_stackable_vnum(protos: &gamedata::item_proto::ItemProtos) -> u32 {
     protos
         .rows()
         .iter()
-        .find(|proto| {
-            proto.size == 1
-                && proto.flags & world::item::ITEM_FLAG_STACKABLE != 0
-                && proto.anti_flags & world::item::ITEM_ANTIFLAG_STACK == 0
-                && (0..6).all(|category| {
-                    !gamedata::item_custom_category::is_custom_category(proto, category)
-                })
-        })
+        .find(|proto| is_stackable_outside_banks(proto))
         .map(|proto| proto.vnum)
         .expect("the owner's data has a stackable one-cell item outside every bank")
+}
+
+/// [`a_stackable_vnum`]'s kind of item that a quickslot also takes: an `ITEM_USE` one
+/// (`G/input_main.cpp:1083-1113`).
+fn a_stackable_use_vnum(protos: &gamedata::item_proto::ItemProtos) -> u32 {
+    protos
+        .rows()
+        .iter()
+        .find(|proto| {
+            is_stackable_outside_banks(proto) && proto.item_type == gamedata::item_kind::ITEM_USE
+        })
+        .map(|proto| proto.vnum)
+        .expect("the owner's data has a stackable one-cell use item outside every bank")
+}
+
+/// A one-cell item that stacks, in no custom bank.
+fn is_stackable_outside_banks(proto: &gamedata::item_proto::ItemProto) -> bool {
+    proto.size == 1
+        && proto.flags & world::item::ITEM_FLAG_STACKABLE != 0
+        && proto.anti_flags & world::item::ITEM_ANTIFLAG_STACK == 0
+        && (0..6)
+            .all(|category| !gamedata::item_custom_category::is_custom_category(proto, category))
 }
 
 /// The window byte, cell, vnum and count of a `GC_ITEM_SET`.
@@ -5420,4 +5436,241 @@ impl RelayedFields {
         assert_eq!(expected.len(), ITEM_SET_LEN, "the expectation itself");
         expected
     }
+}
+
+/// `HEADER_CG_EXCHANGE` (`G/packet.h`).
+const CG_EXCHANGE: u8 = 27;
+/// `HEADER_GC_EXCHANGE` (`G/packet.h`).
+const GC_EXCHANGE: u8 = 42;
+/// `packet_exchange` (`G/packet.h:1627-1650`): the header, `sub_header`, `is_me`, an
+/// `unsigned long long arg1`, `TItemPos arg2`, `DWORD arg3`, `TItemPos arg4`, six `long`
+/// sockets, seven attributes, `dwRefineElement` and `dwTransmutation`.
+const EXCHANGE_LEN: usize = 1 + 1 + 1 + 8 + 3 + 4 + 3 + 6 * 4 + 7 * 3 + 4 + 4;
+/// `NPOS`: `TItemPos(RESERVED_WINDOW, WORD_MAX)`, the `arg2` of a record with no cell.
+const NO_CELL: (u8, u16) = (0, u16::MAX);
+
+/// A `TPacketCGExchange` laid out by hand: the header, `sub_header`, an eight-byte `arg1`,
+/// `arg2`, and a `TItemPos` of the base inventory at `cell`.
+fn client_exchange(sub_header: u8, arg1: u64, arg2: u8, cell: u16) -> Vec<u8> {
+    let mut record = vec![CG_EXCHANGE, sub_header];
+    record.extend_from_slice(&arg1.to_le_bytes());
+    record.push(arg2);
+    record.push(common::item_slots::EWindows::Inventory as u8);
+    record.extend_from_slice(&cell.to_le_bytes());
+    assert_eq!(record.len(), 14, "sizeof(TPacketCGExchange)");
+    record
+}
+
+/// A `GC_EXCHANGE` as `exchange_packet` writes it with no item (`G/exchange.cpp:24-59`):
+/// `arg3` 0, `arg4` `(RESERVED_WINDOW, 0)`, and every item field zero.
+fn exchange_record(sub_header: u8, is_me: bool, arg1: u64, arg2: (u8, u16)) -> Vec<u8> {
+    let mut record = vec![GC_EXCHANGE, sub_header, u8::from(is_me)];
+    record.extend_from_slice(&arg1.to_le_bytes());
+    record.push(arg2.0);
+    record.extend_from_slice(&arg2.1.to_le_bytes());
+    record.resize(EXCHANGE_LEN, 0);
+    record
+}
+
+/// The `EXCHANGE_SUBHEADER_GC_ITEM_ADD` for `count` of `vnum` from inventory `cell`, shown on
+/// display cell `display`, carrying `fields`, in `packet_exchange` field order.
+fn offered_record(is_me: bool, vnum: u32, (display, count, cell): (u16, u32, u16)) -> Vec<u8> {
+    let fields = RelayedFields::distinct();
+    let mut record = vec![GC_EXCHANGE, 1, u8::from(is_me)];
+    record.extend_from_slice(&u64::from(vnum).to_le_bytes());
+    record.push(0);
+    record.extend_from_slice(&display.to_le_bytes());
+    record.extend_from_slice(&count.to_le_bytes());
+    record.push(common::item_slots::EWindows::Inventory as u8);
+    record.extend_from_slice(&cell.to_le_bytes());
+    for socket in fields.sockets {
+        record.extend_from_slice(&socket.to_le_bytes());
+    }
+    for (kind, value) in fields.attributes {
+        record.push(kind);
+        record.extend_from_slice(&value.to_le_bytes());
+    }
+    record.extend_from_slice(&fields.refine_element.to_le_bytes());
+    record.extend_from_slice(&fields.transmutation.to_le_bytes());
+    assert_eq!(record.len(), EXCHANGE_LEN, "the expectation itself");
+    record
+}
+
+/// The trade scenario's two characters, on one spot of map 1: alice's Alpha, in empire 1, with
+/// 5000 gold and seven of `vnum` at cell 5 in item row 30, which carries every relayed field;
+/// and bob's Yankee, in empire 2, with 4000 gold.
+fn seat_the_traders(database: &ScratchDatabase, vnum: u32) {
+    add_characters(database);
+    sql(
+        database,
+        "UPDATE account SET empire = 2 WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y, gold) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000, 4000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "UPDATE player SET gold = 5000 WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 30, id, 1, 5, \
+             7, {vnum} FROM player WHERE name = 'Alpha'"
+        ),
+    );
+    RelayedFields::distinct().store(database, 30);
+}
+
+/// Alpha asks Yankee for a trade, offers the item, takes it back, offers it again, and offers
+/// 300 gold; Yankee offers more gold than it holds, then 1234. Each step's records are checked
+/// on both sides.
+fn make_the_offers(alice: &mut Keyed, bob: &mut Keyed, vnum: u32, (alpha, yankee): (u32, u32)) {
+    let (alpha, yankee) = (u64::from(alpha), u64::from(yankee));
+    // When: Alpha asks Yankee, with a VID whose upper half `Find(DWORD)` never reads. Then: the
+    // asked side's window opens first, each naming the other.
+    alice.send_record(&client_exchange(0, (0xdead_beef << 32) | yankee, 0, 0));
+    assert_eq!(bob.read_game(), exchange_record(0, false, alpha, NO_CELL));
+    assert_eq!(
+        alice.read_game(),
+        exchange_record(0, false, yankee, NO_CELL)
+    );
+
+    // When: Alpha offers the item on display cell 2, and takes back slot 0, named by a BYTE
+    // `arg1` whose next byte is set. Then: each side sees the offer and the removal, the other
+    // side's removal naming the item's cell.
+    alice.send_record(&client_exchange(1, 0, 2, 5));
+    assert_eq!(alice.read_game(), offered_record(true, vnum, (2, 7, 5)));
+    assert_eq!(bob.read_game(), offered_record(false, vnum, (2, 7, 5)));
+    alice.send_record(&client_exchange(2, 0x0100, 0, 0));
+    assert_eq!(alice.read_game(), exchange_record(2, true, 0, NO_CELL));
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    assert_eq!(
+        bob.read_game(),
+        exchange_record(2, false, 0, (inventory, 5))
+    );
+    alice.send_record(&client_exchange(1, 0, 3, 5));
+    assert_eq!(alice.read_game(), offered_record(true, vnum, (3, 7, 5)));
+    assert_eq!(bob.read_game(), offered_record(false, vnum, (3, 7, 5)));
+
+    // When: Alpha offers 300 gold, and Yankee one more than it holds, then 1234. Then: the
+    // short offer is answered to Yankee alone.
+    alice.send_record(&client_exchange(3, 300, 0, 0));
+    assert_eq!(alice.read_game(), exchange_record(3, true, 300, NO_CELL));
+    assert_eq!(bob.read_game(), exchange_record(3, false, 300, NO_CELL));
+    bob.send_record(&client_exchange(3, 4001, 0, 0));
+    assert_eq!(bob.read_game(), exchange_record(7, false, 0, NO_CELL));
+    alice.quiet("the other side is not told of a short offer");
+    bob.send_record(&client_exchange(3, 1234, 0, 0));
+    assert_eq!(bob.read_game(), exchange_record(3, true, 1234, NO_CELL));
+    assert_eq!(alice.read_game(), exchange_record(3, false, 1234, NO_CELL));
+}
+
+/// `cg.game.exchange`, `gc.exchange`, `sys.trade.exchange`, and the six `CInputMain::Exchange`
+/// arms (`G/input_main.cpp:1367-1527`): a trade opens both windows, shows each offer, a taken
+/// back item and each amount of gold to both sides, refuses more gold than the side holds, and
+/// settles when both sides accept (`CExchange::Accept`, `G/exchange.cpp:606-693`); a cancel
+/// ends a second trade for both sides.
+///
+/// The settlement stores both sides in one transaction before either side is sent anything
+/// (ADR-0003), so the store is checked as soon as the records arrive. `Done` runs first for
+/// Yankee, whose accept completed the trade: its gold goes to Alpha; then Alpha's item goes to
+/// Yankee's first free cell and Alpha's gold follows. The quickslot on the item's cell is
+/// deleted, and Alpha's logout save stores the slots the trade left.
+#[test]
+fn a_trade_moves_an_item_and_gold_between_two_players_in_one_transaction() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    let protos = owners_protos();
+    let vnum = a_stackable_use_vnum(&protos);
+    let proto = protos.get(vnum).expect("a proto");
+    assert_eq!(
+        proto.anti_flags & world::item::ITEM_ANTIFLAG_GIVE,
+        0,
+        "an item that may be given"
+    );
+    seat_the_traders(&database, vnum);
+    let (mut alice, alpha) = enter_world(&server, b"alice", 0);
+    let (mut bob, yankee) = enter_world(&server, b"bob", 0);
+    // Given: Alpha's slot 2 names the item's cell 5, and slot 6 skill 3.
+    alice.send_record(&client_quickslot_add(2, 1, 5));
+    assert_eq!(alice.read_game(), [GC_QUICKSLOT_ADD, 2, 1, 5]);
+    alice.send_record(&client_quickslot_add(6, 2, 3));
+    assert_eq!(alice.read_game(), [GC_QUICKSLOT_ADD, 6, 2, 3]);
+    make_the_offers(&mut alice, &mut bob, vnum, (alpha.id, yankee.id));
+
+    // When: Alpha accepts, then Yankee. Then: the first accept is shown to both sides, and the
+    // second settles the trade, stored before either side reads a record.
+    alice.send_record(&client_exchange(4, 0, 0, 0));
+    assert_eq!(alice.read_game(), exchange_record(4, true, 1, NO_CELL));
+    assert_eq!(bob.read_game(), exchange_record(4, false, 1, NO_CELL));
+    bob.send_record(&client_exchange(4, 0, 0, 0));
+    assert_eq!(bob.read_game(), gold_change(yankee.id, 0, 2766));
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Alpha') = 5934 AND (SELECT gold FROM player \
+         WHERE name = 'Yankee') = 3066 AND EXISTS (SELECT 1 FROM item WHERE id = 30 AND \
+         owner_id = (SELECT id FROM player WHERE name = 'Yankee') AND window_type = 1 AND pos \
+         = 0 AND count = 7)",
+    );
+    // The item reaches Yankee's first free cell whole, highlighted because Yankee never held it.
+    let mut received = RelayedFields::distinct().item_set(proto, 0, 7);
+    received[26] = 1;
+    assert_eq!(bob.read_game(), received);
+    assert_eq!(bob.read_game(), gold_change(yankee.id, 300, 3066));
+    let done = |empire, other: &[u8]| {
+        let mut text = b"The exchange with ".to_vec();
+        text.extend_from_slice(other);
+        text.extend_from_slice(b" has been completed.");
+        chat_packet(prodomo::chat::CHAT_INFO, empire, &text)
+    };
+    assert_eq!(bob.read_game(), done(2, b"Alpha"));
+    assert_eq!(bob.read_game(), exchange_record(5, false, 0, NO_CELL));
+    assert_eq!(alice.read_game(), gold_change(alpha.id, 1234, 6234));
+    // The slot on the item's cell is deleted before the clear (`G/exchange.cpp:543`).
+    assert_eq!(alice.read_game(), [GC_QUICKSLOT_DEL, 2]);
+    assert_eq!(alice.read_game(), a_clear_record(5));
+    assert_eq!(alice.read_game(), gold_change(alpha.id, 0, 5934));
+    assert_eq!(alice.read_game(), done(1, b"Yankee"));
+    assert_eq!(alice.read_game(), exchange_record(5, false, 0, NO_CELL));
+    alice.quiet("the trade is over");
+    bob.quiet("the trade is over");
+
+    // When: Yankee asks Alpha, and Alpha cancels. Then: Alpha's window opens first, and the
+    // cancel ends both; an accept after it answers nothing.
+    bob.send_record(&client_exchange(0, u64::from(alpha.id), 0, 0));
+    let started = |other: u32| exchange_record(0, false, u64::from(other), NO_CELL);
+    assert_eq!(alice.read_game(), started(yankee.id));
+    assert_eq!(bob.read_game(), started(alpha.id));
+    alice.send_record(&client_exchange(5, 0, 0, 0));
+    assert_eq!(alice.read_game(), exchange_record(5, false, 0, NO_CELL));
+    assert_eq!(bob.read_game(), exchange_record(5, false, 0, NO_CELL));
+    bob.unanswered(&client_exchange(4, 0, 0, 0));
+    alice.quiet("an accept with no trade reaches nobody");
+
+    // When: Yankee leaves and comes back. Then: the save leaves the traded gold alone, and the
+    // load finds the item at its new cell with every relayed field and no highlight.
+    drop(bob);
+    server.wait_for("Character disconnected; wrote the row");
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Yankee') = 3066",
+    );
+    let (_bob, _yankee, items) = load_character(&server, b"bob", 0);
+    assert_eq!(items, [RelayedFields::distinct().item_set(proto, 0, 7)]);
+
+    // When: Alpha leaves. Then: the save stores the slots the world holds, which the trade
+    // Yankee closed changed after Alpha's descriptor last held them: slot 2 is gone.
+    drop(alice);
+    wait_for(
+        &database,
+        "(SELECT array_agg((slot, kind, pos) ORDER BY slot)::text FROM quickslot WHERE \
+         player_id = (SELECT id FROM player WHERE name = 'Alpha')) = '{\"(6,2,3)\"}'",
+    );
 }

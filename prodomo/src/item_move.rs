@@ -85,9 +85,19 @@ pub struct MovedItems {
     pub points: Option<Points>,
     /// The mover's quickslots after the step's syncs, which the descriptor saves.
     pub quickslots: Option<Quickslots>,
-    /// The mover's gold after a step that paid or was paid, which the row changes' transaction
-    /// stores with them.
-    pub gold: Option<u64>,
+    /// How much a step that paid or was paid changed the mover's gold, which the row changes'
+    /// transaction adds to the stored gold with them.
+    pub gold: Option<i64>,
+}
+
+/// The change from `before` to `after` that a Transfer adds to the stored gold.
+///
+/// Held gold never passes `GOLD_MAX_MAX`, which is below `i64::MAX`, so the change always
+/// fits; were it not to, the saturated change is one the store refuses.
+#[must_use]
+pub fn gold_delta(before: u64, after: u64) -> i64 {
+    let change = i128::from(after) - i128::from(before);
+    i64::try_from(change).unwrap_or(if change < 0 { i64::MIN } else { i64::MAX })
 }
 
 impl MovedItems {
@@ -271,6 +281,15 @@ pub fn row_changes(owner_id: u32, changes: &[ItemChange]) -> Vec<RowChange> {
                 id: *id,
                 sockets: *sockets,
             },
+            ItemChange::Given { id, to, pos } => {
+                let (window_type, pos) = stored_row_position(*pos);
+                RowChange::Given {
+                    id: *id,
+                    to: *to,
+                    window_type,
+                    pos,
+                }
+            }
         })
         .collect()
 }

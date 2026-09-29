@@ -61,8 +61,10 @@ use prodomo::client_live::{
 use prodomo::client_registry::{ChannelClients, ClientEntry, Lease, PositionTable};
 use prodomo::client_session::ClientPhase;
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
-use prodomo::game_loop_messages::{GameLoopController, GameLoopTerminal, GroundPlace};
-use prodomo::game_state::{world_item_id_range, GameState, ShopAnswer, ShopStep};
+use prodomo::game_loop_messages::{GameLoopController, GameLoopTerminal, GroundPlace, Kept};
+use prodomo::game_state::{
+    world_item_id_range, GameState, ShopAnswer, ShopStep, TradeAnswer, TradeSettled, TradeStep,
+};
 use prodomo::handshake::HandshakeServerKind;
 use prodomo::item_load::plan_item_load;
 use prodomo::item_move::{MoveItemRefused, Mover};
@@ -93,13 +95,15 @@ use protocol::cg_account::{
     CgEnterGame, CgLoginByKey, CgPlayerCreate, CgPlayerDelete, CgPlayerSelect,
 };
 use protocol::cg_chat::CgChat;
+use protocol::cg_exchange::CgExchange;
 use protocol::cg_inventory::{
     HEADER_CG_CHANGE_NAME, HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE,
     HEADER_CG_CHARACTER_POSITION, HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_EMPIRE,
-    HEADER_CG_ENTERGAME, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_MOVE,
-    HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_MOVE,
-    HEADER_CG_ON_CLICK, HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP,
-    HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYNC_POSITION,
+    HEADER_CG_ENTERGAME, HEADER_CG_EXCHANGE, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2,
+    HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_LOGIN2,
+    HEADER_CG_LOGIN3, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_QUICKSLOT_ADD,
+    HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER,
+    HEADER_CG_SYNC_POSITION,
 };
 use protocol::cg_item_drop::CgItemDrop;
 use protocol::cg_item_drop2::CgItemDrop2;
@@ -472,12 +476,11 @@ async fn handle_connection(
     // placed into an inventory the world is about to release.
     if let Some(world_vid) = held.world.take() {
         match context.game.leave_world(world_vid).await {
-            // The world's points are the ones the save writes: the potion recovery changes
-            // them on the world's pulse, after the last step this descriptor held.
+            // The world's points and quickslots are the ones the save writes: the potion
+            // recovery changes the points on the world's pulse, after the last step this
+            // descriptor held, and a trade the partner closed the quickslots.
             Ok(Some(departed)) => {
-                if let Some(points) = departed.points {
-                    hold_points(&mut held, points);
-                }
+                hold_kept(&mut held, departed);
                 info!(%addr, vid = world_vid.raw(), "Character left the world");
             }
             // A leave that found nobody is a descriptor that never entered, which the
@@ -686,16 +689,24 @@ fn hold_points(held: &mut Held, points: world::character::Points) {
     held.points = Some(points);
 }
 
-/// Hold the points the world holds for this descriptor's character, which the save writes
-/// from. The world changes them on its own pulse (the potion recovery), so the copy the last
-/// item step left can be stale. A world that cannot answer leaves the held copy, which is
-/// still a state the character was in.
+/// Hold the points and quickslots the world holds for a character.
+fn hold_kept(held: &mut Held, kept: Kept) {
+    if let Some(points) = kept.points {
+        hold_points(held, points);
+    }
+    held.quickslots = kept.quickslots;
+}
+
+/// Hold the points and quickslots the world holds for this descriptor's character, which the
+/// save writes from. The world changes them on its own (the potion recovery on its pulse, a
+/// trade the partner closes), so the copy the last item step left can be stale. A world that
+/// cannot answer leaves the held copy, which is still a state the character was in.
 async fn hold_world_points(context: &ConnectionContext, addr: SocketAddr, held: &mut Held) {
     let Some(vid) = held.world else {
         return;
     };
-    match context.game.points_of(vid).await {
-        Ok(Some(points)) => hold_points(held, points),
+    match context.game.kept_of(vid).await {
+        Ok(Some(kept)) => hold_kept(held, kept),
         Ok(None) => {}
         Err(error) => warn!(%addr, %error, "The world could not be asked for the points to save"),
     }
@@ -1094,8 +1105,8 @@ fn descriptor_language(account: Option<&SelectAccount>) -> u8 {
 
 /// Store, send and broadcast what one item step did, or send the notice for its refusal.
 ///
-/// The rows are written in one transaction before any record is sent, with the gold a buy or a
-/// sale left. The result is whether the descriptor stays open.
+/// The rows are written in one transaction before any record is sent, with the change a buy or
+/// a sale made to the gold. The result is whether the descriptor stays open.
 async fn finish_item_step<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -1141,13 +1152,6 @@ where
     if let Err(error) = stored {
         warn!(%addr, %error, kind = ?moved.kind, "The item step could not be stored; closing");
         return false;
-    }
-    if let Some(gold) = moved.gold {
-        // The save writes the gold the descriptor holds, so it holds what the store now has.
-        // `apply_transfer` refused anything past `i64::MAX`, so this always converts.
-        if let (Some(character), Ok(gold)) = (held.character.as_mut(), i64::try_from(gold)) {
-            character.gold = gold;
-        }
     }
     if let Some(points) = moved.points {
         hold_points(held, points);
@@ -1848,6 +1852,12 @@ where
         {
             shop_step(session, addr, context, held, &frame).await
         }
+        // `CG_EXCHANGE` (27) in the game phase.
+        LiveStep::Record { phase, frame }
+            if phase == ClientPhase::Game && frame.header == HEADER_CG_EXCHANGE.value() =>
+        {
+            trade_step(session, addr, context, held, &frame).await
+        }
         step => report_step(addr, step),
     }
 }
@@ -1917,7 +1927,108 @@ where
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
-/// Send the records a shop step that stored nothing answers; `false` when the session stopped.
+/// `CG_EXCHANGE` (27) in the game phase: `CInputMain::Exchange` (`G/input_main.cpp:1367-1527`).
+///
+/// The world runs the step and writes the other side's records to its client. A trade both
+/// sides accepted is stored for both in one transaction before either is sent its moves; a
+/// malformed record closes the connection.
+async fn trade_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let step = match CgExchange::decode_frame(frame) {
+        Ok(record) => TradeStep::requested(record),
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed exchange record; closing");
+            return false;
+        }
+    };
+    let Some(step) = step else {
+        let subheader = frame.payload.first();
+        info!(%addr, ?subheader, "Client sent an unknown EXCHANGE subheader; ignoring");
+        return true;
+    };
+    let (Some(vid), Some(place)) = (held.world, ground_place(held)) else {
+        info!(%addr, ?step, "Trade step without a character in the world; ignoring");
+        return true;
+    };
+    match context.game.trade(vid, step, place, item_actor(held)).await {
+        Ok(Ok(TradeAnswer::Sent(records))) => {
+            info!(%addr, ?step, "Trade step answered");
+            send_shop_records(session, addr, &records).await
+        }
+        Ok(Ok(TradeAnswer::Declined { reason, records })) => {
+            info!(%addr, ?step, ?reason, "Trade step declined");
+            send_shop_records(session, addr, &records).await
+        }
+        Ok(Ok(TradeAnswer::Settled(settled))) => {
+            finish_trade(session, addr, context, held, *settled).await
+        }
+        Ok(Err(refused)) => {
+            warn!(%addr, %refused, "The world does not hold this descriptor's character; closing");
+            false
+        }
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a trade step; closing");
+            false
+        }
+    }
+}
+
+/// Store both sides of a settled trade in one transaction (ADR-0003), then send the other
+/// side's records to its client and this side's to this one.
+///
+/// The world has settled the trade already, so a failed write closes this descriptor and the
+/// other side keeps what the world gave it until it relogs.
+async fn finish_trade<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    settled: TradeSettled,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let TradeSettled {
+        own,
+        partner,
+        partner_outbox,
+    } = settled;
+    let sides = [&own, &partner].map(|moved| db::items::TransferSide {
+        owner_id: moved.owner_id,
+        changes: &moved.changes,
+        gold: moved.gold.unwrap_or(0),
+    });
+    if let Err(error) = db::items::apply_exchange(&context.store, &sides).await {
+        warn!(%addr, %error, "The trade could not be stored; closing");
+        return false;
+    }
+    let rows = own.changes.len() + partner.changes.len();
+    if let Some(quickslots) = own.quickslots {
+        held.quickslots = quickslots;
+    }
+    if let Some(outbox) = partner_outbox {
+        for record in partner.records {
+            let _sent = outbox.send(record);
+        }
+    }
+    if let Err(error) = send_all(session, &own.records).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    info!(%addr, rows, "Trade settled");
+    true
+}
+
+/// Send the records a shop or trade step that stored nothing answers; `false` when the session
+/// stopped.
 async fn send_shop_records<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -3695,7 +3806,7 @@ fn connection_context(
     store: &Store,
     listeners: &Listeners,
     data: GameData,
-    clients: Arc<ChannelClients>,
+    (clients, positions): (Arc<ChannelClients>, Arc<PositionTable>),
     game: GameLoopController,
 ) -> ConnectionContext {
     // Every legacy game Core reported its own client port (`mother_port`) to the status list; the
@@ -3732,7 +3843,7 @@ fn connection_context(
         handles: Arc::new(AtomicU32::new(0)),
         names: Arc::new(data.names),
         clients,
-        positions: Arc::new(PositionTable::new()),
+        positions,
         creates: Arc::new(CreateCooldown::default()),
         block_char_creation: config.game.block_char_creation,
         delete_levels: (
@@ -3821,12 +3932,15 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     // One client registry serves the descriptors and the world, which tells a map when an item
     // on its ground is destroyed.
     let clients = Arc::new(ChannelClients::new());
+    // One position table too, which a trade finds and measures the other player in.
+    let positions = Arc::new(PositionTable::new());
     let mut game_state = GameState::new(Arc::clone(&data.protos))
         .with_item_count_limit(config.game.item_count_limit)
         .with_npc_shops(Arc::clone(&data.shops))
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
         .with_drop_lifetime(config.game.item_destroy_time_dropitem)
         .with_clients(Arc::clone(&clients))
+        .with_positions(Arc::clone(&positions))
         .with_locale_strings(Arc::clone(&data.locale));
     stand_up_npcs(&mut game_state, &data.npcs)?;
     let mut game_loop = spawn_game_loop(GameLoopConfig::default(), game_state)?;
@@ -3843,7 +3957,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
             &store,
             &listeners,
             data,
-            clients,
+            (clients, positions),
             controller.clone(),
         ),
     };

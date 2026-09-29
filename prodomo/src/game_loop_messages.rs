@@ -13,7 +13,9 @@ use world::item::Item;
 use world::npc::MapNpcs;
 
 use crate::client_registry::ClientOutbox;
-use crate::game_state::{EnterWorldRefused, Released, RevokeRefused, ShopAnswer, ShopStep};
+use crate::game_state::{
+    EnterWorldRefused, Released, RevokeRefused, ShopAnswer, ShopStep, TradeAnswer, TradeStep,
+};
 use crate::item_grant::{GrantOutcome, GrantRefusal, GrantRequest};
 use crate::item_move::{MoveItemRefused, MovedItems, Mover};
 use crate::quickslot::{QuickslotAnswer, QuickslotStep};
@@ -283,7 +285,7 @@ pub enum GameCommand {
         /// A `None` is not fatal to a disconnect: the descriptor is ending anyway,
         /// and legacy logs the same "already gone" case rather than refusing the
         /// close. It is still reported so a double leave is visible.
-        reply: oneshot::Sender<Option<Departed>>,
+        reply: oneshot::Sender<Option<Kept>>,
     },
     /// Runs one client quickslot request for the character online under `vid`.
     Quickslot {
@@ -295,15 +297,15 @@ pub enum GameCommand {
         /// hold the character.
         reply: oneshot::Sender<Option<QuickslotAnswer>>,
     },
-    /// Answers the points of the character online under `vid`, which the descriptor's
-    /// save writes from: the world changes them on its own pulse too (the potion
-    /// recovery), so the copy the descriptor held after its last step can be stale.
-    PointsOf {
+    /// Answers the points and quickslots of the character online under `vid`, which the
+    /// descriptor's save writes from: the world changes them on its own too (the potion
+    /// recovery on its pulse, a trade the partner closes), so the copy the descriptor held
+    /// after its last step can be stale.
+    KeptOf {
         /// The VID the character entered the world under.
         vid: common::vid::Vid,
-        /// Where the game thread reports the points, `None` when it does not hold the
-        /// character or the character has none.
-        reply: oneshot::Sender<Option<Points>>,
+        /// Where the game thread reports them, `None` when it does not hold the character.
+        reply: oneshot::Sender<Option<Kept>>,
     },
     /// Writes one record to a character's client from the thread that owns the world.
     ///
@@ -409,6 +411,20 @@ pub enum GameCommand {
         mover: Mover,
         /// Where the game thread reports what the step did.
         reply: oneshot::Sender<Result<ShopAnswer, MoveItemRefused>>,
+    },
+    /// Runs one trade step for the character online under `vid`: a start, an offer, an accept
+    /// or a cancel.
+    Trade {
+        /// The VID of the character whose client sent the step.
+        vid: common::vid::Vid,
+        /// The step.
+        step: TradeStep,
+        /// Where the character stands.
+        place: GroundPlace,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the step did.
+        reply: oneshot::Sender<Result<TradeAnswer, MoveItemRefused>>,
     },
     /// Requests terminal loop shutdown.
     Stop,
@@ -662,12 +678,15 @@ pub struct Loaded {
     pub gold: u64,
 }
 
-/// What the world hands back when a character leaves it.
+/// What the world holds of a character that a save writes: asked for before a save, and
+/// handed back when the character leaves.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Departed {
-    /// The character's points as the world last changed them, which the final save writes.
-    /// `None` for a character that entered without them.
+pub struct Kept {
+    /// The character's points as the world last changed them. `None` for a character that
+    /// entered without them.
     pub points: Option<Points>,
+    /// Its quickslots, which a trade the partner closes changes.
+    pub quickslots: Quickslots,
 }
 
 /// Why installing the item id allocator did not succeed.
@@ -940,7 +959,7 @@ impl GameLoopController {
     pub async fn leave_world(
         &self,
         vid: common::vid::Vid,
-    ) -> Result<Option<Departed>, LeaveWorldError> {
+    ) -> Result<Option<Kept>, LeaveWorldError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::LeaveWorld { vid, reply })
             .await
@@ -966,15 +985,15 @@ impl GameLoopController {
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 
-    /// Asks the world for the points of the character online under `vid`, which a save
-    /// writes from.
+    /// Asks the world for the points and quickslots of the character online under `vid`,
+    /// which a save writes from.
     ///
     /// # Errors
     ///
     /// As [`Self::move_item`].
-    pub async fn points_of(&self, vid: common::vid::Vid) -> Result<Option<Points>, MoveItemError> {
+    pub async fn kept_of(&self, vid: common::vid::Vid) -> Result<Option<Kept>, MoveItemError> {
         let (reply, answer) = oneshot::channel();
-        self.send_command(GameCommand::PointsOf { vid, reply })
+        self.send_command(GameCommand::KeptOf { vid, reply })
             .await
             .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
@@ -1144,6 +1163,31 @@ impl GameLoopController {
     ) -> Result<Result<ShopAnswer, MoveItemRefused>, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::Shop {
+            vid,
+            step,
+            place,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one trade step, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn trade(
+        &self,
+        vid: common::vid::Vid,
+        step: TradeStep,
+        place: GroundPlace,
+        mover: Mover,
+    ) -> Result<Result<TradeAnswer, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Trade {
             vid,
             step,
             place,

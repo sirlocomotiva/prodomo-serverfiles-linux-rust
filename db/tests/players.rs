@@ -650,6 +650,13 @@ async fn a_whole_row_save_is_what_the_next_load_reads() {
     let hero = created(store, alice, 0, "Hero").await;
     let other = created(store, bob, 0, "Other").await;
 
+    // The gold a Transfer left, which the save must not touch.
+    db::sqlx::query("UPDATE player SET gold = $2 WHERE id = $1")
+        .bind(i32::try_from(hero).unwrap())
+        .bind(0x0012_3456_789a_bcde_i64)
+        .execute(store.pool())
+        .await
+        .unwrap();
     let save = PlayerSave {
         level: 41,
         exp: 0x0102_0304_0506,
@@ -662,7 +669,6 @@ async fn a_whole_row_save_is_what_the_next_load_reads() {
         hp: 0x0012_3456,
         sp: 0x00ab_cdef,
         stamina: 0x0011_2233,
-        gold: 0x0012_3456_789a_bcde,
         voice: 77,
         part_base: 3,
         main_part: 0x1122,
@@ -689,7 +695,10 @@ async fn a_whole_row_save_is_what_the_next_load_reads() {
     assert_eq!(read.hp, save.hp);
     assert_eq!(read.sp, save.sp);
     assert_eq!(read.stamina, save.stamina);
-    assert_eq!(read.gold, save.gold);
+    assert_eq!(
+        read.gold, 0x0012_3456_789a_bcde,
+        "the save leaves the gold alone"
+    );
     assert_eq!(read.voice, save.voice);
     assert_eq!(read.part_base, save.part_base);
     assert_eq!(read.main_part, save.main_part);
@@ -726,7 +735,6 @@ async fn a_save_names_the_account_and_refuses_a_wide_player_id() {
         hp: 1,
         sp: 1,
         stamina: 1,
-        gold: 1,
         voice: 1,
         part_base: 1,
         main_part: 1,

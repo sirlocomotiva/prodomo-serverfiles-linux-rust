@@ -372,6 +372,12 @@ pub async fn save_position(
 /// legacy does: `CreatePlayerProto` clears the table with `memset` and fills every field, so a
 /// write is a full replacement and a missing column is a value legacy would have preserved
 /// from its own read.
+///
+/// The gold is the one column a live session changes that a save does not write. Only a
+/// Transfer writes it (ADR-0003), adding to what the row holds in the same transaction as the
+/// items, and a save writes a copy taken before it runs: a save that wrote the gold it held
+/// could put back gold a Transfer that committed in between had already spent or paid, and
+/// the items would no longer match it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerSave {
     /// `tab.level`.
@@ -396,8 +402,6 @@ pub struct PlayerSave {
     pub sp: i32,
     /// `POINT_STAMINA`.
     pub stamina: i32,
-    /// `tab.gold`, carried in `__ENABLE_GAYA_SYSTEM__` as `tab.gaya` as well.
-    pub gold: i64,
     /// `tab.voice`, which is `POINT_VOICE`.
     pub voice: u8,
     /// `tab.part_base`, a `BYTE` from `m_pointsInstant.bBasePart`.
@@ -442,9 +446,9 @@ pub async fn save_character(
     let player_id = i32::try_from(player).map_err(|_| AccountError::NoSuchPlayer(player))?;
     let updated = sqlx::query(
         "UPDATE player SET level = $3, exp = $4, conqueror_level = $5, conqueror_exp = $6, \
-         st = $7, ht = $8, dx = $9, iq = $10, hp = $11, sp = $12, stamina = $13, gold = $14, \
-         voice = $15, part_base = $16, part_main = $17, part_hair = $18, part_sash = $19, \
-         x = $20, y = $21, skill_group = $22, playtime_minutes = $23 \
+         st = $7, ht = $8, dx = $9, iq = $10, hp = $11, sp = $12, stamina = $13, \
+         voice = $14, part_base = $15, part_main = $16, part_hair = $17, part_sash = $18, \
+         x = $19, y = $20, skill_group = $21, playtime_minutes = $22 \
          WHERE account_id = $1 AND id = $2",
     )
     .bind(account.to_column()?)
@@ -460,7 +464,6 @@ pub async fn save_character(
     .bind(save.hp)
     .bind(save.sp)
     .bind(save.stamina)
-    .bind(save.gold)
     .bind(i16::from(save.voice))
     .bind(i16::from(save.part_base))
     .bind(i32::from(save.main_part))

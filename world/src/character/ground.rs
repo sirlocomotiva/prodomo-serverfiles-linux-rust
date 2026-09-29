@@ -8,8 +8,9 @@
 //!
 //! Not ported, and each is the caller's or a later ledger's: gold on the ground, the drop
 //! time limit (the descriptor keeps it), ownership (a player's drop has no owner, so anyone
-//! may pick it up), the party share, the quest hooks, the exchange and lock checks, and the
-//! item log.
+//! may pick it up), the party share, the quest hooks, the lock check, and the item log. A drop
+//! of an item offered in a trade is refused silently (`IsExchanging`, `:7473`); a pickup may
+//! still join an offered stack, as legacy's does.
 
 use common::item_slots::{
     EWindows, CUSTOM_INVENTORY_SLOT_END, CUSTOM_INVENTORY_SLOT_START, INVENTORY_MAX_NUM,
@@ -87,7 +88,8 @@ pub struct DropAt {
 ///
 /// # Errors
 ///
-/// [`MoveRefused::InvalidSource`], [`MoveRefused::Empty`], [`MoveRefused::Undroppable`],
+/// [`MoveRefused::InvalidSource`], [`MoveRefused::Empty`], [`MoveRefused::Exchanging`],
+/// [`MoveRefused::Undroppable`],
 /// [`MoveRefused::NoItemIds`] or [`MoveRefused::IdsExhausted`] for a part-stack, and
 /// [`MoveRefused::NotPorted`] for a window other than the inventory or a worn item. Nothing
 /// changes on any of them.
@@ -107,6 +109,9 @@ pub fn drop_item(
         )));
     }
     let item = items.item_at(at).cloned().ok_or(MoveRefused::Empty)?;
+    if items.is_exchanging(item.id) {
+        return Err(MoveRefused::Exchanging);
+    }
     if item.anti_flags & (ITEM_ANTIFLAG_DROP | ITEM_ANTIFLAG_GIVE) != 0 {
         return Err(MoveRefused::Undroppable);
     }
@@ -491,6 +496,20 @@ mod tests {
         }
         assert_eq!(items, before);
         assert_eq!(MoveRefused::Undroppable.notice(), Some("[LS;442]"));
+    }
+
+    #[test]
+    fn an_item_offered_in_a_trade_is_not_dropped() {
+        let mut items = holding(&[(4, Item::new(8, SWORD)), (6, arrows(9, 20))]);
+        assert!(items.set_exchanging(8, true) && items.set_exchanging(9, true));
+        let before = items.clone();
+        for (at, count) in [(inv(4), 0), (inv(6), 5)] {
+            let dropped = drop_item(&mut items, None, at, count, TO);
+            assert_eq!(dropped, Err(MoveRefused::Exchanging), "{at:?}");
+        }
+        assert_eq!(items, before);
+        assert!(items.set_exchanging(8, false));
+        assert!(drop_item(&mut items, None, inv(4), 0, TO).is_ok());
     }
 
     #[test]

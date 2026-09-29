@@ -26,11 +26,12 @@
 //! and the look too, so a [`MoveDone`] carries [`MoveRecord`]s, not only item records. A path
 //! that changes something and then fails ends [`MoveKind::Declined`], with what it did.
 //!
-//! Five legacy checks have nothing to test yet and are left out: `IsExchanging`,
-//! `isLocked`, `CanHandleItem`, `IsSecured`, and the observer mode. The quickslot sync and
-//! the `ITEM_SPLIT` log are the caller's.
+//! Four legacy checks have nothing to test yet and are left out: `isLocked`,
+//! `CanHandleItem`, `IsSecured`, and the observer mode. The quickslot sync and the
+//! `ITEM_SPLIT` log are the caller's. An item offered in a trade is refused silently
+//! (`IsExchanging`, `:7618`), after the lookup and before the count, as legacy does.
 //!
-//! # Four Defects this does not reproduce
+//! # Five Defects this does not reproduce
 //!
 //! 1. **The auto-find notice is never sent.** `wFindCell` is a `WORD`, so
 //!    `wFindCell != -1` compares 65535 with -1 and is always true
@@ -49,6 +50,10 @@
 //! 4. **`ITEM_FLAG_IRREMOVABLE` is tested only for window 1** (`:7625`), so the same cell
 //!    addressed through window 2 moves an irremovable item out. Here both windows are
 //!    tested.
+//! 5. **A stack offered in a trade can be merged into.** The merge tests the source's
+//!    `IsExchanging` and never the target's (`:7786`), so a player can grow a stack the other
+//!    side has already seen offered. The use paths test both (`@fixme114`, `:3106`); here the
+//!    move does too, and an offered target is refused silently.
 //!
 //! The auto-find's base search is bounded by the usable cells rather than by
 //! `INVENTORY_MAX_NUM`, the same Divergence [`CharacterItems::find_free_inventory_cell`]
@@ -141,6 +146,8 @@ pub enum MoveKind {
     Bought,
     /// An item, or part of its stack, went to a shop for gold (`CShopManager::Sell`).
     Sold,
+    /// A trade went through: the offered items and gold changed hands (`CExchange::Done`).
+    Traded,
 }
 
 /// A record the client is sent, in the order legacy sends it.
@@ -248,6 +255,15 @@ pub enum ItemChange {
         id: ItemId,
         /// Its sockets now.
         sockets: [i32; crate::item::SOCKETS],
+    },
+    /// A trade gave the item to another character, which stores it here.
+    Given {
+        /// The item.
+        id: ItemId,
+        /// The store id of the character that holds it now.
+        to: u32,
+        /// Where that character stores it.
+        pos: ItemPos,
     },
 }
 
@@ -391,6 +407,8 @@ pub enum MoveRefused {
     TooFar,
     /// `UseItemEx`: the potion's pools are full, or the recovery already fills them.
     NothingToRecover,
+    /// `IsExchanging`: the item, or the stack a merge would join, is offered in a trade.
+    Exchanging,
 }
 
 impl MoveRefused {
@@ -528,6 +546,7 @@ impl core::fmt::Display for MoveRefused {
             Self::NotOnGround => f.write_str("no such item lies on this map"),
             Self::TooFar => f.write_str("the ground item is too far away"),
             Self::NothingToRecover => f.write_str("the potion has nothing to recover"),
+            Self::Exchanging => f.write_str("the item is offered in a trade"),
         }
     }
 }
@@ -572,6 +591,9 @@ pub fn move_item(
         )));
     }
     let item = items.item_at(from).cloned().ok_or(MoveRefused::Empty)?;
+    if items.is_exchanging(item.id) {
+        return Err(MoveRefused::Exchanging);
+    }
     if item.count < count {
         return Err(MoveRefused::CountAboveStack {
             held: item.count,
@@ -793,6 +815,9 @@ fn grid_move(
         .filter(|target| target.id != item.id && target.stacks() && target.vnum == item.vnum)
         .cloned()
     {
+        if items.is_exchanging(target.id) {
+            return Err(MoveRefused::Exchanging);
+        }
         if target.sockets != item.sockets {
             return Err(MoveRefused::SocketsDiffer);
         }
@@ -1267,6 +1292,29 @@ mod tests {
             move_item(&mut items, Some(&mut ids), request, &RULES, None, |_| None),
             Err(MoveRefused::UnknownVnum(27001))
         );
+    }
+
+    #[test]
+    fn an_item_offered_in_a_trade_neither_moves_nor_takes_a_merge() {
+        let placed = [
+            (at(INV, 3), stack(7, 27001, 5)),
+            (at(INV, 4), stack(8, 27001, 100)),
+        ];
+        let mut items = holding(&placed);
+        assert!(items.set_exchanging(7, true));
+        for (to, count) in [(at(INV, 9), 0), (at(INV, 4), 0), (at(INV, 9), 6)] {
+            let reason = refused(&mut items, at(INV, 3), to, count, facts(&[]));
+            assert_eq!(reason, MoveRefused::Exchanging, "to {to:?}, {count}");
+        }
+        let mut items = holding(&placed);
+        assert!(items.set_exchanging(8, true));
+        assert_eq!(
+            refused(&mut items, at(INV, 3), at(INV, 4), 0, facts(&[])),
+            MoveRefused::Exchanging
+        );
+        assert!(run(&mut items, at(INV, 3), at(INV, 9), 0, facts(&[])).is_ok());
+        let mut items = holding(&placed);
+        assert!(run(&mut items, at(INV, 3), at(INV, 4), 0, facts(&[])).is_ok());
     }
 
     #[test]

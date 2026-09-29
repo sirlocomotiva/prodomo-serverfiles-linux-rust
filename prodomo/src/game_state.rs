@@ -37,7 +37,7 @@ use gamedata::regen::RegenEntry;
 use world::character::{
     drop_item, is_recovering, move_item, pickup_item, update_recovery, use_item, CharacterManager,
     CharacterManagerError, DropAt, Gear, GroundItem, GroundRecord, MoveRefused, MoveRequest,
-    MoveRules, Pcg32, Picker, Rejected,
+    MoveRules, Pcg32, Picker, Rejected, Side,
 };
 use world::item::{ItemIdRange, ItemIds};
 use world::npc::{MapNpcs, NpcSpawner, NpcVidsExhausted};
@@ -45,9 +45,9 @@ use world::npc::{MapNpcs, NpcSpawner, NpcVidsExhausted};
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
-use crate::client_registry::{ChannelClients, ClientOutbox};
+use crate::client_registry::{ChannelClients, ClientOutbox, PositionTable};
 use crate::game_loop::PulseProcessor;
-use crate::game_loop_messages::{Departed, GameCommand, GroundPlace};
+use crate::game_loop_messages::{GameCommand, GroundPlace, Kept};
 use crate::item_grant::{grant_item, GrantOutcome, GrantRefusal, GrantRequest};
 use crate::item_move::{belt_grade, ground_record, move_facts, MoveItemRefused, MovedItems, Mover};
 use crate::loading_phase::point_changes;
@@ -57,8 +57,14 @@ use crate::sync_position::distance_approx;
 use world::character::{add_from_client, sync_quickslots};
 
 mod shop;
+mod trade;
 
 pub use shop::{ShopAnswer, ShopDeclined, ShopStep};
+pub use trade::{
+    TradeAnswer, TradeDeclined, TradeSettled, TradeStep, EXCHANGE_SUBHEADER_CG_ACCEPT,
+    EXCHANGE_SUBHEADER_CG_CANCEL, EXCHANGE_SUBHEADER_CG_ELK_ADD, EXCHANGE_SUBHEADER_CG_ITEM_ADD,
+    EXCHANGE_SUBHEADER_CG_ITEM_DEL, EXCHANGE_SUBHEADER_CG_START,
+};
 
 /// `PickupItem`'s `DistanceValid` bound (`G/item.cpp:593`), checked at `G/char_item.cpp:7982`.
 const PICKUP_DISTANCE: i32 = 300;
@@ -366,6 +372,13 @@ pub struct GameState {
     shop_price_3x_disabled: bool,
     /// The keeper each character browses, keyed by its VID.
     browsing: HashMap<common::vid::Vid, shop::Browsing>,
+    /// Where every player of the process stands, which a trade finds and measures the other
+    /// player in.
+    positions: Option<Arc<PositionTable>>,
+    /// The open trades, keyed by the VID of the character that started each.
+    trades: BTreeMap<u32, trade::Deal>,
+    /// The trade each trading character is in and its side of it, keyed by its VID.
+    trading: HashMap<common::vid::Vid, (u32, Side)>,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -429,6 +442,9 @@ impl GameState {
             shops: Arc::default(),
             shop_price_3x_disabled: false,
             browsing: HashMap::new(),
+            positions: None,
+            trades: BTreeMap::new(),
+            trading: HashMap::new(),
         }
     }
 
@@ -655,19 +671,19 @@ impl GameState {
                     debug!(?vid, "nobody was left to hear a quickslot answer");
                 }
             }
-            GameCommand::PointsOf { vid, reply } => {
-                let points = self
-                    .characters
-                    .find_by_vid(vid)
-                    .ok()
-                    .and_then(|character| character.points().cloned());
-                if reply.send(points).is_err() {
+            GameCommand::KeptOf { vid, reply } => {
+                let kept = self.characters.find_by_vid(vid).ok().map(|character| Kept {
+                    points: character.points().cloned(),
+                    quickslots: character.quickslots().clone(),
+                });
+                if reply.send(kept).is_err() {
                     debug!(?vid, "nobody was left to hear a character's points");
                 }
             }
             command @ (GameCommand::MoveItem { .. }
             | GameCommand::UseItem { .. }
-            | GameCommand::Shop { .. }) => self.apply_item_step(command),
+            | GameCommand::Shop { .. }
+            | GameCommand::Trade { .. }) => self.apply_item_step(command),
             command @ (GameCommand::DropItem { .. }
             | GameCommand::PickupItem { .. }
             | GameCommand::GroundItemsOn { .. }
@@ -858,21 +874,27 @@ impl GameState {
     /// the last time after this returns, and anything the world still held would be
     /// released by the destruction and the row would still name it.
     ///
-    /// Answers the character's points as the world last changed them, which the final
-    /// save writes: the recovery event changes them on the world's own pulse, after the
-    /// descriptor's last step. Its event ends with the character (`event_cancel` in
-    /// `CHARACTER::Destroy`).
+    /// Answers the character's points and quickslots as the world last changed them, which
+    /// the final save writes: the recovery event changes the points on the world's own pulse,
+    /// after the descriptor's last step, and a trade the partner closes the quickslots. Its
+    /// event ends with the character (`event_cancel` in `CHARACTER::Destroy`), and so does its
+    /// trade, cancelled for both sides (`CHARACTER::Destroy`'s `Cancel`).
     ///
     /// Returns `None` when the world did not hold that character, which is reported
     /// rather than treated as fatal because a disconnect that finds nobody is
     /// already ending.
-    pub fn leave_world(&mut self, vid: common::vid::Vid) -> Option<Departed> {
+    pub fn leave_world(&mut self, vid: common::vid::Vid) -> Option<Kept> {
+        self.cancel_trade(vid);
         let _outbox = self.outboxes.remove(&vid);
         let _event = self.recovering.remove(&vid);
         self.stop_browsing(vid);
-        let points = self.characters.find_by_vid(vid).ok()?.points().cloned();
+        let character = self.characters.find_by_vid(vid).ok()?;
+        let kept = Kept {
+            points: character.points().cloned(),
+            quickslots: character.quickslots().clone(),
+        };
         self.characters.destroy(vid).ok()?;
-        Some(Departed { points })
+        Some(kept)
     }
 
     /// Whether a character is online under that VID.
@@ -960,7 +982,7 @@ impl GameState {
     }
 
     /// Answer a `LeaveWorld`: the character leaves, and the descriptor is handed its points.
-    fn answer_leave(&mut self, vid: common::vid::Vid, reply: oneshot::Sender<Option<Departed>>) {
+    fn answer_leave(&mut self, vid: common::vid::Vid, reply: oneshot::Sender<Option<Kept>>) {
         let removed = self.leave_world(vid);
         // A leave that finds nobody is a double leave, not a failure: the
         // descriptor is ending and the world already agrees the character is
@@ -1003,8 +1025,8 @@ impl GameState {
         Ok(moved)
     }
 
-    /// Apply one of the steps a character takes with its own items: a move, a use, or a shop
-    /// step.
+    /// Apply one of the steps a character takes with its own items: a move, a use, a shop step
+    /// or a trade step.
     fn apply_item_step(&mut self, command: GameCommand) {
         match command {
             GameCommand::MoveItem {
@@ -1032,6 +1054,22 @@ impl GameState {
                         ?vid,
                         ?step,
                         "a shop step ran and nobody was left to store it"
+                    );
+                }
+            }
+            GameCommand::Trade {
+                vid,
+                step,
+                place,
+                mover,
+                reply,
+            } => {
+                // A dropped settlement leaves both characters' worlds ahead of the store.
+                if reply.send(self.trade(vid, step, place, mover)).is_err() {
+                    warn!(
+                        ?vid,
+                        ?step,
+                        "a trade step ran and nobody was left to store it"
                     );
                 }
             }
@@ -1334,6 +1372,7 @@ impl PulseProcessor for GameState {
         self.metrics.pulses.store(pulse, Ordering::SeqCst);
         self.destroy_expired(pulse);
         self.run_recovery(pulse);
+        self.cancel_distant_trades(pulse);
     }
 }
 
@@ -2751,19 +2790,24 @@ mod tests {
             .expect("the potion is drunk");
         let expected = points_at_seven(&state);
         let (reply, answer) = tokio::sync::oneshot::channel();
-        state.apply(GameCommand::PointsOf {
+        state.apply(GameCommand::KeptOf {
             vid: Vid::new(7),
             reply,
         });
-        assert_eq!(answer.blocking_recv().unwrap(), Some(expected.clone()));
+        let kept = answer
+            .blocking_recv()
+            .unwrap()
+            .expect("the character is online");
+        assert_eq!(kept.points, Some(expected.clone()));
 
         let departed = state
             .leave_world(Vid::new(7))
             .expect("the character was online");
         assert_eq!(departed.points, Some(expected));
+        assert_eq!(departed.quickslots, kept.quickslots);
         assert!(state.recovering.is_empty());
         let (reply, answer) = tokio::sync::oneshot::channel();
-        state.apply(GameCommand::PointsOf {
+        state.apply(GameCommand::KeptOf {
             vid: Vid::new(7),
             reply,
         });

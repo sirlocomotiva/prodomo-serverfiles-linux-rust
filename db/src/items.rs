@@ -246,8 +246,15 @@ pub enum ItemError {
         /// The cell it wanted.
         pos: u32,
     },
-    /// The gold is above the `bigint` `player.gold` is stored in.
-    GoldOutOfRange(u64),
+    /// A Transfer would leave a character with less than no gold.
+    GoldBelowZero {
+        /// The character.
+        owner_id: u32,
+        /// The gold its row holds.
+        held: i64,
+        /// The change the Transfer asked for.
+        change: i64,
+    },
     /// A stored value breaks a rule the schema should have enforced.
     Corrupt(String),
     /// The server refused or failed a query.
@@ -296,7 +303,15 @@ impl fmt::Display for ItemError {
                 f,
                 "cell {window_type}:{pos} is already taken, so item {id} was not stored"
             ),
-            Self::GoldOutOfRange(gold) => write!(f, "gold {gold} is above {}", i64::MAX),
+            Self::GoldBelowZero {
+                owner_id,
+                held,
+                change,
+            } => write!(
+                f,
+                "character {owner_id} holds {held} gold, so a change of {change} would leave \
+                 less than none"
+            ),
             Self::Corrupt(detail) => write!(f, "stored item data is invalid: {detail}"),
             Self::Database(error) => write!(f, "PostgreSQL error: {error}"),
         }
@@ -821,7 +836,7 @@ pub async fn set_count(store: &Store, id: u32, owner_id: u32, count: u16) -> Res
     }
 }
 
-/// One change a move, a stack merge or a split makes to a character's rows.
+/// One change a move, a stack merge, a split or a trade makes to a character's rows.
 ///
 /// The world answers a `CG_ITEM_MOVE` with these, in the order they happened, and
 /// [`apply_row_changes`] writes them as one transaction.
@@ -858,6 +873,30 @@ pub enum RowChange {
         /// All of its sockets, as they are now.
         sockets: [i32; SOCKETS],
     },
+    /// A trade gave the item to another character, into this window and cell, in stored
+    /// terms (`CExchange::Done`, `G/exchange.cpp`). Only [`apply_exchange`] writes one, and
+    /// only to another side of the same Transfer.
+    Given {
+        /// The item.
+        id: u32,
+        /// The character that holds it now.
+        to: u32,
+        /// The window byte the row is stored under.
+        window_type: u8,
+        /// The cell the row is stored under.
+        pos: u32,
+    },
+}
+
+/// One character's part of a Transfer: its row changes, and how far its gold moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferSide<'a> {
+    /// The character whose rows the changes name.
+    pub owner_id: u32,
+    /// Its row changes, in the order they happened.
+    pub changes: &'a [RowChange],
+    /// What the Transfer adds to its gold, or takes away when negative.
+    pub gold: i64,
 }
 
 /// Write one move's row changes as one transaction, under the owner.
@@ -886,7 +925,12 @@ pub async fn apply_row_changes(
     owner_id: u32,
     changes: &[RowChange],
 ) -> Result<(), ItemError> {
-    apply_changes(store, owner_id, changes, None).await
+    let side = TransferSide {
+        owner_id,
+        changes,
+        gold: 0,
+    };
+    apply_sides(store, &[side], false).await
 }
 
 /// Write one Transfer: a step's row changes and the owner's gold, as one transaction
@@ -894,41 +938,64 @@ pub async fn apply_row_changes(
 ///
 /// A shop's buy or sale changes a character's items and its gold together, and one stored
 /// without the other is an item lost or gold made. The rows are written as
-/// [`apply_row_changes`] writes them, under the same checks, and `player.gold` is set to
-/// `gold` in the same transaction.
+/// [`apply_row_changes`] writes them, under the same checks, and `gold` is added to
+/// `player.gold` in the same transaction. The change is relative because only a Transfer
+/// writes the gold: the save leaves the column alone, so the row always holds what the last
+/// Transfer left.
 ///
 /// # Errors
 ///
-/// As [`apply_row_changes`]; [`ItemError::GoldOutOfRange`] for gold the column cannot hold,
-/// refused before the store is reached, and [`ItemError::NoSuchOwner`] when no character has
-/// the id, which rolls the rows back too.
+/// As [`apply_row_changes`]; [`ItemError::GoldBelowZero`] for a change that would leave the
+/// character less than no gold, and [`ItemError::NoSuchOwner`] when no character has the id.
+/// Either rolls the rows back too.
 pub async fn apply_transfer(
     store: &Store,
     owner_id: u32,
     changes: &[RowChange],
-    gold: u64,
+    gold: i64,
 ) -> Result<(), ItemError> {
-    apply_changes(store, owner_id, changes, Some(gold)).await
+    let side = TransferSide {
+        owner_id,
+        changes,
+        gold,
+    };
+    apply_sides(store, &[side], true).await
 }
 
-/// [`apply_row_changes`], and with `gold` the owner's `player.gold` in the same transaction.
-async fn apply_changes(
+/// Write a trade: every side's row changes and gold, as one transaction (ADR-0003).
+///
+/// `CExchange::Done` (`G/exchange.cpp`) moves each side's items to the other and the gold
+/// with them, and a trade stored for one side and not the other is an item or gold made or
+/// lost. Each side is written as [`apply_transfer`] writes it, and a
+/// [`RowChange::Given`] hands a row to another side, whose cells are then checked as its own.
+///
+/// # Errors
+///
+/// As [`apply_transfer`], for any side; [`ItemError::Corrupt`] for two sides with one owner,
+/// or a row given to a character that is not another side, both before the store is reached.
+pub async fn apply_exchange(store: &Store, sides: &[TransferSide<'_>]) -> Result<(), ItemError> {
+    apply_sides(store, sides, true).await
+}
+
+/// [`apply_exchange`], and without `gold` no `player` row is touched.
+async fn apply_sides(
     store: &Store,
-    owner_id: u32,
-    changes: &[RowChange],
-    gold: Option<u64>,
+    sides: &[TransferSide<'_>],
+    gold: bool,
 ) -> Result<(), ItemError> {
-    for change in changes {
-        check_change(owner_id, change)?;
+    let owners: Vec<u32> = sides.iter().map(|side| side.owner_id).collect();
+    for (index, side) in sides.iter().enumerate() {
+        if owners[..index].contains(&side.owner_id) {
+            return Err(ItemError::Corrupt(format!(
+                "character {} is two sides of one transfer",
+                side.owner_id
+            )));
+        }
+        for change in side.changes {
+            check_change(side.owner_id, change, &owners)?;
+        }
     }
-    let gold = match gold {
-        Some(gold) => Some((
-            i32::try_from(owner_id).map_err(|_| ItemError::NoSuchOwner(owner_id))?,
-            i64::try_from(gold).map_err(|_| ItemError::GoldOutOfRange(gold))?,
-        )),
-        None => None,
-    };
-    if changes.is_empty() && gold.is_none() {
+    if !gold && sides.iter().all(|side| side.changes.is_empty()) {
         return Ok(());
     }
     let insert = format!(
@@ -941,39 +1008,79 @@ async fn apply_changes(
     sqlx::query("SET CONSTRAINTS item_owner_cell_key DEFERRED")
         .execute(&mut *transaction)
         .await?;
-    for change in changes {
-        let (id, touched) =
-            write_change(&mut transaction, owner_id, change, &insert, &set_sockets).await?;
-        if touched == 0 {
-            transaction.rollback().await?;
-            return Err(missing(store, id).await);
+    for side in sides {
+        for change in side.changes {
+            let (id, touched) = write_change(
+                &mut transaction,
+                side.owner_id,
+                change,
+                &insert,
+                &set_sockets,
+            )
+            .await?;
+            if touched == 0 {
+                transaction.rollback().await?;
+                return Err(missing(store, id).await);
+            }
         }
     }
-    if let Some((player, gold)) = gold {
-        let touched = sqlx::query("UPDATE player SET gold = $2 WHERE id = $1")
-            .bind(player)
-            .bind(gold)
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected();
-        if touched == 0 {
-            transaction.rollback().await?;
-            return Err(ItemError::NoSuchOwner(owner_id));
+    if gold {
+        for side in sides {
+            if let Err(error) = add_gold(&mut transaction, side.owner_id, side.gold).await {
+                transaction.rollback().await?;
+                return Err(error);
+            }
         }
     }
-    let shared: Vec<(i16, i64)> = sqlx::query_as(
-        "SELECT window_type, pos::bigint FROM item WHERE owner_id = $1 \
-         GROUP BY window_type, pos HAVING count(*) > 1",
-    )
-    .bind(i64::from(owner_id))
-    .fetch_all(&mut *transaction)
-    .await?;
-    if !shared.is_empty() {
-        transaction.rollback().await?;
-        return Err(taken_cell(owner_id, changes, &shared));
+    for &owner_id in &owners {
+        let shared: Vec<(i16, i64)> = sqlx::query_as(
+            "SELECT window_type, pos::bigint FROM item WHERE owner_id = $1 \
+             GROUP BY window_type, pos HAVING count(*) > 1",
+        )
+        .bind(i64::from(owner_id))
+        .fetch_all(&mut *transaction)
+        .await?;
+        if !shared.is_empty() {
+            transaction.rollback().await?;
+            return Err(taken_cell(owner_id, sides, &shared));
+        }
     }
     transaction.commit().await?;
     Ok(())
+}
+
+/// Add `change` to one character's `player.gold` inside a Transfer's transaction.
+///
+/// The statement refuses a result below zero itself, so the check and the write cannot be
+/// split by another writer; the row is read again only to say why nothing changed.
+async fn add_gold(
+    connection: &mut sqlx::PgConnection,
+    owner_id: u32,
+    change: i64,
+) -> Result<(), ItemError> {
+    let player = i32::try_from(owner_id).map_err(|_| ItemError::NoSuchOwner(owner_id))?;
+    let touched =
+        sqlx::query("UPDATE player SET gold = gold + $2 WHERE id = $1 AND gold + $2 >= 0")
+            .bind(player)
+            .bind(change)
+            .execute(&mut *connection)
+            .await?
+            .rows_affected();
+    if touched > 0 {
+        return Ok(());
+    }
+    let held: Option<i64> = sqlx::query_scalar("SELECT gold FROM player WHERE id = $1")
+        .bind(player)
+        .fetch_optional(&mut *connection)
+        .await?;
+    Err(match held {
+        None => ItemError::NoSuchOwner(owner_id),
+        Some(held) => ItemError::GoldBelowZero {
+            owner_id,
+            held,
+            change,
+        },
+    })
 }
 
 /// Run one change's statement inside the move's transaction: the id it names, and how many
@@ -1040,6 +1147,27 @@ async fn write_change(
             }
             (*id, query.execute(&mut *connection).await?.rows_affected())
         }
+        RowChange::Given {
+            id,
+            to,
+            window_type,
+            pos,
+        } => {
+            let receiver = i32::try_from(*to).map_err(|_| ItemError::NoSuchOwner(*to))?;
+            let touched = sqlx::query(
+                "UPDATE item SET owner_id = $3, window_type = $4, pos = $5 \
+                 WHERE id = $1 AND owner_id = $2",
+            )
+            .bind(i64::from(*id))
+            .bind(i64::from(owner_id))
+            .bind(receiver)
+            .bind(i16::from(*window_type))
+            .bind(i64::from(*pos))
+            .execute(&mut *connection)
+            .await?
+            .rows_affected();
+            (*id, touched)
+        }
     })
 }
 
@@ -1057,29 +1185,46 @@ fn set_sockets_statement() -> String {
     )
 }
 
-/// The change that put a row on a cell another row holds, for [`apply_row_changes`].
+/// The change that put a row on a cell another row of `owner_id` holds, for
+/// [`apply_row_changes`] and [`apply_exchange`].
 ///
 /// The last change to land on a shared cell is the one named: an earlier change that
 /// landed there may have been legal until the later one arrived, and the later one is
-/// the change a caller can do something about. A shared cell no change touched cannot
-/// happen while the key is enforced, so it is reported as corrupt rather than guessed at.
-fn taken_cell(owner_id: u32, changes: &[RowChange], shared: &[(i16, i64)]) -> ItemError {
-    let landed = changes.iter().rev().find_map(|change| {
-        let (id, window_type, pos) = match change {
-            RowChange::Moved {
-                id,
-                window_type,
-                pos,
-            } => (*id, *window_type, *pos),
-            RowChange::Created(row) => (row.id, row.window_type, row.pos),
-            RowChange::Count { .. } | RowChange::Destroyed { .. } | RowChange::Sockets { .. } => {
-                return None
-            }
-        };
-        shared
-            .contains(&(i16::from(window_type), i64::from(pos)))
-            .then_some((id, window_type, pos))
+/// the change a caller can do something about. A row given to `owner_id` lands among its
+/// cells as its own moves do. A shared cell no change touched cannot happen while the key
+/// is enforced, so it is reported as corrupt rather than guessed at.
+fn taken_cell(owner_id: u32, sides: &[TransferSide<'_>], shared: &[(i16, i64)]) -> ItemError {
+    let changes = sides.iter().flat_map(|side| {
+        side.changes
+            .iter()
+            .map(move |change| (side.owner_id, change))
     });
+    let landed: Vec<(u32, u8, u32)> = changes
+        .filter_map(|(side, change)| {
+            let (holder, id, window_type, pos) = match change {
+                RowChange::Moved {
+                    id,
+                    window_type,
+                    pos,
+                } => (side, *id, *window_type, *pos),
+                RowChange::Created(row) => (side, row.id, row.window_type, row.pos),
+                RowChange::Given {
+                    id,
+                    to,
+                    window_type,
+                    pos,
+                } => (*to, *id, *window_type, *pos),
+                RowChange::Count { .. }
+                | RowChange::Destroyed { .. }
+                | RowChange::Sockets { .. } => return None,
+            };
+            (holder == owner_id).then_some((id, window_type, pos))
+        })
+        .collect();
+    let landed = landed
+        .into_iter()
+        .rev()
+        .find(|(_, window_type, pos)| shared.contains(&(i16::from(*window_type), i64::from(*pos))));
     match landed {
         Some((id, window_type, pos)) => ItemError::CellAlreadyTaken {
             id,
@@ -1092,18 +1237,24 @@ fn taken_cell(owner_id: u32, changes: &[RowChange], shared: &[(i16, i64)]) -> It
     }
 }
 
-/// The checks [`apply_row_changes`] makes before it reaches the store.
-fn check_change(owner_id: u32, change: &RowChange) -> Result<(), ItemError> {
+/// The checks [`apply_row_changes`] makes before it reaches the store. A row may only be
+/// given to one of `owners`, the characters the Transfer writes, and not to its own holder.
+fn check_change(owner_id: u32, change: &RowChange, owners: &[u32]) -> Result<(), ItemError> {
     match change {
         RowChange::Moved {
             id, window_type, ..
+        } => check_window(*id, *window_type)?,
+        RowChange::Given {
+            id,
+            to,
+            window_type,
+            ..
         } => {
-            if *window_type > GROUND {
-                return Err(ItemError::WindowOutOfRange(*window_type));
-            }
-            if *window_type == GROUND {
+            check_window(*id, *window_type)?;
+            if *to == owner_id || !owners.contains(to) {
                 return Err(ItemError::Corrupt(format!(
-                    "item {id} would be moved to the ground window through its owner"
+                    "item {id} of character {owner_id} would be given to {to}, which is not \
+                     another side of the transfer"
                 )));
             }
         }
@@ -1122,6 +1273,20 @@ fn check_change(owner_id: u32, change: &RowChange) -> Result<(), ItemError> {
             }
         }
         RowChange::Destroyed { .. } | RowChange::Sockets { .. } => {}
+    }
+    Ok(())
+}
+
+/// A moved or given row stays in a window a character holds: not past the ground, and not
+/// on it.
+fn check_window(id: u32, window_type: u8) -> Result<(), ItemError> {
+    if window_type > GROUND {
+        return Err(ItemError::WindowOutOfRange(window_type));
+    }
+    if window_type == GROUND {
+        return Err(ItemError::Corrupt(format!(
+            "item {id} would be moved to the ground window through its owner"
+        )));
     }
     Ok(())
 }

@@ -23696,3 +23696,390 @@ the run, no `prodomo_%` database remains, and no `*.core` file is outside `targe
 workspace has 220 Rust files and 157,878 lines, outside `server/` and `.scratch/`. No crate was
 fetched, and `Cargo.lock` is unchanged. This section claims no width, and the i686 probe was
 not run.
+
+## 225. The trade: `CExchange`, `CInputMain::Exchange` and the two-sided Transfer
+
+Two players on one map can now trade items and gold. In legacy, `CG_EXCHANGE` (27) carries six
+subheaders (`CInputMain::Exchange`, `G/input_main.cpp:1367-1527`). `START` runs
+`CHARACTER::ExchangeStart` (`G/exchange.cpp:77-152`), which gives each side a `CExchange`. The
+offers, the accepts, the four checks at the final accept and `CExchange::Done` are in
+`G/exchange.cpp`. A trade changes two characters at once, so it is the second Transfer under
+ADR-0003 after the shop. Until this section the Rewrite decoded `CG_EXCHANGE`, answered nothing,
+and wrote every character's gold from its save.
+
+### 225.1 What landed
+
+- **The record.** `protocol::gc_exchange` writes `GC_EXCHANGE` (42). It is the 74-byte
+  `packet_exchange` with the 64-bit `arg1` of `ENABLE_REMOVE_LIMIT_GOLD` and the `arg4` source
+  cell of `WJ_ENABLE_TRADABLE_ICON`. It also carries the six sockets, the seven attributes, the
+  refine element (`ENABLE_REFINE_ELEMENT`) and the transmutation (`__CHANGELOOK_SYSTEM__`).
+  `GcExchange::new` is every send but an offered item: `arg4` is `(RESERVED_WINDOW, 0)` and the
+  item fields are 0, as `exchange_packet` writes them (`G/exchange.cpp:25-74`). `GC_EXCHANGE`
+  joins the codec inventory, which goes from 103 to 104 of 134 game-to-client records.
+- **The trade.** `world::character::trade` is `CExchange` for both sides.
+  - A `Trade` holds each side's offer: at most 24 items, each on a display cell of the 6 × 4
+    window (`__NEW_EXCHANGE_WINDOW__`), one amount of gold, and whether the side accepts.
+  - **An offer.** `add_item` refuses, in legacy's order:
+    - a worn item and an empty cell, silently;
+    - an item whose anti-flags forbid giving it, with `Item cannot be handed over.`;
+    - an item offered already, silently;
+    - a display cell the item does not fit, silently.
+
+    A dragon soul stone, an item outside the `INVENTORY` window and an item with no proto are
+    then refused silently (225.3). Otherwise both accepts drop, and the item takes the first free
+    slot. Each side is sent `ITEM_ADD` with the item's data, the offering side first.
+  - **A withdrawal.** `remove_item` answers `ITEM_DEL` to both sides and frees the item. The
+    other side's `ITEM_DEL` names the item's cell.
+  - **Gold.** `add_gold` ignores 0, answers `LESS_GOLD` to the offering side alone when it holds
+    less, and ignores any gold after the first. The set-once rule is kept as legacy has it.
+  - **An accept.** `accept` answers `ACCEPT` to both sides. The second accept settles the trade.
+  - **The settlement.** `settle` runs `CExchange::Accept`'s checks.
+    - For the side whose accept completed the trade and then the other side, it checks that the
+      side still holds each offered item where it offered it and holds the gold. If not, it
+      sends the out-of-place lines. It then checks that the other side has room for the items,
+      or sends the full lines.
+    - It then checks each receiver's gold against `GOLD_MAX_MAX`.
+    - It then runs `Done` for the closer first, then for the other side, on copies of both
+      characters' storage, quickslots and gold. Each item goes to the first free cell of a
+      custom bank it belongs to, and then of the unlocked base inventory. The quickslots that
+      named its cell are deleted and the cell is cleared. The item reaches its receiver
+      highlighted, and a sash rolls its absorption as `AddToCharacter` does.
+    - The answer is each side's records, row changes, gold change and copies. Nothing of either
+      character changes before the caller has stored the trade.
+  - **The offered items.** `CharacterItems` keeps the ids of the items a trade offers, and the
+    item paths refuse them silently. The move refuses an offered source (`:7618`) and an
+    offered merge target (225.3). A use or equip (`:7188`, `:8315`) and a drop (`:7473`) are
+    refused too. A pickup may still join an offered stack, as legacy's does. An offer is kept
+    only while the item is held: a release or a removal forgets it.
+- **The manager.** `prodomo::game_state::trade` keeps each open trade and the side each
+  character is on, as `m_pkExchange` does.
+  - **`START`** is ignored while the character trades, and when the VID names nobody on its
+    Channel and map. Then:
+    - gold at `GOLD_MAX_MAX` is refused with `You have reached the yang limit.`;
+    - a browsed shop is refused with the other-transaction line;
+    - `ExchangeStart` ignores the character itself and an NPC;
+    - a partner who browses a shop is refused with the busy line;
+    - a partner `EXCHANGE_MAX_DISTANCE` (1000) or farther away is ignored;
+    - a partner who trades already gets `ALREADY`.
+
+    Otherwise the asked side's window opens first, and each `START` names the other side's VID.
+    `START` reads `arg1`'s low `DWORD`, as `Find(DWORD)` does.
+  - **The other steps.** `ITEM_ADD`, `ITEM_DEL` (a `BYTE` slot) and `ELK_ADD` run only while
+    the other side does not accept. `ACCEPT` accepts, and `CANCEL` ends the trade for both
+    sides with `END`.
+  - **The settlement.** A settled accept answers `TradeSettled`: each side's moves, and the
+    partner's outbox. A failed settlement sends each side its line and `END`, and nothing
+    changes.
+  - **Records** to the side that did not send the step go through its client's outbox.
+  - **The end of a trade.** A trade ends for both sides when either character leaves the world
+    (`CHARACTER::Destroy`). It also ends on every 16th Pulse once the two stand
+    `EXCHANGE_MAX_DISTANCE` or farther apart, or no longer on one map (225.3).
+  - **The shop.** A click on a keeper is ignored while the character trades, as `OnClick`
+    returns before the click trigger (`G/char.cpp:6210-6217`).
+- **The Transfer.** `db::items::apply_exchange` writes every side's row changes and gold in one
+  transaction (ADR-0003).
+  - `RowChange::Given` hands a row to another side of the same Transfer, into its window and
+    cell. The shared-cell check then runs for every side.
+  - Two sides with one owner are refused before the store is reached. So are a row given to its
+    own holder and a row given to a character that is not a side.
+  - **Relative gold.** The gold is now relative: each side's change is added with
+    `gold = gold + $2`, in a statement that refuses a result below zero. The refusal is
+    `ItemError::GoldBelowZero`, which replaces `GoldOutOfRange`. `apply_transfer` and
+    `MovedItems.gold` carry the change too, which `gold_delta` computes, so the shop's Transfer
+    adds its change as well.
+  - **The save** no longer writes `player.gold`, so the row always holds what the last Transfer
+    left (225.3). The descriptor no longer mirrors the gold it held.
+- **The wiring.**
+  - `main.rs` routes `CG_EXCHANGE` in the game phase to `GameCommand::Trade`. An unknown
+    subheader is logged and ignored, and a malformed record closes the connection.
+  - A settled trade is stored for both sides before any record is sent. Then the partner's
+    records go to its outbox and the closer's to its client. A store that fails closes the
+    closer's connection (225.3).
+  - `GameCommand::PointsOf` is now `KeptOf`, and `Departed` is now `Kept`. Both carry the
+    quickslots too, because a trade the partner closes changes them.
+  - `serve` gives the game thread the position table the descriptors track, which a trade
+    finds and measures the other player in.
+
+### 225.2 What the client sees
+
+- `START` naming a player within reach opens both windows. The asked side is sent `START`
+  naming the starter's VID, then the starter is sent `START` naming the asked side's. Both
+  have `is_me` 0 and `arg2` `NPOS`.
+- An offer sends `ITEM_ADD` to both sides. `is_me` is 1 for the offering side. `arg1` is the
+  vnum, `arg2` the display cell under `RESERVED_WINDOW`, and `arg3` the count. `arg4` is the
+  item's own window and cell, followed by its sockets, attributes, refine element and
+  transmutation.
+- A withdrawal sends `ITEM_DEL` naming the slot, with `arg2` `NPOS` to the offering side and the
+  item's cell to the other side.
+- Gold sends `GOLD_ADD` to both sides. More gold than the side holds sends `LESS_GOLD` (7) to
+  that side alone.
+- The first accept sends `ACCEPT` with `arg1` 1 to both sides. After the second, each side is
+  sent its gold changes, the cleared cells, the items it received with the new-item highlight,
+  `The exchange with <name> has been completed.` and `END`.
+- A refused settlement sends the lines of the check that failed, then `END` to both sides:
+  - an item moved or the gold short: `You are out of money or an item is out of place.` and
+    `The opponent is out of money or the item is out of place.`;
+  - no room: `There are no empty spaces in the opponent's inventory.` and
+    `There are no empty spaces in your inventory.`;
+  - gold at the cap: the yang-limit line.
+- `CANCEL` and the distance send `END` to both sides, and a departure sends it to the side
+  that stays.
+- A relog finds the items and the gold as the trade left them, with no highlight.
+
+### 225.3 Divergences and Defects
+
+Five new Divergences, each a row in `docs/STATUS.md`:
+
+- **The distance is measured for every trade.** `StateMove` measures it every 16 Pulses only
+  while the character that holds the exchange moves (`G/char.cpp:6962-6973`). A trade
+  therefore survives the other side walking away while this one stands still. The Rewrite
+  measures every open trade on every 16th Pulse. A side that is no longer on the trade's map
+  ends it too.
+- **A failed store.** The world settles the trade and the store writes both sides after, as
+  every item move does. When the write fails, the character whose accept completed the trade
+  is disconnected. Its partner keeps the world's side of the trade until it relogs. Legacy's
+  `Done` changes both characters at once, and the delayed saves write them later, so no store
+  refuses a trade.
+- **The checks of unported systems never refuse.** None of these refuses a trade yet: the
+  quest check at `START` (`GiveItemToPC`), the one at the accept (`@fixme150`), the spectator
+  check, `IsSecured`, the exchange-block mode, the item lock, and the safebox, personal shop,
+  cube and aura windows. None of them exists yet. The quest check at `START` was searched
+  (225.4).
+- **Three kinds of item cannot be offered.** A dragon soul stone, an item outside the
+  `INVENTORY` window and an item with no proto are refused silently, after every legacy check.
+  Legacy gives a stone a cell of the other side's dragon soul inventory
+  (`G/exchange.cpp:524-547`), and the Rewrite does not place stones yet.
+- **The save does not write the gold.** Each Transfer adds its change to the stored gold in
+  the transaction that stores its items. `CreatePlayerProto` puts the gold in the table every
+  save writes (`G/char.cpp:1498`). A save that wrote the gold would overwrite a trade the
+  partner's descriptor stored after this descriptor's last step.
+
+The shop's row of 224, the other-window check, now also says that a trade never reaches it,
+because `OnClick` ignores the click of a character that trades.
+
+Four legacy Defects are not reproduced:
+
+- **An item with no cell is kept by its giver.** `Done` skips an item it finds no cell for
+  (`continue`, `G/exchange.cpp:534-539`), and the trade completes without it. `CheckSpace`
+  fills the receiver's cells as they are before either side's items leave, so a first-fit
+  placement can come out differently in `Done`. The Rewrite places every item on the copies,
+  and an item with no cell refuses the whole trade with the full lines.
+- **Gold at the cap is lost.** `ChangeGold` refuses gold that would reach `GOLD_MAX_MAX` after
+  the giver's gold has been taken (`G/char.cpp:3823-3850`). The Rewrite checks both receivers
+  first and refuses the trade with the yang-limit line.
+- **A partner on another map, and a dead `arg1`.** `CHARACTER_MANAGER::Find` lets a modified
+  client start a trade with a player on another map at the same coordinates. Also,
+  `CInputMain::Exchange` refuses a dead `arg1` for every subheader, although only `START` names
+  a character. The Rewrite looks only on the character's own Channel and map, and only for
+  `START`. Nobody dies yet.
+- **A merge into an offered stack.** `MoveItem` tests only the source's `IsExchanging` before
+  a merge (`G/char_item.cpp:7786`), so a player can grow a stack the other side has already
+  seen offered. The Rewrite refuses the merge silently, as the use paths do (`@fixme114`).
+
+### 225.4 The quest check at `START`, searched
+
+`CInputMain::Exchange` asks `quest::CQuestManager::GiveItemToPC` before `ExchangeStart`. A
+quest with a `target` trigger on the asked player would open instead of the trade. The Rewrite
+does not run quests, so this was searched before `START` was routed:
+
+- **The compiled objects.** None of the 95 files under `locale/europe/quest/object/` calls a
+  `target` function or has a `.target` trigger. Compiled objects separate each token with
+  spaces, so the pattern allows spaces around the dot (`target *\. *(vid|pc|npc)`). Positive
+  control: `pc *\. *get_` matches 24 files. Negative control: `target *\. *zzz` matches none.
+  A synthetic file with `target . vid` matches.
+- **The quest sources.** Only `_basic/yohara_system.lua` and `_basic/sash_mission.lua` call
+  `target.vid`, and each target is an NPC they find by vnum (20433, 60003, 20355).
+  `pc` and `npc` are aliases of `target_vid` (`questlua_target.cpp:141-143`). Neither file is
+  in `quest_list`, which has 15 entries.
+
+`GiveItemToPC` therefore never opens a quest for any player in the owner's data. It stays a
+Divergence, because a Game data change could add such a quest before the quest runtime lands.
+
+### 225.5 Not ported yet
+
+- **The dragon soul stone's trade** into the other side's dragon soul inventory.
+- **The checks of unported systems** in 225.3, and `CanHandleItem`.
+- **The logs**: `LogManager::ExchangeLog`, the item and gold logs of `Done`, and the missions a
+  trade counts toward.
+- **`SetExchangeTime`**, which only the portal guard reads.
+- **The DB-cache check** of `Done`, and the personal shop's cancel of an open trade.
+
+### 225.6 Scenario and Parity inventory
+
+`a_trade_moves_an_item_and_gold_between_two_players_in_one_transaction` stands alice's Alpha
+(empire 1, 5000 gold) and bob's Yankee (empire 2, 4000 gold) on one spot of map 1. Alpha holds 7
+of a stackable `ITEM_USE` vnum at cell 5, in item row 30, with every relayed field distinct. The
+item is an `ITEM_USE` one because only such an item takes a quickslot
+(`G/input_main.cpp:1083-1113`); in the owner's data that is 22030.
+
+- Alpha sets slot 2 on the item's cell 5 and slot 6 on skill 3.
+- Alpha asks Yankee with a VID whose upper half is `0xdead_beef`. Yankee's window opens first.
+- Alpha offers the item on display cell 2. It takes back slot 0 with an `arg1` of `0x0100`,
+  whose low byte alone is read, and offers the item again on display cell 3.
+- Alpha offers 300 gold. Yankee offers 4001, which answers `LESS_GOLD` to Yankee alone, and
+  then 1234.
+- Alpha accepts, and both sides are sent `ACCEPT`. Yankee's accept settles the trade:
+  - Yankee is sent its gold change to 2766. By then the store holds Alpha at 5934 and Yankee
+    at 3066, and item 30 at Yankee's cell 0 with a count of 7.
+  - Yankee is then sent the item with the highlight, the gold change of 300 to 3066, the
+    completed line and `END`.
+  - Alpha is sent the gold change of 1234 to 6234, the delete of slot 2
+    (`G/exchange.cpp:543`), the cleared cell 5, the gold change to 5934, the completed line and
+    `END`.
+- Yankee then asks Alpha, and Alpha's window opens first. Alpha cancels, and both sides are sent
+  `END`. An accept after it answers nothing.
+- Yankee relogs. The save leaves the gold at 3066, and the load finds the item at cell 0 with no
+  highlight.
+- Alpha leaves, and the save stores slot 6 alone. Yankee closed the trade, so Alpha's
+  descriptor never held the slots it left; the save takes them from the world.
+
+The Parity harness reads `GC_EXCHANGE` as 74 bytes. The shop scenario's comments now say that
+the save leaves the gold alone. `a_stackable_use_vnum` is `a_stackable_vnum`'s kind of item that
+is also `ITEM_USE`.
+
+In the Parity inventory:
+
+- These rows are `ported`, and each names the scenario: `cg.game.exchange`, `gc.exchange`, the
+  six `sub.Exchange.EXCHANGE_SUBHEADER_CG_*` arms and `sys.trade.exchange`.
+- The notes of `cg.game.item_drop`, `cg.game.on_click`, `gc.character_gold_change` and
+  `sys.char.quickslot` now name what the trade added to each.
+
+### 225.7 Mutation sweep
+
+148 mutants. `mutate225.py` applied and restored each of them as in 215.7:
+
+- The `world` and `protocol` mutants ran their crate's library, and the `db` mutants ran `db`'s
+  `items` tests with `DATABASE_URL` set.
+- Each prodomo mutant ran `prodomo`'s library.
+- Mutants in `world/src/character/trade.rs`, `db/src/items.rs`, `game_state.rs`,
+  `game_state/trade.rs`, `game_state/shop.rs`, `item_move.rs` and `main.rs` also ran every
+  Parity scenario, with `DATABASE_URL` set.
+- Mutants in `main.rs` also ran `process.rs`'s start-up test.
+
+No mutant failed to compile.
+
+| group | mutants | result |
+|---|---|---|
+| `world/src/character/trade.rs`: the start's order and VID; the display grid's bottom, rows and marks; the held check's gold and item; the offer's worn, anti-flag, offered, fit, window, dragon soul and proto checks, the line's side, both accept drops, the mark, the offered flag, the sides and `is_me`; the withdrawal's mark, flag, slot, cell and order; the gold's 0, bound, set-once rule and side; the accept's repeat, the second accept, the withdraw, the accept flag and `arg1`; the shown window, count, source cell, sockets, attributes, refine element and transmutation; the settlement's order, held and room checks, the cap's bounds, 0 cases, the closer's gold and the line's side; `Done`'s order, the quickslot copies, the gold's sign, the room's fill and the banks; the hand-over's slot delete, clear, highlight, sash, receiver, 0 gold, amounts and gold left | 70 | 60 killed, 6 killed on the rerun, 3 removed with the code they changed, 1 equivalent |
+| `world`'s other files: an offer kept only for a held item and forgotten on a release or a removal, the move's source and merge target, the drop and the use | 7 | 7 killed |
+| `prodomo/src/game_state/trade.rs`: `START`'s `DWORD`, `ITEM_DEL`'s byte, the display cell, the pulse mask and skip; the start's trading, cap, browsing, itself, busy, distance along x and y and partner checks, the asked side's key and the starter's side; the NPC, the character lookup and the language; the offer's accepted rule and its side; the usable cells; the settlement's items, quickslots, gold, name, `END`, stored gold, own side, outbox and partner; the close, the end's withdrawal and line, the answer's other side and the partner's records; a side gone, the distance apart and the y apart | 38 | 33 killed, 5 killed on the rerun |
+| `prodomo/src/game_state.rs`: the leave's and the Pulse's cancel | 2 | 2 killed |
+| `prodomo/src/game_state/shop.rs`: the click while trading, and the Transfer's gold change | 2 | 2 killed |
+| `prodomo/src/item_move.rs`: `gold_delta`'s sign and floor, and a given row's receiver | 3 | 3 killed |
+| `prodomo/src/main.rs`: the route, the store of both sides, the stored gold, the two quickslot copies and the partner's records | 6 | 4 killed, 1 killed on the rerun, 1 equivalent |
+| `db/src/items.rs`: the relative gold and its floor, the owner's error, a given row's holder, receiver, self and owner checks, one owner per side, the shared-cell check for each side, the exchange's gold, a Transfer of gold alone and a given row's cell | 12 | 12 killed |
+| `protocol/src/gc_exchange.rs`: `is_me`, the reserved source cell, `arg1`'s and `arg3`'s byte order, the tail's order, `arg2` against `arg4`, and the decoder's `arg4` and transmutation | 8 | 8 killed |
+
+The first run was 147 mutants and left 16 survivors. The 148th, `wt_add_equip2`, replaced
+`wt_add_equip`, which the first run killed, once the offer's check lost the valid-position test
+it mutated; the rerun killed it. Of the survivors, three guarded nothing and their code was
+removed, two are equivalent, and each of the other eleven was a test gap that a new or
+extended test killed on the rerun:
+
+- **The valid-position checks.** `wt_held_valid` and `wt_add_valid` dropped the
+  `IsValidItemPosition` test from the held check and from `add_item`, and nothing changed.
+  `item_at` finds nothing at a position `IsValidItemPosition` refuses, as `GetItem` finds
+  nothing (`G/char_item.cpp:249-256`). Both tests were removed, as 224's `ws_sell_valid` was.
+  `a_moved_item_or_short_gold_refuses_with_the_out_of_place_lines` now offers a position of
+  65535, and the settlement refuses it.
+- **The hand-over's cell.** `wt_hand_pos` dropped `item.pos = pos` before the item was placed.
+  `CharacterItems::set` stores the item at the cell it is given, so the assignment repeated it.
+  It was removed.
+- **The start's order.** `wt_start_order` swapped the order in which the world queued the two
+  `START` records. The world keeps each side's records apart, and `game_state::trade` decides
+  which client hears first, so the order is not observable. It is equivalent.
+- **The trade's quickslot fallback.** `m_held_quickslots` dropped the copy of the settled
+  quickslots into the closer's descriptor. Every save first takes the world's quickslots, at
+  the leave through `Kept` and at the save tick through `KeptOf`, so nothing reads the copy
+  before it is replaced. The copy stays for a save when the game thread cannot answer. It is
+  equivalent.
+- **The display grid's bottom.** `wt_clear_bottom_gone` dropped the row bound of `is_clear`.
+  Every tested item had a size of at least 1, and a cell past the bottom is not in the grid, so
+  the lookup refused it anyway. `the_display_window_is_six_cells_wide_and_four_tall` now offers
+  an item of size 0 on cells 24, 29 and 30.
+- **The held item's id.** `wt_held_id` accepted any item in the offered cell. The out-of-place
+  test now puts another item in the offered item's cell.
+- **The withdrawal's slot.** `wt_rm_slot` sent slot 0 in every `ITEM_DEL`. The test took back
+  only slot 0. `an_item_taken_back_is_told_before_the_accepts_drop` now takes back slot 1.
+- **The check's order.** `wt_check_order` checked the other side before the closer. Each test
+  failed only one side. The out-of-place test now fails both sides, and the full test leaves
+  the closer's items no room and shorts the other side's gold.
+- **The room's fill.** `wt_room_fill` found a cell for each item without taking it. Each test
+  gave one item or had room for all of them. `no_room_refuses_with_the_full_lines` now offers
+  two items to one free cell.
+- **The y distance.** `gt_start_distance_y` and `gt_apart_y` measured only along x. The tests
+  moved the players only along x. `a_start_is_refused_in_legacys_order` and
+  `a_trade_ends_on_a_sixteenth_pulse_once_its_sides_stand_apart` now move Yankee 1041 along y.
+- **A character not in the world.** `gt_find_character` found a partner by its position
+  alone. `a_start_is_refused_in_legacys_order` now names a client that the position table holds
+  and the world does not.
+- **The asked side's language.** `gt_find_language` read every asked side's lines in language
+  0. The tests' strings had no table, so every language gave the same line. The new
+  `a_line_to_the_asked_side_is_in_its_clients_language` gives Yankee a German table.
+- **The unlocked cells.** `gt_trader_cells` let each side use all 180 cells. No test filled the
+  unlocked cells. The new `a_receiver_has_room_only_in_its_unlocked_cells` fills them.
+- **The trade's quickslots at the save.** `m_kept_quickslots` dropped the world's quickslots
+  from the leave and the save tick. The scenario set no quickslot. It now gives Alpha slots 2
+  and 6, lets Yankee close, and checks that Alpha's leave stores slot 6 alone.
+
+### 225.8 Receipt
+
+44 new tests:
+
+- `world/src/character/trade.rs`: 19, for the start's records, the display grid, an offer's
+  data, the give refusal, the silent refusals, the accepts an offer drops, a withdrawal, the
+  gold, a withdrawn trade, a settlement both ways, the closer first, a bank and a sash, the
+  out-of-place lines, the full lines, the gold cap, gold not offered, an item with no cell, the
+  sides and the signed gold.
+- `world`'s `items.rs`, `item_move.rs`, `ground.rs` and `equip.rs`: 1 each, for an offer kept
+  only while its item is held, and an offered item that neither moves nor takes a merge, is not
+  dropped, and is neither worn nor used.
+- `prodomo/src/game_state/trade.rs`: 13, for the step each record asks for, a start, the
+  start's refusals, the offers, an offer while the other side accepts, a settlement, a failed
+  settlement, the unlocked cells, the asked side's language, a cancel, a leave, the distance
+  and the game thread's answer.
+- `prodomo/src/game_state/shop.rs`: 1, for a click while the character trades.
+- `protocol/src/gc_exchange.rs`: 4, for the width and subheaders, the field order and round
+  trip, a record without an item, and the errors.
+- `db/tests/items.rs`: 2, for an exchange's rows and gold both ways, and the sides refused
+  before the store.
+- `prodomo/tests/parity.rs`: the scenario in 225.6.
+
+These tests changed:
+
+- `db`'s `a_transfer_stores_the_rows_and_the_gold_together`, whose gold is now a change. A
+  change below zero is refused with `GoldBelowZero` and rolls the rows back, and a sum past the
+  column is the store's refusal.
+- `db`'s `a_whole_row_save_is_what_the_next_load_reads`, which now sets the gold itself and
+  checks that the save leaves it, and `a_save_names_the_account_and_refuses_a_wide_player_id`
+  and `save`'s `a_save_takes_the_position_from_the_avatar_and_the_rest_from_the_row`, whose save
+  no longer carries gold.
+- `game_state`'s `leaving_hands_back_the_points_and_ends_the_recovery`, which now asks
+  `KeptOf` and also checks the quickslots `Kept` hands back.
+- Six `game_state::shop` tests that buy or sell, which now expect the Transfer's gold change
+  instead of the gold left. `a_count_of_nothing_sells_the_whole_stack` also checks
+  `gold_delta`'s bounds.
+- The game-to-client inventory counts in `gc_inventory` and `cg_wiring`, which go from 103 and
+  31 to 104 and 30.
+- The 224 shop scenario's comments, which now say that the save leaves the gold alone.
+  `a_stackable_vnum` now shares its test with the new `a_stackable_use_vnum`.
+
+The count went from 2811 to 2855. These gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2855 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2855 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 17 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+The 17th ignored doc block is `gc_exchange`'s wire layout, written as `gc_shop`'s is. After the
+run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`. The workspace
+has 223 Rust files and 162,167 lines, outside `server/` and `.scratch/`. No crate was fetched,
+and `Cargo.lock` is unchanged. `psql` is not installed, so the store was read through the
+tests' own queries. The i686 `g++` is not installed either, so the i686 probe was not run.
+`GC_EXCHANGE`'s 74 bytes are summed from the packed `packet_exchange` in `gc_exchange`'s module
+doc, with `long` four bytes wide on the 32-bit target.

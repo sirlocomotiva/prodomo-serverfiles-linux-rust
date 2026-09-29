@@ -26,8 +26,9 @@
 //! Unreachable here, and so not written: riding and polymorph, the unique unstack, the
 //! wedding checks `__FIX_COSTUM_NUNTA_PESTE_COSTUM_NORMAL__` repeats (the `ENABLE_WEDDING_FIX`
 //! ones return first), the special item group effect (a dangling `else` binds it to the sash
-//! arm), `REAL_TIME_FIRST_USE`, the mount quest, the aura window, `IsSecured`,
-//! `IsExchanging` and the quickslot sync.
+//! arm), `REAL_TIME_FIRST_USE`, the mount quest, the aura window, `IsSecured`, the quickslot
+//! sync, and `EquipItem`'s `IsExchanging` (`:8315`): the move and the use refuse an offered
+//! item before they get here.
 
 use common::enums::EWearPositions;
 use common::item_slots::{
@@ -818,11 +819,12 @@ const USED_BY_WEARING: [i32; 8] = [
 /// equip arm of `UseItemEx` (`G/char_item.cpp:7168-7400`, `:2718-3053`). An item that is
 /// not worn goes on (`EquipItem`), and a worn one comes off (`UnequipItem`).
 ///
-/// The checks run in legacy's order: the job (`CanUsedBy`), the sex, the level and conqueror
-/// level limits, and the belt cell the item is used from. Then `EquipItem` or `UnequipItem`
-/// run their own checks as a move's do. Legacy's checks for states this build does not have
-/// (a shop, a cube, an exchange, a stun, a running quest, the secured account, the stack
-/// attribute flood, whose file the owner's data lacks) never refuse here.
+/// The checks run in legacy's order: an item offered in a trade (`IsExchanging`, refused
+/// silently), the job (`CanUsedBy`), the sex, the level and conqueror level limits, and the
+/// belt cell the item is used from. Then `EquipItem` or `UnequipItem` run their own checks as
+/// a move's do. Legacy's checks for states this build does not have (a shop, a cube, a stun,
+/// a running quest, the secured account, the stack attribute flood, whose file the owner's
+/// data lacks) never refuse here.
 ///
 /// # Errors
 ///
@@ -848,6 +850,9 @@ pub fn use_item(
         )));
     }
     let item = items.item_at(at).cloned().ok_or(MoveRefused::Empty)?;
+    if items.is_exchanging(item.id) {
+        return Err(MoveRefused::Exchanging);
+    }
     let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
     let proto = gear
         .protos
@@ -1474,6 +1479,25 @@ mod tests {
             case.refused(inv(3), wear_pos(BODY)),
             MoveRefused::WeddingArmour
         );
+    }
+
+    #[test]
+    fn an_item_offered_in_a_trade_is_neither_worn_nor_used() {
+        let mut case = Case::new(&[(inv(3), Item::new(7, SWORD))]);
+        assert!(case.items.set_exchanging(7, true));
+        assert_eq!(
+            case.refused(inv(3), wear_pos(WEAPON)),
+            MoveRefused::Exchanging
+        );
+        assert_eq!(case.use_refused(inv(3)), MoveRefused::Exchanging);
+        assert_eq!(
+            use_item(&mut case.items, inv(3), &RULES, None),
+            Err(MoveRefused::Exchanging),
+            "refused before the gear is needed"
+        );
+        assert!(case.items.set_exchanging(7, false));
+        assert!(case.use_at(inv(3)).is_ok());
+        assert_eq!(case.at(wear_pos(WEAPON)), Some(7));
     }
 
     #[test]

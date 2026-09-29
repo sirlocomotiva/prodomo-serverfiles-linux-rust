@@ -9,8 +9,9 @@
 //! # The order
 //!
 //! A click (`CHARACTER::OnClick`, `G/char.cpp:6181-6352`, then `StartShopping`,
-//! `G/shop_manager.cpp:115-161`) is ignored when the VID names no NPC, when the NPC's click
-//! trigger is not the shop's, when the character already browses that keeper, when the keeper
+//! `G/shop_manager.cpp:115-161`) is ignored when the VID names no NPC, when the character trades
+//! (`G/char.cpp:6210-6217`), when the NPC's click trigger is not the shop's, when the character
+//! already browses that keeper, when the keeper
 //! is `SHOP_MAX_DISTANCE` or farther, when no shop names the keeper's vnum, and when the
 //! character browses another keeper. Otherwise the window opens with each price tripled for a
 //! stranger unless `disable_shop_price_3x` is set.
@@ -33,10 +34,11 @@
 //! - **The tripled price.** A stranger is shown each price tripled, but `CShop::Buy` charges
 //!   the price untripled (the tripling is commented out, `G/shop.cpp:658-659`). The Rewrite
 //!   charges the price it showed.
-//! - **Unported gates.** The trade-window check (`[LS;876]`), `IsSecured`, `CanHandleItem`, a
-//!   locked item, the quest click that runs first and the buy-and-sell throttle belong to
-//!   systems the Rewrite does not have: none of them is open, secured, locked, scripted or set,
-//!   so none refuses.
+//! - **Unported gates.** The other-window check (`[LS;876]`), which a trade never reaches
+//!   because `OnClick` has already ignored the click, `IsSecured`, `CanHandleItem`, a locked
+//!   item, the quest click that runs first and the buy-and-sell throttle belong to systems the
+//!   Rewrite does not have: none of them is open, secured, locked, scripted or set, so none
+//!   refuses.
 
 use std::sync::Arc;
 
@@ -58,7 +60,7 @@ use world::character::{
 use super::GameState;
 use crate::chat_line::chat_packet;
 use crate::game_loop_messages::GroundPlace;
-use crate::item_move::{MoveItemRefused, MovedItems, Mover};
+use crate::item_move::{gold_delta, MoveItemRefused, MovedItems, Mover};
 use crate::sync_position::distance_approx;
 
 /// `SHOP_MAX_DISTANCE` (`G/shop.h:6`): `StartShopping` opens no window from this far or farther.
@@ -144,6 +146,8 @@ pub enum ShopDeclined {
         /// The VID the client clicked.
         target: u32,
     },
+    /// The character trades.
+    Trading,
     /// The NPC's click trigger is not the shop's.
     NotAShop {
         /// Its `ON_CLICK_*`.
@@ -260,6 +264,9 @@ impl GameState {
         else {
             return ShopAnswer::silent(ShopDeclined::NoSuchNpc { target });
         };
+        if self.trading.contains_key(&vid) {
+            return ShopAnswer::silent(ShopDeclined::Trading);
+        }
         if npc.on_click != ON_CLICK_SHOP {
             return ShopAnswer::silent(ShopDeclined::NotAShop {
                 on_click: npc.on_click,
@@ -453,7 +460,7 @@ fn refusal(refused: ShopRefused, mover: Mover, locale: &LocaleStrings) -> ShopAn
 }
 
 /// A `CHAT_TYPE_INFO` line to the mover.
-fn notice(text: &str, mover: Mover, locale: &LocaleStrings) -> Vec<u8> {
+pub(super) fn notice(text: &str, mover: Mover, locale: &LocaleStrings) -> Vec<u8> {
     chat_packet(
         mover.recipient(locale),
         CHAT_TYPE_INFO,
@@ -464,7 +471,8 @@ fn notice(text: &str, mover: Mover, locale: &LocaleStrings) -> Vec<u8> {
 
 /// The move a buy or a sale made, with the character's gold set to `gold`.
 ///
-/// Neither changes a point, so the move carries none.
+/// Neither changes a point, so the move carries none. The move carries the change to the gold,
+/// which its Transfer adds to the stored gold.
 fn paid(
     character: &mut Character,
     mut done: MoveDone,
@@ -473,6 +481,7 @@ fn paid(
     protos: &ItemProtos,
     locale: &LocaleStrings,
 ) -> MovedItems {
+    let change = gold_delta(character.gold(), gold);
     character.set_gold(gold);
     let (items, slots) = character.items_and_quickslots_mut();
     sync_quickslots(&mut done, slots, items);
@@ -480,7 +489,7 @@ fn paid(
     let owner_id = character.player_id();
     let mut step = MovedItems::new(owner_id, character.vid().raw(), done, mover, protos, locale);
     step.quickslots = Some(quickslots);
-    step.gold = Some(gold);
+    step.gold = Some(change);
     step
 }
 
@@ -495,7 +504,7 @@ mod tests {
     use protocol::gc_shop::GC_SHOP_START_WIRE_SIZE;
     use protocol::item_pos::ItemPos;
     use tokio::sync::oneshot;
-    use world::character::{MoveKind, Quickslot, Quickslots, GOLD_MAX_MAX};
+    use world::character::{MoveKind, Quickslot, Quickslots, Side, GOLD_MAX_MAX};
     use world::item::{Item, ItemIdRange, ITEM_FLAG_STACKABLE};
     use world::npc::{MapNpcs, Npc};
 
@@ -797,7 +806,7 @@ mod tests {
             assert_eq!(shown.items[0].price, price / 3000 * 110_000);
             let paid = ShopStep::Buy { pos: 1 };
             let bought = moved(state.shop(SHOPPER, paid, at(0), of(empire)).unwrap());
-            assert_eq!(bought.gold, Some(9000 - price));
+            assert_eq!(bought.gold, Some(-i64::try_from(price).unwrap()));
             assert_eq!(
                 gold(&state),
                 9000 - price,
@@ -874,7 +883,7 @@ mod tests {
         assert_eq!(click(&mut state, FIREWORKS, at(0)), another);
         // A refused open leaves the window as it was.
         let bought = moved(buy(&mut state, 1));
-        assert_eq!(bought.gold, Some(7000));
+        assert_eq!(bought.gold, Some(-3000));
         assert_eq!(held(&state, 0), Some((5020, 1)));
     }
 
@@ -898,7 +907,7 @@ mod tests {
         assert!(bought.around.is_empty());
         assert_eq!(bought.points, None);
         assert_eq!(bought.quickslots, Some(Quickslots::default()));
-        assert_eq!(bought.gold, Some(7000));
+        assert_eq!(bought.gold, Some(-3000));
         assert_eq!(gold(&state), 7000);
         assert_eq!(held(&state, 0), Some((POTION, 5)));
         assert_eq!(held(&state, 1), Some((5020, 1)));
@@ -989,7 +998,7 @@ mod tests {
         assert_eq!(buy(&mut state, 1), refused);
         assert_eq!((gold(&state), held(&state, 0)), (2999, None));
         shopper(&mut state).set_gold(3000);
-        assert_eq!(moved(buy(&mut state, 1)).gold, Some(0));
+        assert_eq!(moved(buy(&mut state, 1)).gold, Some(-3000));
         assert_eq!((gold(&state), held(&state, 0)), (0, Some((5020, 1))));
     }
 
@@ -1006,7 +1015,7 @@ mod tests {
         // Another row unlocked holds it.
         shopper(&mut state).set_inven_point(1);
         let bought = moved(buy(&mut state, 1));
-        assert_eq!(bought.gold, Some(7000));
+        assert_eq!(bought.gold, Some(-3000));
         assert_eq!(held(&state, 90), Some((5020, 1)));
     }
 
@@ -1052,7 +1061,7 @@ mod tests {
             count: 150,
         };
         assert_eq!(sold.changes, vec![kept]);
-        assert_eq!(sold.gold, Some(1291));
+        assert_eq!(sold.gold, Some(291));
         assert_eq!(sold.quickslots.as_ref(), Some(&slots));
         assert_eq!((gold(&state), held(&state, 3)), (1291, Some((POTION, 150))));
         // More than the stack holds sells the stack, and its quickslot goes with it.
@@ -1061,7 +1070,7 @@ mod tests {
         assert_eq!(rest.records.first(), sold.records.first());
         assert!(rest.records.contains(&vec![29, 0]), "{:?}", rest.records);
         assert_eq!(rest.records.last(), Some(&gold_change(2164, 873)));
-        assert_eq!(rest.gold, Some(2164));
+        assert_eq!(rest.gold, Some(873));
         assert_eq!(rest.quickslots, Some(Quickslots::default()));
         let character = state.characters.find_by_vid(SHOPPER).unwrap();
         assert_eq!(character.quickslots(), &Quickslots::default());
@@ -1074,6 +1083,9 @@ mod tests {
         let _window = open(&mut state, WEAPONS);
         let sold = moved(sell(&mut state, 3, 0));
         assert_eq!(sold.gold, Some(1164));
+        assert_eq!(gold_delta(1164, 0), -1164);
+        assert_eq!(gold_delta(0, u64::MAX), i64::MAX);
+        assert_eq!(gold_delta(u64::MAX, 0), i64::MIN);
         assert_eq!((gold(&state), held(&state, 3)), (1164, None));
     }
 
@@ -1148,6 +1160,26 @@ mod tests {
             );
         }
         assert!(state.browsing.is_empty());
+    }
+
+    #[test]
+    fn a_click_while_the_character_trades_is_ignored() {
+        let mut state = a_market(0, &[], true);
+        let _trading = state.trading.insert(SHOPPER, (7, Side::Asked));
+        assert_eq!(
+            click(&mut state, NOBODY, at(0)),
+            ShopAnswer::silent(ShopDeclined::NoSuchNpc { target: NOBODY }),
+            "the NPC is looked up first"
+        );
+        for keeper in [WEAPONS, TALKER] {
+            assert_eq!(
+                click(&mut state, keeper, at(0)),
+                ShopAnswer::silent(ShopDeclined::Trading)
+            );
+        }
+        assert!(state.browsing.is_empty());
+        let _ended = state.trading.remove(&SHOPPER);
+        assert_eq!(open(&mut state, WEAPONS).owner_vid, WEAPONS);
     }
 
     #[test]

@@ -48,7 +48,7 @@
 //! a per-cell identity. Those are behaviour, not bugs, and the client can see
 //! them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use common::item_slots::{
     usable_inventory_cells, EWindows, BELT_INVENTORY_SLOT_START, CUSTOM_INVENTORY_CATEGORY_NUM,
@@ -305,6 +305,10 @@ pub struct CharacterItems {
     /// [`Self::set`], [`Self::remove`], [`Self::release`] and [`Self::set_count`] write
     /// it, and the first three are the only writers of the arrays too.
     bodies: BTreeMap<ItemId, Item>,
+    /// The items offered in a trade: `CItem::SetExchanging` (`G/item.h`). Legacy keeps the
+    /// flag on the item; here it is kept beside the items, so an item that leaves this storage
+    /// through [`Self::release`] or [`Self::remove`] leaves the set too.
+    exchanging: BTreeSet<ItemId>,
 }
 
 /// Why a stack count was not changed.
@@ -363,7 +367,24 @@ impl CharacterItems {
             attr67: [NO_ITEM; ATTR67_SLOTS as usize],
             switchbot: [NO_ITEM; SWITCHBOT_SLOT_COUNT as usize],
             bodies: BTreeMap::new(),
+            exchanging: BTreeSet::new(),
         }
+    }
+
+    /// Whether the item is offered in a trade: `CItem::IsExchanging`.
+    #[must_use]
+    pub fn is_exchanging(&self, id: ItemId) -> bool {
+        self.exchanging.contains(&id)
+    }
+
+    /// Mark a stored item as offered in a trade, or as no longer offered:
+    /// `CItem::SetExchanging` (`G/exchange.cpp:239`, `:270`, `:711-715`). An id this storage
+    /// does not hold is not marked, and answers `false`.
+    pub fn set_exchanging(&mut self, id: ItemId, exchanging: bool) -> bool {
+        if !exchanging {
+            return self.exchanging.remove(&id);
+        }
+        self.bodies.contains_key(&id) && self.exchanging.insert(id)
     }
 
     /// The item stored under this id, with its `pos` set to where it is stored.
@@ -901,6 +922,7 @@ impl CharacterItems {
             _ => return Err(Rejected::UnknownWindow(pos.window_type)),
         }
         let _body = self.bodies.remove(&id);
+        let _offered = self.exchanging.remove(&id);
         Ok(pos)
     }
 
@@ -1308,6 +1330,7 @@ impl CharacterItems {
             _ => Err(Rejected::UnknownWindow(pos.window_type)),
         }?;
         let _body = self.bodies.remove(&item.id);
+        let _offered = self.exchanging.remove(&item.id);
         Ok(())
     }
 
@@ -2423,6 +2446,32 @@ mod tests {
         assert!(items.item(7).is_none());
         assert_eq!(items, CharacterItems::new());
         assert!(items.release(7).is_err());
+    }
+
+    #[test]
+    fn an_item_is_offered_only_while_it_is_held() {
+        let mut items = CharacterItems::new();
+        assert!(
+            !items.set_exchanging(7, true),
+            "an item not held is never offered"
+        );
+        assert!(!items.is_exchanging(7));
+        let item = one_cell(7);
+        items.set(pos(INV, 3), &item).expect("cell 3");
+        assert!(items.set_exchanging(7, true));
+        assert!(!items.set_exchanging(7, true), "offered already");
+        assert!(items.is_exchanging(7) && !items.is_exchanging(8));
+        assert!(items.set_exchanging(7, false));
+        assert!(!items.set_exchanging(7, false));
+        assert!(!items.is_exchanging(7));
+        assert!(items.set_exchanging(7, true));
+        assert_eq!(items.release(7), Ok(pos(INV, 3)));
+        assert_eq!(items, CharacterItems::new(), "a release forgets the offer");
+        items.set(pos(INV, 3), &item).expect("cell 3");
+        assert!(!items.is_exchanging(7));
+        assert!(items.set_exchanging(7, true));
+        items.remove(pos(INV, 3), &item).expect("removes");
+        assert_eq!(items, CharacterItems::new(), "a removal forgets the offer");
     }
 
     #[test]

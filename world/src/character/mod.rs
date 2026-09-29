@@ -19,6 +19,7 @@ mod potion;
 mod quickslot;
 mod shop;
 mod state;
+mod trade;
 
 pub use apply::{
     ApplyArm, APPLY_ATTBONUS_BOSS, APPLY_ATTBONUS_HUMAN, APPLY_ATTBONUS_METIN,
@@ -74,3 +75,9 @@ pub use shop::{
     GOLD_MAX_MAX, SALE_TAX_NOTICE, WORN_NOTICE,
 };
 pub use state::{Activity, CoreState, Posture};
+pub use trade::{
+    settle, Accepted, Offered, Said, Settled, Side, Trade, TradeRecord, Trader, Unsettled,
+    COMPLETED_NOTICE, EXCHANGE_ITEM_MAX_NUM, EXCHANGE_MAX_DISTANCE, FULL_NOTICE,
+    GIVE_REFUSED_NOTICE, OTHER_TRANSACTION_NOTICE, OUT_OF_PLACE_NOTICE, PARTNER_BUSY_NOTICE,
+    PARTNER_FULL_NOTICE, PARTNER_OUT_OF_PLACE_NOTICE, YANG_LIMIT_NOTICE,
+};

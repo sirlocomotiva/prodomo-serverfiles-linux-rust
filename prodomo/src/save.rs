@@ -197,7 +197,6 @@ pub fn player_save(character: &Character, position: SavePosition, played: Playti
         hp: character.hp,
         sp: character.sp,
         stamina: character.stamina,
-        gold: character.gold,
         voice: character.voice,
         part_base: character.part_base,
         main_part: character.main_part,
@@ -281,7 +280,6 @@ mod tests {
         assert_eq!(save.hp, 31);
         assert_eq!(save.sp, 37);
         assert_eq!(save.stamina, 41);
-        assert_eq!(save.gold, 43);
         assert_eq!(save.voice, 47);
         assert_eq!(save.part_base, 2);
         assert_eq!(save.main_part, 1001);

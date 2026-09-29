@@ -14,9 +14,10 @@ use db::accounts::create_account;
 use db::credentials::{DeleteCode, Login, NewPassword};
 use db::item_id_range::MINIMUM_REMAIN_COUNT;
 use db::items::{
-    apply_row_changes, apply_transfer, destroy_item, insert_item, load_item, load_owner_items,
-    max_id_in_range, resolve_item_id_range, save_item, save_owner_items, set_count, Attribute,
-    ItemError, ItemRow, RowChange, GROUND, MAX_ITEM_ID, SOCKETS,
+    apply_exchange, apply_row_changes, apply_transfer, destroy_item, insert_item, load_item,
+    load_owner_items, max_id_in_range, resolve_item_id_range, save_item, save_owner_items,
+    set_count, Attribute, ItemError, ItemRow, RowChange, TransferSide, GROUND, MAX_ITEM_ID,
+    SOCKETS,
 };
 use db::players::{create_player, Created, NewPlayer};
 use db::store::Store;
@@ -880,21 +881,47 @@ async fn a_transfer_stores_the_rows_and_the_gold_together() {
     );
     assert_eq!(gold_of(store, owner).await, 1_000_000_000_000_000_007);
 
-    // Gold the column cannot hold is refused before the store is reached.
+    // The gold is a change to what the row holds, and one that would leave less than none is
+    // refused by the statement itself, which rolls the rows back too.
     let sale = [RowChange::Destroyed { id: 1_000_240 }];
-    let largest = u64::try_from(i64::MAX).unwrap();
-    let refused = apply_transfer(store, owner, &sale, largest + 1).await;
+    let refused = apply_transfer(store, owner, &sale, -1_000_000_000_000_000_008).await;
     assert!(
-        matches!(refused, Err(ItemError::GoldOutOfRange(gold)) if gold == largest + 1),
+        matches!(
+            refused,
+            Err(ItemError::GoldBelowZero {
+                owner_id,
+                held: 1_000_000_000_000_000_007,
+                change: -1_000_000_000_000_000_008,
+            }) if owner_id == owner
+        ),
         "{refused:?}"
     );
     assert!(load_item(store, 1_000_240).await.unwrap().is_some());
-    apply_transfer(store, owner, &sale, largest).await.unwrap();
-    assert_eq!(gold_of(store, owner).await, i64::MAX);
+    apply_transfer(store, owner, &sale, -1_000_000_000_000_000_007)
+        .await
+        .unwrap();
+    assert_eq!(gold_of(store, owner).await, 0);
     assert_eq!(load_item(store, 1_000_240).await.unwrap(), None);
 
+    // A sum past the column is the store's refusal, and nothing is written.
+    apply_transfer(store, owner, &[], i64::MAX).await.unwrap();
+    assert_eq!(gold_of(store, owner).await, i64::MAX);
+    let refused = apply_transfer(
+        store,
+        owner,
+        &[RowChange::Created(row(1_000_243, owner, 1, 6))],
+        1,
+    )
+    .await;
+    assert!(
+        matches!(refused, Err(ItemError::Database(_))),
+        "{refused:?}"
+    );
+    assert_eq!(gold_of(store, owner).await, i64::MAX);
+    assert_eq!(load_item(store, 1_000_243).await.unwrap(), None);
+
     // Gold alone is still written, and an owner with no row is refused.
-    apply_transfer(store, owner, &[], 0).await.unwrap();
+    apply_transfer(store, owner, &[], -i64::MAX).await.unwrap();
     assert_eq!(gold_of(store, owner).await, 0);
     for nobody in [owner + 1_000, u32::MAX] {
         let refused = apply_transfer(store, nobody, &[], 7).await;
@@ -904,6 +931,179 @@ async fn a_transfer_stores_the_rows_and_the_gold_together() {
         );
     }
     assert_eq!(gold_of(store, owner).await, 0);
+}
+
+/// Where one item row sits: its owner, window and cell.
+async fn place_of(store: &Store, id: u32) -> (Option<u32>, u8, u32) {
+    let item = load_item(store, id)
+        .await
+        .unwrap()
+        .expect("the row is stored");
+    (item.owner_id, item.window_type, item.pos)
+}
+
+/// Row `id` given to `to`, landing on `window_type` cell `pos`.
+fn given(id: u32, to: u32, window_type: u8, pos: u32) -> RowChange {
+    RowChange::Given {
+        id,
+        to,
+        window_type,
+        pos,
+    }
+}
+
+/// One side of an exchange.
+fn side(owner_id: u32, changes: &[RowChange], gold: i64) -> TransferSide<'_> {
+    TransferSide {
+        owner_id,
+        changes,
+        gold,
+    }
+}
+
+/// Two traders: the first holds row `1_000_250` on cell 0 and 500 gold, the second rows
+/// `1_000_251` and `1_000_252` on cells 0 and 1.
+async fn traders(store: &Store) -> (u32, u32) {
+    let one = player(store, "accttradeone", "TradeOne").await;
+    let two = player(store, "accttradetwo", "TradeTwo").await;
+    save_owner_items(
+        store,
+        &[
+            row(1_000_250, one, 1, 0),
+            row(1_000_251, two, 1, 0),
+            row(1_000_252, two, 1, 1),
+        ],
+    )
+    .await
+    .unwrap();
+    apply_transfer(store, one, &[], 500).await.unwrap();
+    (one, two)
+}
+
+/// A trade is one Transfer (ADR-0003): each side's offered rows go to the other and the gold
+/// goes with them, in one transaction, and a refusal found on either side leaves both as they
+/// were.
+#[tokio::test]
+async fn an_exchange_gives_the_rows_both_ways_and_moves_the_gold_with_them() {
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &db.store;
+    let (one, two) = traders(store).await;
+
+    // Each side's row lands on the other's cell 2 or 0; the second lands on a cell the first
+    // vacates in the same transaction, which the deferred key allows.
+    let from_one = [given(1_000_250, two, 1, 2)];
+    let from_two = [given(1_000_251, one, 1, 0)];
+    apply_exchange(
+        store,
+        &[side(one, &from_one, -300), side(two, &from_two, 300)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(place_of(store, 1_000_250).await, (Some(two), 1, 2));
+    assert_eq!(place_of(store, 1_000_251).await, (Some(one), 1, 0));
+    assert_eq!(place_of(store, 1_000_252).await, (Some(two), 1, 1));
+    assert_eq!(
+        (gold_of(store, one).await, gold_of(store, two).await),
+        (200, 300)
+    );
+
+    // A given row that lands on a cell the receiver holds is named, and neither side's rows
+    // nor gold are written.
+    let onto_held = [given(1_000_251, two, 1, 1)];
+    let back = [given(1_000_250, one, 1, 5)];
+    let refused =
+        apply_exchange(store, &[side(one, &onto_held, 100), side(two, &back, -100)]).await;
+    assert!(
+        matches!(
+            refused,
+            Err(ItemError::CellAlreadyTaken {
+                id: 1_000_251,
+                window_type: 1,
+                pos: 1
+            })
+        ),
+        "{refused:?}"
+    );
+    // A side short of gold leaves the other side's rows where they were.
+    let fine = [given(1_000_251, two, 1, 3)];
+    let refused = apply_exchange(store, &[side(two, &back, 0), side(one, &fine, -201)]).await;
+    assert!(
+        matches!(
+            refused,
+            Err(ItemError::GoldBelowZero {
+                owner_id,
+                held: 200,
+                change: -201
+            }) if owner_id == one
+        ),
+        "{refused:?}"
+    );
+    // A row the giving side does not hold is named with its holder.
+    let not_held = [given(1_000_252, two, 1, 4)];
+    let refused = apply_exchange(store, &[side(one, &not_held, 0), side(two, &[], 0)]).await;
+    assert!(
+        matches!(
+            refused,
+            Err(ItemError::NotOwned {
+                id: 1_000_252,
+                owner_id: Some(holder)
+            }) if holder == two
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(place_of(store, 1_000_250).await, (Some(two), 1, 2));
+    assert_eq!(place_of(store, 1_000_251).await, (Some(one), 1, 0));
+    assert_eq!(
+        (gold_of(store, one).await, gold_of(store, two).await),
+        (200, 300)
+    );
+}
+
+/// A given row goes to another side of its exchange, in a window a character holds, and one
+/// character is one side; each refusal is found before the store is reached.
+#[tokio::test]
+async fn an_exchange_is_refused_before_the_store_when_its_sides_do_not_fit() {
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &db.store;
+    let (one, two) = traders(store).await;
+    for changes in [
+        [given(1_000_250, one, 1, 7)],
+        [given(1_000_250, two + 1_000, 1, 7)],
+        [given(1_000_250, two, GROUND, 7)],
+    ] {
+        let refused = apply_exchange(store, &[side(one, &changes, 0), side(two, &[], 0)]).await;
+        assert!(matches!(refused, Err(ItemError::Corrupt(_))), "{refused:?}");
+    }
+    let past_ground = [given(1_000_250, two, GROUND + 1, 7)];
+    let refused = apply_exchange(store, &[side(one, &past_ground, 0), side(two, &[], 0)]).await;
+    assert!(
+        matches!(refused, Err(ItemError::WindowOutOfRange(11))),
+        "{refused:?}"
+    );
+    let refused = apply_exchange(store, &[side(one, &[], 1), side(one, &[], 1)]).await;
+    assert!(matches!(refused, Err(ItemError::Corrupt(_))), "{refused:?}");
+    // A row given outside an exchange has no other side to go to.
+    let refused = apply_row_changes(store, one, &[given(1_000_250, two, 1, 3)]).await;
+    assert!(matches!(refused, Err(ItemError::Corrupt(_))), "{refused:?}");
+    // The controls: the same row given to the other side is stored.
+    apply_exchange(
+        store,
+        &[
+            side(one, &[given(1_000_250, two, 1, 7)], 0),
+            side(two, &[], 0),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(place_of(store, 1_000_250).await, (Some(two), 1, 7));
+    assert_eq!(
+        (gold_of(store, one).await, gold_of(store, two).await),
+        (500, 0)
+    );
 }
 
 /// Equipping onto a worn item is a swap (`char_item.cpp:8164-8264`): the carried item takes
