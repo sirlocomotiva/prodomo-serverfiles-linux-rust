@@ -3691,6 +3691,8 @@ enum Seen {
     Look([u16; 6], u8, u8),
     /// A `GC_SEPCIAL_EFFECT`: the type.
     Effect(u8),
+    /// A `GC_ITEM_UPDATE` of the base window: the cell and the new count.
+    Count(u16, u16),
 }
 
 /// Every record a move sends within a quiet window, each checked against the mover's VID.
@@ -3708,6 +3710,11 @@ fn read_a_move(keyed: &mut Keyed, vid: u32) -> Vec<Seen> {
                 let (window, cell, vnum, _count) = set_fields(record);
                 assert_eq!(window, common::item_slots::EWindows::Inventory as u8);
                 Seen::Set(cell, vnum)
+            }
+            ITEM_UPDATE => {
+                let (window, cell, count) = update_fields(record);
+                assert_eq!(window, common::item_slots::EWindows::Inventory as u8);
+                Seen::Count(cell, count)
             }
             GC_POINT_CHANGE => {
                 assert_eq!(&record[4..8], &vid.to_le_bytes(), "the mover's VID");
@@ -3968,6 +3975,136 @@ fn an_armour_is_used_on_swapped_and_used_off_and_the_store_follows() {
         &database,
         "(SELECT part_main = 0 FROM player WHERE name = 'Alpha')",
     );
+}
+
+/// `cg.game.item_use` of a `USE_POTION`: each small red potion owes 300 hit points, a second
+/// drunk while the first is owed adds to it, the last of the stack clears its cell, the affect
+/// event pays 7% of the maximum each second from a second after the first, and the logout save
+/// keeps the paid hit points.
+#[test]
+fn a_drunk_potion_pays_its_hit_points_over_the_next_seconds_and_the_save_keeps_them() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE player SET hp = 500 WHERE name = 'Alpha'");
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    let (hp, recovery) = (
+        u8::try_from(common::point_slot::POINT_HP).expect("a point byte"),
+        u8::try_from(common::point_slot::POINT_HP_RECOVERY).expect("a point byte"),
+    );
+
+    // Given: Alpha, at 500 hit points, holds two small red potions.
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    let add = enter_game_burst(&mut alpha);
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    Server::write_console(&console, "item give Alpha 27001 2");
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 27_001, 2));
+
+    // When: both are drunk, one after the other.
+    alpha.send_record(&client_item_use(0));
+    alpha.send_record(&client_item_use(0));
+    // Then: 300 hit points are owed for each, the red effect plays twice, the stack goes to
+    // one and then its cell is cleared, and the row with it.
+    assert_eq!(
+        read_a_move(&mut alpha, vid),
+        [
+            Seen::Point(recovery, 300),
+            Seen::Effect(1),
+            Seen::Count(0, 1),
+            Seen::Point(recovery, 600),
+            Seen::Effect(1),
+            Seen::Set(0, 0),
+        ]
+    );
+    check(&database, "NOT EXISTS (SELECT 1 FROM item)");
+
+    // And: each second the event pays 99, which is 7% of Alpha's maximum, until the 600 are
+    // paid.
+    let mut paid = 0;
+    while paid < 600 {
+        let step = (600 - paid).min(99);
+        paid += step;
+        let tick = read_a_tick(&mut alpha, vid);
+        assert_eq!(
+            tick,
+            [
+                Seen::Point(hp, 500 + paid),
+                Seen::Point(recovery, 600 - paid)
+            ]
+        );
+    }
+    // And: then it stops.
+    assert_eq!(
+        alpha.client.drain(Duration::from_millis(1200)),
+        (Vec::new(), Quiet::Open)
+    );
+
+    // And: the logout save keeps what the event paid.
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT hp = 1100 FROM player WHERE name = 'Alpha')",
+    );
+}
+
+/// `event.char_affect.affect_event` and the save cycle: with a one-second cycle, the row of a
+/// character still connected is written with what the event paid, because the descriptor asks
+/// the world for its points before each save.
+#[test]
+fn a_recovering_character_is_saved_with_what_the_event_paid_while_it_is_still_connected() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) = Server::start_with_console_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "save_event_second_cycle = 1",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE player SET hp = 500 WHERE name = 'Alpha'");
+    let hp = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
+
+    // Given: Alpha, at 500 hit points, drinks a small red potion.
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    let add = enter_game_burst(&mut alpha);
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    Server::write_console(&console, "item give Alpha 27001 1");
+    server.wait_for("id 100000000; the client has it");
+    let _set = alpha.read_game();
+    alpha.send_record(&client_item_use(0));
+    let _used = read_a_move(&mut alpha, vid);
+
+    // When: the event has paid all 300.
+    let mut last = Seen::Point(hp, 500);
+    while last != Seen::Point(hp, 800) {
+        last = read_a_tick(&mut alpha, vid)[0].clone();
+    }
+    // Then: a save while the client is still connected stores 800.
+    wait_for(
+        &database,
+        "(SELECT hp = 800 FROM player WHERE name = 'Alpha')",
+    );
+    let (bytes, quiet) = alpha.client.drain(Duration::from_millis(200));
+    assert!(bytes.is_empty(), "a save sends no record: {bytes:02x?}");
+    assert_eq!(quiet, Quiet::Open, "the client is still connected");
+}
+
+/// One second of the recovery event: the pool's `GC_CHARACTER_POINT_CHANGE`, then the
+/// recovery's, both for `vid`.
+fn read_a_tick(keyed: &mut Keyed, vid: u32) -> [Seen; 2] {
+    [keyed.read_game(), keyed.read_game()].map(|record| {
+        assert_eq!(record[0], GC_POINT_CHANGE);
+        assert_eq!(&record[4..8], &vid.to_le_bytes(), "the drinker's VID");
+        let value = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
+        Seen::Point(record[8], value)
+    })
 }
 
 /// A `GC_ITEM_GROUND_ADD` at Alpha's and Zulu's position, with z 0.

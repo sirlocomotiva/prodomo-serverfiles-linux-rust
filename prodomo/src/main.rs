@@ -447,11 +447,18 @@ async fn handle_connection(
     // placed into an inventory the world is about to release.
     if let Some(world_vid) = held.world.take() {
         match context.game.leave_world(world_vid).await {
-            Ok(true) => info!(%addr, vid = world_vid.raw(), "Character left the world"),
+            // The world's points are the ones the save writes: the potion recovery changes
+            // them on the world's pulse, after the last step this descriptor held.
+            Ok(Some(departed)) => {
+                if let Some(points) = departed.points {
+                    hold_points(&mut held, points);
+                }
+                info!(%addr, vid = world_vid.raw(), "Character left the world");
+            }
             // A leave that found nobody is a descriptor that never entered, which the
             // `Option` already rules out, so this is a world that lost the character
             // some other way. The disconnect continues either way.
-            Ok(false) => {
+            Ok(None) => {
                 warn!(%addr, vid = world_vid.raw(), "The world did not hold this character at disconnect");
             }
             // A leave with no answer means the game thread is gone. The process is
@@ -608,6 +615,7 @@ async fn pump_descriptor<S>(
                 if let Some(event) = held.save.as_mut() {
                     event.queued = true;
                 }
+                hold_world_points(context, addr, held).await;
                 if save_held(context, &*held, std::time::Instant::now()).await {
                     info!(%addr, "Save event wrote the character row");
                 }
@@ -651,6 +659,21 @@ fn hold_points(held: &mut Held, points: world::character::Points) {
         held_character.sash_part = parts[EParts::Sash as usize];
     }
     held.points = Some(points);
+}
+
+/// Hold the points the world holds for this descriptor's character, which the save writes
+/// from. The world changes them on its own pulse (the potion recovery), so the copy the last
+/// item step left can be stale. A world that cannot answer leaves the held copy, which is
+/// still a state the character was in.
+async fn hold_world_points(context: &ConnectionContext, addr: SocketAddr, held: &mut Held) {
+    let Some(vid) = held.world else {
+        return;
+    };
+    match context.game.points_of(vid).await {
+        Ok(Some(points)) => hold_points(held, points),
+        Ok(None) => {}
+        Err(error) => warn!(%addr, %error, "The world could not be asked for the points to save"),
+    }
 }
 
 /// How long after an attack, or after the select, an item may not be worn: 1.5 s

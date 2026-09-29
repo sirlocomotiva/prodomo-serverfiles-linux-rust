@@ -131,6 +131,8 @@ pub enum MoveKind {
     Dropped,
     /// A ground item went into a free cell (`PickupItem`), after any merges.
     PickedUp,
+    /// A potion changed the points and one of its stack was used up (`UseItemEx`).
+    Used,
 }
 
 /// A record the client is sent, in the order legacy sends it.
@@ -257,6 +259,10 @@ pub enum Unported {
     Worn(WornSystem),
     /// `CG_ITEM_USE` on an item of this type, whose use arm is not ported.
     Use(i32),
+    /// `CG_ITEM_USE` on an `ITEM_USE` item of this sub type, whose arm is not ported.
+    UseSubType(i32),
+    /// `CG_ITEM_USE` on an `ITEM_USE` item whose vnum has an arm of its own that is not ported.
+    UseVnum(u32),
 }
 
 /// Why a move changed nothing.
@@ -363,6 +369,8 @@ pub enum MoveRefused {
     NotOnGround,
     /// `PickupItem`: `DistanceValid` refused, the item lies farther than 300 away.
     TooFar,
+    /// `UseItemEx`: the potion's pools are full, or the recovery already fills them.
+    NothingToRecover,
 }
 
 impl MoveRefused {
@@ -499,6 +507,7 @@ impl core::fmt::Display for MoveRefused {
             Self::NoRoomToPickUp => f.write_str("no cell has room for the ground item"),
             Self::NotOnGround => f.write_str("no such item lies on this map"),
             Self::TooFar => f.write_str("the ground item is too far away"),
+            Self::NothingToRecover => f.write_str("the potion has nothing to recover"),
         }
     }
 }

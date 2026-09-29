@@ -22074,3 +22074,179 @@ The count went from 2584 to 2609. These gates ran on the final working tree:
 After the run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`. The
 workspace has 207 Rust files and 145,291 lines. No crate was fetched, and `Cargo.lock` is
 unchanged. This section claims no width, and the i686 probe was not run.
+
+## 218. Potions: `CG_ITEM_USE` of `USE_POTION` and `USE_POTION_NODELAY`, and the recovery event
+
+A client can now drink a potion. `CHARACTER::UseItemEx`'s `ITEM_USE` arm
+(`G/char_item.cpp:5579-5755`) has two potion sub-types:
+
+- `USE_POTION_NODELAY` fills the pools at once.
+- `USE_POTION` adds to `POINT_HP_RECOVERY` and `POINT_SP_RECOVERY` and starts the affect
+  event (`StartAffectEvent`). The event's `UpdateAffect` (`G/char_affect.cpp:166-234`) then
+  moves the recovery into the pools, a share each second.
+
+Until this section, every `ITEM_USE` item was refused as not ported.
+
+### 218.1 What landed
+
+- **The constants.** `gamedata::item_kind` gains `ITEM_USE` (3), `USE_POTION` (0) and
+  `USE_POTION_NODELAY` (11). Each is pinned against the `TYPE` and `SUB_TYPE` tables the
+  prototype reader already checks.
+- **The potion reducer.** `world::character::potion::use_potion` runs after every check
+  `UseItem` makes for every use, in the same place in `use_item` as the equip:
+  1. **Gold bars and ability potions.** A gold bar (80003-80008) is refused as
+     `NotPorted(UseVnum)`, because its vnum arm runs before the sub-type switch. So is an
+     ability potion (50801-50820) of any sub-type but `USE_POTION_NODELAY`; that sub-type is a
+     plain potion.
+  2. **`USE_POTION_NODELAY`.** Each of `value0`, `value1`, `value3` and `value4` whose pool is
+     not full changes it at once, and each sends its effect (`SE_HPUP_RED` 1, `SE_SPUP_BLUE`
+     2):
+     - `value0` and `value1` are scaled by `100 + POINT_POTION_BONUS`.
+     - `value3` and `value4` are percentages of the maximum.
+     - A potion that changed nothing is refused as `NothingToRecover` and kept.
+  3. **`USE_POTION`.** `value1` is handled first, then `value0`:
+     - Each is refused with `NothingToRecover` when the recovery already owed plus the pool
+       reaches the maximum.
+     - Otherwise it is added to the recovery, scaled by `MIN(200, 100 + POINT_POTION_BONUS)`,
+       and sends its effect.
+     - A refusal of the hit point half keeps the spell point half already applied and keeps
+       the potion (`Declined`), as legacy's `return false` does.
+  4. **The stack.** One of the stack is used up: a larger stack gets a `GC_ITEM_UPDATE` and a
+     count row, and the last one gets a clear record and a deleted row.
+  5. **Other `ITEM_USE` sub-types** are refused as `NotPorted(UseSubType)`.
+- **The recovery event.** `potion::update_recovery` is the hit point and spell point half of
+  `UpdateAffect`, in legacy's order, hit points first. For each pool with recovery owed:
+  - A full pool drops the whole recovery.
+  - Otherwise `MIN(recovery, max * 7 / 100)` moves from the recovery into the pool.
+
+  `is_recovering` says whether any is left.
+- **The game thread.** `GameState` keeps the characters whose event runs, each with its next
+  pulse:
+  - A use that leaves recovery owed arms the event one second (25 pulses) out, unless it
+    already runs. This is `StartAffectEvent`'s guard.
+  - Each pulse runs the due events, writes their point records to the character's own client,
+    and arms them again a second later.
+  - An event with nothing left ends, and a character that leaves ends its event.
+- **The save.** The event changes the points between item steps, so the descriptor's copy
+  would go stale. Two changes keep it current:
+  - `LeaveWorld` now answers `Departed` with the world's points, which the logout save holds.
+  - A new `PointsOf` command fetches them before each periodic save.
+
+  The world was already the owner of the points after each item step (`MovedItems.points`).
+
+### 218.2 What the client sees
+
+- Drinking an instant potion changes its pools at once, plays the red or blue effect for
+  itself and for the map, and shrinks or clears the stack.
+- Drinking a slow potion sends the recovery owed, the effect and the stack record.
+- Starting a second later and every second after, the pool and the recovery are sent as
+  they move. This continues until the recovery is spent.
+- A potion that has nothing to recover sends nothing and is kept.
+
+### 218.3 Divergences
+
+- **The event records go to the drinker only.** Legacy's `PointChange` of `POINT_HP` also
+  reaches the party and the target viewers. Parties and targeting are not ported.
+- **Stamina is ignored.** Legacy's event also runs until the stamina is full. Stamina
+  regeneration is not ported, so here the event ends when both recoveries are spent.
+- **The event runs on its own.** Legacy's `affect_event` also counts down every timed affect
+  and runs the automatic potions. None of those is ported, so the event here is the recovery
+  and nothing else.
+
+### 218.4 Not ported yet
+
+- The arena limits (`arena_potion_limit`, `m_nPotionLimit`, `[LS;403]` and `[LS;122]`).
+- The `ENABLE_NEWSTUFF` `PvP` refusal (`g_NoPotionsOnPVP`, `[LS;1205]`).
+- The dungeon and guild war `UsePotion` hooks.
+- The moon cake and seed timer (50085 and 50086).
+- The quickslot sync of a used-up stack.
+- The gold bar and ability potion arms, and every other `ITEM_USE` sub-type.
+- The rest of the affect event: the timed affects, the automatic potions
+  (`AFFECT_AUTO_HP_RECOVERY`), stamina, and the affect save.
+
+### 218.5 Scenario and Parity inventory
+
+`a_drunk_potion_pays_its_hit_points_over_the_next_seconds_and_the_save_keeps_them`
+(`prodomo/tests/parity.rs`) sets Alpha to 500 hit points and gives it two small red potions
+(27001, `value0` 300) from the Operator console:
+
+1. **Alpha drinks both, one after the other.** The first sends `POINT_HP_RECOVERY` 300, the
+   red effect and the stack's update to one. The second sends the recovery 600, the effect
+   and the clear of cell 0, and no row is left.
+2. **Each second after, the event pays 99.** This is 7% of Alpha's maximum. The scenario reads
+   the pool and the recovery record of each tick until the 600 are paid, at 1100. Then it
+   reads a quiet second and nothing more.
+3. **Alpha disconnects.** The logout save stores 1100 hit points: the world's points, handed
+   back by `LeaveWorld`.
+
+The scenario reads the ticks one record at a time, not by quiet window. A tick lands about a
+second after the last one, and a 700 ms window started between them can close before the next
+tick.
+
+`a_recovering_character_is_saved_with_what_the_event_paid_while_it_is_still_connected` runs
+with `save_event_second_cycle = 1`. Alpha, at 500, drinks one potion. Once the event has paid
+the 300, the row holds 800 while the client is still connected, which only the `PointsOf`
+fetch before each save can give it.
+
+`Seen` gained `Count` for a `GC_ITEM_UPDATE`, and `read_a_tick` reads one second of the event.
+
+In the Parity inventory:
+
+- `cg.game.item_use` stays `partial`, and its note names the scenario.
+- `event.char_affect.affect_event` is `partial` and names both.
+- `sys.item.core` stays `partial` with a 218 note.
+
+### 218.6 Mutation sweep
+
+43 mutants, applied and restored as in 215.7. Each world mutant ran `world`'s library tests.
+Each prodomo mutant ran `prodomo`'s library and the two potion scenarios, with `DATABASE_URL`
+set.
+
+| group | mutants | result |
+|---|---|---|
+| `world/src/character/potion.rs`: both ends of both vnum ranges, the ability potion's sub-type, `is_potion`'s type and sub-types, the unused and declined answers, the instant potion's bonus, full-pool test, zero test, effect, used flag and percentage base, the bonus cap, the slow potion's order, owed sum, comparison and effect, the last-of-stack test, both row changes, `is_recovering`, the event's share, full-pool test, clear, order and minimum, the effect number | 30 | 29 killed, 1 survived |
+| `world/src/character/equip.rs`: the potion dispatch, the sub-type refusal | 2 | 2 killed |
+| `prodomo/src/game_state.rs`: the start, the first due pulse, the running guard, the due comparison, the reschedule, the frames, the end, the pulse call, the leave | 9 | 9 killed |
+| `prodomo/src/main.rs`: the logout points, the points fetch before a periodic save | 2 | 2 killed |
+
+The first run stopped at `one_count`, whose pattern had the wrong indent. The rest ran from
+`cap` on. The first results had three survivors:
+
+- `upd_full` let a full pool pay one more second instead of dropping the recovery. The test
+  left exactly one second's share owed at the full pool, so both answers agreed. It now
+  leaves two, and the mutant is killed.
+- `main_world_save` removed the points fetch before the periodic save. No scenario saved a
+  connected character after the event. The second scenario (218.5) does, and kills it.
+- `cap` raised `MIN(200, ...)` to 300. It is equivalent: `PointChange` caps
+  `POINT_POTION_BONUS` at 100 (`G/char.cpp:4597-4632`, `CAPPED` in `points.rs`), so
+  `100 + bonus` never passes 200 through any ported path. The cap stays, as legacy's does,
+  and `a_slow_potion_adds_to_the_recovery_with_the_bonus_capped_at_double` now pins the 100
+  cap with a bonus of 150.
+
+### 218.7 Receipt
+
+16 new tests:
+
+- `world/src/character/potion.rs`: 10, for the vnum arms, both potion sub-types, the stack and
+  the recovery event.
+- `world/src/character/equip.rs`: 1, `a_used_potion_runs_its_arm_after_the_checks_every_use_runs`.
+- `prodomo/src/game_state.rs`: 3, for the event's start, its guard and the leave.
+- `prodomo/tests/parity.rs`: 2, the scenarios in 218.5, which run only with `DATABASE_URL`
+  set.
+
+`gamedata/src/item_kind.rs`'s pinning test was extended, not added. The count went from 2609
+to 2625. These gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2625 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2625 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+After the run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`. The
+workspace has 208 Rust files and 146,326 lines. No crate was fetched, and `Cargo.lock` is
+unchanged. This section claims no width, and the i686 probe was not run.

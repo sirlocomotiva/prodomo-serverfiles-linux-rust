@@ -8,6 +8,7 @@ use std::thread::Thread;
 use tokio::sync::{mpsc, oneshot};
 
 use protocol::item_pos::ItemPos;
+use world::character::Points;
 use world::item::Item;
 
 use crate::client_registry::ClientOutbox;
@@ -275,12 +276,23 @@ pub enum GameCommand {
     LeaveWorld {
         /// The VID the character entered the world under.
         vid: common::vid::Vid,
-        /// Where the game thread reports whether it removed the character.
+        /// Where the game thread reports what the removed character left behind, or
+        /// `None` when it did not hold the character.
         ///
-        /// A `false` is not fatal to a disconnect: the descriptor is ending anyway,
+        /// A `None` is not fatal to a disconnect: the descriptor is ending anyway,
         /// and legacy logs the same "already gone" case rather than refusing the
         /// close. It is still reported so a double leave is visible.
-        reply: oneshot::Sender<bool>,
+        reply: oneshot::Sender<Option<Departed>>,
+    },
+    /// Answers the points of the character online under `vid`, which the descriptor's
+    /// save writes from: the world changes them on its own pulse too (the potion
+    /// recovery), so the copy the descriptor held after its last step can be stale.
+    PointsOf {
+        /// The VID the character entered the world under.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the points, `None` when it does not hold the
+        /// character or the character has none.
+        reply: oneshot::Sender<Option<Points>>,
     },
     /// Writes one record to a character's client from the thread that owns the world.
     ///
@@ -602,6 +614,14 @@ impl std::fmt::Display for LeaveWorldError {
 
 impl std::error::Error for LeaveWorldError {}
 
+/// What the world hands back when a character leaves it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Departed {
+    /// The character's points as the world last changed them, which the final save writes.
+    /// `None` for a character that entered without them.
+    pub points: Option<Points>,
+}
+
 /// Why installing the item id allocator did not succeed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstallError {
@@ -856,12 +876,29 @@ impl GameLoopController {
     /// fatal to a disconnect -- the descriptor is ending and the process is losing the
     /// world with it -- but both are reported so a leave that never happened is
     /// visible rather than assumed.
-    pub async fn leave_world(&self, vid: common::vid::Vid) -> Result<bool, LeaveWorldError> {
+    pub async fn leave_world(
+        &self,
+        vid: common::vid::Vid,
+    ) -> Result<Option<Departed>, LeaveWorldError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::LeaveWorld { vid, reply })
             .await
             .map_err(|_| LeaveWorldError::NotSent)?;
         answer.await.map_err(|_| LeaveWorldError::NoAnswer)
+    }
+
+    /// Asks the world for the points of the character online under `vid`, which a save
+    /// writes from.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn points_of(&self, vid: common::vid::Vid) -> Result<Option<Points>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::PointsOf { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 
     /// Asks the world to write one record to a character's client, and waits for the

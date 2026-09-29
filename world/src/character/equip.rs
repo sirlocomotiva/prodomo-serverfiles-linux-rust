@@ -853,7 +853,11 @@ pub fn use_item(
         .protos
         .get(item.vnum)
         .ok_or(MoveRefused::UnknownVnum(item.vnum))?;
-    if !USED_BY_WEARING.contains(&proto.item_type) {
+    let potion = super::potion::is_potion(proto);
+    if !potion && proto.item_type == gamedata::item_kind::ITEM_USE {
+        return Err(MoveRefused::NotPorted(Unported::UseSubType(proto.sub_type)));
+    }
+    if !potion && !USED_BY_WEARING.contains(&proto.item_type) {
         return Err(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
     }
     let race = gear.points.race();
@@ -890,6 +894,9 @@ pub fn use_item(
         .any(|limit| limit.kind == LIMIT_REAL_TIME_START_FIRST_USE)
     {
         return Err(MoveRefused::NotPorted(Unported::Worn(WornSystem::Timer)));
+    }
+    if potion {
+        return super::potion::use_potion(items, &item, proto, &mut *gear.points);
     }
     let mut equipper = Equipper::new(items, gear, rules.usable_cells);
     let outcome = if super::inventory::is_equip_position(item.pos) {
@@ -938,7 +945,9 @@ mod tests {
     const UNIQUE: u32 = 71_001;
     const LEVEL_TEN_SWORD: u32 = 31;
     const UNIQUE_FLAGGED: u32 = 11_240;
-    const POTION: u32 = 27_001;
+    const SPECIAL: u32 = 71_049;
+    const POTION: u32 = 27_101;
+    const HIGH_POTION: u32 = 27_102;
     const SURA_REFUSED: u32 = 12;
     const CHAMPION_SWORD: u32 = 41;
     const TIMED_SWORD: u32 = 51;
@@ -1007,6 +1016,15 @@ mod tests {
             kind: LIMIT_LEVEL,
             value: 30,
         };
+        // `USE_POTION_NODELAY`, 11: 100 hit points at once.
+        let mut potion = proto(POTION, 3, 11, 0);
+        potion.values[0] = 100;
+        let mut high_potion = potion.clone();
+        high_potion.vnum = HIGH_POTION;
+        high_potion.limits[0] = ItemValue {
+            kind: LIMIT_LEVEL,
+            value: 30,
+        };
         // A costume weapon for a weapon sub type other than the sword's 0.
         let mut costume_blade = proto(COSTUME_BLADE, ITEM_COSTUME, COSTUME_WEAPON, 0);
         costume_blade.values[3] = 1;
@@ -1023,8 +1041,10 @@ mod tests {
             proto(UNIQUE, ITEM_UNIQUE, 0, WEARABLE_UNIQUE),
             level_ten,
             proto(UNIQUE_FLAGGED, ITEM_ARMOR, ARMOR_BODY, WEARABLE_UNIQUE),
-            // `ITEM_USE`, 3.
-            proto(POTION, 3, 0, 0),
+            // `ITEM_USE`, 3, `USE_SPECIAL`, 10.
+            proto(SPECIAL, 3, 10, 0),
+            potion,
+            high_potion,
             sura_refused,
             champion,
             timed,
@@ -1610,10 +1630,10 @@ mod tests {
 
     #[test]
     fn a_use_of_another_type_or_from_another_window_is_not_ported() {
-        let mut case = Case::new(&[(inv(3), Item::new(7, POTION))]);
+        let mut case = Case::new(&[(inv(3), Item::new(7, SPECIAL))]);
         assert_eq!(
             case.use_refused(inv(3)),
-            MoveRefused::NotPorted(Unported::Use(3))
+            MoveRefused::NotPorted(Unported::UseSubType(10))
         );
         let mut case = Case::new(&[(inv(3), Item::new(7, UNIQUE))]);
         assert_eq!(
@@ -1641,6 +1661,24 @@ mod tests {
             use_item(&mut items, inv(3), &RULES, None),
             Err(MoveRefused::NotPorted(Unported::Equipment))
         );
+    }
+
+    #[test]
+    fn a_used_potion_runs_its_arm_after_the_checks_every_use_runs() {
+        let mut case = Case::new(&[
+            (inv(3), Item::new(7, POTION)),
+            (inv(4), Item::new(8, HIGH_POTION)),
+        ]);
+        case.points
+            .point_change(point::POINT_HP, -200, false, false)
+            .expect("a pool changes");
+        let hp = case.points.hp();
+        assert_eq!(case.use_refused(inv(4)), MoveRefused::UseLevelTooLow);
+        let done = case.use_at(inv(3)).expect("the potion works");
+        assert_eq!(done.kind, MoveKind::Used);
+        assert_eq!(case.points.hp(), hp + 100);
+        assert_eq!(effects(&done), [crate::character::SE_HPUP_RED]);
+        assert_eq!(case.at(inv(3)), None);
     }
 
     #[test]

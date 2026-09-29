@@ -31,8 +31,9 @@ use std::sync::Arc;
 use common::item_slots::usable_inventory_cells;
 use gamedata::item_proto::ItemProtos;
 use world::character::{
-    drop_item, move_item, pickup_item, use_item, CharacterManager, CharacterManagerError, DropAt,
-    Gear, GroundItem, GroundRecord, MoveRefused, MoveRequest, MoveRules, Pcg32, Picker, Rejected,
+    drop_item, is_recovering, move_item, pickup_item, update_recovery, use_item, CharacterManager,
+    CharacterManagerError, DropAt, Gear, GroundItem, GroundRecord, MoveRefused, MoveRequest,
+    MoveRules, Pcg32, Picker, Rejected,
 };
 use world::item::{ItemIdRange, ItemIds};
 
@@ -41,9 +42,10 @@ use tracing::{debug, warn};
 
 use crate::client_registry::{ChannelClients, ClientOutbox};
 use crate::game_loop::PulseProcessor;
-use crate::game_loop_messages::{GameCommand, GroundPlace};
+use crate::game_loop_messages::{Departed, GameCommand, GroundPlace};
 use crate::item_grant::{grant_item, GrantOutcome, GrantRefusal, GrantRequest};
 use crate::item_move::{belt_grade, ground_record, move_facts, MoveItemRefused, MovedItems, Mover};
+use crate::loading_phase::point_changes;
 use crate::save::PASSES_PER_SEC;
 use crate::sync_position::distance_approx;
 
@@ -327,13 +329,18 @@ pub struct GameState {
     /// Legacy holds them as `CItem` sectree entities, in memory only; a restart loses them,
     /// and so does this.
     ground: BTreeMap<u32, Lying>,
-    /// The next ground VID. A namespace of its own, apart from the character VIDs (a
-    /// Divergence: legacy draws both from one `CEntity` VID counter).
+    /// The next ground VID, apart from the character VIDs as legacy's are. Legacy's
+    /// `ITEM_MANAGER` counter numbers every item when it is created (`++m_dwVIDCount` in
+    /// `ITEM_MANAGER::CreateItem`); a Divergence: this one numbers an item only when it is
+    /// dropped.
     next_ground_vid: u32,
     /// `item_destroy_time_dropitem`, in pulses.
     drop_lifetime: u64,
     /// Who hears a ground item vanish when its destroy event fires.
     clients: Option<Arc<ChannelClients>>,
+    /// The characters whose potion recovery runs, with the pulse their event fires on next
+    /// (`m_pkAffectEvent`).
+    recovering: HashMap<common::vid::Vid, u64>,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -391,6 +398,7 @@ impl GameState {
             next_ground_vid: 1,
             drop_lifetime: drop_lifetime_pulses(DEFAULT_DROP_LIFETIME_SECS),
             clients: None,
+            recovering: HashMap::new(),
         }
     }
 
@@ -574,22 +582,15 @@ impl GameState {
                     );
                 }
             }
-            GameCommand::LeaveWorld { vid, reply } => {
-                let removed = self.leave_world(vid);
-                // A leave that finds nobody is a double leave, not a failure: the
-                // descriptor is ending and the world already agrees the character is
-                // gone. Logging it at warn would make an ordinary reconnect noisy.
-                if !removed {
-                    debug!(
-                        ?vid,
-                        "the world was asked to remove a character it did not hold"
-                    );
-                }
-                if reply.send(removed).is_err() {
-                    debug!(
-                        ?vid,
-                        "the world removed a character nobody was left to hear about"
-                    );
+            GameCommand::LeaveWorld { vid, reply } => self.answer_leave(vid, reply),
+            GameCommand::PointsOf { vid, reply } => {
+                let points = self
+                    .characters
+                    .find_by_vid(vid)
+                    .ok()
+                    .and_then(|character| character.points().cloned());
+                if reply.send(points).is_err() {
+                    debug!(?vid, "nobody was left to hear a character's points");
                 }
             }
             GameCommand::MoveItem {
@@ -793,12 +794,20 @@ impl GameState {
     /// the last time after this returns, and anything the world still held would be
     /// released by the destruction and the row would still name it.
     ///
-    /// Returns `false` when the world did not hold that character, which is reported
+    /// Answers the character's points as the world last changed them, which the final
+    /// save writes: the recovery event changes them on the world's own pulse, after the
+    /// descriptor's last step. Its event ends with the character (`event_cancel` in
+    /// `CHARACTER::Destroy`).
+    ///
+    /// Returns `None` when the world did not hold that character, which is reported
     /// rather than treated as fatal because a disconnect that finds nobody is
     /// already ending.
-    pub fn leave_world(&mut self, vid: common::vid::Vid) -> bool {
+    pub fn leave_world(&mut self, vid: common::vid::Vid) -> Option<Departed> {
         let _outbox = self.outboxes.remove(&vid);
-        self.characters.destroy(vid).is_ok()
+        let _event = self.recovering.remove(&vid);
+        let points = self.characters.find_by_vid(vid).ok()?.points().cloned();
+        self.characters.destroy(vid).ok()?;
+        Some(Departed { points })
     }
 
     /// Whether a character is online under that VID.
@@ -857,8 +866,28 @@ impl GameState {
         })
     }
 
+    /// Answer a `LeaveWorld`: the character leaves, and the descriptor is handed its points.
+    fn answer_leave(&mut self, vid: common::vid::Vid, reply: oneshot::Sender<Option<Departed>>) {
+        let removed = self.leave_world(vid);
+        // A leave that finds nobody is a double leave, not a failure: the
+        // descriptor is ending and the world already agrees the character is
+        // gone. Logging it at warn would make an ordinary reconnect noisy.
+        if removed.is_none() {
+            debug!(
+                ?vid,
+                "the world was asked to remove a character it did not hold"
+            );
+        }
+        if reply.send(removed).is_err() {
+            debug!(
+                ?vid,
+                "the world removed a character nobody was left to hear about"
+            );
+        }
+    }
+
     /// Run one `CG_ITEM_USE` for the character online under `vid`: an equippable item goes on
-    /// or comes off (`CHARACTER::UseItem`, `G/char_item.cpp:7168`).
+    /// or comes off, and a potion is drunk (`CHARACTER::UseItem`, `G/char_item.cpp:7168`).
     ///
     /// # Errors
     ///
@@ -869,9 +898,16 @@ impl GameState {
         at: protocol::item_pos::ItemPos,
         actor: Mover,
     ) -> Result<MovedItems, MoveItemRefused> {
-        self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
+        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
             use_item(items, at, rules, gear)
-        })
+        })?;
+        // `StartAffectEvent`: a potion that left recovery starts the event, one second out,
+        // unless it already runs.
+        if moved.points.as_ref().is_some_and(is_recovering) {
+            let due = self.last_pulse.saturating_add(u64::from(PASSES_PER_SEC));
+            let _running = self.recovering.entry(vid).or_insert(due);
+        }
+        Ok(moved)
     }
 
     /// Apply one of the ground commands: a drop, a pick-up, or the list a client entering a
@@ -1044,6 +1080,40 @@ impl GameState {
         }
     }
 
+    /// Fire every recovery event due by `pulse`: one second of `UpdateAffect`'s recovery, whose
+    /// point records go to the character's client alone. The event runs again a second later
+    /// while recovery is left (`affect_event`, `G/char_affect.cpp:143-162`).
+    fn run_recovery(&mut self, pulse: u64) {
+        let due: Vec<common::vid::Vid> = self
+            .recovering
+            .iter()
+            .filter(|(_, due)| **due <= pulse)
+            .map(|(vid, _)| *vid)
+            .collect();
+        for vid in due {
+            let points = self
+                .characters
+                .find_by_vid_mut(vid)
+                .ok()
+                .and_then(|character| character.items_and_points_mut().1);
+            let Some(points) = points else {
+                let _gone = self.recovering.remove(&vid);
+                continue;
+            };
+            let records = update_recovery(points);
+            let again = is_recovering(points);
+            for frame in point_changes(&records, vid.raw()) {
+                let _delivered = self.write_to_client(vid, frame);
+            }
+            if again {
+                let next = pulse.saturating_add(u64::from(PASSES_PER_SEC));
+                let _rescheduled = self.recovering.insert(vid, next);
+            } else {
+                let _ended = self.recovering.remove(&vid);
+            }
+        }
+    }
+
     /// Run one item step against the storage and gear of the character online under `vid`.
     fn run_item_step(
         &mut self,
@@ -1120,6 +1190,7 @@ impl PulseProcessor for GameState {
         self.last_pulse = pulse;
         self.metrics.pulses.store(pulse, Ordering::SeqCst);
         self.destroy_expired(pulse);
+        self.run_recovery(pulse);
     }
 }
 
@@ -1160,7 +1231,7 @@ mod tests {
     use common::vid::Vid;
     use db::items::RowChange;
     use protocol::item_pos::ItemPos;
-    use world::character::{Lookup, MoveRefused};
+    use world::character::{Lookup, MoveRefused, Points};
 
     fn owners() -> ItemProtos {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
@@ -1289,7 +1360,7 @@ mod tests {
         // only entry the map had and it leaves cleanly. A sender for a character that
         // was never admitted would keep a record addressable to a client the world
         // has no character for.
-        assert!(state.leave_world(Vid::new(7)));
+        assert!(state.leave_world(Vid::new(7)).is_some());
         assert_eq!(state.online_count(), 0);
     }
 
@@ -1402,7 +1473,7 @@ mod tests {
         state
             .enter_world(Vid::new(7), 7, "Shaman", outbox)
             .expect("the character is admitted");
-        assert!(state.leave_world(Vid::new(7)));
+        assert!(state.leave_world(Vid::new(7)).is_some());
         // Both halves are gone together, which is what a grant checks before it
         // builds a record for a character.
         assert!(!state.is_online(Vid::new(7)));
@@ -1411,11 +1482,11 @@ mod tests {
     }
 
     #[test]
-    fn leaving_a_character_the_world_never_had_reports_false_rather_than_panicking() {
+    fn leaving_a_character_the_world_never_had_reports_none_rather_than_panicking() {
         let mut state = a_state();
         // A descriptor that never entered the game still runs the close path, so a
         // double leave is reachable and must not be a panic.
-        assert!(!state.leave_world(Vid::new(999)));
+        assert!(state.leave_world(Vid::new(999)).is_none());
     }
 
     #[test]
@@ -2378,5 +2449,149 @@ mod tests {
         assert_eq!(drop_lifetime_pulses(0), 1);
         assert_eq!(drop_lifetime_pulses(-5), 1);
         assert_eq!(GameState::new(owners()).drop_lifetime, 7_500);
+    }
+
+    /// A level 10 warrior at VID 7, 500 short in both pools, holding two small red potions,
+    /// with a receiver the test keeps.
+    fn a_hurt_drinker() -> (GameState, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
+        let mut state = a_state();
+        let (outbox, inbox) = a_live_outbox();
+        state
+            .enter_world_with_items(
+                Vid::new(7),
+                7,
+                "Shaman",
+                &[(inventory(0), a_potion_stack(11, 2))],
+                outbox,
+            )
+            .expect("the character is admitted with its potions");
+        let mut points = Points::load(&world::character::PointsRow {
+            race: 0,
+            level: 10,
+            conqueror_level: 0,
+            st: 6,
+            ht: 4,
+            dx: 3,
+            iq: 3,
+            sungma: [0; 4],
+            hp: 10_000,
+            sp: 10_000,
+            stamina: 820,
+            inven_point: 0,
+            map_index: 1,
+            part_base: 0,
+            hair_part: 0,
+            sash_part: 0,
+        });
+        let _ = points.compute_points();
+        for kind in [common::point_slot::POINT_HP, common::point_slot::POINT_SP] {
+            let _ = points
+                .point_change(kind, -500, false, false)
+                .expect("a pool changes");
+        }
+        state
+            .characters
+            .find_by_vid_mut(Vid::new(7))
+            .expect("the character is in the world")
+            .set_points(Some(points));
+        (state, inbox)
+    }
+
+    fn points_at_seven(state: &GameState) -> Points {
+        state
+            .characters()
+            .find_by_vid(Vid::new(7))
+            .expect("the character is in the world")
+            .points()
+            .cloned()
+            .expect("the character has points")
+    }
+
+    #[test]
+    fn a_slow_potion_starts_a_recovery_that_the_pulse_pays_out_a_second_later() {
+        let (mut state, mut inbox) = a_hurt_drinker();
+        let before = points_at_seven(&state);
+        state.process_pulse(3);
+        let moved = state
+            .use_item(Vid::new(7), inventory(0), a_mover())
+            .expect("the potion is drunk");
+        assert_eq!(moved.kind, world::character::MoveKind::Used);
+        assert_eq!(state.recovering.get(&Vid::new(7)), Some(&28));
+        let owed = points_at_seven(&state).get_point(common::point_slot::POINT_HP_RECOVERY);
+        assert_eq!(owed, 300, "the small red potion owes 300 HP");
+        assert_eq!(
+            points_at_seven(&state).hp(),
+            before.hp(),
+            "nothing paid yet"
+        );
+
+        while inbox.try_recv().is_ok() {}
+        state.process_pulse(27);
+        assert!(
+            inbox.try_recv().is_err(),
+            "the event is not due before pulse 28"
+        );
+        state.process_pulse(28);
+        let paid = points_at_seven(&state);
+        let step = (before.max_hp() * 7 / 100).min(300);
+        assert_eq!(paid.hp(), before.hp() + step);
+        assert_eq!(
+            paid.get_point(common::point_slot::POINT_HP_RECOVERY),
+            300 - step
+        );
+        let frames: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert!(!frames.is_empty(), "the payment reaches the client");
+        assert_eq!(state.recovering.get(&Vid::new(7)), Some(&53));
+
+        for pulse in (53..).step_by(25).take(20) {
+            state.process_pulse(pulse);
+        }
+        let done = points_at_seven(&state);
+        assert_eq!(done.hp(), before.hp() + 300, "the whole recovery was paid");
+        assert_eq!(done.get_point(common::point_slot::POINT_HP_RECOVERY), 0);
+        assert!(
+            state.recovering.is_empty(),
+            "the event ended with the recovery"
+        );
+    }
+
+    #[test]
+    fn a_second_potion_does_not_restart_a_running_recovery() {
+        let (mut state, _inbox) = a_hurt_drinker();
+        let _ = state
+            .use_item(Vid::new(7), inventory(0), a_mover())
+            .expect("the first potion is drunk");
+        state.process_pulse(10);
+        let _ = state
+            .use_item(Vid::new(7), inventory(0), a_mover())
+            .expect("the second potion is drunk");
+        assert_eq!(state.recovering.get(&Vid::new(7)), Some(&25));
+    }
+
+    #[test]
+    fn leaving_hands_back_the_points_and_ends_the_recovery() {
+        let (mut state, _inbox) = a_hurt_drinker();
+        let _ = state
+            .use_item(Vid::new(7), inventory(0), a_mover())
+            .expect("the potion is drunk");
+        let expected = points_at_seven(&state);
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        state.apply(GameCommand::PointsOf {
+            vid: Vid::new(7),
+            reply,
+        });
+        assert_eq!(answer.blocking_recv().unwrap(), Some(expected.clone()));
+
+        let departed = state
+            .leave_world(Vid::new(7))
+            .expect("the character was online");
+        assert_eq!(departed.points, Some(expected));
+        assert!(state.recovering.is_empty());
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        state.apply(GameCommand::PointsOf {
+            vid: Vid::new(7),
+            reply,
+        });
+        assert_eq!(answer.blocking_recv().unwrap(), None);
     }
 }

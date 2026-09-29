@@ -735,7 +735,7 @@ async fn a_client_that_leaves_the_world_frees_its_name_for_a_later_login() {
     .expect("the answer crossed back");
 
     // Then: the world really let the character go.
-    assert!(left);
+    assert!(left.is_some());
 
     // And: the name is free again, which is what a relog needs. Legacy reuses the
     // name the instant `PlayerDestroy` runs, and a world that held the old character
@@ -787,5 +787,5 @@ async fn leaving_a_character_the_thread_never_admitted_is_reported_rather_than_p
 
     // Reported as `false` rather than refused: the descriptor is ending either way,
     // and legacy logs the same already-gone case instead of blocking the close.
-    assert!(!left);
+    assert!(left.is_none());
 }

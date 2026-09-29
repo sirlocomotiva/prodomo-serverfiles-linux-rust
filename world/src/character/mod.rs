@@ -15,6 +15,7 @@ mod legacy_source;
 mod manager;
 mod model;
 mod points;
+mod potion;
 mod state;
 
 pub use apply::{
@@ -61,4 +62,5 @@ pub use points::{
     apply_is_ported, race_to_job, sungma_will, PassiveBonuses, PointChangeRefused, PointRecord,
     Points, PointsRow, SungmaWill, IMMUNE_FALL, IMMUNE_SLOW, IMMUNE_STUN, SUNGMA_WILL_MAPS,
 };
+pub use potion::{is_recovering, update_recovery, SE_HPUP_RED, SE_SPUP_BLUE};
 pub use state::{Activity, CoreState, Posture};

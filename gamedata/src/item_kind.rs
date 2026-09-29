@@ -20,6 +20,8 @@ pub const ITEM_NONE: i32 = 0;
 pub const ITEM_WEAPON: i32 = 1;
 /// `ITEM_ARMOR`.
 pub const ITEM_ARMOR: i32 = 2;
+/// `ITEM_USE`, an item used up by `CG_ITEM_USE`: potions among others.
+pub const ITEM_USE: i32 = 3;
 /// `ITEM_METIN`, a stone that sits in another item's socket.
 pub const ITEM_METIN: i32 = 10;
 /// `ITEM_ROD`, a fishing rod.
@@ -61,6 +63,11 @@ pub const ARMOR_NECK: i32 = 5;
 pub const ARMOR_EAR: i32 = 6;
 /// `ARMOR_GLOVE`, behind `ENABLE_GLOVE_SYSTEM`, which `prodomodefines.h` defines.
 pub const ARMOR_GLOVE: i32 = 7;
+
+/// `USE_POTION`: a potion whose recovery runs over the following seconds.
+pub const USE_POTION: i32 = 0;
+/// `USE_POTION_NODELAY`: a potion whose recovery is immediate.
+pub const USE_POTION_NODELAY: i32 = 11;
 
 /// `COSTUME_BODY`, which the source pins to `ARMOR_BODY`.
 pub const COSTUME_BODY: i32 = 0;
@@ -184,6 +191,7 @@ mod tests {
             (ITEM_NONE, "ITEM_NONE"),
             (ITEM_WEAPON, "ITEM_WEAPON"),
             (ITEM_ARMOR, "ITEM_ARMOR"),
+            (ITEM_USE, "ITEM_USE"),
             (ITEM_METIN, "ITEM_METIN"),
             (ITEM_ROD, "ITEM_ROD"),
             (ITEM_UNIQUE, "ITEM_UNIQUE"),
@@ -215,6 +223,13 @@ mod tests {
             (ARMOR_GLOVE, "ARMOR_GLOVE"),
         ] {
             assert_eq!(value, index(armor, name), "{name}");
+        }
+        let usable = SUB_TYPE[usize::try_from(ITEM_USE).expect("a small index")];
+        for (value, name) in [
+            (USE_POTION, "USE_POTION"),
+            (USE_POTION_NODELAY, "USE_POTION_NODELAY"),
+        ] {
+            assert_eq!(value, index(usable, name), "{name}");
         }
         let costume = SUB_TYPE[usize::try_from(ITEM_COSTUME).expect("a small index")];
         for (value, name) in [
