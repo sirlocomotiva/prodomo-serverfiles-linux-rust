@@ -22580,3 +22580,257 @@ The workspace has 209 Rust files and 147,740 lines, outside `server/` and `.scra
 219.7's count of 212 files and 147,453 lines included three untracked scratch files. The
 workspace then had 209 files and 147,159 lines. No crate was fetched, and `Cargo.lock` is
 unchanged. This section claims no width, and the i686 probe was not run.
+
+## 221. The locale strings: `locale_string.txt` and `LC_LOCALE_TEXT`
+
+Every server line is now looked up in its descriptor's language before it is formatted.
+`__MULTI_LANGUAGE_SYSTEM__` is defined (`common/prodomodefines.h:133`), so legacy reads one
+`locale_string.txt` per language at boot (`LocaleService_LoadLocaleStringFile`,
+`G/locale_service.cpp:418-454`). `CHARACTER::ChatPacket` (`G/char.cpp:5140-5187`) then passes
+each format through `LC_LOCALE_TEXT` in the descriptor's language (`:5151`), unless the line
+is `CHAT_TYPE_COMMAND`. Until this section, the Rewrite read no table and sent every line as
+written. Its records also carried language 0 wherever legacy carries the descriptor's.
+
+### 221.1 What landed
+
+- **The reader.** `gamedata::locale_string::LanguageTable::parse` reads one file as
+  `locale_init` does (`G/locale.cpp:351-440`):
+  - `quote_find_end` (`:260-288`) finds the `;` that ends each string;
+  - `locale_convert` (`:290-346`) keeps the bytes between the quotes, turns `\n` into a
+    newline, and keeps the backslash of `\"`;
+  - the first pair for a key wins (`locale_add`, `:61-69`).
+  A pair legacy cannot read ends the file, and the table records where and why
+  (`Ending::Stopped`). The bytes are kept as they are, since the owner's keys are CP949.
+- **The tables.** `LocaleStrings::load` reads `<country>/<code>/locale_string.txt` for
+  languages 1 to 11. `country_code` is legacy's `get_locale` (`G/locale.cpp:30-59`), and
+  `ServerConfig::country_dir` is `<game_data>/locale/europe/country`. `LocaleStrings::find`
+  is `locale_find` (`:71-88`). The owner's eleven files read to their end: 757 pairs each
+  and 758 in `pt`, every pair with its own key.
+- **`ChatPacket`.** `prodomo::chat_line::chat_packet` takes a `Recipient`: the tables, the
+  descriptor's language and its empire. It looks the format up unless the line is
+  `CHAT_TYPE_COMMAND`. It formats `%d`, `%s` and `%%` as `vsnprintf` does and cuts the text
+  to `CHAT_MAX_LEN`. The `GC_CHAT` record has `id` 0 and the descriptor's empire. These lines
+  are now built through it:
+  - `chat::info_line`, whose shout refusal is the format
+    `Shout can only be used at level %d or higher.` with the limit as its argument;
+  - the item step notices and the drop limit notice;
+  - the pick-up line, the format `[LS;444;%s]` with the item's name as its argument
+    (`G/char_item.cpp:8080`).
+- **The descriptor's language.** `SelectAccount` gained `language`. The Channel login fills it
+  from the login grant, which holds the `bLanguage` the auth login chose. Legacy's
+  `LOGIN_BY_KEY` copies it into the account table (`D/ClientManagerLogin.cpp:136-138`).
+  `descriptor_language` is `DESC::GetLanguage` (`G/desc.h:181-182`), 0 with no account
+  table.
+  - `Mover` gained `language` and `recipient`. The game thread holds the tables
+    (`GameState::with_locale_strings`), so its notices and pick-up lines are in the mover's
+    language.
+  - `VisibleCharacter` gained `language`, and `additional()` uses the character's own.
+- **The start-up.** `serve` reads the tables after the item protos and logs
+  "Locale strings loaded" with each language's pairs. A file that stops early is warned
+  about, and a file that cannot be read stops the server.
+
+### 221.2 What the client sees
+
+- The entering character's `GC_CHAR_ADDITIONAL_INFO` carries its descriptor's language at
+  byte 69 (`G/char.cpp:1174`). Each `GC_CHARACTER_UPDATE` of an item look carries the
+  mover's at byte 54 (`:1321`). Both carried 0 before.
+- A client in another language hears each info line, notice and pick-up line in its language
+  when its table translates the line. No line ported so far is a key in the owner's tables,
+  so every line still reads as it did.
+
+### 221.3 Divergences
+
+- **A missing file stops the server.** Legacy's `locale_init` returns when `fopen` fails
+  (`G/locale.cpp:356-359`), and that language goes out untranslated. The Rewrite refuses a
+  Game data file it cannot read, as it does every other one.
+- **The YMIR table is not loaded.** Legacy fills table 0 from the `en` file
+  (`G/locale_service.cpp:437-438`). `locale_find` answers the text itself for `LOCALE_YMIR`
+  before it reads any table (`G/locale.cpp:73-74`), so nothing reads that table.
+
+Three legacy Defects are not reproduced:
+
+- **Language 12 reads past the tables.** `locale_find` tests `locale > LOCALE_MAX_NUM`
+  (`G/locale.cpp:76-79`), so language 12 indexes one past the last table. Here every
+  language past 11 reads English. The auth login refuses 12, so no descriptor holds it.
+- **A line longer than `CHAT_MAX_LEN` over-reads.** `vsnprintf` answers the length the whole
+  line would have had, and `ChatPacket` sends that many bytes from its 513-byte buffer
+  (`G/char.cpp:5160-5183`). Here the line is cut to the 512 bytes written.
+- **A conversion with no argument reads past the arguments.** A translation may hold more
+  conversions than its caller passes. Here such a conversion, or one whose argument is of the
+  other kind, is sent as written. No ported line has a translation, so neither case can
+  happen yet.
+
+One Rewrite defect is corrected. `LANGUAGE_EUROPE` (0) is gone from `main.rs` and
+`item_move.rs`. They sent 0 in `GC_CHAR_ADDITIONAL_INFO` and `GC_CHARACTER_UPDATE`, on the
+claim that only character creation sets a descriptor's language. But `LOGIN_BY_KEY` fills the
+account table from the auth login, so legacy sends the language the client chose. The
+enter-game burst also described a neighbour with the entering descriptor's language. It now
+uses the neighbour's own. The served view holds no neighbour yet, so only
+`loading_phase`'s test sees this.
+
+### 221.4 Not ported yet
+
+- `CG_CHANGE_LANGUAGE` and `ChangeLanguage` (`G/char.cpp:11628-11648`), under
+  `cg.game.change_language`.
+- The name tables behind `LC_LOCALE_ITEM`, `LC_LOCALE_MOB`, `LC_LOCALE_QUEST` and
+  `LC_LOCALE_SKILL` (`data.locale.names`).
+- `locale_quest.txt` (`locale_quest_translate_init`), with the quests.
+- Every `vsnprintf` conversion but `%d`, `%s` and `%%`. Each lands with the first line that
+  needs it.
+- `__EXTENDED_WHISPER_DETAILS__`, with the whisper.
+
+136 literal uses in `G/*.cpp` are keys of the owner's tables. Most are in `arena.cpp` (51),
+`questlua_monarch.cpp` (43) and `buff_npc_system.cpp` (12). None is on a ported path, so each
+is translated when its caller lands.
+
+### 221.5 Scenario and Parity inventory
+
+No scenario was added. Three were changed:
+
+- `a_line_legacy_answers_itself_comes_back_to_the_sender_alone`: Bob logs in in German
+  (language 5). The owner's German table has no pair for the shout refusal, so it comes back
+  as written, as legacy sends it.
+- `an_armour_is_worn_swapped_and_taken_off_and_the_store_follows`: Alice logs in in German,
+  and each look's `GC_CHARACTER_UPDATE` carries 5.
+- `a_character_is_loaded_and_the_game_is_entered_in_legacy_order` expects language 1 at byte
+  69, where it expected 0. Every scenario's enter-game burst now checks that byte against the
+  language its auth login chose.
+
+The owner's data cannot show a served translation. Its keys are CP949 Korean text, except
+`Pregunta.`, and none of the 1,847 distinct string literals in `prodomo/src` and `world/src`
+is a key. So `game_state`'s `a_pick_up_line_is_looked_up_in_the_pickers_language` gives the
+game thread a German table with a pair for `[LS;444;%s]`. A German picker hears the
+translation and an English one the key. `process.rs` expects "Locale strings loaded" at
+start-up.
+
+In the Parity inventory:
+
+- `data.locale.strings` and `sys.char.multi_language` go from `missing` to `partial`, with
+  notes naming the tests and what is not ported.
+- `cg.game.change_language` stays `missing`, with a note.
+
+### 221.6 A lost console command, and 209.2's decision
+
+During the sweep, `an_item_is_moved_split_and_merged_and_a_relog_finds_it_there` failed in
+about one full Parity run in three, on the unmutated tree as well. It never failed when it ran
+alone. Its first `item give` was answered. The second was never read, and the scenario's
+20-second wait for its answer ran out.
+
+The console's reader opened the pipe read-only (`tokio::fs::File::open`). A named pipe answers
+end-of-file when its last writer closes, so the reader closed the pipe and reopened it after
+every command. And a pipe whose last reader closes throws away what it holds. So a command
+written after the reader's end-of-file and before its close was lost, and the reopen then
+waited for a writer that had already gone. The scenario writes its second command as soon as
+the first answer is logged, so a loaded machine hit that window.
+
+`operator_console::run` now opens the pipe once, for reading and writing, and holds it until
+shutdown. This uses `tokio::net::unix::pipe::OpenOptions::read_write`, Linux's `O_RDWR`, which
+never waits for a writer. The console's own write end means its reader never sees end-of-file,
+and the pipe always has a reader. The reopen and its pause (`REOPEN_PAUSE`) are gone. The new
+test `each_echo_is_read_and_the_pipe_never_ends_between_them` writes two commands as `echo`
+does, reads both, and checks that the next read waits instead of ending. It fails when the
+receiver is opened read-only. After the change, six full Parity runs in a row
+passed, 48 of 48 each.
+
+This also takes 209.2's decision, which was left to the owner: the console is log-only, its
+first option. The console wrote each answer back through its read-only descriptor. Tokio
+reports that write as a success while the kernel refuses it (209.2). Through a read-write
+descriptor, the console would read its own answer back as the next command. So `run` no
+longer writes into the pipe. Its doc says the answer goes to the log, and so does the start-up
+line. The refused write also had a second effect: Tokio returns the refusal on the next
+write, so the second answer's write failed, the loop broke, and any command still buffered
+was dropped. That path is gone too.
+
+### 221.7 Mutation sweep
+
+53 mutants. `mutate221.py` applied and restored 52 of them as in 215.7, and one was applied by
+hand:
+
+- Each gamedata mutant ran `gamedata`'s `locale_string` tests.
+- The common mutant ran `common`'s library and `config_test`.
+- Each prodomo mutant ran `prodomo`'s library.
+- Mutants in `main.rs`, `item_move.rs` and `loading_phase.rs` also ran every Parity scenario,
+  with `DATABASE_URL` set.
+- Mutants in `main.rs` also ran `process.rs`'s start-up test.
+- The console mutant opened the pipe read-only and ran `operator_console`'s tests.
+
+| group | mutants | result |
+|---|---|---|
+| `gamedata/src/locale_string.rs`: the first pair winning, the pair count, the stop's offset, the NUL's stop and its line end, the space skip, the opening quote, `quote_find_end`'s `\"` and `;`, `locale_convert`'s `\"`, `;`, `\n`, NUL cut and empty string, the `de` and `tr` folders, the first language loaded, the load's error, `find`'s empty text, YMIR, languages past the last and their default | 22 | 19 killed, 3 survived |
+| `prodomo/src/chat_line.rs`: the command test, the lookup, the cut, the format's NUL end and its search, the empire, `%%`, `%d` and `%s` with and without their argument, another conversion, the step past a conversion | 13 | 13 killed |
+| `common/src/config.rs`: the country folder | 1 | 1 killed |
+| `prodomo/src/chat.rs`: the info line's type, the shout refusal's argument | 2 | 2 killed |
+| `prodomo/src/item_move.rs`: the mover's language in its lines, in its update, and the look's | 3 | 3 killed |
+| `prodomo/src/loading_phase.rs`: a neighbour's own language, the entering character's | 2 | 2 killed |
+| `prodomo/src/game_state.rs`: the tables the game thread holds | 1 | 1 killed |
+| `prodomo/src/main.rs`: the descriptor's language, the login grant's, the actor's, the chat line's, the enter-game burst's, the game thread's tables, the start-up line, the warning for a file that stops early | 8 | 5 killed, 3 survived |
+| `prodomo/src/operator_console.rs`: the read-write open | 1 | 1 killed |
+
+`ls_find_ymir` looked a YMIR line up in table 0 and survived the first run, because the test
+left table 0 empty. The test now fills table 0 as legacy does (`G/locale_service.cpp:437-438`),
+and the rerun killed it. Three `locale_string` survivors are equivalent:
+
+- `ls_conv_semicolon` let a `;` end an unquoted string after a backslash. `locale_convert`
+  writes a byte only inside the quotes, and a `"` after a written backslash is kept instead of
+  closing them. So once the quotes close, the last byte written is never a backslash.
+- `ls_conv_nul` kept the bytes after a NUL in a string. `quote_find_end` stops at a NUL, so
+  the bytes `locale_convert` reads never hold one. `a_nul_ends_the_file` tests that class.
+- `ls_find_empty` looked an empty text up instead of answering it. An empty string ends the
+  file, so no table holds an empty key and the lookup answers the text itself.
+  `an_unreadable_pair_ends_the_file` tests that class, and it killed `ls_conv_empty`.
+
+Three `main.rs` survivors are not equivalent, but the owner's data cannot show them:
+
+- `m_chat_lang` sent every chat info line in English, and `m_serve_locale` gave the game
+  thread no tables. No ported line is a key in the owner's tables (221.5), so every line
+  reads the same in every language. Each class is tested one level down, by `chat`'s
+  `an_info_line_is_in_the_recipients_language` and `game_state`'s
+  `a_pick_up_line_is_looked_up_in_the_pickers_language`. The first run reported both
+  killed, but the killer was the lost console command of 221.6. The rerun after the fix shows
+  them surviving.
+- `m_load_warn` never warned about a file that stops early. The owner's eleven files read to
+  their end, so no test reaches the warning. The stop it reports is tested by
+  `an_unreadable_pair_ends_the_file`.
+
+### 221.8 Receipt
+
+18 new tests:
+
+- `gamedata/src/locale_string.rs`: 11, for a pair, a line that does not start with a quote,
+  the first pair winning, the bytes kept inside the quotes, an unreadable pair and a NUL
+  ending the file, a file with no pair, `get_locale`'s folders, `find`, the owner's eleven
+  files, and a missing file.
+- `prodomo/src/chat_line.rs`: 4, for the lookup before the format, a command line, the cut
+  to `CHAT_MAX_LEN`, and each `vsnprintf` conversion.
+- `prodomo/src/chat.rs`: 1, for an info line in the recipient's language.
+- `prodomo/src/game_state.rs`: 1, for a pick-up line in the picker's language.
+- `prodomo/src/operator_console.rs`: 1, the test in 221.6.
+
+These tests changed:
+
+- the three scenarios in 221.5;
+- `process.rs`'s start-up test, which expects "Locale strings loaded";
+- `config_test`'s `a_full_document_reads_every_table`, which checks `country_dir`;
+- `loading_phase`'s `a_visible_character_adds_its_pair_after_the_own_pair`, which checks
+  each summary's language byte;
+- every `chat` and `item_move` test that built a line from an empire, which now builds it
+  from a `Recipient`, and `game_state`'s test mover, which now carries language 1.
+
+`serve` also moved its Game data loading into `load_game_data`, in the same order, to stay
+within the function length limit. The count went from 2646 to 2664. These gates ran on the
+final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2664 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2664 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+After the run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`.
+The workspace has 211 Rust files and 148,732 lines, outside `server/` and `.scratch/`. No
+crate was fetched, and `Cargo.lock` is unchanged. This section claims no width, and the i686
+probe was not run.

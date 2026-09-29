@@ -18,6 +18,7 @@ pub mod item_kind;
 pub mod item_proto;
 pub mod item_proto_value;
 pub mod land;
+pub mod locale_string;
 pub mod map_atlas;
 pub mod mob_names;
 pub mod object_proto;

@@ -433,6 +433,7 @@ fn serve_refuses_clients_until_the_store_is_reachable_and_shuts_down_cleanly_on_
         &console,
         &[
             "Store configured; no connection opened yet",
+            "Locale strings loaded",
             "Dedicated game loop started",
             WAITING,
             "Received SIGTERM",

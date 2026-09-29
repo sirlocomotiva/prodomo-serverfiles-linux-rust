@@ -56,6 +56,8 @@
 use protocol::cg_chat::{CgChat, CG_CHAT_WIRE_SIZE};
 use protocol::gc_chat::{GcChat, CHAT_TYPE_INFO, CHAT_TYPE_TALKING};
 
+use crate::chat_line::{chat_packet, Arg, Recipient};
+
 /// `CHAT_TYPE_TALKING` (`EChatType`, `server/server/common/length.h:405`).
 pub const CHAT_TALKING: u8 = CHAT_TYPE_TALKING;
 /// `CHAT_TYPE_INFO` (`length.h:406`).
@@ -93,6 +95,10 @@ pub const CHAT_COUNTER_DISCONNECT: u8 = 10;
 /// The `[LS;652]` locale key `SendBlockChatInfo` sends for a zero or negative
 /// remaining duration (`input_main.cpp:128-132`).
 pub const BLOCK_CHAT_NO_DURATION: &str = "[LS;652]";
+
+/// The shout level refusal's format, `LC_TEXT("Shout can only be used at level %d or
+/// higher.")` with `g_iShoutLimitLevel` (`input_main.cpp:888`).
+pub const SHOUT_BELOW_LEVEL: &[u8] = b"Shout can only be used at level %d or higher.";
 
 /// The per-descriptor chat state legacy keeps in `CHARACTER`: the `BYTE`
 /// `m_bChatCounter` behind `IncreaseChatCounter` (`char.cpp:8757-8765`).
@@ -352,35 +358,22 @@ pub fn talking_record(effect: &ChatEffect) -> Option<GcChat> {
 /// The encoded `GC_CHAT` line for an effect that `CHARACTER::ChatPacket` answers, or `None`
 /// for every other effect.
 ///
-/// `id` is 0, `bEmpire` is the descriptor's empire (`char.cpp:5179`), and `bCanFormat` keeps
-/// its constructor value of `true`. `__MULTI_LANGUAGE_SYSTEM__` is defined, so legacy first
-/// looks the text up in the player's language table and sends it unchanged when the table has
-/// no entry (`locale.cpp:71-88`); no language table is loaded yet, so every line is sent
-/// unchanged. The text is then a `vsnprintf` format: the one info text with an argument is the
-/// shout level refusal (`input_main.cpp:888`), which is formatted here, and no other info
-/// text holds a `%`.
-///
-/// # Panics
-///
-/// Never for the texts this module builds: every info text is a short constant, far under
-/// `CHAT_MAX_LEN`, so the record builds and encodes. A panic would mean a new info text
-/// longer than a chat line, which is a defect in this module.
+/// The line is built by [`chat_packet`]: the text is looked up in the recipient's language and
+/// then formatted. The one info text with an argument is the shout level refusal
+/// (`input_main.cpp:888`, `LC_TEXT("Shout can only be used at level %d or higher.")`), and no
+/// other info text holds a `%`.
 #[must_use]
-pub fn info_line(effect: &ChatEffect, empire: u8) -> Option<Vec<u8>> {
-    let text = match effect {
-        ChatEffect::InfoToSender { text } => text.as_bytes().to_vec(),
-        ChatEffect::ShoutBelowLevel { limit } => {
-            format!("Shout can only be used at level {limit} or higher.").into_bytes()
-        }
-        _ => return None,
-    };
-    // Every info text is a short constant, far under `CHAT_MAX_LEN`, so neither step fails.
-    let line = GcChat::notice(CHAT_INFO, empire, &text)
-        .expect("an info text is shorter than the chat length limit");
-    Some(
-        line.encode()
-            .expect("an info line always fits the record's size field"),
-    )
+pub fn info_line(effect: &ChatEffect, to: Recipient<'_>) -> Option<Vec<u8>> {
+    match effect {
+        ChatEffect::InfoToSender { text } => Some(chat_packet(to, CHAT_INFO, text.as_bytes(), &[])),
+        ChatEffect::ShoutBelowLevel { limit } => Some(chat_packet(
+            to,
+            CHAT_INFO,
+            SHOUT_BELOW_LEVEL,
+            &[Arg::Int(i64::from(*limit))],
+        )),
+        _ => None,
+    }
 }
 
 /// Replace every banned word with `'*'`, as `CBanwordManager::ConvertString` does.
@@ -436,6 +429,7 @@ pub fn convert_banwords(text: &[u8], words: &[Vec<u8>]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gamedata::locale_string::{LanguageTable, LocaleStrings};
     use protocol::cg_wire::ClientFrame;
 
     fn context() -> ChatContext {
@@ -837,41 +831,73 @@ mod tests {
         );
     }
 
+    fn to(strings: &LocaleStrings, empire: u8) -> Recipient<'_> {
+        Recipient {
+            strings,
+            language: 1,
+            empire,
+        }
+    }
+
     #[test]
     fn an_info_line_is_the_legacy_chat_packet_with_the_speakers_empire() {
-        // `GC_CHAT` (byte 4), `size` 19 as a little-endian `WORD`, `CHAT_TYPE_INFO`, `id` 0,
+        // `GC_CHAT` (byte 4), `size` 18 as a little-endian `WORD`, `CHAT_TYPE_INFO`, `id` 0,
         // `bEmpire` 3, `bCanFormat` 1, then the text with no terminator.
+        let strings = LocaleStrings::default();
         let effect = ChatEffect::InfoToSender { text: "[LS;655]" };
         let mut expected = vec![4, 18, 0, 1, 0, 0, 0, 0, 3, 1];
         expected.extend_from_slice(b"[LS;655]");
-        assert_eq!(info_line(&effect, 3), Some(expected));
-        let other = info_line(&effect, 1).expect("an info line");
+        assert_eq!(info_line(&effect, to(&strings, 3)), Some(expected));
+        let other = info_line(&effect, to(&strings, 1)).expect("an info line");
         assert_eq!(other[8], 1, "the empire byte follows the descriptor");
     }
 
     #[test]
     fn the_shout_level_refusal_is_an_info_line_that_names_the_limit() {
-        let line = info_line(&ChatEffect::ShoutBelowLevel { limit: 15 }, 2).expect("a line");
+        let strings = LocaleStrings::default();
+        let effect = ChatEffect::ShoutBelowLevel { limit: 15 };
+        let line = info_line(&effect, to(&strings, 2)).expect("a line");
         let text = b"Shout can only be used at level 15 or higher.";
         let mut expected = vec![4, 10 + 45, 0, 1, 0, 0, 0, 0, 2, 1];
         expected.extend_from_slice(text);
         assert_eq!(text.len(), 45);
         assert_eq!(line, expected);
-        assert!(ChatEffect::ShoutBelowLevel { limit: 15 }.reaches_client());
+        assert!(effect.reaches_client());
+    }
+
+    #[test]
+    fn an_info_line_is_in_the_recipients_language() {
+        let table = b"\"Shout can only be used at level %d or higher.\";\"Ab Stufe %d.\";\n\
+                      \"[LS;655]\";\"keine Gruppe\";\n";
+        let strings = LocaleStrings::default().with_table(5, LanguageTable::parse(table));
+        let german = Recipient {
+            language: 5,
+            ..to(&strings, 1)
+        };
+        let shout = info_line(&ChatEffect::ShoutBelowLevel { limit: 15 }, german);
+        assert_eq!(&shout.expect("a line")[10..], b"Ab Stufe 15.");
+        let party = info_line(&ChatEffect::InfoToSender { text: "[LS;655]" }, german);
+        assert_eq!(&party.expect("a line")[10..], b"keine Gruppe");
+        let english = info_line(
+            &ChatEffect::InfoToSender { text: "[LS;655]" },
+            to(&strings, 1),
+        );
+        assert_eq!(&english.expect("a line")[10..], b"[LS;655]");
     }
 
     #[test]
     fn only_an_info_effect_builds_an_info_line() {
-        assert!(info_line(&ChatEffect::Close, 1).is_none());
-        assert!(info_line(&ChatEffect::DelayedDisconnect, 1).is_none());
-        assert!(info_line(&ChatEffect::ShoutOnCooldown, 1).is_none());
+        let strings = LocaleStrings::default();
+        assert!(info_line(&ChatEffect::Close, to(&strings, 1)).is_none());
+        assert!(info_line(&ChatEffect::DelayedDisconnect, to(&strings, 1)).is_none());
+        assert!(info_line(&ChatEffect::ShoutOnCooldown, to(&strings, 1)).is_none());
         assert!(!ChatEffect::ShoutOnCooldown.reaches_client());
         let talking = ChatEffect::TalkingToMap {
             vid: 1,
             empire: 1,
             text: b"Ayla : hi".to_vec(),
         };
-        assert!(info_line(&talking, 1).is_none());
+        assert!(info_line(&talking, to(&strings, 1)).is_none());
     }
 
     #[test]

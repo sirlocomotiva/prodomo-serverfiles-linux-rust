@@ -179,6 +179,13 @@ impl ServerConfig {
         self.game_data.join(LOCALE_DIR).join("map")
     }
 
+    /// The language folder: `<game_data>/locale/europe/country`, holding one folder per
+    /// language, each with its `locale_string.txt`.
+    #[must_use]
+    pub fn country_dir(&self) -> PathBuf {
+        self.game_data.join(LOCALE_DIR).join("country")
+    }
+
     /// The text proto folder: `<game_data>/proto` (`PROTO_FROM_DB = 0`).
     #[must_use]
     pub fn proto_dir(&self) -> PathBuf {

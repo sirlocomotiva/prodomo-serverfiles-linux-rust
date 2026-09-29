@@ -16,7 +16,7 @@
 //! delayed save), so the order is the Rewrite's, and a client cannot tell the two apart
 //! because it waits for neither.
 
-use common::enums::{ELocale, EWearPositions};
+use common::enums::EWearPositions;
 use common::item_slots::{EWindows, INVENTORY_MAX_NUM};
 use common::vid::Vid;
 use db::items::{Attribute, ItemRow, RowChange};
@@ -24,8 +24,9 @@ use gamedata::belt_inventory::can_move_into_belt_inventory;
 use gamedata::item_custom_category::{is_custom_category, CATEGORY_NUM};
 use gamedata::item_proto::ItemProtos;
 use gamedata::item_proto_value::type_value;
+use gamedata::locale_string::LocaleStrings;
 use protocol::gc_actors::GcCharacterUpdate;
-use protocol::gc_chat::{GcChat, CHAT_TYPE_INFO};
+use protocol::gc_chat::CHAT_TYPE_INFO;
 use protocol::gc_item_window::GcItemGroundAdd;
 use protocol::gc_vid::{GcHeaderAndDword, GcSpecialEffect, HEADER_GC_ITEM_GROUND_DEL};
 use protocol::item_pos::ItemPos;
@@ -35,14 +36,12 @@ use world::character::{
 };
 use world::item::Item;
 
+use crate::chat_line::{chat_packet, Arg, Recipient};
 use crate::item_load::stored_row_position;
 use crate::loading_phase::point_changes;
 
 /// The flat cell of the worn belt: `INVENTORY_MAX_NUM + WEAR_BELT`, 180 + 27.
 pub const BELT_WEAR_CELL: u16 = INVENTORY_MAX_NUM + EWearPositions::Belt as u16;
-
-/// `LANGUAGE_EUROPE`, the language byte `UpdatePacket` sends (`ELocale::Ymir`).
-const LANGUAGE_EUROPE: u8 = ELocale::Ymir as u8;
 
 /// What the descriptor knows of the moving character that the move reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +50,21 @@ pub struct Mover {
     pub recently_fought: bool,
     /// The character's empire, which a chat line carries.
     pub empire: u8,
+    /// The descriptor's language: the one a chat line is looked up in, and the one
+    /// `UpdatePacket` sends (`char.cpp:1321`).
+    pub language: u8,
+}
+
+impl Mover {
+    /// The descriptor a chat line to the mover goes to.
+    #[must_use]
+    pub const fn recipient(self, strings: &LocaleStrings) -> Recipient<'_> {
+        Recipient {
+            strings,
+            language: self.language,
+            empire: self.empire,
+        }
+    }
 }
 
 /// What a move the world made has left for the descriptor to do.
@@ -76,12 +90,17 @@ pub struct MovedItems {
 impl MovedItems {
     /// The descriptor's half of a move the world made for `owner_id`, whose VID is `vid`.
     ///
-    /// # Panics
-    ///
-    /// Never: each notice is a short constant from [`MoveRefused::notice`], far under
-    /// `CHAT_MAX_LEN`, or a pick-up line around one prototype name.
+    /// Each notice is looked up in the mover's language in `strings`.
     #[must_use]
-    pub fn new(owner_id: u32, vid: u32, done: MoveDone, mover: Mover, protos: &ItemProtos) -> Self {
+    pub fn new(
+        owner_id: u32,
+        vid: u32,
+        done: MoveDone,
+        mover: Mover,
+        protos: &ItemProtos,
+        strings: &LocaleStrings,
+    ) -> Self {
+        let to = mover.recipient(strings);
         let mut records = Vec::with_capacity(done.records.len());
         let mut around = Vec::new();
         for record in done.records {
@@ -96,7 +115,7 @@ impl MovedItems {
                     record.broadcast
                 }
                 MoveRecord::Look(look) => {
-                    character_update(vid, &look).encode_into(&mut frame);
+                    character_update(vid, &look, mover.language).encode_into(&mut frame);
                     true
                 }
                 MoveRecord::Effect(effect_type) => {
@@ -104,7 +123,7 @@ impl MovedItems {
                     true
                 }
                 MoveRecord::Notice(text) => {
-                    frame = notice(text, mover.empire);
+                    frame = notice(text, to);
                     false
                 }
                 MoveRecord::Ground(record) => {
@@ -112,7 +131,7 @@ impl MovedItems {
                     true
                 }
                 MoveRecord::PickedUp { vnum } => {
-                    frame = picked_up_notice(protos, vnum, mover.empire);
+                    frame = picked_up_notice(protos, vnum, to);
                     false
                 }
                 MoveRecord::Quickslot(record) => {
@@ -139,11 +158,12 @@ impl MovedItems {
     }
 }
 
-/// `CHARACTER::UpdatePacket` (`G/char.cpp:1277-1340`) for the look a move left.
+/// `CHARACTER::UpdatePacket` (`G/char.cpp:1277-1340`) for the look a move left, with the
+/// descriptor's `language` (`:1321`).
 ///
 /// The state flags, the affects, the guild, the alignment, the PK mode, the mount and the
 /// premium come from systems this build does not have, and are 0.
-fn character_update(vid: u32, look: &CharacterLook) -> GcCharacterUpdate {
+fn character_update(vid: u32, look: &CharacterLook, language: u8) -> GcCharacterUpdate {
     GcCharacterUpdate {
         dw_vid: vid,
         aw_part: look.parts,
@@ -161,7 +181,7 @@ fn character_update(vid: u32, look: &CharacterLook) -> GcCharacterUpdate {
         dw_new_is_guild_name: 0,
         by_premium: 0,
         i_premium_time: 0,
-        b_language: LANGUAGE_EUROPE,
+        b_language: language,
     }
 }
 
@@ -271,19 +291,12 @@ fn item_row(owner_id: u32, item: &Item) -> ItemRow {
 
 /// The `CHAT_TYPE_INFO` line a refusal sends, encoded, or `None` when legacy sends nothing.
 ///
-/// `CHARACTER::ChatPacket` (`G/char.cpp:5140-5187`): `id` 0, the descriptor's empire, and
-/// `bCanFormat` left at its constructor value. `__MULTI_LANGUAGE_SYSTEM__` is defined, so
-/// legacy first looks the text up in the player's language table and sends it unchanged when
-/// the table has no entry; the Rewrite loads no language table yet, so every line is sent
-/// unchanged, which is what legacy does for a text its table lacks.
-///
-/// # Panics
-///
-/// Never: each notice is one of four short constants from [`MoveRefused::notice`], far under
-/// `CHAT_MAX_LEN`, so the record builds and encodes.
+/// `CHARACTER::ChatPacket` (`G/char.cpp:5140-5187`), which [`chat_packet`] ports: the text is
+/// looked up in the descriptor's language, and none of [`MoveRefused::notice`]'s texts holds a
+/// `%`.
 #[must_use]
-pub fn refusal_notice(refused: &MoveRefused, empire: u8) -> Option<Vec<u8>> {
-    refused.notice().map(|text| notice(text, empire))
+pub fn refusal_notice(refused: &MoveRefused, to: Recipient<'_>) -> Option<Vec<u8>> {
+    refused.notice().map(|text| notice(text, to))
 }
 
 /// `g_ItemDropTimeLimitValue`: `item_drop_limit_time` is 1 in the owner's quest settings
@@ -303,8 +316,8 @@ pub fn drop_allowed(elapsed: Option<std::time::Duration>) -> bool {
 
 /// The [`DROP_LIMIT_NOTICE`] line.
 #[must_use]
-pub fn drop_limit_notice(empire: u8) -> Vec<u8> {
-    notice(DROP_LIMIT_NOTICE, empire)
+pub fn drop_limit_notice(to: Recipient<'_>) -> Vec<u8> {
+    notice(DROP_LIMIT_NOTICE, to)
 }
 
 /// `GC_ITEM_GROUND_ADD` or `GC_ITEM_GROUND_DEL`, encoded (`G/item.cpp:163-218`).
@@ -330,31 +343,25 @@ pub fn ground_record(record: GroundRecord) -> Vec<u8> {
     }
 }
 
-/// `[LS;444;%s]` around the item's name (`G/char_item.cpp:8048`, `:8080`).
+/// `ChatPacket(CHAT_TYPE_INFO, "[LS;444;%s]", item->GetName())` (`G/char_item.cpp:8048`,
+/// `:8080`).
 ///
-/// `GetName` is `LC_LOCALE_ITEM_TEXT(vnum, LOCALE_DEFAULT)`; with no language table loaded the
-/// name is the prototype's locale name, as every other line is sent unchanged. An item with no
-/// prototype cannot be picked up, so the empty name is never sent.
-fn picked_up_notice(protos: &ItemProtos, vnum: u32, empire: u8) -> Vec<u8> {
+/// `GetName` is `LC_LOCALE_ITEM_TEXT(vnum, LOCALE_DEFAULT)`, the item name table this build
+/// does not load, so the name is the prototype's locale name. An item with no prototype cannot
+/// be picked up, so the empty name is never sent.
+fn picked_up_notice(protos: &ItemProtos, vnum: u32, to: Recipient<'_>) -> Vec<u8> {
     let name = protos
         .get(vnum)
         .map_or(&[][..], |proto| proto.locale_name.as_slice());
-    let mut text = b"[LS;444;".to_vec();
-    text.extend_from_slice(name);
-    text.push(b']');
-    let line = GcChat::notice(CHAT_TYPE_INFO, empire, &text)
-        .expect("an item name is shorter than the chat length limit");
-    line.encode()
-        .expect("a pick-up line always fits the record's size field")
+    chat_packet(to, CHAT_TYPE_INFO, PICKED_UP_NOTICE, &[Arg::Text(name)])
 }
 
-/// A `CHAT_TYPE_INFO` line, encoded.
-fn notice(text: &str, empire: u8) -> Vec<u8> {
-    // Each notice is a short constant, far under `CHAT_MAX_LEN`, so neither step can fail.
-    let line = GcChat::notice(CHAT_TYPE_INFO, empire, text.as_bytes())
-        .expect("a move notice is shorter than the chat length limit");
-    line.encode()
-        .expect("a move notice always fits the record's size field")
+/// The format of the pick-up line.
+const PICKED_UP_NOTICE: &[u8] = b"[LS;444;%s]";
+
+/// `ChatPacket(CHAT_TYPE_INFO, LC_TEXT(text))`: a `CHAT_TYPE_INFO` line with no argument.
+fn notice(text: &str, to: Recipient<'_>) -> Vec<u8> {
+    chat_packet(to, CHAT_TYPE_INFO, text.as_bytes(), &[])
 }
 
 #[cfg(test)]
@@ -530,8 +537,10 @@ mod tests {
         let actor = Mover {
             recently_fought: false,
             empire: 1,
+            language: 1,
         };
-        let moved = MovedItems::new(7, 7, done.clone(), actor, &owners());
+        let strings = LocaleStrings::default();
+        let moved = MovedItems::new(7, 7, done.clone(), actor, &owners(), &strings);
         assert_eq!(moved.kind, MoveKind::Moved);
         assert_eq!(moved.owner_id, 7);
         assert_eq!(moved.records.len(), 2);
@@ -557,16 +566,23 @@ mod tests {
 
     #[test]
     fn a_refusal_with_a_notice_sends_one_info_line_and_the_rest_send_nothing() {
-        let line = refusal_notice(&MoveRefused::NotForBelt, 3).expect("the belt refusal speaks");
+        let strings = LocaleStrings::default();
+        let to = |empire| Recipient {
+            strings: &strings,
+            language: 1,
+            empire,
+        };
+        let line =
+            refusal_notice(&MoveRefused::NotForBelt, to(3)).expect("the belt refusal speaks");
         // header 4, size 10 + 9, type 1 (INFO), id 0, empire 3, bCanFormat 1, "[LS;1097]".
         let mut expected = vec![HEADER_GC_CHAT.value(), 19, 0, 1, 0, 0, 0, 0, 3, 1];
         expected.extend_from_slice(b"[LS;1097]");
         assert_eq!(line, expected);
-        let room = refusal_notice(&MoveRefused::NoRoomInInventory, 1).expect("it speaks");
+        let room = refusal_notice(&MoveRefused::NoRoomInInventory, to(1)).expect("it speaks");
         assert_eq!(&room[10..], b"Nu ai spatiu suficient in inventar.");
-        assert_eq!(refusal_notice(&MoveRefused::NoRoom, 1), None);
+        assert_eq!(refusal_notice(&MoveRefused::NoRoom, to(1)), None);
         assert_eq!(
-            refusal_notice(&MoveRefused::NotPorted(Unported::Equipment), 1),
+            refusal_notice(&MoveRefused::NotPorted(Unported::Equipment), to(1)),
             None
         );
     }

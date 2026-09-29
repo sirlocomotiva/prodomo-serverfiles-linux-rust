@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use common::config::{load_server_config, ItemIdSpan, ServerConfig, DEFAULT_CONFIG_PATH};
-use common::enums::{ELocale, EParts};
+use common::enums::EParts;
 use common::logging::{init_from_env, init_logging, LogConfig};
 use common::vid::Vid;
 use db::accounts::{find_auth_account, record_login, AccountError};
@@ -37,6 +37,7 @@ use db::players::{
 use db::store::{schema_version, Store, StoreConfig};
 use gamedata::banword::banwords_from_dump;
 use gamedata::item_proto::ItemProtos;
+use gamedata::locale_string::{Ending, LocaleStrings, LOCALE_COUNT};
 use gamedata::map_atlas::MapAtlas;
 use gamedata::mob_names::MobNames;
 use prodomo::auth_login::{
@@ -49,6 +50,7 @@ use prodomo::channel_login::{
 };
 use prodomo::channel_status::ChannelStatusBoard;
 use prodomo::chat::{judge_chat, ChatContext, ChatEffect, ChatOutcome, ChatState};
+use prodomo::chat_line::Recipient;
 use prodomo::client_live::{
     handshake_token, BootLiveClock, LiveClientSession, LiveClock, LiveError, LiveOutcome, LiveStep,
 };
@@ -217,6 +219,9 @@ struct ConnectionContext {
     /// The item prototypes, shared with the game thread, which the item load at character
     /// select reads for each item's size and flags.
     protos: Arc<ItemProtos>,
+    /// The locale strings every language's chat lines are looked up in, shared with the game
+    /// thread.
+    locale: Arc<LocaleStrings>,
     /// The address clients are told to reconnect to.
     public_ip: Ipv4Addr,
     /// The maps each Channel hosts, and the Shared Channel's.
@@ -735,7 +740,7 @@ where
     };
     let actor = item_actor(held);
     let answer = context.game.move_item(vid, request, actor).await;
-    finish_item_step(session, addr, context, held, actor.empire, answer).await
+    finish_item_step(session, addr, context, held, actor, answer).await
 }
 
 /// `CG_ITEM_USE` (11) in the game phase: `CInputMain::ItemUse` → `CHARACTER::UseItem`
@@ -765,7 +770,7 @@ where
     };
     let actor = item_actor(held);
     let answer = context.game.use_item(vid, record.cell, actor).await;
-    finish_item_step(session, addr, context, held, actor.empire, answer).await
+    finish_item_step(session, addr, context, held, actor, answer).await
 }
 
 /// Whether `header` is `CG_ITEM_USE`, a ground step or a quickslot request.
@@ -924,7 +929,7 @@ where
     let elapsed = held.last_item_drop.map(|last| now.duration_since(last));
     if !prodomo::item_move::drop_allowed(elapsed) {
         info!(%addr, "Item drop inside the drop limit");
-        let line = prodomo::item_move::drop_limit_notice(actor.empire);
+        let line = prodomo::item_move::drop_limit_notice(actor.recipient(&context.locale));
         if let Err(error) = send_all(session, &[line]).await {
             warn!(%addr, %error, "Client session stopped");
             return false;
@@ -933,7 +938,7 @@ where
     }
     held.last_item_drop = Some(now);
     let answer = context.game.drop_item(vid, cell, count, place, actor).await;
-    finish_item_step(session, addr, context, held, actor.empire, answer).await
+    finish_item_step(session, addr, context, held, actor, answer).await
 }
 
 /// `CG_ITEM_PICKUP` (15) in the game phase: `CInputMain::ItemPickup`
@@ -964,7 +969,7 @@ where
         .game
         .pickup_item(vid, record.vid, place, actor)
         .await;
-    finish_item_step(session, addr, context, held, actor.empire, answer).await
+    finish_item_step(session, addr, context, held, actor, answer).await
 }
 
 /// Whether a game-phase header is a drop or a pick-up.
@@ -1026,7 +1031,16 @@ fn item_actor(held: &Held) -> Mover {
             .character
             .as_ref()
             .map_or(0, |character| character.empire),
+        language: descriptor_language(held.account.as_ref()),
     }
+}
+
+/// `DESC::GetLanguage`: the language of the account table the Channel login filled
+/// (`G/desc.h:181-182`), which `LOGIN_BY_KEY` copies from the auth login
+/// (`D/ClientManagerLogin.cpp:136-138`). A descriptor with no account table carries the 0
+/// `DESC::Setup` zeroes it to.
+fn descriptor_language(account: Option<&SelectAccount>) -> u8 {
+    account.map_or(0, |account| account.language)
 }
 
 /// Store, send and broadcast what one item step did, or send the notice for its refusal.
@@ -1038,7 +1052,7 @@ async fn finish_item_step<S>(
     addr: SocketAddr,
     context: &ConnectionContext,
     held: &mut Held,
-    empire: u8,
+    actor: Mover,
     answer: Result<
         Result<prodomo::item_move::MovedItems, MoveItemRefused>,
         prodomo::game_loop_messages::MoveItemError,
@@ -1051,7 +1065,8 @@ where
         Ok(Ok(moved)) => moved,
         Ok(Err(MoveItemRefused::Refused(reason))) => {
             info!(%addr, %reason, "Item step refused");
-            if let Some(line) = prodomo::item_move::refusal_notice(&reason, empire) {
+            let to = actor.recipient(&context.locale);
+            if let Some(line) = prodomo::item_move::refusal_notice(&reason, to) {
                 if let Err(error) = send_all(session, &[line]).await {
                     warn!(%addr, %error, "Client session stopped");
                     return false;
@@ -1141,6 +1156,13 @@ where
         warn!(%addr, "CHAT without a character; ignoring");
         return true;
     };
+    // `ChatPacket` takes the empire and the language from the descriptor; the empire is the
+    // speaker's.
+    let to = Recipient {
+        strings: &context.locale,
+        language: descriptor_language(held.account.as_ref()),
+        empire: character.empire,
+    };
     let map = held.avatar.as_ref().map_or(0, |avatar| avatar.map);
     let chat_context = ChatContext {
         name: character.name.clone(),
@@ -1176,8 +1198,7 @@ where
                 return false;
             }
             ChatEffect::InfoToSender { .. } | ChatEffect::ShoutBelowLevel { .. } => {
-                // `ChatPacket` takes the empire from the descriptor, which is the speaker's.
-                let Some(bytes) = prodomo::chat::info_line(effect, character.empire) else {
+                let Some(bytes) = prodomo::chat::info_line(effect, to) else {
                     warn!(%addr, "Info effect built no line; closing");
                     return false;
                 };
@@ -1851,6 +1872,7 @@ where
     held.account = Some(SelectAccount {
         id: grant.account,
         login: grant.login,
+        language: grant.language,
         lobby: account_lobby,
     });
     let delivery = async {
@@ -2301,7 +2323,7 @@ where
         &empty_view(),
         seat.number,
         global_time(),
-        LANGUAGE_EUROPE,
+        descriptor_language(held.account.as_ref()),
     );
     info!(
         %addr,
@@ -2561,16 +2583,6 @@ async fn save_tick(save: Option<&mut SaveEvent>) {
         None => std::future::pending().await,
     }
 }
-
-/// The `bLanguage` byte a Channel descriptor carries.
-///
-/// `DESC::GetLanguage` returns `m_accountTable.bLanguage` (`G/desc.h:181`), and the account table
-/// is zeroed by `DESC::Setup`, so a descriptor that has not been through character creation
-/// carries 0. `SetLanguage` has exactly one caller, the character-creation path
-/// (`G/char.cpp:11641`). The Rewrite ports only the `europe` Locale (`CONTEXT.md`), whose Game
-/// data is the one the legacy deployment loaded for that byte, so 0 is the only value this port
-/// can produce and the only one a first-login descriptor would carry in legacy either.
-const LANGUAGE_EUROPE: u8 = ELocale::Ymir as u8;
 
 /// Send each record in order as its own frame; `false` when the connection must close.
 async fn send_all<S>(
@@ -3143,7 +3155,8 @@ async fn run_accept_loop(
                         info!(
                             path = %console_path.display(),
                             "Operator console task started; write a command with \
-                             `echo 'item give <name> <vnum> [count]' > <path>`"
+                             `echo 'item give <name> <vnum> [count]' > <path>` and read \
+                             its answer in this log"
                         );
                         tasks.push(task);
                     }
@@ -3271,6 +3284,38 @@ fn load_item_protos(config: &ServerConfig) -> Result<Arc<ItemProtos>, String> {
     Ok(Arc::new(protos))
 }
 
+/// Load the locale strings of every language: `<country_dir>/<code>/locale_string.txt`.
+///
+/// Legacy reads them at boot (`G/locale_service.cpp:418-455`) and goes on without a file it
+/// cannot open, which leaves that language untranslated. The Rewrite refuses to start instead,
+/// as for every other Game data file (a Divergence). A file that stops early is read as far as
+/// legacy reads it and is warned about.
+fn load_locale_strings(config: &ServerConfig) -> Result<Arc<LocaleStrings>, String> {
+    let strings = LocaleStrings::load(&config.country_dir())
+        .map_err(|error| format!("Locale strings are unusable: {error}"))?;
+    for language in 1..LOCALE_COUNT {
+        let Some(table) = strings.table(language) else {
+            continue;
+        };
+        let code = gamedata::locale_string::country_code(language);
+        if let Ending::Stopped { at, cause } = table.ending() {
+            warn!(
+                code,
+                at,
+                ?cause,
+                "Locale strings stop before the end of the file"
+            );
+        }
+        info!(
+            code,
+            pairs = table.pairs(),
+            strings = table.len(),
+            "Locale strings loaded"
+        );
+    }
+    Ok(Arc::new(strings))
+}
+
 /// Load the Name rules: the banned words of the Game data tables and the mob names of the protos.
 fn load_name_rules(config: &ServerConfig) -> Result<NameRules, String> {
     let dump_path = config.game_tables.join("player.sql");
@@ -3323,6 +3368,25 @@ struct GameData {
     names: NameRules,
     /// The item prototypes, the same table the game thread holds.
     protos: Arc<ItemProtos>,
+    /// The locale strings, the same ones the game thread holds.
+    locale: Arc<LocaleStrings>,
+}
+
+/// Load the Game data, before any port opens.
+///
+/// The map regions are Game data the Channel login needs; a client is not accepted before they
+/// are loaded, so a missing or malformed file stops the server before any port opens.
+fn load_game_data(config: &ServerConfig) -> Result<GameData, String> {
+    let atlas = load_atlas(config)?;
+    let names = load_name_rules(config)?;
+    let protos = load_item_protos(config)?;
+    let locale = load_locale_strings(config)?;
+    Ok(GameData {
+        atlas,
+        names,
+        protos,
+        locale,
+    })
 }
 
 /// What every connection shares, built once the listeners are bound and the Game data loaded.
@@ -3363,6 +3427,7 @@ fn connection_context(
         logons: LogonRegistry::new(),
         atlas: Arc::new(data.atlas),
         protos: data.protos,
+        locale: data.locale,
         public_ip: config.public_ip,
         routes: Arc::new(map_routes(config, listeners)),
         handles: Arc::new(AtomicU32::new(0)),
@@ -3432,12 +3497,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
         .map_err(|error| format!("Invalid store configuration: {error}"))?;
     info!(store = ?config.store, "Store configured; no connection opened yet");
 
-    // The map regions are Game data the Channel login needs; a client is not accepted before
-    // they are loaded, so a missing or malformed file stops the server before any port opens.
-    let atlas = load_atlas(&config)?;
-    let names = load_name_rules(&config)?;
-
-    let protos = load_item_protos(&config)?;
+    let data = load_game_data(&config)?;
 
     let mut listeners = Listeners::bind(&listener_plan(&config)).await?;
     for listener in listeners.iter() {
@@ -3460,10 +3520,11 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     // One client registry serves the descriptors and the world, which tells a map when an item
     // on its ground is destroyed.
     let clients = Arc::new(ChannelClients::new());
-    let game_state = GameState::new(Arc::clone(&protos))
+    let game_state = GameState::new(Arc::clone(&data.protos))
         .with_item_count_limit(config.game.item_count_limit)
         .with_drop_lifetime(config.game.item_destroy_time_dropitem)
-        .with_clients(Arc::clone(&clients));
+        .with_clients(Arc::clone(&clients))
+        .with_locale_strings(Arc::clone(&data.locale));
     let mut game_loop = spawn_game_loop(GameLoopConfig::default(), game_state)?;
     let controller = game_loop.controller();
     info!(thread_id = ?game_loop.thread_id(), "Dedicated game loop started");
@@ -3477,11 +3538,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
             &state,
             &store,
             &listeners,
-            GameData {
-                atlas,
-                names,
-                protos,
-            },
+            data,
             clients,
             controller.clone(),
         ),

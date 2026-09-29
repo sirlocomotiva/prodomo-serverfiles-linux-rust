@@ -32,10 +32,10 @@
 
 use std::fmt;
 use std::path::Path;
-use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracing::{error, info, warn};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::net::unix::pipe;
+use tracing::{error, info};
 
 use crate::item_grant::GrantRequest;
 
@@ -44,14 +44,6 @@ use crate::item_grant::GrantRequest;
 /// Named here rather than repeated so a change to `common::item_slots` reaches the
 /// console in the same commit as the reducer.
 const LIMIT: u16 = common::item_slots::ITEM_COUNT_LIMIT;
-
-/// How long to wait before reopening the console file after the writer closes it.
-///
-/// A named pipe is not a file that stays open: the Operator's `echo` opens it, writes,
-/// and closes, so the reader sees end-of-file every single time. Reopening at once
-/// would spin a tight loop against a pipe nobody is holding open, so the pause is
-/// there to be the difference between one reopen per command and a busy loop.
-pub const REOPEN_PAUSE: Duration = Duration::from_millis(50);
 
 /// One line the Operator typed, already split into its arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,17 +218,23 @@ pub struct ConsoleContext {
 
 /// Read commands from `path` until `shutdown` resolves.
 ///
-/// The reader is a tail loop, not a single read: a named pipe returns end-of-file
-/// every time its writer closes, so the only way to serve a sequence of commands is to
-/// reopen. Each command's answer is written back to the log, and to the pipe itself
-/// when the pipe is still open, so the Operator sees the result where they typed it.
+/// The pipe is opened once, for reading and writing, and held until shutdown. A named pipe
+/// whose last writer closes answers end-of-file, and one whose last reader closes throws
+/// away what is still in it. A read-only reader therefore had to close and reopen after
+/// every command, and a command written between its end-of-file and its close was lost
+/// (ledger 221). Holding the write end as well means neither ever happens: the reader waits
+/// for the next `echo` instead of seeing end-of-file, and the pipe always has a reader.
+///
+/// Each answer goes to the log and nowhere else (ledger 209.2's first option). The server
+/// never writes into the pipe, because what it wrote there it would read back as the next
+/// command.
 pub async fn run(
     path: &Path,
     context: ConsoleContext,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
 ) {
     // Re-checked here as well as in `prepare`, because `run` is public and a caller that
-    // skips `prepare` would otherwise get the replay loop with nothing to explain it.
+    // skips `prepare` would otherwise read whatever the path holds.
     if !is_a_pipe(path) {
         error!(
             path = %path.display(),
@@ -245,111 +243,53 @@ pub async fn run(
         );
         return;
     }
+    let mut reader = match open(path) {
+        Ok(receiver) => BufReader::new(receiver),
+        Err(error) => {
+            error!(%error, path = %path.display(), "Operator console could not open its pipe");
+            return;
+        }
+    };
     info!(path = %path.display(), "Operator console reading");
 
+    let mut line = String::new();
     loop {
-        // A shutdown that arrives while the pipe is closed must not wait for the
-        // reopen pause to finish, so the pause is itself cancellable.
-        if shutdown.try_recv().is_ok() {
-            info!("Operator console stopped");
-            return;
-        }
-
-        let Some(mut reader) = open(path, &mut shutdown).await else {
-            info!("Operator console stopped before opening");
-            return;
-        };
-
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let read = tokio::select! {
-                biased;
-                result = shutdown.recv() => {
-                    if result.is_err() {
-                        info!("Operator console stopped");
-                        return;
-                    }
-                    continue;
-                }
-                result = reader.read_line(&mut line) => result,
-            };
-            match read {
-                Ok(0) => break,
-                Ok(_) => {
-                    // The answer goes to the log even when the writer has gone, because
-                    // the log is the record an Operator reads after the fact. A failure
-                    // here is not fatal: the grant already happened or already did not,
-                    // and losing the echo does not undo either.
-                    if let Some(answer) = answer(&line, &context).await {
-                        info!("Operator console: {answer}");
-                        if let Err(error) = reader
-                            .get_mut()
-                            .write_all(format!("{answer}\n").as_bytes())
-                            .await
-                        {
-                            warn!(%error, "Operator console could not echo its answer");
-                            break;
-                        }
-                    }
-                }
-                Err(error) => {
-                    warn!(%error, "Operator console could not read a line");
-                    break;
-                }
-            }
-        }
-        drop(reader);
-
-        // The writer closed, which is the normal end of one command. Wait before
-        // reopening, and let a shutdown cut the wait short.
-        tokio::select! {
+        line.clear();
+        let read = tokio::select! {
             biased;
             _ = shutdown.recv() => {
                 info!("Operator console stopped");
                 return;
             }
-            () = tokio::time::sleep(REOPEN_PAUSE) => {}
+            result = reader.read_line(&mut line) => result,
+        };
+        match read {
+            // The server holds a write end itself, so this is not an `echo` closing.
+            Ok(0) => {
+                error!("Operator console pipe ended while its own write end was open");
+                return;
+            }
+            Ok(_) => {
+                if let Some(answer) = answer(&line, &context).await {
+                    info!("Operator console: {answer}");
+                }
+            }
+            Err(error) => {
+                error!(%error, "Operator console could not read a line; the console stops");
+                return;
+            }
         }
     }
 }
 
-/// Open the console file, or give up when the server is shutting down.
+/// Open the console's pipe for reading and writing.
 ///
-/// A missing file is created, because the Operator's command is the natural place to
-/// make the pipe and a server that refuses to start without one would put the setup
-/// burden in the wrong order. An existing file that is not a named pipe is refused:
-/// reading a log file that is appended to would replay old commands, and re-running a
-/// grant is exactly the mistake a duplicate row comes from.
-async fn open(
-    path: &Path,
-    shutdown: &mut tokio::sync::broadcast::Receiver<()>,
-) -> Option<BufReader<tokio::fs::File>> {
-    // A loop, not recursion: waiting for a writer to appear has to be interruptible by
-    // a shutdown, and a recursive `async fn` would need every frame boxed to compile.
-    loop {
-        match tokio::fs::File::open(path).await {
-            Ok(file) => return Some(BufReader::new(file)),
-            // The pipe exists but has no writer, so there is nothing to read yet. Wait
-            // for one, cancellably, rather than spinning.
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::WouldBlock
-                ) =>
-            {
-                tokio::select! {
-                    biased;
-                    _ = shutdown.recv() => return None,
-                    () = tokio::time::sleep(REOPEN_PAUSE) => {}
-                }
-            }
-            Err(error) => {
-                error!(%error, path = %path.display(), "Operator console could not open its pipe");
-                return None;
-            }
-        }
-    }
+/// `O_RDWR` on a named pipe is Linux's, and it never waits for a writer, because the
+/// descriptor is one. The receiver refuses a path that is not a named pipe.
+fn open(path: &Path) -> std::io::Result<pipe::Receiver> {
+    pipe::OpenOptions::new()
+        .read_write(true)
+        .open_receiver(path)
 }
 
 /// Create the console's named pipe if it is not already there.
@@ -371,7 +311,7 @@ pub async fn prepare(path: &Path) -> std::io::Result<()> {
         }
         return Err(std::io::Error::other(format!(
             "{} exists and is not a named pipe; a regular file there would be replayed \
-             from the start by the console's tail loop, re-running every grant",
+             from the start whenever the console opened it, re-running every grant",
             path.display()
         )));
     }
@@ -385,8 +325,9 @@ pub async fn prepare(path: &Path) -> std::io::Result<()> {
 /// creates a **regular file** with that mode -- there is no flag for a FIFO -- so the
 /// console came up as an ordinary file. The first end-to-end run showed it immediately:
 /// `stat` reported `regular empty file` where a pipe should have been. A regular file
-/// then makes the tail loop replay it: the writer closes, the reader sees end-of-file,
-/// the loop reopens, and the line that was already run is read again, forever. The first
+/// then made that draft's tail loop replay it: the writer closed, the reader saw
+/// end-of-file, the loop reopened, and the line that was already run was read again,
+/// forever. The first
 /// draft also carried a comment saying a non-pipe would be refused, and no code did it.
 ///
 /// `mkfifo` is coreutils, it takes `-m` for the mode, and it is a plain process, so this
@@ -421,9 +362,9 @@ async fn make_pipe(path: &Path) -> std::io::Result<()> {
 /// Whether `path` is a named pipe.
 ///
 /// Checked before the reader starts, and it is the guard the module documentation claims
-/// exists: a regular file at the console's path would be replayed from the start by the
-/// tail loop, re-running every grant the owner ever typed. Refusing it is the only way
-/// that mistake cannot reach a second row.
+/// exists: a regular file at the console's path would be replayed from the start whenever
+/// the console opened it, re-running every grant the owner ever typed. Refusing it is the
+/// only way that mistake cannot reach a second row.
 fn is_a_pipe(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
     std::fs::metadata(path)
@@ -847,7 +788,7 @@ mod tests {
 
 #[cfg(test)]
 mod pipe_tests {
-    use super::{is_a_pipe, prepare};
+    use super::{is_a_pipe, open, prepare};
     use std::path::PathBuf;
 
     /// A path in this test's own directory, so two tests cannot collide.
@@ -929,6 +870,48 @@ mod pipe_tests {
     }
 
     #[tokio::test]
+    async fn each_echo_is_read_and_the_pipe_never_ends_between_them() {
+        // Ledger 221: the read-only reader saw end-of-file when an `echo` closed, and its
+        // close then threw away a command a second `echo` had written in between. The
+        // console's own write end keeps it from ever seeing end-of-file, so it never closes.
+        use tokio::io::AsyncBufReadExt as _;
+
+        let path = a_scratch_path("rdwr");
+        let _ = std::fs::remove_file(&path);
+        prepare(&path).await.expect("the pipe should be created");
+        let mut reader =
+            tokio::io::BufReader::new(open(&path).expect("the console's end should open"));
+        let wait = std::time::Duration::from_secs(10);
+        let mut line = String::new();
+        for command in ["item give Alpha 19", "item give Alpha 27001 10"] {
+            // What `echo` does: open, write one line, close.
+            std::fs::write(&path, format!("{command}\n")).expect("an echo should write");
+            line.clear();
+            tokio::time::timeout(wait, reader.read_line(&mut line))
+                .await
+                .expect("the line should arrive")
+                .expect("the pipe should read");
+            assert_eq!(line, format!("{command}\n"));
+        }
+        // Every writer but the console's own has closed, and the read waits for the next.
+        line.clear();
+        let quiet = std::time::Duration::from_millis(200);
+        let pending = tokio::time::timeout(quiet, reader.read_line(&mut line)).await;
+        assert!(pending.is_err(), "the pipe ended: {pending:?} {line:?}");
+        drop(reader);
+        let _ = std::fs::remove_file(&path);
+
+        // The open itself refuses a regular file.
+        let regular = a_scratch_path("rdwr-regular");
+        std::fs::write(&regular, "item give Shaman 19\n").expect("the file should be writable");
+        assert!(
+            open(&regular).is_err(),
+            "a regular file must not open as the console"
+        );
+        let _ = std::fs::remove_file(&regular);
+    }
+
+    #[tokio::test]
     async fn prepare_makes_a_named_pipe_and_not_a_regular_file() {
         // The first draft opened the path with `OpenOptions::create_new`, which makes a
         // **regular file** with the mode -- there is no flag for a FIFO. The end-to-end
@@ -964,8 +947,8 @@ mod pipe_tests {
     #[tokio::test]
     async fn prepare_refuses_a_regular_file_rather_than_replaying_it() {
         // This is the bug that made the first draft replay every grant forever: a regular
-        // file at the console's path is read from the start every time the tail loop
-        // reopens it. The refusal is what stops that, so it is tested directly.
+        // file at the console's path was read from the start every time that draft's
+        // tail loop reopened it. The refusal is what stops that, so it is tested directly.
         let path = a_scratch_path("regular");
         std::fs::write(&path, "item give Shaman 19\n").expect("the file should be writable");
 

@@ -20,6 +20,9 @@ pub mod auth_login;
 pub mod channel_login;
 pub mod chat;
 
+/// `CHARACTER::ChatPacket`: a server line, in the descriptor's language, to one character.
+pub mod chat_line;
+
 /// The Channel status list answered to `STATE_CHECKER`.
 pub mod channel_status;
 pub mod client_live;

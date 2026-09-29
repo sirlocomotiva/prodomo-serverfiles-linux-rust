@@ -132,6 +132,9 @@ pub struct SelectAccount {
     pub id: AccountId,
     /// Its login, as stored.
     pub login: Login,
+    /// The language the client chose at the auth login (`bLanguage`), which `LOGIN_BY_KEY`
+    /// copies into the account table (`D/ClientManagerLogin.cpp:136-138`).
+    pub language: u8,
     /// Its empire and characters, kept up to date by the select-screen handlers.
     pub lobby: Lobby,
 }
@@ -481,6 +484,7 @@ mod tests {
         SelectAccount {
             id: AccountId::new(7),
             login: Login::new("hero").unwrap(),
+            language: 1,
             lobby: Lobby { empire, players },
         }
     }

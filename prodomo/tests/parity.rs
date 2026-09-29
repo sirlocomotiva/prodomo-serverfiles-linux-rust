@@ -783,6 +783,8 @@ struct Keyed {
     client: Client,
     input: TeaKey,
     output: TeaKey,
+    /// The language the account's auth login chose, which the descriptor's records carry.
+    language: u8,
 }
 
 impl Keyed {
@@ -794,6 +796,7 @@ impl Keyed {
             client,
             input: SETUP_KEY,
             output: SETUP_KEY,
+            language: ENGLISH,
         }
     }
 
@@ -924,10 +927,22 @@ fn listed(list: &[u8], slot: usize) -> Listed {
     }
 }
 
+/// `LOCALE_EN`, the language every parity client logs in with unless its scenario says
+/// otherwise.
+const ENGLISH: u8 = 1;
+/// `LOCALE_DE`.
+const GERMAN: u8 = 5;
+
 /// Log `login` in on the auth port and return its login key.
 fn login_key(server: &Server, login: &[u8]) -> (Client, u32) {
+    login_key_in(server, login, ENGLISH)
+}
+
+/// [`login_key`] in `language`.
+fn login_key_in(server: &Server, login: &[u8], language: u8) -> (Client, u32) {
     let mut auth = auth_client(server);
-    let key = log_in(&mut auth, login, ACCOUNT_PASSWORD, 1).expect("the auth login succeeds");
+    let key = log_in(&mut auth, login, ACCOUNT_PASSWORD, language.into())
+        .expect("the auth login succeeds");
     (auth, key)
 }
 
@@ -1404,7 +1419,14 @@ fn client_sync_position(elements: &[(u32, i32, i32)]) -> Vec<u8> {
 /// Log `login` in, select slot `slot`, and enter the game, leaving the connection in the game
 /// phase with every loading and enter-game record already read.
 fn enter_world(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed) {
-    let (mut keyed, character, _items) = load_character(server, login, slot);
+    enter_world_in(server, login, slot, ENGLISH)
+}
+
+/// [`enter_world`] for an auth login in `language`.
+fn enter_world_in(server: &Server, login: &[u8], slot: u8, language: u8) -> (Keyed, Listed) {
+    let (mut keyed, character, quickslots, _items) =
+        load_with_quickslots_in(server, login, slot, language);
+    assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
     enter_game_burst(&mut keyed);
     (keyed, character)
 }
@@ -1431,7 +1453,17 @@ fn load_with_quickslots(
     login: &[u8],
     slot: u8,
 ) -> (Keyed, Listed, Vec<Vec<u8>>, Vec<Vec<u8>>) {
-    let (mut keyed, _empire, list) = select_screen(server, login);
+    load_with_quickslots_in(server, login, slot, ENGLISH)
+}
+
+/// [`load_with_quickslots`] for an auth login in `language`.
+fn load_with_quickslots_in(
+    server: &Server,
+    login: &[u8],
+    slot: u8,
+    language: u8,
+) -> (Keyed, Listed, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let (mut keyed, _empire, list) = select_screen_in(server, login, language);
     let character = listed(&list, usize::from(slot));
     keyed.send_record(&client_select(slot));
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
@@ -1477,7 +1509,12 @@ fn enter_game_records(keyed: &mut Keyed) -> Vec<u8> {
     keyed.send_record(&client_enter_game());
     let add = keyed.read_game();
     assert_eq!(add[0], GC_CHARACTER_ADD);
-    assert_eq!(keyed.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    let additional = keyed.read_game();
+    assert_eq!(additional[0], GC_CHAR_ADDITIONAL_INFO);
+    assert_eq!(
+        additional[69], keyed.language,
+        "bLanguage from the descriptor: the language the auth login chose"
+    );
     assert_eq!(keyed.read_game()[0], GC_AFFECT_ADD);
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
     assert_eq!(keyed.read_game()[0], GC_TIME);
@@ -1720,8 +1757,14 @@ fn wait_for(database: &ScratchDatabase, condition: &str) {
 /// Log `login` in on Channel 1, once no closing descriptor holds it, and return the connection,
 /// the empire it shows, and the character list.
 fn select_screen(server: &Server, login: &[u8]) -> (Keyed, u8, Vec<u8>) {
-    let (_auth, key) = login_key(server, login);
+    select_screen_in(server, login, ENGLISH)
+}
+
+/// [`select_screen`] for an auth login in `language`.
+fn select_screen_in(server: &Server, login: &[u8], language: u8) -> (Keyed, u8, Vec<u8>) {
+    let (_auth, key) = login_key_in(server, login, language);
     let mut keyed = Keyed::channel(server.channel(1));
+    keyed.language = language;
     let (empire, list) = login_by_key_when_free(&mut keyed, login, key).expect("logs in");
     (keyed, empire, list)
 }
@@ -2146,7 +2189,10 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
     assert_eq!(word_sized(&additional), None);
     assert_eq!(&additional[1..5], &alpha.id.to_le_bytes(), "dwVID");
     assert_eq!(&additional[5..30], &name_field(b"Alpha"), "szName");
-    assert_eq!(additional[69], 0, "bLanguage from the descriptor");
+    assert_eq!(
+        additional[69], 1,
+        "bLanguage from the descriptor: the language the auth login chose"
+    );
     let affect = keyed.read_game();
     assert_eq!(affect.len(), AFFECT_ADD_LEN);
     assert_eq!(affect[0], GC_AFFECT_ADD);
@@ -2534,6 +2580,10 @@ fn a_talking_line_reaches_the_map_including_its_sender() {
 /// `CHAT_TYPE_INFO` line with `id` 0 and the sender's empire: a party line with no party, a
 /// guild line with no guild, and a shout below the level limit (`G/input_main.cpp:888`, `:960`,
 /// `:977`). The neighbour on the same map hears none of them.
+///
+/// Each line is looked up in the sender's language (`LC_LOCALE_TEXT`, `G/char.cpp:5151`). Bob
+/// logs in in German, and the owner's German table has no pair for the shout refusal, so it goes
+/// out as written, as legacy sends it.
 #[test]
 fn a_line_legacy_answers_itself_comes_back_to_the_sender_alone() {
     let Some(database) = ScratchDatabase::create() else {
@@ -2554,7 +2604,7 @@ fn a_line_legacy_answers_itself_comes_back_to_the_sender_alone() {
          470000, 950000 FROM account WHERE login = 'bob'",
     );
     let (mut alice, _) = enter_world(&server, b"alice", 0);
-    let (mut yankee, _) = enter_world(&server, b"bob", 0);
+    let (mut yankee, _) = enter_world_in(&server, b"bob", 0, GERMAN);
 
     let info = |empire: u8, text: &[u8]| {
         let mut line = vec![GC_CHAT];
@@ -3724,6 +3774,7 @@ enum Seen {
 
 /// Every record a move sends within a quiet window, each checked against the mover's VID.
 fn read_a_move(keyed: &mut Keyed, vid: u32) -> Vec<Seen> {
+    let language = keyed.language;
     let (records, quiet) = keyed.drain_game(Duration::from_millis(700), |header| match header {
         GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
         GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
@@ -3754,6 +3805,11 @@ fn read_a_move(keyed: &mut Keyed, vid: u32) -> Vec<Seen> {
                     let at = 5 + 2 * index;
                     u16::from_le_bytes([record[at], record[at + 1]])
                 });
+                // `UpdatePacket` sends the mover's descriptor's language (`G/char.cpp:1321`).
+                assert_eq!(
+                    record[54], language,
+                    "bLanguage from the mover's descriptor"
+                );
                 Seen::Look(parts, record[17], record[18])
             }
             GC_SPECIAL_EFFECT => {
@@ -3809,7 +3865,8 @@ fn give_alpha_wearables(database: &ScratchDatabase) {
 /// (`G/char.cpp:2769-2846`) over Alpha's level 154 and 18 in the defence attribute: the
 /// defence grade is 154 + 18 x 4 / 5 plus the armour's `value1` and twice its `value5`, the
 /// shown grade 154 + 18 plus the same, and the magic defence grade 154 + (3 x 20 + 18) / 3 plus
-/// half the armour's.
+/// half the armour's. Alice logs in in German, and each look carries her descriptor's language
+/// (`G/char.cpp:1321`).
 #[test]
 fn an_armour_is_worn_swapped_and_taken_off_and_the_store_follows() {
     let Some(database) = ScratchDatabase::create() else {
@@ -3819,7 +3876,9 @@ fn an_armour_is_worn_swapped_and_taken_off_and_the_store_follows() {
     create_account(&server, "alice");
     add_characters(&database);
     give_alpha_wearables(&database);
-    let (mut alpha, _character, items) = load_character(&server, b"alice", 0);
+    let (mut alpha, _character, quickslots, items) =
+        load_with_quickslots_in(&server, b"alice", 0, GERMAN);
+    assert!(quickslots.is_empty());
     let waited = std::time::Instant::now();
     assert_eq!(items.len(), 3);
     let add = enter_game_burst(&mut alpha);

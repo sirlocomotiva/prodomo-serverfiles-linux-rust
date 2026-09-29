@@ -98,6 +98,10 @@ fn a_full_document_reads_every_table() {
     assert_eq!(config.game_data, Path::new("/srv/share"));
     assert_eq!(config.map_dir(), Path::new("/srv/share/locale/europe/map"));
     assert_eq!(config.proto_dir(), Path::new("/srv/share/proto"));
+    assert_eq!(
+        config.country_dir(),
+        Path::new("/srv/share/locale/europe/country")
+    );
     assert_eq!(config.game_tables, Path::new("/srv/tables"));
     assert_eq!(
         config.store.url,

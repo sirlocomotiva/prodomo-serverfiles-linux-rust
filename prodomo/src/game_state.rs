@@ -30,6 +30,7 @@ use std::sync::Arc;
 
 use common::item_slots::usable_inventory_cells;
 use gamedata::item_proto::ItemProtos;
+use gamedata::locale_string::LocaleStrings;
 use world::character::{
     drop_item, is_recovering, move_item, pickup_item, update_recovery, use_item, CharacterManager,
     CharacterManagerError, DropAt, Gear, GroundItem, GroundRecord, MoveRefused, MoveRequest,
@@ -307,6 +308,8 @@ pub struct GameState {
     characters: CharacterManager,
     item_ids: Option<ItemIds>,
     protos: Arc<ItemProtos>,
+    /// The locale strings a chat line is looked up in.
+    locale: Arc<LocaleStrings>,
     metrics: Arc<GameStateMetrics>,
     last_pulse: u64,
     /// Where each online character's records go, keyed by the VID it entered under.
@@ -391,6 +394,7 @@ impl GameState {
             characters: CharacterManager::new(),
             item_ids: None,
             protos: protos.into(),
+            locale: Arc::default(),
             metrics: Arc::new(GameStateMetrics::default()),
             last_pulse: 0,
             outboxes: HashMap::new(),
@@ -402,6 +406,14 @@ impl GameState {
             clients: None,
             recovering: HashMap::new(),
         }
+    }
+
+    /// Share the locale strings, which the chat lines a move sends are looked up in. Without
+    /// them every line is sent as it is written.
+    #[must_use]
+    pub fn with_locale_strings(mut self, locale: Arc<LocaleStrings>) -> Self {
+        self.locale = locale;
+        self
     }
 
     /// Set `item_destroy_time_dropitem`, the seconds a dropped item lies before it is destroyed.
@@ -1082,6 +1094,7 @@ impl GameState {
             done,
             actor,
             &self.protos,
+            &self.locale,
         ))
     }
 
@@ -1186,7 +1199,7 @@ impl GameState {
         let (items, slots) = character.items_and_quickslots_mut();
         sync_quickslots(&mut done, slots, items);
         let quickslots = slots.clone();
-        let mut moved = MovedItems::new(owner_id, vid.raw(), done, actor, protos);
+        let mut moved = MovedItems::new(owner_id, vid.raw(), done, actor, protos, &self.locale);
         moved.points = character.points().cloned();
         moved.quickslots = Some(quickslots);
         Ok(moved)
@@ -2074,6 +2087,7 @@ mod tests {
         Mover {
             recently_fought: false,
             empire: 1,
+            language: 1,
         }
     }
 
@@ -2375,6 +2389,35 @@ mod tests {
             Err(MoveItemRefused::Refused(MoveRefused::NotOnGround)),
             "the item is gone once picked up"
         );
+    }
+
+    #[test]
+    fn a_pick_up_line_is_looked_up_in_the_pickers_language() {
+        let german =
+            gamedata::locale_string::LanguageTable::parse(b"\"[LS;444;%s]\";\"Aufgehoben: %s\";\n");
+        let strings = LocaleStrings::default().with_table(5, german);
+        let mut state = a_holder(&[(inventory(3), a_plain_item(11, a_plain_vnum()))], true)
+            .with_locale_strings(Arc::new(strings));
+        let says = |records: &[Vec<u8>], text: &[u8]| {
+            records
+                .iter()
+                .any(|record| record.windows(text.len()).any(|part| part == text))
+        };
+        // Each drop takes the next ground VID.
+        for (ground, language, text) in [(1, 5, &b"Aufgehoben: "[..]), (2, 1, &b"[LS;444;"[..])] {
+            drop_at(&mut state, 3, 0);
+            let mover = Mover {
+                language,
+                ..a_mover()
+            };
+            let picked = state
+                .pickup_item(Vid::new(7), ground, a_place(41, 500, 700), mover)
+                .expect("the pick-up happened");
+            assert!(says(&picked.records, text), "language {language}");
+            let _moved = state
+                .move_item(Vid::new(7), a_move(0, 3, 0), a_mover())
+                .expect("the item goes back to cell 3");
+        }
     }
 
     #[test]

@@ -264,6 +264,9 @@ pub struct VisibleCharacter {
     pub x: i32,
     /// The y the character stands at.
     pub y: i32,
+    /// Its descriptor's language, which its `GC_CHAR_ADDITIONAL_INFO` carries
+    /// (`GetDesc()->GetLanguage()`, `G/char.cpp:1174`).
+    pub language: u8,
 }
 
 impl VisibleCharacter {
@@ -293,7 +296,7 @@ impl VisibleCharacter {
 
     /// The `GC_CHAR_ADDITIONAL_INFO` for this character, with no guild, mount or alignment.
     #[must_use]
-    pub fn additional(&self, language: u8) -> GcCharacterAdditionalInfo {
+    pub fn additional(&self) -> GcCharacterAdditionalInfo {
         GcCharacterAdditionalInfo::new(
             self.vid,
             self.name,
@@ -309,7 +312,7 @@ impl VisibleCharacter {
             0,
             0,
             0,
-            language,
+            self.language,
         )
     }
 }
@@ -657,8 +660,10 @@ pub struct EnterGameBurst {
 ///
 /// `state` is the character's points, which give its own insert record its two speeds.
 /// `channel` is `g_bChannel`, and `now` is `get_global_time()`, which is `time(0)` plus a gap
-/// the Rewrite does not yet carry. The time and channel records are unconditional; every other
-/// record here is about the character or about a list that is empty today.
+/// the Rewrite does not yet carry. `language` is the entering descriptor's, which its own
+/// summary carries; a visible character's summary carries its own descriptor's. The time and
+/// channel records are unconditional; every other record here is about the character or about a
+/// list that is empty today.
 ///
 /// # Panics
 ///
@@ -689,7 +694,7 @@ pub fn enter_game_burst(
     for other in &view.characters {
         before.push(encoded(&mut other.add(), "a visible character insert"));
         before.push(encoded(
-            &mut other.additional(language),
+            &mut other.additional(),
             "a visible character summary",
         ));
     }
@@ -906,6 +911,7 @@ mod tests {
             parts: [0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666],
             x: 0x0000_1000,
             y: -0x0000_2000,
+            language: 5,
         }
     }
 
@@ -1642,6 +1648,11 @@ mod tests {
             "the neighbour's VID"
         );
         assert_eq!(&summary[5..12], b"Spectre");
+        assert_eq!(summary[69], 5, "the neighbour's own descriptor's language");
+        assert_eq!(
+            burst.before_phase[1][69], 3,
+            "the entering descriptor's language"
+        );
     }
 
     /// A second character in view is described by `GC_ENTITY` at load. `wSize` is a `WORD`
