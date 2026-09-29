@@ -1077,6 +1077,9 @@ where
     if let Some(points) = moved.points {
         hold_points(held, points);
     }
+    if let Some(quickslots) = moved.quickslots {
+        held.quickslots = quickslots;
+    }
     if let Err(error) = send_all(session, &moved.records).await {
         warn!(%addr, %error, "Client session stopped");
         return false;

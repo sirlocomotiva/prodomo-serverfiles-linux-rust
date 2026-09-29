@@ -3,12 +3,13 @@
 //!
 //! These change one character's storage and answer with the records and row changes, as a
 //! move does. Where the item lies, how long it lies there and who is told are the caller's:
-//! the ground is not a character's.
+//! the ground is not a character's. A drop deletes the slots that name the dropped cell,
+//! as a [`QuickslotSync`] the caller runs (ledger 220).
 //!
 //! Not ported, and each is the caller's or a later ledger's: gold on the ground, the drop
 //! time limit (the descriptor keeps it), ownership (a player's drop has no owner, so anyone
-//! may pick it up), the party share, the quest hooks, the exchange and lock checks, the
-//! quickslot sync, and the item log.
+//! may pick it up), the party share, the quest hooks, the exchange and lock checks, and the
+//! item log.
 
 use common::item_slots::{
     EWindows, CUSTOM_INVENTORY_SLOT_END, CUSTOM_INVENTORY_SLOT_START, INVENTORY_MAX_NUM,
@@ -25,6 +26,7 @@ use super::item_move::{
     MoveRefused, MoveRules, Unported,
 };
 use super::items::CharacterItems;
+use super::quickslot::{QuickslotSync, SyncTo};
 use crate::item::{
     gc_item_clear, Item, ItemIds, ITEM_ANTIFLAG_DROP, ITEM_ANTIFLAG_GIVE, ITEM_ANTIFLAG_STACK,
     ITEM_FLAG_STACKABLE,
@@ -152,9 +154,16 @@ pub fn drop_item(
         y: to.y,
         last_owner,
     };
+    // `SyncQuickslot(QUICKSLOT_TYPE_ITEM, Cell.cell, 255)` runs before the drop, so the
+    // slots are deleted even when part of the stack stays.
+    let sync = QuickslotSync {
+        from: at.cell,
+        to: SyncTo::Delete,
+    };
     let done = MoveDone {
         kind: MoveKind::Dropped,
         records: vec![
+            MoveRecord::QuickslotSync(sync),
             MoveRecord::Item(record),
             MoveRecord::Ground(ground.add_record()),
             MoveRecord::Notice(DROPPED_NOTICE),
@@ -394,6 +403,10 @@ mod tests {
         assert_eq!(
             done.records,
             vec![
+                MoveRecord::QuickslotSync(QuickslotSync {
+                    from: 4,
+                    to: SyncTo::Delete
+                }),
                 MoveRecord::Item(ItemRecord::Set(gc_item_clear(inv(4)))),
                 MoveRecord::Ground(GroundRecord::Add {
                     vid: 3,
@@ -431,9 +444,16 @@ mod tests {
         let (done, ground) = drop_item(&mut items, Some(&mut ids), inv(4), 5, TO).expect("drops");
         let kept = items.item_at(inv(4)).expect("the stack stays").clone();
         assert_eq!(kept.count, 15);
+        // The slots naming the cell are deleted even though part of the stack stays.
         assert_eq!(
-            done.records[0],
-            MoveRecord::Item(ItemRecord::Update(kept.gc_item_update()))
+            done.records[..2],
+            [
+                MoveRecord::QuickslotSync(QuickslotSync {
+                    from: 4,
+                    to: SyncTo::Delete
+                }),
+                MoveRecord::Item(ItemRecord::Update(kept.gc_item_update())),
+            ]
         );
         assert_eq!(done.changes, vec![ItemChange::Count { id: 7, count: 15 }]);
         assert_eq!((ground.item.id, ground.item.count), (1000, 5));

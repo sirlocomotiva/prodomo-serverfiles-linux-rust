@@ -4213,6 +4213,67 @@ fn the_quickslots_are_set_swapped_and_deleted_and_a_relog_sets_them_again() {
     );
 }
 
+/// `sys.char.quickslot`'s sync: a slot follows its potion when the potion moves, chains to the
+/// next potion of its vnum when a merge uses it up, and is deleted when part of it is dropped
+/// (`G/char_quickslot.cpp:12-34`, `:138-155`). The logout save stores the slots the world
+/// answered.
+#[test]
+fn a_quickslot_follows_its_potion_chains_when_it_is_used_up_and_a_drop_deletes_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+
+    // Given: Alpha holds two small red potions at cell 0, on slot 4.
+    let (mut alpha, _character) = enter_world(&server, b"alice", 0);
+    Server::write_console(&console, "item give Alpha 27001 2");
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 27_001, 2));
+    alpha.send_record(&client_quickslot_add(4, 1, 0));
+    assert_eq!(alpha.read_game(), [GC_QUICKSLOT_ADD, 4, 1, 0]);
+
+    // When: the stack is moved whole to cell 3.
+    alpha.send_record(&client_item_move(0, 3, 0));
+    // Then: after the set, the slot is set again on cell 3 (`G/char_item.cpp:7822`).
+    assert_eq!(alpha.read_game(), a_clear_record(0));
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 3, 27_001, 2));
+    assert_eq!(alpha.read_game(), [GC_QUICKSLOT_ADD, 4, 1, 3]);
+
+    // When: a third potion is given, lands at cell 0, and the stack at cell 3 is merged into
+    // it.
+    Server::write_console(&console, "item give Alpha 27001 1");
+    server.wait_for("id 100000001; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 27_001, 1));
+    alpha.send_record(&client_item_move(3, 0, 2));
+    // Then: the used-up stack at cell 3 is cleared and, because a potion used up chains
+    // (`CItem::SetCount`), the slot follows the first potion left, at cell 0; then cell 0 is
+    // updated to three (`G/char_item.cpp:7802-7803`).
+    assert_eq!(alpha.read_game(), a_clear_record(3));
+    assert_eq!(alpha.read_game(), [GC_QUICKSLOT_ADD, 4, 1, 0]);
+    assert_eq!(update_fields(&alpha.read_game()), (inventory, 0, 3));
+
+    // When: one of the three is dropped.
+    alpha.send_record(&client_item_drop(0, Some(1)));
+    // Then: legacy deletes the slot before the drop, even for part of the stack
+    // (`G/char_item.cpp:7501`).
+    assert_eq!(alpha.read_game(), [GC_QUICKSLOT_DEL, 4]);
+    assert_eq!(update_fields(&alpha.read_game()), (inventory, 0, 2));
+    assert_eq!(alpha.read_game(), a_ground_add(1, 27_001));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;443]"));
+
+    // And: the logout save stores no slot, and the two potions left at cell 0.
+    drop(alpha);
+    wait_for(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM quickslot) AND (SELECT count FROM item WHERE id = \
+         100000001) = 2",
+    );
+}
+
 /// One second of the recovery event: the pool's `GC_CHARACTER_POINT_CHANGE`, then the
 /// recovery's, both for `vid`.
 fn read_a_tick(keyed: &mut Keyed, vid: u32) -> [Seen; 2] {

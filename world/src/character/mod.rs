@@ -64,5 +64,8 @@ pub use points::{
     Points, PointsRow, SungmaWill, IMMUNE_FALL, IMMUNE_SLOW, IMMUNE_STUN, SUNGMA_WILL_MAPS,
 };
 pub use potion::{is_recovering, update_recovery, SE_HPUP_RED, SE_SPUP_BLUE};
-pub use quickslot::{add_from_client, Quickslot, QuickslotRecord, Quickslots, QUICKSLOT_MAX_NUM};
+pub use quickslot::{
+    add_from_client, chains_when_used_up, find_specify_item, sync_quickslots, Quickslot,
+    QuickslotRecord, QuickslotSync, Quickslots, SyncTo, QUICKSLOT_MAX_NUM,
+};
 pub use state::{Activity, CoreState, Posture};

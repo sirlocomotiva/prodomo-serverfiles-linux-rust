@@ -69,6 +69,7 @@ use super::inventory::{
 };
 use super::items::{CharacterItems, CountRefused, Rejected};
 use super::points::PointRecord;
+use super::quickslot::{QuickslotRecord, QuickslotSync, SyncTo};
 use crate::item::{gc_item_clear, Item, ItemId, ItemIds, ITEM_FLAG_IRREMOVABLE};
 use common::enums::EWearPositions;
 
@@ -108,6 +109,9 @@ pub struct MoveFacts {
     pub belt_eligible: bool,
     /// Whether it is a dragon-soul item (`ITEM_DS`).
     pub dragon_soul: bool,
+    /// Whether a stack used up by a merge chains its slots
+    /// ([`super::quickslot::chains_when_used_up`]).
+    pub chains_quickslots: bool,
 }
 
 /// Which of the three outcomes a move had.
@@ -174,6 +178,11 @@ pub enum MoveRecord {
         /// The item's vnum.
         vnum: u32,
     },
+    /// A quickslot record.
+    Quickslot(QuickslotRecord),
+    /// A sync of the item slots, which [`super::quickslot::sync_quickslots`] turns into the
+    /// [`MoveRecord::Quickslot`] records it sends before the answer leaves the world.
+    QuickslotSync(QuickslotSync),
 }
 
 /// A record about a ground item (`CItem::EncodeInsertPacket`, `EncodeRemovePacket`,
@@ -581,6 +590,7 @@ pub fn move_item(
             from,
             to,
             count,
+            chains: facts.chains_quickslots,
         };
         return grid_move(items, ids, place, rules, None);
     };
@@ -601,6 +611,7 @@ pub fn move_item(
         from,
         to,
         count,
+        chains: facts.chains_quickslots,
     };
     let moved = check_placement(to, &facts)
         .and_then(|()| grid_move(items, ids, place, rules, Some((worn, gear))));
@@ -744,6 +755,8 @@ struct Place<'a> {
     from: ItemPos,
     to: ItemPos,
     count: u16,
+    /// [`MoveFacts::chains_quickslots`].
+    chains: bool,
 }
 
 /// The wear cell a worn item leaves, with the gear its taking off changes.
@@ -762,6 +775,7 @@ fn grid_move(
         from,
         to,
         count,
+        chains,
     } = place;
     if let Some(target) = items
         .item_at(to)
@@ -778,7 +792,7 @@ fn grid_move(
             &target,
             count,
             rules.count_limit,
-            (worn, usable_cells),
+            (worn, usable_cells, chains),
         );
     }
     let fits = |exception: Option<u16>| {
@@ -842,13 +856,18 @@ fn stored(items: &CharacterItems, id: ItemId) -> Result<&Item, MoveRefused> {
 /// of the storage and cleared on the client, which is what `SetCount(0)` does through
 /// `M2_DESTROY_ITEM`. When nothing moves, both records are still sent, and there is nothing
 /// to store.
+///
+/// A used-up source syncs its slots as `SetCount(0)` does (`G/item.cpp:303-330`): one that
+/// chains is cleared first and its slots then follow the first item of its vnum, and any
+/// other has its slots deleted before it is cleared. A worn source syncs its wear cell,
+/// which no slot can name, so it sends nothing and is left out.
 fn merge(
     items: &mut CharacterItems,
     item: &Item,
     target: &Item,
     count: u16,
     count_limit: u16,
-    (worn, usable_cells): (Worn<'_, '_>, u16),
+    (worn, usable_cells, chains): (Worn<'_, '_>, u16, bool),
 ) -> Result<MoveDone, MoveRefused> {
     let asked = if count == 0 { item.count } else { count };
     let room = count_limit
@@ -869,7 +888,16 @@ fn merge(
             changes = trail.changes;
         } else {
             let pos = items.release(item.id).map_err(MoveRefused::Storage)?;
-            records.push(MoveRecord::Item(ItemRecord::Set(gc_item_clear(pos))));
+            let clear = MoveRecord::Item(ItemRecord::Set(gc_item_clear(pos)));
+            let (sync, to) = (item.pos.cell, SyncTo::Chain(item.vnum));
+            if chains {
+                records.push(clear);
+                records.push(MoveRecord::QuickslotSync(QuickslotSync { from: sync, to }));
+            } else {
+                let to = SyncTo::Delete;
+                records.push(MoveRecord::QuickslotSync(QuickslotSync { from: sync, to }));
+                records.push(clear);
+            }
         }
         changes.push(ItemChange::Destroyed { id: item.id });
     } else {
@@ -903,7 +931,8 @@ fn merge(
 }
 
 /// `ITEM_MOVE` (`char_item.cpp:7810-7824`): `RemoveFromCharacter` clears the old cell, and
-/// `SetItem(DestCell, item, false)` fills the new one with no highlight.
+/// `SetItem(DestCell, item, false)` fills the new one with no highlight. When both cells were
+/// sent in the inventory window, the item's slots follow it (`SyncQuickslot`).
 ///
 /// The clear names the cell in stored terms, because `RemoveFromCharacter` addresses the
 /// item's own window. The set names the destination as the client sent it, because
@@ -919,12 +948,20 @@ fn whole_move(
         .move_item(from, to, item)
         .map_err(MoveRefused::Storage)?;
     let pos = stored(items, item.id)?.pos;
+    let mut records = vec![
+        MoveRecord::Item(ItemRecord::Set(gc_item_clear(old))),
+        MoveRecord::Item(ItemRecord::Set(item.gc_item_set(to, 0))),
+    ];
+    let inventory = EWindows::Inventory as u8;
+    if from.window_type == inventory && to.window_type == inventory {
+        records.push(MoveRecord::QuickslotSync(QuickslotSync {
+            from: from.cell,
+            to: SyncTo::Cell(to.cell),
+        }));
+    }
     Ok(MoveDone {
         kind: MoveKind::Moved,
-        records: vec![
-            MoveRecord::Item(ItemRecord::Set(gc_item_clear(old))),
-            MoveRecord::Item(ItemRecord::Set(item.gc_item_set(to, 0))),
-        ],
+        records,
         changes: vec![ItemChange::Moved { id: item.id, pos }],
     })
 }
@@ -1025,6 +1062,7 @@ mod tests {
             categories: categories.to_vec(),
             belt_eligible: false,
             dragon_soul: false,
+            chains_quickslots: false,
         }
     }
 
@@ -1114,6 +1152,62 @@ mod tests {
             item_records(&done)[0],
             ItemRecord::Set(gc_item_clear(at(INV, 3)))
         );
+    }
+
+    fn syncs(done: &MoveDone) -> Vec<(usize, QuickslotSync)> {
+        done.records
+            .iter()
+            .enumerate()
+            .filter_map(|(at, record)| match record {
+                MoveRecord::QuickslotSync(sync) => Some((at, *sync)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_whole_move_in_the_inventory_window_syncs_its_slots_after_the_set() {
+        let mut items = holding(&[(at(INV, 3), plain(7, 19))]);
+        let done = run(&mut items, at(INV, 3), at(INV, 4), 0, facts(&[])).expect("moves");
+        let to = SyncTo::Cell(4);
+        assert_eq!(syncs(&done), [(2, QuickslotSync { from: 3, to })]);
+        assert_eq!(done.records.len(), 3);
+        // Named through the equipment window, the move syncs nothing (`G/char_item.cpp:7822`).
+        let mut items = holding(&[(at(INV, 3), plain(7, 19))]);
+        let done = run(&mut items, at(EQUIP, 3), at(INV, 4), 0, facts(&[])).expect("moves");
+        assert_eq!(syncs(&done), []);
+        // A split moves no slot.
+        let mut items = holding(&[(at(INV, 3), stack(7, 27001, 30))]);
+        let done = run(&mut items, at(INV, 3), at(INV, 4), 5, facts(&[])).expect("splits");
+        assert_eq!((done.kind, syncs(&done)), (MoveKind::Split, vec![]));
+    }
+
+    #[test]
+    fn a_merge_that_uses_up_its_source_deletes_or_chains_its_slots() {
+        let placed = [
+            (at(INV, 3), stack(7, 27001, 30)),
+            (at(INV, 4), stack(8, 27001, 100)),
+        ];
+        let clear = MoveRecord::Item(ItemRecord::Set(gc_item_clear(at(INV, 3))));
+        let mut items = holding(&placed);
+        let done = run(&mut items, at(INV, 3), at(INV, 4), 0, facts(&[])).expect("merges");
+        let to = SyncTo::Delete;
+        assert_eq!(syncs(&done), [(0, QuickslotSync { from: 3, to })]);
+        assert_eq!(done.records[1], clear);
+        let chains = MoveFacts {
+            chains_quickslots: true,
+            ..facts(&[])
+        };
+        let mut items = holding(&placed);
+        let done = run(&mut items, at(INV, 3), at(INV, 4), 0, chains.clone()).expect("merges");
+        let to = SyncTo::Chain(27001);
+        assert_eq!(syncs(&done), [(1, QuickslotSync { from: 3, to })]);
+        assert_eq!(done.records[0], clear);
+        assert_eq!(done.records.len(), 3);
+        // A source that keeps some of its stack syncs nothing.
+        let mut items = holding(&placed);
+        let done = run(&mut items, at(INV, 3), at(INV, 4), 10, chains).expect("merges");
+        assert_eq!(syncs(&done), []);
     }
 
     #[test]
@@ -1228,6 +1322,7 @@ mod tests {
         );
         let dragon = MoveFacts {
             dragon_soul: true,
+            chains_quickslots: false,
             ..facts(&[])
         };
         assert_eq!(

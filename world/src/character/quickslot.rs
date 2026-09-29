@@ -1,20 +1,25 @@
 //! Quickslots: `CHARACTER::SetQuickslot`, `DelQuickslot` and `SwapQuickslot`
-//! (`G/char_quickslot.cpp:45-136`), and the item check `CInputMain::QuickslotAdd` makes first
-//! (`G/input_main.cpp:1083-1113`).
+//! (`G/char_quickslot.cpp:45-136`), the item check `CInputMain::QuickslotAdd` makes first
+//! (`G/input_main.cpp:1083-1113`), and `SyncQuickslot` and `ChainQuickslotItem`
+//! (`G/char_quickslot.cpp:12-34`, `:138-155`), which make an item slot follow its item.
 //!
 //! A character has 36 slots. Each is empty, or names an inventory cell, a skill or a command.
 //! Every change answers the records legacy sends for it, in its order.
 //!
-//! Not ported, and each is a later ledger's: `SyncQuickslot` and `ChainQuickslotItem`, which
-//! follow an item that moves, is used up or leaves the inventory.
+//! An item step cannot reach the slots, so it leaves a [`QuickslotSync`] among its records
+//! where legacy syncs, and [`sync_quickslots`] runs each one on the character's slots in its
+//! place.
 
 use common::enums::EQuickSlotType;
-use common::item_slots::EWindows;
-use gamedata::item_kind::ITEM_USE;
-use gamedata::item_proto::ItemProtos;
+use common::item_slots::{
+    EWindows, CUSTOM_INVENTORY_SLOT_END, CUSTOM_INVENTORY_SLOT_START, INVENTORY_MAX_NUM,
+};
+use gamedata::item_kind::{ITEM_USE, USE_ABILITY_UP, USE_POTION};
+use gamedata::item_proto::{ItemProto, ItemProtos};
 use protocol::item_pos::ItemPos;
 
 use super::inventory::{is_belt_inventory_position, is_default_inventory_position};
+use super::item_move::{MoveDone, MoveRecord};
 use super::items::CharacterItems;
 
 /// `QUICKSLOT_MAX_NUM` (`common/length.h:51`).
@@ -155,6 +160,143 @@ impl Quickslots {
         self.0.swap(a, b);
         out.push(QuickslotRecord::Swap { slot, with });
         true
+    }
+}
+
+/// What an item slot that names a cell an item left does next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncTo {
+    /// `SyncQuickslot(QUICKSLOT_TYPE_ITEM, from, cell)`: the item moved to this cell.
+    Cell(u16),
+    /// `SyncQuickslot(QUICKSLOT_TYPE_ITEM, from, 255)`: the item is gone.
+    Delete,
+    /// `CItem::SetCount(0)` of an item [`chains_when_used_up`] names: the slot follows the
+    /// first other item of this vnum (`FindSpecifyItem`, then `ChainQuickslotItem`), and is
+    /// deleted when there is none.
+    Chain(u32),
+}
+
+/// A sync an item step left among its records, for [`sync_quickslots`] to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuickslotSync {
+    /// The cell the item left.
+    pub from: u16,
+    /// What the slots that named it do.
+    pub to: SyncTo,
+}
+
+/// Whether `SetCount(0)` of an item of this prototype chains its slots to another item of the
+/// same vnum, rather than deleting them (`G/item.cpp:307`).
+///
+/// Legacy tests the sub type alone, whatever the type, so any item whose sub type is 0 or 7
+/// chains too, and so does vnum 70020.
+#[must_use]
+pub fn chains_when_used_up(proto: &ItemProto) -> bool {
+    proto.sub_type == USE_ABILITY_UP || proto.sub_type == USE_POTION || proto.vnum == 70_020
+}
+
+impl Quickslots {
+    /// `SyncQuickslot(QUICKSLOT_TYPE_ITEM, from, to)`: every item slot that names `from` is
+    /// deleted when `to` is `None`, and set to `to` otherwise.
+    ///
+    /// Legacy passes both cells as a `BYTE`, so a cell past 255 would name another cell. Here
+    /// a slot names `from` only when it is that very cell, and a slot moved to a cell past 255
+    /// is refused as [`Self::set`] refuses any cell a slot cannot name.
+    fn sync_item(&mut self, from: u16, to: Option<u16>, out: &mut Vec<QuickslotRecord>) {
+        if to == Some(from) {
+            return;
+        }
+        let Ok(old) = u8::try_from(from) else {
+            return;
+        };
+        let named = Quickslot {
+            kind: EQuickSlotType::Item as u8,
+            pos: old,
+        };
+        for slot in (0_u8..).take(QUICKSLOT_MAX_NUM) {
+            if self.get(slot) != Some(named) {
+                continue;
+            }
+            match to.map(u8::try_from) {
+                None => {
+                    let _deleted = self.delete(slot, out);
+                }
+                Some(Ok(pos)) => {
+                    let quickslot = Quickslot {
+                        kind: EQuickSlotType::Item as u8,
+                        pos,
+                    };
+                    let _set = self.set(slot, quickslot, out);
+                }
+                Some(Err(_)) => {}
+            }
+        }
+    }
+
+    /// `ChainQuickslotItem`: the first item slot that names `from` is set to `cell`.
+    fn chain_item(&mut self, from: u16, cell: u16, out: &mut Vec<QuickslotRecord>) {
+        let (Ok(old), Ok(pos)) = (u8::try_from(from), u8::try_from(cell)) else {
+            return;
+        };
+        let kind = EQuickSlotType::Item as u8;
+        let named = Quickslot { kind, pos: old };
+        if let Some(slot) = (0_u8..)
+            .take(QUICKSLOT_MAX_NUM)
+            .find(|slot| self.get(*slot) == Some(named))
+        {
+            let _set = self.set(slot, Quickslot { kind, pos }, out);
+        }
+    }
+
+    /// Run one sync on the slots, answering the records it sent.
+    pub fn sync(&mut self, sync: QuickslotSync, items: &CharacterItems) -> Vec<QuickslotRecord> {
+        let mut out = Vec::new();
+        match sync.to {
+            SyncTo::Cell(cell) => self.sync_item(sync.from, Some(cell), &mut out),
+            SyncTo::Delete => self.sync_item(sync.from, None, &mut out),
+            SyncTo::Chain(vnum) => match find_specify_item(items, vnum) {
+                Some(cell) => self.chain_item(sync.from, cell, &mut out),
+                None => self.sync_item(sync.from, None, &mut out),
+            },
+        }
+        out
+    }
+}
+
+/// `CHARACTER::FindSpecifyItem` (`G/char_item.cpp:8724-8742`): the cell of the first item of
+/// `vnum`, in the base inventory and then in the custom banks, in cell order.
+///
+/// Legacy reads the base inventory up to `Inventory_Size()`, the unlocked cells. No item lies
+/// past them, so reading all 180 finds the same item.
+#[must_use]
+pub fn find_specify_item(items: &CharacterItems, vnum: u32) -> Option<u16> {
+    (0..INVENTORY_MAX_NUM)
+        .chain(CUSTOM_INVENTORY_SLOT_START..CUSTOM_INVENTORY_SLOT_END)
+        .find(|cell| {
+            let at = ItemPos {
+                window_type: EWindows::Inventory as u8,
+                cell: *cell,
+            };
+            items.item_at(at).is_some_and(|item| item.vnum == vnum)
+        })
+}
+
+/// Run every [`QuickslotSync`] an item step left in its records on `slots`, in its place: each
+/// becomes the [`MoveRecord::Quickslot`] records it sent. A chain finds its item in `items`,
+/// which is the storage after the step, as legacy's `FindSpecifyItem` runs once the used-up
+/// item has left.
+pub fn sync_quickslots(done: &mut MoveDone, slots: &mut Quickslots, items: &CharacterItems) {
+    let records = core::mem::take(&mut done.records);
+    for record in records {
+        match record {
+            MoveRecord::QuickslotSync(sync) => done.records.extend(
+                slots
+                    .sync(sync, items)
+                    .into_iter()
+                    .map(MoveRecord::Quickslot),
+            ),
+            record => done.records.push(record),
+        }
     }
 }
 
@@ -341,5 +483,148 @@ mod tests {
                 quickslot: slot(SKILL, 4)
             }]
         );
+    }
+
+    fn placed(cells: &[(u16, u32)]) -> CharacterItems {
+        let mut items = CharacterItems::new();
+        for (cell, vnum) in cells {
+            let at = ItemPos {
+                window_type: EWindows::Inventory as u8,
+                cell: *cell,
+            };
+            items
+                .set(at, &Item::new(u32::from(*cell) + 1, *vnum))
+                .expect("the fixture places");
+        }
+        items
+    }
+
+    fn sync(slots: &mut Quickslots, from: u16, to: SyncTo) -> Vec<QuickslotRecord> {
+        slots.sync(QuickslotSync { from, to }, &CharacterItems::new())
+    }
+
+    #[test]
+    fn a_sync_moves_or_deletes_every_item_slot_on_the_old_cell() {
+        let mut slots = Quickslots::default();
+        let _ = set(&mut slots, 0, slot(ITEM, 3));
+        let _ = set(&mut slots, 1, slot(SKILL, 3));
+        let _ = set(&mut slots, 2, slot(ITEM, 9));
+        // The slot on the new cell is a twin, and is emptied before the move lands.
+        assert_eq!(
+            sync(&mut slots, 3, SyncTo::Cell(9)),
+            vec![
+                QuickslotRecord::Del { slot: 2 },
+                QuickslotRecord::Add {
+                    slot: 0,
+                    quickslot: slot(ITEM, 9)
+                },
+            ]
+        );
+        assert_eq!(slots.get(1), Some(slot(SKILL, 3)), "a skill is not an item");
+        // The same cell, a cell no slot names and a cell past a `BYTE` change nothing.
+        assert_eq!(sync(&mut slots, 9, SyncTo::Cell(9)), vec![]);
+        assert_eq!(sync(&mut slots, 4, SyncTo::Cell(5)), vec![]);
+        assert_eq!(sync(&mut slots, 9 + 256, SyncTo::Cell(5)), vec![]);
+        // A cell a slot cannot name leaves the slot where it was.
+        assert_eq!(sync(&mut slots, 9, SyncTo::Cell(9 + 256)), vec![]);
+        assert_eq!(sync(&mut slots, 9, SyncTo::Cell(180)), vec![]);
+        assert_eq!(slots.get(0), Some(slot(ITEM, 9)));
+        assert_eq!(
+            sync(&mut slots, 9, SyncTo::Delete),
+            vec![QuickslotRecord::Del { slot: 0 }]
+        );
+        assert_eq!(
+            slots.set_slots().collect::<Vec<_>>(),
+            vec![(1, slot(SKILL, 3))]
+        );
+    }
+
+    #[test]
+    fn a_chain_follows_the_first_item_of_the_vnum_or_deletes_the_slot() {
+        let mut slots = Quickslots::default();
+        let _ = set(&mut slots, 4, slot(ITEM, 3));
+        let bank = CUSTOM_INVENTORY_SLOT_START;
+        let items = placed(&[(bank, 27_001), (40, 27_001), (12, 27_002), (20, 27_001)]);
+        assert_eq!(find_specify_item(&items, 27_001), Some(20));
+        assert_eq!(
+            find_specify_item(&placed(&[(bank, 27_001)]), 27_001),
+            Some(bank)
+        );
+        assert_eq!(find_specify_item(&items, 27_003), None);
+        let chain = QuickslotSync {
+            from: 3,
+            to: SyncTo::Chain(27_001),
+        };
+        assert_eq!(
+            slots.sync(chain, &items),
+            vec![QuickslotRecord::Add {
+                slot: 4,
+                quickslot: slot(ITEM, 20)
+            }]
+        );
+        // Only in the banks, past a `BYTE`: the slot stays.
+        let chain = QuickslotSync {
+            from: 20,
+            to: SyncTo::Chain(27_001),
+        };
+        assert_eq!(slots.sync(chain, &placed(&[(bank, 27_001)])), vec![]);
+        assert_eq!(
+            slots.sync(chain, &CharacterItems::new()),
+            vec![QuickslotRecord::Del { slot: 4 }]
+        );
+    }
+
+    #[test]
+    fn the_syncs_become_their_records_in_their_place() {
+        let mut slots = Quickslots::default();
+        let _ = set(&mut slots, 4, slot(ITEM, 3));
+        let mut done = MoveDone {
+            kind: super::super::item_move::MoveKind::Moved,
+            records: vec![
+                MoveRecord::Notice("first"),
+                MoveRecord::QuickslotSync(QuickslotSync {
+                    from: 3,
+                    to: SyncTo::Cell(7),
+                }),
+                MoveRecord::QuickslotSync(QuickslotSync {
+                    from: 50,
+                    to: SyncTo::Delete,
+                }),
+                MoveRecord::Notice("last"),
+            ],
+            changes: Vec::new(),
+        };
+        sync_quickslots(&mut done, &mut slots, &CharacterItems::new());
+        assert_eq!(
+            done.records,
+            vec![
+                MoveRecord::Notice("first"),
+                MoveRecord::Quickslot(QuickslotRecord::Add {
+                    slot: 4,
+                    quickslot: slot(ITEM, 7)
+                }),
+                MoveRecord::Notice("last"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_used_up_item_chains_by_its_sub_type_whatever_its_type() {
+        let proto =
+            |vnum, item_type, sub_type| ItemProto::for_category_rule(vnum, item_type, sub_type);
+        assert!(chains_when_used_up(&proto(27_001, ITEM_USE, USE_POTION)));
+        assert!(chains_when_used_up(&proto(
+            50_801,
+            ITEM_USE,
+            USE_ABILITY_UP
+        )));
+        assert!(chains_when_used_up(&proto(
+            19,
+            gamedata::item_kind::ITEM_WEAPON,
+            0
+        )));
+        assert!(chains_when_used_up(&proto(70_020, ITEM_USE, 3)));
+        let nodelay = gamedata::item_kind::USE_POTION_NODELAY;
+        assert!(!chains_when_used_up(&proto(27_101, ITEM_USE, nodelay)));
     }
 }

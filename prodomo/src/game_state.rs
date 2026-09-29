@@ -49,7 +49,7 @@ use crate::loading_phase::point_changes;
 use crate::quickslot::{QuickslotAnswer, QuickslotStep};
 use crate::save::PASSES_PER_SEC;
 use crate::sync_position::distance_approx;
-use world::character::add_from_client;
+use world::character::{add_from_client, sync_quickslots};
 
 /// `PickupItem`'s `DistanceValid` bound (`G/item.cpp:593`), checked at `G/char_item.cpp:7982`.
 const PICKUP_DISTANCE: i32 = 300;
@@ -1181,10 +1181,14 @@ impl GameState {
             dice: &mut self.dice,
             recently_fought: actor.recently_fought,
         });
-        let done = step(items, self.item_ids.as_mut(), &rules, gear.as_mut(), protos)
+        let mut done = step(items, self.item_ids.as_mut(), &rules, gear.as_mut(), protos)
             .map_err(MoveItemRefused::Refused)?;
+        let (items, slots) = character.items_and_quickslots_mut();
+        sync_quickslots(&mut done, slots, items);
+        let quickslots = slots.clone();
         let mut moved = MovedItems::new(owner_id, vid.raw(), done, actor, protos);
         moved.points = character.points().cloned();
+        moved.quickslots = Some(quickslots);
         Ok(moved)
     }
 
@@ -2670,6 +2674,45 @@ mod tests {
             state.quickslot(Vid::new(8), QuickslotStep::Del { slot: 0 }),
             None,
             "nobody is online under VID 8"
+        );
+    }
+
+    #[test]
+    fn an_item_step_answers_its_slot_records_and_the_slots_after_it() {
+        let placed = [
+            (inventory(0), a_potion_stack(11, 2)),
+            (inventory(5), a_potion_stack(12, 3)),
+        ];
+        let mut state = a_holder(&placed, true);
+        let potion = |pos| world::character::Quickslot { kind: 1, pos };
+        let step = QuickslotStep::Add {
+            slot: 3,
+            quickslot: potion(0),
+        };
+        let _added = slot_answer(&mut state, step);
+        // A whole move: the slot follows, after the set.
+        let moved = state
+            .move_item(Vid::new(7), a_move(0, 1, 0), a_mover())
+            .expect("the potion moves");
+        assert_eq!(moved.records.len(), 3);
+        assert_eq!(moved.records[2], vec![28, 3, 1, 1]);
+        let slots = moved.quickslots.expect("the step answers the slots");
+        assert_eq!(slots.get(3), Some(potion(1)));
+        // A merge that uses up the source: the small red potion is `USE_POTION`, so the clear
+        // goes first and the slot then follows the other stack.
+        let merged = state
+            .move_item(Vid::new(7), a_move(1, 5, 0), a_mover())
+            .expect("the stacks merge");
+        assert_eq!(merged.records.len(), 3);
+        assert_eq!(merged.records[1], vec![28, 3, 1, 5]);
+        let slots = merged.quickslots.expect("the step answers the slots");
+        assert_eq!(slots.get(3), Some(potion(5)));
+        // A drop of part of the stack deletes the slot first.
+        let dropped = drop_at(&mut state, 5, 1);
+        assert_eq!(dropped.records[0], vec![29, 3]);
+        assert_eq!(
+            dropped.quickslots,
+            Some(world::character::Quickslots::default())
         );
     }
 

@@ -31,7 +31,7 @@ use protocol::gc_vid::{GcHeaderAndDword, GcSpecialEffect, HEADER_GC_ITEM_GROUND_
 use protocol::item_pos::ItemPos;
 use world::character::{
     CharacterItems, CharacterLook, GroundRecord, ItemChange, MoveDone, MoveFacts, MoveKind,
-    MoveRecord, MoveRefused, Points,
+    MoveRecord, MoveRefused, Points, Quickslots,
 };
 use world::item::Item;
 
@@ -69,6 +69,8 @@ pub struct MovedItems {
     pub changes: Vec<RowChange>,
     /// The mover's points after the move, which the descriptor saves.
     pub points: Option<Points>,
+    /// The mover's quickslots after the step's syncs, which the descriptor saves.
+    pub quickslots: Option<Quickslots>,
 }
 
 impl MovedItems {
@@ -113,6 +115,12 @@ impl MovedItems {
                     frame = picked_up_notice(protos, vnum, mover.empire);
                     false
                 }
+                MoveRecord::Quickslot(record) => {
+                    frame = crate::quickslot::encode(&[record]).concat();
+                    false
+                }
+                // The world runs every sync before it answers; one left here sends nothing.
+                MoveRecord::QuickslotSync(_) => continue,
             };
             if shared {
                 around.push(frame.clone());
@@ -126,6 +134,7 @@ impl MovedItems {
             around,
             changes: row_changes(owner_id, &done.changes),
             points: None,
+            quickslots: None,
         }
     }
 }
@@ -195,6 +204,7 @@ pub fn move_facts(protos: &ItemProtos, vnum: u32) -> Option<MoveFacts> {
             .collect(),
         belt_eligible: can_move_into_belt_inventory(proto),
         dragon_soul: type_value(b"ITEM_DS") == Some(proto.item_type),
+        chains_quickslots: world::character::chains_when_used_up(proto),
     })
 }
 

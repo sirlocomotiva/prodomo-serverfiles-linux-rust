@@ -1133,6 +1133,7 @@ mod tests {
                 categories: Vec::new(),
                 belt_eligible: false,
                 dragon_soul: false,
+                chains_quickslots: false,
             };
             move_item(
                 &mut self.items,

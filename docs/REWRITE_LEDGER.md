@@ -22418,3 +22418,165 @@ After the run, no `prodomo_%` database remains, and no `*.core` file is outside 
 workspace has 212 Rust files and 147,453 lines. No crate was fetched, and `Cargo.lock` is
 unchanged. This section claims no width, and the i686 probe was not run. The stricter database
 helpers failed no existing scenario.
+
+## 220. The quickslot sync: `SyncQuickslot` and `ChainQuickslotItem`
+
+A slot now follows its item. Legacy keeps a slot on the item's cell, not on the item. So each
+item step that empties or changes a cell tells the slots about it. `SyncQuickslot`
+(`G/char_quickslot.cpp:12-34`) sets every item slot on the old cell to the new cell, or
+deletes it. `ChainQuickslotItem` (`:138-155`) sets the first such slot to another item's
+cell. Until this section, a slot kept naming the cell its item had left (219.4).
+
+### 220.1 What landed
+
+- **The sync.** `world::character::Quickslots::sync` runs one `QuickslotSync`, with its old
+  cell and a `SyncTo`:
+  - `Cell(to)` is `SyncQuickslot(ITEM, from, to)`. It does nothing when the cells are the
+    same. Otherwise it calls `SetQuickslot` on every item slot that names `from`, with the
+    twin deletion and the records `set` already sends.
+  - `Delete` is `SyncQuickslot(ITEM, from, 255)`: `DelQuickslot` on every such slot.
+  - `Chain(vnum)` is the used-up arm of `CItem::SetCount(0)` (`G/item.cpp:307-328`). It finds
+    the first item of the vnum left (`find_specify_item`, which is `FindSpecifyItem`,
+    `G/char_item.cpp:8724-8742`: the base inventory, then the custom banks). The first slot
+    on the old cell is set to it, or, with none left, every slot on the old cell is deleted.
+- **Which items chain.** `chains_when_used_up` is `SetCount`'s test: a sub type of
+  `USE_POTION` or `USE_ABILITY_UP`, or vnum 70020. Legacy tests the sub type whatever the
+  type, and so does the port. `gamedata::item_kind` gained `USE_ABILITY_UP`. Other items used
+  up delete their slots first, then clear the cell. A chaining item clears the cell first,
+  then chains, because legacy removes it from the character before `FindSpecifyItem`.
+- **The markers.** The item steps leave a `MoveRecord::QuickslotSync` among their records, in
+  legacy's order:
+  - A whole move whose two cells are both in the inventory window syncs the old cell to the
+    new one, after the set (`G/char_item.cpp:7822-7823`). A split does not sync.
+  - A merge that uses its source up is the source's `SetCount(0)` (`:7802`). It chains or
+    deletes, before the target's update.
+  - The last potion drunk is the same `SetCount(0)` (`G/char_item.cpp:5677`, `:5753`).
+  - A drop deletes the slots on the dropped cell first, even when only part of the stack is
+    dropped (`:7501`).
+  `MoveFacts` gained `chains_quickslots`, and `move_facts` fills it from the prototype.
+- **The game thread.** `run_item_step` runs each step, then `sync_quickslots` on the
+  character's slots and the items after the step. Each marker becomes the
+  `MoveRecord::Quickslot` records it sent, in its place. `MovedItems` answers the slots after
+  the step.
+- **The descriptor.** The encoder sends a slot record as its `GC_QUICKSLOT_ADD` or
+  `GC_QUICKSLOT_DEL`, and `finish_item_step` holds the slots the world answered, for the
+  save.
+
+### 220.2 What the client sees
+
+- A potion on a slot, moved whole to another cell, is followed by `GC_QUICKSLOT_ADD` for the
+  new cell, after its item records.
+- A potion stack merged away, or its last potion drunk, clears its cell and then sets the
+  slot on the first potion of its vnum left. With none left, the slot is deleted.
+- Any other item used up by a merge deletes its slots, then clears its cell.
+- A drop sends `GC_QUICKSLOT_DEL` for each slot on the cell before the item records, even
+  when part of the stack stays.
+
+### 220.3 Divergences
+
+- **A cell is not truncated to a `BYTE`.** Legacy passes both cells of `SyncQuickslot` and
+  `ChainQuickslotItem` as a `BYTE`. So an item leaving cell 290 would move the slots on cell
+  34, and an item moving to cell 290 would set a slot on cell 34. Here a slot names the old
+  cell only when it is that very cell. A new cell past 255 moves no slot, which is what
+  `set` would refuse for a cell no slot can name. This is a legacy Defect.
+- **Equipping does not sync.** `EquipItem` calls `SyncQuickslot(ITEM, old, wear_cell)`
+  (`G/char_item.cpp:8530`). This moves the slot to the inventory cell whose number is the
+  wear cell, which holds another item or none. A client cannot name a worn cell on a slot, so
+  the move can only be wrong. Here an equip leaves the slot on the cell the item left. This
+  is a legacy Defect.
+
+The sync runs once the step is complete, not inside it. No step reads the slots, and a chain
+looks only at which items are left, so the records and the slots are the same as legacy's.
+The dragon soul test before a sync (`IsDragonSoul`) is not ported: no step that syncs can
+reach the dragon soul window yet.
+
+### 220.4 Not ported yet
+
+- The automatic add of a potion to the first free slot (`G/char_item.cpp:9050-9057` and
+  `:9191-9198`, in both `AutoGiveItem`s). Its callers are the quest, shop and drop grants, and none
+  is ported. The Operator's grant is not `AutoGiveItem`. It lands with its first caller's
+  ledger.
+- The syncs of the callers not ported yet. They land with their callers:
+  - `ClearItem` (`G/char_item.cpp:697`)
+  - the death drops (`G/char_battle.cpp`)
+  - the exchange, the shops and the safebox
+  - the GM commands
+  - the item expiry (`G/item_manager.cpp`)
+  - `CG_ITEM_DESTROY` (`G/char_item.cpp:7437`)
+
+### 220.5 Scenario and Parity inventory
+
+`a_quickslot_follows_its_potion_chains_when_it_is_used_up_and_a_drop_deletes_it`
+(`prodomo/tests/parity.rs`) gives Alpha two small red potions from the Operator console and
+puts them on slot 4:
+
+1. **A whole move.** The stack moves from cell 0 to cell 3. The clear and the set are
+   followed by `GC_QUICKSLOT_ADD` of slot 4 on cell 3.
+2. **A chain.** A third potion is given and lands at cell 0. The stack at cell 3 is merged
+   into it. Cell 3 is cleared, slot 4 is set on cell 0, and then cell 0 is updated to three.
+3. **A drop.** One potion is dropped from cell 0. `GC_QUICKSLOT_DEL` of slot 4 comes first,
+   then the update to two, the ground add and legacy's line.
+4. **The save.** The logout save stores no slot, and the two potions stay at cell 0. The
+   descriptor stored the slots the world answered, not the ones it held before the steps.
+
+The game thread's `an_item_step_answers_its_slot_records_and_the_slots_after_it` covers the
+same three steps without a client.
+
+In the Parity inventory, `sys.char.quickslot` stays `partial`. Its note names both scenarios,
+the sync ported, and the automatic add and the callers not ported.
+
+### 220.6 Mutation sweep
+
+31 mutants, applied and restored as in 215.7:
+
+- Each world mutant ran `world`'s library tests.
+- Each prodomo mutant ran `prodomo`'s library and the scenario in 220.5, with `DATABASE_URL`
+  set.
+
+| group | mutants | result |
+|---|---|---|
+| `world/src/character/quickslot.rs`: the three chaining tests, the same-cell return, the slot match and its kind, the delete, the set, the first slot of a chain and its set, the chain with no item left, a chain run as a delete, the base and custom cells of `find_specify_item` and its vnum, the marker's replacement | 16 | 15 killed, 1 survived |
+| `world/src/character/item_move.rs`: the merge's chain order, its chain test, its delete, the whole move's sync, its window test, the facts' chain | 6 | 6 killed |
+| `world/src/character/potion.rs`: the chain test, the chain, the delete | 3 | 3 killed |
+| `world/src/character/ground.rs`: the drop's delete | 1 | 1 killed |
+| `prodomo/src/item_move.rs`: the facts' chain, the slot record's encoding | 2 | 2 killed |
+| `prodomo/src/game_state.rs`: the sync, the slots answered | 2 | 2 killed |
+| `prodomo/src/main.rs`: the slots held from an answer | 1 | 1 killed |
+
+The survivor, `q_chain_first`, chained the last slot on the old cell instead of the first. It
+is equivalent. `set` empties every twin before it sets a slot, so no two slots name the same
+cell. The load sets its rows through `set` too, so a store holding two such rows still loads
+one.
+
+### 220.7 Receipt
+
+9 new tests:
+
+- `world/src/character/quickslot.rs`: 4, for a sync to a cell and a delete, a chain with and
+  without an item left, the markers becoming their records in place, and the chaining test.
+- `world/src/character/item_move.rs`: 2, for the whole move's sync (and none for another
+  window or a split) and the merge's delete or chain.
+- `world/src/character/potion.rs`: 1, for the last potion's delete or chain.
+- `prodomo/src/game_state.rs`: 1, for a move, a merge and a drop through the game thread.
+- `prodomo/tests/parity.rs`: 1, the scenario in 220.5, which runs only with `DATABASE_URL`
+  set.
+
+`ground`'s `a_whole_item_leaves_the_cell_and_its_row` and
+`part_of_a_stack_becomes_a_new_item_nobody_held` now expect the drop's marker. The count
+went from 2637 to 2646. These gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2646 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2646 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+After the run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`.
+The workspace has 209 Rust files and 147,740 lines, outside `server/` and `.scratch/`.
+219.7's count of 212 files and 147,453 lines included three untracked scratch files. The
+workspace then had 209 files and 147,159 lines. No crate was fetched, and `Cargo.lock` is
+unchanged. This section claims no width, and the i686 probe was not run.

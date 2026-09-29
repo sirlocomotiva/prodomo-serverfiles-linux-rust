@@ -8,9 +8,12 @@
 //! maximum a second from there into the pool, which the caller runs once a second while
 //! [`is_recovering`] holds.
 //!
+//! The last potion of a stack syncs its slots as `SetCount(0)` does (ledger 220): a
+//! `USE_POTION` potion's slots follow the next stack of its vnum, and a `USE_POTION_NODELAY`
+//! potion's are deleted.
+//!
 //! Not ported, and each is a later ledger's: the arena and `PvP` potion limits, the dungeon and
-//! guild war hooks, the moon cake timer, the quickslot sync of a used-up stack, and the rest of
-//! the affect event (the continuous recovery affects, the automatic potions, the stamina and
+//! guild war hooks, the moon cake timer, and the rest of the affect event (the continuous recovery affects, the automatic potions, the stamina and
 //! the affect timers).
 
 use common::point_slot as point;
@@ -23,6 +26,7 @@ use super::item_move::{
 };
 use super::items::CharacterItems;
 use super::points::{PointRecord, Points};
+use super::quickslot::{chains_when_used_up, QuickslotSync, SyncTo};
 use crate::item::{gc_item_clear, Item};
 
 /// `SE_HPUP_RED` (`common/length.h`): the red effect a hit point potion shows.
@@ -83,7 +87,7 @@ pub(super) fn use_potion(
     if !used {
         return Err(MoveRefused::NothingToRecover);
     }
-    use_one(items, item, &mut trail)?;
+    use_one(items, item, chains_when_used_up(proto), &mut trail)?;
     Ok(done(MoveKind::Used, trail))
 }
 
@@ -135,12 +139,33 @@ fn start_recovery(
 
 /// `item->SetCount(item->GetCount() - 1)`: the last of a stack leaves the cell and the store,
 /// and a larger stack shrinks in place.
-fn use_one(items: &mut CharacterItems, item: &Item, trail: &mut Trail) -> Result<(), MoveRefused> {
+///
+/// The last one syncs its slots (`G/item.cpp:303-330`). When `chains`, it is cleared first and
+/// its slots then follow the first item of its vnum; otherwise its slots are deleted before it
+/// is cleared.
+fn use_one(
+    items: &mut CharacterItems,
+    item: &Item,
+    chains: bool,
+    trail: &mut Trail,
+) -> Result<(), MoveRefused> {
     if item.count <= 1 {
         let pos = items.release(item.id).map_err(MoveRefused::Storage)?;
-        trail
-            .records
-            .push(MoveRecord::Item(ItemRecord::Set(gc_item_clear(pos))));
+        let clear = MoveRecord::Item(ItemRecord::Set(gc_item_clear(pos)));
+        let from = item.pos.cell;
+        if chains {
+            trail.records.push(clear);
+            let to = SyncTo::Chain(item.vnum);
+            trail
+                .records
+                .push(MoveRecord::QuickslotSync(QuickslotSync { from, to }));
+        } else {
+            let to = SyncTo::Delete;
+            trail
+                .records
+                .push(MoveRecord::QuickslotSync(QuickslotSync { from, to }));
+            trail.records.push(clear);
+        }
         trail.changes.push(ItemChange::Destroyed { id: item.id });
         return Ok(());
     }
@@ -416,6 +441,38 @@ mod tests {
             Some(&MoveRecord::Item(ItemRecord::Set(gc_item_clear(AT))))
         );
         assert_eq!(done.changes, [ItemChange::Destroyed { id: 7 }]);
+    }
+
+    #[test]
+    fn the_last_potion_deletes_its_slots_or_chains_them_by_its_sub_type() {
+        let clear = MoveRecord::Item(ItemRecord::Set(gc_item_clear(AT)));
+        // `USE_POTION_NODELAY` is neither sub type 0 nor 7: the slots go before the clear.
+        let (mut items, item) = holding(1, 27_101);
+        let proto = potion(27_101, USE_POTION_NODELAY, [100, 0, 0, 0, 0, 0]);
+        let done = use_potion(&mut items, &item, &proto, &mut warrior(300)).expect("works");
+        let delete = MoveRecord::QuickslotSync(QuickslotSync {
+            from: 3,
+            to: SyncTo::Delete,
+        });
+        assert_eq!(done.records[done.records.len() - 2..], [delete, clear]);
+        // `USE_POTION`: the clear goes first, and the slots then follow the next stack.
+        let (mut items, item) = holding(1, 27_001);
+        let slow = potion(27_001, USE_POTION, [100, 0, 0, 0, 0, 0]);
+        let done = use_potion(&mut items, &item, &slow, &mut warrior(300)).expect("works");
+        let chain = MoveRecord::QuickslotSync(QuickslotSync {
+            from: 3,
+            to: SyncTo::Chain(27_001),
+        });
+        assert_eq!(done.records[done.records.len() - 2..], [clear, chain]);
+        assert!(chains_when_used_up(&slow));
+        // A stack that stays syncs nothing.
+        let (mut items, item) = holding(2, 27_101);
+        let proto = potion(27_101, USE_POTION_NODELAY, [100, 0, 0, 0, 0, 0]);
+        let done = use_potion(&mut items, &item, &proto, &mut warrior(300)).expect("works");
+        assert!(!done
+            .records
+            .iter()
+            .any(|record| matches!(record, MoveRecord::QuickslotSync(_))));
     }
 
     #[test]

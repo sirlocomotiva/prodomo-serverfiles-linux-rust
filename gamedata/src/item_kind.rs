@@ -66,6 +66,8 @@ pub const ARMOR_GLOVE: i32 = 7;
 
 /// `USE_POTION`: a potion whose recovery runs over the following seconds.
 pub const USE_POTION: i32 = 0;
+/// `USE_ABILITY_UP`: a potion that raises a point for a while.
+pub const USE_ABILITY_UP: i32 = 7;
 /// `USE_POTION_NODELAY`: a potion whose recovery is immediate.
 pub const USE_POTION_NODELAY: i32 = 11;
 
@@ -227,6 +229,7 @@ mod tests {
         let usable = SUB_TYPE[usize::try_from(ITEM_USE).expect("a small index")];
         for (value, name) in [
             (USE_POTION, "USE_POTION"),
+            (USE_ABILITY_UP, "USE_ABILITY_UP"),
             (USE_POTION_NODELAY, "USE_POTION_NODELAY"),
         ] {
             assert_eq!(value, index(usable, name), "{name}");
