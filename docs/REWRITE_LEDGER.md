@@ -21068,3 +21068,311 @@ run, and no `*.core` file is outside `target/`. The workspace has 196 Rust files
 lines. No width is claimed in this section: `GC_CHARACTER_POINT_CHANGE`'s 25 bytes and
 `GC_CHARACTER_POINTS`' 2041 are the ones the codecs already pin, and the i686 probe was not run
 (`i686-linux-gnu-g++-12` is not installed on this machine).
+
+## 213. A relogged character wears its equipment, and its points count it
+
+Before this section the item load refused every `EQUIPMENT` row as a window not ported, so a
+character logged out wearing armour came back with the armour's row untouched in the store and
+nothing worn, and the points the load sent counted no item. The client was sent a main part from
+the stored `part_main` column, while the server computed as if nothing was worn. Now the load wears
+what legacy wears, sets aside what legacy sets aside, and computes the points with the worn items'
+bonuses, their armour and the set bonuses, the way `ComputePoints` does after the last `EquipTo`.
+
+### 213.1 What landed
+
+- **`world/src/character/apply.rs`** (new): the 130 `APPLY_*` types this build compiles
+  (`length.h:495-640`, with `__CONQUEROR_LEVEL__` and `BONUS_PCT` on), the point slot each one
+  changes (`aApplyInfo`, `G/constants.cpp:717-864`), and `ApplyArm`, which sorts a type into the
+  arm of `ApplyPoint` it takes: nothing, `APPLY_CON`, `APPLY_INT`, `APPLY_SKILL`, the two maximum
+  hit point types, the two maximum spell point types, or one point slot. A test reads the legacy
+  enum and the table from `server/` (`legacy_source.rs`, test-only) and pins both to the source.
+  `common::enums::EApplyTypes`, a hand-written copy nothing used, is removed.
+- **`world/src/character/equipment.rs`** (new): `Equipment`, the worn items read from the
+  inventory window at `INVENTORY_MAX_NUM` plus each wear cell, in cell order.
+
+  | legacy | here |
+  |---|---|
+  | `CItem::ModifyPoints(true)`, the apply half (`G/item.cpp:781-1155`) | `item_applies` |
+  | `CItem::ModifyPoints(true)`, the parts switch (`:1156-1337`) | `Equipment::parts` |
+  | the worn loop of `ComputePoints` (`G/char.cpp:3070-3080`) | `Equipment::modify_points` |
+  | the set bonus of `ComputePoints` (`:3082-3110`) | `Equipment::set_bonus_applies` |
+  | the armour sum of `ComputeBattlePoints` (`:2776-2794`) | `Equipment::armour` |
+  | `IsNewSetNeedRefresh` (`:11747-11763`) | `is_set_item` |
+
+  `item_applies` walks legacy's order: the proto's three applies (raised by an accessory's grade,
+  scaled by a sash's share of an absorbed item, raised by an armour's rarity), the stones in the
+  sockets, the seven attributes (skipped on the four event items of `VnumHelper.h:60-69`), and a
+  weapon's refine element.
+- **`world/src/character/points.rs`**: `apply_point` is `ApplyPoint` (`G/char.cpp:4826-5043`);
+  `compute_points_with` is `ComputePoints` with an `Equipment`, and `compute_points` is the same
+  with nothing worn. It clears the skill-damage bonuses, sets the parts from the base part and the
+  worn items, adds the worn armour to the battle points, applies every worn item's bonuses in cell
+  order and then the set bonuses, and clamps the pools. `compute_loaded` is the item load's call:
+  it runs the computation and puts the stored pools back (213.4, Defect 1). `set_armour` is gone;
+  the armour is read from the `Equipment`. `PointsRow` gains `part_base`, `hair_part` and
+  `sash_part`, and `parts()` answers the six parts the last computation left.
+- **`common/src/cfloat.rs`** (new): `i32_to_f32` and `f32_to_i32`, the C `(float)` and `(int)`
+  conversions of the 32-bit target, computed from exact steps because the workspace lints refuse
+  a lossy `as`. `ApplyPoint` keeps a pool's share of a raised maximum in single precision
+  (`G/char.cpp:4879-4885`), so the port must round as legacy does. Five tests witness both
+  against 64-bit arithmetic.
+- **`gamedata/src/item_kind.rs`** (new): the item types, the sub types the equipment reads, and
+  the limit types, each pinned by a test to its index in the reader's name tables.
+  `LIMIT_REAL_TIME_START_FIRST_USE` and `LIMIT_TIMER_BASED_ON_WEAR` moved here from
+  `item_proto.rs`. `ItemProtos::from_rows` builds a table from rows a test makes, sorted and indexed
+  as `parse` does. The doc comments of `APPLIES` and `VALUES`, which both repeated the text of
+  `LIMITS`, now name `ITEM_APPLY_MAX_NUM` and `ITEM_VALUES_MAX_NUM`.
+- **`world/Cargo.toml`**: `world` depends on `gamedata` by path, so the equipment can read the
+  prototypes. It is an in-tree crate, so nothing was fetched and `Cargo.lock` gains one line.
+- **`world/src/character/items.rs`**: a worn item takes one cell whatever its size, as legacy
+  marks only the anchor outside the base grid (`G/char_item.cpp:438-439`). Before this section any
+  item larger than one cell was refused outside the grid; a two-cell body armour could not be
+  worn. A larger item is still refused in the belt band, which also marks only its anchor.
+- **`prodomo/src/item_load.rs`**: `plan_item_load` takes the character's level and places an
+  `EQUIPMENT` row in legacy's order (`G/input_db.cpp:1498-1531`):
+
+  1. a dragon soul stone is refused before its cell is read, because its deck is not ported;
+  2. a cell at or past `WEAR_MAX_NUM` is set aside;
+  3. a taken wear cell is set aside;
+  4. a row that fails `CheckItemUseLevel` (`G/item.cpp:2634-2645`, the first level limit) is set
+     aside;
+  5. an item whose wearing starts a system not ported is refused and its row kept
+     (`Refused::WornNotPorted`, 213.5);
+  6. otherwise the item is worn in the inventory window at `INVENTORY_MAX_NUM` plus the cell.
+
+  A set-aside worn item goes to the first free inventory cell after the directly placed items, and
+  its row is rewritten there, as an inventory item set aside already was. `stored_row_position`
+  maps a worn item's cell 180 to 274 back to the `EQUIPMENT` window, so the logout save writes it
+  where it came from.
+- **`prodomo/src/main.rs`**: `load_items` passes the level to the plan and calls `compute_loaded`
+  with the equipment the load placed before `item_load_points`, and the held row takes the
+  computed main, hair and sash parts with the pools, so the save writes them (`G/char.cpp:1606`
+  copies the parts into the saved table).
+- **`prodomo/src/loading_phase.rs`**: `GC_CHAR_ADDITIONAL_INFO` takes its parts from the computed
+  points. `entity_parts`, which read the stored `part_main`, is gone: `SetPlayerProto` keeps the
+  row's base part (`G/char.cpp:2258`) and its `ComputePoints` sets the main part to it
+  (`:2917`, through `GetOriginalPart`, `:5428-5432`), and only a worn body armour or costume
+  replaces it. The select screen still shows the stored `part_main`, which the logout save now
+  writes from the computed main part.
+
+### 213.2 What the client sees
+
+`UpdatePacket` returns at `G/char.cpp:1283` while the character is in no sector, and at load it is
+in none. So in legacy each `EquipTo` changes the points without a record, and the first record
+that carries them is the item load's `PointsPacket`. The Rewrite computes once, after the last
+item, and sends the same record: the per-item computations are not observable. The loading burst's
+first points record is the one `SetPlayerProto` computed, with no item, in legacy and here.
+
+The worn items' `GC_ITEM_SET` records go at `INVENTORY_MAX_NUM` plus the cell in the inventory
+window (`G/char_item.cpp:658-670`), with highlight 0, in row order, before the set-aside items.
+
+### 213.3 Divergences
+
+| Divergence | legacy |
+|---|---|
+| An `EQUIPMENT` row's cell is read whole: a cell at or past `WEAR_MAX_NUM` is set aside. | `GetWear` and `EquipTo` take a `BYTE`, so a row at cell 256 is worn at cell 0 (`G/input_db.cpp:1498-1531`). |
+| A worn item that starts a system not ported is refused and its row kept (213.5). | It is worn and starts the system. |
+| `OnAfterCreatedItem` (`G/item.cpp:2757-2784`) runs for no loaded item. | It locks a blend item and starts its expiry, loads a toggle item, and starts the real-time timer of a first-use item. |
+
+The first is a Divergence rather than a Defect only because no honest client can store a cell past
+the wear cells; the store's `CHECK` keeps the column in range, and the load reads what the store
+holds. The second and third shrink as those systems are ported. `STATUS.md`'s Divergences table
+carries all three.
+
+### 213.4 Defects not reproduced
+
+1. **A relog heals.** `ApplyPoint` keeps a pool's share of a maximum a worn item raises. The stored
+   pool was saved with the item worn, but the share is taken against the maximum without it, so a
+   character saved at 600 of 1500 hit points, 500 of the maximum from a worn item, holds 600 of
+   1000 until the item is worn and 900 of 1500 after it (`G/char.cpp:4876-4893`).
+   `compute_loaded` puts the stored pools back after the computation, and the load's
+   `CheckMaximumPoints` clamps them next.
+2. **An item strong against bosses is strong against stones.** `aApplyInfo` lists
+   `POINT_ATTBONUS_METIN` in row 90 and `POINT_ATTBONUS_BOSS` in row 91 (`G/constants.cpp:820-821`),
+   while `EApplyTypes` numbers `APPLY_ATTBONUS_BOSS` 90 and `APPLY_ATTBONUS_METIN` 91. The battle
+   code reads each point against its own target (`G/battle.cpp:366-369`), so wearing the item swaps
+   the bonus. The Rewrite maps each type to the point of its own name.
+3. **An item's immunities land on the wrong bits.** `ComputePoints` ORs each worn item's
+   `dwImmuneFlag` into the character's (`G/char.cpp:3078`), but the proto's bits follow the
+   `IMMUNE` names of `get_Item_Immune_Value` (`D/ProtoReader.cpp:459-480`: paralysis, curse, stun,
+   sleep, slow, poison, terror) and the character's are `IMMUNE_STUN`, `IMMUNE_SLOW`,
+   `IMMUNE_FALL` and so on (`length.h:713-722`), so an item immune to stun makes its wearer immune
+   to falling. No row of the owner's proto sets a name the reader knows: 7295 rows say `NONE`, 9
+   leave the column empty, and the one other value, row 30324's `ITEM_STACKABLE`, reads as 0 and
+   belongs to an `ITEM_QUEST` that cannot be worn. The load
+   refuses a worn item with the flag, so the computation never ORs anything. `ENABLE_IMMUNE_FIX`
+   is defined only locally, at `G/item.cpp:1400`, where it removes the same OR from `EquipTo` and
+   `Unequip`; it does not reach `ComputePoints`.
+4. **A rarity past the table reads past it.** An armour's socket 4 indexes the three-entry table
+   `{0, 20, 50}` without a bound (`G/item.cpp:938-944` and `1146-1155`). A value outside it adds
+   nothing here.
+5. **A refine element past the sixth names an unrelated apply.** A weapon's element applies
+   `APPLY_ENCHANT_ELECT + (type - 1)` (`G/item.cpp:912` and `1142`), so type 7 applies
+   `APPLY_SUNGMA_STR` and a type past 129 none. A type past 6 grants nothing here.
+6. **Bonus arithmetic wraps.** Legacy multiplies in 32-bit `long`. The Rewrite computes in 64 bits,
+   or 128 for the sash scale, and saturates when it narrows, as ledger 212's point arithmetic does.
+
+`STATUS.md`'s Defects list carries all six.
+
+### 213.5 Not ported yet
+
+The load refuses a worn item that would start any of these, so none is ever half-started:
+
+- the dragon soul deck (`ITEM_DS`; `ITEM_SPECIAL_DS` is read as an ordinary item, as legacy's
+  `IsDragonSoul` does);
+- the aura costume, with its drain and its armour (`G/char.cpp:2796-2819`), the mount costume
+  (`MountSummon`) and the pet costume (`PetSummon`);
+- `ITEM_UNIQUE`'s expiry event, and any item with a real-time, first-use or wear-timer limit;
+- the accessory stone expiry (`StartAccessorySocketExpireEvent`), for an accessory with a stone;
+- the immunities (213.4, Defect 3);
+- a bonus type whose point's `PointChange` arm is not ported (`apply_is_ported`), such as
+  `APPLY_ENERGY` and `APPLY_COSTUME_ATTR_BONUS`.
+
+Also not ported, and harmless to leave out today:
+
+- **`BuffOnAttr`**: `g_aBuffOnAttrPoints` is read by the `BuffOnAttr_*` functions, which add
+  affects; no affect is ported, and the one point they read, `POINT_ENERGY`, is refused above.
+- **The hide-costume switch**: `PRODOMO_HIDE_COSTUME` is defined, but the choice is the quest flags
+  `costume_option.hide_*`, and quests are not ported, so every flag reads 0 and the costume shows,
+  which is legacy's answer for a player who never set one.
+- **The skill passives and the affects** in `ComputePoints` (`ComputeSkillPoints`,
+  `RefreshAffect`), the horse and the polymorph.
+- **`m_SkillDamageBonus` has no reader.** `APPLY_SKILL` changes it (`G/char.cpp:4860-4866`) and
+  `ComputePoints` clears it (`:2893`); a sweep of every file under `server/` finds the name five
+  times, all in `char.h:1573` and those two functions (control: the sweep finds all five; a
+  nonsense name finds none). The Rewrite keeps the map, which `skill_damage_bonus` reads, so
+  the combat port has it.
+- **`ApplyPoint`'s `sys_err`** for `APPLY_EXTRACT_HP_PCT` (75) and any type past 129 is not logged.
+- `APPLY_MAGIC_ATTBONUS_PER` (83) counts as ported: its slot has no `PointChange` arm in legacy,
+  whose `default` logs and returns (`G/char.cpp:4773-4775`), so it changes nothing in either.
+
+Recorded for the reader, not changed:
+
+- Both of legacy's set bonuses give `APPLY_ATTBONUS_BOSS` twice, at three and four pieces
+  (`G/constants.cpp:235-236` and `269-270`). The Rewrite gives what they name.
+- `WEAR_GLOVE` (36) is compiled in under `ENABLE_GLOVE_SYSTEM` (`length.h:252-253`) but is missing
+  from `common::enums::EWearPositions`, which stops at `TalismanElec` (35). Nothing in the Rewrite
+  reads cell 36 yet; the in-game equip must add it.
+- A part is a `WORD`, so `SetPart` keeps the low 16 bits of a vnum; the Rewrite keeps the same
+  bits (`the_part_word_keeps_the_low_sixteen_bits`).
+- The share formula can leave a pool one below the exact share, because the product is rounded to
+  single precision and then truncated. `an_apply_of_a_maximum_keeps_the_pools_share_in_single_precision`
+  pins a case.
+- The load trusts the stored wear cell: `EquipTo` does not check that the item belongs in the
+  cell, so neither does the Rewrite. Equipping in the game, which picks the cell with
+  `FindEquipCell`, will.
+- The occupied-cell set-aside cannot be reached from the store, whose unique key on
+  `(owner, window, pos)` refuses a second row at one cell. A unit test feeds it duplicate rows.
+
+### 213.6 Scenarios and Parity inventory
+
+`a_relogged_character_is_sent_its_items_before_the_game_is_entered` (ledger 210) kept its refused
+row in window 2 to show a window not ported. Window 2 is now loaded, so that row moved to the
+switchbot window (8, cell 4), which is still refused and still kept.
+
+`a_relogged_character_wears_its_equipment_and_its_points_count_it` lowers Alpha, the shaman of
+ledger 212, to level 9 with 1500 hit points and 70000 spell points stored, and gives it five
+`EQUIPMENT` rows. It first checks the proto fields its sums read against the owner's data.
+
+| row | item | cell | result |
+|---|---|---|---|
+| 20 | 11810 shaman body armour, `LEVEL 9`, `value1` 21, `MOV_SPEED -2`, attribute `MAX_HP` 500 | 0 | worn at 180 |
+| 21 | 5000 bell, `LEVEL 10` | 1 | set aside to inventory cell 0 |
+| 22 | 7000 fan, `LEVEL 0`, `ATT_SPEED 26` | 4 | worn at 184 |
+| 23 | 11804 body armour, two cells | 64 | set aside to inventory cell 1 |
+| 24 | 110000 dragon soul stone | 65 | refused, row kept, logged |
+
+The loading burst's points record is the item-less one: 1500 hit points of 1420, a defence grade
+of 23, both speeds 100, a shown defence grade of 27, a magic defence grade of 35. The four item
+records follow in the table's order. `CheckMaximumPoints` sends (7, 0, 600), then the gold record,
+then the points record with the worn values, all hand sums:
+
+| slot | value | from |
+|---|---|---|
+| maximum hit points | 1920 | 700 + 18 x 40 + 500 |
+| hit points | 1500 | stored, below the worn maximum (213.4, Defect 1) |
+| spell points | 600 | clamped |
+| defence grade | 44 | 9 + 18 x 4 / 5 + 21 |
+| attack speed | 126 | 100 + 26 |
+| movement speed | 98 | 100 - 2 |
+| shown defence grade | 48 | 9 + 18 + 21 |
+| magic defence grade | 45 | 9 + (3 x 20 + 18) / 3 + 21 / 2 |
+
+The store then holds rows 20 to 24 at `(2,0)`, `(1,0)`, `(2,4)`, `(1,1)` and `(2,65)`. Entering the
+game sends a `GC_CHARACTER_ADD` with speeds 98 and 126 and a `GC_CHAR_ADDITIONAL_INFO` whose parts
+are 11810, 7000, 0, the stored hair and sash, and 0. The logout save writes `part_main` 11810, 1500
+hit points and 600 spell points, and the next select screen shows the armour.
+
+- `sys.item.core` stays `partial`; its note names the scenario and says what is left: equipping
+  and unequipping in the game, use, drop and pick up.
+- `sys.char.points` stays `partial`; its note names the scenario and drops the equipment from
+  what is left.
+
+### 213.7 Mutation sweep
+
+76 mutants in two batches, each applied to the pristine file with the change asserted to be in
+executable code, and every file restored and checked against its pre-sweep SHA-256. Each mutant ran
+its crate's tests (`world`'s or `common`'s library), then `prodomo`'s library, then the points,
+conqueror, load, logout, relog and item scenarios, all with `DATABASE_URL` set, and stopped at the
+first failing run.
+
+| group | mutants | result |
+|---|---|---|
+| `prodomo/src/item_load.rs`: the dragon soul stone refused before its cell is read; the wear cell's bound and offset; the taken cell and the level limit, its comparison and the first limit deciding; the aura, mount, pet, unique, real-time, first-use, wear-timer, accessory, immune and apply refusals; the equipment window the worn row is stored in; the dispatch on the window; a set-aside row kept | 20 | 19 killed, 1 survived |
+| `world/src/character/equipment.rs`, first batch: the armour's `value5` weight; the main part starting from the base | 2 | 2 killed |
+| `world/src/character/equipment.rs`, second batch: the accessory grade's floor, its last-apply and skill exclusions, its maximum and the belt; the stones' accessory exclusion and type; the rarity's share, its armour check, its defence and its table; the four event items; the sash's attribute share and its one-point floor, its armour defence floor, its weapon attack, its negative apply; the element's attack, enchantment offset, range and bonus digits; the sash scale's rounding; the set bonus count, table and piece test; the mount; the costume weapon cell; the sash part and glow, the hair value, the look, the part word; the shield armour | 33 | 30 killed, 3 survived |
+| `world/src/character/points.rs`: the loaded pools; the vitality and intelligence maxima; the skill apply's sign and mask; both maximum ratios; the set bonus loop; the armour; the ported check | 12 | 11 killed, 1 survived |
+| `world/src/character/apply.rs`: the extract arm, the percentage maximum arm, the boss and metin rows | 3 | 3 killed |
+| `common/src/cfloat.rs`: the float rounding, the truncation and the sign | 3 | 3 killed |
+| `prodomo/src/loading_phase.rs`: the parts `GC_CHAR_ADDITIONAL_INFO` sends | 1 | 1 killed |
+| `prodomo/src/main.rs`: the points computed with the equipment; the held row's main part | 2 | 2 killed |
+
+Every kill was semantic: no mutant failed to compile. All five survivors were real gaps and now
+have tests:
+
+| survivor | the test that kills it |
+|---|---|
+| the taken-cell check removed from the load | `a_worn_row_past_the_wear_cells_or_on_a_taken_one_is_set_aside`. Its second row on a taken cell was a plain item, which the placement also set aside, so the test could not tell. It is now a unique item: legacy tests the cell before `EquipTo` (`G/input_db.cpp:1498-1503`), so the item is set aside, while the mutant refuses it for the unique system. |
+| the rarity raising any item's applies, not only an armour's | `an_armours_rarity_raises_its_applies_and_its_defence`: a weapon with rarity 2 keeps its `MAX_HP` 513 (`G/item.cpp:940`). |
+| the sash's absorbed weapon attack dropping `value5` when `value3` is the larger | `a_sash_applies_its_share_of_an_absorbed_weapon_and_its_own_element`: a weapon with `value3` 560, `value4` 544 and `value5` 48 gives an attack grade of 153, a quarter of 608 plus one. |
+| the costume weapon cell no longer hiding the weapon | `a_worn_weapon_armour_and_costume_set_their_parts`. Its only costume weapon was a real one, whose own part is read after the weapon's and overwrites it, so the test could not tell. Legacy asks whether the cell holds an item, not whether it holds a costume (`G/item.cpp:1177`), so a second sword in the costume weapon cell now hides the weapon and shows nothing; the same is asserted for the costume body cell. |
+| the set bonus loop left out of `ComputePoints` | `two_pieces_of_a_set_give_its_first_bonus`: the weapon 19 and the body 11209 of "SetBonus - 1" give 500 more maximum hit points, and the body alone gives none. The set table's own test read `set_bonus_applies` but nothing read it through the computation. |
+
+Each survivor was re-run against its finished test with the same sweep and was killed semantically,
+and every file matched its checksum afterwards.
+
+### 213.8 Receipt
+
+Fifty-one new tests, and one renamed:
+
+- `world/src/character/equipment.rs`: 20, three of them strengthened by the sweep (213.7);
+- `world/src/character/points.rs`: 8, including `two_pieces_of_a_set_give_its_first_bonus` from
+  the sweep;
+- `prodomo/src/item_load.rs`: 7;
+- `world/src/character/apply.rs`: 6;
+- `common/src/cfloat.rs`: 5;
+- `gamedata/src/item_kind.rs`: 3;
+- `world/src/character/items.rs`: 1 (`a_large_item_is_refused_in_a_band_that_marks_only_its_anchor`);
+- `prodomo/tests/parity.rs`: the scenario of 213.6;
+- `prodomo/src/loading_phase.rs`: `entity_parts_are_the_stored_armour_hair_and_sash` renamed
+  `the_loaded_parts_are_the_base_part_and_the_stored_hair_and_sash`, because the main part is now
+  the base part and the worn armour's, not the stored one.
+
+The net change is 51, from 2494 to 2545. The gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2545 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2545 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+`SELECT datname FROM pg_database WHERE datname LIKE 'prodomo\_%'` returns nothing after the
+run, and no `*.core` file is outside `target/`. The workspace has 201 Rust files and 139,708
+lines. `world` now depends on `gamedata` through an in-tree path, which `Cargo.lock` records; no
+crate was fetched. No width is claimed in this section: `GC_CHARACTER_ADD` and
+`GC_CHAR_ADDITIONAL_INFO` are the codecs the earlier ledgers pin, and the i686 probe was not run
+(`i686-linux-gnu-g++-12` is not installed on this machine).

@@ -14,7 +14,8 @@
 //! |---|---|
 //! | `CHARACTER::PointChange` (`char.cpp:3872-4822`) | [`Points::point_change`] |
 //! | `CHARACTER::ComputeBattlePoints` (`char.cpp:2686-2860`) | [`Points::compute_battle_points`] |
-//! | `CHARACTER::ComputePoints` (`char.cpp:2862-3160`) | [`Points::compute_points`] |
+//! | `CHARACTER::ComputePoints` (`char.cpp:2862-3160`) | [`Points::compute_points_with`] |
+//! | `CHARACTER::ApplyPoint` (`char.cpp:4826-5043`) | [`Points::apply_point`] |
 //! | `CHARACTER::CheckMaximumPoints` (`char.cpp:3863-3870`) | [`Points::check_maximum_points`] |
 //! | `CHARACTER::GetLimitPoint` (`char.cpp:3730-3799`) | [`Points::limit_point`] |
 //! | `CHARACTER::GetMaxHP` (`char.cpp:8430-8436`) | [`Points::max_hp`] |
@@ -67,15 +68,30 @@
 //!
 //! Also not ported: the `IsDead() || IsStun()` guard on the three pools (the Rewrite has no
 //! death yet), the target and party broadcasts after a hit-point change, the walking switch
-//! after a stamina change, the polymorph and mount branches of the battle points, and every
-//! part of `ComputePoints` that reads equipment, affects or skills. The worn-armour sum and
-//! the passive-skill bonuses are inputs ([`Points::set_armour`],
-//! [`Points::set_passive_bonuses`]) so the equipment and skill systems can supply them;
-//! today both are zero, which is exact for a character with no worn armour and no skill
-//! level.
+//! after a stamina change, the polymorph and mount branches of the battle points, and the
+//! parts of `ComputePoints` that read affects, skills, the horse, the dragon-soul deck and the
+//! attribute buffs (`BuffOnAttr`). The passive-skill bonuses are an input
+//! ([`Points::set_passive_bonuses`]) so the skill system can supply them; today they are zero,
+//! which is exact for a character with no skill level. The worn items are computed: see
+//! [`Points::compute_points_with`].
+//!
+//! `ComputePoints` also ORs each worn item's `dwImmuneFlag` into the character's immunity bits
+//! (`char.cpp:3078`). The two use different bit orders: the proto's are the `IMMUNE` column's
+//! names in `ProtoReader.cpp` order (paralysis, curse, stun, sleep, slow, poison, terror), the
+//! character's are `IMMUNE_STUN`, `IMMUNE_SLOW`, `IMMUNE_FALL` and so on (`length.h:713-722`),
+//! so an item immune to stun makes its wearer immune to falling. That is a Defect. No item in
+//! the owner's proto sets the column, and the item load refuses one that does, so the
+//! computation here never meets one and ORs nothing.
 
+use std::collections::BTreeMap;
+
+use common::cfloat::{f32_to_i32, i32_to_f32};
+use common::enums::EParts;
 use common::levels::{self, JobInitialPoints};
 use common::point_slot as point;
+
+use super::apply::ApplyArm;
+use super::equipment::{Equipment, PARTS};
 
 /// The slots in each point array (`POINT_MAX_NUM`).
 const SLOTS: usize = point::POINT_MAX_NUM;
@@ -222,6 +238,12 @@ pub struct PointsRow {
     pub inven_point: u16,
     /// The map the character stands on, which picks the sungma will.
     pub map_index: i32,
+    /// `part_base`, the body shape the main part falls back to when no armour is worn.
+    pub part_base: u8,
+    /// The stored hair part, which a hair costume replaces.
+    pub hair_part: u16,
+    /// The stored sash part, which a sash replaces.
+    pub sash_part: u16,
 }
 
 /// The four sungma slots, in the order of [`PointsRow::sungma`].
@@ -454,6 +476,9 @@ pub struct Points {
     map_will: SungmaWill,
     armour: i32,
     passive: PassiveBonuses,
+    skill_damage_bonus: BTreeMap<u8, i32>,
+    part_base: u8,
+    parts: [u16; PARTS],
 }
 
 impl Points {
@@ -490,7 +515,15 @@ impl Points {
             map_will: sungma_will(row.map_index),
             armour: 0,
             passive: PassiveBonuses::default(),
+            skill_damage_bonus: BTreeMap::new(),
+            part_base: row.part_base,
+            parts: [0; PARTS],
         };
+        // `SetPlayerProto` sets the base part, the hair and the sash from the row before it
+        // computes (`char.cpp:2258-2265`); the computation then puts the base part in the
+        // main part. The aura part is not stored, so it starts at 0.
+        points.parts[EParts::Hair as usize] = row.hair_part;
+        points.parts[EParts::Sash as usize] = row.sash_part;
         for (slot, value) in [
             (point::POINT_ST, row.st),
             (point::POINT_HT, row.ht),
@@ -509,6 +542,12 @@ impl Points {
         points.sp = row.sp;
         points.stamina = row.stamina;
         points
+    }
+
+    /// The six parts the client draws, in `EParts` order, as the last computation left them.
+    #[must_use]
+    pub fn parts(&self) -> [u16; PARTS] {
+        self.parts
     }
 
     /// The level the battle points are computed from.
@@ -625,11 +664,11 @@ impl Points {
         self.map_will = sungma_will(map_index);
     }
 
-    /// The defence the worn armour gives, which the battle points add: for each worn body,
-    /// head, foot or shield armour, its `value1` plus twice its `value5`
-    /// (`char.cpp:2775-2793`). It takes effect at the next battle-point computation.
-    pub fn set_armour(&mut self, armour: i32) {
-        self.armour = armour;
+    /// `m_SkillDamageBonus`: the sum of the `APPLY_SKILL` changes the worn items and set
+    /// bonuses make to one skill, or 0 for a skill none of them names.
+    #[must_use]
+    pub fn skill_damage_bonus(&self, skill: u8) -> i32 {
+        self.skill_damage_bonus.get(&skill).copied().unwrap_or(0)
     }
 
     /// The passive-skill bonuses, which take effect at the next [`Points::compute_points`].
@@ -672,14 +711,54 @@ impl Points {
         records
     }
 
+    /// [`Points::compute_points_with`] for a character that wears nothing.
+    pub fn compute_points(&mut self) -> Vec<PointRecord> {
+        self.compute_points_with(&Equipment::default())
+    }
+
     /// `ComputePoints` for a player character, as far as the Rewrite has the systems it reads.
     ///
-    /// Clears the instant array, keeping the counters, the party bonuses and the recovery
-    /// slots; recomputes the base maxima and speeds, the passive-skill bonuses and the battle
-    /// points; and clamps the hit and spell points to the new maxima.
-    pub fn compute_points(&mut self) -> Vec<PointRecord> {
+    /// Clears the instant array and the skill-damage bonuses, keeping the counters, the party
+    /// bonuses and the recovery slots; recomputes the base maxima and speeds, the
+    /// passive-skill bonuses and the battle points with the worn armour; applies every worn
+    /// item's bonuses in wear-cell order, then the set bonuses; and clamps the hit and spell
+    /// points to the new maxima.
+    pub fn compute_points_with(&mut self, equipment: &Equipment<'_>) -> Vec<PointRecord> {
         let mut records = Vec::new();
-        self.recompute(&mut records);
+        self.recompute(equipment, &mut records);
+        records
+    }
+
+    /// The item load's computation: `ComputePoints` with the equipment the load placed, keeping
+    /// the pools the character was saved with.
+    ///
+    /// Legacy's `EquipTo` applies each worn item's bonuses as the load places it, and then
+    /// computes the points or the battle points again (`item.cpp:1458-1505`); after the last
+    /// item that is one computation with everything worn. Its `ApplyPoint` keeps each pool's
+    /// share of a maximum an item raises, but the stored pool was saved with the item already
+    /// worn, so the share is taken against the maximum without it: a character saved at 600 of
+    /// 1500, 500 of the maximum from an item, holds 600 of 1000 until the item is worn and 900
+    /// of 1500 after. That relog heal is a Defect. Here the stored pools come back after the computation, and the load's
+    /// `CheckMaximumPoints` clamps them next. The computation's records are not returned: every
+    /// slot they set is sent again, at its final value, by the load's points record.
+    pub fn compute_loaded(&mut self, equipment: &Equipment<'_>) {
+        let (hp, sp, stamina) = (self.hp, self.sp, self.stamina);
+        let _discarded = self.compute_points_with(equipment);
+        self.hp = hp;
+        self.sp = sp;
+        self.stamina = stamina;
+    }
+
+    /// `ApplyPoint(type, value)`: carry out one bonus of an item or a set.
+    ///
+    /// `APPLY_CON` and `APPLY_INT` change the attribute and the maxima it gives;
+    /// `APPLY_SKILL` changes one skill's damage bonus; the maximum hit and spell point types
+    /// keep the current pool's share of its maximum; every other type changes its one point
+    /// slot. A type whose slot's `PointChange` arm is not ported changes nothing
+    /// ([`apply_is_ported`]).
+    pub fn apply_point(&mut self, apply: u8, value: i32) -> Vec<PointRecord> {
+        let mut records = Vec::new();
+        self.apply(apply, value, &mut records);
         records
     }
 
@@ -713,6 +792,58 @@ impl Points {
 
     fn job_points(&self) -> &'static JobInitialPoints {
         &levels::JOB_INITIAL_POINTS[usize::from(race_to_job(self.race))]
+    }
+
+    /// The body of `ApplyPoint` (`char.cpp:4826-5043`).
+    fn apply(&mut self, apply: u8, value: i32, records: &mut Vec<PointRecord>) {
+        let job = self.job_points();
+        let per = |factor: i32| narrow(i64::from(value) * i64::from(factor));
+        match ApplyArm::of(apply) {
+            ApplyArm::Nothing => {}
+            ApplyArm::Con => {
+                self.nested(point::POINT_HT, value, records);
+                self.nested(point::POINT_MAX_HP, per(job.hp_per_ht), records);
+                self.nested(point::POINT_MAX_STAMINA, per(job.stamina_per_con), records);
+            }
+            ApplyArm::Int => {
+                self.nested(point::POINT_IQ, value, records);
+                self.nested(point::POINT_MAX_SP, per(job.sp_per_iq), records);
+            }
+            ApplyArm::Skill => {
+                // The top byte names the skill, bit 23 says whether the low 23 bits are added
+                // or taken away.
+                let [skill, ..] = value.to_be_bytes();
+                let change = value & 0x007f_ffff;
+                let change = if value & 0x0080_0000 == 0 {
+                    -change
+                } else {
+                    change
+                };
+                let bonus = self.skill_damage_bonus.entry(skill).or_insert(0);
+                *bonus = bonus.saturating_add(change);
+            }
+            ApplyArm::MaxHp(slot) => {
+                let before = self.max_hp();
+                if before == 0 {
+                    return;
+                }
+                self.nested(slot, value, records);
+                let hp = i32_to_f32(self.hp);
+                let ratio = i32_to_f32(self.max_hp()) / i32_to_f32(before);
+                self.nested(point::POINT_HP, f32_to_i32(hp * ratio - hp), records);
+            }
+            ApplyArm::MaxSp(slot) => {
+                let before = self.max_sp;
+                if before == 0 {
+                    return;
+                }
+                self.nested(slot, value, records);
+                let sp = i32_to_f32(self.sp);
+                let ratio = i32_to_f32(self.max_sp) / i32_to_f32(before);
+                self.nested(point::POINT_SP, f32_to_i32(sp * ratio - sp), records);
+            }
+            ApplyArm::Point(slot) => self.nested(slot, value, records),
+        }
     }
 
     /// Add to an instant slot and answer the new value.
@@ -979,7 +1110,7 @@ impl Points {
         i64::from(self.instant[kind])
     }
 
-    fn recompute(&mut self, records: &mut Vec<PointRecord>) {
+    fn recompute(&mut self, equipment: &Equipment<'_>, records: &mut Vec<PointRecord>) {
         const KEPT: [usize; 15] = [
             point::POINT_STAT,
             point::POINT_STAT_RESET_COUNT,
@@ -1002,6 +1133,7 @@ impl Points {
         let conqueror_step = self.instant[point::POINT_CONQUEROR_LEVEL_STEP];
 
         self.instant = [0; SLOTS];
+        self.skill_damage_bonus.clear();
         for (kind, value) in KEPT.into_iter().zip(kept) {
             self.instant[kind] = value;
         }
@@ -1018,6 +1150,9 @@ impl Points {
         }
         self.instant[point::POINT_CONQUEROR_POINT] = conqueror_point;
         self.instant[point::POINT_CONQUEROR_LEVEL_STEP] = conqueror_step;
+        // The parts go back to `GetOriginalPart` and the worn loop's parts switch sets them
+        // (`char.cpp:2917-2926`); no other step reads them, so both happen here.
+        self.parts = equipment.parts(u16::from(self.part_base), self.parts);
         self.instant[point::POINT_INVEN] = self.inven_point;
 
         let job = self.job_points();
@@ -1045,6 +1180,7 @@ impl Points {
         self.nested(point::POINT_ATTBONUS_METIN, passive.stone, records);
         self.nested(point::POINT_ATTBONUS_BOSS, passive.boss, records);
 
+        self.armour = equipment.armour();
         self.battle_points(records);
 
         self.real[point::POINT_MAX_HP] = hp_base;
@@ -1056,6 +1192,15 @@ impl Points {
         let hp_before = self.hp;
         let sp_before = self.sp;
         self.immune_flag = 0;
+
+        for (_, applies) in equipment.modify_points() {
+            for (apply, value) in applies {
+                self.apply(apply, value, records);
+            }
+        }
+        for (apply, value) in equipment.set_bonus_applies() {
+            self.apply(apply, value, records);
+        }
 
         if self.hp > self.max_hp() {
             self.nested(
@@ -1083,6 +1228,21 @@ impl Points {
     }
 }
 
+/// Whether [`Points::apply_point`] carries out `apply` as legacy does: every type but one
+/// whose point slot's `PointChange` arm is not ported ([`PointChangeRefused::NotPorted`]),
+/// which the apply leaves unchanged.
+///
+/// `APPLY_MAGIC_ATTBONUS_PER` (83) counts as ported: its slot, `POINT_MAGIC_ATT_BONUS_PER`,
+/// has no `PointChange` arm in legacy, whose `default` logs and returns
+/// (`char.cpp:4773-4775`), so it changes nothing there and nothing here.
+#[must_use]
+pub fn apply_is_ported(apply: u8) -> bool {
+    match ApplyArm::of(apply) {
+        ApplyArm::Point(slot) => !NOT_PORTED.contains(&slot),
+        _ => true,
+    }
+}
+
 /// Narrow a 64-bit total to the `int` legacy keeps it in, saturating rather than wrapping.
 fn narrow(value: i64) -> i32 {
     i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
@@ -1090,7 +1250,59 @@ fn narrow(value: i64) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use common::enums::EWearPositions;
+    use common::item_slots::{EWindows, INVENTORY_MAX_NUM};
+    use gamedata::item_kind::{ARMOR_BODY, ITEM_ARMOR, ITEM_WEAPON};
+    use gamedata::item_proto::{ItemProto, ItemProtos, ItemValue};
+    use protocol::item_pos::ItemPos;
+
     use super::*;
+    use crate::character::apply::{
+        APPLY_ATTBONUS_BOSS, APPLY_ATTBONUS_HUMAN, APPLY_ATTBONUS_METIN, APPLY_CON,
+        APPLY_COSTUME_ATTR_BONUS, APPLY_ENERGY, APPLY_INT, APPLY_MAX_HP, APPLY_MAX_HP_PCT,
+        APPLY_MAX_SP, APPLY_NONE, APPLY_SKILL, MAX_APPLY_NUM,
+    };
+
+    /// `APPLY_MAGIC_ATTBONUS_PER`, whose slot `POINT_MAGIC_ATT_BONUS_PER` has no
+    /// `PointChange` arm in legacy.
+    const APPLY_MAGIC_ATTBONUS_PER: u8 = 83;
+    use crate::character::CharacterItems;
+    use crate::item::Item;
+
+    const BODY: u16 = EWearPositions::Body as u16;
+    const WEAPON: u16 = EWearPositions::Weapon as u16;
+
+    fn proto(vnum: u32, item_type: i32, sub_type: i32) -> ItemProto {
+        ItemProto::for_category_rule(vnum, item_type, sub_type)
+    }
+
+    fn valued(mut proto: ItemProto, values: [i32; 6]) -> ItemProto {
+        proto.values = values;
+        proto
+    }
+
+    fn applying(mut proto: ItemProto, applies: [(u8, i32); 3]) -> ItemProto {
+        proto.applies = applies.map(|(kind, value)| ItemValue {
+            kind: i32::from(kind),
+            value,
+        });
+        proto
+    }
+
+    fn wearing(worn: &[(u16, &Item)]) -> CharacterItems {
+        let mut items = CharacterItems::new();
+        for (wear, item) in worn {
+            let pos = ItemPos::new(EWindows::Inventory as u8, INVENTORY_MAX_NUM + wear);
+            items.set(pos, item).expect("the wear cell is free");
+        }
+        items
+    }
+
+    /// An `APPLY_SKILL` value: the skill in the top byte, bit 23 set to add.
+    fn skill_apply(skill: u8, add: bool, change: i32) -> i32 {
+        let top = i32::from_ne_bytes(u32::from(skill).wrapping_shl(24).to_ne_bytes());
+        top | if add { 0x0080_0000 } else { 0 } | change
+    }
 
     /// A fresh level-1 character of a race, with its job's starting attributes, full pools,
     /// and no conqueror level, on map 1.
@@ -1110,6 +1322,9 @@ mod tests {
             stamina: 0,
             inven_point: 0,
             map_index: 1,
+            part_base: 0,
+            hair_part: 0,
+            sash_part: 0,
         }
     }
 
@@ -1497,13 +1712,239 @@ mod tests {
     #[test]
     fn the_armour_and_the_item_shop_defence_bonus_raise_every_defence() {
         let mut points = warrior();
-        points.set_armour(40);
+        let armour = valued(proto(11_210, ITEM_ARMOR, ARMOR_BODY), [0, 40, 0, 0, 0, 0]);
+        let protos = ItemProtos::from_rows(vec![armour]);
+        let body = Item::new(1, 11_210);
+        let worn = wearing(&[(BODY, &body)]);
+        points.compute_points_with(&Equipment::of(&worn, &protos));
         points
             .point_change(point::POINT_MALL_DEFBONUS, 50, false, false)
             .unwrap();
         points.compute_battle_points();
         // armour = 40 + 40 * 50 / 100 = 60.
         assert_eq!(grades(&points), [14, 64, 65, 8, 35]);
+    }
+
+    #[test]
+    fn an_apply_of_vitality_or_intelligence_raises_the_maxima_it_gives() {
+        let mut points = warrior();
+        let records = points.apply_point(APPLY_CON, 2);
+        assert_eq!(points.get_point(point::POINT_HT), 6);
+        assert_eq!(points.max_hp(), 760 + 2 * 40);
+        assert_eq!(points.max_stamina(), 820 + 2 * 5);
+        // Vitality does not keep the hit points' share: the pool stays where it was.
+        assert_eq!(points.hp(), 760);
+        let tail: Vec<(u8, i64)> = records[records.len() - 3..]
+            .iter()
+            .map(|record| (record.kind, record.value))
+            .collect();
+        assert_eq!(
+            tail,
+            [
+                (u8::try_from(point::POINT_HT).unwrap(), 6),
+                (u8::try_from(point::POINT_MAX_HP).unwrap(), 840),
+                (u8::try_from(point::POINT_MAX_STAMINA).unwrap(), 830),
+            ]
+        );
+
+        points.apply_point(APPLY_INT, 3);
+        assert_eq!(points.get_point(point::POINT_IQ), 6);
+        assert_eq!(points.max_sp(), 260 + 3 * 20);
+        assert_eq!(points.sp(), 260);
+    }
+
+    #[test]
+    fn an_apply_of_a_skill_adds_or_takes_away_its_damage_bonus() {
+        let mut points = warrior();
+        assert!(points
+            .apply_point(APPLY_SKILL, skill_apply(5, true, 10))
+            .is_empty());
+        assert!(points
+            .apply_point(APPLY_SKILL, skill_apply(5, false, 4))
+            .is_empty());
+        assert_eq!(points.skill_damage_bonus(5), 6);
+        // A skill above 127 sets the sign bit, which must not reach the skill or the change.
+        points.apply_point(APPLY_SKILL, skill_apply(200, true, 0x0012_3456));
+        assert_eq!(points.skill_damage_bonus(200), 0x0012_3456);
+        points.apply_point(APPLY_SKILL, skill_apply(200, false, 0x0012_3450));
+        assert_eq!(points.skill_damage_bonus(200), 6);
+        assert_eq!(points.skill_damage_bonus(6), 0);
+        assert_eq!(points.get_point(point::POINT_SKILL_DAMAGE_BONUS), 0);
+    }
+
+    #[test]
+    fn an_apply_of_a_maximum_keeps_the_pools_share_in_single_precision() {
+        let mut points = warrior();
+        points
+            .point_change(point::POINT_HP, -380, false, false)
+            .unwrap();
+        points.apply_point(APPLY_MAX_HP, 240);
+        assert_eq!((points.hp(), points.max_hp()), (500, 1000));
+
+        // 7777 / 7777 of 8017 is 8017 exactly, but `(float)8017 / 7777` is a little short of
+        // the true ratio, so the full pool ends one point below its maximum, as in legacy.
+        let mut points = warrior();
+        points
+            .point_change(point::POINT_MAX_HP, 7017, false, false)
+            .unwrap();
+        points
+            .point_change(point::POINT_HP, 7017, false, false)
+            .unwrap();
+        points.apply_point(APPLY_MAX_HP, 240);
+        assert_eq!((points.hp(), points.max_hp()), (7776 + 240, 8017));
+
+        // And here single precision lands on the integer that the true share falls short of.
+        let mut points = warrior();
+        points
+            .point_change(point::POINT_MAX_HP, 7017, false, false)
+            .unwrap();
+        points
+            .point_change(point::POINT_HP, 2502 - 760, false, false)
+            .unwrap();
+        points.apply_point(APPLY_MAX_HP, 9011 - 7777);
+        assert_eq!((points.hp(), points.max_hp()), (2502 + 397, 9011));
+
+        let mut points = warrior();
+        points.apply_point(APPLY_MAX_HP_PCT, 10);
+        assert_eq!((points.hp(), points.max_hp()), (836, 836));
+        assert_eq!(points.get_point(point::POINT_MAX_HP_PCT), 10);
+
+        let mut points = warrior();
+        points
+            .point_change(point::POINT_SP, -130, false, false)
+            .unwrap();
+        points.apply_point(APPLY_MAX_SP, 40);
+        assert_eq!((points.sp(), points.max_sp()), (150, 300));
+    }
+
+    #[test]
+    fn an_apply_of_a_maximum_does_nothing_while_the_maximum_is_zero() {
+        let mut points = warrior();
+        points.apply_point(APPLY_MAX_HP, -760);
+        assert_eq!((points.hp(), points.max_hp()), (0, 0));
+        assert!(points.apply_point(APPLY_MAX_HP, 100).is_empty());
+        assert_eq!((points.hp(), points.max_hp()), (0, 0));
+    }
+
+    #[test]
+    fn an_apply_of_any_other_type_changes_its_one_slot() {
+        let mut points = warrior();
+        assert!(points.apply_point(APPLY_NONE, 99).is_empty());
+        let records = points.apply_point(APPLY_ATTBONUS_HUMAN, 7);
+        assert_eq!(records, [record(point::POINT_ATTBONUS_HUMAN, 0, 7)]);
+        // Each boss and metin type raises the point of its own name (see `apply.rs`).
+        points.apply_point(APPLY_ATTBONUS_BOSS, 3);
+        points.apply_point(APPLY_ATTBONUS_METIN, 5);
+        assert_eq!(points.get_point(point::POINT_ATTBONUS_BOSS), 3);
+        assert_eq!(points.get_point(point::POINT_ATTBONUS_METIN), 5);
+    }
+
+    #[test]
+    fn an_apply_is_ported_unless_its_slot_is_not() {
+        let mut unported = Vec::new();
+        let mut armless = Vec::new();
+        for apply in 0..=u8::MAX {
+            let ported = apply_is_ported(apply);
+            if !ported {
+                unported.push(apply);
+            }
+            let ApplyArm::Point(slot) = ApplyArm::of(apply) else {
+                assert!(ported, "{apply}");
+                continue;
+            };
+            assert!(usize::from(apply) < MAX_APPLY_NUM, "{apply}");
+            let mut points = warrior();
+            let refused = match points.point_change(slot, 0, false, false) {
+                Ok(_) => {
+                    assert!(ported, "{apply}");
+                    continue;
+                }
+                Err(PointChangeRefused::NotPorted(refused)) => {
+                    assert!(!ported, "{apply}");
+                    refused
+                }
+                // Legacy's `PointChange` has no arm for the slot either: its `default` logs and
+                // returns, so the apply changes nothing there and here.
+                Err(PointChangeRefused::Unknown(refused)) => {
+                    assert!(ported, "{apply}");
+                    armless.push(apply);
+                    refused
+                }
+            };
+            assert_eq!(refused, slot, "{apply}");
+            let before = points.clone();
+            assert!(points.apply_point(apply, 5).is_empty(), "{apply}");
+            assert_eq!(points, before, "{apply}");
+        }
+        assert_eq!(unported, [APPLY_ENERGY, APPLY_COSTUME_ATTR_BONUS]);
+        assert_eq!(armless, [APPLY_MAGIC_ATTBONUS_PER]);
+    }
+
+    #[test]
+    fn the_worn_items_apply_in_the_computation_and_the_hit_points_are_put_back() {
+        let armour = applying(
+            valued(proto(11_210, ITEM_ARMOR, ARMOR_BODY), [0, 40, 0, 0, 0, 0]),
+            [
+                (APPLY_CON, 2),
+                (APPLY_MAX_HP, 240),
+                (APPLY_SKILL, skill_apply(5, true, 10)),
+            ],
+        );
+        let protos = ItemProtos::from_rows(vec![armour]);
+        let body = Item::new(1, 11_210);
+        let worn = wearing(&[(BODY, &body)]);
+        let equipment = Equipment::of(&worn, &protos);
+
+        let mut points = warrior();
+        points.compute_points_with(&equipment);
+        assert_eq!(points.get_point(point::POINT_HT), 6);
+        assert_eq!(points.max_hp(), 760 + 80 + 240);
+        assert_eq!(points.max_stamina(), 830);
+        // `APPLY_MAX_HP` raised the pool to keep its share, and the `@fixme118` restore put the
+        // difference back.
+        assert_eq!(points.hp(), 760);
+        assert_eq!(points.skill_damage_bonus(5), 10);
+        // The level, four fifths of the vitality of 6, and the armour.
+        assert_eq!(points.get_point(point::POINT_DEF_GRADE), 1 + 4 + 40);
+
+        // A second computation starts again from nothing.
+        points.compute_points_with(&equipment);
+        assert_eq!(points.max_hp(), 1080);
+        assert_eq!(points.skill_damage_bonus(5), 10);
+
+        // Taking the armour off lowers the maximum and clamps the pool to it.
+        points
+            .point_change(point::POINT_HP, 300, false, false)
+            .unwrap();
+        assert_eq!(points.hp(), 1060);
+        points.compute_points();
+        assert_eq!((points.hp(), points.max_hp()), (760, 760));
+        assert_eq!(points.skill_damage_bonus(5), 0);
+        assert_eq!(points.get_point(point::POINT_DEF_GRADE), 1 + 3);
+    }
+
+    #[test]
+    fn two_pieces_of_a_set_give_its_first_bonus() {
+        // "SetBonus - 1": the weapon 19 and the body 11209, each in its own cell.
+        let protos = ItemProtos::from_rows(vec![
+            proto(19, ITEM_WEAPON, 0),
+            applying(
+                proto(11_209, ITEM_ARMOR, ARMOR_BODY),
+                [(APPLY_MAX_HP, 40), (APPLY_NONE, 0), (APPLY_NONE, 0)],
+            ),
+        ]);
+        let weapon = Item::new(1, 19);
+        let body = Item::new(2, 11_209);
+        let worn = wearing(&[(WEAPON, &weapon), (BODY, &body)]);
+        let mut points = warrior();
+        points.compute_points_with(&Equipment::of(&worn, &protos));
+        assert_eq!(points.max_hp(), 760 + 40 + 500);
+        assert_eq!(points.hp(), 760);
+
+        // One piece alone gives nothing.
+        let worn = wearing(&[(BODY, &body)]);
+        points.compute_points_with(&Equipment::of(&worn, &protos));
+        assert_eq!(points.max_hp(), 760 + 40);
     }
 
     #[test]

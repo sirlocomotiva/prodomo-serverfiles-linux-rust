@@ -354,6 +354,9 @@ pub fn load_points(character: &Character, map_index: i32) -> Points {
         stamina: character.stamina,
         inven_point: 0,
         map_index,
+        part_base: character.part_base,
+        hair_part: character.hair_part,
+        sash_part: character.sash_part,
     })
 }
 
@@ -439,20 +442,6 @@ pub fn skill_levels() -> [GcSkill; GC_SKILL_SLOT_COUNT] {
     }; GC_SKILL_SLOT_COUNT]
 }
 
-/// The six equipment parts a character shows, in `ECharacterEquipmentPart` order.
-///
-/// Only armour, hair and sash are stored today. The Rewrite has no equipment, so the rest are
-/// zero, which is what `sectree_manager.cpp:1712-1727` sends for a character with nothing worn
-/// and no costume.
-#[must_use]
-pub fn entity_parts(character: &Character) -> [u16; ENTITY_PART_NUM] {
-    let mut parts = [0u16; ENTITY_PART_NUM];
-    parts[0] = character.main_part;
-    parts[3] = character.hair_part;
-    parts[4] = character.sash_part;
-    parts
-}
-
 /// A character's Name in its 25-byte wire field.
 ///
 /// Legacy writes the Name with `strlcpy(pack.szName, ch->GetName(), sizeof(pack.szName))`, which
@@ -513,16 +502,20 @@ fn speed_byte(speed: i32) -> u8 {
 
 /// The `GC_CHAR_ADDITIONAL_INFO` for the character that is entering, with no guild, mount or
 /// alignment (`EncodeAdditionalInfo`, `G/char.cpp:1236-1300`).
+///
+/// The parts are the ones the last `ComputePoints` left (`GetPart`), which after the item load
+/// are the worn armour, weapon, hair costume and sash over the base part.
 #[must_use]
 pub fn character_additional(
     character: &Character,
+    state: &Points,
     vid: u32,
     language: u8,
 ) -> GcCharacterAdditionalInfo {
     GcCharacterAdditionalInfo::new(
         vid,
         name_field(&character.name),
-        entity_parts(character),
+        state.parts(),
         character.empire,
         0,
         u32::from(character.level),
@@ -689,7 +682,7 @@ pub fn enter_game_burst(
         "the own-character insert",
     ));
     before.push(encoded(
-        &mut character_additional(character, vid, language),
+        &mut character_additional(character, state, vid, language),
         "the own-character summary",
     ));
     for other in &view.characters {
@@ -1340,15 +1333,17 @@ mod tests {
     }
 
     #[test]
-    fn entity_parts_are_the_stored_armour_hair_and_sash() {
-        let hero = hero();
-        let parts = entity_parts(&hero);
-        assert_eq!(parts[0], 0x1122, "armour");
-        assert_eq!(parts[1], 0, "weapon: the Rewrite has no equipment yet");
-        assert_eq!(parts[2], 0, "head: the Rewrite has no equipment yet");
+    fn the_loaded_parts_are_the_base_part_and_the_stored_hair_and_sash() {
+        // `SetPlayerProto` puts the base part in the main part and reads the hair and the sash
+        // from the row; the stored armour part (0x1122) is what the select screen shows, and
+        // the load puts it back only by wearing the armour.
+        let parts = hero_points().parts();
+        assert_eq!(parts[0], 1, "the base part");
+        assert_eq!(parts[1], 0, "weapon: nothing is worn");
+        assert_eq!(parts[2], 0, "head");
         assert_eq!(parts[3], 0x3344, "hair");
         assert_eq!(parts[4], 0x5566, "sash");
-        assert_eq!(parts[5], 0, "aura");
+        assert_eq!(parts[5], 0, "aura: not stored");
     }
 
     /// `TPacketGCCharacterAdd` is 35 packed bytes and its header is **byte 1**, not 68: byte
@@ -1385,7 +1380,7 @@ mod tests {
     fn character_additional_is_70_bytes_over_byte_136() {
         let hero = hero();
         let mut bytes = Vec::new();
-        character_additional(&hero, 0x1122_3344, 3).encode_into(&mut bytes);
+        character_additional(&hero, &hero_points(), 0x1122_3344, 3).encode_into(&mut bytes);
         assert_eq!(bytes.len(), 70);
         assert_eq!(bytes[0], 136, "GC_CHAR_ADDITIONAL_INFO");
         assert_eq!(&bytes[1..5], &0x1122_3344u32.to_le_bytes(), "dwVID");
@@ -1393,8 +1388,8 @@ mod tests {
         assert_eq!(&bytes[10..30], &[0u8; 20], "the rest of szName is zero");
         assert_eq!(
             &bytes[30..42],
-            &[0x22, 0x11, 0, 0, 0, 0, 0x44, 0x33, 0x66, 0x55, 0, 0],
-            "awPart is armour, weapon, head, hair, sash, aura as six LE words",
+            &[1, 0, 0, 0, 0, 0, 0x44, 0x33, 0x66, 0x55, 0, 0],
+            "awPart is main, weapon, head, hair, sash, aura as six LE words",
         );
         assert_eq!(bytes[42], 2, "bEmpire");
         assert_eq!(

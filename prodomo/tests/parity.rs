@@ -3399,9 +3399,9 @@ fn an_item_is_moved_split_and_merged_and_a_relog_finds_it_there() {
 /// own insert; two are written by hand, which is what a row from any other writer looks like.
 /// The belt row checks legacy's window translation (`G/input_db.cpp:1491-1495`). The
 /// overlapping row checks the set-aside path and its save: legacy moves an item whose cell is
-/// taken to the first free cell and writes the new cell (`G/item.cpp:529`). The equipment row
-/// is the negative control: equipment is not loaded by this build, so its row must produce no
-/// record and must still be in the store afterwards, and a load that sent a record for every
+/// taken to the first free cell and writes the new cell (`G/item.cpp:529`). The switchbot row
+/// is the negative control: the switchbot is not loaded by this build, so its row must produce
+/// no record and must still be in the store afterwards, and a load that sent a record for every
 /// row would fail on the record count.
 #[test]
 fn a_relogged_character_is_sent_its_items_before_the_game_is_entered() {
@@ -3422,7 +3422,7 @@ fn a_relogged_character_is_sent_its_items_before_the_game_is_entered() {
     server.wait_for("Character left the world");
 
     // And: three rows written by hand, with ids below the grant range. Row 7 is at the fourth
-    // cell of the belt window with a count of 2; row 8 is an equipment row; row 9 is at cell 5
+    // cell of the belt window with a count of 2; row 8 is a switchbot row; row 9 is at cell 5
     // of the inventory, which the granted two-cell item's footprint already covers.
     let protos = owners_protos();
     let small = protos
@@ -3431,7 +3431,7 @@ fn a_relogged_character_is_sent_its_items_before_the_game_is_entered() {
         .find(|proto| proto.size == 1)
         .map(|proto| proto.vnum)
         .expect("the owner's data has a one-cell item");
-    for (id, window, pos, count) in [(7, 9, 3, 2), (8, 2, 4, 1), (9, 1, 5, 1)] {
+    for (id, window, pos, count) in [(7, 9, 3, 2), (8, 8, 4, 1), (9, 1, 5, 1)] {
         sql(
             &database,
             &format!(
@@ -3448,11 +3448,11 @@ fn a_relogged_character_is_sent_its_items_before_the_game_is_entered() {
     let (mut alpha, _character, items) = load_character(&server, b"alice", 0);
 
     // Then: one `GC_ITEM_SET` for the granted item and one for the belt item, in the store's
-    // window order, then one for the item that was set aside, and none for the equipment row.
+    // window order, then one for the item that was set aside, and none for the switchbot row.
     assert_eq!(
         items.len(),
         3,
-        "the granted, belt, and moved items, and nothing for the equipment row: {items:02x?}"
+        "the granted, belt, and moved items, and nothing for the switchbot row: {items:02x?}"
     );
     let inventory = common::item_slots::EWindows::Inventory as u8;
     assert_the_granted_record(&items[0], &protos);
@@ -3481,7 +3481,7 @@ fn a_relogged_character_is_sent_its_items_before_the_game_is_entered() {
     server.wait_for("An item was not loaded; its row is kept");
     check(
         &database,
-        "EXISTS (SELECT 1 FROM item WHERE id = 8 AND window_type = 2 AND pos = 4)",
+        "EXISTS (SELECT 1 FROM item WHERE id = 8 AND window_type = 8 AND pos = 4)",
     );
     check(
         &database,
@@ -3506,6 +3506,227 @@ fn a_relogged_character_is_sent_its_items_before_the_game_is_entered() {
     );
     check(&database, "(SELECT pos FROM item WHERE id = 100000001) = 2");
     assert_eq!(state, Quiet::Open, "the client is still connected");
+}
+
+/// The body armour a level-9 character can wear: `LEVEL 9`, `value1` 21, `APPLY_MOV_SPEED -2`.
+const WORN_ARMOUR: u32 = 11_810;
+/// The fan any level can wear: `LEVEL 0`, `APPLY_ATT_SPEED 26`.
+const WORN_FAN: u32 = 7_000;
+/// The bell a level-9 character cannot wear: `LEVEL 10`.
+const BELL: u32 = 5_000;
+/// A two-cell body armour, stored past the wear cells.
+const SPARE_ARMOUR: u32 = 11_804;
+/// A dragon soul stone.
+const STONE: u32 = 110_000;
+
+/// `sys.item.core`, `sys.char.points`: a relogged character wears its stored equipment,
+/// and the item load's points record counts it.
+///
+/// Alpha is lowered to level 9 and given five `EQUIPMENT` rows ([`give_alpha_equipment`]). The
+/// armour in the body cell and the fan in the weapon cell are worn, which the client sees as the
+/// inventory window at `INVENTORY_MAX_NUM` plus the cell (`G/char_item.cpp:658-670`). The bell
+/// fails `CheckItemUseLevel` by one level and cell 64 is past the wear cells, so both are set
+/// aside to the first free inventory cells and their rows rewritten (`G/input_db.cpp:1519-1531`
+/// and `:1541-1561`). The dragon soul stone is refused, because its deck is not ported, and its
+/// row is kept.
+///
+/// Every expected value is a hand sum of the owner's prototypes and `ComputeBattlePoints`
+/// (`G/char.cpp:2769-2846`). The armour adds its `value1`, 21, and twice its `value5`, 0: the
+/// defence grade is 9 + 18 x 4 / 5 + 21, the shown grade 9 + 18 + 21, the magic defence
+/// 9 + (3 x 20 + 18) / 3 + 21 / 2. The armour's attribute adds 500 to the maximum hit points and
+/// its prototype takes 2 from the movement speed; the fan's prototype adds 26 to the attack
+/// speed. The stored 1500 hit points are above the item-less maximum but not the worn one, so
+/// they are kept: the relog heal legacy's `ApplyPoint` would give is a Defect. The body armour
+/// becomes the main part, which the logout save stores and the next list shows.
+#[test]
+fn a_relogged_character_wears_its_equipment_and_its_points_count_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    give_alpha_equipment(&database);
+
+    // When: the character is selected.
+    let (mut keyed, _empire, list) = select_screen(&server, b"alice");
+    let alpha = listed(&list, 0);
+    keyed.send_record(&client_select(0));
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
+    assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
+    assert_eq!(keyed.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
+    let gold = keyed.read_game();
+    assert_eq!(gold[0], GC_CHARACTER_GOLD);
+    let loaded = keyed.read_game();
+    assert_eq!(loaded[0], GC_PLAYER_POINTS);
+    for (slot, value, what) in [
+        (5, 1500, "POINT_HP, as stored"),
+        (6, 1420, "POINT_MAX_HP, before the items: 700 + 18 x 40"),
+        (16, 23, "POINT_DEF_GRADE, before the items: 9 + 14"),
+        (17, 100, "POINT_ATT_SPEED, before the items"),
+        (19, 100, "POINT_MOV_SPEED, before the items"),
+        (20, 27, "POINT_CLIENT_DEF_GRADE, before the items: 9 + 18"),
+        (23, 35, "POINT_MAGIC_DEF_GRADE, before the items: 9 + 26"),
+    ] {
+        assert_eq!(point_slot(&loaded, slot), value, "{what}");
+    }
+    assert_eq!(keyed.read_game()[0], GC_SKILL_LEVEL_NEW);
+
+    // Then: the two worn items at their wear cells, in row order, then the two set-aside
+    // items at the first free cells.
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    assert_eq!(
+        loaded_item_sets(&mut keyed, 4),
+        vec![
+            (inventory, 180, WORN_ARMOUR, 1),
+            (inventory, 184, WORN_FAN, 1),
+            (inventory, 0, BELL, 1),
+            (inventory, 1, SPARE_ARMOUR, 1),
+        ],
+        "worn at 180 plus the wear cell, then set aside in row order"
+    );
+
+    // And: `CheckMaximumPoints` lowers only the spell points, then `PointsPacket` sends the
+    // worn points. Every other slot is the first record's.
+    assert_eq!(keyed.read_game(), point_change(alpha.id, 7, 0, 600));
+    assert_eq!(keyed.read_game(), gold, "the item load's gold record");
+    let mut worn = loaded.clone();
+    for (slot, value) in [
+        (6, 1920),
+        (7, 600),
+        (16, 44),
+        (17, 126),
+        (19, 98),
+        (20, 48),
+        (23, 45),
+    ] {
+        worn = with_point_slot(&worn, slot, value);
+    }
+    assert_eq!(
+        keyed.read_game(),
+        worn,
+        "the item load's points record: the maximum hit points with the attribute, the \
+         defence grades with the armour, both speeds with the prototypes, and the stored \
+         hit points kept"
+    );
+    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+
+    // And: the set-aside rows were rewritten at their new cells, and the worn rows and the
+    // refused stone's row are as they were.
+    check(
+        &database,
+        "(SELECT array_agg((window_type, pos) ORDER BY id)::text FROM item WHERE id \
+         BETWEEN 20 AND 24) = '{\"(2,0)\",\"(1,0)\",\"(2,4)\",\"(1,1)\",\"(2,65)\"}'",
+    );
+    server.wait_for("An item was not loaded; its row is kept");
+    assert!(
+        server.logged("wearing it needs the dragon soul deck, which is not ported"),
+        "the stone's refusal names the system"
+    );
+
+    // When: the game is entered. Then: both speeds are the worn ones, the armour is the main
+    // part and the fan the weapon part, the hair and sash parts are the stored ones, and the
+    // head and aura parts are 0.
+    let (add, parts) = enter_game_with_parts(&mut keyed);
+    assert_eq!(add[24], 98, "bMovingSpeed");
+    assert_eq!(add[25], 126, "bAttackSpeed");
+    let part = |vnum: u32| u16::try_from(vnum).expect("a part is a WORD");
+    assert_eq!(
+        parts,
+        [part(WORN_ARMOUR), part(WORN_FAN), 0, 0xc3d4, 0xe5f6, 0]
+    );
+
+    // And: the logout save stores the main part and the kept pools, and the next list shows
+    // the armour.
+    drop(keyed);
+    wait_for(
+        &database,
+        "(SELECT (part_main, hp, sp) = (11810, 1500, 600) FROM player WHERE name = 'Alpha')",
+    );
+    let (_keyed, _empire, list) = select_screen(&server, b"alice");
+    assert_eq!(listed(&list, 0).main_part, part(WORN_ARMOUR));
+}
+
+/// Lower Alpha to level 9 with 1500 hit points and 70000 spell points, and give it five
+/// `EQUIPMENT` rows, ids 20 to 24: the armour at cell 0 with a 500-point maximum hit point
+/// attribute, the bell at cell 1, the fan at cell 4, the spare armour at cell 64, and the stone
+/// at cell 65. The prototype fields the hand sums read are checked against the owner's data
+/// first, so a changed prototype fails here and not as a wrong sum.
+fn give_alpha_equipment(database: &ScratchDatabase) {
+    let protos = owners_protos();
+    let proto = |vnum| protos.get(vnum).expect("the owner's data has it");
+    let level_limit = |vnum| {
+        let limit = proto(vnum).limits[0];
+        (limit.kind, limit.value)
+    };
+    assert_eq!(proto(WORN_ARMOUR).values[1], 21, "the armour's defence");
+    assert_eq!(proto(WORN_ARMOUR).values[5], 0);
+    assert_eq!(level_limit(WORN_ARMOUR), (1, 9));
+    assert_eq!(level_limit(BELL), (1, 10));
+    assert_eq!(level_limit(WORN_FAN), (1, 0));
+    assert_eq!(proto(STONE).item_type, gamedata::item_kind::ITEM_DS);
+    assert_eq!((proto(BELL).size, proto(SPARE_ARMOUR).size), (1, 2));
+
+    sql(
+        database,
+        "UPDATE player SET level = 9, hp = 1500, sp = 70000 WHERE name = 'Alpha'",
+    );
+    for (id, pos, vnum) in [
+        (20, 0, WORN_ARMOUR),
+        (21, 1, BELL),
+        (22, 4, WORN_FAN),
+        (23, 64, SPARE_ARMOUR),
+        (24, 65, STONE),
+    ] {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT {id}, id, \
+                 2, {pos}, 1, {vnum} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    sql(
+        database,
+        "UPDATE item SET attrtype0 = 1, attrvalue0 = 500 WHERE id = 20",
+    );
+}
+
+/// Read `count` `GC_ITEM_SET` records of the item load, each checked whole-width with no
+/// highlight, and answer their window, cell, vnum and count.
+fn loaded_item_sets(keyed: &mut Keyed, count: usize) -> Vec<(u8, u16, u32, u16)> {
+    (0..count)
+        .map(|_| {
+            let record = keyed.read_game();
+            assert_eq!(record.len(), ITEM_SET_LEN);
+            assert_eq!(record[0], ITEM_SET);
+            assert_eq!(record[26], 0, "no highlight");
+            set_fields(&record)
+        })
+        .collect()
+}
+
+/// Send `CG_ENTER_GAME` and read the enter-game burst, leaving nothing unread. Answers the
+/// own `GC_CHARACTER_ADD` and the six parts of `GC_CHAR_ADDITIONAL_INFO`, which follow its
+/// `dwVID` and 25-byte name.
+fn enter_game_with_parts(keyed: &mut Keyed) -> (Vec<u8>, [u16; 6]) {
+    keyed.send_record(&client_enter_game());
+    let add = keyed.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD);
+    let additional = keyed.read_game();
+    assert_eq!(additional.len(), CHAR_ADDITIONAL_INFO_LEN);
+    assert_eq!(additional[0], GC_CHAR_ADDITIONAL_INFO);
+    let parts = std::array::from_fn(|index| {
+        let at = 30 + 2 * index;
+        u16::from_le_bytes([additional[at], additional[at + 1]])
+    });
+    assert_eq!(keyed.read_game()[0], GC_AFFECT_ADD);
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
+    assert_eq!(keyed.read_game()[0], GC_TIME);
+    assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
+    assert_eq!(keyed.read_game()[0], GC_CHAT);
+    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    (add, parts)
 }
 
 /// Checks the relogged character's granted item: vnum 19 at the cell the grant chose, with the

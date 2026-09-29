@@ -56,6 +56,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::csv_table::{self, CsvError};
+use crate::item_kind::{LIMIT_REAL_TIME_START_FIRST_USE, LIMIT_TIMER_BASED_ON_WEAR};
 use crate::item_proto_value::{
     self, apply_type_value, flag_mask, limit_type_value, sub_type_value, type_value, SubType,
     ANTI_FLAG, FLAG, IMMUNE, WEAR_FLAG,
@@ -77,10 +78,10 @@ pub const COLUMNS: usize = 33;
 /// `ITEM_LIMIT_MAX_NUM` (`item_length.h:11`), the `aLimits` pair count.
 pub const LIMITS: usize = 2;
 
-/// `ITEM_LIMIT_MAX_NUM` (`item_length.h:11`), the `aLimits` pair count.
+/// `ITEM_APPLY_MAX_NUM` (`item_length.h:12`), the `aApplies` pair count.
 pub const APPLIES: usize = 3;
 
-/// `ITEM_LIMIT_MAX_NUM` (`item_length.h:11`), the `aLimits` pair count.
+/// `ITEM_VALUES_MAX_NUM` (`item_length.h:9`), the `alValues` count.
 pub const VALUES: usize = 6;
 
 /// `ITEM_SOCKET_MAX_NUM` under `ENABLE_EXTENDED_SOCKETS` (`item_length.h:13-18`).
@@ -88,18 +89,6 @@ pub const VALUES: usize = 6;
 /// `prodomodefines.h:76` defines it. Nothing ever writes these six entries, so the count is kept
 /// only so the constant has a meaning; [`ItemProto::sockets`] is always all zero.
 const SOCKETS: usize = 6;
-
-/// `ELimitTypes::LIMIT_REAL_TIME_START_FIRST_USE` (`item_length.h:443`).
-///
-/// `Set_Proto_Item_Table:962-968` compares a limit's **index into `arLimitType`** against this enum
-/// member. The two numberings coincide even though the names differ: the table spells index 7
-/// `REAL_TIME_FIRST_USE` where the enum spells it `LIMIT_REAL_TIME_START_FIRST_USE`. Comparing
-/// against the file's spelling instead of the enum's would silently leave the index at -1 and
-/// disable every real-time limit in the game.
-const LIMIT_REAL_TIME_START_FIRST_USE: i32 = 7;
-
-/// `ELimitTypes::LIMIT_TIMER_BASED_ON_WEAR` (`item_length.h:448`).
-const LIMIT_TIMER_BASED_ON_WEAR: i32 = 8;
 
 /// One `TItemLimit` / `TItemApply` pair: an index into a value table and its amount.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -263,6 +252,22 @@ impl ItemProtos {
         let proto = read("item_proto.txt")?;
         let locale_names = read("item_names.txt")?;
         parse(&proto, &locale_names)
+    }
+
+    /// A table of the given rows, sorted and indexed the way [`parse`] sorts and indexes the
+    /// file's rows.
+    ///
+    /// The sort key is `(vnum, line)`, so two rows that share a vnum resolve to the one with
+    /// the lower [`ItemProto::line`] exactly as they do in a parsed file. A caller that builds
+    /// its own rows (a test that needs one proto shape, say) gets the same lookups a parsed
+    /// file would give it.
+    #[must_use]
+    pub fn from_rows(mut by_vnum: Vec<ItemProto>) -> Self {
+        by_vnum.sort_by_key(|p| (p.vnum, p.line));
+        let ranges = (0..by_vnum.len())
+            .filter(|i| by_vnum[*i].is_range())
+            .collect();
+        Self { by_vnum, ranges }
     }
 
     /// The number of rows, which is the file's data-row count and not the header.
@@ -815,19 +820,15 @@ pub fn parse(proto: &[u8], locale_names: &[u8]) -> Result<ItemProtos, ItemProtoE
     }
     // `sort(m_vec_itemTable.begin(), m_vec_itemTable.end(), FCompareVnum())` at
     // `ClientManagerBoot.cpp:644` compares `dwVnum` alone. `std::sort` is not stable, so legacy's
-    // order for a repeated vnum is unspecified; the `(vnum, line)` key below makes the Rewrite
-    // answer with the first row in file order, which is what `RealNumber`'s forward walk and both
-    // name lookups reach. See the module documentation.
+    // order for a repeated vnum is unspecified; the `(vnum, line)` key of `from_rows` makes the
+    // Rewrite answer with the first row in file order, which is what `RealNumber`'s forward walk
+    // and both name lookups reach. See the module documentation.
     // Every row is kept, duplicates included, because `m_vec_itemTable` holds them all and
     // `ItemProtos::duplicates` reports the repeats rather than hiding them. The key is a **total**
     // order: no two rows share `(vnum, line)`, because `line` is a file line. That is what makes
     // the answer independent of the sort, so an unstable sort is equivalent here rather than a
     // different answer. See the module documentation.
-    by_vnum.sort_by_key(|p| (p.vnum, p.line));
-    let ranges = (0..by_vnum.len())
-        .filter(|i| by_vnum[*i].is_range())
-        .collect();
-    Ok(ItemProtos { by_vnum, ranges })
+    Ok(ItemProtos::from_rows(by_vnum))
 }
 #[cfg(test)]
 mod tests {

@@ -60,7 +60,7 @@ use protocol::item_pos::ItemPos;
 
 use super::inventory::{
     custom_inventory_category_of, inventory_page_by_pos, is_belt_inventory_position,
-    is_custom_inventory_position, stored_window,
+    is_custom_inventory_position, is_equip_position, stored_window,
 };
 use crate::item::{CountRejected, Item, ItemId, NO_ITEM};
 
@@ -1029,12 +1029,15 @@ impl CharacterItems {
         } else {
             // Outside the base inventory the bounds stay at their defaults, and
             // `cell < 180` is false, so legacy marks only the anchor
-            // (`char_item.cpp:438-439`). That is right for a one-cell equipment
-            // item and wrong for anything larger, so a larger one is refused
-            // rather than stored with a footprint that disagrees with its size.
+            // (`char_item.cpp:438-439`). That is right for any worn item, whose
+            // size is the room it takes in a bag and which fills one wear cell
+            // whatever its size, and for a one-cell item elsewhere. A larger item
+            // anywhere else is refused rather than stored with a footprint that
+            // disagrees with its size.
             (vec![cell], 1)
         };
-        if covered != u16::from(item.size) {
+        let worn = !bounds.walks(cell) && is_equip_position(pos);
+        if covered != u16::from(item.size) && !worn {
             return Err(Rejected::FootprintCutOff {
                 window: pos.window_type,
                 cell,
@@ -1794,8 +1797,8 @@ mod tests {
     fn an_equipment_item_marks_only_its_own_cell() {
         // For a cell outside `0..180` the bounds stay the defaults, and
         // `cell < 180` is false, so legacy marks only the anchor
-        // (`char_item.cpp:438-439`). Equipment cells are one cell each, so that
-        // is right, and the Rewrite keeps it for that reason.
+        // (`char_item.cpp:438-439`). A worn item fills one wear cell whatever
+        // its size, so that is right, and the Rewrite keeps it for that reason.
         let cell = 200_u16;
         let mut items = CharacterItems::new();
         items
@@ -1803,26 +1806,49 @@ mod tests {
             .expect("cell 200 is real");
         assert_eq!(items.grid_anchor(pos(EQUIP, cell)), cell + 1);
         assert_eq!(items.get(pos(EQUIP, cell)), Lookup::Occupied(61));
-        // A four-cell item in the same band is refused rather than silently
-        // truncated to one marked cell, which is how a later write would come
-        // to believe the other three are free.
+        // A body armour three cells tall is worn in one cell, and its
+        // neighbours stay free.
+        items
+            .set(pos(INV, 180), &sized(62, 3))
+            .expect("the body cell takes an armour of any size");
+        assert_eq!(items.grid_anchor(pos(INV, 180)), 181);
+        assert_eq!(items.get(pos(INV, 180)), Lookup::Occupied(62));
+        for free in [181, 185] {
+            assert_eq!(items.grid_anchor(pos(INV, free)), 0, "cell {free}");
+            assert_eq!(items.get(pos(INV, free)), Lookup::Empty, "cell {free}");
+        }
+    }
+
+    #[test]
+    fn a_large_item_is_refused_in_a_band_that_marks_only_its_anchor() {
+        // Past the wear cells the bounds are still the defaults, so legacy
+        // marks only the anchor there too. A belt cell holds a one-cell item,
+        // and a larger one is refused rather than silently truncated to one
+        // marked cell, which is how a later write would come to believe the
+        // cells below it are free.
+        let cell = BELT_INVENTORY_SLOT_START;
+        assert!(!is_equip_position(pos(INV, cell)), "a control: not worn");
+        let mut items = CharacterItems::new();
         let err = items
-            .set(pos(EQUIP, 201), &sized(62, 4))
-            .expect_err("an equipment band records only its anchor");
+            .set(pos(INV, cell), &sized(63, 2))
+            .expect_err("a belt cell records only its anchor");
         assert_eq!(
             err,
             Rejected::FootprintCutOff {
-                window: EQUIP,
-                cell: 201,
-                size: 4,
+                window: INV,
+                cell,
+                size: 2,
                 covered: 1
             }
         );
         assert_eq!(
-            items.get(pos(EQUIP, 201)),
+            items.get(pos(INV, cell)),
             Lookup::Empty,
             "nothing was stored"
         );
+        items
+            .set(pos(INV, cell), &one_cell(64))
+            .expect("a one-cell item fits");
     }
 
     #[test]

@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use common::config::{load_server_config, ItemIdSpan, ServerConfig, DEFAULT_CONFIG_PATH};
-use common::enums::ELocale;
+use common::enums::{ELocale, EParts};
 use common::logging::{init_from_env, init_logging, LogConfig};
 use common::vid::Vid;
 use db::accounts::{find_auth_account, record_login, AccountError};
@@ -1665,12 +1665,16 @@ where
         return false;
     };
     held.items = items;
-    // The item load's `CheckMaximumPoints` may have brought the pools down, and the save
-    // writes them from the held row.
+    // The item load's `CheckMaximumPoints` may have brought the pools down, and the worn items
+    // set the parts; the save writes both from the held row (`G/char.cpp:1606`).
     if let Some(held_character) = held.character.as_mut() {
         held_character.hp = points.hp();
         held_character.sp = points.sp();
         held_character.stamina = points.stamina();
+        let parts = points.parts();
+        held_character.main_part = parts[EParts::Main as usize];
+        held_character.hair_part = parts[EParts::Hair as usize];
+        held_character.sash_part = parts[EParts::Sash as usize];
     }
     held.points = Some(points);
     // The index the map test resolved is the character's map. It is held here because the
@@ -1712,7 +1716,7 @@ where
     };
     // `Inven_Point` is 0: the store keeps no value for it yet, and the world's character
     // starts at 0, so a set-aside item and a later grant search the same cells.
-    let load = plan_item_load(&rows, &context.protos, 0);
+    let load = plan_item_load(&rows, &context.protos, 0, character.level);
     for refusal in &load.refused {
         warn!(
             %addr,
@@ -1744,6 +1748,9 @@ where
         .iter()
         .map(|placed| placed.record().encode())
         .collect();
+    // `EquipTo` computes the points with each worn item as the load places it.
+    let storage = load.storage();
+    points.compute_loaded(&world::character::Equipment::of(&storage, &context.protos));
     records.extend(item_load_points(character, points, vid));
     if let Err(error) = send_all(session, &records).await {
         warn!(%addr, %error, "Client session stopped");

@@ -11,6 +11,7 @@ tracing = { workspace = true }
 serde = { workspace = true }
 common = { path = "../common" }
 protocol = { path = "../protocol" }
+gamedata = { path = "../gamedata" }
 
 [lints]
 workspace = true
