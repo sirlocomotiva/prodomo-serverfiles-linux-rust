@@ -1244,14 +1244,17 @@ fn client_select(index: u8) -> Vec<u8> {
 }
 
 /// `GC_CHARACTER_ADD` (1), `GC_CHAR_ADDITIONAL_INFO` (136) and `GC_CHAT` (4) carry a `WORD`
-/// length at bytes 1 and 2 covering the whole record. `GC_ENTITY` (249) is the same shape. The
-/// rest of the two bursts are fixed width, and those widths are the ones the loading phase's own
-/// golden-byte tests pin.
+/// length at bytes 1 and 2 covering the whole record. `GC_ENTITY` (249) and `GC_NPC_POSITION`
+/// (115) are the same shape. The rest of the two bursts are fixed width, and those widths are the
+/// ones the loading phase's own golden-byte tests pin.
 fn dynamic_len(header: u8) -> usize {
     match header {
-        GC_CHARACTER_ADD | GC_CHAR_ADDITIONAL_INFO | GC_CHAT | GC_ENTITY | GC_SYNC_POSITION => {
-            usize::MAX
-        }
+        GC_CHARACTER_ADD
+        | GC_CHAR_ADDITIONAL_INFO
+        | GC_CHAT
+        | GC_ENTITY
+        | GC_SYNC_POSITION
+        | GC_NPC_POSITION => usize::MAX,
         other => panic!("{other} is a fixed-width loading or enter-game record"),
     }
 }
@@ -1260,7 +1263,10 @@ fn dynamic_len(header: u8) -> usize {
 /// fixed-width one. Reading it is how the harness sizes a variable record.
 fn word_sized(record: &[u8]) -> Option<usize> {
     let header = record[0];
-    if matches!(header, GC_CHAT | GC_ENTITY | GC_SYNC_POSITION) {
+    if matches!(
+        header,
+        GC_CHAT | GC_ENTITY | GC_SYNC_POSITION | GC_NPC_POSITION
+    ) {
         Some(usize::from(record[1]) | (usize::from(record[2]) << 8))
     } else {
         None
@@ -1284,6 +1290,11 @@ const GC_QUICKSLOT_DEL: u8 = 29;
 const GC_QUICKSLOT_SWAP: u8 = 30;
 const GC_CHARACTER_ADD: u8 = 1;
 const GC_CHAR_ADDITIONAL_INFO: u8 = 136;
+/// `HEADER_GC_NPC_POSITION`: `TPacketGCNPCPosition`, a `WORD wSize` and a `WORD count`, then
+/// `count` 34-byte `TNPCPosition` entries (`G/packet.h`).
+const GC_NPC_POSITION: u8 = 115;
+/// `TNPCPosition`: `bType`, `name[25]`, `x`, `y`.
+const NPC_POSITION_LEN: usize = 1 + 25 + 4 + 4;
 const GC_AFFECT_ADD: u8 = 126;
 const GC_TIME: u8 = 106;
 const GC_CHANNEL: u8 = 121;
@@ -1331,7 +1342,7 @@ fn game_len(header: u8) -> usize {
         GC_SKILL_LEVEL_NEW => SKILL_LEVEL_LEN,
         GC_CHARACTER_ADD => CHARACTER_ADD_LEN,
         GC_CHAR_ADDITIONAL_INFO => CHAR_ADDITIONAL_INFO_LEN,
-        GC_ENTITY | GC_CHAT => dynamic_len(header),
+        GC_ENTITY | GC_CHAT | GC_NPC_POSITION => dynamic_len(header),
         GC_AFFECT_ADD => AFFECT_ADD_LEN,
         GC_TIME => TIME_LEN,
         GC_CHANNEL => CHANNEL_LEN,
@@ -1357,6 +1368,8 @@ const CG_CHAT: u8 = 0x03;
 const CG_MOVE: u8 = 0x07;
 const CG_SYNC_POSITION: u8 = 0x08;
 const CG_CHARACTER_POSITION: u8 = 0x1c;
+/// `HEADER_CG_ON_CLICK`.
+const CG_ON_CLICK: u8 = 0x1a;
 const GC_MOVE: u8 = 0x03;
 const GC_SYNC_POSITION: u8 = 0x05;
 const GC_CHARACTER_POSITION: u8 = 0x2b;
@@ -1540,13 +1553,58 @@ fn enter_game_records(keyed: &mut Keyed) -> Vec<u8> {
         additional[69], keyed.language,
         "bLanguage from the descriptor: the language the auth login chose"
     );
-    assert_eq!(keyed.read_game()[0], GC_AFFECT_ADD);
+    let (_shown, affect) = read_shown(keyed);
+    assert_eq!(affect[0], GC_AFFECT_ADD);
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, keyed.channel_number]);
     let notice = keyed.read_game();
     assert_eq!(notice[0], GC_CHAT);
     add
+}
+
+/// What `Show` and `SendNPCPosition` send after the own-character pair: every character in view,
+/// each as its `GC_CHARACTER_ADD` and, for a PC or an NPC, its `GC_CHAR_ADDITIONAL_INFO`, and then
+/// the map's NPC list when the map has one.
+struct Shown {
+    /// The insert and summary records, in the order they arrived.
+    records: Vec<Vec<u8>>,
+    /// The `GC_NPC_POSITION` record, when the map lists any NPC.
+    list: Option<Vec<u8>>,
+}
+
+impl Shown {
+    /// The `GC_CHARACTER_ADD` records alone.
+    fn inserts(&self) -> Vec<&[u8]> {
+        self.records
+            .iter()
+            .filter(|record| record[0] == GC_CHARACTER_ADD)
+            .map(Vec::as_slice)
+            .collect()
+    }
+}
+
+/// Read what [`Shown`] describes, answering it with the record that follows it.
+fn read_shown(keyed: &mut Keyed) -> (Shown, Vec<u8>) {
+    let mut records = Vec::new();
+    let mut next = keyed.read_game();
+    while matches!(next[0], GC_CHARACTER_ADD | GC_CHAR_ADDITIONAL_INFO) {
+        records.push(next);
+        next = keyed.read_game();
+    }
+    let list = if next[0] == GC_NPC_POSITION {
+        assert_eq!(
+            word_sized(&next),
+            Some(next.len()),
+            "wSize is the whole record"
+        );
+        let list = next;
+        next = keyed.read_game();
+        Some(list)
+    } else {
+        None
+    };
+    (Shown { records, list }, next)
 }
 
 /// A 25-byte Name field holding `name`, NUL-padded.
@@ -2203,8 +2261,8 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
     assert_eq!(keyed.read_game(), points, "the item load's points record");
     assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
 
-    // `CG_ENTER_GAME`. `Entergame` writes the own-character pair, then the revive-invisible
-    // affect, then `SetPhase(PHASE_GAME)`, then the time, Channel, and event records.
+    // `CG_ENTER_GAME`. `Entergame` writes the own pair, `Show` and `SendNPCPosition` the NPCs,
+    // the revive-invisible affect, `SetPhase(PHASE_GAME)`, and the time, Channel and events.
     keyed.send_record(&client_enter_game());
     let add = keyed.read_game();
     assert_eq!(
@@ -2229,7 +2287,8 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
         additional[69], 1,
         "bLanguage from the descriptor: the language the auth login chose"
     );
-    let affect = keyed.read_game();
+    let (shown, affect) = read_shown(&mut keyed);
+    assert!(shown.list.is_some(), "map 1 lists its NPCs");
     assert_eq!(affect.len(), AFFECT_ADD_LEN);
     assert_eq!(affect[0], GC_AFFECT_ADD);
     assert_eq!(
@@ -2261,6 +2320,182 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
     assert_eq!(chat[9], 1, "bCanFormat");
     assert_eq!(&chat[10..], b"letters_event 0");
     assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+}
+
+/// The VID the Rewrite gives the first NPC it stands up: `world::npc::FIRST_NPC_VID`. Channel 1
+/// is stood up first, and map 1 is its first map.
+const FIRST_NPC_VID: u32 = 0x8000_0000;
+
+/// The name `mob_names.txt` in `country/en` gives vnum 20300, the first NPC of map 1's `npc.txt`.
+const FIRST_NPC_NAME: &[u8] = b"Invatator Lupta de Corp";
+
+/// Where map 1's warp, vnum 10001, is in `npc.txt`, counting from 0.
+const WARP_INDEX: u32 = 37;
+
+/// `CG_ON_CLICK`: the header and the clicked `dwVID`, `TPacketCGOnClick`.
+fn client_click(vid: u32) -> Vec<u8> {
+    let mut record = vec![CG_ON_CLICK];
+    record.extend_from_slice(&vid.to_le_bytes());
+    record
+}
+
+/// `sys.world.regen`, `sys.world.view`, `cg.game.on_click`: map 1's regen files stand its NPCs up
+/// at boot, and entering the map shows every one of them as `EncodeInsertPacket` writes it
+/// (`G/char.cpp:1060-1110`), then lists them for the mini-map (`SendNPCPosition`,
+/// `G/sectree_manager.cpp:1089-1128`). The first is `npc.txt`'s first entry, vnum 20300, at its
+/// point with direction 1, so rotation 0. Its summary carries its `en` name, its map's empire and
+/// `PK_MODE_FREE`, and no level, because only a PC's level is sent. The map's warp is inserted
+/// and listed like an NPC, with no summary.
+///
+/// A click on an NPC, or on a VID nobody holds, answers nothing and keeps the connection
+/// (`G/input_main.cpp:1305-1316`). The quest click and the shop an NPC opens
+/// (`G/char.cpp:6181-6352`) are not ported yet, and the Rewrite logs the click.
+///
+/// Each Channel stands up the maps it hosts, so a character entering map 72 on the Shared
+/// Channel is shown map 72's NPCs and none of Channel 1's.
+#[test]
+fn entering_a_map_shows_its_npcs_and_a_click_keeps_the_connection() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alice, alpha, _items) = load_character(&server, b"alice", 0);
+    alice.send_record(&client_enter_game());
+    let own = alice.read_game();
+    assert_eq!(own[0], GC_CHARACTER_ADD);
+    assert_eq!(
+        &own[1..5],
+        &alpha.id.to_le_bytes(),
+        "the own insert comes first"
+    );
+    assert_eq!(alice.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    let (shown, affect) = read_shown(&mut alice);
+    assert_eq!(affect[0], GC_AFFECT_ADD, "the NPCs come before the affect");
+
+    // `npc.txt`'s 48 characters, numbered in the order they were stood up. 47 are NPCs, each
+    // with its summary. The 38th, vnum 10001, is a warp, and `EncodeInsertPacket` sends a summary
+    // only for a PC or an NPC.
+    assert_eq!(shown.inserts().len(), 48);
+    let mut records = shown.records.iter();
+    for index in 0..48 {
+        let vid = (FIRST_NPC_VID + index).to_le_bytes();
+        let insert = records.next().expect("an insert");
+        assert_eq!(insert[0], GC_CHARACTER_ADD, "insert {index}");
+        assert_eq!(&insert[1..5], &vid, "insert {index}");
+        if index == WARP_INDEX {
+            assert_eq!(insert[21], 3, "bType CHAR_TYPE_WARP");
+            assert_eq!(&insert[22..24], &10_001u16.to_le_bytes());
+            continue;
+        }
+        assert_eq!(insert[21], 1, "bType CHAR_TYPE_NPC");
+        let summary = records.next().expect("a summary");
+        assert_eq!(summary[0], GC_CHAR_ADDITIONAL_INFO, "summary {index}");
+        assert_eq!(&summary[1..5], &vid, "summary {index}");
+    }
+    assert_eq!(records.next(), None, "nobody else is in view");
+
+    let mut insert = vec![GC_CHARACTER_ADD];
+    insert.extend_from_slice(&FIRST_NPC_VID.to_le_bytes());
+    insert.extend_from_slice(&0f32.to_le_bytes());
+    insert.extend_from_slice(&471_800i32.to_le_bytes());
+    insert.extend_from_slice(&951_600i32.to_le_bytes());
+    insert.extend_from_slice(&0i32.to_le_bytes());
+    insert.push(1);
+    insert.extend_from_slice(&20_300u16.to_le_bytes());
+    insert.extend_from_slice(&[100, 100, 0]);
+    insert.extend_from_slice(&[0; 8]);
+    assert_eq!(shown.records[0], insert, "npc.txt's first NPC");
+
+    let mut summary = vec![0; CHAR_ADDITIONAL_INFO_LEN];
+    summary[0] = GC_CHAR_ADDITIONAL_INFO;
+    summary[1..5].copy_from_slice(&FIRST_NPC_VID.to_le_bytes());
+    summary[5..30].copy_from_slice(&name_field(FIRST_NPC_NAME));
+    summary[42] = 1;
+    summary[57] = 2;
+    assert_eq!(
+        shown.records[1], summary,
+        "its en name, map 1's empire, PK_MODE_FREE and nothing else"
+    );
+
+    let list = shown.list.expect("map 1 lists its NPCs");
+    assert_eq!(list.len(), 5 + 48 * NPC_POSITION_LEN);
+    assert_eq!(&list[1..3], &1637u16.to_le_bytes(), "wSize");
+    assert_eq!(&list[3..5], &48u16.to_le_bytes(), "count");
+    let mut first = vec![1];
+    first.extend_from_slice(&name_field(FIRST_NPC_NAME));
+    first.extend_from_slice(&62_200i32.to_le_bytes());
+    first.extend_from_slice(&55_600i32.to_le_bytes());
+    assert_eq!(
+        &list[5..5 + NPC_POSITION_LEN],
+        first.as_slice(),
+        "the point less map 1's base, 409600 and 896000"
+    );
+    let entries: Vec<&[u8]> = list[5..].chunks(NPC_POSITION_LEN).collect();
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry[1..26] == name_field(b"Fierar")),
+        "the smith is on the mini-map"
+    );
+    let warp = usize::try_from(WARP_INDEX).expect("small");
+    assert_eq!(entries[warp][0], 3, "the warp is listed as a warp");
+
+    assert_eq!(alice.read_game(), [GC_PHASE, PHASE_GAME]);
+    assert_eq!(alice.read_game()[0], GC_TIME);
+    assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
+    assert_eq!(alice.read_game()[0], GC_CHAT);
+    assert_eq!(alice.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+
+    alice.send_record(&client_click(FIRST_NPC_VID));
+    alice.quiet("a click on an NPC");
+    alice.send_record(&client_click(FIRST_NPC_VID - 1));
+    alice.quiet("a click on a VID nobody holds");
+    alice.send_record(&client_click(alpha.id));
+    alice.quiet("a click on oneself");
+    // The connection still answers: Alpha is level 154, so a shout reaches Alpha.
+    alice.send_record(&client_chat(prodomo::chat::CHAT_SHOUT, b"hello"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(prodomo::chat::CHAT_SHOUT, 1, b"|Len|l Alpha : hello")
+    );
+
+    map_72_is_shown_on_the_shared_channel(&server, &database);
+}
+
+/// Charlie enters map 72 on the Shared Channel and is shown map 72's `npc.txt` alone.
+fn map_72_is_shown_on_the_shared_channel(server: &Server, database: &ScratchDatabase) {
+    create_account(server, "carol");
+    sql(
+        database,
+        "UPDATE account SET empire = 1 WHERE login = 'carol'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         10000, 1210000 FROM account WHERE login = 'carol'",
+    );
+    let (mut carol, _charlie, _quickslots, _items) =
+        load_with_quickslots_on(server, 99, b"carol", 0, ENGLISH);
+    carol.send_record(&client_enter_game());
+    assert_eq!(carol.read_game()[0], GC_CHARACTER_ADD);
+    assert_eq!(carol.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    let (shown, affect) = read_shown(&mut carol);
+    assert_eq!(affect[0], GC_AFFECT_ADD);
+    let races: Vec<u16> = shown
+        .inserts()
+        .iter()
+        .map(|insert| u16::from_le_bytes([insert[22], insert[23]]))
+        .collect();
+    assert_eq!(
+        races,
+        [10_080, 10_078, 30_123, 30_124, 30_124, 30_125, 30_126, 30_127, 30_128],
+        "map 72's npc.txt on the Shared Channel, two warps and seven NPCs"
+    );
+    assert_eq!(shown.records.len(), 9 + 7, "a summary for each NPC alone");
+    let list = shown.list.expect("map 72 lists its NPCs");
+    assert_eq!(&list[3..5], &9u16.to_le_bytes(), "count");
 }
 
 /// Point slot `slot` of a `GC_CHARACTER_POINTS` record: the slots start one byte after the
@@ -4870,7 +5105,8 @@ fn enter_game_with_parts(keyed: &mut Keyed) -> (Vec<u8>, [u16; 6]) {
         let at = 30 + 2 * index;
         u16::from_le_bytes([additional[at], additional[at + 1]])
     });
-    assert_eq!(keyed.read_game()[0], GC_AFFECT_ADD);
+    let (_shown, affect) = read_shown(keyed);
+    assert_eq!(affect[0], GC_AFFECT_ADD);
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);

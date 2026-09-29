@@ -14,6 +14,8 @@ pub mod event;
 /// Map identity and explicit sector topology.
 pub mod map;
 
+pub mod npc;
+
 /// World coordinate conversion and packed sector keys.
 pub mod sector;
 

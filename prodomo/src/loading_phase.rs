@@ -83,9 +83,12 @@
 //!   Rewrite does not reproduce the stale `z` that fallback leaves behind, because the Rewrite
 //!   has no `z` yet: the world owns height.
 
+use std::sync::Arc;
+
 use common::levels;
 use common::point_slot as point;
 use db::players::{Character, PLAYER_SLOTS};
+use gamedata::mob_proto::{CHAR_TYPE_NPC, CHAR_TYPE_PC};
 use protocol::gc_actors::{
     GcCharacterAdd, GcCharacterAdditionalInfo, GcMainCharacter2Empire, NAME_LEN,
 };
@@ -101,6 +104,7 @@ use protocol::gc_npc_position::{GcNpcPosition, GcNpcPositionEntry};
 use protocol::gc_small::GcHeaderAndByte;
 use protocol::gc_vid::GcHeaderAndDword;
 use world::character::{PointRecord, Points, PointsRow};
+use world::npc::{MapNpcs, Npc, NpcPosition};
 
 /// The legacy `PHASE_LOADING` byte (`EPhase`, `G/packet.h:796`).
 pub const PHASE_LOADING: u8 = 4;
@@ -138,8 +142,9 @@ pub const IDLE_ANGLE_BITS: u32 = 0;
 /// character's points yet.
 pub const BASE_SPEED: u8 = 100;
 
-/// `CHARACTER_BIRTH` is 1, the only `bType` a PC ever gets.
-pub const BIRTH: u8 = 1;
+/// `PK_MODE_FREE` (`EPKModes`, `G/char.h:348-356`), the mode `CHARACTER::SetProto` gives every
+/// mob (`G/char.cpp:2474`).
+pub const PK_MODE_FREE: u8 = 2;
 
 /// What the descriptor should do with a `CG_CHARACTER_SELECT`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,7 +290,7 @@ impl VisibleCharacter {
             self.x,
             self.y,
             0,
-            BIRTH,
+            CHAR_TYPE_PC,
             u16::from(self.job),
             BASE_SPEED,
             BASE_SPEED,
@@ -319,14 +324,77 @@ impl VisibleCharacter {
 
 /// The characters and NPCs the world can see from a position.
 ///
-/// Both lists are empty until the world is ported. They are parameters rather than constants
-/// so the record order can be pinned now and filled in later without reshaping this module.
+/// The characters are empty until the world holds another character's points. The NPCs are the
+/// map's: the Rewrite's view is the whole map, where legacy's is the sectrees around the
+/// character (a Divergence), so every NPC on the map is in view.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Neighbourhood {
     /// The other characters in view.
     pub characters: Vec<VisibleCharacter>,
-    /// The NPCs on the map.
-    pub npcs: Vec<GcNpcPositionEntry>,
+    /// The map's NPCs and its mini-map list.
+    pub npcs: Arc<MapNpcs>,
+}
+
+/// The `GC_CHARACTER_ADD` for an NPC standing where it spawned
+/// (`CHARACTER::EncodeInsertPacket`, `G/char.cpp:1060-1110`).
+///
+/// The type is the proto's, the angle its rotation, the z its spawn's, and the race the vnum's
+/// low 16 bits. The speeds are its limited points. It has no affect, and no state flag: a regen
+/// NPC spawns without the spawn motion, and `Show` clears that bit once the record is written.
+#[must_use]
+pub fn npc_add(npc: &Npc) -> GcCharacterAdd {
+    GcCharacterAdd::new(
+        npc.vid,
+        f32::from(npc.rotation),
+        npc.x,
+        npc.y,
+        npc.z,
+        npc.char_type,
+        npc.race,
+        npc.moving_speed,
+        npc.attack_speed,
+        0,
+        [0, 0],
+    )
+}
+
+/// The `GC_CHAR_ADDITIONAL_INFO` for an NPC, which legacy sends only for `CHAR_TYPE_NPC`: a warp
+/// or a goto gets `None` (`G/char.cpp:1111`).
+///
+/// The Name is `GetName()`, the `LOCALE_YMIR` mob name of the race. `ENABLE_SHOWNPCLEVEL` is not
+/// defined, so the level is 0, and an NPC has no parts, guild, mount, alignment or language.
+#[must_use]
+pub fn npc_additional(npc: &Npc) -> Option<GcCharacterAdditionalInfo> {
+    (npc.char_type == CHAR_TYPE_NPC).then(|| {
+        GcCharacterAdditionalInfo::new(
+            npc.vid,
+            name_bytes_field(&npc.name),
+            [0; ENTITY_PART_NUM],
+            npc.empire,
+            0,
+            0,
+            0,
+            0,
+            PK_MODE_FREE,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    })
+}
+
+/// A mini-map entry as `SendNPCPosition` writes it (`G/sectree_manager.cpp:1110-1117`).
+#[must_use]
+pub fn npc_position(position: &NpcPosition) -> GcNpcPositionEntry {
+    GcNpcPositionEntry::new(
+        position.char_type,
+        name_bytes_field(&position.name),
+        position.x,
+        position.y,
+    )
 }
 
 /// The points engine of a loaded character, as the points half of `CHARACTER::SetPlayerProto`
@@ -453,9 +521,17 @@ pub fn skill_levels() -> [GcSkill; GC_SKILL_SLOT_COUNT] {
 /// one is truncated at 24 with the terminator left in place rather than filling all 25 bytes.
 #[must_use]
 pub fn name_field(name: &str) -> [u8; NAME_LEN] {
+    name_bytes_field(name.as_bytes())
+}
+
+/// A Name's bytes in the 25-byte wire field, as `strlcpy` copies them: up to the first NUL, at
+/// most 24 bytes, and always terminated.
+#[must_use]
+pub fn name_bytes_field(name: &[u8]) -> [u8; NAME_LEN] {
     let mut field = [0u8; NAME_LEN];
-    let kept = usize::min(name.len(), NAME_LEN - 1);
-    field[..kept].copy_from_slice(&name.as_bytes()[..kept]);
+    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    let kept = usize::min(end, NAME_LEN - 1);
+    field[..kept].copy_from_slice(&name[..kept]);
     field
 }
 
@@ -477,6 +553,10 @@ pub fn main_character(character: &Character, vid: u32) -> GcMainCharacter2Empire
 
 /// The `GC_CHARACTER_ADD` for the character that is entering, standing still.
 ///
+/// `bType` is `GetCharType()` (`G/char.cpp:1077`), which `SetPlayerProto` makes `CHAR_TYPE_PC`
+/// for every PC (`G/char.cpp:2240`). Until ledger 223 the Rewrite sent 1, which is
+/// `CHAR_TYPE_NPC`.
+///
 /// The two speeds are `GetLimitPoint(POINT_MOV_SPEED)` and `GetLimitPoint(POINT_ATT_SPEED)`
 /// (`G/char.cpp:1089-1091`), which the limit holds to 0..200 and 0..170, so each fits the
 /// record's byte.
@@ -488,7 +568,7 @@ pub fn character_add(character: &Character, state: &Points, vid: u32) -> GcChara
         character.x,
         character.y,
         0,
-        BIRTH,
+        CHAR_TYPE_PC,
         u16::from(character.job),
         speed_byte(state.limit_point(point::POINT_MOV_SPEED)),
         speed_byte(state.limit_point(point::POINT_ATT_SPEED)),
@@ -698,13 +778,18 @@ pub fn enter_game_burst(
             "a visible character summary",
         ));
     }
+    // The NPCs arrive through the same view insert, in VID order after the characters.
+    for npc in &view.npcs.npcs {
+        before.push(encoded(&mut npc_add(npc), "an NPC insert"));
+        if let Some(mut additional) = npc_additional(npc) {
+            before.push(encoded(&mut additional, "an NPC summary"));
+        }
+    }
     // `SECTREE_MANAGER::SendNPCPosition` returns without writing when the map has no NPC, so
-    // an empty list sends nothing at all (`G/sectree_manager.cpp:1866-1875`).
-    if !view.npcs.is_empty() {
-        before.push(encoded(
-            &mut GcNpcPosition::new(view.npcs.clone()),
-            "the NPC list",
-        ));
+    // an empty list sends nothing at all (`G/sectree_manager.cpp:1089-1098`).
+    if !view.npcs.positions.is_empty() {
+        let entries = view.npcs.positions.iter().map(npc_position).collect();
+        before.push(encoded(&mut GcNpcPosition::new(entries), "the NPC list"));
     }
     // `ch->ReviveInvisible(5)` adds an affect, and `AddAffect` sends `GC_AFFECT_ADD` for
     // every affect it takes on a PC (`G/char.cpp:7490-7493`, `G/char_affect.cpp:747-750`).
@@ -852,6 +937,7 @@ impl RecordFrame for GcChat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gamedata::mob_proto::{CHAR_TYPE_GOTO, CHAR_TYPE_MONSTER, CHAR_TYPE_STONE, CHAR_TYPE_WARP};
 
     /// A character with values chosen so that every field's little-endian bytes are distinct:
     /// no field is byte-symmetric, so an endianness or byte-order slip cannot pass.
@@ -918,7 +1004,7 @@ mod tests {
     fn with_neighbour() -> Neighbourhood {
         Neighbourhood {
             characters: vec![neighbour()],
-            npcs: Vec::new(),
+            npcs: Arc::default(),
         }
     }
 
@@ -1372,7 +1458,10 @@ mod tests {
         assert_eq!(&bytes[9..13], &hero.x.to_le_bytes(), "x");
         assert_eq!(&bytes[13..17], &hero.y.to_le_bytes(), "y");
         assert_eq!(&bytes[17..21], &[0u8; 4], "z");
-        assert_eq!(bytes[21], BIRTH, "bType is CHARACTER_BIRTH");
+        assert_eq!(
+            bytes[21], 6,
+            "bType is GetCharType(), CHAR_TYPE_PC for every PC"
+        );
         assert_eq!(&bytes[22..24], &5u16.to_le_bytes(), "wRaceNum");
         assert_eq!(bytes[24], BASE_SPEED, "bMovingSpeed");
         assert_eq!(bytes[25], BASE_SPEED, "bAttackSpeed");
@@ -1631,6 +1720,95 @@ mod tests {
         );
     }
 
+    /// An NPC whose every field differs, so that no field can stand in for another.
+    fn smith() -> Npc {
+        Npc {
+            vid: 0x8000_0007,
+            vnum: 0x1_4e30,
+            race: 0x4e30,
+            char_type: CHAR_TYPE_NPC,
+            x: 12_345,
+            y: 23_456,
+            z: 7,
+            rotation: 135,
+            empire: 3,
+            moving_speed: 120,
+            attack_speed: 90,
+            name: b"Fierar".to_vec(),
+        }
+    }
+
+    /// An NPC's insert carries each of its own fields, and nothing it does not have.
+    #[test]
+    fn an_npc_insert_carries_each_of_its_fields() {
+        let add = npc_add(&smith());
+        assert_eq!(add.dw_vid, 0x8000_0007);
+        assert_eq!(
+            add.angle.to_bits(),
+            135f32.to_bits(),
+            "the angle is its rotation"
+        );
+        assert_eq!((add.x, add.y, add.z), (12_345, 23_456, 7));
+        assert_eq!((add.b_type, add.w_race_num), (CHAR_TYPE_NPC, 0x4e30));
+        assert_eq!((add.b_moving_speed, add.b_attack_speed), (120, 90));
+        assert_eq!((add.b_state_flag, add.dw_affect_flag), (0, [0, 0]));
+        let warp = Npc {
+            char_type: CHAR_TYPE_WARP,
+            ..smith()
+        };
+        assert_eq!(
+            npc_add(&warp).b_type,
+            CHAR_TYPE_WARP,
+            "the type is the proto's"
+        );
+    }
+
+    /// An NPC's summary is its VID, name, empire and `PK_MODE_FREE`; a warp or goto has none.
+    #[test]
+    fn only_an_npc_of_type_npc_has_a_summary() {
+        let summary = npc_additional(&smith()).unwrap();
+        assert_eq!(summary.dw_vid, 0x8000_0007);
+        assert_eq!(&summary.name[..7], b"Fierar\0");
+        assert_eq!((summary.b_empire, summary.b_pk_mode), (3, PK_MODE_FREE));
+        assert_eq!((summary.dw_level, summary.b_language), (0, 0));
+        for char_type in [
+            CHAR_TYPE_WARP,
+            CHAR_TYPE_GOTO,
+            CHAR_TYPE_MONSTER,
+            CHAR_TYPE_STONE,
+        ] {
+            let other = Npc {
+                char_type,
+                ..smith()
+            };
+            assert!(npc_additional(&other).is_none(), "type {char_type}");
+        }
+    }
+
+    /// A mini-map entry carries its own type, name and position.
+    #[test]
+    fn a_mini_map_entry_carries_its_own_fields() {
+        let position = NpcPosition {
+            char_type: CHAR_TYPE_GOTO,
+            name: b"Poarta".to_vec(),
+            x: 62_200,
+            y: 55_600,
+        };
+        let entry = npc_position(&position);
+        assert_eq!(entry.npc_type, CHAR_TYPE_GOTO);
+        assert_eq!(&entry.name[..7], b"Poarta\0");
+        assert_eq!((entry.x, entry.y), (62_200, 55_600));
+    }
+
+    /// A name is cut at its first NUL and at 24 bytes, and the field always ends with a NUL.
+    #[test]
+    fn a_name_field_is_cut_as_strlcpy_cuts_it() {
+        assert_eq!(&name_bytes_field(b"Ab\0cd")[..4], b"Ab\0\0");
+        let long = name_bytes_field(&[b'x'; 30]);
+        assert_eq!(long[..24], [b'x'; 24]);
+        assert_eq!(long[24], 0, "the 25th byte is the terminator");
+    }
+
     /// A character already in view adds two records, its insert and its summary, after the
     /// entering character's own pair.
     #[test]
@@ -1640,6 +1818,10 @@ mod tests {
             headers(&burst.before_phase),
             vec![1, 136, 1, 136, 126],
             "the neighbour's pair sits between the own pair and the affect",
+        );
+        assert_eq!(
+            burst.before_phase[2][21], CHAR_TYPE_PC,
+            "every PC's insert carries CHAR_TYPE_PC, the neighbour's too"
         );
         let summary = &burst.before_phase[3];
         assert_eq!(

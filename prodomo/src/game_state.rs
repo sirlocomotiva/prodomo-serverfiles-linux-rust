@@ -17,8 +17,9 @@
 //!
 //! # What is deliberately absent
 //!
-//! There is no Channel map set, no script VM, and no NPC. This holds the pieces the
-//! item path needs and nothing more, because each of the rest is a separate unit
+//! There is no Channel map set and no script VM. The NPCs the regen files stand up at boot
+//! are here, but they never move, respawn or answer a click. This holds the pieces the item
+//! path and the map view need and nothing more, because each of the rest is a separate unit
 //! with its own decision to record. [`PulseProcessor::process_pulse`](crate::game_loop::PulseProcessor::process_pulse) therefore
 //! steps nothing yet; it counts, and the count is what proves the thread is running
 //! this value rather than an empty closure.
@@ -31,12 +32,15 @@ use std::sync::Arc;
 use common::item_slots::usable_inventory_cells;
 use gamedata::item_proto::ItemProtos;
 use gamedata::locale_string::LocaleStrings;
+use gamedata::map_atlas::MapRegion;
+use gamedata::regen::RegenEntry;
 use world::character::{
     drop_item, is_recovering, move_item, pickup_item, update_recovery, use_item, CharacterManager,
     CharacterManagerError, DropAt, Gear, GroundItem, GroundRecord, MoveRefused, MoveRequest,
     MoveRules, Pcg32, Picker, Rejected,
 };
 use world::item::{ItemIdRange, ItemIds};
+use world::npc::{MapNpcs, NpcSpawner, NpcVidsExhausted};
 
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
@@ -322,7 +326,8 @@ pub struct GameState {
     outboxes: HashMap<common::vid::Vid, ClientOutbox>,
     /// `g_bItemCountLimit`: the largest stack a merge may build.
     item_count_limit: u16,
-    /// The draw a sash rolls its absorption from.
+    /// The draw a sash rolls its absorption from, and the draws the boot spawn places and turns
+    /// the NPCs with.
     ///
     /// Legacy's `number()` draws from the process-wide `thecore_random`, which `srandom`
     /// seeds with the boot time; this one is seeded from the standard library's per-process
@@ -346,6 +351,11 @@ pub struct GameState {
     /// The characters whose potion recovery runs, with the pulse their event fires on next
     /// (`m_pkAffectEvent`).
     recovering: HashMap<common::vid::Vid, u64>,
+    /// The NPCs standing on each map of each Channel, keyed by (Channel, map index).
+    ///
+    /// Shared with the descriptor that shows them, because they never change once boot has
+    /// stood them up: nothing moves, respawns or removes an NPC yet.
+    npcs: BTreeMap<(u8, i32), Arc<MapNpcs>>,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -405,6 +415,7 @@ impl GameState {
             drop_lifetime: drop_lifetime_pulses(DEFAULT_DROP_LIFETIME_SECS),
             clients: None,
             recovering: HashMap::new(),
+            npcs: BTreeMap::new(),
         }
     }
 
@@ -439,6 +450,33 @@ impl GameState {
     pub const fn with_item_count_limit(mut self, limit: u16) -> Self {
         self.item_count_limit = limit;
         self
+    }
+
+    /// Stand up the NPCs one map's regen entries name, on one Channel, drawing from this
+    /// state's own dice as legacy's boot draws from `thecore_random`.
+    ///
+    /// Called once per map before the thread starts. A second call for the same map replaces
+    /// its NPCs; their VIDs are not reused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NpcVidsExhausted`] when the spawner has no VID left to give.
+    pub fn spawn_npcs(
+        &mut self,
+        spawner: &mut NpcSpawner<'_>,
+        channel: u8,
+        region: &MapRegion,
+        entries: &[RegenEntry],
+    ) -> Result<(), NpcVidsExhausted> {
+        let npcs = spawner.spawn_map(region, entries, &mut self.dice)?;
+        self.npcs.insert((channel, region.index), Arc::new(npcs));
+        Ok(())
+    }
+
+    /// The NPCs standing on one map of one Channel, or none for a map boot stood none up on.
+    #[must_use]
+    pub fn npcs_on(&self, channel: u8, map: i32) -> Arc<MapNpcs> {
+        self.npcs.get(&(channel, map)).cloned().unwrap_or_default()
     }
 
     /// A handle to the counters, which stays readable after the state is moved into
@@ -627,7 +665,8 @@ impl GameState {
             } => answer_item_step(vid, reply, self.use_item(vid, at, mover)),
             command @ (GameCommand::DropItem { .. }
             | GameCommand::PickupItem { .. }
-            | GameCommand::GroundItemsOn { .. }) => self.apply_ground(command),
+            | GameCommand::GroundItemsOn { .. }
+            | GameCommand::NpcsOn { .. }) => self.apply_ground(command),
             GameCommand::Stop => {
                 // The loop handles `Stop` itself, before a command ever reaches a
                 // processor. Reaching here would mean the loop and the state
@@ -958,8 +997,8 @@ impl GameState {
         Ok(moved)
     }
 
-    /// Apply one of the ground commands: a drop, a pick-up, or the list a client entering a
-    /// map is shown.
+    /// Apply one of the ground commands: a drop, a pick-up, or the lists a client entering a
+    /// map is shown (the items lying there and the NPCs standing there).
     fn apply_ground(&mut self, command: GameCommand) {
         match command {
             GameCommand::DropItem {
@@ -984,6 +1023,15 @@ impl GameState {
             } => {
                 if reply.send(self.ground_items_on(channel, map)).is_err() {
                     debug!(channel, map, "nobody was left to hear the ground items");
+                }
+            }
+            GameCommand::NpcsOn {
+                channel,
+                map,
+                reply,
+            } => {
+                if reply.send(self.npcs_on(channel, map)).is_err() {
+                    debug!(channel, map, "nobody was left to hear the NPCs");
                 }
             }
             _ => debug_assert!(false, "only ground commands reach apply_ground"),
@@ -2784,5 +2832,83 @@ mod tests {
         assert_eq!(answer.blocking_recv().unwrap(), Ok(()));
         let swapped = slot_answer(&mut state, QuickslotStep::Swap { slot: 6, with: 0 });
         assert_eq!(swapped.quickslots.get(0), Some(skill));
+    }
+
+    fn an_npc_map(index: i32) -> MapRegion {
+        MapRegion {
+            index,
+            name: b"test".to_vec(),
+            sx: 10_000,
+            sy: 20_000,
+            ex: 12_000,
+            ey: 22_000,
+            spawn: (0, 0),
+            empire_spawns: None,
+        }
+    }
+
+    fn a_smith_at(x: i32, y: i32) -> RegenEntry {
+        RegenEntry {
+            kind: gamedata::regen::RegenKind::Mob,
+            sx: x,
+            sy: y,
+            ex: x,
+            ey: y,
+            z_section: 0,
+            direction: 1,
+            time: 60,
+            max_count: 1,
+            vnum: 20_016,
+        }
+    }
+
+    /// Boot stands the NPCs up per (Channel, map), and `NpcsOn` shares the same table.
+    #[test]
+    fn the_npcs_boot_stood_up_are_shared_per_channel_and_map() {
+        use gamedata::mob_locale_names::MobLocaleNames;
+        use gamedata::mob_proto::{MobProto, MobProtos, CHAR_TYPE_NPC};
+        use gamedata::records::MobTableRecord;
+        use world::npc::NpcVids;
+
+        let protos = MobProtos::from_rows(vec![MobProto {
+            line: 2,
+            table: MobTableRecord {
+                vnum: 20_016,
+                mob_type: CHAR_TYPE_NPC,
+                ..MobTableRecord::default()
+            },
+        }]);
+        let names = MobLocaleNames::parse(b"VNUM\tNAME\n20016\tSmith\n").unwrap();
+        let mut spawner = NpcSpawner::new(&protos, &names, NpcVids::default());
+        let mut state = a_state();
+        let entries = [a_smith_at(10_100, 20_100), a_smith_at(10_200, 20_200)];
+        state
+            .spawn_npcs(&mut spawner, 2, &an_npc_map(1), &entries)
+            .expect("VIDs to spare");
+        state
+            .spawn_npcs(&mut spawner, 2, &an_npc_map(41), &entries[..1])
+            .expect("VIDs to spare");
+
+        let first = state.npcs_on(2, 1);
+        assert_eq!(first.npcs.len(), 2);
+        assert_eq!(first.npcs[0].name, b"Smith");
+        assert_eq!(first.npcs[0].empire, 1, "map 1 is Shinsoo's");
+        assert_eq!(state.npcs_on(2, 41).npcs.len(), 1);
+        assert_eq!(state.npcs_on(2, 41).npcs[0].empire, 3, "map 41 is Jinno's");
+        assert!(state.npcs_on(1, 1).npcs.is_empty(), "another Channel");
+        assert!(state.npcs_on(2, 2).npcs.is_empty(), "a map with no regen");
+        assert_eq!(spawner.report().spawned, 3);
+
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        state.apply(GameCommand::NpcsOn {
+            channel: 2,
+            map: 1,
+            reply,
+        });
+        let shared = answer.blocking_recv().expect("the game thread answered");
+        assert!(
+            Arc::ptr_eq(&shared, &first),
+            "the table is shared, not copied"
+        );
     }
 }

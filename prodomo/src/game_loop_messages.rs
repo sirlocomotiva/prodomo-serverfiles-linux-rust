@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 use protocol::item_pos::ItemPos;
 use world::character::{Points, Quickslots};
 use world::item::Item;
+use world::npc::MapNpcs;
 
 use crate::client_registry::ClientOutbox;
 use crate::game_state::{EnterWorldRefused, Released, RevokeRefused};
@@ -384,6 +385,16 @@ pub enum GameCommand {
         map: i32,
         /// Where the game thread sends the records.
         reply: oneshot::Sender<Vec<Vec<u8>>>,
+    },
+    /// Shares the NPCs the regen files stood up on one map of one Channel, with the map's
+    /// mini-map list.
+    NpcsOn {
+        /// The Channel.
+        channel: u8,
+        /// The map index.
+        map: i32,
+        /// Where the game thread sends the map's NPCs.
+        reply: oneshot::Sender<Arc<MapNpcs>>,
     },
     /// Requests terminal loop shutdown.
     Stop,
@@ -1094,6 +1105,23 @@ impl GameLoopController {
     ) -> Result<Vec<Vec<u8>>, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::GroundItemsOn {
+            channel,
+            map,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world for the NPCs standing on one map, which a client entering it is shown.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn npcs_on(&self, channel: u8, map: i32) -> Result<Arc<MapNpcs>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::NpcsOn {
             channel,
             map,
             reply,

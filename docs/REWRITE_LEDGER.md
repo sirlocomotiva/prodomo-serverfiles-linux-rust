@@ -23073,3 +23073,294 @@ After the run, no `prodomo_%` database remains, and no `*.core` file is outside 
 The workspace has 211 Rust files and 149,574 lines, outside `server/` and `.scratch/`. No
 crate was fetched, and `Cargo.lock` is unchanged. This section claims no width, and the i686
 probe was not run.
+
+## 223. The NPCs: the mob proto, the regen files and `SendNPCPosition`
+
+A map's NPCs now stand on it. In legacy, `SECTREE_MANAGER::Build`
+(`G/sectree_manager.cpp:691-775`) reads each hosted map's `regen.txt`, `npc.txt`, `boss.txt`
+and `stone.txt` with `regen_load` (`G/regen.cpp:601-720`). Every mob entry whose proto is an
+NPC, warp or goto is listed for the mini-map, and every entry with a regen time spawns at once
+through `regen_spawn` (`:325-383`). When a character enters the game, `Entergame`
+(`G/input_login.cpp:562`) calls `Show` (`:590`), whose view insert writes each character in
+view with `EncodeInsertPacket` (`G/char.cpp:1060-1110`), then `SendNPCPosition` (`:592`,
+`G/sectree_manager.cpp:1089-1128`), then `ReviveInvisible` (`:593`). Until this section the
+Rewrite read no mob proto and no regen file, and its enter-game burst had no NPC in it.
+
+This section also corrects a Rewrite defect from ledger 187: the own insert's `bType` was 1,
+which is `CHAR_TYPE_NPC` (223.3).
+
+### 223.1 What landed
+
+- **The mob proto.** `gamedata::mob_proto` reads `proto/mob_proto.txt` and
+  `proto/mob_names.txt` the way the legacy DB server does
+  (`D/ClientManagerBoot.cpp:220-297`, `D/ProtoReader.cpp:589-854`). Every one of the 71 columns
+  legacy reads goes through the `str_to_number` overload of its field's width, `RANK`, `TYPE`
+  and `BATTLE_TYPE` resolve through their tables with 255 for a name they do not hold, `SIZE`
+  answers 0 for one, and the three flag columns are split as `StringSplit` splits them. The
+  locale name is the proto folder's `mob_names.txt`, the last row for a vnum winning, or the
+  row's own name. The owner's file loads whole: 1,725 data rows, with the twelve `PET` rows at
+  type 255 as legacy loads them. `MobProtos::get` answers with the first row of a vnum in file
+  order, and `serve` logs each of the 36 repeated vnums at start-up.
+- **The `LOCALE_YMIR` mob names.** `gamedata::mob_locale_names` reads
+  `country/en/mob_names.txt`, the file `LocaleService_LoadMobNameFile` loads into the
+  `LOCALE_YMIR` slot (`G/locale_service.cpp:501-523`). An NPC has no descriptor, so
+  `CHARACTER::GetName` (`G/char.cpp:797-800`) answers its name from that slot. The first row for
+  a vnum wins (`std::map::insert`, `G/locale.cpp:188-206`), where the proto folder's file keeps
+  the last; the owner's `en` file repeats nine vnums, each with two names. A vnum with no row is
+  `NoName`. The bytes are kept as the file has them: vnum 101 is `C\xe2ine s\xe3lbatic`.
+- **The regen files.** `gamedata::regen` reads a hosted map's four files in legacy's order as
+  `get_word` and `read_line` read them (`G/regen.cpp:27-247`): the separators, the quoted word,
+  the `//` comment, the eleven fields, the exception entry that stops after its z section, the
+  regen time's `h`, `m` and `s` runs, and the box built from the centre and half widths in
+  centimetres. `regen_load`'s placement adds the map's base and orders the bounds. A missing
+  file adds nothing, as legacy skips it. The owner's map 1 has 1,013 + 50 + 23 + 32 entries.
+- **The spawner.** `world::npc::NpcSpawner` is `regen_load`'s loop over one map. It lists every
+  mob entry whose proto is an NPC, warp or goto at its box's centre less the map's base, and it
+  runs `regen_spawn` for every entry with a regen time. An entry at one point spawns there
+  `max_count` times with the entry's direction, or `number(0, 7) * 45` for direction 0. A mob
+  entry with a box tries 16 points of `number(sx, ex)`, `number(sy, ey)`. `SpawnMob` then
+  answers nothing for a vnum with no proto or a point outside the map, and draws
+  `number(0, 360)` for a rotation the caller did not give. An NPC with no empire takes its
+  map's (`GetEmpireFromMapIndex`, `G/sectree_manager.cpp:1135-1166`), and its speeds are
+  limited to 0..250 (`GetLimitPoint`). The draws are legacy's, in legacy's order, from the game
+  thread's own dice (the Pcg32 Divergence the sash roll already records).
+  Monsters, stones, groups, anywhere entries and the ore veins of `mining::info` are counted in
+  `SpawnReport` and not spawned. On the owner's map 1 that is 48 NPCs spawned and 1,079
+  characters counted.
+- **The game thread.** `GameState::spawn_npcs` stands one map's NPCs up before the thread
+  starts, keyed by Channel and map index, and `GameCommand::NpcsOn` shares a map's table with a
+  descriptor. `serve` loads the proto, the names and the regen files of every map each Channel
+  hosts with the rest of the Game data, and `stand_up_npcs` logs what was spawned and counted.
+- **The enter-game burst.** `main.rs`'s `entering_burst` asks the world for the map's NPCs.
+  `enter_game_burst` writes each one after the own pair: `npc_add`'s `GC_CHARACTER_ADD`, then,
+  for a `CHAR_TYPE_NPC` only, `npc_additional`'s `GC_CHAR_ADDITIONAL_INFO`
+  (`G/char.cpp:1111`). The map's `GC_NPC_POSITION` follows, then the revive-invisible affect.
+  The loading burst's view stays empty, as legacy's `Show` runs only at `Entergame`.
+- **The click.** `CG_ON_CLICK` (26) is decoded in the game phase, logged, and answered with
+  nothing, and the connection is kept (223.4).
+
+### 223.2 What the client sees
+
+- After its own insert and summary, a client entering map 1 is sent 48 inserts, VIDs
+  `0x8000_0000` to `0x8000_002F` in `npc.txt`'s order. The first is vnum 20300 at
+  (471800, 951600) facing 0 degrees: `bType` 1, race 20300, both speeds 100, no affect and no
+  state flag.
+- Each of the 47 NPCs is followed by its summary: its VID, its `LOCALE_YMIR` name
+  (`Invatator Lupta de Corp` first), its empire (1 on map 1), `PK_MODE_FREE` (2,
+  `G/char.cpp:2474`), language 0 and level 0, since `ENABLE_SHOWNPCLEVEL` is not defined. The
+  warp at index 37 (vnum 10001) is `CHAR_TYPE_WARP`, and legacy sends it no summary.
+- `GC_NPC_POSITION` then lists the same 48 in file order: `wSize` 1637, count 48, and 34 bytes
+  each (type, the proto folder's locale name, x and y from the map's base). The first entry is
+  type 1 at (62200, 55600), and the warp's entry has type 3.
+- A map that lists no NPC sends no `GC_NPC_POSITION`, as legacy returns before writing.
+- A click on an NPC, on no one, or on the clicker is answered with nothing, and the client stays
+  connected.
+- The client's own insert carries `bType` 6 (223.3).
+
+### 223.3 A Rewrite defect: the own insert's `bType`
+
+Ledger 187 sent `bType` 1 in the entering character's `GC_CHARACTER_ADD`, as `BIRTH`, with the
+note that `CHARACTER_BIRTH` is the only type a PC gets. `EncodeInsertPacket` writes
+`GetCharType()` there (`G/char.cpp:1077`), and `SetPlayerProto` makes every PC
+`CHAR_TYPE_PC`, 6 (`G/char.cpp:2240`). 1 is `CHAR_TYPE_NPC`, so a client drew its own character
+with an NPC's type. `BIRTH` is gone. `character_add` and `VisibleCharacter::add` send
+`CHAR_TYPE_PC`, and every scenario's enter-game burst checks it.
+
+### 223.4 Divergences and Defects
+
+Eight Divergences, each a row in `docs/STATUS.md`:
+
+- **The view is the whole map.** A client entering a map is sent every NPC, warp and goto on
+  it, in VID order. Legacy sends only the characters in the sectrees around the entering
+  character within `VIEW_RANGE + VIEW_BONUS_RANGE` (5000 plus the bonus,
+  `G/entity_view.cpp:86-138`), and the rest as it walks.
+- **NPC VIDs count up from 2^31.** Legacy numbers every character from one counter
+  (`AllocVID`, `G/char_manager.cpp:91-95`). The Rewrite names a player by its store id, so
+  NPCs take VIDs above every positive `int`.
+- **No regen event.** The boot spawn runs once. Legacy schedules a `regen_event` for every
+  entry with a regen time (`G/regen.cpp:684-688`), which respawns whatever has died and draws
+  `number(0, 16)` for its first delay. No NPC dies yet, so no event is kept and that draw is
+  not made.
+- **An NPC never moves.** A PC coming into view starts the state machine of every non-PC that
+  is not a warp or goto (`G/entity_view.cpp:113-115`). No state machine is ported.
+- **A warp or goto warps nobody.** `StartWarpNPCEvent` (`G/char.cpp:2509-2511`,
+  `:7890-8030`) checks every half second for a PC within 300 and warps it to the place its name
+  spells. That goes when the in-game Warp is wired.
+- **A click answers nothing.** `CHARACTER::OnClick` (`G/char.cpp:6181-6352`) runs the quest
+  click and then the NPC's click trigger, which opens a shop. This shrinks as the quests and
+  shops are ported.
+- **A repeated mob vnum resolves to its first row in file order.** Legacy sorts with
+  `std::sort`, which is not stable, so the row it keeps depends on the standard library.
+- **A missing `country/en/mob_names.txt`, or a regen file that exists but cannot be read,
+  stops the server.** Legacy logs the first and names every mob `NoName`, and skips the second.
+  The Rewrite refuses both, as it refuses a missing `locale_string.txt` (221).
+
+Three legacy Defects are not reproduced:
+
+- **The sectree lookup aliases.** `SECTREE_MAP::Find` keys a sectree by 16 bits of `x / 6400`
+  and `y / 6400` of the coordinate as a `DWORD` (`G/sectree_manager.cpp:71-77`), so a point far
+  outside a map, or a negative one, can land in one of its sectrees and spawn there. The
+  Rewrite spawns a point only inside its map's region. The owner's files place no NPC outside
+  its map.
+- **The regen reader's undefined cases.** `read_line` reads a word into `szTmp[256]` with no
+  bound, adds and multiplies in a C `int`, and `regen_spawn` spawns an entry with a negative
+  count 2^32 minus that many times. The Rewrite refuses such a file and names the entry.
+- **A mob flag named twice is summed twice** (`D/ProtoReader.cpp:680-753`), which carries into
+  the next flag's bit. The Rewrite sets the bit once.
+
+### 223.5 Not ported yet
+
+- **Monsters, stones, groups, anywhere spawns and ore veins.** They are read and counted, and
+  none is spawned: `SpawnMob` checks their cell attributes, which need the map's attribute
+  files, and each starts a state machine.
+- **The click.** The quest click, the NPC's click trigger and its shop, the personal shop of a
+  PC and the exchange checks. The shops are the next section.
+- **The warp and goto event**, **the regen event**, **the view range** and **the NPC state
+  machine**, as the Divergences say.
+- **`dungeon.txt`** and the other regen files a dungeon or event reads when it starts.
+
+### 223.6 Scenario and Parity inventory
+
+`entering_a_map_shows_its_npcs_and_a_click_keeps_the_connection` enters alice's Alpha on map 1
+of Channel 1. After the own pair it reads the 48 inserts with their VIDs in order, the warp's
+type, race and missing summary, the first insert byte for byte, the first summary's VID, name,
+empire and PK mode, and the whole `GC_NPC_POSITION`: its size, count, first entry, the smith
+`Fierar`, and the warp's type. The phase, the time, the Channel and the events follow as
+before. Three clicks, on the first NPC, on a VID that names nothing, and on Alpha, are each
+answered with nothing, and a shout afterwards comes back to Alpha: the connection is still
+open. Charlie then enters map 72 on the Shared Channel and is shown map 72's `npc.txt` and
+nothing of Channel 1's maps: two warps and seven NPCs in file order, a summary for each NPC
+alone, and a list of nine.
+
+The Parity harness reads `GC_NPC_POSITION` (115) as a word-sized record, and `read_shown`
+reads the inserts, the summaries and the optional list between the own pair and the affect, so
+every other scenario's enter-game burst takes the NPCs of its map.
+`a_character_is_loaded_and_the_game_is_entered_in_legacy_order` now checks that map 1 lists its
+NPCs.
+
+In the Parity inventory:
+
+- `gc.npc_position` is `ported` and names the scenario.
+- `cg.game.on_click`, `sys.world.view`, `sys.world.regen`, `sys.mob.proto`, `data.map.regen`
+  and `data.locale.names` are `partial`, each note citing the scenario and what is missing.
+- `gc.character_add`, `gc.char_additional_info` and `data.proto.mob` stay as they were, with
+  notes for the NPC records, the `bType` correction and the whole proto.
+
+### 223.7 Mutation sweep
+
+215 mutants. `mutate223.py` applied and restored each of them as in 215.7:
+
+- The `world` mutants ran `world`'s library, and the `gamedata` mutants ran `gamedata`'s.
+- Each prodomo mutant ran `prodomo`'s library.
+- Mutants in `npc.rs`, `regen.rs`, `mob_proto.rs`, `mob_locale_names.rs`, `loading_phase.rs`,
+  `game_state.rs`, `game_loop_messages.rs` and `main.rs` also ran every Parity scenario, with
+  `DATABASE_URL` set.
+- Mutants in `main.rs` also ran `process.rs`'s start-up test.
+
+| group | mutants | result |
+|---|---|---|
+| `world/src/npc.rs`: the first VID, the 16 tries, the speed limit and its floor, both ends of both ore-vein ranges, the three empires' map lists, the listed types, the ore veins' exclusion, the race's high byte and mask, the name's NUL, the spawn filter, the listed entry's kind and type, the idle entry's time and count, a negative count, the anywhere entry, the point's `&&`, z and direction (0, random, fixed), a box for a non-mob, the box's x, the draws' order, the region check, z and unplaced count, `SpawnMob`'s region check, the rotation's range, the empire's type and zero, the name's race, the spawned count, the speeds, the list's x, y and name, and the VIDs' step and end | 45 | 39 killed, 6 killed on the rerun |
+| `gamedata/src/regen.rs`: the files' order, the word buffer, the metre, the exception's `spawns`, the centre's floor, a missing file, the placement's exception, x, y, swaps and centre, a negative count and its time, the entry's number in both errors, the comment, the next line, the exception's stop, the time, the half widths, z, direction and count, the kinds `ga`, `r` and `s`, the widening, the time's `h`, `m`, reset and other bytes, the NUL, the carriage return, the quotes and the slashes, and the last word | 41 | 39 killed, 2 killed on the rerun |
+| `gamedata/src/mob_proto.rs`: the lookup, the sort, the duplicates' dedup and line, the header, the names' last row and short row, the column count, each of the 49 numeric and enum columns, the name and locale name lengths and key, the fallback, the folder, the enchants, resists and skills, `strlcpy`, the enum trim and missing name, the size's `+` and trim, the flags' empty word, limit, cut and bit, `strtoul` and `strtol`'s sign and saturation, the magnitude ceiling, C whitespace, the plus sign, and each width cut and `strtof`'s infinity, hex, fraction, bare sign, exponent, exponent sign, sign and finite check | 82 | 76 killed, 6 killed on the rerun |
+| `gamedata/src/mob_locale_names.rs`: the first row, the header, the one-column row, `NoName`, the file's path, `atoi`'s whitespace, sign, saturation and plus, and the key's bits | 10 | 8 killed, 2 killed on the rerun |
+| `prodomo/src/loading_phase.rs`: `PK_MODE_FREE`, the PC type in both inserts, the NPC insert's angle, z, type, speeds, x and y and state, the summary's type, empire, PK mode, name and VID, the list entry's name, x and y and type, the name's NUL and cut, and the burst's NPCs, summaries and list | 23 | 18 killed, 5 killed on the rerun |
+| `prodomo/src/game_state.rs`: the NPC table's key, the map lookup, the spawn and its route | 4 | 4 killed |
+| `prodomo/src/game_loop_messages.rs`: the map and the Channel of `NpcsOn` | 2 | 2 killed |
+| `prodomo/src/main.rs`: the click's answer and arm, the map and Channel asked for, the stand-up, the hosted maps, the regen Channel and the entering seat | 8 | 6 killed, 2 killed on the rerun |
+
+The first run left 23 survivors. Each was a test gap, and a new test killed each on the
+rerun:
+
+- **The box's tries and bounds.** `w_range_tries` made 15 tries, `w_range_x` drew x from one
+  less than the box's far edge, and `w_point_or` treated a line as a point. No test drew the
+  16th try, a far edge or a line. `npc`'s `the_sixteenth_try_is_the_last` places on the 16th
+  try and, with 16 misses, shows no 17th draw is made. `a_box_draws_from_edge_to_edge` draws
+  each far edge, and `a_line_is_a_box_not_a_point` spawns a vertical and a horizontal line,
+  each drawing both coordinates and a rotation.
+- **The ore veins' ends.** `w_ore_first` and `w_ore_second` dropped one end of each range, and
+  no test named 20059 or 30301. `the_ore_veins_are_minings_two_ranges` walks every vnum from
+  20000 to 30400 and expects exactly the two ranges.
+- **The spawn filter.** `w_spawns_filter` spawned every entry. The only entry the filter drops
+  is an exception, and no spawn test had one. `an_exception_entry_spawns_nothing` spawns an
+  exception and expects an empty map and an empty report.
+- **The regen reader's word and entry number.** `rg_cstring` kept the bytes after a NUL, and
+  `rg_entry_number` counted placement faults from 0. `regen`'s time test now reads `1\0s` as 0,
+  and `a_placement_fault_counts_entries_from_one` refuses a file whose second entry has a
+  negative count and expects the error to name entry 2.
+- **The mob proto's widths and keys.** `mp_def` cut `DEF` to a byte, `mp_low_word` dropped a
+  word's top bit, `mp_locale_key` saturated a vnum past `INT_MAX` instead of taking its bits,
+  `mp_size_trim` did not trim `SIZE`, `mp_c_space_vt` dropped the vertical tab from C's
+  whitespace, and `mp_dup_dedup` reported a vnum listed three times twice. The fixtures used
+  small values, plain names and two copies at most. `each_numeric_column_is_read_at_its_width`
+  fills every numeric column with 65793 and then -2 and checks each field's cut and sign.
+  `a_vnum_past_int_max_finds_its_name_by_its_bits` names vnums 4294967295 and 2147483648 by
+  their `int` keys. The size test adds `" BIG "`, the whitespace test walks all six C
+  whitespace bytes and two that are not, and the duplicate test lists a vnum three times.
+- **`atoi` in the `LOCALE_YMIR` names.** `ml_atoi_space` dropped the space from C whitespace,
+  and `ml_atoi_plus` read `+` as a minus. No row had either.
+  `atoi_skips_c_whitespace_and_reads_one_sign` reads each whitespace byte, two that are not,
+  `+7`, `-7`, `+-7` and both saturations.
+- **The insert fields a scenario does not reach.** `lp_visible_type` sent `CHAR_TYPE_NPC` for a
+  visible PC, which no scenario shows, since no other PC is in view at entry. `lp_npc_angle`,
+  `lp_npc_z` and `lp_npc_speeds` zeroed the angle and z and swapped the speeds, and map 1's
+  first NPC has rotation 0, z 0 and two equal speeds. `lp_name_nul` sent the bytes after a
+  name's NUL, which no owner name has. `loading_phase`'s `an_npc_insert_carries_each_of_its_fields`
+  builds an NPC with a distinct value in every field, and the visible character's test now
+  checks its type. `a_name_field_is_cut_as_strlcpy_cuts_it` sends `Ab\0cd` and a 30-byte name.
+  `only_an_npc_of_type_npc_has_a_summary` and `a_mini_map_entry_carries_its_own_fields` cover
+  the summary's filter and the list entry the same way.
+- **The Channel an NPC table is kept under.** `m_regen_channel` stood every map up under
+  Channel 1, and `m_npcs_channel` asked for Channel 1's table whatever the descriptor's Channel.
+  Every scenario that looked at NPCs entered on Channel 1, where both answer the same table.
+  The NPC scenario now also enters Charlie on map 72 of the Shared Channel, which Channel 1 does
+  not host, and expects map 72's nine characters.
+
+### 223.8 Receipt
+
+67 new tests:
+
+- `gamedata/src/mob_proto.rs`: 19, for the owner's file, an NPC row's columns, an unknown type,
+  the type, size and flag tables, a repeated flag, the flag limit, each numeric column's field
+  and width, the conversions, `strtof`, an infinite multiplier, a short row, the locale name, a
+  vnum past `INT_MAX`, the name cuts, a duplicate vnum and a missing file.
+- `gamedata/src/mob_locale_names.rs`: 6, for the owner's `en` file, the first row winning, the
+  rows, `atoi`, a missing file and an unterminated quote.
+- `gamedata/src/regen.rs`: 15, for the owner's map 1, the files' order, an unreadable file, the
+  words, a truncated entry, the type, the exception, the numbers, the regen time, the word
+  buffer, a box past an `int`, the placement, a negative count, the entry number and a refused
+  file's name.
+- `world/src/npc.rs`: 21, for the maps' empires, a point, the direction, the rotation drawn for
+  a character not spawned, a box's tries, edges and lines, an exception, a box outside the map,
+  the 16th try, `max_count`, the mini-map list, the report, the ore veins, a group at a point,
+  the empire fallback, the race and name, the speeds, the name's NUL, the VIDs running out and
+  the owner's map 1.
+- `prodomo/src/game_state.rs`: 1, for the NPC tables kept per Channel and map.
+- `prodomo/src/loading_phase.rs`: 4, for an NPC insert's fields, the summary's filter, a
+  mini-map entry and the name's cut.
+- `prodomo/tests/parity.rs`: the scenario in 223.6.
+
+These tests changed:
+
+- `loading_phase`'s `character_add_is_35_bytes_under_byte_one`, which now expects
+  `CHAR_TYPE_PC` where it expected `BIRTH`, and its visible-character test, which now checks the
+  neighbour's type;
+- every scenario's enter-game burst, which now reads the NPCs of its map through `read_shown`;
+- `a_character_is_loaded_and_the_game_is_entered_in_legacy_order`, which now checks that map 1
+  lists its NPCs.
+
+The count went from 2682 to 2749. These gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2749 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2749 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+After the run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`.
+The workspace has 215 Rust files and 153,474 lines, outside `server/` and `.scratch/`. No
+crate was fetched, and `Cargo.lock` is unchanged. This section claims no width, and the i686
+probe was not run.

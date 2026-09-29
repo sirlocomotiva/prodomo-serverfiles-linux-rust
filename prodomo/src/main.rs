@@ -38,8 +38,11 @@ use db::store::{schema_version, Store, StoreConfig};
 use gamedata::banword::banwords_from_dump;
 use gamedata::item_proto::ItemProtos;
 use gamedata::locale_string::{Ending, LocaleStrings, LOCALE_COUNT};
-use gamedata::map_atlas::MapAtlas;
+use gamedata::map_atlas::{MapAtlas, MapRegion};
+use gamedata::mob_locale_names::MobLocaleNames;
 use gamedata::mob_names::MobNames;
+use gamedata::mob_proto::MobProtos;
+use gamedata::regen::{self, RegenEntry};
 use prodomo::auth_login::{
     judge_account, judge_credentials, login_from_field, password_candidate, AuthClaim, AuthRefusal,
     AuthRegistry, LoginGrant,
@@ -66,7 +69,8 @@ use prodomo::lifecycle::{LifecycleError, PostHandshakePhase};
 use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::loading_phase::{
     enter_game_burst, item_load_points, judge_enter_game, judge_select, load_points, loading_burst,
-    map_is_allowed, public_map_index, EnterGameVerdict, Neighbourhood, SelectVerdict,
+    map_is_allowed, public_map_index, EnterGameBurst, EnterGameVerdict, Neighbourhood,
+    SelectVerdict,
 };
 use prodomo::movement::{
     judge_move, judge_pose, MoveContext, MoveDisposition, MoveOutcome, MoveRefusal, PoseOutcome,
@@ -93,7 +97,7 @@ use protocol::cg_inventory::{
     HEADER_CG_CHARACTER_POSITION, HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_EMPIRE,
     HEADER_CG_ENTERGAME, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_MOVE,
     HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_MOVE,
-    HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP,
+    HEADER_CG_ON_CLICK, HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP,
     HEADER_CG_STATE_CHECKER, HEADER_CG_SYNC_POSITION,
 };
 use protocol::cg_item_drop::CgItemDrop;
@@ -109,6 +113,7 @@ use protocol::cg_position::CgCharacterPosition;
 use protocol::cg_quickslot_add::CgQuickslotAdd;
 use protocol::cg_quickslot_del::CgQuickslotDel;
 use protocol::cg_quickslot_swap::CgQuickslotSwap;
+use protocol::cg_vid::CgOnClick;
 use protocol::cg_wire::ClientFrame;
 use protocol::gc::{GcAuthSuccess, GcLoginFailure};
 use protocol::gc_inventory::HEADER_GC_EMPIRE;
@@ -120,6 +125,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
 use world::character::MoveRequest;
 use world::item::Item;
+use world::npc::{NpcSpawner, NpcVids};
 
 /// The command line.
 #[derive(Debug, Parser)]
@@ -997,6 +1003,43 @@ fn ground_place(held: &Held) -> Option<GroundPlace> {
     })
 }
 
+/// The enter-game burst for the character `held` has loaded, with the view of its map: the NPCs
+/// the world stood up there at boot.
+///
+/// Other characters are not in the view; that part is still the world system's to contribute.
+/// `None` when the world did not answer, and the connection closes.
+async fn entering_burst(
+    context: &ConnectionContext,
+    addr: SocketAddr,
+    channel: u8,
+    held: &Held,
+) -> Option<EnterGameBurst> {
+    let (Some(character), Some(points)) = (held.character.as_ref(), held.points.as_ref()) else {
+        return None;
+    };
+    let map = held.map.unwrap_or_default();
+    let npcs = match context.game.npcs_on(channel, map).await {
+        Ok(npcs) => npcs,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not list the NPCs; closing");
+            return None;
+        }
+    };
+    let view = Neighbourhood {
+        characters: Vec::new(),
+        npcs,
+    };
+    Some(enter_game_burst(
+        character,
+        points,
+        character_vid(character),
+        &view,
+        channel,
+        global_time(),
+        descriptor_language(held.account.as_ref()),
+    ))
+}
+
 /// Send a client that has just entered its map the items lying there.
 ///
 /// Legacy shows them as the character's sectree view fills, each as `EncodeInsertPacket`
@@ -1786,7 +1829,33 @@ where
         {
             sync_positions(session, addr, context, held, &frame)
         }
+        // `CG_ON_CLICK` (26) in the game phase: `CInputMain::OnClick`
+        // (`G/input_main.cpp:1305-1316`), reached at `:3769-3771`.
+        LiveStep::Record { phase, frame }
+            if phase == ClientPhase::Game && frame.header == HEADER_CG_ON_CLICK.value() =>
+        {
+            click(addr, &frame)
+        }
         step => report_step(addr, step),
+    }
+}
+
+/// `CG_ON_CLICK`: answer nothing and keep the connection; `false` only for a malformed record.
+///
+/// `CInputMain::OnClick` finds the clicked VID and calls its `CHARACTER::OnClick`
+/// (`G/char.cpp:6181-6352`), which runs the quest click and then the NPC's click trigger, the one
+/// that opens a shop. A VID that names nothing is ignored. Neither the quests nor the shops are
+/// ported yet, so every click is what a click on nothing is in legacy: logged and ignored.
+fn click(addr: SocketAddr, frame: &ClientFrame) -> bool {
+    match CgOnClick::decode_frame(frame) {
+        Ok(record) => {
+            info!(%addr, vid = record.vid, "Client clicked; nothing answers a click yet");
+            true
+        }
+        Err(error) => {
+            warn!(%addr, ?error, "Client sent a malformed ON_CLICK; closing");
+            false
+        }
     }
 }
 
@@ -1921,12 +1990,12 @@ const SELECT_HEADERS: [u8; 4] = [
     HEADER_CG_CHANGE_NAME.value(),
 ];
 
-/// The world view the bursts describe.
+/// The world view the loading burst describes.
 ///
-/// The Rewrite has no world yet, so a Channel always reports an empty view: a second character
-/// in the same map and a map's NPCs are both contributed by the world system, and neither has
-/// a store to read them from. `Neighbourhood::default` is that empty view, and the bursts take
-/// it the same way they will take a populated one.
+/// It is empty. A second character in the same map is contributed by the world system, which
+/// has no store to read it from yet, and a map's NPCs are shown only when the character enters
+/// the game ([`entering_burst`]), as legacy's `Show` inserts them then. `Neighbourhood::default` is
+/// that empty view, and the burst takes it the same way it will take a populated one.
 fn empty_view() -> Neighbourhood {
     Neighbourhood::default()
 }
@@ -2340,15 +2409,10 @@ where
         return false;
     };
     let vid = character_vid(character);
-    let burst = enter_game_burst(
-        character,
-        points,
-        vid,
-        &empty_view(),
-        seat.number,
-        global_time(),
-        descriptor_language(held.account.as_ref()),
-    );
+    let map = held.map.unwrap_or_default();
+    let Some(burst) = entering_burst(context, addr, seat.number, held).await else {
+        return false;
+    };
     info!(
         %addr,
         vid,
@@ -2371,7 +2435,6 @@ where
     // in another client's broadcast. `DESC::SetPlayer` is the legacy step that makes a
     // descriptor visible to the others, and it happens at this same moment.
     let speed = points.limit_point(common::point_slot::POINT_MOV_SPEED);
-    let map = held.map.unwrap_or_default();
     held.avatar = Some(Avatar {
         map,
         x: character.x,
@@ -3396,6 +3459,16 @@ struct GameData {
     protos: Arc<ItemProtos>,
     /// The locale strings, the same ones the game thread holds.
     locale: Arc<LocaleStrings>,
+    /// What the game thread stands the NPCs up from before it starts.
+    npcs: NpcData,
+}
+
+/// What boot stands the NPCs up from: the mob prototypes, the names a client is sent, and the
+/// regen entries of every map each Channel hosts.
+struct NpcData {
+    protos: MobProtos,
+    names: MobLocaleNames,
+    maps: Vec<(u8, MapRegion, Vec<RegenEntry>)>,
 }
 
 /// Load the Game data, before any port opens.
@@ -3407,12 +3480,86 @@ fn load_game_data(config: &ServerConfig) -> Result<GameData, String> {
     let names = load_name_rules(config)?;
     let protos = load_item_protos(config)?;
     let locale = load_locale_strings(config)?;
+    let npcs = load_npc_data(config, &atlas)?;
     Ok(GameData {
         atlas,
         names,
         protos,
         locale,
+        npcs,
     })
+}
+
+/// Load what the NPCs are stood up from: `mob_proto.txt` with its names, the `LOCALE_YMIR` mob
+/// names, and the regen files of every map each Channel hosts.
+///
+/// A missing or malformed file stops the server. Legacy's DB server stops on a mob proto it
+/// cannot read; it skips a regen file it cannot open and answers `NoName` for every mob when
+/// the names file is missing, where the Rewrite refuses both (Divergences). A hosted map the
+/// map index does not list has no NPCs, as legacy never builds it.
+fn load_npc_data(config: &ServerConfig, atlas: &MapAtlas) -> Result<NpcData, String> {
+    let proto_dir = config.proto_dir();
+    let protos = MobProtos::load(&proto_dir).map_err(|error| {
+        format!(
+            "Mob prototypes are unusable in {}: {error}",
+            proto_dir.display()
+        )
+    })?;
+    for (vnum, line) in protos.duplicates() {
+        warn!(
+            vnum,
+            line, "A mob vnum is listed more than once; the first row is used"
+        );
+    }
+    let names = MobLocaleNames::load(&config.country_dir())
+        .map_err(|error| format!("Mob names are unusable: {error}"))?;
+    let map_dir = config.map_dir();
+    let mut maps = Vec::new();
+    for channel in &config.channels {
+        for &map in &channel.maps {
+            let Some(region) = i32::try_from(map).ok().and_then(|map| atlas.region(map)) else {
+                warn!(
+                    channel = channel.number,
+                    map, "A hosted map is not in the map index"
+                );
+                continue;
+            };
+            let entries = regen::load_map(&map_dir, region)
+                .map_err(|error| format!("Regen files are unusable: {error}"))?;
+            maps.push((channel.number, region.clone(), entries));
+        }
+    }
+    info!(
+        prototypes = protos.rows().len(),
+        names = names.len(),
+        maps = maps.len(),
+        "Mob prototypes and regen files loaded"
+    );
+    Ok(NpcData {
+        protos,
+        names,
+        maps,
+    })
+}
+
+/// Stand the NPCs up in the world before the game thread starts, drawing from its dice.
+fn stand_up_npcs(state: &mut GameState, data: &NpcData) -> Result<(), String> {
+    let mut spawner = NpcSpawner::new(&data.protos, &data.names, NpcVids::default());
+    for (channel, region, entries) in &data.maps {
+        state
+            .spawn_npcs(&mut spawner, *channel, region, entries)
+            .map_err(|error| format!("NPCs could not be stood up: {error}"))?;
+    }
+    let report = spawner.report();
+    info!(
+        spawned = report.spawned,
+        unported = report.unported,
+        no_proto = report.no_proto,
+        unplaced = report.unplaced,
+        idle = report.idle,
+        "NPCs stood up"
+    );
+    Ok(())
 }
 
 /// What every connection shares, built once the listeners are bound and the Game data loaded.
@@ -3548,11 +3695,12 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     // One client registry serves the descriptors and the world, which tells a map when an item
     // on its ground is destroyed.
     let clients = Arc::new(ChannelClients::new());
-    let game_state = GameState::new(Arc::clone(&data.protos))
+    let mut game_state = GameState::new(Arc::clone(&data.protos))
         .with_item_count_limit(config.game.item_count_limit)
         .with_drop_lifetime(config.game.item_destroy_time_dropitem)
         .with_clients(Arc::clone(&clients))
         .with_locale_strings(Arc::clone(&data.locale));
+    stand_up_npcs(&mut game_state, &data.npcs)?;
     let mut game_loop = spawn_game_loop(GameLoopConfig::default(), game_state)?;
     let controller = game_loop.controller();
     info!(thread_id = ?game_loop.thread_id(), "Dedicated game loop started");
