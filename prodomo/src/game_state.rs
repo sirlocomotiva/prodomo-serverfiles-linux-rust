@@ -46,8 +46,10 @@ use crate::game_loop_messages::{Departed, GameCommand, GroundPlace};
 use crate::item_grant::{grant_item, GrantOutcome, GrantRefusal, GrantRequest};
 use crate::item_move::{belt_grade, ground_record, move_facts, MoveItemRefused, MovedItems, Mover};
 use crate::loading_phase::point_changes;
+use crate::quickslot::{QuickslotAnswer, QuickslotStep};
 use crate::save::PASSES_PER_SEC;
 use crate::sync_position::distance_approx;
+use world::character::add_from_client;
 
 /// `PickupItem`'s `DistanceValid` bound (`G/item.cpp:593`), checked at `G/char_item.cpp:7982`.
 const PICKUP_DISTANCE: i32 = 300;
@@ -553,14 +555,15 @@ impl GameState {
                 player_id,
                 name,
                 items,
-                points,
+                loaded,
                 outbox,
                 reply,
             } => {
                 let answer = self.enter_world_with_items(vid, player_id, &name, &items, outbox);
                 if answer.is_ok() {
                     if let Some(character) = self.characters.find_player_mut(&name) {
-                        character.set_points(points);
+                        character.set_points(loaded.points);
+                        character.set_quickslots(loaded.quickslots);
                     }
                 }
                 // A dropped admit answer means the descriptor is already closing, and a
@@ -583,6 +586,11 @@ impl GameState {
                 }
             }
             GameCommand::LeaveWorld { vid, reply } => self.answer_leave(vid, reply),
+            GameCommand::Quickslot { vid, step, reply } => {
+                if reply.send(self.quickslot(vid, step)).is_err() {
+                    debug!(?vid, "nobody was left to hear a quickslot answer");
+                }
+            }
             GameCommand::PointsOf { vid, reply } => {
                 let points = self
                     .characters
@@ -863,6 +871,34 @@ impl GameState {
             move_item(items, ids, request, rules, gear, |vnum| {
                 move_facts(protos, vnum)
             })
+        })
+    }
+
+    /// Run one client quickslot request for the character online under `vid`, answering the
+    /// records for its client and the slots after it, or `None` when nobody is online under
+    /// `vid`.
+    pub fn quickslot(
+        &mut self,
+        vid: common::vid::Vid,
+        step: QuickslotStep,
+    ) -> Option<QuickslotAnswer> {
+        let character = self.characters.find_by_vid_mut(vid).ok()?;
+        let (items, slots) = character.items_and_quickslots_mut();
+        let mut records = Vec::new();
+        match step {
+            QuickslotStep::Add { slot, quickslot } => {
+                records = add_from_client(slots, items, &self.protos, slot, quickslot);
+            }
+            QuickslotStep::Del { slot } => {
+                let _deleted = slots.delete(slot, &mut records);
+            }
+            QuickslotStep::Swap { slot, with } => {
+                let _swapped = slots.swap(slot, with, &mut records);
+            }
+        }
+        Some(QuickslotAnswer {
+            records: crate::quickslot::encode(&records),
+            quickslots: slots.clone(),
         })
     }
 
@@ -2593,5 +2629,72 @@ mod tests {
             reply,
         });
         assert_eq!(answer.blocking_recv().unwrap(), None);
+    }
+
+    fn slot_answer(state: &mut GameState, step: QuickslotStep) -> QuickslotAnswer {
+        state
+            .quickslot(Vid::new(7), step)
+            .expect("the character is in the world")
+    }
+
+    #[test]
+    fn a_quickslot_request_answers_its_records_and_the_slots_after_it() {
+        let mut state = a_holder(&[(inventory(0), a_potion_stack(11, 2))], true);
+        let potion = world::character::Quickslot { kind: 1, pos: 0 };
+        let added = slot_answer(
+            &mut state,
+            QuickslotStep::Add {
+                slot: 3,
+                quickslot: potion,
+            },
+        );
+        assert_eq!(added.records, vec![vec![28, 3, 1, 0]]);
+        assert_eq!(added.quickslots.get(3), Some(potion));
+        // An empty cell is refused without a record, and the slots stay as they were.
+        let refused = slot_answer(
+            &mut state,
+            QuickslotStep::Add {
+                slot: 4,
+                quickslot: world::character::Quickslot { kind: 1, pos: 5 },
+            },
+        );
+        assert!(refused.records.is_empty());
+        assert_eq!(refused.quickslots, added.quickslots);
+        let swapped = slot_answer(&mut state, QuickslotStep::Swap { slot: 3, with: 9 });
+        assert_eq!(swapped.records, vec![vec![30, 3, 9]]);
+        assert_eq!(swapped.quickslots.get(9), Some(potion));
+        let deleted = slot_answer(&mut state, QuickslotStep::Del { slot: 9 });
+        assert_eq!(deleted.records, vec![vec![29, 9]]);
+        assert_eq!(deleted.quickslots, world::character::Quickslots::default());
+        assert_eq!(
+            state.quickslot(Vid::new(8), QuickslotStep::Del { slot: 0 }),
+            None,
+            "nobody is online under VID 8"
+        );
+    }
+
+    #[test]
+    fn the_world_starts_from_the_quickslots_the_load_set() {
+        let mut state = a_state();
+        let (outbox, _inbox) = a_live_outbox();
+        let mut quickslots = world::character::Quickslots::default();
+        let skill = world::character::Quickslot { kind: 2, pos: 4 };
+        let _set = quickslots.set(6, skill, &mut Vec::new());
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        state.apply(GameCommand::EnterWorld {
+            vid: Vid::new(7),
+            player_id: 7,
+            name: "Shaman".to_string(),
+            items: Vec::new(),
+            loaded: crate::game_loop_messages::Loaded {
+                points: None,
+                quickslots,
+            },
+            outbox,
+            reply,
+        });
+        assert_eq!(answer.blocking_recv().unwrap(), Ok(()));
+        let swapped = slot_answer(&mut state, QuickslotStep::Swap { slot: 6, with: 0 });
+        assert_eq!(swapped.quickslots.get(0), Some(skill));
     }
 }

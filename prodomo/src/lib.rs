@@ -75,6 +75,8 @@ pub mod item_move;
 pub mod item_persist;
 pub mod operator;
 pub mod operator_console;
+/// Quickslots between the store, the world and the client.
+pub mod quickslot;
 
 /// When a character's row is written, as legacy's save cycle and disconnect decide it.
 pub mod save;

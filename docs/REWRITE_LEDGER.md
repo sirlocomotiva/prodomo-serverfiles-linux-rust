@@ -22250,3 +22250,171 @@ to 2625. These gates ran on the final working tree:
 After the run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`. The
 workspace has 208 Rust files and 146,326 lines. No crate was fetched, and `Cargo.lock` is
 unchanged. This section claims no width, and the i686 probe was not run.
+
+## 219. Quickslots: `CG_QUICKSLOT_ADD`, `CG_QUICKSLOT_DEL`, `CG_QUICKSLOT_SWAP`, the load and the save
+
+A client can now fill its quickbar. Legacy keeps 36 slots on the character (`m_quickslot`).
+Each slot is empty, or names an inventory cell, a skill or a command. Three client requests
+change the slots (`G/input_main.cpp:1083-1126`, dispatched at `:3742-3755` with no observer
+check). The load sets every stored slot again (`G/input_db.cpp:439-440`), and the save writes the
+array with the player row (`G/char.cpp:1603-1604`). Until this section, the three headers were
+unhandled, and the Rewrite had nowhere to store a slot.
+
+### 219.1 What landed
+
+- **The store.** Migration `0007_quickslots.sql` adds a `quickslot` table: one row per set
+  slot, keyed by player and slot. Its checks hold the slot below 36, the kind from 1 to 3 and
+  the position in a `BYTE`. An empty slot is no row. `db::quickslots` loads the rows in slot
+  order and replaces them in one transaction.
+- **The slots.** `world::character::Quickslots` is `m_quickslot`, and it lives on the world's
+  `Character`:
+  - `set` is `SetQuickslot` (`G/char_quickslot.cpp:45-98`). It refuses a slot of 36 or more
+    and a kind of 4 or more. Then it empties every slot that already holds the same thing,
+    the target included, each with its `GC_QUICKSLOT_DEL`. Then it checks what the slot
+    names: an item must name a base inventory or belt cell, a skill must be below 255, a
+    command always passes, and the empty kind is refused. Last, it sets the slot and sends
+    `GC_QUICKSLOT_ADD`.
+  - `delete` is `DelQuickslot` (`:100-114`), and `swap` is `SwapQuickslot` (`:116-136`).
+    Each sends its record for any slot below 36, an empty one included.
+  - `add_from_client` is `CInputMain::QuickslotAdd`'s check before `SetQuickslot`. An item slot
+    must name an inventory cell holding an `ITEM_USE` item, or the request is dropped with no
+    record.
+- **The game thread.** A new `GameCommand::Quickslot` runs one request on the character's
+  slots. It answers the encoded records and the slots after the request. `EnterWorld` carries
+  a `Loaded` with the load's points and quickslots, so the world starts from the slots the
+  client was shown.
+- **The descriptor.**
+  - At character select, the stored rows are set in slot order through `Quickslots::set`, and
+    the records are sent first after the map test, before the gold and points.
+  - The three headers are handled in the game phase. The records go to the client, and the
+    descriptor holds the slots the world answered.
+  - Each save, periodic or at logout, writes the held slots after the player row.
+- **The dispatch.** `CG_ITEM_USE`, the ground steps and the quickslot requests now share one
+  arm in `analyze`, which `belongings_step` dispatches. This keeps `analyze` under the line
+  limit.
+
+### 219.2 What the client sees
+
+- A slot put on the bar is told with `GC_QUICKSLOT_ADD`. A second copy of the same skill,
+  item or command empties the first with `GC_QUICKSLOT_DEL`, before the add.
+- An item slot on an empty cell, or on an item that is not `ITEM_USE`, gets no record.
+- A delete and a swap are always told for a slot below 36.
+- A relog sets every stored slot again in the loading burst, between the main character and
+  the gold.
+
+### 219.3 Divergences
+
+- **The quickslots are their own table and their own transaction.** Legacy writes the array
+  as a blob in the player row, in one write. Here the save writes the player row, then the
+  quickslots in a second transaction. A store failure between the two leaves the new row with
+  the old slots, and the save reports the failure. The next save writes both again.
+
+A stored item slot is not checked against the items at the load. That matches legacy, whose
+`PlayerLoad` sets the slots before `ItemLoad` runs, so a relog can show a slot naming an empty
+cell in both.
+
+### 219.4 Not ported yet
+
+- `SyncQuickslot` (`G/char_quickslot.cpp:12-34`) and `ChainQuickslotItem` (`:138-155`). They
+  make a slot follow an item that is used up, dropped, moved or worn (`G/char_item.cpp:697`,
+  `:7437`, `:7501`, `:7823`, `:8530`). Until then, a slot keeps naming the cell the item
+  left. This is ledger 220.
+- The automatic add of a potion to the first free slot (`G/char_item.cpp:9050-9057` and
+  `:9191-9198`).
+
+### 219.5 Scenario and Parity inventory
+
+`the_quickslots_are_set_swapped_and_deleted_and_a_relog_sets_them_again`
+(`prodomo/tests/parity.rs`) gives Alpha a small red potion from the Operator console:
+
+1. **Three slots are set.** The potion on slot 0, skill 3 on slot 1 and command 5 on slot 2
+   are each told with `GC_QUICKSLOT_ADD`.
+2. **An empty cell is refused.** An item slot naming the empty cell 5 gets no record.
+3. **A twin is emptied.** Skill 3 on slot 5 sends `GC_QUICKSLOT_DEL` for slot 1, then the
+   add.
+4. **A swap and a delete.** Slot 0 swapped with slot 7, and slot 2 deleted, are each told.
+5. **The save and the relog.** The logout save stores `(5, 2, 3)` and `(7, 1, 0)`. The next
+   select sends both adds, in slot order, before the gold.
+6. **The loaded slots reach the world.** After the relog, the game is entered and slots 5 and
+   7 are swapped. The logout save stores `(5, 1, 0)` and `(7, 2, 3)`, which only the loaded
+   slots, handed to the world and held by the descriptor, can give.
+
+`load_character` now reads any quickslot adds before the gold, and asserts there are none.
+`load_with_quickslots` answers them.
+
+The database helpers `check` and `wait_for` now fail a NULL condition (219.6).
+
+In the Parity inventory:
+
+- `cg.game.quickslot_add`, `cg.game.quickslot_del` and `cg.game.quickslot_swap` are `ported`.
+- `gc.quickslot_add`, `gc.quickslot_del` and `gc.quickslot_swap` are `ported`.
+- `sys.char.quickslot` is `partial`, and its note names the scenario and the sync not ported.
+
+### 219.6 Mutation sweep
+
+34 mutants, applied and restored as in 215.7:
+
+- Each world mutant ran `world`'s library tests.
+- Each prodomo mutant ran `prodomo`'s library and the quickslot scenario, with `DATABASE_URL`
+  set.
+- Each db mutant ran `db`'s `quickslots` tests.
+
+| group | mutants | result |
+|---|---|---|
+| `world/src/character/quickslot.rs`: the slot count, the kind bound, the twin deletion and its match, the item cell check, the skill bound, the command arm, the add record, the store, the delete's clear and record, the swap's bound, trade and record, the client's `ITEM_USE` check and its item-kind guard, the empty test | 17 | 15 killed, 2 survived |
+| `prodomo/src/quickslot.rs`: the add's slot, the swap's order, the load's set, the stored kind | 4 | 4 killed |
+| `prodomo/src/game_state.rs`: the slots at `EnterWorld`, the add, the delete, the swap | 4 | 4 killed |
+| `prodomo/src/main.rs`: the load's place in the burst, the slots held at the load, the slots held from an answer, the records sent, the save, the slots handed to the world, the dispatch | 7 | 7 killed |
+| `db/src/quickslots.rs`: the delete before the insert, the load order | 2 | 2 killed |
+
+The first run had four survivors:
+
+- `q_kind_bound` let kind 4 past the first bound. It is equivalent: the match after it accepts
+  only kinds 1 to 3, so kind 4 is refused there. Legacy checks it twice as well
+  (`G/char_quickslot.cpp:52-53`, `:65-84`), and both checks stay.
+- `q_command` turned the command arm into "any kind but 0". It is equivalent: the arms
+  before it take kinds 1 and 2, and the bound refuses 4 and up, so only 0 and 3 reach it.
+- `m_hold_load` and `m_loaded` dropped the loaded slots on the way to the world. The scenario's
+  second save should have caught both, but it could not fail. The parity helpers `check` and
+  `wait_for` ran `IF NOT (condition) THEN RAISE`, and an `array_agg` over no rows is NULL.
+  `NOT NULL` takes neither branch, so a condition that was NULL passed. Both helpers now raise
+  unless the condition `IS TRUE`, and every scenario's database checks gained that. The
+  scenario also enters the game after the relog, swaps the two loaded slots and waits for the
+  swapped rows, which kills both mutants.
+
+A third mutant, running the inserts outside the transaction, was not run. The insert would
+wait on the transaction's own delete lock, and the test would hang rather than fail.
+
+### 219.7 Receipt
+
+12 new tests:
+
+- `world/src/character/quickslot.rs`: 4, for the bounds of each kind, the twins, the delete
+  and swap records, and the client's item check.
+- `prodomo/src/quickslot.rs`: 2, for the record bytes and the load.
+- `prodomo/src/game_state.rs`: 2, for a request's answer and the slots `EnterWorld` hands
+  the world.
+- `db/tests/quickslots.rs`: 3. Two are the replace and the rollback, and they run only with
+  `DATABASE_URL` set. The third is the `support` module's own test, which each test file
+  compiles.
+- `prodomo/tests/parity.rs`: 1, the scenario in 219.5, which runs only with `DATABASE_URL`
+  set.
+
+`loading_phase`'s `no_quickslot_record_is_sent` was renamed
+`the_burst_leaves_the_quickslot_records_to_the_descriptor`, not added. The count went from
+2625 to 2637. These gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2637 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2637 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+After the run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`. The
+workspace has 212 Rust files and 147,453 lines. No crate was fetched, and `Cargo.lock` is
+unchanged. This section claims no width, and the i686 probe was not run. The stricter database
+helpers failed no existing scenario.

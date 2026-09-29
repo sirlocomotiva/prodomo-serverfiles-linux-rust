@@ -8,13 +8,14 @@ use std::thread::Thread;
 use tokio::sync::{mpsc, oneshot};
 
 use protocol::item_pos::ItemPos;
-use world::character::Points;
+use world::character::{Points, Quickslots};
 use world::item::Item;
 
 use crate::client_registry::ClientOutbox;
 use crate::game_state::{EnterWorldRefused, Released, RevokeRefused};
 use crate::item_grant::{GrantOutcome, GrantRefusal, GrantRequest};
 use crate::item_move::{MoveItemRefused, MovedItems, Mover};
+use crate::quickslot::{QuickslotAnswer, QuickslotStep};
 
 /// Default capacity of the Tokio-to-game command queue.
 pub const DEFAULT_COMMAND_CAPACITY: usize = 256;
@@ -248,9 +249,8 @@ pub enum GameCommand {
         /// already shows its items: a grant in that gap would be offered a cell a loaded
         /// item holds.
         items: Vec<(ItemPos, Item)>,
-        /// The points the load computed with those items worn, which wearing and taking off
-        /// change.
-        points: Option<world::character::Points>,
+        /// The points the load computed with those items worn, and the quickslots it set.
+        loaded: Loaded,
         /// Where the game thread writes records addressed to this client.
         ///
         /// The world has no socket. It holds this sender and the descriptor drains
@@ -283,6 +283,16 @@ pub enum GameCommand {
         /// and legacy logs the same "already gone" case rather than refusing the
         /// close. It is still reported so a double leave is visible.
         reply: oneshot::Sender<Option<Departed>>,
+    },
+    /// Runs one client quickslot request for the character online under `vid`.
+    Quickslot {
+        /// The VID the character entered the world under.
+        vid: common::vid::Vid,
+        /// The request.
+        step: QuickslotStep,
+        /// Where the game thread reports the records and the slots, `None` when it does not
+        /// hold the character.
+        reply: oneshot::Sender<Option<QuickslotAnswer>>,
     },
     /// Answers the points of the character online under `vid`, which the descriptor's
     /// save writes from: the world changes them on its own pulse too (the potion
@@ -614,6 +624,17 @@ impl std::fmt::Display for LeaveWorldError {
 
 impl std::error::Error for LeaveWorldError {}
 
+/// What the load gave a character besides its items, which the world holds from the
+/// admission on.
+#[derive(Debug, Clone, Default)]
+pub struct Loaded {
+    /// The points the load computed with the items worn, which wearing and taking off change.
+    /// `None` for a character admitted without them.
+    pub points: Option<Points>,
+    /// The quickslots the load set.
+    pub quickslots: Quickslots,
+}
+
 /// What the world hands back when a character leaves it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Departed {
@@ -828,7 +849,7 @@ impl GameLoopController {
         name: String,
         outbox: ClientOutbox,
     ) -> Result<Result<(), EnterWorldRefused>, EnterWorldError> {
-        self.enter_world_with_items(vid, player_id, name, Vec::new(), None, outbox)
+        self.enter_world_with_items(vid, player_id, name, Vec::new(), Loaded::default(), outbox)
             .await
     }
 
@@ -846,7 +867,7 @@ impl GameLoopController {
         player_id: u32,
         name: String,
         items: Vec<(ItemPos, Item)>,
-        points: Option<world::character::Points>,
+        loaded: Loaded,
         outbox: ClientOutbox,
     ) -> Result<Result<(), EnterWorldRefused>, EnterWorldError> {
         let (reply, answer) = oneshot::channel();
@@ -855,7 +876,7 @@ impl GameLoopController {
             player_id,
             name,
             items,
-            points,
+            loaded,
             outbox,
             reply,
         })
@@ -885,6 +906,24 @@ impl GameLoopController {
             .await
             .map_err(|_| LeaveWorldError::NotSent)?;
         answer.await.map_err(|_| LeaveWorldError::NoAnswer)
+    }
+
+    /// Asks the world to run one client quickslot request for the character online under
+    /// `vid`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn quickslot(
+        &self,
+        vid: common::vid::Vid,
+        step: QuickslotStep,
+    ) -> Result<Option<QuickslotAnswer>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Quickslot { vid, step, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 
     /// Asks the world for the points of the character online under `vid`, which a save

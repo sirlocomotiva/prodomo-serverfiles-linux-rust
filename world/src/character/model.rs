@@ -4,6 +4,7 @@ use common::{vid::Vid, CharacterId};
 use super::combat::{Damage, DamageOutcome, Vitality};
 use super::items::CharacterItems;
 use super::points::Points;
+use super::quickslot::Quickslots;
 use super::state::{Activity, CharacterState, CoreState, Posture};
 
 /// Runtime category used to distinguish players from non-player characters.
@@ -31,6 +32,7 @@ pub struct Character {
     items: CharacterItems,
     envanter: u16,
     points: Option<Points>,
+    quickslots: Quickslots,
 }
 
 impl Character {
@@ -50,6 +52,7 @@ impl Character {
             items: CharacterItems::new(),
             envanter: 0,
             points: None,
+            quickslots: Quickslots::default(),
         }
     }
 
@@ -68,6 +71,7 @@ impl Character {
             items: CharacterItems::new(),
             envanter: 0,
             points: None,
+            quickslots: Quickslots::default(),
         }
     }
 
@@ -219,6 +223,22 @@ impl Character {
     /// The item windows and the points together, which wearing an item changes both of.
     pub fn items_and_points_mut(&mut self) -> (&mut CharacterItems, Option<&mut Points>) {
         (&mut self.items, self.points.as_mut())
+    }
+
+    /// The character's quickslots (`m_quickslot`).
+    pub const fn quickslots(&self) -> &Quickslots {
+        &self.quickslots
+    }
+
+    /// Sets the character's quickslots, the way the load's `SetQuickslot` calls leave them.
+    pub fn set_quickslots(&mut self, quickslots: Quickslots) {
+        self.quickslots = quickslots;
+    }
+
+    /// The item windows, read, and the quickslots, which a client's item slot is checked
+    /// against.
+    pub fn items_and_quickslots_mut(&mut self) -> (&CharacterItems, &mut Quickslots) {
+        (&self.items, &mut self.quickslots)
     }
 
     /// Returns the character's `Inven_Point`, the `m_points.envanter` that

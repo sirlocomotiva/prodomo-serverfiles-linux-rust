@@ -16,6 +16,7 @@ mod manager;
 mod model;
 mod points;
 mod potion;
+mod quickslot;
 mod state;
 
 pub use apply::{
@@ -63,4 +64,5 @@ pub use points::{
     Points, PointsRow, SungmaWill, IMMUNE_FALL, IMMUNE_SLOW, IMMUNE_STUN, SUNGMA_WILL_MAPS,
 };
 pub use potion::{is_recovering, update_recovery, SE_HPUP_RED, SE_SPUP_BLUE};
+pub use quickslot::{add_from_client, Quickslot, QuickslotRecord, Quickslots, QUICKSLOT_MAX_NUM};
 pub use state::{Activity, CoreState, Posture};

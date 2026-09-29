@@ -549,8 +549,9 @@ pub struct LoadingBurst {
 /// The records the loading burst sends, in legacy order.
 ///
 /// `vid` is the character's own VID, the identity the rest of the session uses. The quickslot
-/// records are absent: the Rewrite has no quickslot table, and a character with no stored
-/// quickslot is what `SetQuickslot` skips in legacy too (`G/input_db.cpp:436-443`).
+/// records are not built here: the descriptor loads the stored slots and puts what
+/// [`crate::quickslot::load`] sends at the front of `after_map_test`, where `PlayerLoad` sets
+/// them (`G/input_db.cpp:436-443`).
 ///
 /// `DESC::SetPhase(PHASE_LOADING)` is the burst's first record and is **not** returned here: the
 /// descriptor writes it as a phase transition, because that is the legacy operation that
@@ -1679,10 +1680,10 @@ mod tests {
         );
     }
 
-    /// The quickslot records are absent because the Rewrite has no quickslot table, and a
-    /// character with no stored quickslot is what legacy's `SetQuickslot` skips too.
+    /// The quickslot records come from the store, which the descriptor reads, so the burst
+    /// built from the row alone holds none.
     #[test]
-    fn no_quickslot_record_is_sent() {
+    fn the_burst_leaves_the_quickslot_records_to_the_descriptor() {
         let burst = loading_burst(&hero(), &hero_points(), 1, &empty_view());
         assert!(
             !all(&burst.before_map_test, &burst.after_map_test)

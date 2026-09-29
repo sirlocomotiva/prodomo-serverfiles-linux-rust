@@ -70,6 +70,7 @@ use prodomo::movement::{
     judge_move, judge_pose, MoveContext, MoveDisposition, MoveOutcome, MoveRefusal, PoseOutcome,
 };
 use prodomo::operator::{prepare, read_new_password, AccountCommand, GmCommand, OperatorCommand};
+use prodomo::quickslot::QuickslotStep;
 use prodomo::ready_gate::ReadyGate;
 use prodomo::select_phase::{
     create_failure, create_offset, created, deleted, empire_selected, judge_create, judge_delete,
@@ -90,6 +91,7 @@ use protocol::cg_inventory::{
     HEADER_CG_CHARACTER_POSITION, HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_EMPIRE,
     HEADER_CG_ENTERGAME, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_MOVE,
     HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_MOVE,
+    HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP,
     HEADER_CG_STATE_CHECKER, HEADER_CG_SYNC_POSITION,
 };
 use protocol::cg_item_drop::CgItemDrop;
@@ -102,6 +104,9 @@ use protocol::cg_login3::CgLogin3;
 use protocol::cg_move::CgMove;
 use protocol::cg_name::CgChangeName;
 use protocol::cg_position::CgCharacterPosition;
+use protocol::cg_quickslot_add::CgQuickslotAdd;
+use protocol::cg_quickslot_del::CgQuickslotDel;
+use protocol::cg_quickslot_swap::CgQuickslotSwap;
 use protocol::cg_wire::ClientFrame;
 use protocol::gc::{GcAuthSuccess, GcLoginFailure};
 use protocol::gc_inventory::HEADER_GC_EMPIRE;
@@ -268,6 +273,9 @@ struct Held {
     /// The points of that character (legacy `CHARACTER::m_points` and `m_pointsInstant`),
     /// computed when the load answered.
     points: Option<world::character::Points>,
+    /// The quickslots of that character (legacy `m_quickslot`): the ones the load set, then
+    /// the ones the world's last quickslot answer left, which the save writes.
+    quickslots: world::character::Quickslots,
     /// The channel the client logged in through, which is `g_bChannel` on the descriptor.
     ///
     /// It is held from the Channel login rather than read from the listener, because a
@@ -758,6 +766,116 @@ where
     let actor = item_actor(held);
     let answer = context.game.use_item(vid, record.cell, actor).await;
     finish_item_step(session, addr, context, held, actor.empire, answer).await
+}
+
+/// Whether `header` is `CG_ITEM_USE`, a ground step or a quickslot request.
+fn is_belongings_step(header: u8) -> bool {
+    header == HEADER_CG_ITEM_USE.value() || is_ground_step(header) || is_quickslot_step(header)
+}
+
+/// Run a step [`is_belongings_step`] accepts:
+///
+/// - `CG_ITEM_USE` (11): `CInputMain::ItemUse` (`G/input_main.cpp:993`).
+/// - `CG_ITEM_DROP` (12), `CG_ITEM_DROP2` (20) and `CG_ITEM_PICKUP` (15), reached when the
+///   character is not an observer (`G/input_main.cpp:3693-3717`).
+/// - `CG_QUICKSLOT_ADD` (16), `CG_QUICKSLOT_DEL` (17) and `CG_QUICKSLOT_SWAP` (18), which no
+///   observer check guards (`G/input_main.cpp:3742-3755`).
+async fn belongings_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if frame.header == HEADER_CG_ITEM_USE.value() {
+        use_an_item(session, addr, context, held, frame).await
+    } else if is_quickslot_step(frame.header) {
+        change_a_quickslot(session, addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_ITEM_PICKUP.value() {
+        pick_up_an_item(session, addr, context, held, frame).await
+    } else {
+        drop_an_item(session, addr, context, held, frame).await
+    }
+}
+
+/// Whether `header` is one of the three quickslot requests.
+fn is_quickslot_step(header: u8) -> bool {
+    [
+        HEADER_CG_QUICKSLOT_ADD,
+        HEADER_CG_QUICKSLOT_DEL,
+        HEADER_CG_QUICKSLOT_SWAP,
+    ]
+    .iter()
+    .any(|known| known.value() == header)
+}
+
+/// `CG_QUICKSLOT_ADD`, `CG_QUICKSLOT_DEL` and `CG_QUICKSLOT_SWAP` in the game phase:
+/// `CInputMain::QuickslotAdd`, `QuickslotDelete` and `QuickslotSwap`
+/// (`G/input_main.cpp:1083-1126`). The world changes the slots and answers the records for
+/// this client, and the descriptor holds the slots the save writes.
+async fn change_a_quickslot<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let decoded = if frame.header == HEADER_CG_QUICKSLOT_ADD.value() {
+        CgQuickslotAdd::decode_frame(frame)
+            .map(|record| QuickslotStep::Add {
+                slot: record.pos,
+                quickslot: world::character::Quickslot {
+                    kind: record.slot.b_type,
+                    pos: record.slot.b_pos,
+                },
+            })
+            .map_err(|error| error.to_string())
+    } else if frame.header == HEADER_CG_QUICKSLOT_DEL.value() {
+        CgQuickslotDel::decode_frame(frame)
+            .map(|record| QuickslotStep::Del { slot: record.pos })
+            .map_err(|error| error.to_string())
+    } else {
+        CgQuickslotSwap::decode_frame(frame)
+            .map(|record| QuickslotStep::Swap {
+                slot: record.pos,
+                with: record.change_pos,
+            })
+            .map_err(|error| error.to_string())
+    };
+    let step = match decoded {
+        Ok(step) => step,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed quickslot record; closing");
+            return false;
+        }
+    };
+    let Some(vid) = held.world else {
+        info!(%addr, "Quickslot request without a character in the world; ignoring");
+        return true;
+    };
+    let answer = match context.game.quickslot(vid, step).await {
+        Ok(Some(answer)) => answer,
+        Ok(None) => {
+            warn!(%addr, "The world holds no character for this descriptor; closing");
+            return false;
+        }
+        Err(error) => {
+            error!(%addr, %error, "The world could not be reached; closing");
+            return false;
+        }
+    };
+    held.quickslots = answer.quickslots;
+    if let Err(error) = send_all(session, &answer.records).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    true
 }
 
 /// `CG_ITEM_DROP` (12) and `CG_ITEM_DROP2` (20) in the game phase: `CInputMain::ItemDrop` and
@@ -1593,22 +1711,11 @@ where
         {
             move_an_item(session, addr, context, held, &frame).await
         }
-        // `CG_ITEM_USE` (11) in the game phase: `CInputMain::ItemUse` (`G/input_main.cpp:993`).
+        // `CG_ITEM_USE` (11), the ground steps and the quickslot requests in the game phase.
         LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && frame.header == HEADER_CG_ITEM_USE.value() =>
+            if phase == ClientPhase::Game && is_belongings_step(frame.header) =>
         {
-            use_an_item(session, addr, context, held, &frame).await
-        }
-        // `CG_ITEM_DROP` (12), `CG_ITEM_DROP2` (20) and `CG_ITEM_PICKUP` (15) in the game
-        // phase, reached when the character is not an observer (`G/input_main.cpp:3693-3717`).
-        LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && is_ground_step(frame.header) =>
-        {
-            if frame.header == HEADER_CG_ITEM_PICKUP.value() {
-                pick_up_an_item(session, addr, context, held, &frame).await
-            } else {
-                drop_an_item(session, addr, context, held, &frame).await
-            }
+            belongings_step(session, addr, context, held, &frame).await
         }
         // `CG_MOVE` (7) in the game phase: `CInputMain::Move` (`G/input_main.cpp:1757`).
         LiveStep::Record { phase, frame }
@@ -1921,7 +2028,19 @@ where
     // `d->BindCharacter(ch)` is the step that makes the character the descriptor's own, and it
     // is what `CInputLogin::Entergame` later reads. Without it `CG_ENTER_GAME` has nothing to
     // answer, so the loaded row is held here and kept for the descriptor's life.
-    let burst = loading_burst(&character, &points, vid, &view);
+    let mut burst = loading_burst(&character, &points, vid, &view);
+    // `PlayerLoad` sets each stored quickslot right after the map test and before the points
+    // packet (`G/input_db.cpp:439-440`).
+    let stored = match db::quickslots::load_quickslots(&context.store, player).await {
+        Ok(stored) => stored,
+        Err(error) => {
+            warn!(%addr, player, %error, "Quickslot load failed; closing");
+            return false;
+        }
+    };
+    let (quickslots, quickslot_records) = prodomo::quickslot::load(&stored);
+    burst.after_map_test.splice(0..0, quickslot_records);
+    held.quickslots = quickslots;
     held.character = Some(character.clone());
     held.channel = seat.number;
     info!(
@@ -2254,9 +2373,9 @@ where
         let outbox = lease.outbox();
         held.presence = Some(lease);
         let items = std::mem::take(&mut held.items);
-        let points = held.points.clone();
+        let loaded = loaded_state(held);
         let Some(world_vid) =
-            join_the_world(context, addr, character, vid, (items, points), outbox).await
+            join_the_world(context, addr, character, vid, (items, loaded), outbox).await
         else {
             return false;
         };
@@ -2264,6 +2383,14 @@ where
         return show_the_ground(session, addr, context, seat.number, map).await;
     }
     true
+}
+
+/// What the load left for the world besides the items: the points and the quickslots.
+fn loaded_state(held: &Held) -> prodomo::game_loop_messages::Loaded {
+    prodomo::game_loop_messages::Loaded {
+        points: held.points.clone(),
+        quickslots: held.quickslots.clone(),
+    }
 }
 
 /// Puts a live client's character into the game thread's world, and records the entry.
@@ -2297,7 +2424,7 @@ async fn join_the_world(
     addr: SocketAddr,
     character: &db::players::Character,
     vid: u32,
-    (items, points): (Vec<(ItemPos, Item)>, Option<world::character::Points>),
+    (items, loaded): (Vec<(ItemPos, Item)>, prodomo::game_loop_messages::Loaded),
     outbox: prodomo::client_registry::ClientOutbox,
 ) -> Option<common::vid::Vid> {
     let world_vid = common::vid::Vid::new(vid);
@@ -2308,7 +2435,7 @@ async fn join_the_world(
             character.id,
             character.name.clone(),
             items,
-            points,
+            loaded,
             outbox,
         )
         .await;
@@ -2391,7 +2518,18 @@ async fn save_held(context: &ConnectionContext, held: &Held, at: std::time::Inst
         prodomo::save::playtime(character.playtime_minutes, elapsed),
     );
     match db::players::save_character(&context.store, account.id, character.id, &save).await {
-        Ok(true) => true,
+        // Legacy writes the quickslots in the player row (`G/char.cpp:1603-1604`); here they
+        // are their own table, written after the row.
+        Ok(true) => {
+            let slots = prodomo::quickslot::stored(&held.quickslots);
+            match db::quickslots::save_quickslots(&context.store, character.id, &slots).await {
+                Ok(()) => true,
+                Err(error) => {
+                    warn!(player = character.id, %error, "Could not save the quickslots");
+                    false
+                }
+            }
+        }
         Ok(false) => {
             warn!(
                 player = character.id,

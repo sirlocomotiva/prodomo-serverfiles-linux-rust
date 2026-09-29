@@ -1260,6 +1260,10 @@ const GC_MAIN_CHARACTER2_EMPIRE: u8 = 113;
 const GC_CHARACTER_GOLD: u8 = 224;
 const GC_PLAYER_POINTS: u8 = 16;
 const GC_SKILL_LEVEL_NEW: u8 = 76;
+/// The three quickslot records (`G/packet.h`), 28 to 30.
+const GC_QUICKSLOT_ADD: u8 = 28;
+const GC_QUICKSLOT_DEL: u8 = 29;
+const GC_QUICKSLOT_SWAP: u8 = 30;
 const GC_CHARACTER_ADD: u8 = 1;
 const GC_CHAR_ADDITIONAL_INFO: u8 = 136;
 const GC_AFFECT_ADD: u8 = 126;
@@ -1322,6 +1326,9 @@ fn game_len(header: u8) -> usize {
         ITEM_UPDATE => ITEM_UPDATE_LEN,
         GROUND_ADD => GROUND_ADD_LEN,
         GROUND_DEL => GROUND_DEL_LEN,
+        GC_QUICKSLOT_ADD => 1 + 1 + 2,
+        GC_QUICKSLOT_DEL => 1 + 1,
+        GC_QUICKSLOT_SWAP => 1 + 2,
         other => panic!("unexpected loading or enter-game header {other}"),
     }
 }
@@ -1411,6 +1418,19 @@ fn enter_world(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed) {
 /// before the skill levels and once after the items. Nothing between the two changes a point,
 /// so the second pair is the first pair's bytes.
 fn load_character(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed, Vec<Vec<u8>>) {
+    let (keyed, character, quickslots, items) = load_with_quickslots(server, login, slot);
+    assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
+    (keyed, character, items)
+}
+
+/// [`load_character`] for a character with stored quickslots: also answers the
+/// `GC_QUICKSLOT_ADD` records the load sent between the main character and the gold, where
+/// `PlayerLoad` sets them (`G/input_db.cpp:439-440`).
+fn load_with_quickslots(
+    server: &Server,
+    login: &[u8],
+    slot: u8,
+) -> (Keyed, Listed, Vec<Vec<u8>>, Vec<Vec<u8>>) {
     let (mut keyed, _empire, list) = select_screen(server, login);
     let character = listed(&list, usize::from(slot));
     keyed.send_record(&client_select(slot));
@@ -1418,7 +1438,14 @@ fn load_character(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed, Ve
     assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
     let main = keyed.read_game();
     assert_eq!(main[0], GC_MAIN_CHARACTER2_EMPIRE);
-    let gold = keyed.read_game();
+    let mut quickslots = Vec::new();
+    let gold = loop {
+        let record = keyed.read_game();
+        if record[0] != GC_QUICKSLOT_ADD {
+            break record;
+        }
+        quickslots.push(record);
+    };
     assert_eq!(gold[0], GC_CHARACTER_GOLD);
     let points = keyed.read_game();
     assert_eq!(points[0], GC_PLAYER_POINTS);
@@ -1433,7 +1460,7 @@ fn load_character(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed, Ve
     };
     assert_eq!(tail, gold, "the item load ends with the gold record");
     assert_eq!(keyed.read_game(), points, "then the points record");
-    (keyed, character, items)
+    (keyed, character, quickslots, items)
 }
 
 /// Send `CG_ENTER_GAME` from the loading phase and read the enter-game burst, leaving the
@@ -1654,13 +1681,18 @@ impl Keyed {
     }
 }
 
+/// The statement that raises unless `condition` is true. A NULL condition raises too: an
+/// aggregate over no rows is NULL, and `IF NOT (NULL)` would take neither branch and pass.
+fn assertion(condition: &str) -> String {
+    format!(
+        "DO $$ BEGIN IF ({condition}) IS NOT TRUE THEN RAISE EXCEPTION 'failed'; END IF; END $$"
+    )
+}
+
 /// Assert a condition on the scenario's database.
 fn check(database: &ScratchDatabase, condition: &str) {
-    execute(
-        database.url(),
-        &format!("DO $$ BEGIN IF NOT ({condition}) THEN RAISE EXCEPTION 'failed'; END IF; END $$"),
-    )
-    .unwrap_or_else(|error| panic!("{condition}: {error}"));
+    execute(database.url(), &assertion(condition))
+        .unwrap_or_else(|error| panic!("{condition}: {error}"));
 }
 
 /// Assert a condition once it holds, up to a deadline.
@@ -1673,12 +1705,7 @@ fn wait_for(database: &ScratchDatabase, condition: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut last;
     loop {
-        match execute(
-            database.url(),
-            &format!(
-                "DO $$ BEGIN IF NOT ({condition}) THEN RAISE EXCEPTION 'failed'; END IF; END $$"
-            ),
-        ) {
+        match execute(database.url(), &assertion(condition)) {
             Ok(()) => return,
             Err(error) => last = error.to_string(),
         }
@@ -4094,6 +4121,96 @@ fn a_recovering_character_is_saved_with_what_the_event_paid_while_it_is_still_co
     let (bytes, quiet) = alpha.client.drain(Duration::from_millis(200));
     assert!(bytes.is_empty(), "a save sends no record: {bytes:02x?}");
     assert_eq!(quiet, Quiet::Open, "the client is still connected");
+}
+
+/// A `CG_QUICKSLOT_ADD` of `kind` and `pos` into `slot`.
+fn client_quickslot_add(slot: u8, kind: u8, pos: u8) -> Vec<u8> {
+    protocol::cg_quickslot_add::CgQuickslotAdd::new(
+        slot,
+        protocol::TQuickslot {
+            b_type: kind,
+            b_pos: pos,
+        },
+    )
+    .encode()
+}
+
+/// `cg.game.quickslot_add`, `cg.game.quickslot_del`, `cg.game.quickslot_swap`: a potion, a
+/// skill and a command are put on the bar, an empty cell is refused, a second copy of the skill
+/// empties the first, a swap and a delete are told, and a relog sets the stored slots again in
+/// the loading burst.
+#[test]
+fn the_quickslots_are_set_swapped_and_deleted_and_a_relog_sets_them_again() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+
+    // Given: Alpha holds a small red potion at cell 0.
+    let (mut alpha, _character) = enter_world(&server, b"alice", 0);
+    Server::write_console(&console, "item give Alpha 27001 1");
+    server.wait_for("id 100000000; the client has it");
+    let _set = alpha.read_game();
+
+    // When: the potion, skill 3 and command 5 are put on slots 0, 1 and 2.
+    alpha.send_record(&client_quickslot_add(0, 1, 0));
+    alpha.send_record(&client_quickslot_add(1, 2, 3));
+    alpha.send_record(&client_quickslot_add(2, 3, 5));
+    // Then: each is told.
+    assert_eq!(alpha.read_game(), [GC_QUICKSLOT_ADD, 0, 1, 0]);
+    assert_eq!(alpha.read_game(), [GC_QUICKSLOT_ADD, 1, 2, 3]);
+    assert_eq!(alpha.read_game(), [GC_QUICKSLOT_ADD, 2, 3, 5]);
+    // And: the empty cell 5 is refused with no record, as legacy's `QuickslotAdd` is.
+    alpha.unanswered(&client_quickslot_add(4, 1, 5));
+
+    // When: skill 3 is put on slot 5 too.
+    alpha.send_record(&client_quickslot_add(5, 2, 3));
+    // Then: slot 1 is emptied first.
+    assert_eq!(alpha.read_game(), [GC_QUICKSLOT_DEL, 1]);
+    assert_eq!(alpha.read_game(), [GC_QUICKSLOT_ADD, 5, 2, 3]);
+
+    // When: slot 0 is swapped with slot 7, and slot 2 is deleted.
+    alpha.send_record(&protocol::cg_quickslot_swap::CgQuickslotSwap::new(0, 7).encode());
+    alpha.send_record(&protocol::cg_quickslot_del::CgQuickslotDel::new(2).encode());
+    // Then: both are told.
+    assert_eq!(alpha.read_game(), [GC_QUICKSLOT_SWAP, 0, 7]);
+    assert_eq!(alpha.read_game(), [GC_QUICKSLOT_DEL, 2]);
+
+    // And: the logout save stores the two slots left.
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT array_agg((slot, kind, pos) ORDER BY slot)::text FROM quickslot) \
+         = '{\"(5,2,3)\",\"(7,1,0)\"}'",
+    );
+
+    // When: the character is selected again.
+    server.wait_for("Character left the world");
+    let (mut alpha, _character, quickslots, items) = load_with_quickslots(&server, b"alice", 0);
+    // Then: the loading burst sets both, in slot order, before the gold.
+    assert_eq!(
+        quickslots,
+        [
+            vec![GC_QUICKSLOT_ADD, 5, 2, 3],
+            vec![GC_QUICKSLOT_ADD, 7, 1, 0]
+        ]
+    );
+    assert_eq!(items.len(), 1, "the potion is still at cell 0");
+
+    // When: the game is entered and the two loaded slots are swapped.
+    let _add = enter_game_burst(&mut alpha);
+    alpha.send_record(&protocol::cg_quickslot_swap::CgQuickslotSwap::new(5, 7).encode());
+    assert_eq!(alpha.read_game(), [GC_QUICKSLOT_SWAP, 5, 7]);
+    // Then: the world swapped the slots the load set, and the logout save stores them.
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT array_agg((slot, kind, pos) ORDER BY slot)::text FROM quickslot) \
+         = '{\"(5,1,0)\",\"(7,2,3)\"}'",
+    );
 }
 
 /// One second of the recovery event: the pool's `GC_CHARACTER_POINT_CHANGE`, then the
