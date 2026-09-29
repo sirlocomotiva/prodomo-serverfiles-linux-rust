@@ -2,6 +2,7 @@
 
 mod apply;
 mod combat;
+mod dice;
 mod equipment;
 mod grant;
 mod inventory;
@@ -26,7 +27,11 @@ pub use combat::{
     DamageOutcome, HitOutcome, MeleeDamageInput, NormalHitInput, PkActor, PkDenial, PkEligibility,
     PkMode, Vitality,
 };
-pub use equipment::{accessory_socket_grade, is_set_item, item_applies, Equipment, Worn, PARTS};
+pub use dice::{number, Dice, Pcg32};
+pub use equipment::{
+    accessory_socket_grade, is_set_item, item_applies, removal_applies, Equipment, PartChange,
+    Worn, PARTS,
+};
 pub use grant::{grant, GrantRefused, Granted, GRANT_WINDOW};
 pub use inventory::{
     character_cell_bound, custom_inventory_category_of, custom_inventory_position,

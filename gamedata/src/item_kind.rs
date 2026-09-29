@@ -1,8 +1,9 @@
 //! The item type, sub-type and limit numbers the game rules compare an [`ItemProto`] against.
 //!
 //! Each is the value of a legacy enum member in `server/server/common/item_length.h`:
-//! `EItemTypes` (`:68-107`), `EArmorSubTypes` (`:136-148`), `ECostumeSubTypes` (`:150-171`) and
-//! `ELimitTypes` (`:427-451`). The Game data reader turns a name in `item_proto.txt` into its
+//! `EItemTypes` (`:68-107`), `EArmorSubTypes` (`:136-148`), `ECostumeSubTypes` (`:150-171`),
+//! `EItemAntiFlag` (`:376-396`), `EItemWearableFlag` (`:398-425`) and `ELimitTypes`
+//! (`:427-451`). The Game data reader turns a name in `item_proto.txt` into its
 //! **index** in the matching name table of [`item_proto_value`](crate::item_proto_value), and
 //! the rules compare that index against the enum member, so the two numberings must agree. The
 //! tests pin each constant to its name's index, which is the witness that they do.
@@ -27,6 +28,8 @@ pub const ITEM_ROD: i32 = 13;
 pub const ITEM_UNIQUE: i32 = 16;
 /// `ITEM_PICK`, a pickaxe.
 pub const ITEM_PICK: i32 = 24;
+/// `ITEM_TOTEM`, which `FindEquipCell` refuses whatever its wear flags say.
+pub const ITEM_TOTEM: i32 = 26;
 /// `ITEM_COSTUME`.
 pub const ITEM_COSTUME: i32 = 28;
 /// `ITEM_DS`, a dragon soul stone.
@@ -80,6 +83,14 @@ pub const COSTUME_SASH_SKIN: i32 = 7;
 pub const LIMIT_NONE: i32 = 0;
 /// `LIMIT_LEVEL`: the wearer's level must be at least the limit's value.
 pub const LIMIT_LEVEL: i32 = 1;
+/// `LIMIT_STR`: the wearer's strength must be at least the limit's value.
+pub const LIMIT_STR: i32 = 2;
+/// `LIMIT_DEX`: the wearer's dexterity must be at least the limit's value.
+pub const LIMIT_DEX: i32 = 3;
+/// `LIMIT_INT`: the wearer's intelligence must be at least the limit's value.
+pub const LIMIT_INT: i32 = 4;
+/// `LIMIT_CON`: the wearer's vitality must be at least the limit's value.
+pub const LIMIT_CON: i32 = 5;
 /// `LIMIT_REAL_TIME`: the item expires at the time in its socket 0.
 pub const LIMIT_REAL_TIME: i32 = 6;
 /// `LIMIT_REAL_TIME_START_FIRST_USE` (`item_length.h:443`).
@@ -90,13 +101,73 @@ pub const LIMIT_REAL_TIME: i32 = 6;
 /// against the file's spelling instead of the enum's would silently leave the index at -1 and
 /// disable every real-time limit in the game.
 pub const LIMIT_REAL_TIME_START_FIRST_USE: i32 = 7;
-/// `LIMIT_TIMER_BASED_ON_WEAR` (`item_length.h:448`): the item's time runs while it is worn.
+/// `LIMIT_TIMER_BASED_ON_WEAR` (`item_length.h:447`): the item's time runs while it is worn.
 pub const LIMIT_TIMER_BASED_ON_WEAR: i32 = 8;
+/// `LIMIT_CHAMPION` (`item_length.h:448`): the wearer's conqueror level must be at least the
+/// limit's value.
+pub const LIMIT_CHAMPION: i32 = 9;
+
+/// `ITEM_ANTIFLAG_FEMALE`: a female character may not wear it.
+pub const ITEM_ANTIFLAG_FEMALE: u32 = 1 << 0;
+/// `ITEM_ANTIFLAG_MALE`: a male character may not wear it.
+pub const ITEM_ANTIFLAG_MALE: u32 = 1 << 1;
+/// `ITEM_ANTIFLAG_WARRIOR`, which the file spells `ANTI_MUSA`.
+pub const ITEM_ANTIFLAG_WARRIOR: u32 = 1 << 2;
+/// `ITEM_ANTIFLAG_ASSASSIN`.
+pub const ITEM_ANTIFLAG_ASSASSIN: u32 = 1 << 3;
+/// `ITEM_ANTIFLAG_SURA`.
+pub const ITEM_ANTIFLAG_SURA: u32 = 1 << 4;
+/// `ITEM_ANTIFLAG_SHAMAN`, which the file spells `ANTI_MUDANG`.
+pub const ITEM_ANTIFLAG_SHAMAN: u32 = 1 << 5;
+
+/// `WEARABLE_BODY`.
+pub const WEARABLE_BODY: u32 = 1 << 0;
+/// `WEARABLE_HEAD`.
+pub const WEARABLE_HEAD: u32 = 1 << 1;
+/// `WEARABLE_FOOTS`.
+pub const WEARABLE_FOOTS: u32 = 1 << 2;
+/// `WEARABLE_WRIST`.
+pub const WEARABLE_WRIST: u32 = 1 << 3;
+/// `WEARABLE_WEAPON`.
+pub const WEARABLE_WEAPON: u32 = 1 << 4;
+/// `WEARABLE_NECK`.
+pub const WEARABLE_NECK: u32 = 1 << 5;
+/// `WEARABLE_EAR`.
+pub const WEARABLE_EAR: u32 = 1 << 6;
+/// `WEARABLE_UNIQUE` (`item_length.h:407`).
+///
+/// The reader's name table puts `WEAR_UNIQUE` at bit 8 and `WEAR_SHIELD` at bit 7
+/// (`arWearrFlag`, `server/server/db/ProtoReader.cpp:426`), the other way round from this enum,
+/// so an item whose file cell says `WEAR_SHIELD` gets this bit. The owner's `item_proto.txt` is
+/// written for that: its shields say `WEAR_UNIQUE` and its unique accessories say `WEAR_SHIELD`.
+/// The tests pin the swap, because "fixing" either side alone would put every shield in a
+/// unique cell.
+pub const WEARABLE_UNIQUE: u32 = 1 << 7;
+/// `WEARABLE_SHIELD` (`item_length.h:408`); see [`WEARABLE_UNIQUE`] for its file spelling.
+pub const WEARABLE_SHIELD: u32 = 1 << 8;
+/// `WEARABLE_ARROW`.
+pub const WEARABLE_ARROW: u32 = 1 << 9;
+/// `WEARABLE_ABILITY`.
+pub const WEARABLE_ABILITY: u32 = 1 << 11;
+/// `WEARABLE_FIRE`, the fire talisman.
+pub const WEARABLE_FIRE: u32 = 1 << 13;
+/// `WEARABLE_ICE`.
+pub const WEARABLE_ICE: u32 = 1 << 14;
+/// `WEARABLE_EARTH`.
+pub const WEARABLE_EARTH: u32 = 1 << 15;
+/// `WEARABLE_DARK`.
+pub const WEARABLE_DARK: u32 = 1 << 16;
+/// `WEARABLE_WIND`.
+pub const WEARABLE_WIND: u32 = 1 << 17;
+/// `WEARABLE_ELEC`.
+pub const WEARABLE_ELEC: u32 = 1 << 18;
+/// `WEARABLE_GLOVE` (`ENABLE_GLOVE_SYSTEM`).
+pub const WEARABLE_GLOVE: u32 = 1 << 19;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::item_proto_value::{LIMIT_TYPE, SUB_TYPE, TYPE};
+    use crate::item_proto_value::{ANTI_FLAG, LIMIT_TYPE, SUB_TYPE, TYPE, WEAR_FLAG};
 
     /// The index of `name` in `table`, as the reader would store it.
     fn index(table: &[&str], name: &str) -> i32 {
@@ -117,6 +188,7 @@ mod tests {
             (ITEM_ROD, "ITEM_ROD"),
             (ITEM_UNIQUE, "ITEM_UNIQUE"),
             (ITEM_PICK, "ITEM_PICK"),
+            (ITEM_TOTEM, "ITEM_TOTEM"),
             (ITEM_COSTUME, "ITEM_COSTUME"),
             (ITEM_DS, "ITEM_DS"),
             (ITEM_SPECIAL_DS, "ITEM_SPECIAL_DS"),
@@ -166,11 +238,63 @@ mod tests {
         for (value, name) in [
             (LIMIT_NONE, "LIMIT_NONE"),
             (LIMIT_LEVEL, "LEVEL"),
+            (LIMIT_STR, "STR"),
+            (LIMIT_DEX, "DEX"),
+            (LIMIT_INT, "INT"),
+            (LIMIT_CON, "CON"),
             (LIMIT_REAL_TIME, "REAL_TIME"),
             (LIMIT_REAL_TIME_START_FIRST_USE, "REAL_TIME_FIRST_USE"),
             (LIMIT_TIMER_BASED_ON_WEAR, "TIMER_BASED_ON_WEAR"),
+            (LIMIT_CHAMPION, "CHAMPION"),
         ] {
             assert_eq!(value, index(LIMIT_TYPE, name), "{name}");
+        }
+    }
+
+    /// The bit a name in the file's flag column sets.
+    fn bit(table: &[&str], name: &str) -> u32 {
+        1 << index(table, name)
+    }
+
+    #[test]
+    fn each_anti_flag_is_the_bit_of_its_file_name() {
+        for (value, name) in [
+            (ITEM_ANTIFLAG_FEMALE, "ANTI_FEMALE"),
+            (ITEM_ANTIFLAG_MALE, "ANTI_MALE"),
+            (ITEM_ANTIFLAG_WARRIOR, "ANTI_MUSA"),
+            (ITEM_ANTIFLAG_ASSASSIN, "ANTI_ASSASSIN"),
+            (ITEM_ANTIFLAG_SURA, "ANTI_SURA"),
+            (ITEM_ANTIFLAG_SHAMAN, "ANTI_MUDANG"),
+        ] {
+            assert_eq!(value, bit(ANTI_FLAG, name), "{name}");
+        }
+    }
+
+    /// Every wear bit is the bit of its own file name except the two the reader swaps, which
+    /// are pinned crossed: `WEAR_SHIELD` in the file is `WEARABLE_UNIQUE` in the game.
+    #[test]
+    fn each_wear_flag_is_the_bit_of_its_file_name_with_shield_and_unique_crossed() {
+        for (value, name) in [
+            (WEARABLE_BODY, "WEAR_BODY"),
+            (WEARABLE_HEAD, "WEAR_HEAD"),
+            (WEARABLE_FOOTS, "WEAR_FOOTS"),
+            (WEARABLE_WRIST, "WEAR_WRIST"),
+            (WEARABLE_WEAPON, "WEAR_WEAPON"),
+            (WEARABLE_NECK, "WEAR_NECK"),
+            (WEARABLE_EAR, "WEAR_EAR"),
+            (WEARABLE_UNIQUE, "WEAR_SHIELD"),
+            (WEARABLE_SHIELD, "WEAR_UNIQUE"),
+            (WEARABLE_ARROW, "WEAR_ARROW"),
+            (WEARABLE_ABILITY, "WEAR_ABILITY"),
+            (WEARABLE_FIRE, "WEAR_TALISMAN_FIRE"),
+            (WEARABLE_ICE, "WEAR_TALISMAN_ICE"),
+            (WEARABLE_EARTH, "WEAR_TALISMAN_EARTH"),
+            (WEARABLE_DARK, "WEAR_TALISMAN_DARK"),
+            (WEARABLE_WIND, "WEAR_TALISMAN_WIND"),
+            (WEARABLE_ELEC, "WEAR_TALISMAN_ELEC"),
+            (WEARABLE_GLOVE, "WEAR_GLOVE"),
+        ] {
+            assert_eq!(value, bit(WEAR_FLAG, name), "{name}");
         }
     }
 }

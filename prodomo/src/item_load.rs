@@ -496,11 +496,14 @@ fn load_position(row: &ItemRow) -> Result<ItemPos, Refused> {
 /// the `EQUIPMENT` window when its cell is past the base inventory and outside the belt range
 /// (`G/char_item.cpp:619-629`), and the save stores it at `cell - INVENTORY_MAX_NUM`. An
 /// `INVENTORY` cell in the belt range is stored as `BELT_INVENTORY` at
-/// `cell - BELT_INVENTORY_SLOT_START`, because `ENABLE_BELT_INVENTORY_EX` is defined. Every
-/// other position is stored as the world holds it.
+/// `cell - BELT_INVENTORY_SLOT_START`, because `ENABLE_BELT_INVENTORY_EX` is defined. The
+/// world stores a worn item's own position with the window `SetItem` gave it, `EQUIPMENT`, and
+/// the same cell, so both windows are translated. Every other position is stored as the world
+/// holds it.
 #[must_use]
 pub fn stored_row_position(pos: ItemPos) -> (u8, u32) {
-    if pos.window_type == EWindows::Inventory as u8 {
+    if pos.window_type == EWindows::Inventory as u8 || pos.window_type == EWindows::Equipment as u8
+    {
         let belt = BELT_INVENTORY_SLOT_START..BELT_INVENTORY_SLOT_START + BELT_INVENTORY_SLOT_COUNT;
         if belt.contains(&pos.cell) {
             return (
@@ -848,6 +851,9 @@ mod tests {
         // The hand values: 274 is cell 0 of the belt and 289 is cell 15.
         assert_eq!(stored_row_position(ItemPos::new(1, 289)), (9, 15));
         assert_eq!(stored_row_position(ItemPos::new(1, 290)), (1, 290));
+        // A worn item's own position names the equipment window, and is stored the same way.
+        assert_eq!(stored_row_position(ItemPos::new(2, 180)), (2, 0));
+        assert_eq!(stored_row_position(ItemPos::new(2, 273)), (2, 93));
     }
 
     #[test]

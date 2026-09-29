@@ -556,6 +556,29 @@ impl Points {
         self.level
     }
 
+    /// The race, which the job and the sex are read from.
+    #[must_use]
+    pub fn race(&self) -> u8 {
+        self.race
+    }
+
+    /// The conqueror level, which `LIMIT_CHAMPION` is checked against.
+    #[must_use]
+    pub fn conqueror_level(&self) -> u8 {
+        self.conqueror_level
+    }
+
+    /// `bBasePart`, the body part the character shows with no armour.
+    #[must_use]
+    pub fn part_base(&self) -> u8 {
+        self.part_base
+    }
+
+    /// `SetPart`: one part the client draws.
+    pub fn set_part(&mut self, part: EParts, value: u16) {
+        self.parts[part as usize] = value;
+    }
+
     /// `GetPoint`: the instant slot, or 0 for a slot past the array, as legacy answers it.
     #[must_use]
     pub fn get_point(&self, kind: usize) -> i32 {
@@ -709,6 +732,14 @@ impl Points {
         let mut records = Vec::new();
         self.battle_points(&mut records);
         records
+    }
+
+    /// [`Points::compute_battle_points`] with the armour `equipment` wears, which is what
+    /// `EquipTo` and `Unequip` compute when the item is not a set piece (`item.cpp:1490-1496` in
+    /// `EquipTo`, and the same tail in `Unequip`).
+    pub fn compute_battle_points_with(&mut self, equipment: &Equipment<'_>) -> Vec<PointRecord> {
+        self.armour = equipment.armour();
+        self.compute_battle_points()
     }
 
     /// [`Points::compute_points_with`] for a character that wears nothing.
@@ -1723,6 +1754,40 @@ mod tests {
         points.compute_battle_points();
         // armour = 40 + 40 * 50 / 100 = 60.
         assert_eq!(grades(&points), [14, 64, 65, 8, 35]);
+    }
+
+    #[test]
+    fn the_battle_points_with_an_equipment_take_its_armour_and_nothing_else() {
+        let mut points = warrior();
+        let before = grades(&points);
+        let armour = valued(proto(11_210, ITEM_ARMOR, ARMOR_BODY), [0, 40, 0, 0, 0, 0]);
+        let protos = ItemProtos::from_rows(vec![armour]);
+        let body = Item::new(1, 11_210);
+        let worn = wearing(&[(BODY, &body)]);
+        let records = points.compute_battle_points_with(&Equipment::of(&worn, &protos));
+        // Only the defence grades move, by the armour; the applies are not run.
+        let after = grades(&points);
+        assert_eq!(after[1] - before[1], 40);
+        assert_eq!(after[2] - before[2], 40);
+        assert_eq!(records, points.compute_battle_points());
+        // Taking the armour off takes the defence away again.
+        let bare = CharacterItems::new();
+        points.compute_battle_points_with(&Equipment::of(&bare, &protos));
+        assert_eq!(grades(&points), before);
+    }
+
+    #[test]
+    fn a_set_part_changes_that_part_only() {
+        let mut points = warrior();
+        let parts = points.parts();
+        points.set_part(EParts::Hair, 0x0a0b);
+        points.set_part(EParts::Sash, 0x0c0d);
+        let mut expected = parts;
+        expected[EParts::Hair as usize] = 0x0a0b;
+        expected[EParts::Sash as usize] = 0x0c0d;
+        assert_eq!(points.parts(), expected);
+        assert_eq!(points.race(), 0);
+        assert_eq!(points.conqueror_level(), 0);
     }
 
     #[test]

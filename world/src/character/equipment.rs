@@ -308,6 +308,100 @@ impl<'a> Equipment<'a> {
         }
     }
 
+    /// The part one worn item's `ModifyPoints` sets when it is worn (`add`) or taken off, and
+    /// whether the switch then sends `UpdatePacket` (`item.cpp:1156-1375`).
+    ///
+    /// `base` is `bBasePart` and `current` the parts as they are. Taking off a body armour
+    /// shows the base part; a costume body shows the worn armour's look, or the base part; a
+    /// costume weapon shows the worn weapon's look, or keeps the weapon part as it is
+    /// (`GetOriginalPart(PART_WEAPON)`). The item must still be in `wear` when it is taken off,
+    /// because legacy runs the switch before `SetWear(NULL)`.
+    #[must_use]
+    pub fn part_change(
+        &self,
+        wear: u16,
+        worn: Worn<'a>,
+        add: bool,
+        base: u16,
+        current: [u16; PARTS],
+    ) -> Option<PartChange> {
+        let proto = worn.proto;
+        let update = proto.item_type == ITEM_COSTUME
+            && [COSTUME_BODY, COSTUME_HAIR, COSTUME_SASH, COSTUME_WEAPON].contains(&proto.sub_type);
+        let (part, value) = if add {
+            let (part, value) = self.part_of(wear, worn)?;
+            (part, word(value))
+        } else {
+            self.part_removed(wear, proto, base, current)?
+        };
+        Some(PartChange {
+            part,
+            value,
+            update,
+        })
+    }
+
+    /// The remove case of the parts switch.
+    fn part_removed(
+        &self,
+        wear: u16,
+        proto: &ItemProto,
+        base: u16,
+        current: [u16; PARTS],
+    ) -> Option<(EParts, u16)> {
+        let at_weapon = wear == EWearPositions::Weapon as u16;
+        match proto.item_type {
+            ITEM_PICK | ITEM_ROD => at_weapon.then_some((EParts::Weapon, 0)),
+            ITEM_WEAPON => {
+                if self.wear(EWearPositions::CostumeWeapon as u16).is_some() {
+                    return None;
+                }
+                at_weapon.then_some((EParts::Weapon, 0))
+            }
+            ITEM_ARMOR => {
+                if self.wear(EWearPositions::CostumeBody as u16).is_some() {
+                    return None;
+                }
+                (proto.sub_type == ARMOR_BODY).then_some((EParts::Main, base))
+            }
+            ITEM_COSTUME => match proto.sub_type {
+                COSTUME_BODY => Some((
+                    EParts::Main,
+                    self.wear(EWearPositions::Body as u16)
+                        .map_or(base, |armour| word(look_of(armour.item))),
+                )),
+                COSTUME_HAIR => Some((EParts::Hair, 0)),
+                COSTUME_AURA => {
+                    (wear == EWearPositions::CostumeAura as u16).then_some((EParts::Aura, 0))
+                }
+                COSTUME_SASH => Some((EParts::Sash, 0)),
+                COSTUME_WEAPON => Some((
+                    EParts::Weapon,
+                    self.wear(EWearPositions::Weapon as u16)
+                        .map_or(current[EParts::Weapon as usize], |weapon| {
+                            word(look_of(weapon.item))
+                        }),
+                )),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// `GetRefineElementType` of the character (`char_item.cpp`, `ENABLE_REFINE_ELEMENT`): the
+    /// worn weapon's element once it is refined three times or more, else 0.
+    #[must_use]
+    pub fn refine_element_type(&self) -> u8 {
+        let Some(weapon) = self.wear(EWearPositions::Weapon as u16) else {
+            return 0;
+        };
+        let element = weapon.item.refine_element;
+        if element / 10_000_000 % 10 < 3 {
+            return 0;
+        }
+        u8::try_from(refine_type(weapon.item)).unwrap_or(0)
+    }
+
     /// The set bonus of `ComputePoints`: for each set, the bonuses the count of its worn
     /// pieces gives, in the order legacy applies them.
     #[must_use]
@@ -323,6 +417,43 @@ impl<'a> Equipment<'a> {
             applies.extend(set.bonuses.iter().take(given));
         }
         applies
+    }
+}
+
+/// A part `ModifyPoints` sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartChange {
+    /// The part.
+    pub part: EParts,
+    /// Its new value, the `WORD` `SetPart` keeps.
+    pub value: u16,
+    /// Whether the switch sends `UpdatePacket` after it, which only the costume arms do.
+    pub update: bool,
+}
+
+/// The bonuses `ModifyPoints(false)` applies to take `applies` off again: each value negated,
+/// except `APPLY_SKILL`, whose value carries the skill in its high bits and is taken off by
+/// flipping its sign bit, `value ^ 0x00800000` (`item.cpp:1116-1128`).
+#[must_use]
+pub fn removal_applies(applies: &[(u8, i32)]) -> Vec<(u8, i32)> {
+    applies
+        .iter()
+        .map(|&(apply, value)| {
+            if apply == APPLY_SKILL {
+                (apply, value ^ 0x0080_0000)
+            } else {
+                (apply, value.wrapping_neg())
+            }
+        })
+        .collect()
+}
+
+/// The vnum an item shows: its transmutation, or its own vnum when it has none.
+fn look_of(item: &Item) -> u32 {
+    if item.transmutation == 0 {
+        item.vnum
+    } else {
+        item.transmutation
     }
 }
 
@@ -627,6 +758,7 @@ mod tests {
     const COSTUME_WEAPON_CELL: u16 = EWearPositions::CostumeWeapon as u16;
     const COSTUME_SASH_CELL: u16 = EWearPositions::CostumeSash as u16;
     const COSTUME_AURA_CELL: u16 = EWearPositions::CostumeAura as u16;
+    const COSTUME_MOUNT_CELL: u16 = EWearPositions::CostumeMount as u16;
 
     /// A metin stone, an absorbed body armour and an absorbed weapon for the fixtures.
     const STONE: u32 = 28_101;
@@ -1373,6 +1505,175 @@ mod tests {
         assert_eq!(parts, [0x0203, 0, 0, 0, 0, 0]);
         let parts = parts_of(&[(BODY, &body), (COSTUME_BODY_CELL, &item(9, 12_210))]);
         assert_eq!(parts, [0x0203, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn taking_an_item_off_sets_the_remove_case_part() {
+        let rows = vec![
+            proto(0x0001_0203, ITEM_WEAPON, 0),
+            proto(11_210, ITEM_ARMOR, ARMOR_BODY),
+            proto(12_210, ITEM_ARMOR, ARMOR_HEAD),
+            proto(41_001, ITEM_COSTUME, COSTUME_BODY),
+            proto(40_100, ITEM_COSTUME, COSTUME_WEAPON),
+            proto(45_001, ITEM_COSTUME, COSTUME_HAIR),
+            proto(85_001, ITEM_COSTUME, COSTUME_SASH),
+            proto(49_001, ITEM_COSTUME, COSTUME_AURA),
+            proto(29_101, ITEM_PICK, 0),
+        ];
+        let protos = ItemProtos::from_rows(rows);
+        let current = [0x0a0b, 0x0c0d, 0x0e0f, 0x1011, 0x1213, 0x1415];
+        let off = |worn: &[(u16, &Item)], wear: u16| {
+            let items = wearing(worn);
+            let equipment = Equipment::of(&items, &protos);
+            let item = equipment.wear(wear).expect("the item is worn");
+            equipment.part_change(wear, item, false, 0x0203, current)
+        };
+        let change = |part, value, update| {
+            Some(PartChange {
+                part,
+                value,
+                update,
+            })
+        };
+        let sword = item(1, 0x0001_0203);
+        let mut body = item(2, 11_210);
+        body.transmutation = 11_299;
+        let costume_body = item(3, 41_001);
+        let mut costume_weapon = item(4, 40_100);
+        costume_weapon.transmutation = 0x0506;
+        // A weapon or a pick at the weapon cell clears the weapon; elsewhere it changes nothing.
+        assert_eq!(
+            off(&[(WEAPON, &sword)], WEAPON),
+            change(EParts::Weapon, 0, false)
+        );
+        assert_eq!(off(&[(UNIQUE1, &sword)], UNIQUE1), None);
+        assert_eq!(
+            off(&[(WEAPON, &item(5, 29_101))], WEAPON),
+            change(EParts::Weapon, 0, false)
+        );
+        assert_eq!(off(&[(UNIQUE1, &item(5, 29_101))], UNIQUE1), None);
+        // A costume weapon keeps the weapon part the costume shows.
+        let both = [(WEAPON, &sword), (COSTUME_WEAPON_CELL, &costume_weapon)];
+        assert_eq!(off(&both, WEAPON), None);
+        // Taking the costume weapon off shows the weapon's look, or keeps the weapon part.
+        let mut looked = sword.clone();
+        looked.transmutation = 0x0708;
+        let both = [(WEAPON, &looked), (COSTUME_WEAPON_CELL, &costume_weapon)];
+        assert_eq!(
+            off(&both, COSTUME_WEAPON_CELL),
+            change(EParts::Weapon, 0x0708, true)
+        );
+        assert_eq!(
+            off(
+                &[(COSTUME_WEAPON_CELL, &costume_weapon)],
+                COSTUME_WEAPON_CELL
+            ),
+            change(EParts::Weapon, 0x0c0d, true)
+        );
+        // A body armour shows the base part again, unless a costume body is worn; a head
+        // armour changes nothing.
+        assert_eq!(
+            off(&[(BODY, &body)], BODY),
+            change(EParts::Main, 0x0203, false)
+        );
+        let both = [(BODY, &body), (COSTUME_BODY_CELL, &costume_body)];
+        assert_eq!(off(&both, BODY), None);
+        assert_eq!(off(&[(HEAD, &item(6, 12_210))], HEAD), None);
+        // Taking the costume body off shows the armour's look, or the base part.
+        assert_eq!(
+            off(&both, COSTUME_BODY_CELL),
+            change(EParts::Main, 11_299, true)
+        );
+        assert_eq!(
+            off(&[(COSTUME_BODY_CELL, &costume_body)], COSTUME_BODY_CELL),
+            change(EParts::Main, 0x0203, true)
+        );
+        // Hair and sash clear their part and update; the aura clears it only from its cell,
+        // and never updates.
+        let hair = [(COSTUME_HAIR_CELL, &item(7, 45_001))];
+        assert_eq!(off(&hair, COSTUME_HAIR_CELL), change(EParts::Hair, 0, true));
+        let sash = [(COSTUME_SASH_CELL, &item(8, 85_001))];
+        assert_eq!(off(&sash, COSTUME_SASH_CELL), change(EParts::Sash, 0, true));
+        let aura = item(9, 49_001);
+        assert_eq!(
+            off(&[(COSTUME_AURA_CELL, &aura)], COSTUME_AURA_CELL),
+            change(EParts::Aura, 0, false)
+        );
+        assert_eq!(off(&[(UNIQUE1, &aura)], UNIQUE1), None);
+    }
+
+    #[test]
+    fn putting_an_item_on_sets_the_add_case_part_and_only_costumes_update() {
+        let rows = vec![
+            proto(11_210, ITEM_ARMOR, ARMOR_BODY),
+            proto(41_001, ITEM_COSTUME, COSTUME_BODY),
+            proto(41_900, ITEM_COSTUME, COSTUME_MOUNT),
+        ];
+        let protos = ItemProtos::from_rows(rows);
+        let on = |worn: &[(u16, &Item)], wear: u16| {
+            let items = wearing(worn);
+            let equipment = Equipment::of(&items, &protos);
+            let item = equipment.wear(wear).expect("the item is worn");
+            equipment.part_change(wear, item, true, 0x0203, [0; PARTS])
+        };
+        let armour = on(&[(BODY, &item(1, 11_210))], BODY).expect("a body armour sets a part");
+        assert_eq!(
+            (armour.part, armour.value, armour.update),
+            (EParts::Main, 11_210, false)
+        );
+        let costume = on(&[(COSTUME_BODY_CELL, &item(2, 41_001))], COSTUME_BODY_CELL)
+            .expect("a costume body sets a part");
+        assert_eq!(
+            (costume.part, costume.value, costume.update),
+            (EParts::Main, 41_001, true)
+        );
+        assert_eq!(
+            on(
+                &[(COSTUME_MOUNT_CELL, &item(3, 41_900))],
+                COSTUME_MOUNT_CELL
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_removal_negates_each_apply_and_flips_the_skill_sign_bit() {
+        let applies = [
+            (APPLY_MAX_HP, 0x0102_0304),
+            (APPLY_SKILL, 0x0000_0301),
+            (APPLY_SKILL, 0x0080_0301),
+            (APPLY_MAX_SP, i32::MIN),
+        ];
+        assert_eq!(
+            removal_applies(&applies),
+            vec![
+                (APPLY_MAX_HP, -0x0102_0304),
+                (APPLY_SKILL, 0x0080_0301),
+                (APPLY_SKILL, 0x0000_0301),
+                (APPLY_MAX_SP, i32::MIN),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_refine_element_type_needs_a_weapon_refined_three_times() {
+        let protos = ItemProtos::from_rows(vec![proto(190, ITEM_WEAPON, 0)]);
+        let element_of = |refine_element: Option<u32>| {
+            let mut sword = item(1, 190);
+            let items = match refine_element {
+                Some(value) => {
+                    sword.refine_element = value;
+                    wearing(&[(WEAPON, &sword)])
+                }
+                None => wearing(&[]),
+            };
+            Equipment::of(&items, &protos).refine_element_type()
+        };
+        assert_eq!(element_of(None), 0);
+        // The type is the hundred-millions digit, the grade the ten-millions one.
+        assert_eq!(element_of(Some(420_000_000)), 0);
+        assert_eq!(element_of(Some(430_000_000)), 4);
+        assert_eq!(element_of(Some(290_000_000)), 2);
     }
 
     #[test]

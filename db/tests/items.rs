@@ -14,7 +14,7 @@ use db::accounts::create_account;
 use db::credentials::{DeleteCode, Login, NewPassword};
 use db::item_id_range::MINIMUM_REMAIN_COUNT;
 use db::items::{
-    apply_row_changes, destroy_item, load_item, load_owner_items, max_id_in_range,
+    apply_row_changes, destroy_item, insert_item, load_item, load_owner_items, max_id_in_range,
     resolve_item_id_range, save_item, save_owner_items, set_count, Attribute, ItemError, ItemRow,
     RowChange, GROUND, MAX_ITEM_ID, SOCKETS,
 };
@@ -818,6 +818,158 @@ async fn a_moves_row_changes_commit_together_in_order() {
     // An empty list touches nothing.
     apply_row_changes(store, owner, &[]).await.unwrap();
     assert_eq!(load_owner_items(store, owner).await.unwrap(), got);
+}
+
+/// Equipping onto a worn item is a swap (`char_item.cpp:8164-8264`): the carried item takes
+/// the wear cell while the worn one takes the carried item's old cell. The first of the two
+/// row moves lands on a cell the second is about to vacate, which a key checked per row
+/// refused before migration `0006`.
+#[tokio::test]
+async fn a_swap_through_each_others_cells_commits_and_a_real_clash_is_still_refused() {
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &db.store;
+    let owner = player(store, "acctswap", "SwapOne").await;
+    save_owner_items(
+        store,
+        &[row(1_000_230, owner, 1, 3), row(1_000_231, owner, 1, 180)],
+    )
+    .await
+    .unwrap();
+    apply_row_changes(
+        store,
+        owner,
+        &[
+            RowChange::Moved {
+                id: 1_000_230,
+                window_type: 1,
+                pos: 180,
+            },
+            RowChange::Moved {
+                id: 1_000_231,
+                window_type: 1,
+                pos: 3,
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    let swapped = load_owner_items(store, owner).await.unwrap();
+    let cells: Vec<(u32, u32)> = swapped.iter().map(|item| (item.id, item.pos)).collect();
+    assert_eq!(cells, vec![(1_000_231, 3), (1_000_230, 180)]);
+
+    // Half a swap ends with two rows in one cell, and the refusal names the change that
+    // landed there, not the row that was already in it.
+    let refused = apply_row_changes(
+        store,
+        owner,
+        &[RowChange::Moved {
+            id: 1_000_231,
+            window_type: 1,
+            pos: 180,
+        }],
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(ItemError::CellAlreadyTaken {
+                id: 1_000_231,
+                window_type: 1,
+                pos: 180
+            })
+        ),
+        "{refused:?}"
+    );
+    // A split's new row on a held cell is refused the same way.
+    let refused = apply_row_changes(
+        store,
+        owner,
+        &[RowChange::Created(row(1_000_232, owner, 1, 3))],
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(ItemError::CellAlreadyTaken {
+                id: 1_000_232,
+                window_type: 1,
+                pos: 3
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(load_owner_items(store, owner).await.unwrap(), swapped);
+
+    // Outside a move the key is still checked on each statement.
+    let refused = insert_item(store, &row(1_000_233, owner, 1, 3)).await;
+    assert!(
+        matches!(
+            refused,
+            Err(ItemError::CellAlreadyTaken {
+                id: 1_000_233,
+                window_type: 1,
+                pos: 3
+            })
+        ),
+        "{refused:?}"
+    );
+}
+
+/// A sash's first equip rolls its absorption share into socket 0 (`item.cpp:436-455`), and
+/// the equip stores every socket with the move, under the owner.
+#[tokio::test]
+async fn a_socket_change_stores_every_socket_and_only_for_its_owner() {
+    let Some(db) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &db.store;
+    let owner = player(store, "acctsock", "SockOne").await;
+    let other = player(store, "acctsock2", "SockTwo").await;
+    let mut sash = row(1_000_240, owner, 1, 4);
+    sash.sockets = [0, 1_234, -5, 0, 0, 0];
+    save_owner_items(store, &[sash.clone()]).await.unwrap();
+    let sockets = [0x0102_0304, 1_234, -5, 7, -0x0708_090a, 11];
+    apply_row_changes(
+        store,
+        owner,
+        &[
+            RowChange::Moved {
+                id: 1_000_240,
+                window_type: 2,
+                pos: 203,
+            },
+            RowChange::Sockets {
+                id: 1_000_240,
+                sockets,
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    let stored = load_item(store, 1_000_240).await.unwrap().unwrap();
+    assert_eq!(stored.sockets, sockets);
+    assert_eq!((stored.window_type, stored.pos), (2, 203));
+    assert_eq!(stored.attributes, sash.attributes);
+
+    let refused = apply_row_changes(
+        store,
+        other,
+        &[RowChange::Sockets {
+            id: 1_000_240,
+            sockets: [0; SOCKETS],
+        }],
+    )
+    .await;
+    assert!(
+        matches!(refused, Err(ItemError::NotOwned { id: 1_000_240, .. })),
+        "{refused:?}"
+    );
+    assert_eq!(
+        load_item(store, 1_000_240).await.unwrap().unwrap().sockets,
+        sockets
+    );
 }
 
 #[tokio::test]

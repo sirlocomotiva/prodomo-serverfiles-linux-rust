@@ -847,6 +847,14 @@ pub enum RowChange {
         /// The item.
         id: u32,
     },
+    /// The item's sockets changed, which is what a sash's first equip does to its absorption
+    /// share (`CItem::AddToCharacter`, `item.cpp:436-455`).
+    Sockets {
+        /// The item.
+        id: u32,
+        /// All of its sockets, as they are now.
+        sockets: [i32; SOCKETS],
+    },
 }
 
 /// Write one move's row changes as one transaction, under the owner.
@@ -861,8 +869,15 @@ pub enum RowChange {
 /// [`ItemError::CountOutOfRange`], [`ItemError::WindowOutOfRange`] or
 /// [`ItemError::Corrupt`] for a change that cannot be stored, and the [`insert_item`] errors
 /// for a created row. [`ItemError::NoSuchItem`] or [`ItemError::NotOwned`] when a change
-/// names an id the owner does not hold, [`ItemError::CellAlreadyTaken`] when a moved row
-/// lands on another row's cell, and [`ItemError::Database`].
+/// names an id the owner does not hold, [`ItemError::CellAlreadyTaken`] when a moved or
+/// created row ends on a cell another row holds, and [`ItemError::Database`].
+///
+/// The cell key is checked on the rows' **end** state, not after each statement. Equipping
+/// onto a worn item is a swap (`char_item.cpp:8164-8264`), and its first move lands on a
+/// cell the second move is about to vacate; migration `0006` made the key deferrable for
+/// that, and this defers it for its own transaction only. The cells are then checked by a
+/// query before the commit, because a violation raised by the commit itself names no row,
+/// and the refusal has to name the change that caused it.
 pub async fn apply_row_changes(
     store: &Store,
     owner_id: u32,
@@ -879,7 +894,11 @@ pub async fn apply_row_changes(
         all_columns(),
         placeholders(30, 1)
     );
+    let set_sockets = set_sockets_statement();
     let mut transaction = store.pool().begin().await?;
+    sqlx::query("SET CONSTRAINTS item_owner_cell_key DEFERRED")
+        .execute(&mut *transaction)
+        .await?;
     for change in changes {
         let (id, touched) = match change {
             RowChange::Moved {
@@ -895,8 +914,7 @@ pub async fn apply_row_changes(
                 .bind(i16::from(*window_type))
                 .bind(i64::from(*pos))
                 .execute(&mut *transaction)
-                .await
-                .map_err(|error| classify_move(error, *id, *window_type, *pos))?
+                .await?
                 .rows_affected();
                 (*id, touched)
             }
@@ -930,14 +948,83 @@ pub async fn apply_row_changes(
                     .map_err(|error| classify_insert(error, row))?;
                 (row.id, 1)
             }
+            RowChange::Sockets { id, sockets } => {
+                let mut query = sqlx::query(&set_sockets)
+                    .bind(i64::from(*id))
+                    .bind(i64::from(owner_id));
+                for socket in sockets {
+                    query = query.bind(*socket);
+                }
+                (*id, query.execute(&mut *transaction).await?.rows_affected())
+            }
         };
         if touched == 0 {
             transaction.rollback().await?;
             return Err(missing(store, id).await);
         }
     }
+    let shared: Vec<(i16, i64)> = sqlx::query_as(
+        "SELECT window_type, pos::bigint FROM item WHERE owner_id = $1 \
+         GROUP BY window_type, pos HAVING count(*) > 1",
+    )
+    .bind(i64::from(owner_id))
+    .fetch_all(&mut *transaction)
+    .await?;
+    if !shared.is_empty() {
+        transaction.rollback().await?;
+        return Err(taken_cell(owner_id, changes, &shared));
+    }
     transaction.commit().await?;
     Ok(())
+}
+
+/// The statement a [`RowChange::Sockets`] runs: every socket column of one owned row, bound
+/// from `$3` on.
+fn set_sockets_statement() -> String {
+    format!(
+        "UPDATE item SET {} WHERE id = $1 AND owner_id = $2",
+        SOCKET_COLUMNS
+            .iter()
+            .zip(3..)
+            .map(|(name, index)| format!("{name} = ${index}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// The change that put a row on a cell another row holds, for [`apply_row_changes`].
+///
+/// The last change to land on a shared cell is the one named: an earlier change that
+/// landed there may have been legal until the later one arrived, and the later one is
+/// the change a caller can do something about. A shared cell no change touched cannot
+/// happen while the key is enforced, so it is reported as corrupt rather than guessed at.
+fn taken_cell(owner_id: u32, changes: &[RowChange], shared: &[(i16, i64)]) -> ItemError {
+    let landed = changes.iter().rev().find_map(|change| {
+        let (id, window_type, pos) = match change {
+            RowChange::Moved {
+                id,
+                window_type,
+                pos,
+            } => (*id, *window_type, *pos),
+            RowChange::Created(row) => (row.id, row.window_type, row.pos),
+            RowChange::Count { .. } | RowChange::Destroyed { .. } | RowChange::Sockets { .. } => {
+                return None
+            }
+        };
+        shared
+            .contains(&(i16::from(window_type), i64::from(pos)))
+            .then_some((id, window_type, pos))
+    });
+    match landed {
+        Some((id, window_type, pos)) => ItemError::CellAlreadyTaken {
+            id,
+            window_type,
+            pos,
+        },
+        None => ItemError::Corrupt(format!(
+            "character {owner_id} holds two rows in one cell that no change touched: {shared:?}"
+        )),
+    }
 }
 
 /// The checks [`apply_row_changes`] makes before it reaches the store.
@@ -969,7 +1056,7 @@ fn check_change(owner_id: u32, change: &RowChange) -> Result<(), ItemError> {
                 )));
             }
         }
-        RowChange::Destroyed { .. } => {}
+        RowChange::Destroyed { .. } | RowChange::Sockets { .. } => {}
     }
     Ok(())
 }
@@ -984,20 +1071,6 @@ async fn missing(store: &Store, id: u32) -> ItemError {
         },
         Err(error) => error,
     }
-}
-
-/// Turn a unique violation on a moved row into the cell it wanted.
-fn classify_move(error: sqlx::Error, id: u32, window_type: u8, pos: u32) -> ItemError {
-    if let sqlx::Error::Database(database) = &error {
-        if database.code().as_deref() == Some("23505") {
-            return ItemError::CellAlreadyTaken {
-                id,
-                window_type,
-                pos,
-            };
-        }
-    }
-    ItemError::Database(error)
 }
 
 /// The highest allocated id in a range, or `None` when the range holds nothing.

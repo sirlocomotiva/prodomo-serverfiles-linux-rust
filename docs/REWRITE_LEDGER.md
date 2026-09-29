@@ -21376,3 +21376,147 @@ lines. `world` now depends on `gamedata` through an in-tree path, which `Cargo.l
 crate was fetched. No width is claimed in this section: `GC_CHARACTER_ADD` and
 `GC_CHAR_ADDITIONAL_INFO` are the codecs the earlier ledgers pin, and the i686 probe was not run
 (`i686-linux-gnu-g++-12` is not installed on this machine).
+
+## 214. The groundwork for equipping in the game: a swap the store takes, the dice, the removal part
+
+Equipping in the game (`CHARACTER::EquipItem`, `UnequipItem`, `SwapItem`, and the equip arms of
+`MoveItem`) needs four things the Rewrite did not have: a store that commits a swap, a random
+source for the sash roll, the parts and bonuses a removal sets, and the constants the equip checks
+read. This section lands those, each tested against the legacy source. The equip reducer itself and
+its wiring into the move handler are the next section; the move handler still answers every move
+into or out of a wear cell with the `NotPorted(Equipment)` refusal of ledger 211, so nothing the
+client sees changes here.
+
+### 214.1 What landed
+
+- **A swap the store takes.** `db/migrations/0006_item_cell_deferrable.sql` replaces the partial
+  unique index `item_owner_cell_key` with a unique constraint of the same name on
+  `(owner_id, window_type, pos)`, `DEFERRABLE INITIALLY IMMEDIATE`. A swap written as two row moves
+  lands the first row on a cell the second still holds, which an index refuses row by row. Two
+  ground rows (`owner_id IS NULL`) still never clash, because a unique constraint treats NULLs as
+  distinct. `db::items::apply_row_changes` defers the constraint for its own transaction, and
+  before it commits it looks for any cell the owner holds twice; one found rolls the transaction
+  back and answers `CellAlreadyTaken` with the last moved or created row that landed there
+  (`taken_cell`). The commit re-checks as the backstop. Every other statement keeps the per-row
+  check.
+- **A socket change.** `RowChange::Sockets { id, sockets }` writes all six sockets of one owned
+  row, for the sash roll of `CItem::AddToCharacter` that the equip reducer will need.
+- **The dice.** `world::character::dice` has `number(dice, from, to)`, the legacy
+  `number()` (`G/libthecore/utils.cpp:355-375`) over a `Dice` source the caller owns: the bounds
+  swap, the width computed in `int`, the full range answered 0 without a draw, and C's signed `%`.
+  `Pcg32` (PCG-XSH-RR 64/32) is the source the game thread will own, checked against the
+  reference demo's first six outputs.
+- **The removal part.** `Equipment::part_change(wear, worn, add, base, current)` answers the part
+  one worn item's `ModifyPoints` sets and whether the switch then sends `UpdatePacket`
+  (`G/item.cpp:1156-1334`). Taking an item off: a pick or rod, or a weapon with no costume weapon
+  worn, clears the weapon part from the weapon cell only; a body armour with no costume body worn
+  shows `bBasePart`; a costume body shows the worn armour's look, or the base part; hair and sash
+  clear their part; an aura clears its part only from its own cell (`GetOriginalPart(PART_AURA)`
+  is the `default` arm, 0); a costume weapon shows the worn weapon's look, or keeps the weapon
+  part (`GetOriginalPart(PART_WEAPON)` is `GetPart`, `G/char.cpp:5424-5456`). Only the costume
+  body, hair, sash and weapon arms reach the `UpdatePacket` at `G/item.cpp:1331-1334`.
+- **The removal bonuses.** `removal_applies` negates each apply of `ModifyPoints(false)`, except
+  `APPLY_SKILL`, whose sign bit is flipped (`value ^ 0x00800000`).
+- **The refine element the look carries.** `Equipment::refine_element_type` is
+  `CHARACTER::GetRefineElementType` (`G/char_item.cpp:10224-10234`): 0 with no weapon, 0 below
+  three refines (`GetRefineElementPlus`, the ten-millions digit, `G/item.h:98`), else the
+  weapon's element type.
+- **Points helpers.** `Points::compute_battle_points_with(&Equipment)` recomputes the battle points
+  with the armour worn, which is the non-set tail of `EquipTo` and `Unequip`
+  (`G/item.cpp:1490-1496`); `set_part`, `race`, `conqueror_level` and `part_base` read and write
+  what the equip checks need.
+- **Constants.** `EWearPositions::Glove` (36) and `ESpecialEffect::SashSucceded` (25) and
+  `SashEquip` (26) in `common::enums`; the item types, armour and costume subtypes, limit types,
+  anti-flags and wear flags the equip checks read, in `gamedata::item_kind`, with the anti-flag
+  and wear-flag bits checked against the legacy flag-name tables.
+- **The stored position of a worn item.** `prodomo::item_load::stored_row_position` translates a
+  position in the `EQUIPMENT` window the same way as one in `INVENTORY`, because the world keeps a
+  worn item's own position as `SetItem` gave it: `(2, 180)` is stored at `(2, 0)`.
+
+### 214.2 What the client sees
+
+Nothing changes. The move handler still refuses a move into or out of a wear cell.
+
+### 214.3 Divergences
+
+- **The random source.** Legacy draws from the C library's `random()`, one process-wide sequence.
+  The Rewrite passes a `Dice` to each reducer, and the game thread will own a `Pcg32`. The client
+  sees only the numbers drawn, never the sequence, so no client-visible behaviour changes.
+
+### 214.4 Defects not reproduced
+
+None new. `number()` computes its width in `int`, so a range wider than `INT_MAX` wraps negative
+and C's signed `%` can answer below the low bound. No caller the Rewrite ports passes such a range,
+so no client can reach it; the test `a_width_past_int_max_wraps_negative_as_in_c` pins the C result
+so that a later caller that could reach it is seen.
+
+### 214.5 Not ported yet
+
+The equip reducer: `EquipItem`, `UnequipItem`, `SwapItem`, `CanEquipNow`, `CanUnequipNow`,
+`FindEquipCell`, the equip arms of `MoveItem`, the effects and notices they send, the sash roll on
+`AddToCharacter`, the 1.5-second fight rule, and the `GC_CHARACTER_UPDATE`, `GC_SPECIAL_EFFECT` and
+point records they send to the player and its viewers. Ledger 215 is that reducer and its wiring.
+
+### 214.6 Scenarios and Parity inventory
+
+No scenario is added and no row changes status: nothing the client sees changed. `sys.item.core`
+stays `partial`.
+
+### 214.7 Mutation sweep
+
+28 mutants, each applied to the pristine file with the change asserted to be in executable code,
+and every file restored and checked against its pre-sweep SHA-256. Each mutant ran its crate's
+tests with `DATABASE_URL` set: `world`'s library, `prodomo`'s library, or `db`'s library and its
+`items` suite.
+
+| group | mutants | result |
+|---|---|---|
+| `world/src/character/equipment.rs`: the skill sign bit and the negation of a removal; the costume update and its four subtypes; the pick's weapon cell; the body armour's base part and its subtype; the costume body's look; the costume weapon keeping the weapon part; the aura's cell; the hair and sash parts; the refine grade's bound, its digit and the weapon it reads; the look's transmutation; the add and remove cases | 17 | 16 killed, 1 survived |
+| `world/src/character/points.rs`: the armour the battle points take; the part `set_part` writes | 2 | 1 killed, 1 survived |
+| `world/src/character/dice.rs`: the bound swap; the full range's 0; the 31-bit draw; the rotation; the seed | 5 | 5 killed |
+| `prodomo/src/item_load.rs`: the equipment window's translation | 1 | 1 killed |
+| `db/src/items.rs`: the deferred constraint; the doubled-cell check; the socket change's owner | 3 | 3 killed |
+
+Both survivors were test gaps, not equivalent mutants:
+
+- `rm_pick_cell` let a pick clear the weapon part from any cell. The test took a pick off only at
+  the weapon cell; it now also takes one off at `UNIQUE1` and expects no part.
+- `set_part` wrote every part to the hair slot. The test set only the hair; it now sets the hair
+  and the sash.
+
+Both were rerun against the strengthened tests and killed. No mutant was a compile kill.
+
+### 214.8 Receipt
+
+Seventeen new tests:
+
+- `world/src/character/dice.rs`: 7;
+- `world/src/character/equipment.rs`: 4, one of them strengthened by the sweep (214.7);
+- `world/src/character/points.rs`: 2, one of them strengthened by the sweep;
+- `db/tests/items.rs`: 2 (`a_swap_through_each_others_cells_commits_and_a_real_clash_is_still_refused`
+  and `a_socket_change_stores_every_socket_and_only_for_its_owner`), which run only with
+  `DATABASE_URL` set;
+- `gamedata/src/item_kind.rs`: 2.
+
+`prodomo/src/item_load.rs`'s `a_belt_cell_is_stored_in_the_belt_window_and_loads_back_to_the_same_cell`
+gained two assertions for the equipment window. The net change is 17, from 2545 to 2562. The gates
+ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2562 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2562 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+The first clippy run found two things, both fixed by refactoring: `apply_row_changes` had grown
+to 103 lines, so the socket statement moved into `set_sockets_statement`, and a test declared a
+constant after a statement, so it moved to the module's other wear-cell constants.
+
+`SELECT datname FROM pg_database WHERE datname LIKE 'prodomo\_%'` returns nothing after the
+run, and no `*.core` file is outside `target/`. The workspace has 202 Rust files and 140,599 lines. No crate was fetched
+and `Cargo.lock` is unchanged. No width is claimed in this section; the i686 probe was not run
+(`i686-linux-gnu-g++-12` is not installed on this machine).

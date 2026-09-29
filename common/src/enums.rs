@@ -82,6 +82,8 @@ pub enum EWearPositions {
     TalismanWind = 34,
     /// Electric talisman slot
     TalismanElec = 35,
+    /// Glove slot (`ENABLE_GLOVE_SYSTEM`)
+    Glove = 36,
     /// Maximum wear position
     Max = 64,
 }
@@ -970,6 +972,10 @@ pub enum ESpecialEffect {
     EquipHappinessRing = 23,
     /// Equip love pendant
     EquipLovePendant = 24,
+    /// A sash combination succeeded (`__SASH_SYSTEM__`)
+    SashSucceded = 25,
+    /// A sash is worn (`__SASH_SYSTEM__`)
+    SashEquip = 26,
 }
 
 // ============================================================================
