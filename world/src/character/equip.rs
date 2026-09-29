@@ -197,6 +197,29 @@ pub fn worn_system_not_ported(
         .map(|(apply, _)| WornSystem::Apply(apply))
 }
 
+/// The anti-flag that refuses a race's job, or 0 for a job with none (`CItem::CanUsedBy`,
+/// `G/item.cpp:599-625`, and the same switch in `CanEquipNow`).
+pub(crate) fn job_anti_flag(race: u8) -> u32 {
+    [
+        ITEM_ANTIFLAG_WARRIOR,
+        ITEM_ANTIFLAG_ASSASSIN,
+        ITEM_ANTIFLAG_SURA,
+        ITEM_ANTIFLAG_SHAMAN,
+    ]
+    .get(usize::from(race_to_job(race)))
+    .copied()
+    .unwrap_or(0)
+}
+
+/// The anti-flag that refuses a race's sex (`FN_check_item_sex`, `G/char_item.cpp:191-207`).
+pub(crate) fn sex_anti_flag(race: u8) -> u32 {
+    if is_female(race) {
+        ITEM_ANTIFLAG_FEMALE
+    } else {
+        ITEM_ANTIFLAG_MALE
+    }
+}
+
 /// `GET_SEX`: whether a race is female. Races 1, 3, 4 and 6 are; every other race is male.
 #[must_use]
 pub fn is_female(race: u8) -> bool {
@@ -424,16 +447,7 @@ impl<'s, 'g> Equipper<'s, 'g> {
     /// `CanEquipNow` (`G/char_item.cpp:10060-10193`).
     pub(crate) fn can_equip_now(&self, item: &Item, proto: &ItemProto) -> Result<(), MoveRefused> {
         let points = &*self.gear.points;
-        let job_flag = [
-            ITEM_ANTIFLAG_WARRIOR,
-            ITEM_ANTIFLAG_ASSASSIN,
-            ITEM_ANTIFLAG_SURA,
-            ITEM_ANTIFLAG_SHAMAN,
-        ]
-        .get(usize::from(race_to_job(points.race())))
-        .copied()
-        .unwrap_or(0);
-        if proto.anti_flags & job_flag != 0 {
+        if proto.anti_flags & job_anti_flag(points.race()) != 0 {
             return Err(MoveRefused::JobAntiFlag);
         }
         for limit in &proto.limits {
@@ -673,13 +687,7 @@ impl<'s, 'g> Equipper<'s, 'g> {
         {
             return Err(MoveRefused::WeddingArmour);
         }
-        let female = is_female(self.gear.points.race());
-        let refused_sex = if female {
-            ITEM_ANTIFLAG_FEMALE
-        } else {
-            ITEM_ANTIFLAG_MALE
-        };
-        if proto.anti_flags & refused_sex != 0 {
+        if proto.anti_flags & sex_anti_flag(self.gear.points.race()) != 0 {
             return Err(MoveRefused::WrongSex);
         }
         if wear != EWearPositions::Arrow as u16 && self.gear.recently_fought {
@@ -786,6 +794,115 @@ impl<'s, 'g> Equipper<'s, 'g> {
     }
 }
 
+/// The item types whose `UseItemEx` arm is `EquipItem` or `UnequipItem`
+/// (`G/char_item.cpp:3040-3053`).
+const USED_BY_WEARING: [i32; 8] = [
+    ITEM_COSTUME,
+    ITEM_WEAPON,
+    ITEM_ARMOR,
+    ITEM_ROD,
+    ITEM_RING,
+    ITEM_BELT,
+    ITEM_TALISMAN,
+    ITEM_PICK,
+];
+
+/// Run one `CG_ITEM_USE` on an item that is worn by using it: `CHARACTER::UseItem` and the
+/// equip arm of `UseItemEx` (`G/char_item.cpp:7168-7400`, `:2718-3053`). An item that is
+/// not worn goes on (`EquipItem`), and a worn one comes off (`UnequipItem`).
+///
+/// The checks run in legacy's order: the job (`CanUsedBy`), the sex, the level and conqueror
+/// level limits, and the belt cell the item is used from. Then `EquipItem` or `UnequipItem`
+/// run their own checks as a move's do. Legacy's checks for states this build does not have
+/// (a shop, a cube, an exchange, a stun, a running quest, the secured account, the stack
+/// attribute flood, whose file the owner's data lacks) never refuse here.
+///
+/// # Errors
+///
+/// [`MoveRefused::NotPorted`] for an item of a type whose use arm is not ported
+/// ([`Unported::Use`], among them `ITEM_UNIQUE` and the dragon soul stones), for an item in a
+/// window other than the inventory and the equipment, for a timed item before its first use
+/// sets its clock, and without `gear`. Otherwise any refusal of the checks, which changes
+/// nothing, as [`move_item`](super::move_item)'s do.
+pub fn use_item(
+    items: &mut CharacterItems,
+    at: ItemPos,
+    rules: &super::item_move::MoveRules,
+    gear: Option<&mut Gear<'_>>,
+) -> Result<super::item_move::MoveDone, MoveRefused> {
+    use super::item_move::{declined, done, is_flat_window, MoveKind};
+
+    if !super::inventory::is_valid_item_position(at) {
+        return Err(MoveRefused::InvalidSource);
+    }
+    if !is_flat_window(at.window_type) {
+        return Err(MoveRefused::NotPorted(Unported::SourceWindow(
+            at.window_type,
+        )));
+    }
+    let item = items.item_at(at).cloned().ok_or(MoveRefused::Empty)?;
+    let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
+    let proto = gear
+        .protos
+        .get(item.vnum)
+        .ok_or(MoveRefused::UnknownVnum(item.vnum))?;
+    if !USED_BY_WEARING.contains(&proto.item_type) {
+        return Err(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
+    }
+    let race = gear.points.race();
+    if proto.anti_flags & job_anti_flag(race) != 0 {
+        return Err(MoveRefused::NotUsableByJob);
+    }
+    if proto.anti_flags & sex_anti_flag(race) != 0 {
+        return Err(MoveRefused::WrongSex);
+    }
+    for limit in &proto.limits {
+        let (have, refused) = match limit.kind {
+            LIMIT_LEVEL => (i32::from(gear.points.level()), MoveRefused::UseLevelTooLow),
+            LIMIT_CHAMPION => (
+                i32::from(gear.points.conqueror_level()),
+                MoveRefused::ChampionTooLow,
+            ),
+            _ => continue,
+        };
+        if have < limit.value {
+            return Err(refused);
+        }
+    }
+    if super::inventory::is_belt_inventory_position(item.pos) {
+        let grade = rules.belt_grade.ok_or(MoveRefused::NoBeltWorn)?;
+        if !super::items::belt_cell_is_available(item.pos.cell - BELT_INVENTORY_SLOT_START, grade) {
+            return Err(MoveRefused::BeltCellLocked);
+        }
+    }
+    // `REAL_TIME_FIRST_USE` starts the item's clock here, before the switch; a timed item is
+    // not ported, so it is refused before that change.
+    if proto
+        .limits
+        .iter()
+        .any(|limit| limit.kind == LIMIT_REAL_TIME_START_FIRST_USE)
+    {
+        return Err(MoveRefused::NotPorted(Unported::Worn(WornSystem::Timer)));
+    }
+    let mut equipper = Equipper::new(items, gear, rules.usable_cells);
+    let outcome = if super::inventory::is_equip_position(item.pos) {
+        equipper.unequip_item(&item).map(|()| MoveKind::Unequipped)
+    } else {
+        equipper.equip_item(&item).map(|swapped| {
+            if swapped {
+                MoveKind::Swapped
+            } else {
+                MoveKind::Equipped
+            }
+        })
+    };
+    let trail = equipper.into_trail();
+    match outcome {
+        Ok(kind) => Ok(done(kind, trail)),
+        Err(refused) => declined(refused, trail),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use gamedata::item_kind::{ARMOR_BODY, ITEM_ANTIFLAG_MALE, LIMIT_LEVEL};
@@ -814,6 +931,12 @@ mod tests {
     const UNIQUE: u32 = 71_001;
     const LEVEL_TEN_SWORD: u32 = 31;
     const UNIQUE_FLAGGED: u32 = 11_240;
+    const POTION: u32 = 27_001;
+    const SURA_REFUSED: u32 = 12;
+    const CHAMPION_SWORD: u32 = 41;
+    const TIMED_SWORD: u32 = 51;
+    const MALE_ONLY_HIGH: u32 = 11_250;
+    const COSTUME_BLADE: u32 = 40_001;
 
     const RULES: MoveRules = MoveRules {
         count_limit: 200,
@@ -857,8 +980,29 @@ mod tests {
         grade_4.values[0] = 4;
         let mut grade_2 = proto(SASH_GRADE_2, ITEM_COSTUME, COSTUME_SASH, 0);
         grade_2.values[0] = 2;
+        let mut sura_refused = proto(SURA_REFUSED, ITEM_WEAPON, 0, WEARABLE_WEAPON);
+        sura_refused.anti_flags = gamedata::item_kind::ITEM_ANTIFLAG_WARRIOR;
+        let mut champion = proto(CHAMPION_SWORD, ITEM_WEAPON, 0, WEARABLE_WEAPON);
+        champion.limits[1] = ItemValue {
+            kind: gamedata::item_kind::LIMIT_CHAMPION,
+            value: 1,
+        };
+        let mut timed = proto(TIMED_SWORD, ITEM_WEAPON, 0, WEARABLE_WEAPON);
+        timed.limits[0] = ItemValue {
+            kind: gamedata::item_kind::LIMIT_REAL_TIME_START_FIRST_USE,
+            value: 0,
+        };
         let mut male_only = proto(MALE_ONLY, ITEM_ARMOR, ARMOR_BODY, WEARABLE_BODY);
         male_only.anti_flags = ITEM_ANTIFLAG_MALE;
+        let mut male_only_high = proto(MALE_ONLY_HIGH, ITEM_ARMOR, ARMOR_BODY, WEARABLE_BODY);
+        male_only_high.anti_flags = ITEM_ANTIFLAG_MALE;
+        male_only_high.limits[0] = ItemValue {
+            kind: LIMIT_LEVEL,
+            value: 30,
+        };
+        // A costume weapon for a weapon sub type other than the sword's 0.
+        let mut costume_blade = proto(COSTUME_BLADE, ITEM_COSTUME, COSTUME_WEAPON, 0);
+        costume_blade.values[3] = 1;
         ItemProtos::from_rows(vec![
             proto(SWORD, ITEM_WEAPON, 0, WEARABLE_WEAPON),
             armour,
@@ -872,6 +1016,13 @@ mod tests {
             proto(UNIQUE, ITEM_UNIQUE, 0, WEARABLE_UNIQUE),
             level_ten,
             proto(UNIQUE_FLAGGED, ITEM_ARMOR, ARMOR_BODY, WEARABLE_UNIQUE),
+            // `ITEM_USE`, 3.
+            proto(POTION, 3, 0, 0),
+            sura_refused,
+            champion,
+            timed,
+            male_only_high,
+            costume_blade,
         ])
     }
 
@@ -964,6 +1115,33 @@ mod tests {
                 Some(&mut gear),
                 |_| Some(facts),
             )
+        }
+
+        /// `CG_ITEM_USE` on the item at `at`.
+        fn use_at(&mut self, at: ItemPos) -> Result<MoveDone, MoveRefused> {
+            self.use_with(at, &RULES)
+        }
+
+        fn use_with(&mut self, at: ItemPos, rules: &MoveRules) -> Result<MoveDone, MoveRefused> {
+            let protos = protos();
+            let mut dice = Fixed(5);
+            let mut gear = Gear {
+                points: &mut self.points,
+                protos: &protos,
+                dice: &mut dice,
+                recently_fought: self.recently_fought,
+            };
+            use_item(&mut self.items, at, rules, Some(&mut gear))
+        }
+
+        /// A use that must be refused, and change nothing.
+        fn use_refused(&mut self, at: ItemPos) -> MoveRefused {
+            let items = self.items.clone();
+            let points = self.points.clone();
+            let reason = self.use_at(at).expect_err("the use is refused");
+            assert_eq!(self.items, items, "a refused use changed the storage");
+            assert_eq!(self.points, points, "a refused use changed the points");
+            reason
         }
 
         /// A move that must be refused, and change nothing.
@@ -1337,5 +1515,178 @@ mod tests {
     fn the_female_races_are_one_three_four_and_six() {
         let female: Vec<u8> = (0..8).filter(|race| is_female(*race)).collect();
         assert_eq!(female, vec![1, 3, 4, 6]);
+    }
+
+    #[test]
+    fn using_a_sword_puts_it_on_and_using_it_again_takes_it_off() {
+        let sword = Item::new(7, SWORD);
+        let mut case = Case::new(&[(inv(3), sword.clone())]);
+        let on = case.use_at(inv(3)).expect("equips");
+        assert_eq!(on.kind, MoveKind::Equipped);
+        assert_eq!(
+            item_records(&on),
+            vec![
+                ItemRecord::Set(gc_item_clear(inv(3))),
+                ItemRecord::Set(sword.gc_item_set(wear_pos(WEAPON), 0)),
+            ]
+        );
+        assert!(matches!(on.records.last(), Some(MoveRecord::Look(_))));
+        assert_eq!(case.at(wear_pos(WEAPON)), Some(7));
+
+        // `UnequipItem` puts it back in the first free cell, 0, not the cell it came from.
+        let off = case.use_at(wear_pos(WEAPON)).expect("unequips");
+        assert_eq!(off.kind, MoveKind::Unequipped);
+        assert_eq!(case.at(inv(0)), Some(7));
+        assert_eq!(case.at(wear_pos(WEAPON)), None);
+        let records = item_records(&off);
+        assert_eq!(
+            records.first(),
+            Some(&ItemRecord::Set(gc_item_clear(wear_pos(WEAPON))))
+        );
+        assert_eq!(
+            records.last(),
+            Some(&ItemRecord::Set(sword.gc_item_set(inv(0), 0)))
+        );
+        assert_eq!(
+            case.points.parts()[common::enums::EParts::Weapon as usize],
+            0
+        );
+    }
+
+    #[test]
+    fn using_a_second_armour_swaps_it_with_the_worn_one() {
+        let mut case = Case::wearing(&[(BODY, Item::new(8, ARMOUR))]);
+        case.items
+            .set(inv(5), &Item::new(9, HEAVY_ARMOUR))
+            .expect("free");
+        let done = case.use_at(inv(5)).expect("swaps");
+        assert_eq!(done.kind, MoveKind::Swapped);
+        assert_eq!(case.at(wear_pos(BODY)), Some(9));
+        assert_eq!(case.at(inv(5)), Some(8));
+    }
+
+    #[test]
+    fn a_use_checks_the_job_the_sex_and_the_use_limits_before_any_change() {
+        // `CanUsedBy`: a warrior may not use an item that refuses warriors.
+        let mut case = Case::new(&[(inv(3), Item::new(7, SURA_REFUSED))]);
+        assert_eq!(case.use_refused(inv(3)), MoveRefused::NotUsableByJob);
+        assert_eq!(MoveRefused::NotUsableByJob.notice(), Some("[LS;1004]"));
+        let mut case = Case::new(&[(inv(3), Item::new(7, MALE_ONLY))]);
+        assert_eq!(case.use_refused(inv(3)), MoveRefused::WrongSex);
+        // `FN_check_item_sex` runs in `UseItem`, before `UseItemEx`'s limits.
+        let mut case = Case::new(&[(inv(3), Item::new(7, MALE_ONLY_HIGH))]);
+        assert_eq!(case.use_refused(inv(3)), MoveRefused::WrongSex);
+        // `UseItemEx`'s level check comes first, with its own notice, not `CanEquipNow`'s.
+        let mut case = Case::new(&[(inv(3), Item::new(7, HIGH_SWORD))]);
+        assert_eq!(case.use_refused(inv(3)), MoveRefused::UseLevelTooLow);
+        assert_eq!(MoveRefused::UseLevelTooLow.notice(), Some("[LS;1013]"));
+        let mut case = Case::new(&[(inv(3), Item::new(7, LEVEL_TEN_SWORD))]);
+        assert!(
+            case.use_at(inv(3)).is_ok(),
+            "a limit equal to the level passes"
+        );
+        let mut case = Case::new(&[(inv(3), Item::new(7, CHAMPION_SWORD))]);
+        assert_eq!(case.use_refused(inv(3)), MoveRefused::ChampionTooLow);
+        // A timed item would start its clock here, before `EquipItem`'s fight rule, and timers
+        // are not ported.
+        let mut case = Case::new(&[(inv(3), Item::new(7, TIMED_SWORD))]);
+        case.recently_fought = true;
+        assert_eq!(
+            case.use_refused(inv(3)),
+            MoveRefused::NotPorted(Unported::Worn(WornSystem::Timer))
+        );
+        // `EquipItem`'s own checks still run after these.
+        let mut case = Case::new(&[(inv(3), Item::new(7, SWORD))]);
+        case.recently_fought = true;
+        assert_eq!(case.use_refused(inv(3)), MoveRefused::RecentlyFought);
+    }
+
+    #[test]
+    fn a_use_of_another_type_or_from_another_window_is_not_ported() {
+        let mut case = Case::new(&[(inv(3), Item::new(7, POTION))]);
+        assert_eq!(
+            case.use_refused(inv(3)),
+            MoveRefused::NotPorted(Unported::Use(3))
+        );
+        let mut case = Case::new(&[(inv(3), Item::new(7, UNIQUE))]);
+        assert_eq!(
+            case.use_refused(inv(3)),
+            MoveRefused::NotPorted(Unported::Use(ITEM_UNIQUE))
+        );
+        let mut case = Case::new(&[]);
+        assert_eq!(case.use_refused(inv(3)), MoveRefused::Empty);
+        let safebox = ItemPos {
+            window_type: EWindows::Safebox as u8,
+            cell: 0,
+        };
+        assert_eq!(case.use_refused(safebox), MoveRefused::InvalidSource);
+        let dragon_soul = ItemPos {
+            window_type: EWindows::DragonSoulInventory as u8,
+            cell: 0,
+        };
+        assert_eq!(
+            case.use_refused(dragon_soul),
+            MoveRefused::NotPorted(Unported::SourceWindow(dragon_soul.window_type))
+        );
+        let mut items = CharacterItems::new();
+        items.set(inv(3), &Item::new(7, SWORD)).expect("free");
+        assert_eq!(
+            use_item(&mut items, inv(3), &RULES, None),
+            Err(MoveRefused::NotPorted(Unported::Equipment))
+        );
+    }
+
+    #[test]
+    fn a_use_from_the_belt_needs_a_belt_that_opens_the_cell() {
+        let first = BELT_INVENTORY_SLOT_START;
+        let mut case = Case::new(&[(inv(first + 2), Item::new(7, SWORD))]);
+        assert_eq!(case.use_refused(inv(first + 2)), MoveRefused::NoBeltWorn);
+        let grade_two = MoveRules {
+            belt_grade: Some(2),
+            ..RULES
+        };
+        // Belt cell 2 needs grade 4.
+        assert_eq!(
+            case.use_with(inv(first + 2), &grade_two),
+            Err(MoveRefused::BeltCellLocked)
+        );
+        let grade_four = MoveRules {
+            belt_grade: Some(4),
+            ..RULES
+        };
+        let done = case.use_with(inv(first + 2), &grade_four).expect("equips");
+        assert_eq!(done.kind, MoveKind::Equipped);
+        // `UseItemEx`'s limits run before its belt check.
+        let mut case = Case::new(&[(inv(first + 2), Item::new(7, CHAMPION_SWORD))]);
+        assert_eq!(
+            case.use_refused(inv(first + 2)),
+            MoveRefused::ChampionTooLow
+        );
+    }
+
+    #[test]
+    fn a_use_that_cannot_free_the_costume_weapon_keeps_the_notice_it_sent() {
+        // The worn costume is for another weapon sub type, so the sword needs it off first, and
+        // with no usable inventory cell it cannot come off.
+        let mut case = Case::wearing(&[(
+            EWearPositions::CostumeWeapon as u16,
+            Item::new(5, COSTUME_BLADE),
+        )]);
+        case.items.set(inv(3), &Item::new(7, SWORD)).expect("free");
+        let no_room = MoveRules {
+            usable_cells: 0,
+            ..RULES
+        };
+        let items = case.items.clone();
+        let done = case.use_with(inv(3), &no_room).expect("a notice was sent");
+        assert_eq!(done.kind, MoveKind::Declined);
+        assert_eq!(
+            done.records.first(),
+            Some(&MoveRecord::Notice(
+                MoveRefused::NoRoomToUnequip.notice().expect("[1130]")
+            ))
+        );
+        assert!(done.changes.is_empty());
+        assert_eq!(case.items, items);
     }
 }

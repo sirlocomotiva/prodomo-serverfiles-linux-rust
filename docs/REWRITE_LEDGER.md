@@ -21730,3 +21730,159 @@ net change is 15, from 2562 to 2577. The gates ran on the final working tree:
 After the run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`. The
 workspace has 205 Rust files and 142,924 lines. No crate was fetched, and `Cargo.lock` is
 unchanged. This section claims no width; the i686 probe was not run.
+
+## 216. Using an equippable item: `CG_ITEM_USE` puts it on or takes it off
+
+A `CG_ITEM_USE` (11) of a costume, weapon, armour, rod, ring, belt, talisman or pick now puts
+the item on, swaps it with the worn one, or takes it off when it is worn. `CInputMain::ItemUse`
+(`G/input_main.cpp:993`) calls `CHARACTER::UseItem` (`G/char_item.cpp:7168`) and `UseItemEx`
+(`:2718`), and for these eight types the `UseItemEx` switch is
+`!IsEquipped ? EquipItem : UnequipItem` (`:3040-3053`). Until this section the header had no
+game-phase handler. Every other use is refused as not ported. The other uses, drop and pick
+up are next.
+
+### 216.1 What landed
+
+- **The reducer.** `world::character::use_item` runs the checks `UseItem` and `UseItemEx` make
+  before that switch, in legacy's order, then hands the item to ledger 215's `Equipper`:
+  1. The position must be valid (`InvalidSource`) and in a flat window
+     (`NotPorted(SourceWindow)`), and the cell must hold an item (`Empty`).
+  2. A type outside the eight is refused with `NotPorted(Use(type))` before any change. This
+     covers `ITEM_UNIQUE` and the dragon soul stones, whose use arms are other systems.
+  3. `CanUsedBy`: the job anti-flag refuses with `[LS;1004]` (`NotUsableByJob`).
+  4. `FN_check_item_sex`: `[LS;1005]` (`WrongSex`), before any limit.
+  5. `UseItemEx`'s limits loop: a level limit refuses with `[LS;1013]` (`UseLevelTooLow`, not
+     `CanEquipNow`'s `[LS;…]`), and a champion limit with the Romanian line legacy sends.
+  6. The belt window: no worn belt sends "<Belt> You can't use this item if you have no
+     equipped belt" (`NoBeltWorn`), and a cell the belt's grade does not open sends "<Belt>
+     You can't use this item if you don't upgrade your belt" (`BeltCellLocked`).
+  7. `REAL_TIME_START_FIRST_USE` would set the item's sockets here, before the switch. Timers
+     are not ported, so the item is refused with `NotPorted(Worn(Timer))` before that change.
+  8. A worn item goes through `unequip_item` (`Unequipped`); any other through `equip_item`
+     (`Equipped` or `Swapped`), with all of 215's checks, notices and effects.
+
+  A refusal after a notice was sent keeps that notice (`declined`), as a move does.
+- **The helpers.** `job_anti_flag` and `sex_anti_flag` are shared by `CanEquipNow`, the equip
+  checks and the use, so the three read one table.
+- **The game thread.** `GameCommand::UseItem` and `GameLoopController::use_item` mirror the
+  move. `GameState::use_item` and `move_item` share `run_item_step`, which builds the rules and
+  the gear once, and `answer_item_step` hands either answer back.
+- **The session.** `use_an_item` decodes the frame and shares `finish_item_step` with
+  `move_an_item`: the rows are stored in one transaction before any record is sent, the new
+  points are held for the save, and `around` is broadcast to the viewers. A malformed frame
+  closes the descriptor, and a use without a character in the world is ignored, as legacy's
+  `if (ch)` is.
+
+### 216.2 What the client sees
+
+- Using an equippable item in the inventory, a bank or the belt puts it on exactly as moving it
+  onto its wear cell does (215.2): the same item, points and `GC_CHARACTER_UPDATE` records, the
+  sash effect, and the viewers' copies.
+- Using an item whose wear cell is taken swaps the two; the worn one lands in the used item's
+  cell.
+- Using a worn item takes it off to the first inventory cell it fits.
+- The refusals send legacy's notices and change nothing. A use of any other type sends nothing
+  and logs the refusal.
+
+### 216.3 Divergences
+
+None.
+
+### 216.4 Defects not reproduced
+
+None new. The swap keeps 215.4's whole-or-nothing order.
+
+### 216.5 Not ported yet
+
+- Every use arm but the eight: potions, scrolls, boxes, quest items, skill books, the unique
+  items, the dragon soul stones and the rest. They are refused as `NotPorted(Use(type))`.
+- `ENABLE_REWARD_SYSTEM`'s `DoReward(REWARD_MISSION_USE_ITEM)` after a successful use.
+- `UseItem`'s other steps, unreachable or belonging to systems not ported:
+  - the stack-attribute flood check: only `item_stack_attribute.txt` sets it, and the owner's
+    data has no `locale/germany` copy of that file;
+  - `IsExchanging`, the switchbot, `IsStun`, `IsSecured`, the summon items, 50200 and 71049,
+    the running quest and the `ITEM_FLAG_LOG` item log;
+  - `UseItemEx`'s arena, `IsLoadedAffect` and battle pass checks.
+- `CG_ITEM_USE` in the login phase (`cg.login.item_use`, consumed with no effect in legacy).
+
+### 216.6 Scenarios and Parity inventory
+
+`an_armour_is_used_on_swapped_and_used_off_and_the_store_follows` (`prodomo/tests/parity.rs`)
+gives Alpha the rows of 215's scenario and waits out the 1.5 s after the select, then:
+
+1. **Uses 11810 at cell 0.** The records are the ones the move onto the body cell sends, with
+   speed 98 and defence 21. The row is stored at `(2, 0)`.
+2. **Uses 11806 at cell 1.** The body cell is taken, so 11810 is swapped out to cell 1.
+3. **Uses the worn 11806 at cell 180.** It comes off to cell 0, the first cell a two-cell armour
+   fits, and the grades fall back. The rows are `(1, 1)` and `(1, 0)`.
+4. **Logs out.** The save stores `part_main` 0.
+
+In the Parity inventory:
+
+- `cg.game.item_use` is `partial` and names this scenario in its note, because the checker
+  lets only a `ported` row name one in the scenario column.
+- `sys.item.core` stays `partial` with a 216 note.
+- **A correction to 215.** Ledger 215 put two scenarios in `cg.game.item_move`'s scenario
+  column. `inventory_rows_keep_the_rules` refuses that, and 215's gates ran before the edit, so
+  commit `12d0c8ea` shipped with that test failing. The column now names
+  `an_item_is_moved_split_and_merged_and_a_relog_finds_it_there` alone, and the equip scenario
+  moved into the note. 215.8's receipt is left as written.
+
+### 216.7 Mutation sweep
+
+17 mutants, applied and restored as in 215.7. Each world mutant ran `world`'s library tests.
+Each prodomo mutant ran `prodomo`'s library and the armour parity scenarios, with
+`DATABASE_URL` set.
+
+| group | mutants | result |
+|---|---|---|
+| `world/src/character/equip.rs`: the valid position; the flat window; the type check and the armour in the table; the job, sex, level-comparison and champion checks; the belt's presence and cell; the timer refusal; the worn-or-not branch; the swapped kind; `declined` | 14 | 10 killed, 4 survived |
+| `prodomo/src/main.rs`: the dispatch; the cell passed on | 2 | 2 killed |
+| `prodomo/src/game_state.rs`: the cell passed to the reducer | 1 | survived |
+
+The first run of `used_by_armor` shrank the table's length and was a compile kill. It was
+rewritten to replace `ITEM_ARMOR` with a second `ITEM_WEAPON`, and that version was killed.
+
+All five survivors were gaps, four in the tests and one in the harness:
+
+- `use_sex` dropped the use's sex check, and `EquipItem`'s own check refused the same item. A
+  male-only armour with a level-30 limit now shows the order: the sex check comes first.
+- `use_champion` dropped the use's champion limit, and `CanEquipNow` refused the same item. A
+  champion sword in a belt cell with no belt now shows the order: the limit comes before the
+  belt.
+- `use_timer` dropped the use's timer refusal, and `equip_checks` refused the same item later.
+  The timed sword is now used right after a fight: the timer comes before the fight rule.
+- `use_declined` returned the bare refusal after a notice was sent. The new test
+  `a_use_that_cannot_free_the_costume_weapon_keeps_the_notice_it_sent` checks that the `[1130]`
+  notice is kept.
+- `use_step` survived because the harness did not run the parity scenarios for
+  `game_state.rs`. The harness now runs them.
+
+All five were rerun, and all were killed.
+
+### 216.8 Receipt
+
+Seven new tests:
+
+- `world/src/character/equip.rs`: 6. Five use tests, three of them strengthened by the sweep,
+  and `a_use_that_cannot_free_the_costume_weapon_keeps_the_notice_it_sent`, added by it
+  (216.7).
+- `prodomo/tests/parity.rs`: 1, `an_armour_is_used_on_swapped_and_used_off_and_the_store_follows`,
+  which runs only with `DATABASE_URL` set.
+
+The count went from 2577 to 2584. The first gate run found the inventory failure in 216.6.
+These gates ran on the final working tree, after that fix:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2584 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2584 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+After the run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`. The
+workspace has 205 Rust files and 143,529 lines. No crate was fetched, and `Cargo.lock` is
+unchanged. This section claims no width, and the i686 probe was not run.

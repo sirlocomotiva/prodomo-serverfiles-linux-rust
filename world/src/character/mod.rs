@@ -30,8 +30,8 @@ pub use combat::{
 };
 pub use dice::{number, Dice, Pcg32};
 pub use equip::{
-    find_equip_cell, is_equipable, is_female, wear_pos, worn_system_not_ported, CharacterLook,
-    Gear, WornSystem,
+    find_equip_cell, is_equipable, is_female, use_item, wear_pos, worn_system_not_ported,
+    CharacterLook, Gear, WornSystem,
 };
 pub use equipment::{
     accessory_socket_grade, is_set_item, item_applies, removal_applies, Equipment, PartChange,

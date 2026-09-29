@@ -3252,6 +3252,13 @@ fn client_item_move(from: u16, to: u16, count: u16) -> Vec<u8> {
     .encode()
 }
 
+/// `CG_ITEM_USE` of the inventory cell `cell`.
+fn client_item_use(cell: u16) -> Vec<u8> {
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    protocol::cg_item_use::CgItemUse::new(protocol::item_pos::ItemPos::new(inventory, cell))
+        .encode()
+}
+
 /// A one-cell stackable vnum in no custom bank, so a grant of it lands in the base inventory
 /// and a move of it can split and merge.
 fn a_stackable_vnum(protos: &gamedata::item_proto::ItemProtos) -> u32 {
@@ -3862,6 +3869,90 @@ fn an_armour_is_worn_swapped_and_taken_off_and_the_store_follows() {
     wait_for(
         &database,
         "(SELECT (part_main, part_sash) = (0, 1) FROM player WHERE name = 'Alpha')",
+    );
+}
+
+/// Ledger 216: `CG_ITEM_USE` of an equippable item puts it on, and a use of the worn item takes
+/// it off (`CHARACTER::UseItemEx`, `G/char_item.cpp:3040-3053`).
+///
+/// Alpha holds the rows of the move scenario above. A use names only the cell, so the wear cell
+/// is the one `EquipItem` picks, and a worn item comes off to the first cell it fits.
+#[test]
+fn an_armour_is_used_on_swapped_and_used_off_and_the_store_follows() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    give_alpha_wearables(&database);
+    let (mut alpha, _character, items) = load_character(&server, b"alice", 0);
+    let waited = std::time::Instant::now();
+    assert_eq!(items.len(), 3);
+    let add = enter_game_burst(&mut alpha);
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    std::thread::sleep(Duration::from_millis(1600).saturating_sub(waited.elapsed()));
+    let (hair, stored_sash) = (0xc3d4, 0xe5f6);
+    let battle = |armour: i64| {
+        vec![
+            Seen::Point(18, 344),
+            Seen::Point(20, 168 + armour),
+            Seen::Point(16, 168 + armour),
+            Seen::Point(20, 172 + armour),
+            Seen::Point(22, 348),
+            Seen::Point(23, 180 + armour / 2),
+        ]
+    };
+    let look = |main: u32, speed: u8| {
+        let main = u16::try_from(main).expect("a part is a WORD");
+        Seen::Look([main, 0, 0, hair, stored_sash, 0], speed, 100)
+    };
+
+    // When: the level-9 armour at cell 0 is used.
+    alpha.send_record(&client_item_use(0));
+    // Then: it is worn at the body cell, as the move onto that cell wears it.
+    let mut expected = vec![
+        Seen::Set(0, 0),
+        Seen::Set(180, WORN_ARMOUR),
+        Seen::Point(19, 98),
+    ];
+    expected.extend(battle(21));
+    expected.push(look(WORN_ARMOUR, 98));
+    assert_eq!(read_a_move(&mut alpha, vid), expected);
+    check(
+        &database,
+        "(SELECT (window_type, pos) = (2, 0) FROM item WHERE id = 30)",
+    );
+
+    // When: the other armour at cell 1 is used.
+    alpha.send_record(&client_item_use(1));
+    // Then: the body cell is taken, so the worn armour is swapped out to cell 1.
+    let mut expected = vec![Seen::Point(19, 100), Seen::Set(180, 0)];
+    expected.extend(battle(0));
+    expected.extend([look(0, 100), Seen::Set(1, 0)]);
+    expected.extend([Seen::Set(180, SWAPPED_ARMOUR), Seen::Point(19, 100)]);
+    expected.extend(battle(12 + 2 * 18));
+    expected.extend([look(SWAPPED_ARMOUR, 100), Seen::Set(1, WORN_ARMOUR)]);
+    assert_eq!(read_a_move(&mut alpha, vid), expected);
+
+    // When: the worn armour is used.
+    alpha.send_record(&client_item_use(180));
+    // Then: it is taken off to the first cell it fits, cell 0, and the grades fall back.
+    let mut expected = vec![Seen::Point(19, 100), Seen::Set(180, 0)];
+    expected.extend(battle(0));
+    expected.extend([look(0, 100), Seen::Set(0, SWAPPED_ARMOUR)]);
+    assert_eq!(read_a_move(&mut alpha, vid), expected);
+    check(
+        &database,
+        "(SELECT array_agg((window_type, pos) ORDER BY id)::text FROM item WHERE id IN (30, 31)) \
+         = '{\"(1,1)\",\"(1,0)\"}'",
+    );
+
+    // And: the logout save stores the bare body.
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT part_main = 0 FROM player WHERE name = 'Alpha')",
     );
 }
 

@@ -88,10 +88,11 @@ use protocol::cg_chat::CgChat;
 use protocol::cg_inventory::{
     HEADER_CG_CHANGE_NAME, HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE,
     HEADER_CG_CHARACTER_POSITION, HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_EMPIRE,
-    HEADER_CG_ENTERGAME, HEADER_CG_ITEM_MOVE, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_MOVE,
-    HEADER_CG_STATE_CHECKER, HEADER_CG_SYNC_POSITION,
+    HEADER_CG_ENTERGAME, HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_USE, HEADER_CG_LOGIN2,
+    HEADER_CG_LOGIN3, HEADER_CG_MOVE, HEADER_CG_STATE_CHECKER, HEADER_CG_SYNC_POSITION,
 };
 use protocol::cg_item_move::CgItemMove;
+use protocol::cg_item_use::CgItemUse;
 use protocol::cg_login::CgEmpire;
 use protocol::cg_login3::CgLogin3;
 use protocol::cg_move::CgMove;
@@ -694,19 +695,75 @@ where
         to: record.to,
         count: record.count,
     };
-    // `ChatPacket` takes the empire from the descriptor, which is the character's.
-    let empire = held
-        .character
-        .as_ref()
-        .map_or(0, |character| character.empire);
-    let actor = Mover {
-        recently_fought: recently_fought(held),
-        empire,
+    let actor = item_actor(held);
+    let answer = context.game.move_item(vid, request, actor).await;
+    finish_item_step(session, addr, context, held, actor.empire, answer).await
+}
+
+/// `CG_ITEM_USE` (11) in the game phase: `CInputMain::ItemUse` → `CHARACTER::UseItem`
+/// (`G/char_item.cpp:7168`). Only an equippable item is ported: it goes on, or comes off.
+///
+/// What the world did reaches the store and the client as a move's does.
+async fn use_an_item<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgItemUse::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed ITEM_USE; closing");
+            return false;
+        }
     };
-    let moved = match context.game.move_item(vid, request, actor).await {
+    let Some(vid) = held.world else {
+        info!(%addr, "ITEM_USE without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = context.game.use_item(vid, record.cell, actor).await;
+    finish_item_step(session, addr, context, held, actor.empire, answer).await
+}
+
+/// What the descriptor knows of its character that a move or a use reads.
+fn item_actor(held: &Held) -> Mover {
+    Mover {
+        recently_fought: recently_fought(held),
+        // `ChatPacket` takes the empire from the descriptor, which is the character's.
+        empire: held
+            .character
+            .as_ref()
+            .map_or(0, |character| character.empire),
+    }
+}
+
+/// Store, send and broadcast what one item step did, or send the notice for its refusal.
+///
+/// The rows are written in one transaction before any record is sent. The result is whether
+/// the descriptor stays open.
+async fn finish_item_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    empire: u8,
+    answer: Result<
+        Result<prodomo::item_move::MovedItems, MoveItemRefused>,
+        prodomo::game_loop_messages::MoveItemError,
+    >,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let moved = match answer {
         Ok(Ok(moved)) => moved,
         Ok(Err(MoveItemRefused::Refused(reason))) => {
-            info!(%addr, %reason, "Item move refused");
+            info!(%addr, %reason, "Item step refused");
             if let Some(line) = prodomo::item_move::refusal_notice(&reason, empire) {
                 if let Err(error) = send_all(session, &[line]).await {
                     warn!(%addr, %error, "Client session stopped");
@@ -720,14 +777,14 @@ where
             return false;
         }
         Err(error) => {
-            warn!(%addr, %error, "The world could not be asked to move an item; closing");
+            warn!(%addr, %error, "The world could not be asked for an item step; closing");
             return false;
         }
     };
     if let Err(error) =
         db::items::apply_row_changes(&context.store, moved.owner_id, &moved.changes).await
     {
-        warn!(%addr, %error, kind = ?moved.kind, "The item move could not be stored; closing");
+        warn!(%addr, %error, kind = ?moved.kind, "The item step could not be stored; closing");
         return false;
     }
     if let Some(points) = moved.points {
@@ -1366,6 +1423,12 @@ where
             if phase == ClientPhase::Game && frame.header == HEADER_CG_ITEM_MOVE.value() =>
         {
             move_an_item(session, addr, context, held, &frame).await
+        }
+        // `CG_ITEM_USE` (11) in the game phase: `CInputMain::ItemUse` (`G/input_main.cpp:993`).
+        LiveStep::Record { phase, frame }
+            if phase == ClientPhase::Game && frame.header == HEADER_CG_ITEM_USE.value() =>
+        {
+            use_an_item(session, addr, context, held, &frame).await
         }
         // `CG_MOVE` (7) in the game phase: `CInputMain::Move` (`G/input_main.cpp:1757`).
         LiveStep::Record { phase, frame }

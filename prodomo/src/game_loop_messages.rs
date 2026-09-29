@@ -314,6 +314,17 @@ pub enum GameCommand {
         /// Where the game thread reports what the move did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one `CG_ITEM_USE` for the character online under `vid`, answered as a move is.
+    UseItem {
+        /// The VID of the character whose client sent the use.
+        vid: common::vid::Vid,
+        /// The cell the client named.
+        at: protocol::item_pos::ItemPos,
+        /// What the descriptor knows of the character that the use reads.
+        mover: Mover,
+        /// Where the game thread reports what the use did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Requests terminal loop shutdown.
     Stop,
 }
@@ -847,6 +858,29 @@ impl GameLoopController {
         self.send_command(GameCommand::MoveItem {
             vid,
             request,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `CG_ITEM_USE`, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn use_item(
+        &self,
+        vid: common::vid::Vid,
+        at: protocol::item_pos::ItemPos,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::UseItem {
+            vid,
+            at,
             mover,
             reply,
         })

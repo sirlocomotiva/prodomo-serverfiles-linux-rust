@@ -31,8 +31,8 @@ use std::sync::Arc;
 use common::item_slots::usable_inventory_cells;
 use gamedata::item_proto::ItemProtos;
 use world::character::{
-    move_item, CharacterManager, CharacterManagerError, Gear, MoveRequest, MoveRules, Pcg32,
-    Rejected,
+    move_item, use_item, CharacterManager, CharacterManagerError, Gear, MoveRequest, MoveRules,
+    Pcg32, Rejected,
 };
 use world::item::{ItemIdRange, ItemIds};
 
@@ -551,18 +551,13 @@ impl GameState {
                 request,
                 mover,
                 reply,
-            } => {
-                let answer = self.move_item(vid, request, mover);
-                // A dropped move answer means the descriptor is closing. The world has
-                // moved the item, and the store has not, so the next login loads the old
-                // cell; that is the same outcome as a write that failed, and it is logged.
-                if reply.send(answer).is_err() {
-                    warn!(
-                        ?vid,
-                        "an item moved in the world and nobody was left to store it"
-                    );
-                }
-            }
+            } => answer_item_step(vid, reply, self.move_item(vid, request, mover)),
+            GameCommand::UseItem {
+                vid,
+                at,
+                mover,
+                reply,
+            } => answer_item_step(vid, reply, self.use_item(vid, at, mover)),
             GameCommand::Stop => {
                 // The loop handles `Stop` itself, before a command ever reaches a
                 // processor. Reaching here would mean the loop and the state
@@ -806,6 +801,43 @@ impl GameState {
         request: MoveRequest,
         actor: Mover,
     ) -> Result<MovedItems, MoveItemRefused> {
+        self.run_item_step(vid, actor, |items, ids, rules, gear, protos| {
+            move_item(items, ids, request, rules, gear, |vnum| {
+                move_facts(protos, vnum)
+            })
+        })
+    }
+
+    /// Run one `CG_ITEM_USE` for the character online under `vid`: an equippable item goes on
+    /// or comes off (`CHARACTER::UseItem`, `G/char_item.cpp:7168`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub fn use_item(
+        &mut self,
+        vid: common::vid::Vid,
+        at: protocol::item_pos::ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
+            use_item(items, at, rules, gear)
+        })
+    }
+
+    /// Run one item step against the storage and gear of the character online under `vid`.
+    fn run_item_step(
+        &mut self,
+        vid: common::vid::Vid,
+        actor: Mover,
+        step: impl FnOnce(
+            &mut world::character::CharacterItems,
+            Option<&mut ItemIds>,
+            &MoveRules,
+            Option<&mut Gear<'_>>,
+            &ItemProtos,
+        ) -> Result<world::character::MoveDone, world::character::MoveRefused>,
+    ) -> Result<MovedItems, MoveItemRefused> {
         let character = self
             .characters
             .find_by_vid_mut(vid)
@@ -824,15 +856,8 @@ impl GameState {
             dice: &mut self.dice,
             recently_fought: actor.recently_fought,
         });
-        let done = move_item(
-            items,
-            self.item_ids.as_mut(),
-            request,
-            &rules,
-            gear.as_mut(),
-            |vnum| move_facts(protos, vnum),
-        )
-        .map_err(MoveItemRefused::Refused)?;
+        let done = step(items, self.item_ids.as_mut(), &rules, gear.as_mut(), protos)
+            .map_err(MoveItemRefused::Refused)?;
         let mut moved = MovedItems::new(owner_id, vid.raw(), done, actor);
         moved.points = character.points().cloned();
         Ok(moved)
@@ -875,6 +900,23 @@ impl PulseProcessor for GameState {
     fn process_pulse(&mut self, pulse: u64) {
         self.last_pulse = pulse;
         self.metrics.pulses.store(pulse, Ordering::SeqCst);
+    }
+}
+
+/// Hands an item step's answer back to the descriptor that asked for it.
+fn answer_item_step(
+    vid: common::vid::Vid,
+    reply: tokio::sync::oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    answer: Result<MovedItems, MoveItemRefused>,
+) {
+    // A dropped answer means the descriptor is closing. The world has moved the item, and
+    // the store has not, so the next login loads the old cell; that is the same outcome as
+    // a write that failed, and it is logged.
+    if reply.send(answer).is_err() {
+        warn!(
+            ?vid,
+            "an item moved in the world and nobody was left to store it"
+        );
     }
 }
 

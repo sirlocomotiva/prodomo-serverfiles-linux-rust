@@ -222,6 +222,8 @@ pub enum Unported {
     Switchbot,
     /// Wearing this item starts a system this build does not have.
     Worn(WornSystem),
+    /// `CG_ITEM_USE` on an item of this type, whose use arm is not ported.
+    Use(i32),
 }
 
 /// Why a move changed nothing.
@@ -312,6 +314,14 @@ pub enum MoveRefused {
     SwapRefused,
     /// The wear cell the client named is taken.
     WearCellTaken,
+    /// `CItem::CanUsedBy`: the item's anti-flags refuse the character's job.
+    NotUsableByJob,
+    /// `UseItemEx`: the level limit.
+    UseLevelTooLow,
+    /// `UseItemEx`: an item in the belt's inventory with no belt worn.
+    NoBeltWorn,
+    /// `UseItemEx`: an item in a belt cell the worn belt's grade does not open.
+    BeltCellLocked,
 }
 
 impl MoveRefused {
@@ -375,6 +385,16 @@ impl MoveRefused {
             ),
             // `char_item.cpp:7754`.
             Self::WearCellTaken => Some("[LS;1092]"),
+            // `char_item.cpp:7192`.
+            Self::NotUsableByJob => Some("[LS;1004]"),
+            // `char_item.cpp:2734`.
+            Self::UseLevelTooLow => Some("[LS;1013]"),
+            // `char_item.cpp:2791`.
+            Self::NoBeltWorn => Some("<Belt> You can't use this item if you have no equipped belt"),
+            // `char_item.cpp:2797`.
+            Self::BeltCellLocked => {
+                Some("<Belt> You can't use this item if you don't upgrade your belt")
+            }
             _ => None,
         }
     }
@@ -426,13 +446,17 @@ impl core::fmt::Display for MoveRefused {
             Self::AbilityOccupied => f.write_str("the talent cell is taken"),
             Self::SwapRefused => f.write_str("the swap was refused"),
             Self::WearCellTaken => f.write_str("the wear cell is taken"),
+            Self::NotUsableByJob => f.write_str("the item refuses this job's use"),
+            Self::UseLevelTooLow => f.write_str("the level is below the item's use limit"),
+            Self::NoBeltWorn => f.write_str("a belt item is used with no belt worn"),
+            Self::BeltCellLocked => f.write_str("the belt does not open this cell"),
         }
     }
 }
 
 impl std::error::Error for MoveRefused {}
 
-fn is_flat_window(window_type: u8) -> bool {
+pub(crate) fn is_flat_window(window_type: u8) -> bool {
     matches!(
         EWindows::try_from(window_type),
         Ok(EWindows::Inventory | EWindows::Equipment)
@@ -539,7 +563,7 @@ pub fn move_item(
 }
 
 /// A finished wear-cell path.
-fn done(kind: MoveKind, trail: Trail) -> MoveDone {
+pub(crate) fn done(kind: MoveKind, trail: Trail) -> MoveDone {
     MoveDone {
         kind,
         records: trail.records,
@@ -549,7 +573,7 @@ fn done(kind: MoveKind, trail: Trail) -> MoveDone {
 
 /// A wear-cell path that refused: nothing to answer but the refusal when it had not changed
 /// anything or sent anything, else what it did, with the refusal's notice last.
-fn declined(refused: MoveRefused, mut trail: Trail) -> Result<MoveDone, MoveRefused> {
+pub(crate) fn declined(refused: MoveRefused, mut trail: Trail) -> Result<MoveDone, MoveRefused> {
     if trail.records.is_empty() && trail.changes.is_empty() {
         return Err(refused);
     }
