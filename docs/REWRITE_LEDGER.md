@@ -21886,3 +21886,191 @@ These gates ran on the final working tree, after that fix:
 After the run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`. The
 workspace has 205 Rust files and 143,529 lines. No crate was fetched, and `Cargo.lock` is
 unchanged. This section claims no width, and the i686 probe was not run.
+
+## 217. Items on the ground: `CG_ITEM_DROP`, `CG_ITEM_DROP2` and `CG_ITEM_PICKUP`
+
+A client can now drop an item from its inventory, and anyone on the map can pick it up again.
+`CInputMain::ItemDrop` and `ItemDrop2` (`G/input_main.cpp:3693-3702`) call
+`CHARACTER::DropItem` (`G/char_item.cpp:7444`), and `ItemPickup` (`:3714-3717`) calls
+`CHARACTER::PickupItem` (`:7972`). Until this section the three headers had no game-phase
+handler. A dropped item lies on its map until it is picked up or its destroy event fires
+`item_destroy_time_dropitem` seconds later, and every client on the map sees it fall and go.
+
+### 217.1 What landed
+
+- **The drop.** `world::character::ground::drop_item` runs `DropItem`'s checks in legacy's
+  order:
+  1. The position must be valid (`InvalidSource`) and in a flat window
+     (`NotPorted(SourceWindow)`), and the cell must hold an item (`Empty`).
+  2. `ITEM_ANTIFLAG_DROP` or `ITEM_ANTIFLAG_GIVE` refuses with `[LS;442]` (`Undroppable`).
+     Both flags are new in `world::item`.
+  3. A worn item is refused as `NotPorted(Equipment)` (217.3).
+  4. A count of 0 or at least the stack's drops the whole item: the cell is cleared and the
+     row deleted, because legacy's `AddToGround` saves an item with no owner, and that save is
+     a `GD_ITEM_DESTROY`. The item remembers its dropper as `m_dwLastOwnerPID`.
+  5. Any other count leaves the rest in the stack with a `GC_ITEM_UPDATE`. The part is a new
+     item with a fresh id, the stack's vnum, flags and sockets (`FN_copy_item_socket`), no row
+     and no last owner.
+
+  The records are the cell's, then `GC_ITEM_GROUND_ADD`, then `[LS;443]`.
+- **The pick-up.** `ground::pickup_item` is `PickupItem`'s path for an item the picker owns,
+  which is every item a player dropped:
+  1. A stackable item without `ITEM_ANTIFLAG_STACK` tops up every stack of its vnum with the
+     same sockets, in cell order through the base inventory and then the banks
+     (`:8011-8018`), up to the stack limit. Taken whole that way, the stacks are updated,
+     `[LS;444;<name>]` is sent and the ground item goes.
+  2. Otherwise it goes whole to the first free cell of its banks, then of the unlocked base
+     inventory (`GetEmptyInventoryEx`). It is deleted from the ground, then set, highlighted
+     unless the picker was its last holder (`AddToCharacter`), and the notice follows.
+  3. No free cell refuses with `[LS;445]` (`NoRoomToPickUp`) when nothing merged, and keeps
+     the merges with the notice last when something did (`Declined`). What merged has left
+     the ground item, whose count falls.
+  4. A sash is rolled its absorption share on the way in, as a grant rolls it; `roll_sash` is
+     now shared with the equip reducer.
+- **The ground.** The game thread holds the ground: `GameState` keeps each lying item with its
+  channel, map and expiry pulse, and gives each drop the next ground VID. A pick-up must be
+  on the picker's channel and map (`NotOnGround`) and within `DistanceValid`'s 300
+  (`G/item.cpp:593`, by `distance_approx`), else `TooFar`. Neither sends a notice, as legacy's
+  `return false` sends none. An item the picker cannot take goes back to the ground.
+- **The destroy event.** `destroy_expired` runs on every pulse, removes each item whose
+  lifetime is up, and broadcasts `GC_ITEM_GROUND_DEL` to the map through the `ChannelClients`
+  the sessions share. The lifetime is `[game] item_destroy_time_dropitem` (300 s,
+  `G/config.cpp:56`), counted in pulses and never 0.
+- **The session.** `drop_an_item` decodes either header (`CG_ITEM_DROP` carries no count, so
+  it drops the whole item) and applies `DropItem`'s time limit. The limit is the one
+  `ENABLE_NEWSTUFF` reads from `g_ItemDropTimeLimitValue`, which the owner's quest sets to 1000
+  ms (`questlib_extra.lua:139`, `questmanager.cpp:1605`). A drop inside it sends legacy's
+  line and changes nothing; any other drop starts it again, even one the world then refuses,
+  as `m_dwLastItemDropTime` is set before the checks. `pick_up_an_item` sends the ground VID.
+  Both share `finish_item_step` with the move and the use: rows first, then the records, then
+  the map's copy. A malformed frame closes the descriptor.
+- **Enter-game.** A character that enters a map is sent every item lying on it.
+
+### 217.2 What the client sees
+
+- Dropping a whole item clears its cell, drops it at the character's feet with `[LS;443]`,
+  and every client on the map sees it fall. Dropping part of a stack updates the stack first.
+- A second drop within a second is refused with legacy's line.
+- Picking an item up deletes it from every client's ground, then sets or tops up the picker's
+  cells and names the item. A pick-up that finds no room sends `[LS;445]` and the item stays.
+- An item nobody picks up is deleted from every client's ground when its time is up.
+- A character that enters a map sees what lies on it.
+
+### 217.3 Divergences
+
+- **Ground VIDs are given at the drop.** Legacy gives every item a VID when it is created,
+  from `ITEM_MANAGER`'s own counter (`G/item_manager.cpp:264`), and the ground records carry
+  it. Here only a ground item has one, given when it falls, from a counter of its own that
+  starts at 1. A client sees only ground VIDs, so it cannot tell the two apart.
+- **The map hears everything.** Legacy sends the ground add and delete to the sectree's
+  viewers, and a character entering a sectree sees the items in it. Here the whole map is
+  told, and a character entering the map is sent every item on it, because view areas are
+  not ported. This is the scope ledger 215 gave the character updates.
+- **A worn item cannot be dropped yet.** `DropItem` lets a client drop a worn item, which then
+  runs `RemoveFromCharacter`'s unequip. That path waits on the unequip effects, and is
+  refused as not ported.
+- **The limit stamp belongs to the descriptor.** Legacy keeps `m_dwLastItemDropTime` on the
+  character, so a character selected again after going back to the select screen starts
+  without it. Here the session keeps it, so a return to the select screen would carry it
+  over; that return is not ported, so no client can see the difference yet.
+
+### 217.4 Defects not reproduced
+
+- Legacy's pick-up cell search reads the whole inventory, ignoring the unlock stat, as 198.3
+  found for the grant. The pick-up here is bounded by the unlocked cells, as the grant is.
+
+### 217.5 Not ported yet
+
+- `DropGold` and gold on the ground (`ITEM_ELK`): a `CG_ITEM_DROP2` carrying gold is logged
+  and ignored, before the time limit.
+- `CG_ITEM_DESTROY` (21), the dragon soul window's drop, and dropping a worn item.
+- Ownership: a monster drop's owner, the party share (`IsOwnership`, `PickupItem`'s party
+  branch), and `ENABLE_SPECIAL_DROP_CHAT_RENEWAL`.
+- `DropItem`'s `CanHandleItem`, `IsDead`, exchange, lock, running-quest and `IsSecured`
+  checks; the quickslot sync; the `ITEM_SPLIT`, `DROP` and `GET` item logs; and
+  `PickupItem`'s quest hooks and `@fixme150`.
+- The autogive and gold lifetimes (`item_destroy_time_autogive`, `_dropgold`).
+- The ground is held in memory only, as legacy's is: a restart loses it.
+
+### 217.6 Scenarios and Parity inventory
+
+`a_dropped_stack_lies_on_the_map_until_someone_picks_it_up` (`prodomo/tests/parity.rs`) gives
+Alpha ten of a stackable item from the Operator console, with Zulu of the same empire at the
+same position:
+
+1. **Alpha drops four with `CG_ITEM_DROP2`.** The stack is updated to six, `GROUND_ADD` VID 1
+   and `[LS;443]` follow, and the store holds one row of six.
+2. **Alpha drops again at once.** Legacy's time-limit line answers.
+3. **Zulu enters.** It is sent VID 1.
+4. **After 1.1 s Alpha drops the rest with `CG_ITEM_DROP`.** The cell is cleared, VID 2 falls,
+   Zulu sees it, and no row is left.
+5. **Zulu picks up VID 1.** Both clients delete it, Zulu's cell 0 is set to four with the
+   highlight on, the name follows, and the new item's row is Zulu's.
+6. **Alpha picks up VID 2.** It comes back to cell 0 unhighlighted under its own row.
+7. **Alpha picks up VID 1 again.** Nothing answers, and Zulu hears nothing.
+
+`a_dropped_item_nobody_picks_up_is_destroyed_on_time_and_the_map_sees_it_go` starts the server
+with `item_destroy_time_dropitem = 2`. A gold `CG_ITEM_DROP2` goes unanswered and does not
+start the time limit. Alpha's whole drop falls, and at least 1.9 s later both clients are sent
+`GROUND_DEL`. No row is left, and the item cannot be picked up. The parity crate gained
+`Server::start_with_console_configured` for this: a console and `[game]` lines together.
+
+In the Parity inventory:
+
+- `cg.game.item_drop`, `cg.game.item_drop2` and `cg.game.item_pickup` are `partial`, naming
+  the first scenario in their notes.
+- `gc.item_ground_add` and `gc.item_ground_del` are `ported`, with the first scenario.
+- `event.item.item_destroy_event` is `partial` and names the second scenario.
+- `sys.item.core` stays `partial` with a 217 note.
+
+### 217.7 Mutation sweep
+
+41 mutants, applied and restored as in 215.7. Each world mutant ran `world`'s library tests.
+Each prodomo mutant ran `prodomo`'s library and the drop scenarios, with `DATABASE_URL` set.
+
+| group | mutants | result |
+|---|---|---|
+| `world/src/character/ground.rs`: the valid position, the flat window, both anti-flags, the worn refusal, the whole-drop count, both last owners, the part's sockets and flags, the notice; the stackable test, the anchor, the sockets match, the stack limit, the bank, the declined answer, the highlight, the sash roll, the record order, the count left | 23 | 22 killed, 1 survived |
+| `prodomo/src/game_state.rs`: the distance, the map and channel checks, the reinsert, the VID bump, the expiry comparison, call and broadcast, the lifetime in pulses, the enter-game filter | 10 | 10 killed |
+| `prodomo/src/item_move.rs`: the limit comparison, the record's z | 2 | 2 killed |
+| `prodomo/src/main.rs`: the gold guard, the limit and its stamp, `CG_ITEM_DROP2`'s count, the pick-up dispatch, the enter-game send, the shared client list | 7 | 5 killed, 2 survived |
+
+The first run stopped before any mutant was applied because `drop_notice`'s pattern matched
+twice. The pattern was widened.
+
+The three survivors:
+
+- `main_gold` and `main_shared_clients` were gaps: no scenario sent gold or waited for a
+  destroy event. The second scenario (217.6) covers both, and both were killed on the rerun.
+- `pick_anchor` dropped the pick-up's `stack.pos == pos` filter. `CharacterItems::item_at`
+  already answers only an item's anchor, so the mutant was equivalent. The filter was removed,
+  and `a_stack_two_cells_tall_is_topped_up_once` now checks that a stack covering two cells is
+  merged once.
+
+### 217.8 Receipt
+
+25 new tests:
+
+- `world/src/character/ground.rs`: 16, one of them (`a_stack_two_cells_tall_is_topped_up_once`)
+  added by the sweep (217.7).
+- `prodomo/src/game_state.rs`: 6, for the ground, the VIDs, the place and distance checks, the
+  refused pick-up, the destroy pulse and the lifetime in pulses.
+- `prodomo/src/item_move.rs`: 1, `a_drop_waits_a_full_second_after_the_last_one`.
+- `prodomo/tests/parity.rs`: 2, the scenarios in 217.6, which run only with `DATABASE_URL`
+  set.
+
+The count went from 2584 to 2609. These gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2609 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2609 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 15 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+After the run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`. The
+workspace has 207 Rust files and 145,291 lines. No crate was fetched, and `Cargo.lock` is
+unchanged. This section claims no width, and the i686 probe was not run.

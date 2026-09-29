@@ -110,10 +110,30 @@ impl Server {
         store_url: &str,
         channels: &[ChannelSpec],
     ) -> (Self, PathBuf) {
+        Self::start_with_console_configured(binary, store_url, channels, "")
+    }
+
+    /// [`Server::start_with_console`] plus the lines of a `[game]` table, as
+    /// [`Server::start_configured`] takes them; empty for none.
+    ///
+    /// # Panics
+    ///
+    /// As [`Server::start`].
+    #[must_use]
+    pub fn start_with_console_configured(
+        binary: &Path,
+        store_url: &str,
+        channels: &[ChannelSpec],
+        game: &str,
+    ) -> (Self, PathBuf) {
         let root = unique_root();
         let console = root.join("operator-console");
-        let game = format!("operator_console = \"{}\"", console.display());
-        let server = Self::start_in(root, binary, store_url, channels, &game);
+        let mut lines = format!("operator_console = \"{}\"", console.display());
+        if !game.is_empty() {
+            lines.push('\n');
+            lines.push_str(game);
+        }
+        let server = Self::start_in(root, binary, store_url, channels, &lines);
         (server, console)
     }
 

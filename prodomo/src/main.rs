@@ -55,7 +55,7 @@ use prodomo::client_live::{
 use prodomo::client_registry::{ChannelClients, ClientEntry, Lease, PositionTable};
 use prodomo::client_session::ClientPhase;
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
-use prodomo::game_loop_messages::{GameLoopController, GameLoopTerminal};
+use prodomo::game_loop_messages::{GameLoopController, GameLoopTerminal, GroundPlace};
 use prodomo::game_state::{world_item_id_range, GameState};
 use prodomo::handshake::HandshakeServerKind;
 use prodomo::item_load::plan_item_load;
@@ -88,10 +88,14 @@ use protocol::cg_chat::CgChat;
 use protocol::cg_inventory::{
     HEADER_CG_CHANGE_NAME, HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE,
     HEADER_CG_CHARACTER_POSITION, HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_EMPIRE,
-    HEADER_CG_ENTERGAME, HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_USE, HEADER_CG_LOGIN2,
-    HEADER_CG_LOGIN3, HEADER_CG_MOVE, HEADER_CG_STATE_CHECKER, HEADER_CG_SYNC_POSITION,
+    HEADER_CG_ENTERGAME, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_MOVE,
+    HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3, HEADER_CG_MOVE,
+    HEADER_CG_STATE_CHECKER, HEADER_CG_SYNC_POSITION,
 };
+use protocol::cg_item_drop::CgItemDrop;
+use protocol::cg_item_drop2::CgItemDrop2;
 use protocol::cg_item_move::CgItemMove;
+use protocol::cg_item_pickup::CgItemPickup;
 use protocol::cg_item_use::CgItemUse;
 use protocol::cg_login::CgEmpire;
 use protocol::cg_login3::CgLogin3;
@@ -302,6 +306,9 @@ struct Held {
     /// When a `CG_MOVE` with an attack or combo function was last accepted
     /// (`CHARACTER::OnMove(true)`, `G/char.cpp:6154`).
     last_attack: Option<tokio::time::Instant>,
+    /// `m_dwLastItemDropTime`: when a drop last passed the drop limit
+    /// (`G/char_item.cpp:7465`), whatever the rest of the drop then did.
+    last_item_drop: Option<tokio::time::Instant>,
 }
 
 /// The per-descriptor half of legacy's save cycle.
@@ -728,6 +735,145 @@ where
     let actor = item_actor(held);
     let answer = context.game.use_item(vid, record.cell, actor).await;
     finish_item_step(session, addr, context, held, actor.empire, answer).await
+}
+
+/// `CG_ITEM_DROP` (12) and `CG_ITEM_DROP2` (20) in the game phase: `CInputMain::ItemDrop` and
+/// `ItemDrop2` (`G/input_main.cpp:1024-1051`) → `CHARACTER::DropItem` (`G/char_item.cpp:7444`).
+///
+/// `CG_ITEM_DROP` carries no count, which `DropItem` reads as the whole stack. A gold drop is
+/// `DropGold`, which is not ported: it is logged and ignored. The drop limit is checked here,
+/// because its clock is the descriptor's, and passing it restarts the clock whatever the world
+/// then answers, as legacy's does.
+async fn drop_an_item<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let decoded = if frame.header == HEADER_CG_ITEM_DROP2.value() {
+        CgItemDrop2::decode_frame(frame)
+            .map(|record| (record.cell, record.gold, record.count))
+            .map_err(|error| error.to_string())
+    } else {
+        CgItemDrop::decode_frame(frame)
+            .map(|record| (record.cell, record.gold, 0))
+            .map_err(|error| error.to_string())
+    };
+    let (cell, gold, count) = match decoded {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed ITEM_DROP; closing");
+            return false;
+        }
+    };
+    let (Some(vid), Some(place)) = (held.world, ground_place(held)) else {
+        info!(%addr, "ITEM_DROP without a character in the world; ignoring");
+        return true;
+    };
+    if gold > 0 {
+        info!(%addr, gold, "DropGold is not ported; ignoring the gold drop");
+        return true;
+    }
+    let actor = item_actor(held);
+    let now = tokio::time::Instant::now();
+    let elapsed = held.last_item_drop.map(|last| now.duration_since(last));
+    if !prodomo::item_move::drop_allowed(elapsed) {
+        info!(%addr, "Item drop inside the drop limit");
+        let line = prodomo::item_move::drop_limit_notice(actor.empire);
+        if let Err(error) = send_all(session, &[line]).await {
+            warn!(%addr, %error, "Client session stopped");
+            return false;
+        }
+        return true;
+    }
+    held.last_item_drop = Some(now);
+    let answer = context.game.drop_item(vid, cell, count, place, actor).await;
+    finish_item_step(session, addr, context, held, actor.empire, answer).await
+}
+
+/// `CG_ITEM_PICKUP` (15) in the game phase: `CInputMain::ItemPickup`
+/// (`G/input_main.cpp:1076`) → `CHARACTER::PickupItem` (`G/char_item.cpp:7972`).
+async fn pick_up_an_item<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgItemPickup::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed ITEM_PICKUP; closing");
+            return false;
+        }
+    };
+    let (Some(vid), Some(place)) = (held.world, ground_place(held)) else {
+        info!(%addr, "ITEM_PICKUP without a character in the world; ignoring");
+        return true;
+    };
+    let actor = item_actor(held);
+    let answer = context
+        .game
+        .pickup_item(vid, record.vid, place, actor)
+        .await;
+    finish_item_step(session, addr, context, held, actor.empire, answer).await
+}
+
+/// Whether a game-phase header is a drop or a pick-up.
+fn is_ground_step(header: u8) -> bool {
+    [
+        HEADER_CG_ITEM_DROP,
+        HEADER_CG_ITEM_DROP2,
+        HEADER_CG_ITEM_PICKUP,
+    ]
+    .iter()
+    .any(|ground| ground.value() == header)
+}
+
+/// Where the character stands, which is where a drop lands and what a pick-up is measured from.
+fn ground_place(held: &Held) -> Option<GroundPlace> {
+    held.avatar.as_ref().map(|avatar| GroundPlace {
+        channel: held.channel,
+        map: avatar.map,
+        x: avatar.x,
+        y: avatar.y,
+    })
+}
+
+/// Send a client that has just entered its map the items lying there.
+///
+/// Legacy shows them as the character's sectree view fills, each as `EncodeInsertPacket`
+/// writes `GC_ITEM_GROUND_ADD` (`G/item.cpp:163`). The Rewrite's scope is the whole map, so the
+/// whole map's items are sent at once.
+async fn show_the_ground<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    channel: u8,
+    map: i32,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let records = match context.game.ground_items_on(channel, map).await {
+        Ok(records) => records,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not list the ground items; closing");
+            return false;
+        }
+    };
+    if let Err(error) = send_all(session, &records).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    true
 }
 
 /// What the descriptor knows of its character that a move or a use reads.
@@ -1430,6 +1576,17 @@ where
         {
             use_an_item(session, addr, context, held, &frame).await
         }
+        // `CG_ITEM_DROP` (12), `CG_ITEM_DROP2` (20) and `CG_ITEM_PICKUP` (15) in the game
+        // phase, reached when the character is not an observer (`G/input_main.cpp:3693-3717`).
+        LiveStep::Record { phase, frame }
+            if phase == ClientPhase::Game && is_ground_step(frame.header) =>
+        {
+            if frame.header == HEADER_CG_ITEM_PICKUP.value() {
+                pick_up_an_item(session, addr, context, held, &frame).await
+            } else {
+                drop_an_item(session, addr, context, held, &frame).await
+            }
+        }
         // `CG_MOVE` (7) in the game phase: `CInputMain::Move` (`G/input_main.cpp:1757`).
         LiveStep::Record { phase, frame }
             if phase == ClientPhase::Game && frame.header == HEADER_CG_MOVE.value() =>
@@ -2081,6 +2238,7 @@ where
             return false;
         };
         held.world = Some(world_vid);
+        return show_the_ground(session, addr, context, seat.number, map).await;
     }
     true
 }
@@ -3010,6 +3168,7 @@ fn connection_context(
     store: &Store,
     listeners: &Listeners,
     data: GameData,
+    clients: Arc<ChannelClients>,
     game: GameLoopController,
 ) -> ConnectionContext {
     // Every legacy game Core reported its own client port (`mother_port`) to the status list; the
@@ -3044,7 +3203,7 @@ fn connection_context(
         routes: Arc::new(map_routes(config, listeners)),
         handles: Arc::new(AtomicU32::new(0)),
         names: Arc::new(data.names),
-        clients: Arc::new(ChannelClients::new()),
+        clients,
         positions: Arc::new(PositionTable::new()),
         creates: Arc::new(CreateCooldown::default()),
         block_char_creation: config.game.block_char_creation,
@@ -3134,8 +3293,13 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     // item id allocator on purpose: the start id is `MAX(id)` over the item table, and
     // that table is only readable once the store has migrated, which happens inside
     // the accept loop below. The allocator arrives as a command from there.
-    let game_state =
-        GameState::new(Arc::clone(&protos)).with_item_count_limit(config.game.item_count_limit);
+    // One client registry serves the descriptors and the world, which tells a map when an item
+    // on its ground is destroyed.
+    let clients = Arc::new(ChannelClients::new());
+    let game_state = GameState::new(Arc::clone(&protos))
+        .with_item_count_limit(config.game.item_count_limit)
+        .with_drop_lifetime(config.game.item_destroy_time_dropitem)
+        .with_clients(Arc::clone(&clients));
     let mut game_loop = spawn_game_loop(GameLoopConfig::default(), game_state)?;
     let controller = game_loop.controller();
     info!(thread_id = ?game_loop.thread_id(), "Dedicated game loop started");
@@ -3154,6 +3318,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
                 names,
                 protos,
             },
+            clients,
             controller.clone(),
         ),
     };

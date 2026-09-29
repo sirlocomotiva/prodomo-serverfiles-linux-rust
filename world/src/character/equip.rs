@@ -84,6 +84,22 @@ pub struct Gear<'a> {
     pub recently_fought: bool,
 }
 
+/// The sash half of `CItem::AddToCharacter` (`G/item.cpp:487-516`): a sash whose absorption
+/// is unset rolls it from its grade. Answers whether it rolled.
+pub(crate) fn roll_sash(item: &mut Item, proto: &ItemProto, dice: &mut dyn Dice) -> bool {
+    let sash = proto.item_type == ITEM_COSTUME && proto.sub_type == COSTUME_SASH;
+    let rolled = sash && item.sockets[SASH_ABSORPTION_SOCKET] == 0;
+    if rolled {
+        item.sockets[SASH_ABSORPTION_SOCKET] = match proto.values[0] {
+            2 => 5,
+            3 => 10,
+            4 => number(dice, 11, 19),
+            _ => 1,
+        };
+    }
+    rolled
+}
+
 impl core::fmt::Debug for Gear<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Gear")
@@ -608,16 +624,7 @@ impl<'s, 'g> Equipper<'s, 'g> {
     fn add_to_character(&mut self, item: &Item, pos: ItemPos) -> Result<(), MoveRefused> {
         let proto = self.proto(item.vnum)?;
         let mut item = item.clone();
-        let sash = proto.item_type == ITEM_COSTUME && proto.sub_type == COSTUME_SASH;
-        let rolled = sash && item.sockets[SASH_ABSORPTION_SOCKET] == 0;
-        if rolled {
-            item.sockets[SASH_ABSORPTION_SOCKET] = match proto.values[0] {
-                2 => 5,
-                3 => 10,
-                4 => number(self.gear.dice, 11, 19),
-                _ => 1,
-            };
-        }
+        let rolled = roll_sash(&mut item, proto, self.gear.dice);
         self.items.set(pos, &item).map_err(MoveRefused::Storage)?;
         self.trail
             .records

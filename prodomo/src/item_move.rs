@@ -26,11 +26,12 @@ use gamedata::item_proto::ItemProtos;
 use gamedata::item_proto_value::type_value;
 use protocol::gc_actors::GcCharacterUpdate;
 use protocol::gc_chat::{GcChat, CHAT_TYPE_INFO};
-use protocol::gc_vid::GcSpecialEffect;
+use protocol::gc_item_window::GcItemGroundAdd;
+use protocol::gc_vid::{GcHeaderAndDword, GcSpecialEffect, HEADER_GC_ITEM_GROUND_DEL};
 use protocol::item_pos::ItemPos;
 use world::character::{
-    CharacterItems, CharacterLook, ItemChange, MoveDone, MoveFacts, MoveKind, MoveRecord,
-    MoveRefused, Points,
+    CharacterItems, CharacterLook, GroundRecord, ItemChange, MoveDone, MoveFacts, MoveKind,
+    MoveRecord, MoveRefused, Points,
 };
 use world::item::Item;
 
@@ -76,9 +77,9 @@ impl MovedItems {
     /// # Panics
     ///
     /// Never: each notice is a short constant from [`MoveRefused::notice`], far under
-    /// `CHAT_MAX_LEN`.
+    /// `CHAT_MAX_LEN`, or a pick-up line around one prototype name.
     #[must_use]
-    pub fn new(owner_id: u32, vid: u32, done: MoveDone, mover: Mover) -> Self {
+    pub fn new(owner_id: u32, vid: u32, done: MoveDone, mover: Mover, protos: &ItemProtos) -> Self {
         let mut records = Vec::with_capacity(done.records.len());
         let mut around = Vec::new();
         for record in done.records {
@@ -102,6 +103,14 @@ impl MovedItems {
                 }
                 MoveRecord::Notice(text) => {
                     frame = notice(text, mover.empire);
+                    false
+                }
+                MoveRecord::Ground(record) => {
+                    frame = ground_record(record);
+                    true
+                }
+                MoveRecord::PickedUp { vnum } => {
+                    frame = picked_up_notice(protos, vnum, mover.empire);
                     false
                 }
             };
@@ -267,6 +276,68 @@ pub fn refusal_notice(refused: &MoveRefused, empire: u8) -> Option<Vec<u8>> {
     refused.notice().map(|text| notice(text, empire))
 }
 
+/// `g_ItemDropTimeLimitValue`: `item_drop_limit_time` is 1 in the owner's quest settings
+/// (`legacy/gamedata/locale/europe/quest/questlib_extra.lua:139`), which
+/// `G/questmanager.cpp:1605` makes 1000 ms.
+pub const DROP_LIMIT: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// What `DropItem` sends inside [`DROP_LIMIT`] (`G/char_item.cpp:7460`).
+pub const DROP_LIMIT_NOTICE: &str = "@@(char_item.cpp)tradus:[#Unk]You cannot drop Yang yet";
+
+/// Whether a drop `elapsed` after the last one that passed this check may go on
+/// (`G/char_item.cpp:7456-7465`). `None` is a character that has not dropped yet.
+#[must_use]
+pub fn drop_allowed(elapsed: Option<std::time::Duration>) -> bool {
+    elapsed.is_none_or(|elapsed| elapsed >= DROP_LIMIT)
+}
+
+/// The [`DROP_LIMIT_NOTICE`] line.
+#[must_use]
+pub fn drop_limit_notice(empire: u8) -> Vec<u8> {
+    notice(DROP_LIMIT_NOTICE, empire)
+}
+
+/// `GC_ITEM_GROUND_ADD` or `GC_ITEM_GROUND_DEL`, encoded (`G/item.cpp:163-218`).
+///
+/// The z is 0: the character's `GetXYZ` z, which the Rewrite does not track and legacy's
+/// characters on the ground keep at 0.
+#[must_use]
+pub fn ground_record(record: GroundRecord) -> Vec<u8> {
+    match record {
+        GroundRecord::Add { vid, vnum, x, y } => GcItemGroundAdd {
+            x,
+            y,
+            z: 0,
+            vid,
+            vnum,
+        }
+        .encode(),
+        GroundRecord::Del { vid } => {
+            let mut frame = Vec::new();
+            GcHeaderAndDword::new(HEADER_GC_ITEM_GROUND_DEL, vid).encode_into(&mut frame);
+            frame
+        }
+    }
+}
+
+/// `[LS;444;%s]` around the item's name (`G/char_item.cpp:8048`, `:8080`).
+///
+/// `GetName` is `LC_LOCALE_ITEM_TEXT(vnum, LOCALE_DEFAULT)`; with no language table loaded the
+/// name is the prototype's locale name, as every other line is sent unchanged. An item with no
+/// prototype cannot be picked up, so the empty name is never sent.
+fn picked_up_notice(protos: &ItemProtos, vnum: u32, empire: u8) -> Vec<u8> {
+    let name = protos
+        .get(vnum)
+        .map_or(&[][..], |proto| proto.locale_name.as_slice());
+    let mut text = b"[LS;444;".to_vec();
+    text.extend_from_slice(name);
+    text.push(b']');
+    let line = GcChat::notice(CHAT_TYPE_INFO, empire, &text)
+        .expect("an item name is shorter than the chat length limit");
+    line.encode()
+        .expect("a pick-up line always fits the record's size field")
+}
+
 /// A `CHAT_TYPE_INFO` line, encoded.
 fn notice(text: &str, empire: u8) -> Vec<u8> {
     // Each notice is a short constant, far under `CHAT_MAX_LEN`, so neither step can fail.
@@ -278,6 +349,15 @@ fn notice(text: &str, empire: u8) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_drop_waits_a_full_second_after_the_last_one() {
+        use std::time::Duration;
+        assert!(super::drop_allowed(None));
+        assert!(!super::drop_allowed(Some(Duration::ZERO)));
+        assert!(!super::drop_allowed(Some(Duration::from_millis(999))));
+        assert!(super::drop_allowed(Some(Duration::from_millis(1000))));
+    }
+
     use super::*;
     use common::item_slots::{BELT_INVENTORY_SLOT_START, CUSTOM_INVENTORY_SLOT_START};
     use protocol::gc_inventory::HEADER_GC_CHAT;
@@ -441,7 +521,7 @@ mod tests {
             recently_fought: false,
             empire: 1,
         };
-        let moved = MovedItems::new(7, 7, done.clone(), actor);
+        let moved = MovedItems::new(7, 7, done.clone(), actor, &owners());
         assert_eq!(moved.kind, MoveKind::Moved);
         assert_eq!(moved.owner_id, 7);
         assert_eq!(moved.records.len(), 2);

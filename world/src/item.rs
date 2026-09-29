@@ -88,6 +88,13 @@ pub const ITEM_FLAG_IRREMOVABLE: u32 = 1 << 8;
 /// or split even on a stackable item.
 pub const ITEM_ANTIFLAG_STACK: u32 = 1 << 15;
 
+/// `ITEM_ANTIFLAG_DROP` (`item_length.h:385`): the item may not be dropped.
+pub const ITEM_ANTIFLAG_DROP: u32 = 1 << 7;
+
+/// `ITEM_ANTIFLAG_GIVE` (`item_length.h:391`): the item may not be given, and so not dropped
+/// either (`char_item.cpp:7481`).
+pub const ITEM_ANTIFLAG_GIVE: u32 = 1 << 13;
+
 /// An item instance's unique id.
 ///
 /// Legacy's is a `DWORD` from a monotonic counter that is never rewound, so a

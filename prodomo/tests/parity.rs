@@ -1320,6 +1320,8 @@ fn game_len(header: u8) -> usize {
         GC_OWNERSHIP => OWNERSHIP_LEN,
         ITEM_SET => ITEM_SET_LEN,
         ITEM_UPDATE => ITEM_UPDATE_LEN,
+        GROUND_ADD => GROUND_ADD_LEN,
+        GROUND_DEL => GROUND_DEL_LEN,
         other => panic!("unexpected loading or enter-game header {other}"),
     }
 }
@@ -1438,6 +1440,13 @@ fn load_character(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed, Ve
 /// connection in the game phase with nothing unread. Answers the character's own
 /// `GC_CHARACTER_ADD`.
 fn enter_game_burst(keyed: &mut Keyed) -> Vec<u8> {
+    let add = enter_game_records(keyed);
+    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    add
+}
+
+/// [`enter_game_burst`] without the final quiet check, for a map whose ground is not empty.
+fn enter_game_records(keyed: &mut Keyed) -> Vec<u8> {
     keyed.send_record(&client_enter_game());
     let add = keyed.read_game();
     assert_eq!(add[0], GC_CHARACTER_ADD);
@@ -1448,7 +1457,6 @@ fn enter_game_burst(keyed: &mut Keyed) -> Vec<u8> {
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
     let notice = keyed.read_game();
     assert_eq!(notice[0], GC_CHAT);
-    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
     add
 }
 
@@ -2956,6 +2964,12 @@ const ITEM_SET: u8 = 21;
 /// `GC_ITEM_UPDATE` (byte 25, 59 bytes): a stack that changed in place.
 const ITEM_UPDATE_LEN: usize = 59;
 const ITEM_UPDATE: u8 = 25;
+/// `GC_ITEM_GROUND_ADD`: the header, `x`, `y`, `z`, the VID and the vnum.
+const GROUND_ADD: u8 = 0x1a;
+const GROUND_ADD_LEN: usize = 21;
+/// `GC_ITEM_GROUND_DEL`: the header and the VID.
+const GROUND_DEL: u8 = 0x1b;
+const GROUND_DEL_LEN: usize = 5;
 
 /// The width of a record an Operator's item work puts in a client's window.
 ///
@@ -3954,6 +3968,222 @@ fn an_armour_is_used_on_swapped_and_used_off_and_the_store_follows() {
         &database,
         "(SELECT part_main = 0 FROM player WHERE name = 'Alpha')",
     );
+}
+
+/// A `GC_ITEM_GROUND_ADD` at Alpha's and Zulu's position, with z 0.
+fn a_ground_add(vid: u32, vnum: u32) -> Vec<u8> {
+    let mut record = vec![GROUND_ADD];
+    for word in [470_000_i32, 950_000, 0] {
+        record.extend_from_slice(&word.to_le_bytes());
+    }
+    record.extend_from_slice(&vid.to_le_bytes());
+    record.extend_from_slice(&vnum.to_le_bytes());
+    record
+}
+
+/// A `GC_ITEM_GROUND_DEL`.
+fn a_ground_del(vid: u32) -> Vec<u8> {
+    let mut record = vec![GROUND_DEL];
+    record.extend_from_slice(&vid.to_le_bytes());
+    record
+}
+
+/// A `CHAT_TYPE_INFO` line to a character of empire 1.
+fn an_info_line(text: &[u8]) -> Vec<u8> {
+    let size = u8::try_from(10 + text.len()).expect("a short line");
+    let mut record = vec![GC_CHAT, size, 0, 1, 0, 0, 0, 0, 1, 1];
+    record.extend_from_slice(text);
+    record
+}
+
+/// A `CG_ITEM_DROP2` of `count` from the inventory cell `cell`, or a `CG_ITEM_DROP` when
+/// `count` is `None`.
+fn client_item_drop(cell: u16, count: Option<u16>) -> Vec<u8> {
+    let cell =
+        protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, cell);
+    match count {
+        Some(count) => protocol::cg_item_drop2::CgItemDrop2::new(cell, 0, count).encode(),
+        None => protocol::cg_item_drop::CgItemDrop::new(cell, 0).encode(),
+    }
+}
+
+/// `cg.game.item_drop`, `cg.game.item_drop2`, `cg.game.item_pickup`: part of a stack is
+/// dropped, a drop inside the second after it is refused, the rest is dropped whole, and each
+/// part is picked up again, one by a character that entered the map after it fell. Every client
+/// on the map sees each item fall and go, and the store follows each step.
+#[test]
+fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, 470000, \
+         950000 FROM account WHERE login = 'bob'",
+    );
+    let protos = owners_protos();
+    let stackable = a_stackable_vnum(&protos);
+    let mut picked_up = b"[LS;444;".to_vec();
+    picked_up.extend_from_slice(&protos.get(stackable).expect("a proto").locale_name);
+    picked_up.push(b']');
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+
+    // Given: Alpha holds ten of a stackable item at cell 0.
+    let (mut alpha, _character) = enter_world(&server, b"alice", 0);
+    Server::write_console(&console, &format!("item give Alpha {stackable} 10"));
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(
+        set_fields(&alpha.read_game()),
+        (inventory, 0, stackable, 10)
+    );
+
+    // When: four are dropped.
+    alpha.send_record(&client_item_drop(0, Some(4)));
+    // Then: the stack is updated to six, the four fall under ground VID 1 and legacy's line
+    // follows (`G/char_item.cpp:7536`); the four are a new item with no row yet.
+    assert_eq!(update_fields(&alpha.read_game()), (inventory, 0, 6));
+    assert_eq!(alpha.read_game(), a_ground_add(1, stackable));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;443]"));
+    check(
+        &database,
+        "(SELECT count FROM item WHERE id = 100000000) = 6 AND (SELECT count(*) FROM item) = 1",
+    );
+    // And: a drop inside the same second is refused with legacy's line.
+    alpha.send_record(&client_item_drop(0, None));
+    assert_eq!(
+        alpha.read_game(),
+        an_info_line(b"@@(char_item.cpp)tradus:[#Unk]You cannot drop Yang yet")
+    );
+    let dropped_at = std::time::Instant::now();
+
+    // When: Zulu enters the map.
+    let (mut zulu, _items) = {
+        let (mut keyed, _character, items) = load_character(&server, b"bob", 0);
+        enter_game_records(&mut keyed);
+        (keyed, items)
+    };
+    // Then: the item lying there is shown.
+    assert_eq!(zulu.read_game(), a_ground_add(1, stackable));
+
+    // When: once the second has passed, Alpha drops the rest whole.
+    std::thread::sleep(Duration::from_millis(1100).saturating_sub(dropped_at.elapsed()));
+    alpha.send_record(&client_item_drop(0, None));
+    // Then: the cell is cleared, the six fall under ground VID 2, Zulu sees them fall, and the
+    // row is gone.
+    assert_eq!(alpha.read_game(), a_clear_record(0));
+    assert_eq!(alpha.read_game(), a_ground_add(2, stackable));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;443]"));
+    assert_eq!(zulu.read_game(), a_ground_add(2, stackable));
+    check(&database, "NOT EXISTS (SELECT 1 FROM item)");
+
+    // When: Zulu picks up the four.
+    zulu.send_record(&protocol::cg_item_pickup::CgItemPickup::new(1).encode());
+    // Then: they leave the ground for Zulu's cell 0, highlighted because Zulu did not drop
+    // them, and Alpha sees them go.
+    assert_eq!(zulu.read_game(), a_ground_del(1));
+    let set = zulu.read_game();
+    assert_eq!(set_fields(&set), (inventory, 0, stackable, 4));
+    assert_eq!(set[26], 1, "the pick-up highlight");
+    assert_eq!(zulu.read_game(), an_info_line(&picked_up));
+    assert_eq!(alpha.read_game(), a_ground_del(1));
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item JOIN player ON player.id = item.owner_id WHERE item.id = \
+         100000001 AND name = 'Zulu' AND window_type = 1 AND pos = 0 AND count = 4)",
+    );
+
+    // When: Alpha picks up the six it dropped.
+    alpha.send_record(&protocol::cg_item_pickup::CgItemPickup::new(2).encode());
+    // Then: they come back to cell 0 unhighlighted, under their own row again.
+    assert_eq!(alpha.read_game(), a_ground_del(2));
+    let set = alpha.read_game();
+    assert_eq!(set_fields(&set), (inventory, 0, stackable, 6));
+    assert_eq!(set[26], 0, "Alpha was the last holder");
+    assert_eq!(alpha.read_game(), an_info_line(&picked_up));
+    assert_eq!(zulu.read_game(), a_ground_del(2));
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item JOIN player ON player.id = item.owner_id WHERE item.id = \
+         100000000 AND name = 'Alpha' AND window_type = 1 AND pos = 0 AND count = 6)",
+    );
+    // And: an item already picked up is not there to pick up, and nobody is told.
+    alpha.unanswered(&protocol::cg_item_pickup::CgItemPickup::new(1).encode());
+    assert_eq!(zulu.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+}
+
+/// `event.item.item_destroy_event`: with a two-second lifetime, an item nobody picks up is
+/// destroyed on time and every client on the map sees it go. A `CG_ITEM_DROP2` carrying gold
+/// is ignored before the drop limit, because `DropGold` is not ported.
+#[test]
+fn a_dropped_item_nobody_picks_up_is_destroyed_on_time_and_the_map_sees_it_go() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) = Server::start_with_console_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "item_destroy_time_dropitem = 2",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, 470000, \
+         950000 FROM account WHERE login = 'bob'",
+    );
+    let stackable = a_stackable_vnum(&owners_protos());
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+
+    // Given: Alpha holds three of a stackable item at cell 0, and Zulu stands beside it.
+    let (mut alpha, _character) = enter_world(&server, b"alice", 0);
+    Server::write_console(&console, &format!("item give Alpha {stackable} 3"));
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, stackable, 3));
+    let mut zulu = {
+        let (mut keyed, _character, _items) = load_character(&server, b"bob", 0);
+        enter_game_records(&mut keyed);
+        keyed
+    };
+
+    // When: Alpha drops gold. Then: nothing answers, and the drop limit is not started.
+    alpha.unanswered(
+        &protocol::cg_item_drop2::CgItemDrop2::new(
+            protocol::item_pos::ItemPos::new(inventory, 0),
+            100,
+            1,
+        )
+        .encode(),
+    );
+
+    // When: Alpha drops the stack whole.
+    alpha.send_record(&client_item_drop(0, None));
+    let dropped_at = std::time::Instant::now();
+    // Then: it falls under ground VID 1 and both clients see it.
+    assert_eq!(alpha.read_game(), a_clear_record(0));
+    assert_eq!(alpha.read_game(), a_ground_add(1, stackable));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;443]"));
+    assert_eq!(zulu.read_game(), a_ground_add(1, stackable));
+
+    // Then: two seconds on, it is destroyed and both clients see it go.
+    assert_eq!(alpha.read_game(), a_ground_del(1));
+    assert_eq!(zulu.read_game(), a_ground_del(1));
+    assert!(
+        dropped_at.elapsed() >= Duration::from_millis(1900),
+        "destroyed after {:?}",
+        dropped_at.elapsed()
+    );
+    // And: the item is gone for good: no row, and nothing to pick up.
+    check(&database, "NOT EXISTS (SELECT 1 FROM item)");
+    zulu.unanswered(&protocol::cg_item_pickup::CgItemPickup::new(1).encode());
 }
 
 /// Lower Alpha to level 9 with 1500 hit points and 70000 spell points, and give it five

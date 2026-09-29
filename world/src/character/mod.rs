@@ -6,6 +6,7 @@ mod dice;
 mod equip;
 mod equipment;
 mod grant;
+mod ground;
 mod inventory;
 mod item_move;
 mod items;
@@ -38,6 +39,7 @@ pub use equipment::{
     Worn, PARTS,
 };
 pub use grant::{grant, GrantRefused, Granted, GRANT_WINDOW};
+pub use ground::{drop_item, pickup_item, DropAt, GroundItem, Picker, DROPPED_NOTICE};
 pub use inventory::{
     character_cell_bound, custom_inventory_category_of, custom_inventory_position,
     inventory_page_by_pos, inventory_type_by_pos, inventory_type_of_cell,
@@ -47,8 +49,8 @@ pub use inventory::{
     INVENTORY_PLACEHOLDER, NPOS,
 };
 pub use item_move::{
-    move_item, ItemChange, ItemRecord, MoveDone, MoveFacts, MoveKind, MoveRecord, MoveRefused,
-    MoveRequest, MoveRules, Unported, AUTO_FIND_CELL,
+    move_item, GroundRecord, ItemChange, ItemRecord, MoveDone, MoveFacts, MoveKind, MoveRecord,
+    MoveRefused, MoveRequest, MoveRules, Unported, AUTO_FIND_CELL,
 };
 pub use items::{
     belt_cell_is_available, CharacterItems, CountRefused, Lookup, Rejected, ATTR67_SLOTS,

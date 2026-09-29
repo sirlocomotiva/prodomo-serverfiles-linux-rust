@@ -23,7 +23,7 @@
 //! steps nothing yet; it counts, and the count is what proves the thread is running
 //! this value rather than an empty closure.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{BuildHasher, RandomState};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -31,19 +31,34 @@ use std::sync::Arc;
 use common::item_slots::usable_inventory_cells;
 use gamedata::item_proto::ItemProtos;
 use world::character::{
-    move_item, use_item, CharacterManager, CharacterManagerError, Gear, MoveRequest, MoveRules,
-    Pcg32, Rejected,
+    drop_item, move_item, pickup_item, use_item, CharacterManager, CharacterManagerError, DropAt,
+    Gear, GroundItem, GroundRecord, MoveRefused, MoveRequest, MoveRules, Pcg32, Picker, Rejected,
 };
 use world::item::{ItemIdRange, ItemIds};
 
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
-use crate::client_registry::ClientOutbox;
+use crate::client_registry::{ChannelClients, ClientOutbox};
 use crate::game_loop::PulseProcessor;
-use crate::game_loop_messages::GameCommand;
+use crate::game_loop_messages::{GameCommand, GroundPlace};
 use crate::item_grant::{grant_item, GrantOutcome, GrantRefusal, GrantRequest};
-use crate::item_move::{belt_grade, move_facts, MoveItemRefused, MovedItems, Mover};
+use crate::item_move::{belt_grade, ground_record, move_facts, MoveItemRefused, MovedItems, Mover};
+use crate::save::PASSES_PER_SEC;
+use crate::sync_position::distance_approx;
+
+/// `PickupItem`'s `DistanceValid` bound (`G/item.cpp:593`), checked at `G/char_item.cpp:7982`.
+const PICKUP_DISTANCE: i32 = 300;
+
+/// An item lying on one map of one Channel.
+#[derive(Debug)]
+struct Lying {
+    ground: GroundItem,
+    channel: u8,
+    map: i32,
+    /// The pulse the destroy event fires on.
+    expires: u64,
+}
 
 /// Counters the owning side can read while the game thread is running.
 ///
@@ -307,7 +322,20 @@ pub struct GameState {
     /// hash keys. Either way a player cannot predict the draw, and the Rewrite does not
     /// reproduce legacy's sequence (a Divergence).
     dice: Pcg32,
+    /// The items lying on the ground, keyed by their ground VID.
+    ///
+    /// Legacy holds them as `CItem` sectree entities, in memory only; a restart loses them,
+    /// and so does this.
+    ground: BTreeMap<u32, Lying>,
+    /// The next ground VID. A namespace of its own, apart from the character VIDs (a
+    /// Divergence: legacy draws both from one `CEntity` VID counter).
+    next_ground_vid: u32,
+    /// `item_destroy_time_dropitem`, in pulses.
+    drop_lifetime: u64,
+    /// Who hears a ground item vanish when its destroy event fires.
+    clients: Option<Arc<ChannelClients>>,
 }
+
 /// An item the world has taken back, together with whose it was.
 ///
 /// Both halves are needed together and neither can be recovered from the other. The
@@ -359,7 +387,25 @@ impl GameState {
             outboxes: HashMap::new(),
             item_count_limit: common::item_slots::ITEM_COUNT_LIMIT,
             dice: Pcg32::new(RandomState::new().hash_one(0_u8), 0),
+            ground: BTreeMap::new(),
+            next_ground_vid: 1,
+            drop_lifetime: drop_lifetime_pulses(DEFAULT_DROP_LIFETIME_SECS),
+            clients: None,
         }
+    }
+
+    /// Set `item_destroy_time_dropitem`, the seconds a dropped item lies before it is destroyed.
+    #[must_use]
+    pub fn with_drop_lifetime(mut self, seconds: i32) -> Self {
+        self.drop_lifetime = drop_lifetime_pulses(seconds);
+        self
+    }
+
+    /// Share the Channel's client registry, which hears a ground item's destroy event.
+    #[must_use]
+    pub fn with_clients(mut self, clients: Arc<ChannelClients>) -> Self {
+        self.clients = Some(clients);
+        self
     }
 
     /// Set `g_bItemCountLimit`, the largest stack a merge may build.
@@ -558,6 +604,9 @@ impl GameState {
                 mover,
                 reply,
             } => answer_item_step(vid, reply, self.use_item(vid, at, mover)),
+            command @ (GameCommand::DropItem { .. }
+            | GameCommand::PickupItem { .. }
+            | GameCommand::GroundItemsOn { .. }) => self.apply_ground(command),
             GameCommand::Stop => {
                 // The loop handles `Stop` itself, before a command ever reaches a
                 // processor. Reaching here would mean the loop and the state
@@ -825,6 +874,176 @@ impl GameState {
         })
     }
 
+    /// Apply one of the ground commands: a drop, a pick-up, or the list a client entering a
+    /// map is shown.
+    fn apply_ground(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::DropItem {
+                vid,
+                at,
+                count,
+                place,
+                mover,
+                reply,
+            } => answer_item_step(vid, reply, self.drop_item(vid, at, count, place, mover)),
+            GameCommand::PickupItem {
+                vid,
+                ground,
+                place,
+                mover,
+                reply,
+            } => answer_item_step(vid, reply, self.pickup_item(vid, ground, place, mover)),
+            GameCommand::GroundItemsOn {
+                channel,
+                map,
+                reply,
+            } => {
+                if reply.send(self.ground_items_on(channel, map)).is_err() {
+                    debug!(channel, map, "nobody was left to hear the ground items");
+                }
+            }
+            _ => debug_assert!(false, "only ground commands reach apply_ground"),
+        }
+    }
+
+    /// Run one `CG_ITEM_DROP` for the character online under `vid` (`CHARACTER::DropItem`,
+    /// `G/char_item.cpp:7444`). The item lies where the character stands until it is picked
+    /// up or its destroy event fires.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub fn drop_item(
+        &mut self,
+        vid: common::vid::Vid,
+        at: protocol::item_pos::ItemPos,
+        count: u16,
+        place: GroundPlace,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let owner_id = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?
+            .player_id();
+        let to = DropAt {
+            vid: self.next_ground_vid,
+            x: place.x,
+            y: place.y,
+            owner_id,
+        };
+        let mut dropped = None;
+        let moved = self.run_item_step(vid, actor, |items, ids, _rules, _gear, _protos| {
+            drop_item(items, ids, at, count, to).map(|(done, ground)| {
+                dropped = Some(ground);
+                done
+            })
+        })?;
+        if let Some(ground) = dropped {
+            self.ground.insert(
+                ground.vid,
+                Lying {
+                    ground,
+                    channel: place.channel,
+                    map: place.map,
+                    expires: self.last_pulse.saturating_add(self.drop_lifetime),
+                },
+            );
+            self.next_ground_vid = self.next_ground_vid.wrapping_add(1).max(1);
+        }
+        Ok(moved)
+    }
+
+    /// Run one `CG_ITEM_PICKUP` for the character online under `vid` (`CHARACTER::PickupItem`,
+    /// `G/char_item.cpp:7972`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`]; [`MoveRefused::NotOnGround`] when nothing lies under that VID on
+    /// the character's map, and [`MoveRefused::TooFar`] past `DistanceValid`.
+    pub fn pickup_item(
+        &mut self,
+        vid: common::vid::Vid,
+        ground: u32,
+        place: GroundPlace,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let lying = self
+            .ground
+            .get(&ground)
+            .filter(|lying| lying.channel == place.channel && lying.map == place.map)
+            .ok_or(MoveItemRefused::Refused(MoveRefused::NotOnGround))?;
+        let (dx, dy) = (
+            lying.ground.x.saturating_sub(place.x),
+            lying.ground.y.saturating_sub(place.y),
+        );
+        if distance_approx(dx, dy) > PICKUP_DISTANCE {
+            return Err(MoveItemRefused::Refused(MoveRefused::TooFar));
+        }
+        let character = self
+            .characters
+            .find_by_vid_mut(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let Some(mut lying) = self.ground.remove(&ground) else {
+            return Err(MoveItemRefused::Refused(MoveRefused::NotOnGround));
+        };
+        let owner_id = character.player_id();
+        let rules = MoveRules {
+            count_limit: self.item_count_limit,
+            usable_cells: usable_inventory_cells(character.inven_point()),
+            belt_grade: belt_grade(character.items(), &self.protos),
+        };
+        let mut picker = Picker {
+            owner_id,
+            rules: &rules,
+            protos: &self.protos,
+            dice: &mut self.dice,
+        };
+        let done = pickup_item(character.items_mut(), &mut lying.ground, &mut picker);
+        if lying.ground.item.count > 0 {
+            self.ground.insert(ground, lying);
+        }
+        let done = done.map_err(MoveItemRefused::Refused)?;
+        Ok(MovedItems::new(
+            owner_id,
+            vid.raw(),
+            done,
+            actor,
+            &self.protos,
+        ))
+    }
+
+    /// The `GC_ITEM_GROUND_ADD` records for every item lying on one map of one Channel, in
+    /// ground VID order: what a client entering the map is shown.
+    #[must_use]
+    pub fn ground_items_on(&self, channel: u8, map: i32) -> Vec<Vec<u8>> {
+        self.ground
+            .values()
+            .filter(|lying| lying.channel == channel && lying.map == map)
+            .map(|lying| ground_record(lying.ground.add_record()))
+            .collect()
+    }
+
+    /// Fire every destroy event due by `pulse`: the item leaves the ground and its map hears
+    /// `GC_ITEM_GROUND_DEL` (`CItem::DestroyEvent`, `item_destroy_time_dropitem`).
+    fn destroy_expired(&mut self, pulse: u64) {
+        let due: Vec<u32> = self
+            .ground
+            .iter()
+            .filter(|(_, lying)| lying.expires <= pulse)
+            .map(|(vid, _)| *vid)
+            .collect();
+        for vid in due {
+            let Some(lying) = self.ground.remove(&vid) else {
+                continue;
+            };
+            if let Some(clients) = &self.clients {
+                let record = ground_record(GroundRecord::Del { vid });
+                clients.broadcast_on_map(lying.channel, lying.map, &record);
+            }
+        }
+    }
+
     /// Run one item step against the storage and gear of the character online under `vid`.
     fn run_item_step(
         &mut self,
@@ -858,7 +1077,7 @@ impl GameState {
         });
         let done = step(items, self.item_ids.as_mut(), &rules, gear.as_mut(), protos)
             .map_err(MoveItemRefused::Refused)?;
-        let mut moved = MovedItems::new(owner_id, vid.raw(), done, actor);
+        let mut moved = MovedItems::new(owner_id, vid.raw(), done, actor, protos);
         moved.points = character.points().cloned();
         Ok(moved)
     }
@@ -900,7 +1119,19 @@ impl PulseProcessor for GameState {
     fn process_pulse(&mut self, pulse: u64) {
         self.last_pulse = pulse;
         self.metrics.pulses.store(pulse, Ordering::SeqCst);
+        self.destroy_expired(pulse);
     }
+}
+
+/// Legacy's `item_destroy_time_dropitem` default, in seconds (`G/config.cpp:56`).
+const DEFAULT_DROP_LIFETIME_SECS: i32 = 300;
+
+/// A lifetime in seconds as pulses, at least one.
+fn drop_lifetime_pulses(seconds: i32) -> u64 {
+    u64::try_from(seconds)
+        .unwrap_or(0)
+        .saturating_mul(u64::from(PASSES_PER_SEC))
+        .max(1)
 }
 
 /// Hands an item step's answer back to the descriptor that asked for it.
@@ -1973,5 +2204,179 @@ mod tests {
             assert_eq!(metrics.pulses(), 0, "no thread was started");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    fn a_place(map: i32, x: i32, y: i32) -> GroundPlace {
+        GroundPlace {
+            channel: 1,
+            map,
+            x,
+            y,
+        }
+    }
+
+    fn drop_at(state: &mut GameState, cell: u16, count: u16) -> MovedItems {
+        state
+            .drop_item(
+                Vid::new(7),
+                inventory(cell),
+                count,
+                a_place(41, 500, 700),
+                a_mover(),
+            )
+            .expect("the drop happened")
+    }
+
+    #[test]
+    fn a_dropped_item_lies_on_its_map_until_it_is_picked_up_again() {
+        let vnum = a_plain_vnum();
+        let mut state = a_holder(&[(inventory(3), a_plain_item(11, vnum))], true);
+        let dropped = drop_at(&mut state, 3, 0);
+        assert_eq!(dropped.kind, world::character::MoveKind::Dropped);
+        assert_eq!(held_at(&state, inventory(3)), Lookup::Empty);
+        let shown = GroundRecord::Add {
+            vid: 1,
+            vnum,
+            x: 500,
+            y: 700,
+        };
+        assert_eq!(state.ground_items_on(1, 41), vec![ground_record(shown)]);
+        assert!(state.ground_items_on(1, 42).is_empty(), "another map");
+        assert!(state.ground_items_on(2, 41).is_empty(), "another Channel");
+
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        state.apply(GameCommand::PickupItem {
+            vid: Vid::new(7),
+            ground: 1,
+            place: a_place(41, 700, 700),
+            mover: a_mover(),
+            reply,
+        });
+        let picked = answer
+            .blocking_recv()
+            .expect("the game thread answered")
+            .expect("the pick-up happened");
+        assert_eq!(picked.kind, world::character::MoveKind::PickedUp);
+        assert_eq!(held_at(&state, inventory(0)), Lookup::Occupied(11));
+        assert!(state.ground_items_on(1, 41).is_empty());
+        assert_eq!(
+            state.pickup_item(Vid::new(7), 1, a_place(41, 500, 700), a_mover()),
+            Err(MoveItemRefused::Refused(MoveRefused::NotOnGround)),
+            "the item is gone once picked up"
+        );
+    }
+
+    #[test]
+    fn each_drop_takes_the_next_ground_vid_and_a_refused_drop_takes_none() {
+        let vnum = a_plain_vnum();
+        let mut state = a_holder(
+            &[
+                (inventory(0), a_potion_stack(11, 5)),
+                (inventory(1), a_plain_item(12, vnum)),
+            ],
+            true,
+        );
+        drop_at(&mut state, 0, 2);
+        assert_eq!(
+            state.drop_item(Vid::new(7), inventory(9), 0, a_place(41, 1, 1), a_mover()),
+            Err(MoveItemRefused::Refused(MoveRefused::Empty))
+        );
+        drop_at(&mut state, 1, 0);
+        let vids: Vec<u32> = state.ground.keys().copied().collect();
+        assert_eq!(vids, vec![1, 2]);
+        assert_eq!(state.ground[&1].ground.item.count, 2);
+        assert_eq!(state.ground[&2].ground.item.id, 12);
+    }
+
+    #[test]
+    fn a_pick_up_from_another_map_or_past_the_approximate_three_hundred_is_refused_and_the_item_stays(
+    ) {
+        let mut state = a_holder(&[(inventory(0), a_plain_item(11, a_plain_vnum()))], true);
+        drop_at(&mut state, 0, 0);
+        assert_eq!(
+            state.pickup_item(Vid::new(7), 1, a_place(42, 500, 700), a_mover()),
+            Err(MoveItemRefused::Refused(MoveRefused::NotOnGround))
+        );
+        let far = GroundPlace {
+            channel: 2,
+            ..a_place(41, 500, 700)
+        };
+        assert_eq!(
+            state.pickup_item(Vid::new(7), 1, far, a_mover()),
+            Err(MoveItemRefused::Refused(MoveRefused::NotOnGround)),
+            "another Channel"
+        );
+        assert_eq!(
+            state.pickup_item(Vid::new(7), 1, a_place(41, 814, 700), a_mover()),
+            Err(MoveItemRefused::Refused(MoveRefused::TooFar)),
+            "DISTANCE_APPROX puts 314 along one axis at 301"
+        );
+        assert_eq!(
+            state.pickup_item(Vid::new(8), 1, a_place(41, 800, 700), a_mover()),
+            Err(MoveItemRefused::NoSuchCharacter { vid: Vid::new(8) })
+        );
+        assert_eq!(state.ground_items_on(1, 41).len(), 1);
+        state
+            .pickup_item(Vid::new(7), 1, a_place(41, 813, 700), a_mover())
+            .expect("313 along one axis approximates to 300, which is in reach");
+    }
+
+    #[test]
+    fn a_pick_up_that_finds_no_room_leaves_the_item_on_the_ground() {
+        let vnum = a_plain_vnum();
+        let items: Vec<(ItemPos, world::item::Item)> = (0..90)
+            .map(|cell| (inventory(cell), a_plain_item(100 + u32::from(cell), vnum)))
+            .collect();
+        let mut state = a_holder(&items, true);
+        drop_at(&mut state, 0, 0);
+        state
+            .characters_mut()
+            .find_by_vid_mut(Vid::new(7))
+            .unwrap()
+            .items_mut()
+            .set(inventory(0), &a_plain_item(99, vnum))
+            .expect("the cell was freed by the drop");
+        assert_eq!(
+            state.pickup_item(Vid::new(7), 1, a_place(41, 500, 700), a_mover()),
+            Err(MoveItemRefused::Refused(MoveRefused::NoRoomToPickUp))
+        );
+        assert_eq!(state.ground_items_on(1, 41).len(), 1);
+    }
+
+    #[test]
+    fn the_destroy_event_fires_on_its_pulse_and_the_map_hears_it() {
+        let clients = Arc::new(ChannelClients::new());
+        let entry = |map| crate::client_registry::ClientEntry {
+            channel: 1,
+            map,
+            name: "Watcher".to_owned(),
+            vid: 9,
+        };
+        let mut here = clients.join(entry(41));
+        let mut elsewhere = clients.join(entry(42));
+        let mut state = a_holder(&[(inventory(0), a_plain_item(11, a_plain_vnum()))], true)
+            .with_clients(Arc::clone(&clients))
+            .with_drop_lifetime(2);
+        state.process_pulse(10);
+        drop_at(&mut state, 0, 0);
+        state.process_pulse(59);
+        assert_eq!(state.ground_items_on(1, 41).len(), 1, "one pulse early");
+        assert_eq!(here.try_next(), None);
+        state.process_pulse(60);
+        assert!(state.ground_items_on(1, 41).is_empty());
+        assert_eq!(
+            here.try_next(),
+            Some(ground_record(GroundRecord::Del { vid: 1 }))
+        );
+        assert_eq!(elsewhere.try_next(), None, "another map hears nothing");
+    }
+
+    #[test]
+    fn the_drop_lifetime_is_counted_in_pulses_and_never_zero() {
+        assert_eq!(drop_lifetime_pulses(300), 7_500);
+        assert_eq!(drop_lifetime_pulses(1), 25);
+        assert_eq!(drop_lifetime_pulses(0), 1);
+        assert_eq!(drop_lifetime_pulses(-5), 1);
+        assert_eq!(GameState::new(owners()).drop_lifetime, 7_500);
     }
 }

@@ -127,6 +127,10 @@ pub enum MoveKind {
     Unequipped,
     /// A wear-cell path changed something and then refused; the records end with its notice.
     Declined,
+    /// The item, or part of its stack, went to the ground (`DropItem`).
+    Dropped,
+    /// A ground item went into a free cell (`PickupItem`), after any merges.
+    PickedUp,
 }
 
 /// A record the client is sent, in the order legacy sends it.
@@ -161,6 +165,35 @@ pub enum MoveRecord {
     Effect(u8),
     /// A `CHAT_TYPE_INFO` line.
     Notice(&'static str),
+    /// A ground item appeared or went, which the viewers are sent too.
+    Ground(GroundRecord),
+    /// `[LS;444;%s]`: the picked-up item's name, which the caller looks up by vnum.
+    PickedUp {
+        /// The item's vnum.
+        vnum: u32,
+    },
+}
+
+/// A record about a ground item (`CItem::EncodeInsertPacket`, `EncodeRemovePacket`,
+/// `G/item.cpp:163-218`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroundRecord {
+    /// `GC_ITEM_GROUND_ADD`: the item lies at `x`, `y`.
+    Add {
+        /// The ground item's VID.
+        vid: u32,
+        /// Its vnum.
+        vnum: u32,
+        /// Map x.
+        x: i32,
+        /// Map y.
+        y: i32,
+    },
+    /// `GC_ITEM_GROUND_DEL`: the item is gone from the ground.
+    Del {
+        /// The ground item's VID.
+        vid: u32,
+    },
 }
 
 /// A change the store has to make for the move to survive a restart.
@@ -322,6 +355,14 @@ pub enum MoveRefused {
     NoBeltWorn,
     /// `UseItemEx`: an item in a belt cell the worn belt's grade does not open.
     BeltCellLocked,
+    /// `DropItem`: the item's anti-flags forbid dropping or giving it.
+    Undroppable,
+    /// `PickupItem`: no cell has room and no stack took all of it.
+    NoRoomToPickUp,
+    /// `PickupItem`: the named VID is not an item lying on the picker's map.
+    NotOnGround,
+    /// `PickupItem`: `DistanceValid` refused, the item lies farther than 300 away.
+    TooFar,
 }
 
 impl MoveRefused {
@@ -395,6 +436,10 @@ impl MoveRefused {
             Self::BeltCellLocked => {
                 Some("<Belt> You can't use this item if you don't upgrade your belt")
             }
+            // `char_item.cpp:7483`.
+            Self::Undroppable => Some("[LS;442]"),
+            // `char_item.cpp:8066`.
+            Self::NoRoomToPickUp => Some("[LS;445]"),
             _ => None,
         }
     }
@@ -450,6 +495,10 @@ impl core::fmt::Display for MoveRefused {
             Self::UseLevelTooLow => f.write_str("the level is below the item's use limit"),
             Self::NoBeltWorn => f.write_str("a belt item is used with no belt worn"),
             Self::BeltCellLocked => f.write_str("the belt does not open this cell"),
+            Self::Undroppable => f.write_str("the item may not be dropped"),
+            Self::NoRoomToPickUp => f.write_str("no cell has room for the ground item"),
+            Self::NotOnGround => f.write_str("no such item lies on this map"),
+            Self::TooFar => f.write_str("the ground item is too far away"),
         }
     }
 }

@@ -325,8 +325,59 @@ pub enum GameCommand {
         /// Where the game thread reports what the use did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one `CG_ITEM_DROP` or `CG_ITEM_DROP2` for the character online under `vid`,
+    /// answered as a move is.
+    DropItem {
+        /// The VID of the character whose client sent the drop.
+        vid: common::vid::Vid,
+        /// The cell the client named.
+        at: protocol::item_pos::ItemPos,
+        /// How many of the stack, where 0 is all of it.
+        count: u16,
+        /// Where the character stands.
+        place: GroundPlace,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the drop did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Runs one `CG_ITEM_PICKUP` for the character online under `vid`, answered as a move is.
+    PickupItem {
+        /// The VID of the character whose client sent the pick-up.
+        vid: common::vid::Vid,
+        /// The ground item's VID.
+        ground: u32,
+        /// Where the character stands.
+        place: GroundPlace,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the pick-up did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+    /// Lists the `GC_ITEM_GROUND_ADD` records for every item on one map of one Channel.
+    GroundItemsOn {
+        /// The Channel.
+        channel: u8,
+        /// The map index.
+        map: i32,
+        /// Where the game thread sends the records.
+        reply: oneshot::Sender<Vec<Vec<u8>>>,
+    },
     /// Requests terminal loop shutdown.
     Stop,
+}
+
+/// Where a character stands, as the descriptor holds it: the world keeps no position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GroundPlace {
+    /// The Channel.
+    pub channel: u8,
+    /// `GetMapIndex()`.
+    pub map: i32,
+    /// `GetX()`.
+    pub x: i32,
+    /// `GetY()`.
+    pub y: i32,
 }
 
 /// Why a command did not reach the game thread.
@@ -882,6 +933,80 @@ impl GameLoopController {
             vid,
             at,
             mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to drop an item, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn drop_item(
+        &self,
+        vid: common::vid::Vid,
+        at: protocol::item_pos::ItemPos,
+        count: u16,
+        place: GroundPlace,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::DropItem {
+            vid,
+            at,
+            count,
+            place,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to pick a ground item up, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn pickup_item(
+        &self,
+        vid: common::vid::Vid,
+        ground: u32,
+        place: GroundPlace,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::PickupItem {
+            vid,
+            ground,
+            place,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world for the items lying on one map, as the records a client entering it
+    /// is sent.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn ground_items_on(
+        &self,
+        channel: u8,
+        map: i32,
+    ) -> Result<Vec<Vec<u8>>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GroundItemsOn {
+            channel,
+            map,
             reply,
         })
         .await
