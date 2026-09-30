@@ -44,6 +44,7 @@ use gamedata::mob_names::MobNames;
 use gamedata::mob_proto::MobProtos;
 use gamedata::npc_shop::{shops_from_dump, NpcShops};
 use gamedata::regen::{self, RegenEntry};
+use gamedata::server_attr::{self, SectreeGrid};
 use prodomo::auth_login::{
     judge_account, judge_credentials, login_from_field, password_candidate, AuthClaim, AuthRefusal,
     AuthRegistry, LoginGrant,
@@ -76,9 +77,9 @@ use prodomo::item_move::{MoveItemRefused, Mover};
 use prodomo::lifecycle::{LifecycleError, PostHandshakePhase};
 use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::loading_phase::{
-    enter_game_burst, item_load_points, judge_enter_game, judge_select, load_points, loading_burst,
-    map_is_allowed, public_map_index, EnterGameBurst, EnterGameVerdict, Neighbourhood,
-    SelectVerdict,
+    enter_game_burst, entering_position, item_load_points, judge_enter_game, judge_select,
+    load_points, loading_burst, map_is_allowed, public_map_index, EnterGameBurst, EnterGameVerdict,
+    EnteringPosition, Neighbourhood, SelectVerdict,
 };
 use prodomo::movement::{
     judge_move, judge_pose, MoveContext, MoveDisposition, MoveOutcome, MoveRefusal, PoseOutcome,
@@ -140,6 +141,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::signal;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
+use world::cells::{HostedCells, MapCells};
 use world::character::MoveRequest;
 use world::item::Item;
 use world::npc::{NpcSpawner, NpcVids};
@@ -239,6 +241,8 @@ struct ConnectionContext {
     logons: Arc<LogonRegistry>,
     /// The map regions of the legacy Game data.
     atlas: Arc<MapAtlas>,
+    /// The cell attributes of every hosted map, which `Entergame` places a character by.
+    cells: Arc<HostedCells>,
     /// The item prototypes, shared with the game thread, which the item load at character
     /// select reads for each item's size and flags.
     protos: Arc<ItemProtos>,
@@ -2993,6 +2997,7 @@ where
         info!(%addr, "ENTER_GAME without a character; closing");
         return false;
     }
+    place_entering_character(context, addr, held);
     // The reducer proved the character is there; the field is the only place it lives.
     let Some(character) = held.character.as_ref() else {
         return false;
@@ -3089,6 +3094,57 @@ where
         return show_the_ground(session, addr, context, seat.number, map).await;
     }
     true
+}
+
+/// Move the held character to where `CInputLogin::Entergame` shows it: the first movable point
+/// around its saved position, else its empire's recall position when the map has a sectree
+/// there, else the saved position (`G/input_login.cpp:572-590`).
+///
+/// Everything after this reads the new position: the enter-game burst, the world, and the save.
+fn place_entering_character(context: &ConnectionContext, addr: SocketAddr, held: &mut Held) {
+    let map = held.map.unwrap_or_default();
+    let Some(character) = held.character.as_mut() else {
+        return;
+    };
+    let saved = (character.x, character.y);
+    let placed = entering_position(
+        context.cells.get(map),
+        &context.atlas,
+        map,
+        character.empire,
+        saved,
+    );
+    let (x, y) = match placed {
+        EnteringPosition::Movable { x, y } => (x, y),
+        EnteringPosition::Recalled { x, y } => {
+            warn!(
+                %addr,
+                name = %character.name.as_str(),
+                x = saved.0,
+                y = saved.1,
+                map,
+                to_x = x,
+                to_y = y,
+                "No movable position around the saved one; showing the character at its \
+                 empire's recall position",
+            );
+            (x, y)
+        }
+        EnteringPosition::Kept => {
+            warn!(
+                %addr,
+                name = %character.name.as_str(),
+                x = saved.0,
+                y = saved.1,
+                map,
+                "No movable position around the saved one and no recall position on the map; \
+                 keeping it",
+            );
+            saved
+        }
+    };
+    character.x = x;
+    character.y = y;
 }
 
 /// What the load left for the world besides the items: the points, the quickslots and the
@@ -4075,6 +4131,8 @@ fn map_routes(config: &ServerConfig, listeners: &Listeners) -> MapRoutes {
 struct GameData {
     /// The map regions.
     atlas: MapAtlas,
+    /// The cell attributes of every hosted map.
+    cells: Arc<HostedCells>,
     /// The Names a character may not take.
     names: NameRules,
     /// The item prototypes, the same table the game thread holds.
@@ -4105,10 +4163,12 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let protos = load_item_protos(config)?;
     let locale = load_locale_strings(config)?;
     let npcs = load_npc_data(config, &atlas)?;
+    let cells = load_map_cells(config, &atlas)?;
     let shops = load_npc_shops(config, &protos)?;
     let quests = load_quests(config, &npcs)?;
     let data = GameData {
         atlas,
+        cells,
         names,
         protos,
         locale,
@@ -4202,6 +4262,38 @@ fn load_npc_data(config: &ServerConfig, atlas: &MapAtlas) -> Result<NpcData, Str
     })
 }
 
+/// Load the `server_attr` of every map a Channel hosts, once however many Channels host it
+/// (`SECTREE_MANAGER::LoadAttribute`, `G/sectree_manager.cpp:392-490`).
+///
+/// A missing or refused file stops the server (a Divergence): legacy's `Build` ignores
+/// `LoadAttribute`'s answer (`:752-753`), so a map whose file it cannot read runs with sectrees
+/// that hold no attributes, and the first read of one dereferences NULL. A hosted map the map
+/// index does not list has no cells, as legacy never builds it; [`load_npc_data`] warns about
+/// it.
+fn load_map_cells(config: &ServerConfig, atlas: &MapAtlas) -> Result<Arc<HostedCells>, String> {
+    let map_dir = config.map_dir();
+    let mut hosted = HostedCells::default();
+    let indexes: std::collections::BTreeSet<i32> = config
+        .channels
+        .iter()
+        .flat_map(|channel| channel.maps.iter())
+        .filter_map(|&map| i32::try_from(map).ok())
+        .collect();
+    for index in indexes {
+        let Some(region) = atlas.region(index) else {
+            continue;
+        };
+        let attr = server_attr::load_map(&map_dir, region)
+            .map_err(|error| format!("Map {index} is unusable: {error}"))?;
+        // `load_map` has placed the region's sectrees, so the grid is there.
+        let grid = SectreeGrid::of(region)
+            .ok_or_else(|| format!("Map {index} is unusable: its sectrees cannot be placed"))?;
+        hosted.insert(index, MapCells::new(grid, Arc::new(attr)));
+    }
+    info!(maps = hosted.len(), "Map attributes loaded");
+    Ok(Arc::new(hosted))
+}
+
 /// Load the quests: every script of the Locale's `quest` folder compiled by the port of `qc` and
 /// loaded into one Lua 5.1 state with the quest libraries (ADR-0004, ADR-0006), and the mob names
 /// of every language, which `mob_name` answers in the character's.
@@ -4282,6 +4374,7 @@ fn connection_context(
         user_limit: config.game.user_limit,
         logons: LogonRegistry::new(),
         atlas: Arc::new(data.atlas),
+        cells: data.cells,
         protos: data.protos,
         locale: data.locale,
         public_ip: config.public_ip,

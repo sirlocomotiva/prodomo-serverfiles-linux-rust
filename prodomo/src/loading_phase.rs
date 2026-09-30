@@ -78,16 +78,23 @@
 //!   `c_r.players[pinfo->index].dwID` before it tests `pinfo->index >= PLAYER_PER_ACCOUNT`
 //!   (`G/input_login.cpp:265-274`), an out-of-bounds read a client can trigger with one byte.
 //!   The Rewrite tests the index first; see [`judge_select`].
-//! - **A position the map cannot take is not a disconnect.** Legacy logs and falls back to
-//!   the empire recall point (`G/input_login.cpp:572-585`); the Rewrite does the same. The
-//!   Rewrite does not reproduce the stale `z` that fallback leaves behind, because the Rewrite
-//!   has no `z` yet: the world owns height.
+//! - **A position the map cannot take is not a disconnect.** Legacy shows the character at
+//!   the first movable point around its saved position, and logs and falls back to the empire
+//!   recall point when none is (`G/input_login.cpp:572-590`); the Rewrite does the same
+//!   ([`entering_position`]). The fallback also takes the recall point's `z`, which
+//!   `LoadMapRegion` never sets (`G/sectree_manager.cpp:347-386`), so legacy sends and saves
+//!   an indeterminate height (`G/char.cpp:1081`, `:1563`); the Rewrite sends and saves 0. Where
+//!   the map has no recall point, or its recall point has no sectree on the map, legacy's
+//!   `Show` finds no sectree and returns before placing the character
+//!   (`G/char.cpp:1847-1854`), so the client never gets its own insert (a Defect). The Rewrite
+//!   keeps the saved position, where legacy's character stays.
 
 use std::sync::Arc;
 
 use common::levels;
 use common::point_slot as point;
 use db::players::{Character, PLAYER_SLOTS};
+use gamedata::map_atlas::MapAtlas;
 use gamedata::mob_proto::{CHAR_TYPE_NPC, CHAR_TYPE_PC};
 use protocol::gc_actors::{
     GcCharacterAdd, GcCharacterAdditionalInfo, GcMainCharacter2Empire, NAME_LEN,
@@ -103,6 +110,7 @@ use protocol::gc_nested::{
 use protocol::gc_npc_position::{GcNpcPosition, GcNpcPositionEntry};
 use protocol::gc_small::GcHeaderAndByte;
 use protocol::gc_vid::GcHeaderAndDword;
+use world::cells::MapCells;
 use world::character::{PointRecord, Points, PointsRow};
 use world::npc::{MapNpcs, Npc, NpcPosition};
 
@@ -719,6 +727,64 @@ pub fn item_load_points(character: &Character, state: &mut Points, vid: u32) -> 
 /// this is a fall-back, not a path a row can reach.
 fn gold(character: &Character) -> u64 {
     u64::try_from(character.gold).unwrap_or(0)
+}
+
+/// Where `CInputLogin::Entergame` shows a character (`G/input_login.cpp:572-585`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnteringPosition {
+    /// The first movable point of `GetMovablePosition` around the saved position, which is the
+    /// saved position itself when its cell is movable.
+    Movable {
+        /// The point's x.
+        x: i32,
+        /// The point's y.
+        y: i32,
+    },
+    /// No point around is movable, so legacy logs `!GetMovablePosition` and shows the
+    /// character at its empire's recall position.
+    Recalled {
+        /// The recall position's x.
+        x: i32,
+        /// The recall position's y.
+        y: i32,
+    },
+    /// No point around is movable, and the map has no recall position or its recall position
+    /// has no sectree on the map. Legacy's `Show` then returns before placing the character
+    /// (`G/char.cpp:1847-1854`), so it stays at the saved position and the client never gets
+    /// its own insert (a Defect). The Rewrite keeps the saved position and shows it there.
+    ///
+    /// The owner's map 235 (`metin2_map_n_flame_dungeon_01`) recalls every empire to
+    /// (614200, 706800), which lies on map 62, so a character there with no movable point
+    /// around it is kept.
+    Kept,
+}
+
+/// Where `CInputLogin::Entergame` shows a character saved at `saved` on `map_index`: the first
+/// movable point around it ([`MapCells::movable_position`]), else the recall position of its
+/// empire ([`crate::warp::recall_position`]) when the map has a sectree there.
+///
+/// `cells` is the map's, or `None` for a map the process does not host, where legacy finds no
+/// sectree and so neither a movable point nor a place to show the character.
+#[must_use]
+pub fn entering_position(
+    cells: Option<&MapCells>,
+    atlas: &MapAtlas,
+    map_index: i32,
+    empire: u8,
+    saved: (i32, i32),
+) -> EnteringPosition {
+    let Some(cells) = cells else {
+        return EnteringPosition::Kept;
+    };
+    if let Some((x, y)) = cells.movable_position(saved.0, saved.1) {
+        return EnteringPosition::Movable { x, y };
+    }
+    match crate::warp::recall_position(atlas, map_index, empire) {
+        Some((x, y)) if cells.grid().sectree_at(x, y).is_some() => {
+            EnteringPosition::Recalled { x, y }
+        }
+        _ => EnteringPosition::Kept,
+    }
 }
 
 /// The enter-game burst, split where `CInputLogin::Entergame` calls `SetPhase`.
@@ -1933,6 +1999,207 @@ mod tests {
         ] {
             assert!(half.iter().all(|frame| !frame.is_empty()));
             assert!(!half.is_empty(), "every half of a burst has a record");
+        }
+    }
+
+    /// A one-sectree map at sectree (1, 2) whose cells are all `fill` but `free`, with its
+    /// region in an atlas as map 5.
+    fn enclosed(fill: u32, free: &[(usize, usize)]) -> (MapCells, MapAtlas) {
+        use gamedata::server_attr::{CellBlock, SectreeGrid, ServerAttr, SECTREE_CELLS};
+        let mut cells = vec![fill; SECTREE_CELLS * SECTREE_CELLS];
+        for &(x, y) in free {
+            cells[y * SECTREE_CELLS + x] = 0;
+        }
+        let block = CellBlock::from_cells(&cells);
+        let attr = ServerAttr::from_blocks(1, 1, vec![block]).expect("one block");
+        let grid = SectreeGrid {
+            x: 1,
+            y: 2,
+            columns: 1,
+            rows: 1,
+        };
+        let region = gamedata::map_atlas::MapRegion {
+            index: 5,
+            name: b"five".to_vec(),
+            sx: 6400,
+            sy: 12_800,
+            ex: 12_800,
+            ey: 19_200,
+            spawn: (7000, 13_000),
+            empire_spawns: Some([(7100, 13_100), (7200, 13_200), (7300, 13_300)]),
+        };
+        (
+            MapCells::new(grid, std::sync::Arc::new(attr)),
+            MapAtlas::from_regions(vec![region]),
+        )
+    }
+
+    #[test]
+    fn a_character_enters_at_the_first_movable_point_or_its_empires_recall() {
+        use gamedata::server_attr::{ATTR_BLOCK, ATTR_OBJECT};
+        // Cell (64, 64) of the sectree holds (9625, 16025).
+        let saved = (9625, 16_025);
+        let (cells, atlas) = enclosed(ATTR_BLOCK, &[(64, 64)]);
+        assert_eq!(
+            entering_position(Some(&cells), &atlas, 5, 1, saved),
+            EnteringPosition::Movable { x: 9625, y: 16_025 }
+        );
+        let (cells, atlas) = enclosed(ATTR_OBJECT, &[(65, 64)]);
+        assert_eq!(
+            entering_position(Some(&cells), &atlas, 5, 1, saved),
+            EnteringPosition::Movable { x: 9675, y: 16_025 }
+        );
+        // Nothing movable: the empire's spawn, or the single spawn outside 1..=3.
+        let (cells, atlas) = enclosed(ATTR_BLOCK | ATTR_OBJECT, &[]);
+        let recalled: Vec<EnteringPosition> = (0..=4)
+            .map(|empire| entering_position(Some(&cells), &atlas, 5, empire, saved))
+            .collect();
+        let at = |x, y| EnteringPosition::Recalled { x, y };
+        assert_eq!(
+            recalled,
+            [
+                at(7000, 13_000),
+                at(7100, 13_100),
+                at(7200, 13_200),
+                at(7300, 13_300),
+                at(7000, 13_000)
+            ]
+        );
+        // A private map of map 5 recalls to map 5's spawn.
+        assert_eq!(
+            entering_position(Some(&cells), &atlas, 50_003, 2, saved),
+            at(7200, 13_200)
+        );
+        // No movable point and no region, or no sectree at all: legacy's `Show` fails and the
+        // saved position is kept.
+        assert_eq!(
+            entering_position(Some(&cells), &atlas, 6, 1, saved),
+            EnteringPosition::Kept
+        );
+        assert_eq!(
+            entering_position(None, &atlas, 5, 3, saved),
+            EnteringPosition::Kept
+        );
+        assert_eq!(
+            entering_position(None, &MapAtlas::default(), 5, 1, saved),
+            EnteringPosition::Kept
+        );
+    }
+
+    #[test]
+    fn a_recall_position_off_the_maps_sectrees_keeps_the_saved_one() {
+        use gamedata::server_attr::{ATTR_BLOCK, SECTREE_SIZE};
+        let saved = (9625, 16_025);
+        let (cells, _) = enclosed(ATTR_BLOCK, &[]);
+        // The sectree spans 6400..12800 x 12800..19200; each empire's spawn sits one unit past
+        // a different edge, and the single spawn on its last point.
+        let region = gamedata::map_atlas::MapRegion {
+            index: 5,
+            name: b"five".to_vec(),
+            sx: 6400,
+            sy: 12_800,
+            ex: 12_800,
+            ey: 19_200,
+            spawn: (2 * SECTREE_SIZE - 1, 3 * SECTREE_SIZE - 1),
+            empire_spawns: Some([
+                (SECTREE_SIZE - 1, 13_000),
+                (2 * SECTREE_SIZE, 13_000),
+                (7000, 3 * SECTREE_SIZE),
+            ]),
+        };
+        let atlas = MapAtlas::from_regions(vec![region]);
+        let placed: Vec<EnteringPosition> = (0..=3)
+            .map(|empire| entering_position(Some(&cells), &atlas, 5, empire, saved))
+            .collect();
+        assert_eq!(
+            placed,
+            [
+                EnteringPosition::Recalled {
+                    x: 12_799,
+                    y: 19_199
+                },
+                EnteringPosition::Kept,
+                EnteringPosition::Kept,
+                EnteringPosition::Kept
+            ]
+        );
+    }
+
+    #[test]
+    fn the_owners_map_1_moves_a_character_saved_on_a_blocked_cell() {
+        let map_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe/map");
+        let atlas = MapAtlas::load(&map_dir).expect("the legacy map directory parses");
+        let region = atlas.region(1).expect("map 1");
+        let attr = gamedata::server_attr::load_map(&map_dir, region).expect("map 1's cells");
+        let grid = gamedata::server_attr::SectreeGrid::of(region).expect("placed");
+        let cells = MapCells::new(grid, std::sync::Arc::new(attr));
+        let enter = |empire, saved| entering_position(Some(&cells), &atlas, 1, empire, saved);
+        // Answers of an independent model: liblzo2 decoding the file, walking the same 161
+        // points. (470000, 950000) is blocked, as is every point to (71, 71); (100, 0) is not.
+        assert_eq!(
+            enter(1, (470_000, 950_000)),
+            EnteringPosition::Movable {
+                x: 470_100,
+                y: 950_000
+            }
+        );
+        assert_eq!(
+            enter(1, (470_000, 950_050)),
+            EnteringPosition::Movable {
+                x: 470_100,
+                y: 950_050
+            }
+        );
+        // A water cell is movable.
+        assert_eq!(
+            enter(1, (450_100, 903_400)),
+            EnteringPosition::Movable {
+                x: 450_100,
+                y: 903_400
+            }
+        );
+        // Every point around (416025, 902425) is blocked: the empire's town spawn.
+        assert_eq!(
+            enter(1, (416_025, 902_425)),
+            EnteringPosition::Recalled {
+                x: 469_300,
+                y: 964_200
+            }
+        );
+        assert_eq!(
+            enter(2, (416_025, 902_425)),
+            EnteringPosition::Recalled {
+                x: 417_600,
+                y: 956_100
+            }
+        );
+    }
+
+    #[test]
+    fn the_owners_map_235_recalls_off_its_sectrees_so_the_saved_position_is_kept() {
+        let map_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe/map");
+        let atlas = MapAtlas::load(&map_dir).expect("the legacy map directory parses");
+        let region = atlas.region(235).expect("map 235");
+        assert_eq!(region.name, b"metin2_map_n_flame_dungeon_01");
+        let attr = gamedata::server_attr::load_map(&map_dir, region).expect("map 235's cells");
+        let grid = gamedata::server_attr::SectreeGrid::of(region).expect("placed");
+        let cells = MapCells::new(grid, std::sync::Arc::new(attr));
+        // Town.txt's empire lines put every recall at (614200, 706800), which is map 62's.
+        for empire in 1..=3 {
+            assert_eq!(
+                crate::warp::recall_position(&atlas, 235, empire),
+                Some((614_200, 706_800))
+            );
+        }
+        assert_eq!(atlas.index_at(614_200, 706_800), Some(62));
+        // A saved position with no movable point around it (here, off the map) is kept.
+        for empire in 1..=3 {
+            assert_eq!(
+                entering_position(Some(&cells), &atlas, 235, empire, (0, 0)),
+                EnteringPosition::Kept
+            );
         }
     }
 }

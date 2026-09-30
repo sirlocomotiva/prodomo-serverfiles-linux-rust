@@ -1059,6 +1059,11 @@ fn assert_alpha(list: &[u8], port: u16) {
     assert_ne!(alpha.id, 0);
 }
 
+/// Where Alpha of [`add_characters`] enters the game. Its saved (470000, 950000) is a BLOCK cell
+/// of map 1's `server_attr`, and the first movable point `GetMovablePosition` finds around it is
+/// 100 east (`G/input_login.cpp:572-585`, `G/sectree_manager.cpp:789-812`).
+const ALPHA_ENTERS_AT: (i32, i32) = (470_100, 950_000);
+
 /// `cg.login.login2`, `sys.login.by_key`, `gc.empire`, `gc.login_success`: a Channel `LOGIN2`
 /// carrying the login key, the login, and the client key of the auth login is answered on the
 /// client key pair with `GC_EMPIRE`, the 357-byte character list, and the select phase. Each
@@ -1518,6 +1523,24 @@ fn load_with_quickslots_on(
 /// Select slot `slot` of the character list `list` from the select phase and read what
 /// [`load_with_quickslots`] reads: the character, its quickslot records and its item records.
 fn load_selected(keyed: &mut Keyed, list: &[u8], slot: u8) -> (Listed, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let burst = read_loading_burst(keyed, list, slot);
+    (burst.character, burst.quickslots, burst.items)
+}
+
+/// What [`read_loading_burst`] reads.
+struct LoadingBurst {
+    /// The selected character, as the list gave it.
+    character: Listed,
+    /// The `GC_MAIN_CHARACTER` record.
+    main: Vec<u8>,
+    /// The `GC_QUICKSLOT_ADD` records.
+    quickslots: Vec<Vec<u8>>,
+    /// The `GC_ITEM_SET` records.
+    items: Vec<Vec<u8>>,
+}
+
+/// [`load_selected`], also answering the loading burst's `GC_MAIN_CHARACTER`.
+fn read_loading_burst(keyed: &mut Keyed, list: &[u8], slot: u8) -> LoadingBurst {
     let character = listed(list, usize::from(slot));
     keyed.send_record(&client_select(slot));
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
@@ -1546,7 +1569,12 @@ fn load_selected(keyed: &mut Keyed, list: &[u8], slot: u8) -> (Listed, Vec<Vec<u
     };
     assert_eq!(tail, gold, "the item load ends with the gold record");
     assert_eq!(keyed.read_game(), points, "then the points record");
-    (character, quickslots, items)
+    LoadingBurst {
+        character,
+        main,
+        quickslots,
+        items,
+    }
 }
 
 /// Send `CG_ENTER_GAME` from the loading phase and read the enter-game burst, leaving the
@@ -2338,6 +2366,91 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
     assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
 }
 
+/// Log `login` in, enter the game as slot 0 and answer the connection, the position the loading
+/// burst's `GC_MAIN_CHARACTER` carried and the one the enter-game `GC_CHARACTER_ADD` carries.
+fn entered(server: &Server, login: &[u8]) -> (Keyed, (i32, i32), (i32, i32)) {
+    let (mut keyed, _empire, list) = select_screen(server, login);
+    let main = read_loading_burst(&mut keyed, &list, 0).main;
+    let word = |at: usize| i32::from_le_bytes([main[at], main[at + 1], main[at + 2], main[at + 3]]);
+    let loaded = (word(32), word(36));
+    let add = enter_game_burst(&mut keyed);
+    (keyed, loaded, inserted_at(&add))
+}
+
+/// `sys.login.enter`, `data.map.attr`: `CInputLogin::Entergame` shows a character at the first
+/// movable point `GetMovablePosition` finds around its saved position and, when there is none,
+/// at its empire's recall position on the map (`G/input_login.cpp:572-585`,
+/// `G/sectree_manager.cpp:493-532`, `:789-812`). The loading burst's `GC_MAIN_CHARACTER`, written
+/// at select, still carries the saved position; the enter-game `GC_CHARACTER_ADD` carries where
+/// the character is shown, and the logout saves that.
+///
+/// On map 1's `server_attr`, Alpha's (470000, 950000) is a BLOCK cell with a free one 100 east.
+/// Every point `GetMovablePosition` tries around (416025, 902425) is blocked, so Zulu of empire 2
+/// is recalled to empire 2's town and Echo of empire 1 to empire 1's, and legacy's `sys_err`
+/// line is a warning. (468800, 965200) is BANPK, which does not stop a character, so Whiskey
+/// stays where it was saved; it is over 3000 from every NPC of map 1, so no warp moves it.
+#[test]
+fn an_entering_character_stands_on_the_first_movable_point_or_at_its_empires_recall() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    for login in ["alice", "bob", "carol", "dave"] {
+        create_account(&server, login);
+    }
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE account SET empire = 2 WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login IN ('carol', 'dave')",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, c.n, 1, c.x, c.y \
+         FROM account, (VALUES ('bob', 'Zulu', 416025, 902425), ('carol', 'Echo', 416025, \
+         902425), ('dave', 'Whiskey', 468800, 965200)) AS c(l, n, x, y) WHERE login = c.l",
+    );
+
+    for (login, name, saved, shown) in [
+        ("alice", "Alpha", (470_000, 950_000), ALPHA_ENTERS_AT),
+        ("bob", "Zulu", (416_025, 902_425), (417_600, 956_100)),
+        ("carol", "Echo", (416_025, 902_425), (469_300, 964_200)),
+        ("dave", "Whiskey", (468_800, 965_200), (468_800, 965_200)),
+    ] {
+        let (keyed, loaded, inserted) = entered(&server, login.as_bytes());
+        assert_eq!(
+            loaded, saved,
+            "{name}: the loading burst carries the saved position"
+        );
+        assert_eq!(
+            inserted, shown,
+            "{name}: the enter-game insert is where it is shown"
+        );
+        drop(keyed);
+        wait_for(
+            &database,
+            &format!(
+                "(SELECT x FROM player WHERE name = '{name}') = {} AND (SELECT y FROM player \
+                 WHERE name = '{name}') = {}",
+                shown.0, shown.1
+            ),
+        );
+    }
+    server.wait_for("name=Zulu x=416025 y=902425 map=1 to_x=417600 to_y=956100");
+    server.wait_for("name=Echo x=416025 y=902425 map=1 to_x=469300 to_y=964200");
+    // Whiskey's registration on its map is logged after the placement, so every line up to it
+    // is collected, a warning about Whiskey included.
+    server.wait_for("map=1 name=Whiskey presence=");
+    assert!(
+        !server.logged("name=Alpha x=") && !server.logged("name=Whiskey x="),
+        "a character with a movable point is not warned about:\n{}",
+        server.console()
+    );
+}
+
 /// The VID the Rewrite gives the first NPC it stands up: `world::npc::FIRST_NPC_VID`. Channel 1
 /// is stood up first, and map 1 is its first map.
 const FIRST_NPC_VID: u32 = 0x8000_0000;
@@ -2770,8 +2883,8 @@ const GOTO_TARGET: (i32, i32) = (444_100, 932_100);
 
 /// `event.char.warp_npc_event` for a goto NPC, which the owner's data spawns on no map it hosts
 /// (ledger 228): the scenario spawns 10601 of `metin2_map_monkey_dungeon2`, `CHAR_TYPE_GOTO`
-/// and named `. 345 361`, on map 1 at (470000, 950100), 100 north of Alpha, with a line the
-/// owner's `npc.txt` does not have.
+/// and named `. 345 361`, on map 1 at (470000, 950100), within reach of [`ALPHA_ENTERS_AT`], with
+/// a line the owner's `npc.txt` does not have.
 ///
 /// On the event's next fire Alpha is shown on its own map at the target (`FuncCheckWarp`,
 /// `G/char.cpp:7971-7972`), which is in another sectree, so its own client is sent the insert
@@ -2793,7 +2906,7 @@ fn a_goto_npc_shows_its_neighbour_at_its_target_on_the_same_map() {
 
     let (mut alice, alpha, _items) = load_character(&server, b"alice", 0);
     let own = enter_game_records(&mut alice);
-    assert_eq!(inserted_at(&own), (470_000, 950_000));
+    assert_eq!(inserted_at(&own), ALPHA_ENTERS_AT);
     let shown = alice.read_game();
     assert_eq!(shown[0], GC_CHARACTER_ADD);
     assert_eq!(shown[1..5], alpha.id.to_le_bytes(), "Alpha itself");
@@ -5526,10 +5639,10 @@ fn read_a_tick(keyed: &mut Keyed, vid: u32) -> [Seen; 2] {
     })
 }
 
-/// A `GC_ITEM_GROUND_ADD` at Alpha's and Zulu's position, with z 0.
+/// A `GC_ITEM_GROUND_ADD` where Alpha and Zulu stand, [`ALPHA_ENTERS_AT`], with z 0.
 fn a_ground_add(vid: u32, vnum: u32) -> Vec<u8> {
     let mut record = vec![GROUND_ADD];
-    for word in [470_000_i32, 950_000, 0] {
+    for word in [ALPHA_ENTERS_AT.0, ALPHA_ENTERS_AT.1, 0] {
         record.extend_from_slice(&word.to_le_bytes());
     }
     record.extend_from_slice(&vid.to_le_bytes());

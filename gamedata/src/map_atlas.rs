@@ -604,4 +604,50 @@ mod tests {
         assert_eq!(atlas.index_at(969_600, 278_400), Some(41));
         assert_eq!(atlas.index_at(0, 0), None);
     }
+
+    /// Every region of the owner's folder, as a reader written apart from this one (Python
+    /// regular expressions over `index`, `Setting.txt` and `Town.txt`, ledger 229a) computes it:
+    /// FNV-1a 64 over each region in file order, its name and a zero, its index, edges and spawn
+    /// as little-endian `i32`s, then a one and the six empire coordinates, or a zero.
+    #[test]
+    fn the_owners_regions_match_an_independent_reader() {
+        let dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/locale/europe/map");
+        let atlas = MapAtlas::load(&dir).unwrap();
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut update = |bytes: &[u8]| {
+            for &byte in bytes {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
+            }
+        };
+        let mut empires = 0;
+        for region in atlas.regions() {
+            update(&region.name);
+            update(&[0]);
+            let (x, y) = region.spawn;
+            for word in [
+                region.index,
+                region.sx,
+                region.sy,
+                region.ex,
+                region.ey,
+                x,
+                y,
+            ] {
+                update(&word.to_le_bytes());
+            }
+            if let Some(spawns) = region.empire_spawns {
+                empires += 1;
+                update(&[1]);
+                for (x, y) in spawns {
+                    update(&x.to_le_bytes());
+                    update(&y.to_le_bytes());
+                }
+            } else {
+                update(&[0]);
+            }
+        }
+        assert_eq!((atlas.regions().len(), empires), (59, 16));
+        assert_eq!(hash, 0x419d_8e05_4bfb_86cc);
+    }
 }

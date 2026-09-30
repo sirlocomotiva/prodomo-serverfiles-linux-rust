@@ -80,6 +80,7 @@ use crate::loading_phase::{
     character_add, character_additional, map_is_allowed, public_map_index, INSTANCE_MAP_BASE,
 };
 use db::players::Character;
+use gamedata::map_atlas::MapAtlas;
 use protocol::gc_nested::GcWarp;
 use protocol::gc_vid::{GcHeaderAndDword, HEADER_GC_CHARACTER_DEL};
 use world::character::Points;
@@ -244,6 +245,27 @@ pub fn home_warp_location(empire: u8) -> Option<WarpTarget> {
 #[must_use]
 pub fn go_home(empire: u8) -> Option<(i32, i32)> {
     EMPIRE_START.get(usize::from(empire)).copied()
+}
+
+/// `SECTREE_MANAGER::GetRecallPositionByEmpire` (`G/sectree_manager.cpp:493-532`): where a
+/// character of `empire` is sent back to on a map, or `None` when the map index is not in the
+/// atlas.
+///
+/// A private map's index (10000 and up) is folded onto its base map. The position is the base
+/// map's `Town.txt` spawn for the empire when the file lists one per empire and the empire is 1
+/// to 3, and its single spawn otherwise.
+///
+/// Under `__VERSION_162__`, which the owner's build defines (`common/prodomodefines.h:39`),
+/// legacy first answers a restart position a quest registered with `add_restart_city_pos`. No
+/// owner quest calls it (control: `pc.warp` is found in the same quest tree), and it is not
+/// ported, so that table is always empty and the atlas answers.
+#[must_use]
+pub fn recall_position(atlas: &MapAtlas, map_index: i32, empire: u8) -> Option<(i32, i32)> {
+    let region = atlas.region(public_map_index(map_index))?;
+    Some(match (region.empire_spawns, empire) {
+        (Some(spawns), 1..=3) => spawns[usize::from(empire - 1)],
+        _ => region.spawn,
+    })
 }
 
 /// The map index `WarpEnd` tests against the allow set (`G/char.cpp:6804-6806`).
@@ -531,6 +553,53 @@ mod tests {
     /// The identity resolver: every position is on the map it names.
     fn on_map(map_index: i32) -> impl Fn(i32, i32) -> Option<i32> {
         move |_, _| Some(map_index)
+    }
+
+    /// The owner's map atlas.
+    fn owners_atlas() -> MapAtlas {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe/map");
+        MapAtlas::load(&dir).expect("the legacy map directory parses")
+    }
+
+    #[test]
+    fn the_recall_position_is_the_empires_town_spawn() {
+        let atlas = owners_atlas();
+        // Map 1's `Town.txt` lists a spawn per empire; each empire gets its own, and an empire
+        // outside 1..=3 gets the single spawn.
+        let map_1: Vec<Option<(i32, i32)>> = (0..=4)
+            .map(|empire| recall_position(&atlas, 1, empire))
+            .collect();
+        assert_eq!(
+            map_1,
+            [
+                Some((469_300, 964_200)),
+                Some((469_300, 964_200)),
+                Some((417_600, 956_100)),
+                Some((417_600, 956_100)),
+                Some((469_300, 964_200)),
+            ]
+        );
+        let map_3 = recall_position(&atlas, 3, 1);
+        assert_eq!(map_3, Some((353_100, 882_900)));
+        // Map 72 lists one spawn, which every empire gets.
+        for empire in 0..=3 {
+            assert_eq!(
+                recall_position(&atlas, 72, empire),
+                Some((10_000, 1_207_800))
+            );
+        }
+        // A private map reads its base map, from 10000 on.
+        assert_eq!(recall_position(&atlas, 10_000, 2), map_1[2]);
+        assert_eq!(recall_position(&atlas, 30_007, 1), map_3);
+        assert_eq!(
+            recall_position(&atlas, 729_999, 3),
+            Some((10_000, 1_207_800))
+        );
+        // An index the atlas does not list has no recall position.
+        for index in [0, 9_999, -1, 99_990_000] {
+            assert_eq!(recall_position(&atlas, index, 1), None, "{index}");
+        }
     }
 
     /// The `g_start_map` and `g_start_position` agreement, which `home_warp_location` needs

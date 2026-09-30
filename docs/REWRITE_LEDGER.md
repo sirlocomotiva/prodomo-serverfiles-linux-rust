@@ -25577,3 +25577,379 @@ After the run, no `prodomo_%` database remains and no `*.core` file is outside `
 workspace has 242 Rust files and 178,705 lines, outside `server/` and `.scratch/`. No crate was
 fetched, and `Cargo.lock` is unchanged. `psql` is not installed, so the store was read through
 `podman exec` into the database's container.
+
+## 229a. The map cells: `server_attr`, LZO1X, `GetMovablePosition` and the enter-game placement
+
+Section 229 ports the monsters, combat, drops and exp. It is split: 229a reads the map cells
+the monsters stand on, and places an entering character the way legacy does. The later parts
+(229b onwards) are the view, the spawns and regen, the AI, combat, the drops and the exp.
+
+Every legacy map folder holds a `server_attr` file. `SECTREE_MANAGER::Build` reads it after
+building the map's sectrees (`LoadAttribute`, `G/sectree_manager.cpp:392-491`, called at
+`:752-753`). The file is two little-endian `int`s, the sectree columns and rows, then one block
+per sectree, rows outer: a `u32` byte count and that many bytes of one LZO1X stream, which
+`LZOManager::Decompress` hands to the library's `lzo1x_decompress_safe`
+(`G/lzo_manager.cpp:32-39`). Each stream holds the sectree's 128 x 128 cells of 50 x 50 units
+as `DWORD`s, rows outer. Each block becomes a `CAttribute`
+(`server/server/libgame/attribute.cpp:94-147`), and `SECTREE::GetAttribute` reads the cell
+`((x % 6400) / 50, (y % 6400) / 50)` of the sectree holding an absolute position
+(`G/sectree.cpp:202-206`). On top of that, `IsMovablePosition` asks for a sectree with neither
+`ATTR_BLOCK` nor `ATTR_OBJECT`, and `GetMovablePosition` walks the 161 points of
+`aArroundCoords` (`G/constants.cpp:426-589`), the position itself and then 20 rings of 8 points
+from 50 to 1000 units out, returning the first movable one (`G/sectree_manager.cpp:779-814`).
+
+`CInputLogin::Entergame` uses it before it shows the character (`G/input_login.cpp:572-585`):
+the character stands on the first movable point around its saved position. When none of the
+161 is movable, legacy logs `!GetMovablePosition` and shows the character at its empire's
+recall position (`GetRecallPositionByEmpire`, `G/sectree_manager.cpp:493-532`, from the map's
+`Town.txt`) when the map has a sectree there (229a.2 has the exception). Until this section
+the Rewrite showed a character wherever the row said, a blocked cell included, because it had
+no cells.
+
+The monsters need the same cells: a spawn is placed with `IsMovablePosition` and
+`GetRandomLocation`, a drop with `GetMovablePosition` around the corpse
+(`G/char_battle.cpp:570`, `:757`, `:844`), and a step with `IsAttr`. So the cells come first.
+
+### 229a.1 What landed
+
+- **`gamedata::lzo`** (new) decodes one LZO1X block as `lzo1x_decompress_safe` does. It is
+  written from the LZO1X stream format and holds no code from the library: the literal runs
+  (the first byte above 17, a byte below 16 at an instruction boundary, and the zero-byte length
+  extension), the four match kinds (`M1` to `M4`, with the end-of-stream marker in `M4`), the
+  trailing literals in a match's low two bits, and overlapping copies byte by byte. Every step
+  checks, in the library's order, that the input holds the bytes it reads and the next
+  instruction's lookahead, that the output has room, and that a match reaches no further back
+  than the output written. A broken stream fails with the library's code (`LzoFault`:
+  `INPUT_OVERRUN` -4, `OUTPUT_OVERRUN` -5, `LOOKBEHIND_OVERRUN` -6, `INPUT_NOT_CONSUMED` -8),
+  and the error keeps the bytes written so far, as the library reports them.
+- **`gamedata::server_attr`** (new) reads a map's `server_attr` whole. `ServerAttr::parse`
+  reads the header and each block in file order, decodes it with the capacity legacy gives the
+  decoder (`4 * 69,699` bytes, `:465`) and keeps it as `CellBlock`, the shapes `CAttribute`
+  keeps: one value when every cell holds it, else the cells in the narrowest of a byte, a word
+  or a `DWORD` that holds every set bit. `SectreeGrid::of` places a map's sectrees from its
+  region (`base / 6400`, the width and height rounded up to whole sectrees), and `load_map`
+  reads the file of a region's folder and checks it against that grid. The refusals are in
+  229a.3.
+- **`world::cells`** (new) answers the cell questions. `MapCells` is a map's grid and
+  attributes: `attribute` is `GetAttribute`, `is_attr` is `IsAttr`, `is_movable` is
+  `IsMovablePosition` and `movable_position` is `GetMovablePosition`. `AROUND` is
+  `aArroundCoords`, built from legacy's diagonals (35, 71, 106, ... 707), each ring's radius
+  over `sqrt(2)` rounded to the nearest; a test parses `G/constants.cpp:427-588` and compares all
+  161 points. `HostedCells` holds every hosted map's cells by index, and a private map's index
+  (10000 and up) reads its base map's, as legacy's private sectrees share their base map's
+  attributes (`SECTREE::CloneAttribute` copies the pointer, `G/sectree.cpp:184-188`).
+- **`prodomo::warp::recall_position`** (new) is `GetRecallPositionByEmpire`: a private index
+  folded onto its base, the base map's `Town.txt` spawn for empires 1 to 3 when the file lists
+  one per empire, and its single spawn otherwise. Under `__VERSION_162__`, which the owner's
+  build defines (`common/prodomodefines.h:39`), legacy first answers a restart position a quest
+  registered with `add_restart_city_pos`; no owner quest calls it (229a.4).
+- **`prodomo::loading_phase::entering_position`** (new) is `Entergame`'s choice:
+  `EnteringPosition::Movable` for the first movable point, else `Recalled` for the recall
+  position when the map has a sectree there, else `Kept`, the saved position (229a.3).
+- **The binary.** `load_map_cells` loads every hosted map's `server_attr` at start-up, after the
+  NPC data and before the shops, into `GameData` and each connection's context; a refused file
+  stops the server before any port opens (`Map N is unusable: ...`), and `Map attributes
+  loaded` logs the count. `enter_game` calls the new `place_entering_character` right after
+  `judge_enter_game`: the held character's position becomes the entering position before the
+  world admits it, so the enter-game burst, the world and the save all see it. A recall is
+  logged as a warning with the name, the saved position, the map and the recall position
+  (`to_x`, `to_y`); a kept position is logged as a warning with the name, the position and the
+  map.
+- **`gamedata::map_atlas`.** The regions and the empire rows have read `Setting.txt`,
+  `Town.txt` and the map index since ledger 185. A new test pins a digest of all 59 owner
+  regions and the 16 whose `Town.txt` lists a spawn per empire, computed by a second reader
+  written apart from this one (regular expressions over the three files), so the recall
+  positions this section starts to use are checked against the whole owner data set.
+
+### 229a.2 What the client sees
+
+A character whose saved position is movable sees nothing new.
+
+A character saved on a blocked cell (or one a building covers, once buildings exist) is loaded
+as before: the loading burst's `GC_MAIN_CHARACTER` carries the saved position, as legacy's
+does, because `PlayerLoad` sends it before `Entergame` moves the character. The enter-game
+burst's own `GC_CHARACTER_ADD` then carries the first movable point around it, and the next
+save, the logout's included, writes that point. On the owner's map 1, Alpha's saved
+(470000, 950000) is a `BLOCK` cell, and Alpha now enters 100 east, at (470100, 950000).
+
+A character with no movable point within 1000 is shown at its empire's recall position: on
+map 1 that is (469300, 964200) for empire 1 and (417600, 956100) for empires 2 and 3, from
+`metin2_map_a1/Town.txt`. The loading burst still carries the saved position.
+
+The exception is a map whose recall position has no sectree on the map. The owner's map 235,
+`metin2_map_n_flame_dungeon_01`, spans (742400, 614400) to (819200, 691200), and its
+`Town.txt` puts every empire's recall at (614200, 706800), a point of map 62. There legacy's
+`Show` fails and its client never gets its own insert (229a.3); the Rewrite shows the character
+at its saved position.
+
+### 229a.3 Divergences and Defects
+
+Divergences (STATUS rows):
+
+- **A `server_attr` legacy would misread stops the server.** Legacy checks no `fread`, so a
+  short file decodes whatever its buffers held; ignores the decoder's result (`:466`), keeping a
+  block that failed once 65,536 bytes are out; stops at a block of the wrong length and leaves
+  every later sectree without attributes; `abort()`s on a header wider or taller than the map's
+  sectrees; reads no block after a header with a negative width or height, leaving the map
+  without attributes; and logs a missing file. `Build` ignores `LoadAttribute`'s result
+  (`:752-753`) and goes on. A map with a negative base, or with sectrees past the 16 bits
+  `SECTREEID` keeps of each axis, is built and read under truncated ids, and one with a negative
+  size gets no sectree (`:224-262`, `:424-427`). The Rewrite refuses each of these at start-up
+  (`ServerAttrFault::NegativeSize` and `Unplaced` for the last two). Bytes after the last block
+  are ignored, as legacy ignores them. None of the owner's 59 regions and 69 files is refused:
+  every block decodes with code 0 to exactly 65,536 bytes, and every file ends at its last
+  block.
+- **A sectree past its map's header reads every cell as 0** (provisional, owner question 9).
+  The owner's map 216, `metin2_map_devilcatacomb`, has `MapSize 8 8`, so 32 x 32 sectrees, and
+  its file covers 24 x 24. Legacy leaves the other 448 without an attribute, and the first
+  read there dereferences NULL, which ends the process (an assert in the Debug build). A random
+  spawn, a player's save or a PvP check there reaches it.
+- **Only the sectrees inside a map are built** (provisional, owner question 10). Legacy's
+  `BuildSectreeFromSetting` also builds up to two edge trees past the map's corner, one a column
+  past the partial one and one at a row taken from the base's x, a typo
+  (`G/sectree_manager.cpp:245-259`). Neither is in the map, neither gets an attribute, and only a
+  forged position reaches them. The partial column and row of a map whose base is not a
+  multiple of 6400 keep no sectree, as in legacy: the owner's maps 12, 13 and 226, whose files
+  are all 0.
+- **The recall is a warning.** Legacy logs it with `sys_err` (`G/input_login.cpp:579-583`).
+
+Defects not reproduced (STATUS, "Legacy defects not to reproduce"):
+
+- **`Show` at a point the map has no sectree for.** When no point around is movable, legacy
+  calls `Show` at the recall position without testing that the map has a sectree there, and at
+  an uninitialised `PIXEL_POSITION` when the map has no recall position, because
+  `GetRecallPositionByEmpire`'s result is ignored (`G/input_login.cpp:572-590`). Where no
+  sectree of the map holds the point, `Show` returns before `SetXYZ`
+  (`G/char.cpp:1847-1854`, `:1890`): the character stays at its saved position, which the save
+  writes, and its client never gets its own insert. The owner's map 235 recalls every empire
+  to (614200, 706800), on map 62, so this is reachable there. The Rewrite keeps the saved
+  position (`EnteringPosition::Kept`), shows the character there and warns.
+- **The recall's `z`.** `pos = pos2` also takes the recall position's `z`, and
+  `LoadMapRegion` never sets it (`TMapRegion region;` is a local whose `PIXEL_POSITION`s are
+  left indeterminate, `G/sectree_manager.cpp:347-386`), so an indeterminate height reaches the
+  insert packet and the save (`G/char.cpp:1081`, `:1563`). The Rewrite sends and saves 0. This
+  corrects the STATUS row of ledger 187, which said the fallback keeps the old `z`.
+- **The 69,699-byte stack array.** `LoadAttribute` reads each block's `uiSize` bytes into a
+  variable-length array of 69,699 bytes without bounding it (`:413`, `:461-462`). The Rewrite
+  refuses a longer block. The owner's blocks are 269 to 3752 bytes.
+- **`CAttribute::Get`'s bound.** It tests `x > width || y > height`. On a block with cells of
+  more than one value, whose rows `Alloc` lays end to end
+  (`server/server/libgame/attribute.cpp:44-78`), a column of 128 reads the next row's first
+  cell, or one past the cells on row 127, and row 128 follows a row pointer read one past the
+  block's row table; a block of one value answers it (`:220-235`). No legacy caller passes one;
+  `CellBlock::get` answers 0 there.
+- **The 16-bit sectree id.** `SECTREEID` keeps 16 bits of each axis (`G/sectree.h:13-23`), so
+  a position at or past 419,430,400 aliases a sectree near the origin. The Rewrite finds no
+  sectree there.
+
+Kept as legacy: the absolute cell grid (a map whose base is not a multiple of 6400 reads its
+blocks shifted by `base % 6400`; the three such owner maps are uniform, so nothing shows), a
+private map reading its base map's cells, `GetMovablePosition` drawing no number, and the loading
+burst carrying the saved position.
+
+### 229a.4 Not ported yet
+
+- The sectree entity lists and the view range: the view is still the whole map (ledger 223's
+  Divergence). `sys.world.map` and `sys.world.view` stay `partial`.
+- `GetRandomLocation`, `GetValidLocation`, `ForAttrRegion` and the building attributes
+  (`ATTR_OBJECT` written at run time); no building exists (`sys.world.objects`).
+- A step's cell check: a player's step is not checked against the cells. Legacy's player
+  movement checks only that a sectree exists; the monsters' steps test the cells, and come
+  with them in 229b onwards.
+- `add_restart_city_pos` and its table: the quest API name stays not ported, and no owner quest
+  calls it (control: `pc.warp` is found in the same quest tree), so legacy's table is empty for
+  the owner's data and the atlas answers, as it does in the Rewrite.
+- `sys.login.enter`'s remaining parts: `GetValidLocation`, the entity list and `SendNPCPosition`
+  per sectree, `GUILD_LOGIN_MEMBER` and the post-phase events.
+
+### 229a.5 Scenario and Parity inventory
+
+`an_entering_character_stands_on_the_first_movable_point_or_at_its_empires_recall` logs in four
+characters on map 1 and drops each after it enters:
+
+- Alpha (empire 1), saved at (470000, 950000), a `BLOCK` cell: the loading burst carries the
+  saved position, the enter-game insert (470100, 950000), and the row holds (470100, 950000)
+  after the logout.
+- Zulu (empire 2) and Echo (empire 1), both saved at (416025, 902425), a point whose 161
+  neighbours are all blocked: each enters at its empire's recall, (417600, 956100) and
+  (469300, 964200), the row holds it after the logout, and the server logs the recall with the
+  saved and the new position.
+- Whiskey (empire 1), saved at (468800, 965200), a `BANPK` cell more than 3000 from every NPC:
+  it enters where it was saved, the row keeps it, and no recall line names it or Alpha (the
+  control).
+
+Existing scenarios changed with the placement, to legacy's positions:
+`a_goto_npc_shows_its_neighbour_at_its_target_on_the_same_map` now expects Alpha's insert at
+(470100, 950000) (`ALPHA_ENTERS_AT`), and the two dropped-item scenarios and the quickslot
+scenario expect the ground item where Alpha now stands. The harness's `load_selected` hands its
+body to a new `read_loading_burst`, which also returns the `GC_MAIN_CHARACTER` record.
+
+Parity rows:
+
+- `data.map.setting`, `data.map.attr` and `data.map.town` are `ported`, with this scenario. A
+  reader is `ported` when it reads the whole owner data set byte for byte and a scenario
+  exercises the system that uses it: the attributes against liblzo2 on every block (229a.6),
+  and the regions and recall rows against the second reader's digest.
+- `sys.login.enter` stays `partial`, its note gaining the placement; `sys.world.map` stays
+  `partial`, its note gaining the cells and the recall.
+
+The counts went from 116 to 119 `ported` and from 1341 to 1338 `missing` (1645 rows).
+
+### 229a.6 The LZO witness
+
+The decoder was checked against the library it replaces. `liblzo2.so.2.0.0` from a Debian
+container image layer already on this machine was loaded through Python's `ctypes`, and its
+`lzo1x_decompress_safe` and the Rust decoder (a throwaway harness outside the workspace
+that includes `gamedata/src/lzo.rs` by path) were each given the same 22,820 cases:
+
+- every block of all 69 owner maps, 13,712 blocks, at legacy's capacity;
+- 18 hand-made streams (the empty stream, the end marker cut short, whole and with a byte
+  after it, first-byte literal runs, zero-extended runs, matches of each short form, a match
+  reaching before the output) at six capacities from 0 to legacy's;
+- 9,000 damaged owner blocks: 1,500 sampled blocks, each truncated, bit-flipped, byte-changed,
+  or given an inserted, a deleted or 1 to 4 appended bytes.
+
+Five runs with different seeds found 0 mismatches in the result code, the output length and,
+on success, the output's FNV-1a digest. The codes seen were 0, -4, -5, -6 and -8, so every
+fault the decoder can report was reached. `gamedata::server_attr`'s goldens pin the FNV digests
+of maps 1, 3, 12, 200 and 216 as the library decodes them.
+
+### 229a.7 Mutation sweep
+
+125 mutants: 70 from the first design, 40 from a second design of the decoder alone, and 15 a
+critic added after reading both. `mutate229.py` applied and restored each of them as in 215.7,
+in two copies of the tree that split the list between them, so the main tree was never mutated.
+Each run checked that the mutation changed code, not a comment, before the file's test module,
+and that the file's checksum came back afterwards. With `DATABASE_URL` set, a mutant ran its
+crate's library tests and three scenarios: 229a.5's, the enter-game order scenario and the goto
+scenario. A `main.rs` mutant on the rerun also ran the new process test. The run asserted that
+each filter ran every test it named.
+
+No mutant failed to compile.
+
+| group | mutants | result |
+|---|---|---|
+| `world/src/cells.rs`: the 161 points' rings and signs, the cell's divisor, axes and modulus, a missing block, `IsAttr`'s any-flag test, `IsMovablePosition`'s `BLOCK` and `OBJECT` and a missing sectree, the first movable point and its offsets, and the private map's fold | 22 | 22 killed |
+| `gamedata/src/server_attr.rs`: the uniform check, the byte and word masks, the word's and the cell's byte order, a block's bounds and axes, the header's axes, sign and short reads, the block count, each fault's variant and block, the size bound, the capacity, the length check, a corrupt block, trailing bytes, `from_blocks`' count, the block lookup, the sectrees' base, floors, fit and clamps, and `load_map`'s path, missing file and fit | 41 | 39 killed, 2 killed on the rerun |
+| `gamedata/src/lzo.rs`: the first byte's run and its checks, a literal run's extension, room and lookahead, the match after literals, each match form's boundary, distance, length and extension, the end marker, the lookbehind check and the checks' order, the trailing literals, the 16-bit field's byte order, the overlapping copy, and each check's boundary and fault | 46 | 40 killed, 6 killed on the rerun |
+| `prodomo/src/warp.rs` and `loading_phase.rs`: the recall's spawn slot, empire and fold, and the entering position's walk and its three answers | 10 | 10 killed |
+| `prodomo/src/main.rs`: the placement's call and its recall, the cells of every hosted map, a refused file and an ignored placement | 6 | 5 killed, 1 killed on the rerun |
+
+The first run left 9 survivors. Each was a test gap that a new or extended test killed on the
+rerun, and none was equivalent. Every new decoder answer was first asked of liblzo2 through the
+witness of 229a.6.
+
+- **A block's edge.** `cells_get_row_bound_inclusive` let a uniform block answer its value at
+  row 128; the test read row 128 only of a `DWORD` block. The defect is a block that answers
+  past its 128 x 128 cells. `keeps_each_block_in_the_narrowest_shape` now reads (127, 127),
+  (128, 0) and (0, 128) of the uniform block too.
+- **A header of no rows.** `attr_count_zero_rows_as_one` read a row of blocks for a header of 7
+  columns and 0 rows, which legacy's loops read none of (`G/sectree_manager.cpp:419-420`). The
+  defect is a file refused, or a block read, that legacy never reads.
+  `ignores_bytes_after_the_last_block` now parses a 7 x 0 header as an empty file.
+- **A literal run's checks.** `lzo_first_lookahead_short`, `lzo_instr_lookahead_short` and
+  `lzo_instr_output_check_short` dropped the three bytes of lookahead after the first byte's run
+  and after an instruction's, and the three bytes of room an instruction's run needs above its
+  count. The defects are a cut stream answered with another fault or output length than the
+  library's, and a run written past the capacity. The new
+  `a_literal_run_needs_its_room_and_the_next_instructions_lookahead` cuts both runs short of the
+  end marker and gives the second one room for three bytes.
+- **The end marker.** `lzo_m4_end_ignores_high` ended the stream at a far match whose 16-bit field
+  is 0 but whose high bit is set, a match exactly 32,768 bytes back. The defect is a block that
+  decodes short. The new `a_far_match_ends_the_stream_only_when_its_whole_distance_field_is_zero`
+  refuses that match after 4 bytes and decodes it after 32,768, as the library does.
+- **The 2-byte match.** `lzo_m2_after_match_no_lookbehind` dropped the lookbehind check of the
+  match a byte below 16 starts after trailing literals, so the copy reached before the output and
+  panicked. The defect is a crash at start-up where the library refuses the block. The new
+  `a_byte_below_16_after_trailing_literals_is_a_2_byte_match_within_the_output` decodes one,
+  refuses one that reaches too far and one with no room.
+- **The checks' order.** `lzo_match_checks_swapped` checked a match's room before its reach. The
+  library checks the reach first, so a match that fails both is a lookbehind fault. The new
+  `every_match_form_checks_its_reach_before_its_room` sends each of the five match forms too far
+  back and too long.
+- **The refusal at start-up.** `extra_main_load_cells_error_skipped` hosted a map whose file was
+  refused, without its cells. The scenarios start the server on the owner's data, which every
+  map passes. The new process test
+  `serve_refuses_to_start_when_a_hosted_maps_cell_attributes_are_cut_short` gives the server a
+  Game data folder of links to the owner's whose map 1 `server_attr` stops after 1,000 bytes, and
+  checks that it names the map and the file, exits, and binds nothing.
+
+A six-agent review of the section read it through three lenses (the Rust, the claims and the
+fidelity to legacy), and a verifier re-read each finding against the source. All eleven
+findings were confirmed, none refuted, and each is fixed above:
+
+- **The code.** `movable_position`'s test said an off-map point is skipped, but its walk found
+  a movable cell before any point left the map. `takes_the_first_movable_point_around` now frees
+  cell (0, 2), so the walk passes off-map points first; two hand mutants, an off-map point read
+  as movable and a walk that stops at the first off-map point, are both killed.
+- **The claims.** `aArroundCoords`' diagonals are each ring's radius over `sqrt(2)` rounded to
+  the nearest, not written by hand. Whiskey's cell is `BANPK`, not water. The recall's
+  `sys_err` is at `G/input_login.cpp:579-583`. The `L/` prefix, which the ledger defines for no
+  folder, is spelled `server/server/libgame/`. A private map shares its base map's attributes,
+  because `CloneAttribute` copies the pointer, so a write on either reaches both. Not building
+  the edge trees is a provisional Divergence, not a Defect. `CAttribute::Get`'s bound reads the
+  next row's first cell, one past the cells on row 127, or a row pointer past the row table.
+- **The fidelity.** A recall position with no sectree on the map is not shown: legacy's `Show`
+  fails there, and on the owner's map 235 every empire's recall is a point of map 62. The
+  Rewrite now keeps the saved position (`EnteringPosition::Kept`), with the Defect recorded in
+  229a.3. The new `a_recall_position_off_the_maps_sectrees_keeps_the_saved_one` and
+  `the_owners_map_235_recalls_off_its_sectrees_so_the_saved_position_is_kept` kill four hand
+  mutants: no sectree test, the test inverted, its axes swapped, and a map with no cells
+  recalled. The refusals of a negative `server_attr` header and of a map legacy's 16-bit ids
+  cannot place are recorded with the other refusals in 229a.3. The ledger-187 STATUS row that
+  said the fallback keeps the old `z` is corrected: it takes the recall's `z`, which
+  `LoadMapRegion` never sets.
+
+### 229a.8 Receipt
+
+31 new tests:
+
+- `gamedata/src/lzo.rs` (new): 9, for every instruction kind in a stream the library wrote, the
+  capacity, every prefix of a stream, the library's answers for hand-made streams, a literal
+  run's room and lookahead, the end marker's whole distance field, the 2-byte match after
+  trailing literals, the checks' order, and the library's codes.
+- `gamedata/src/server_attr.rs` (new): 9, for five of the owner's maps as liblzo2 decodes them
+  (header, shapes, digest and cell values), the owner's sectrees, a file past the map's
+  sectrees, a missing file, each block's narrowest shape and the bits that pick it,
+  `from_blocks`, bytes after the last block and an empty file, and the files legacy would
+  misread.
+- `world/src/cells.rs` (new): 5, for legacy's table of 161 points, the cell holding a position,
+  `IsAttr` and `IsMovablePosition`, the first movable point around a position, and a private
+  map.
+- `gamedata/src/map_atlas.rs`: 1, the owner's regions against a second reader.
+- `prodomo/src/loading_phase.rs`: 4, for the entering position's three answers, a recall
+  position off the map's sectrees, map 1 moving a character saved on a blocked cell, and map
+  235 keeping one whose recall is on map 62.
+- `prodomo/src/warp.rs`: 1, the empire's town spawn as the recall position.
+- `prodomo/tests/parity.rs`: the scenario in 229a.5.
+- `prodomo/tests/process.rs`: 1, a hosted map whose `server_attr` is cut short stops the server
+  before it binds a port.
+
+Existing tests changed as 229a.5 says: the goto scenario (`ALPHA_ENTERS_AT`), the two
+dropped-item scenarios and the quickslot scenario. The harness's `load_selected` hands its body
+to a new `read_loading_burst`, whose `LoadingBurst` also carries the `GC_MAIN_CHARACTER` record,
+and the new `entered` logs a character in and answers both of its positions. In `process.rs`,
+`data_keys` finds the owner's folder through a new `legacy_dir`, which the new test shares.
+
+The count went from 3070 to 3101. These gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 3101 passed, 0 failed |
+| the same with `DATABASE_URL` set | 3101 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 19 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+`cargo-clippy` and `cargo-fmt` are the system's 1.85.1 toolchain, `clippy 0.1.85` and
+`rustfmt 1.8.0`, and are called by their `/usr/bin` paths. The first run of the gates, before
+the sweep's rerun, failed rustdoc on three redundant explicit links in `server_attr.rs`'s module
+doc; they were removed, and the table is a later run, after the review's fixes. The tests added
+after the sweep's first run and after the review are in the count.
+
+After the run, no `prodomo_%` database remains and no `*.core` file is outside `target/`. The
+workspace has 245 Rust files and 181,295 lines, outside `server/` and `.scratch/`. No crate was
+fetched, and `Cargo.lock` is unchanged. `psql` is not installed, so the store was read through
+`podman exec` into the database's container.

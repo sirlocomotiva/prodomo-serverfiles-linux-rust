@@ -8,6 +8,8 @@
 /// Runtime character state and lifecycle management.
 pub mod character;
 
+pub mod cells;
+
 /// Deterministic pulse-based event scheduling.
 pub mod event;
 

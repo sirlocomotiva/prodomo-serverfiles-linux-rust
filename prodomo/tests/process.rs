@@ -66,7 +66,7 @@ fn unique_test_root() -> PathBuf {
 
 /// The keys naming the owner's legacy Game data folder and table dumps, read in place.
 fn data_keys() -> String {
-    let legacy = Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy");
+    let legacy = legacy_dir();
     format!(
         "game_data = \"{}\"\ngame_tables = \"{}\"\n",
         legacy.join("gamedata").display(),
@@ -572,6 +572,73 @@ fn serve_refuses_to_start_when_the_configured_item_id_span_is_too_narrow() {
         console.contains("Store closed"),
         "the store is closed on the way out:\n{console}"
     );
+}
+
+#[test]
+fn serve_refuses_to_start_when_a_hosted_maps_cell_attributes_are_cut_short() {
+    // Legacy reads a short `server_attr` without checking its reads (STATUS, the Divergence of
+    // ledger 229a); the server stops before any port opens instead, naming the map.
+    let data_root = DirectoryGuard(unique_test_root());
+    let attr = Path::new("locale/europe/map/metin2_map_a1/server_attr");
+    let data = link_owner_data_but(&data_root.0, attr);
+    let owner = fs::read(legacy_dir().join("gamedata").join(attr))
+        .expect("the owner's map 1 should have a server_attr");
+    fs::write(data.join(attr), &owner[..1000]).expect("the short copy should be writable");
+    let config = format!(
+        "game_data = \"{}\"\ngame_tables = \"{}\"\n[store]\nurl = \"{UNREACHABLE_STORE}\"\n\
+         [auth]\nport = 0\n[[channel]]\nnumber = 1\nports = [0]\nmaps = [1]\n",
+        data.display(),
+        legacy_dir().join("sql/gamedata").display()
+    );
+    let (status, console) = run_to_exit(Some(&config));
+    assert!(
+        !status.success(),
+        "a short server_attr should stop the server"
+    );
+    assert!(
+        console.contains("Map 1 is unusable")
+            && console.contains("metin2_map_a1/server_attr: the file ends inside block"),
+        "the refusal should name the map and the file:\n{console}"
+    );
+    assert!(!console.contains(LISTENING), "nothing is bound:\n{console}");
+    drop(data_root);
+}
+
+/// Removes a directory the test made, however the test ends.
+struct DirectoryGuard(PathBuf);
+
+impl Drop for DirectoryGuard {
+    fn drop(&mut self) {
+        drop(fs::remove_dir_all(&self.0));
+    }
+}
+
+/// The owner's legacy folder.
+fn legacy_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy")
+}
+
+/// A Game data folder under `root` whose every entry is a link to the owner's, except the
+/// directories on the way to `path` and `path` itself, which the caller writes. The owner's data
+/// is never written.
+fn link_owner_data_but(root: &Path, path: &Path) -> PathBuf {
+    let data = root.join("gamedata");
+    let mut from = legacy_dir().join("gamedata");
+    let mut to = data.clone();
+    for component in path.components() {
+        fs::create_dir_all(&to).expect("the linked Game data folder should be creatable");
+        let entries = fs::read_dir(&from).expect("the owner's Game data folder should be readable");
+        for entry in entries {
+            let entry = entry.expect("the owner's Game data folder should be readable");
+            if entry.file_name() != component.as_os_str() {
+                std::os::unix::fs::symlink(entry.path(), to.join(entry.file_name()))
+                    .expect("a link to the owner's Game data should be creatable");
+            }
+        }
+        from.push(component);
+        to.push(component);
+    }
+    data
 }
 
 /// Run `prodomo --config <path> serve` against `config` and return its exit status and console.

@@ -11,7 +11,7 @@ mod inventory;
 mod item_move;
 mod items;
 #[cfg(test)]
-mod legacy_source;
+pub(crate) mod legacy_source;
 mod manager;
 mod model;
 mod points;
