@@ -34,7 +34,7 @@ sqlx = { version = "0.8", default-features = false, features = [
 uuid = "1"
 argon2 = "0.5"
 password-hash = { version = "0.5", features = ["getrandom"] }
-mlua = { version = "0.10", features = ["lua51", "vendored"] }
+mlua = { version = "0.10", features = ["lua51", "vendored", "send"] }
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 rustix = { version = "1", features = ["process"] }

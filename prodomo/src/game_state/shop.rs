@@ -9,8 +9,10 @@
 //! # The order
 //!
 //! A click (`CHARACTER::OnClick`, `G/char.cpp:6181-6352`, then `StartShopping`,
-//! `G/shop_manager.cpp:115-161`) is ignored when the VID names no NPC, when the character trades
-//! (`G/char.cpp:6210-6217`), when the NPC's click trigger is not the shop's, and when the character
+//! `G/shop_manager.cpp:115-161`) is ignored when the VID names no NPC and when the character trades
+//! (`G/char.cpp:6210-6217`). Then the NPC's quests run (`CQuestManager::Click`,
+//! `G/char.cpp:6333-6338`), and a quest that takes the click answers with its dialog and opens no
+//! shop. It is ignored when the NPC's click trigger is not the shop's and when the character
 //! already browses that keeper. Then an open safebox refuses it with `[LS;876]`
 //! (`G/shop_manager.cpp:124-127`), and it is ignored when the keeper is `SHOP_MAX_DISTANCE` or
 //! farther, when no shop names the keeper's vnum, and when the character browses another keeper.
@@ -37,9 +39,9 @@
 //!   charges the price it showed.
 //! - **Unported gates.** Of the other-window check (`[LS;876]`) only the safebox refuses: a trade
 //!   never reaches it because `OnClick` has already ignored the click, and the personal shop, the
-//!   cube and the aura window are not in the Rewrite. `IsSecured`, `CanHandleItem`, a locked item,
-//!   the quest click that runs first and the buy-and-sell throttle belong to systems the Rewrite
-//!   does not have: none of them is open, secured, locked, scripted or set, so none refuses.
+//!   cube and the aura window are not in the Rewrite. `IsSecured`, `CanHandleItem`, a locked item
+//!   and the buy-and-sell throttle belong to systems the Rewrite does not have: none of them is
+//!   open, secured, locked or set, so none refuses.
 
 use std::sync::Arc;
 
@@ -57,6 +59,7 @@ use protocol::gc_shop::{
 use world::character::{
     buy_item, sell_item, sync_quickslots, Character, MoveDone, MoveRules, ShopRefused,
 };
+use world::npc::Npc;
 
 use super::GameState;
 use crate::chat_line::chat_packet;
@@ -149,6 +152,8 @@ pub enum ShopDeclined {
     },
     /// The character trades.
     Trading,
+    /// A quest took the click, and its dialog is the answer (`G/char.cpp:6333-6338`).
+    Quest,
     /// The NPC's click trigger is not the shop's.
     NotAShop {
         /// Its `ON_CLICK_*`.
@@ -258,18 +263,55 @@ impl GameState {
         let _browsing = self.browsing.remove(&vid);
     }
 
-    /// `OnClickShop`, then `StartShopping` and `CShop::AddGuest`.
+    /// `CHARACTER::OnClick` on an NPC: the quests first, then its click trigger.
     fn open_shop(&mut self, vid: Vid, target: u32, place: GroundPlace, mover: Mover) -> ShopAnswer {
-        let Some(npc) = self
-            .npcs
-            .get(&(place.channel, place.map))
-            .and_then(|map| map.npcs.iter().find(|npc| npc.vid == target))
-        else {
+        let Some(race) = self.npc_at(place, target).map(|npc| npc.race) else {
             return ShopAnswer::silent(ShopDeclined::NoSuchNpc { target });
         };
         if self.trading.contains_key(&vid) {
             return ShopAnswer::silent(ShopDeclined::Trading);
         }
+        let (taken, mut records) = self.quest_click(vid, (target, race), place, mover);
+        if taken {
+            return ShopAnswer::Declined {
+                reason: ShopDeclined::Quest,
+                records,
+            };
+        }
+        match self.open_window(vid, target, place, mover) {
+            ShopAnswer::Sent(sent) => {
+                records.extend(sent);
+                ShopAnswer::Sent(records)
+            }
+            ShopAnswer::Declined {
+                reason,
+                records: declined,
+            } => {
+                records.extend(declined);
+                ShopAnswer::Declined { reason, records }
+            }
+            sold @ ShopAnswer::Moved(_) => sold,
+        }
+    }
+
+    /// The NPC under `target` on the map at `place`.
+    fn npc_at(&self, place: GroundPlace, target: u32) -> Option<&Npc> {
+        self.npcs
+            .get(&(place.channel, place.map))
+            .and_then(|map| map.npcs.iter().find(|npc| npc.vid == target))
+    }
+
+    /// `OnClickShop`, then `StartShopping` and `CShop::AddGuest`.
+    fn open_window(
+        &mut self,
+        vid: Vid,
+        target: u32,
+        place: GroundPlace,
+        mover: Mover,
+    ) -> ShopAnswer {
+        let Some(npc) = self.npc_at(place, target) else {
+            return ShopAnswer::silent(ShopDeclined::NoSuchNpc { target });
+        };
         if npc.on_click != ON_CLICK_SHOP {
             return ShopAnswer::silent(ShopDeclined::NotAShop {
                 on_click: npc.on_click,
@@ -340,6 +382,7 @@ impl GameState {
                 price: 0,
             });
         offer.price = shown_price(offer.price, browsing.tripled);
+        let questing = self.quest_running(vid);
         let character = self
             .characters
             .find_by_vid_mut(vid)
@@ -352,6 +395,7 @@ impl GameState {
             count_limit: self.item_count_limit,
             usable_cells: usable_inventory_cells(character.inven_point()),
             belt_grade: None,
+            questing,
         };
         let gold = character.gold();
         match buy_item(
@@ -513,6 +557,7 @@ mod tests {
     use gamedata::npc_shop::shops_from_dump;
     use protocol::gc_actors::GcCharacterGoldChange;
     use protocol::gc_item_window::HEADER_GC_ITEM_SET;
+    use protocol::gc_script::GcScript;
     use protocol::gc_shop::GC_SHOP_START_WIRE_SIZE;
     use protocol::item_pos::ItemPos;
     use tokio::sync::oneshot;
@@ -1179,6 +1224,41 @@ mod tests {
         assert_eq!(buy(&mut state, 1), none);
         assert_eq!(step(&mut state, ShopStep::End, at(0)), none);
         assert_eq!(open(&mut state, FIREWORKS).owner_vid, FIREWORKS);
+    }
+
+    /// `CHARACTER::OnClick` asks the quests first (`G/char.cpp:6181-6352`): a keeper whose quest
+    /// takes the click opens no shop, and while that script waits the click is no quest's and
+    /// the shop opens. The shop reads the keeper's vnum and the quest its race, and no keeper of
+    /// the owner's has a quest, so a 9007 of the OX manager's race stands in for one.
+    #[test]
+    fn a_keeper_whose_quest_takes_the_click_opens_no_shop() {
+        /// 9007 of the OX manager's race.
+        const SCRIPTED: u32 = 0x8000_0007;
+        let mut state = a_market(0, &[], true);
+        let scripted = Npc {
+            race: 20_011,
+            ..keeper(SCRIPTED, 9007, 1)
+        };
+        let _here = state
+            .npcs
+            .insert((1, 41), standing(vec![keeper(WEAPONS, 9007, 1), scripted]));
+        state.start_a_quest(SHOPPER);
+        state.end_the_quest(SHOPPER);
+        let mut menu = Vec::new();
+        GcScript::new(1, b"[QUESTION 1;OX Contest |2;Inchide]".to_vec())
+            .encode_into(&mut menu)
+            .unwrap();
+        let declined = ShopAnswer::Declined {
+            reason: ShopDeclined::Quest,
+            records: vec![menu],
+        };
+        assert_eq!(click(&mut state, SCRIPTED, at(0)), declined);
+        assert!(state.browsing.is_empty());
+        assert_eq!(
+            window(click(&mut state, SCRIPTED, at(0))).owner_vid,
+            SCRIPTED
+        );
+        assert!(state.browsing.contains_key(&SHOPPER));
     }
 
     #[test]

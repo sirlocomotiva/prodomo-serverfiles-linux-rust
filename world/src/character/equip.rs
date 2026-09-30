@@ -820,11 +820,12 @@ const USED_BY_WEARING: [i32; 8] = [
 /// not worn goes on (`EquipItem`), and a worn one comes off (`UnequipItem`).
 ///
 /// The checks run in legacy's order: an item offered in a trade (`IsExchanging`, refused
-/// silently), the job (`CanUsedBy`), the sex, the level and conqueror level limits, and the
+/// silently), the job (`CanUsedBy`), the sex, a script of the character that waits for its
+/// client (`@fixme150`, `G/char_item.cpp:7350`), the level and conqueror level limits, and the
 /// belt cell the item is used from. Then `EquipItem` or `UnequipItem` run their own checks as
 /// a move's do. Legacy's checks for states this build does not have (a shop, a cube, a stun,
-/// a running quest, the secured account, the stack attribute flood, whose file the owner's
-/// data lacks) never refuse here.
+/// the secured account, the stack attribute flood, whose file the owner's data lacks) never
+/// refuse here.
 ///
 /// # Errors
 ///
@@ -871,6 +872,9 @@ pub fn use_item(
     }
     if proto.anti_flags & sex_anti_flag(race) != 0 {
         return Err(MoveRefused::WrongSex);
+    }
+    if rules.questing {
+        return Err(MoveRefused::UsedWhileQuesting);
     }
     for limit in &proto.limits {
         let (have, refused) = match limit.kind {
@@ -963,6 +967,7 @@ mod tests {
         count_limit: 200,
         usable_cells: 90,
         belt_grade: None,
+        questing: false,
     };
 
     /// Always draws the same number.
@@ -1615,6 +1620,33 @@ mod tests {
         assert_eq!(done.kind, MoveKind::Swapped);
         assert_eq!(case.at(wear_pos(BODY)), Some(9));
         assert_eq!(case.at(inv(5)), Some(8));
+    }
+
+    /// `UseItem` (`@fixme150`, `G/char_item.cpp:7349-7354`): while a script waits nothing is
+    /// used, after the job and sex checks and before `UseItemEx`'s limits.
+    #[test]
+    fn a_character_whose_script_waits_uses_nothing() {
+        let questing = MoveRules {
+            questing: true,
+            ..RULES
+        };
+        let mut case = Case::new(&[(inv(3), Item::new(7, SWORD))]);
+        let items = case.items.clone();
+        assert_eq!(
+            case.use_with(inv(3), &questing),
+            Err(MoveRefused::UsedWhileQuesting)
+        );
+        assert_eq!(case.items, items);
+        let notice = "@@(char_item.cpp)tradus:You cannot use this item if you're using quests";
+        assert_eq!(MoveRefused::UsedWhileQuesting.notice(), Some(notice));
+        let mut case = Case::new(&[(inv(3), Item::new(7, MALE_ONLY))]);
+        let refused = case.use_with(inv(3), &questing);
+        assert_eq!(refused, Err(MoveRefused::WrongSex));
+        let mut case = Case::new(&[(inv(3), Item::new(7, HIGH_SWORD))]);
+        let refused = case.use_with(inv(3), &questing);
+        assert_eq!(refused, Err(MoveRefused::UsedWhileQuesting));
+        let mut case = Case::new(&[(inv(3), Item::new(7, SWORD))]);
+        assert!(case.use_with(inv(3), &RULES).is_ok());
     }
 
     #[test]

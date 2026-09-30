@@ -1255,7 +1255,8 @@ fn dynamic_len(header: u8) -> usize {
         | GC_ENTITY
         | GC_SYNC_POSITION
         | GC_NPC_POSITION
-        | GC_SHOP => usize::MAX,
+        | GC_SHOP
+        | GC_SCRIPT => usize::MAX,
         other => panic!("{other} is a fixed-width loading or enter-game record"),
     }
 }
@@ -1266,7 +1267,7 @@ fn word_sized(record: &[u8]) -> Option<usize> {
     let header = record[0];
     if matches!(
         header,
-        GC_CHAT | GC_ENTITY | GC_SYNC_POSITION | GC_NPC_POSITION | GC_SHOP
+        GC_CHAT | GC_ENTITY | GC_SYNC_POSITION | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT
     ) {
         Some(usize::from(record[1]) | (usize::from(record[2]) << 8))
     } else {
@@ -1343,7 +1344,7 @@ fn game_len(header: u8) -> usize {
         GC_SKILL_LEVEL_NEW => SKILL_LEVEL_LEN,
         GC_CHARACTER_ADD => CHARACTER_ADD_LEN,
         GC_CHAR_ADDITIONAL_INFO => CHAR_ADDITIONAL_INFO_LEN,
-        GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP => dynamic_len(header),
+        GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT => dynamic_len(header),
         GC_AFFECT_ADD => AFFECT_ADD_LEN,
         GC_TIME => TIME_LEN,
         GC_CHANNEL => CHANNEL_LEN,
@@ -2357,8 +2358,8 @@ fn client_click(vid: u32) -> Vec<u8> {
 /// A click on an NPC, or on a VID nobody holds, answers nothing and keeps the connection
 /// (`G/input_main.cpp:1305-1316`). Only a keeper whose click trigger is the shop's opens a window
 /// (`G/char.cpp:6181-6352`), and vnum 20300 is not one; the keeper's scenario is
-/// [`a_keeper_opens_its_shop_and_a_buy_and_a_sale_are_stored`]. The quest click is not ported
-/// yet.
+/// [`a_keeper_opens_its_shop_and_a_buy_and_a_sale_are_stored`]. Vnum 20300 has no quest either;
+/// the quest click's scenario is [`a_quest_npc_answers_a_click_with_its_dialog_and_runs_it`].
 ///
 /// Each Channel stands up the maps it hosts, so a character entering map 72 on the Shared
 /// Channel is shown map 72's NPCs and none of Channel 1's.
@@ -2505,6 +2506,131 @@ fn map_72_is_shown_on_the_shared_channel(server: &Server, database: &ScratchData
     assert_eq!(shown.records.len(), 9 + 7, "a summary for each NPC alone");
     let list = shown.list.expect("map 72 lists its NPCs");
     assert_eq!(&list[3..5], &9u16.to_le_bytes(), "count");
+}
+
+/// `HEADER_GC_SCRIPT`: `TPacketGCScript`, a `WORD size` covering the whole record, the `skin`
+/// byte and a `WORD src_size`, then the script with no terminator (`G/packet.h`).
+const GC_SCRIPT: u8 = 45;
+/// `HEADER_CG_SCRIPT_ANSWER`: the header and the answer byte, `TPacketCGScriptAnswer`.
+const CG_SCRIPT_ANSWER: u8 = 0x1d;
+/// `HEADER_CG_QUEST_INPUT_STRING`: the header and `msg[65]`, `TPacketCGQuestInputString`.
+const CG_QUEST_INPUT_STRING: u8 = 0x1e;
+
+/// Map 1's OX manager in `npc.txt`, whose `en` name is Uriel. `ox_event.quest`'s
+/// `oxevent_manager` answers its chat.
+const OX_MANAGER_VNUM: u16 = 20_011;
+
+/// `say_title(mob_name(npc.get_race()) .. ":")` for the OX manager: `color256(255, 230, 186)`,
+/// the name, `color256(196, 196, 196)` and `say`'s `[ENTER]`, each ratio printed as Lua 5.1's
+/// `%.14g` prints it (`questlib.lua`).
+const OX_TITLE: &[u8] = b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]Uriel:\
+    [COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]";
+
+/// `translate.oxevent._20_say`, the entry's first page.
+const OX_FIRST_PAGE: &[u8] = b"Hey - you there! Yes, you - you look quite[ENTER]intelligent. \
+    There is a Contest called the OX[ENTER]Contest. You can test your knowledge there. If[ENTER]\
+    you win, you'll get a nice reward. ";
+
+/// `translate.oxevent._30_say`, the page `oxevent_status == 0` shows.
+const OX_LAST_PAGE: &[u8] = b"I can allow you to participate in the Contest[ENTER]when it starts, \
+    but you can also just watch.[ENTER]The start time hasn't been determined yet. I'm[ENTER]\
+    going to inform you once it's time, so be ready! ";
+
+/// A `GC_SCRIPT` as `CQuestManager::SendScript` sends it (`G/questmanager.cpp`): the size of the
+/// whole record, the skin, and the script's own length.
+fn server_script(skin: u8, script: &[u8]) -> Vec<u8> {
+    let src_size = u16::try_from(script.len()).expect("short");
+    let mut record = vec![GC_SCRIPT];
+    record.extend_from_slice(&(src_size + 6).to_le_bytes());
+    record.push(skin);
+    record.extend_from_slice(&src_size.to_le_bytes());
+    record.extend_from_slice(script);
+    record
+}
+
+/// `CG_SCRIPT_ANSWER`: the header and the answer.
+fn client_script_answer(answer: u8) -> Vec<u8> {
+    vec![CG_SCRIPT_ANSWER, answer]
+}
+
+/// `CG_QUEST_INPUT_STRING`: the header and `msg`, NUL-padded to 65 bytes.
+fn client_quest_input(msg: &[u8]) -> Vec<u8> {
+    let mut record = vec![CG_QUEST_INPUT_STRING];
+    record.extend_from_slice(msg);
+    record.resize(1 + 65, 0);
+    record
+}
+
+/// `sys.quest.runtime`, `cg.game.on_click`, `cg.game.script_answer`,
+/// `cg.game.quest_input_string`, `gc.script`: a click on an NPC runs its quests before its click
+/// trigger (`G/char.cpp:6333-6338`, `CQuestManager::Click`, `G/questmanager.cpp:918-990`). Map
+/// 1's OX manager, vnum 20011, has one chat quest, so the click answers with the chat menu: the
+/// quest's entry and the `Inchide` every menu ends with (`G/questnpc.cpp:940-955`), in skin 1.
+///
+/// While the menu is open a second click is no quest's, and vnum 20011 is no keeper, so it
+/// answers nothing; neither does a text with no `input()` waiting for it, nor a `wait`'s answer
+/// (above 250, `G/input_main.cpp:2200-2217`) while a menu waits. Picking the entry runs it: the
+/// title and the first page end in `[NEXT]`; continuing shows the last page, which ends in
+/// `[DONE]` because the script ends. The next click offers the menu again, and `Inchide` closes
+/// it with a `[DONE]` in skin 0, `QUEST_SKIN_NOWINDOW`.
+#[test]
+fn a_quest_npc_answers_a_click_with_its_dialog_and_runs_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    alice.send_record(&client_enter_game());
+    assert_eq!(alice.read_game()[0], GC_CHARACTER_ADD);
+    assert_eq!(alice.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    let (shown, affect) = read_shown(&mut alice);
+    assert_eq!(affect[0], GC_AFFECT_ADD);
+    let managers: Vec<u32> = shown
+        .inserts()
+        .iter()
+        .filter(|insert| insert[22..24] == OX_MANAGER_VNUM.to_le_bytes())
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+        .collect();
+    assert_eq!(managers.len(), 1, "map 1 has one OX manager");
+    let ox = managers[0];
+    assert_eq!(alice.read_game(), [GC_PHASE, PHASE_GAME]);
+    assert_eq!(alice.read_game()[0], GC_TIME);
+    assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
+    assert_eq!(alice.read_game()[0], GC_CHAT);
+    alice.quiet("the enter-game burst is over");
+
+    alice.send_record(&client_click(ox));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"[QUESTION 1;OX Contest |2;Inchide]")
+    );
+    alice.quiet("the menu is the click's one answer");
+    alice.unanswered(&client_click(ox));
+    alice.unanswered(&client_quest_input(b"abc"));
+    alice.unanswered(&client_script_answer(254));
+
+    alice.send_record(&client_script_answer(0));
+    let first = [OX_TITLE, OX_FIRST_PAGE, b"[ENTER][NEXT]"].concat();
+    assert_eq!(alice.read_game(), server_script(1, &first));
+    alice.quiet("one page at a time");
+    alice.unanswered(&client_script_answer(0));
+    alice.send_record(&client_script_answer(254));
+    let last = [OX_TITLE, OX_LAST_PAGE, b"[ENTER][DONE]"].concat();
+    assert_eq!(alice.read_game(), server_script(1, &last));
+    alice.quiet("the script ended");
+    alice.unanswered(&client_script_answer(254));
+
+    alice.send_record(&client_click(ox));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, b"[QUESTION 1;OX Contest |2;Inchide]"),
+        "a finished script leaves the NPC's menu to the next click"
+    );
+    alice.send_record(&client_script_answer(1));
+    assert_eq!(alice.read_game(), server_script(0, b"[DONE]"));
+    alice.quiet("Inchide ends the chat");
 }
 
 /// `npc.txt`'s keeper on map 3, vnum 20042, whose click trigger is the shop's. Its shop, 9,

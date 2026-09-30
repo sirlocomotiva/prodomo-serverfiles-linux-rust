@@ -14,8 +14,8 @@ use world::npc::MapNpcs;
 
 use crate::client_registry::ClientOutbox;
 use crate::game_state::{
-    EnterWorldRefused, Released, RevokeRefused, SafeboxAnswer, SafeboxStep, ShopAnswer, ShopStep,
-    TradeAnswer, TradeStep,
+    EnterWorldRefused, QuestStep, Released, RevokeRefused, SafeboxAnswer, SafeboxStep, ShopAnswer,
+    ShopStep, TradeAnswer, TradeStep,
 };
 use crate::item_grant::{GrantOutcome, GrantRefusal, GrantRequest};
 use crate::item_move::{MoveItemRefused, MovedItems, Mover};
@@ -437,6 +437,19 @@ pub enum GameCommand {
         mover: Mover,
         /// Where the game thread reports what the step did.
         reply: oneshot::Sender<Result<SafeboxAnswer, MoveItemRefused>>,
+    },
+    /// Runs one quest step for the character online under `vid`.
+    Quest {
+        /// The VID of the character whose client sent the step.
+        vid: common::vid::Vid,
+        /// The step.
+        step: QuestStep,
+        /// Where the character stands, whose map's NPCs a script finds.
+        place: GroundPlace,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports the records the step's script sent.
+        reply: oneshot::Sender<Result<Vec<Vec<u8>>, MoveItemRefused>>,
     },
     /// Requests terminal loop shutdown.
     Stop,
@@ -1226,6 +1239,31 @@ impl GameLoopController {
         self.send_command(GameCommand::Safebox {
             vid,
             step,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one quest step, and waits for the records its script sent.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn quest(
+        &self,
+        vid: common::vid::Vid,
+        step: QuestStep,
+        place: GroundPlace,
+        mover: Mover,
+    ) -> Result<Result<Vec<Vec<u8>>, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Quest {
+            vid,
+            step,
+            place,
             mover,
             reply,
         })

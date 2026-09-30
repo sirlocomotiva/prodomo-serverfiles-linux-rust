@@ -44,9 +44,10 @@
 //!
 //! A worn item, a dragon-soul item and an item outside the `INVENTORY` window cannot be put in,
 //! and nothing is taken out into the dragon-soul inventory: each is [`Unported`], refused
-//! silently. The item lock (`isLocked`), `CanHandleItem`, the running-quest check and the item log
-//! are not ported either, nor are the six pages a premium account or the large-safebox item opens
-//! ([`SAFEBOX_ROWS`]).
+//! silently. The item lock (`isLocked`), `CanHandleItem` and the item log are not ported either,
+//! nor are the six pages a premium account or the large-safebox item opens ([`SAFEBOX_ROWS`]).
+//! The running-quest check (`G/input_main.cpp:2278`) is the caller's: a character whose script
+//! waits stores nothing, silently.
 
 use std::collections::BTreeMap;
 
@@ -705,6 +706,7 @@ mod tests {
         count_limit: LIMIT,
         usable_cells: 90,
         belt_grade: None,
+        questing: false,
     };
 
     struct Fixed(u32);

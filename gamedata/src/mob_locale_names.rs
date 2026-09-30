@@ -20,6 +20,11 @@
 //!
 //! Legacy logs a file it cannot open and answers `NoName` for every mob. This module refuses it
 //! instead, the same Divergence as for `locale_string.txt`.
+//!
+//! The quest function `mob_name` (`G/questlua_global.cpp:673-695`) is the one reader that asks
+//! in the player's own language (`LC_LOCALE_MOB_TEXT(vnum, GetLanguage())`), so
+//! [`crate::mob_locale_names::MobNamesByLanguage`] reads every language's file, `LOCALE_YMIR`'s
+//! from `en` as legacy does.
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -29,7 +34,7 @@ use std::path::{Path, PathBuf};
 use common::enums::LOCALE_DEFAULT;
 
 use crate::csv_table::{self, CsvError};
-use crate::locale_string::country_code;
+use crate::locale_string::{country_code, LOCALE_COUNT};
 
 /// The file each language's folder holds.
 pub const MOB_NAMES_FILE: &str = "mob_names.txt";
@@ -87,8 +92,17 @@ impl MobLocaleNames {
     ///
     /// Returns [`MobLocaleNamesError`] when the file cannot be read or parsed.
     pub fn load(country_dir: &Path) -> Result<Self, MobLocaleNamesError> {
+        Self::load_language(country_dir, LOCALE_DEFAULT as u8)
+    }
+
+    /// Read one language's file, `<country_dir>/<code>/mob_names.txt`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MobLocaleNamesError`] when the file cannot be read or parsed.
+    pub fn load_language(country_dir: &Path, language: u8) -> Result<Self, MobLocaleNamesError> {
         let path = country_dir
-            .join(country_code(LOCALE_DEFAULT as u8))
+            .join(country_code(language))
             .join(MOB_NAMES_FILE);
         let file = std::fs::read(&path).map_err(|source| MobLocaleNamesError::Io {
             path: path.clone(),
@@ -131,6 +145,46 @@ impl MobLocaleNames {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
+    }
+}
+
+/// Every language's mob names: legacy `localeMob`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MobNamesByLanguage {
+    tables: Vec<MobLocaleNames>,
+}
+
+impl MobNamesByLanguage {
+    /// Read the file of every language below `LOCALE_MAX_NUM`
+    /// (`LocaleService_LoadMobNameFile`, `G/locale_service.cpp:502-522`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MobLocaleNamesError`] when a file cannot be read or parsed.
+    pub fn load(country_dir: &Path) -> Result<Self, MobLocaleNamesError> {
+        let tables = (0..LOCALE_COUNT)
+            .map(|language| MobLocaleNames::load_language(country_dir, language))
+            .collect::<Result<_, _>>()?;
+        Ok(Self { tables })
+    }
+
+    /// Build the table from each language's names, in language order. A language with no
+    /// table reads English.
+    #[must_use]
+    pub fn from_tables(tables: Vec<MobLocaleNames>) -> Self {
+        Self { tables }
+    }
+
+    /// `locale_mob_find(vnum, language)` (`G/locale.cpp:120-131`): the name, or `NoName`.
+    ///
+    /// Legacy tests `locale > LOCALE_MAX_NUM`, so language 12 would read past its array. Here
+    /// every language past the last reads English, as the rest of them do in legacy.
+    #[must_use]
+    pub fn find(&self, vnum: u32, language: u8) -> &[u8] {
+        self.tables
+            .get(usize::from(language))
+            .or_else(|| self.tables.get(usize::from(LOCALE_DEFAULT as u8)))
+            .map_or(NO_NAME, |names| names.find(vnum))
     }
 }
 
@@ -222,6 +276,50 @@ mod tests {
         assert_eq!(atoi(b"+-7"), 0, "one sign only");
         assert_eq!(atoi(b"+2147483648"), i32::MAX);
         assert_eq!(atoi(b"-2147483649"), i32::MIN);
+    }
+
+    /// Every language's file loads, in language order.
+    #[test]
+    fn every_language_file_loads() {
+        let names = MobNamesByLanguage::load(&owners_country()).unwrap();
+        assert_eq!(names.tables.len(), usize::from(LOCALE_COUNT));
+        for language in 0..LOCALE_COUNT {
+            let own = MobLocaleNames::load_language(&owners_country(), language).unwrap();
+            assert_eq!(names.tables[usize::from(language)], own, "{language}");
+        }
+        assert_eq!(names.find(20_016, 5), b"Fierar");
+        assert_eq!(names.find(1, 5), NO_NAME);
+        let error = MobNamesByLanguage::load(Path::new("/nonexistent/country")).unwrap_err();
+        assert!(error.to_string().contains("/en/mob_names.txt"), "{error}");
+    }
+
+    /// A language reads its own table, and every language past the last reads English.
+    #[test]
+    fn a_language_past_the_last_reads_english() {
+        let table = |name: &[u8]| {
+            let mut file = b"VNUM\tNAME\n20016\t".to_vec();
+            file.extend_from_slice(name);
+            MobLocaleNames::parse(&file).unwrap()
+        };
+        let names = MobNamesByLanguage::from_tables(
+            (0..LOCALE_COUNT)
+                .map(|language| table(country_code(language).as_bytes()))
+                .collect(),
+        );
+        assert_eq!(names.find(20_016, 0), b"en");
+        assert_eq!(names.find(20_016, 5), country_code(5).as_bytes());
+        assert_ne!(names.find(20_016, 5), names.find(20_016, 1));
+        for language in [LOCALE_COUNT, LOCALE_COUNT + 1, u8::MAX] {
+            assert_eq!(
+                names.find(20_016, language),
+                country_code(LOCALE_DEFAULT as u8).as_bytes(),
+                "{language}"
+            );
+        }
+        assert_eq!(MobNamesByLanguage::default().find(20_016, 1), NO_NAME);
+        let short = MobNamesByLanguage::from_tables(vec![MobLocaleNames::default(), table(b"En")]);
+        assert_eq!(short.find(20_016, 7), b"En");
+        assert_eq!(short.find(20_016, 0), NO_NAME);
     }
 
     /// A missing file is refused and named.

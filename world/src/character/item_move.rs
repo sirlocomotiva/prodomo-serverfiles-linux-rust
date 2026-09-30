@@ -104,6 +104,8 @@ pub struct MoveRules {
     pub usable_cells: u16,
     /// The worn belt's `value0`, or `None` when no belt is worn.
     pub belt_grade: Option<i32>,
+    /// Whether a script of the character waits for its client (`quest::PC::IsRunning`).
+    pub questing: bool,
 }
 
 /// The facts about an item's prototype a move reads.
@@ -434,6 +436,13 @@ pub enum MoveRefused {
     NothingToRecover,
     /// `IsExchanging`: the item, or the stack a merge would join, is offered in a trade.
     Exchanging,
+    /// `UseItem` (`@fixme150`): a script of the character waits for its client.
+    UsedWhileQuesting,
+    /// `DropItem`: a script of the character waits for its client.
+    DroppedWhileQuesting,
+    /// `PickupItem` (`@fixme150`): a quest item, and a script of the character waits for its
+    /// client.
+    PickedUpWhileQuesting,
 }
 
 impl MoveRefused {
@@ -511,6 +520,14 @@ impl MoveRefused {
             Self::Undroppable => Some("[LS;442]"),
             // `char_item.cpp:8066`.
             Self::NoRoomToPickUp => Some("[LS;445]"),
+            // `char_item.cpp:7352`.
+            Self::UsedWhileQuesting => {
+                Some("@@(char_item.cpp)tradus:You cannot use this item if you're using quests")
+            }
+            // `char_item.cpp:7989`.
+            Self::PickedUpWhileQuesting => {
+                Some("You cannot pickup this item if you're using quests")
+            }
             _ => None,
         }
     }
@@ -572,6 +589,11 @@ impl core::fmt::Display for MoveRefused {
             Self::TooFar => f.write_str("the ground item is too far away"),
             Self::NothingToRecover => f.write_str("the potion has nothing to recover"),
             Self::Exchanging => f.write_str("the item is offered in a trade"),
+            Self::UsedWhileQuesting => f.write_str("an item is used while a script waits"),
+            Self::DroppedWhileQuesting => f.write_str("an item is dropped while a script waits"),
+            Self::PickedUpWhileQuesting => {
+                f.write_str("a quest item is picked up while a script waits")
+            }
         }
     }
 }
@@ -1100,6 +1122,7 @@ mod tests {
         count_limit: 200,
         usable_cells: 90,
         belt_grade: None,
+        questing: false,
     };
 
     const fn at(window_type: u8, cell: u16) -> ItemPos {

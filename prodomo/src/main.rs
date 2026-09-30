@@ -39,7 +39,7 @@ use gamedata::banword::banwords_from_dump;
 use gamedata::item_proto::ItemProtos;
 use gamedata::locale_string::{Ending, LocaleStrings, LOCALE_COUNT};
 use gamedata::map_atlas::{MapAtlas, MapRegion};
-use gamedata::mob_locale_names::MobLocaleNames;
+use gamedata::mob_locale_names::{MobLocaleNames, MobNamesByLanguage};
 use gamedata::mob_names::MobNames;
 use gamedata::mob_proto::MobProtos;
 use gamedata::npc_shop::{shops_from_dump, NpcShops};
@@ -69,7 +69,7 @@ use prodomo::game_loop_messages::{GameLoopController, GameLoopTerminal, GroundPl
 use prodomo::game_state::{
     world_item_id_range, GameState, ShopAnswer, ShopStep, TradeAnswer, TradeSettled, TradeStep,
 };
-use prodomo::game_state::{SafeboxAnswer, SafeboxStep};
+use prodomo::game_state::{QuestStep, Quests, SafeboxAnswer, SafeboxStep};
 use prodomo::handshake::HandshakeServerKind;
 use prodomo::item_load::plan_item_load;
 use prodomo::item_move::{MoveItemRefused, Mover};
@@ -106,9 +106,9 @@ use protocol::cg_inventory::{
     HEADER_CG_CHARACTER_POSITION, HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_EMPIRE,
     HEADER_CG_ENTERGAME, HEADER_CG_EXCHANGE, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2,
     HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_LOGIN2,
-    HEADER_CG_LOGIN3, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_QUICKSLOT_ADD,
-    HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER,
-    HEADER_CG_SYNC_POSITION,
+    HEADER_CG_LOGIN3, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_QUEST_INPUT_STRING,
+    HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP,
+    HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYNC_POSITION,
 };
 use protocol::cg_item_drop::CgItemDrop;
 use protocol::cg_item_drop2::CgItemDrop2;
@@ -117,9 +117,11 @@ use protocol::cg_item_pickup::CgItemPickup;
 use protocol::cg_item_use::CgItemUse;
 use protocol::cg_login::CgEmpire;
 use protocol::cg_login3::CgLogin3;
+use protocol::cg_micro::CgScriptAnswer;
 use protocol::cg_move::CgMove;
 use protocol::cg_name::CgChangeName;
 use protocol::cg_position::CgCharacterPosition;
+use protocol::cg_quest_text::CgQuestInputString;
 use protocol::cg_quickslot_add::CgQuickslotAdd;
 use protocol::cg_quickslot_del::CgQuickslotDel;
 use protocol::cg_quickslot_swap::CgQuickslotSwap;
@@ -1856,11 +1858,12 @@ where
         {
             sync_positions(session, addr, context, held, &frame)
         }
-        // `CG_ON_CLICK` (26) and `CG_SHOP` (50) in the game phase.
+        // `CG_ON_CLICK` (26), `CG_SHOP` (50), `CG_SCRIPT_ANSWER` (29) and
+        // `CG_QUEST_INPUT_STRING` (30) in the game phase.
         LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && is_shop_step(frame.header) =>
+            if phase == ClientPhase::Game && is_npc_step(frame.header) =>
         {
-            shop_step(session, addr, context, held, &frame).await
+            npc_step(session, addr, context, held, &frame).await
         }
         // `CG_EXCHANGE` (27) in the game phase.
         LiveStep::Record { phase, frame }
@@ -1872,9 +1875,32 @@ where
     }
 }
 
+/// Whether `header` is one of the records an NPC is used through: a shop's or a quest's.
+fn is_npc_step(header: u8) -> bool {
+    is_shop_step(header) || is_quest_step(header)
+}
+
 /// Whether `header` is `CG_ON_CLICK` or `CG_SHOP`, the two records a shop is used through.
 fn is_shop_step(header: u8) -> bool {
     header == HEADER_CG_ON_CLICK.value() || header == HEADER_CG_SHOP.value()
+}
+
+/// Run a shop step or a quest step.
+async fn npc_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if is_quest_step(frame.header) {
+        quest_step(session, addr, context, held, frame).await
+    } else {
+        shop_step(session, addr, context, held, frame).await
+    }
 }
 
 /// `CG_ON_CLICK` (26) and `CG_SHOP` (50) in the game phase: `CInputMain::OnClick` and
@@ -1882,9 +1908,10 @@ fn is_shop_step(header: u8) -> bool {
 /// (`:3756-3771`).
 ///
 /// `CHARACTER::OnClick` (`G/char.cpp:6181-6352`) runs the quest click and then the NPC's click
-/// trigger. Only the trigger that opens a shop is ported, so a click on anything but a keeper is
-/// logged and ignored, as a click on nothing is in legacy. A buy or a sale is stored and sent as
-/// a move is, with the gold it left; a malformed record closes the connection.
+/// trigger. A quest that takes the click answers with its dialog. Only the trigger that opens a
+/// shop is ported, so any other click no quest takes is logged and ignored, as a click on nothing
+/// is in legacy. A buy or a sale is stored and sent as a move is, with the gold it left; a
+/// malformed record closes the connection.
 async fn shop_step<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -1935,6 +1962,61 @@ where
         Err(error) => Err(error),
     };
     finish_item_step(session, addr, context, held, actor, answer).await
+}
+
+/// Whether `header` is `CG_SCRIPT_ANSWER` or `CG_QUEST_INPUT_STRING`, the two records a quest's
+/// dialog is answered with.
+fn is_quest_step(header: u8) -> bool {
+    header == HEADER_CG_SCRIPT_ANSWER.value() || header == HEADER_CG_QUEST_INPUT_STRING.value()
+}
+
+/// `CG_SCRIPT_ANSWER` (29) and `CG_QUEST_INPUT_STRING` (30) in the game phase:
+/// `CInputMain::ScriptAnswer` and `QuestInputString` (`G/input_main.cpp:2200-2234`), which no
+/// observer check guards (`:3786-3791`).
+///
+/// The world runs the character's quest step and answers the dialog and the chat lines its
+/// script sent; a malformed record closes the connection.
+async fn quest_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let decoded = if frame.header == HEADER_CG_SCRIPT_ANSWER.value() {
+        CgScriptAnswer::decode_frame(frame)
+            .map(|record| QuestStep::Answer(record.answer))
+            .map_err(|error| error.to_string())
+    } else {
+        CgQuestInputString::decode_frame(frame)
+            .map(|record| QuestStep::input(&record))
+            .map_err(|error| format!("{error:?}"))
+    };
+    let step = match decoded {
+        Ok(step) => step,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed quest record; closing");
+            return false;
+        }
+    };
+    let (Some(vid), Some(place)) = (held.world, ground_place(held)) else {
+        info!(%addr, ?step, "Quest step without a character in the world; ignoring");
+        return true;
+    };
+    match context.game.quest(vid, step, place, item_actor(held)).await {
+        Ok(Ok(records)) => send_shop_records(session, addr, &records).await,
+        Ok(Err(refused)) => {
+            warn!(%addr, %refused, "The world does not hold this descriptor's character; closing");
+            false
+        }
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a quest step; closing");
+            false
+        }
+    }
 }
 
 /// `CG_EXCHANGE` (27) in the game phase: `CInputMain::Exchange` (`G/input_main.cpp:1367-1527`).
@@ -3679,30 +3761,32 @@ struct GameData {
 /// What boot stands the NPCs up from: the mob prototypes, the names a client is sent, and the
 /// regen entries of every map each Channel hosts.
 struct NpcData {
-    protos: MobProtos,
+    protos: Arc<MobProtos>,
     names: MobLocaleNames,
     maps: Vec<(u8, MapRegion, Vec<RegenEntry>)>,
 }
 
-/// Load the Game data, before any port opens.
+/// Load the Game data and the quests, which the game thread takes, before any port opens.
 ///
 /// The map regions are Game data the Channel login needs; a client is not accepted before they
 /// are loaded, so a missing or malformed file stops the server before any port opens.
-fn load_game_data(config: &ServerConfig) -> Result<GameData, String> {
+fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let atlas = load_atlas(config)?;
     let names = load_name_rules(config)?;
     let protos = load_item_protos(config)?;
     let locale = load_locale_strings(config)?;
     let npcs = load_npc_data(config, &atlas)?;
     let shops = load_npc_shops(config, &protos)?;
-    Ok(GameData {
+    let quests = load_quests(config, &npcs)?;
+    let data = GameData {
         atlas,
         names,
         protos,
         locale,
         npcs,
         shops,
-    })
+    };
+    Ok((data, quests))
 }
 
 /// Load the NPC shops: the `shop` and `shop_item` rows of the Game data tables, laid out as
@@ -3783,10 +3867,33 @@ fn load_npc_data(config: &ServerConfig, atlas: &MapAtlas) -> Result<NpcData, Str
         "Mob prototypes and regen files loaded"
     );
     Ok(NpcData {
-        protos,
+        protos: Arc::new(protos),
         names,
         maps,
     })
+}
+
+/// Load the quests: every script of the Locale's `quest` folder compiled by the port of `qc` and
+/// loaded into one Lua 5.1 state with the quest libraries (ADR-0004, ADR-0006), and the mob names
+/// of every language, which `mob_name` answers in the character's.
+///
+/// A library, a state table or a file that fails stops the server, and so does a missing
+/// `questnpc.txt`. A script `qc` refuses is warned about and not loaded, as legacy's build left
+/// out a script that did not compile.
+fn load_quests(config: &ServerConfig, npcs: &NpcData) -> Result<Quests, String> {
+    let locale_dir = config.locale_dir();
+    let manager = quest::manager::Manager::load(&locale_dir)
+        .map_err(|error| format!("Quests are unusable in {}: {error}", locale_dir.display()))?;
+    let names = MobNamesByLanguage::load(&config.country_dir())
+        .map_err(|error| format!("Mob names are unusable: {error}"))?;
+    let host = manager.host();
+    info!(
+        quests = host.quests().len(),
+        files = host.objects().len(),
+        refused = host.refused().len(),
+        "Quests loaded"
+    );
+    Ok(Quests::new(manager, Arc::clone(&npcs.protos), names))
 }
 
 /// Stand the NPCs up in the world before the game thread starts, drawing from its dice.
@@ -3919,7 +4026,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
         .map_err(|error| format!("Invalid store configuration: {error}"))?;
     info!(store = ?config.store, "Store configured; no connection opened yet");
 
-    let data = load_game_data(&config)?;
+    let (data, quests) = load_game_data(&config)?;
 
     let mut listeners = Listeners::bind(&listener_plan(&config)).await?;
     for listener in listeners.iter() {
@@ -3951,7 +4058,8 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
         .with_drop_lifetime(config.game.item_destroy_time_dropitem)
         .with_clients(Arc::clone(&clients))
         .with_positions(Arc::clone(&positions))
-        .with_locale_strings(Arc::clone(&data.locale));
+        .with_locale_strings(Arc::clone(&data.locale))
+        .with_quests(quests);
     stand_up_npcs(&mut game_state, &data.npcs)?;
     let mut game_loop = spawn_game_loop(GameLoopConfig::default(), game_state)?;
     let controller = game_loop.controller();

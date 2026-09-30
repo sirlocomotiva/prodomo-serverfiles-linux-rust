@@ -209,6 +209,10 @@ impl GameState {
                 }
             }
             SafeboxStep::Checkin { from, safe_pos } => {
+                // `input_main.cpp:2278`: a character whose script waits stores nothing, silently.
+                if self.quest_running(vid) {
+                    return Ok(SafeboxAnswer::Sent(Vec::new()));
+                }
                 return Ok(self.carry(vid, None, from, safe_pos, mover));
             }
             SafeboxStep::Checkout { safe_pos, to, mall } => {
@@ -256,6 +260,7 @@ impl GameState {
         safe_pos: u32,
         mover: Mover,
     ) -> SafeboxAnswer {
+        let questing = self.quest_running(vid);
         let Some(storage) = self.storages.get_mut(&vid) else {
             return SafeboxAnswer::Sent(Vec::new());
         };
@@ -271,6 +276,7 @@ impl GameState {
             count_limit: self.item_count_limit,
             usable_cells: usable_inventory_cells(character.inven_point()),
             belt_grade: belt_grade(character.items(), &self.protos),
+            questing,
         };
         let done = if mall.is_none() {
             checkin(
@@ -754,6 +760,26 @@ mod tests {
             sent(step(&mut state, from_mall)).is_empty(),
             "the mall is not open"
         );
+    }
+
+    /// `SafeboxCheckin` stores nothing, silently, while a script of the character waits
+    /// (`G/input_main.cpp:2278`), and stores again once it ends.
+    #[test]
+    fn a_character_whose_script_waits_stores_nothing() {
+        let mut state = a_holder(&[(inventory(2), potions(61, 3))]);
+        open_empty(&mut state);
+        state.start_a_quest(HOLDER);
+        let checkin = SafeboxStep::Checkin {
+            from: inventory(2),
+            safe_pos: 6,
+        };
+        assert!(sent(step(&mut state, checkin)).is_empty());
+        state.end_the_quest(HOLDER);
+        let checkin = SafeboxStep::Checkin {
+            from: inventory(2),
+            safe_pos: 6,
+        };
+        assert_eq!(moved(step(&mut state, checkin)).kind, MoveKind::Stored);
     }
 
     #[test]

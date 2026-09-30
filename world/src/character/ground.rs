@@ -8,7 +8,8 @@
 //!
 //! Not ported, and each is the caller's or a later ledger's: gold on the ground, the drop
 //! time limit (the descriptor keeps it), ownership (a player's drop has no owner, so anyone
-//! may pick it up), the party share, the quest hooks, the lock check, and the item log. A drop
+//! may pick it up), the party share, the quest events, the lock check, and the item log. While a
+//! script waits for the character's client it drops nothing and picks up no quest item. A drop
 //! of an item offered in a trade is refused silently (`IsExchanging`, `:7473`); a pickup may
 //! still join an offered stack, as legacy's does.
 
@@ -16,6 +17,7 @@ use common::item_slots::{
     EWindows, CUSTOM_INVENTORY_SLOT_END, CUSTOM_INVENTORY_SLOT_START, INVENTORY_MAX_NUM,
 };
 use gamedata::item_custom_category::{is_custom_category, CATEGORY_NUM};
+use gamedata::item_kind::ITEM_QUEST;
 use gamedata::item_proto::ItemProtos;
 use protocol::item_pos::ItemPos;
 
@@ -76,6 +78,8 @@ pub struct DropAt {
     pub y: i32,
     /// The dropper's store id.
     pub owner_id: u32,
+    /// Whether a script of the dropper waits for its client (`quest::PC::IsRunning`).
+    pub questing: bool,
 }
 
 /// `CHARACTER::DropItem`: the item at `at`, or `count` of its stack, goes to the ground.
@@ -89,7 +93,7 @@ pub struct DropAt {
 /// # Errors
 ///
 /// [`MoveRefused::InvalidSource`], [`MoveRefused::Empty`], [`MoveRefused::Exchanging`],
-/// [`MoveRefused::Undroppable`],
+/// [`MoveRefused::DroppedWhileQuesting`], [`MoveRefused::Undroppable`],
 /// [`MoveRefused::NoItemIds`] or [`MoveRefused::IdsExhausted`] for a part-stack, and
 /// [`MoveRefused::NotPorted`] for a window other than the inventory or a worn item. Nothing
 /// changes on any of them.
@@ -111,6 +115,10 @@ pub fn drop_item(
     let item = items.item_at(at).cloned().ok_or(MoveRefused::Empty)?;
     if items.is_exchanging(item.id) {
         return Err(MoveRefused::Exchanging);
+    }
+    // `G/char_item.cpp:7479`, silently.
+    if to.questing {
+        return Err(MoveRefused::DroppedWhileQuesting);
     }
     if item.anti_flags & (ITEM_ANTIFLAG_DROP | ITEM_ANTIFLAG_GIVE) != 0 {
         return Err(MoveRefused::Undroppable);
@@ -215,7 +223,9 @@ fn merge_cells() -> impl Iterator<Item = u16> {
 ///
 /// # Errors
 ///
-/// [`MoveRefused::UnknownVnum`] for an item with no prototype, and
+/// [`MoveRefused::UnknownVnum`] for an item with no prototype,
+/// [`MoveRefused::PickedUpWhileQuesting`] for an `ITEM_QUEST` while a script of the picker
+/// waits for its client (`@fixme150`, `G/char_item.cpp:7984-7993`), and
 /// [`MoveRefused::NoRoomToPickUp`] when nothing merged and no cell is free. Nothing changes on
 /// either. When something merged and no cell is free the answer is [`MoveKind::Declined`]:
 /// the merges stand, with the notice last.
@@ -229,6 +239,9 @@ pub fn pickup_item(
         .protos
         .get(vnum)
         .ok_or(MoveRefused::UnknownVnum(vnum))?;
+    if proto.item_type == ITEM_QUEST && picker.rules.questing {
+        return Err(MoveRefused::PickedUpWhileQuesting);
+    }
     let mut records = Vec::new();
     let mut changes = Vec::new();
     let gone = MoveRecord::Ground(GroundRecord::Del { vid: ground.vid });
@@ -316,11 +329,14 @@ mod tests {
     const ARROW: u32 = 8_000;
     const BANKED: u32 = 70_800;
     const SASH: u32 = 85_004;
+    /// An `ITEM_QUEST`.
+    const LETTER: u32 = 50_000;
 
     const RULES: MoveRules = MoveRules {
         count_limit: 200,
         usable_cells: 90,
         belt_grade: None,
+        questing: false,
     };
 
     struct Fixed(u32);
@@ -343,6 +359,7 @@ mod tests {
             ItemProto::for_category_rule(ARROW, 1, 0),
             ItemProto::for_category_rule(BANKED, 0, 0),
             sash,
+            ItemProto::for_category_rule(LETTER, ITEM_QUEST, 0),
         ])
     }
 
@@ -370,6 +387,7 @@ mod tests {
         x: 500,
         y: 700,
         owner_id: 42,
+        questing: false,
     };
 
     fn on_ground(item: Item, last_owner: u32) -> GroundItem {
@@ -510,6 +528,62 @@ mod tests {
         assert_eq!(items, before);
         assert!(items.set_exchanging(8, false));
         assert!(drop_item(&mut items, None, inv(4), 0, TO).is_ok());
+    }
+
+    /// `DropItem` (`G/char_item.cpp:7473-7486`): while a script waits nothing is dropped, silently,
+    /// after the trade check and before the anti-flags.
+    #[test]
+    fn a_character_whose_script_waits_drops_nothing() {
+        let mut bound = Item::new(7, SWORD);
+        bound.anti_flags = ITEM_ANTIFLAG_GIVE;
+        let mut items = holding(&[(4, bound), (5, Item::new(8, SWORD))]);
+        assert!(items.set_exchanging(8, true));
+        let before = items.clone();
+        let questing = DropAt {
+            questing: true,
+            ..TO
+        };
+        let dropped = drop_item(&mut items, None, inv(4), 0, questing);
+        assert_eq!(dropped, Err(MoveRefused::DroppedWhileQuesting));
+        let offered = drop_item(&mut items, None, inv(5), 0, questing);
+        assert_eq!(offered, Err(MoveRefused::Exchanging));
+        assert_eq!(items, before);
+        assert_eq!(MoveRefused::DroppedWhileQuesting.notice(), None);
+        let dropped = drop_item(&mut items, None, inv(4), 0, TO);
+        assert_eq!(dropped, Err(MoveRefused::Undroppable));
+    }
+
+    /// `PickupItem` (`@fixme150`, `G/char_item.cpp:7984-7993`): while a script waits a quest item
+    /// stays on the ground, with a line; any other item is picked up.
+    #[test]
+    fn a_character_whose_script_waits_picks_up_no_quest_item() {
+        let protos = protos();
+        let rules = MoveRules {
+            questing: true,
+            ..RULES
+        };
+        let mut dice = Fixed(0);
+        let mut picker = Picker {
+            owner_id: 43,
+            rules: &rules,
+            protos: &protos,
+            dice: &mut dice,
+        };
+        let mut items = CharacterItems::new();
+        let mut letter = on_ground(Item::new(7, LETTER), 42);
+        let refused = pickup_item(&mut items, &mut letter, &mut picker);
+        assert_eq!(refused, Err(MoveRefused::PickedUpWhileQuesting));
+        assert_eq!((letter.item.count, items.item(7)), (1, None));
+        let notice = MoveRefused::PickedUpWhileQuesting.notice();
+        assert_eq!(
+            notice,
+            Some("You cannot pickup this item if you're using quests")
+        );
+        let mut sword = on_ground(Item::new(8, SWORD), 42);
+        let sword_moved = pickup_item(&mut items, &mut sword, &mut picker).expect("picks up");
+        assert_eq!(sword_moved.kind, MoveKind::PickedUp);
+        let letter_moved = pick(&mut items, &mut letter, 43, 0).expect("picks up");
+        assert_eq!(letter_moved.kind, MoveKind::PickedUp);
     }
 
     #[test]

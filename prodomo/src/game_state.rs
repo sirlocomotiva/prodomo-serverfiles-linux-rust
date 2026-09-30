@@ -17,9 +17,9 @@
 //!
 //! # What is deliberately absent
 //!
-//! There is no Channel map set and no script VM. The NPCs the regen files stand up at boot
-//! are here, but they never move or respawn, and a click reaches only a keeper's shop. This
-//! holds the pieces the item path, the shops and the map view need and nothing more, because
+//! There is no Channel map set. The NPCs the regen files stand up at boot are here, but they
+//! never move or respawn, and a click reaches their quests and then a keeper's shop. This holds
+//! the pieces the item path, the shops, the quests and the map view need and nothing more, because
 //! each of the rest is a separate unit with its own decision to record. [`PulseProcessor::process_pulse`](crate::game_loop::PulseProcessor::process_pulse) therefore
 //! steps nothing yet; it counts, and the count is what proves the thread is running
 //! this value rather than an empty closure.
@@ -56,10 +56,12 @@ use crate::save::PASSES_PER_SEC;
 use crate::sync_position::distance_approx;
 use world::character::{add_from_client, sync_quickslots};
 
+mod quests;
 mod safebox;
 mod shop;
 mod trade;
 
+pub use quests::{QuestStep, Quests};
 pub use safebox::{
     SafeboxAnswer, SafeboxStep, ALREADY_OPEN_NOTICE, LOAD_WAIT_PULSES, MALL_WAIT_NOTICE,
     OTHER_WINDOW_NOTICE, SAFEBOX_WAIT_NOTICE, TRADE_WAIT_NOTICE, TRADE_WAIT_SECONDS,
@@ -386,6 +388,8 @@ pub struct GameState {
     trading: HashMap<common::vid::Vid, (u32, Side)>,
     /// The safebox and mall of each character that has opened one, keyed by its VID.
     storages: HashMap<common::vid::Vid, safebox::Storage>,
+    /// The quests boot loaded, when it did.
+    quests: Option<Quests>,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -453,6 +457,7 @@ impl GameState {
             trades: BTreeMap::new(),
             trading: HashMap::new(),
             storages: HashMap::new(),
+            quests: None,
         }
     }
 
@@ -692,7 +697,8 @@ impl GameState {
             | GameCommand::UseItem { .. }
             | GameCommand::Shop { .. }
             | GameCommand::Trade { .. }
-            | GameCommand::Safebox { .. }) => self.apply_item_step(command),
+            | GameCommand::Safebox { .. }
+            | GameCommand::Quest { .. }) => self.apply_item_step(command),
             command @ (GameCommand::DropItem { .. }
             | GameCommand::PickupItem { .. }
             | GameCommand::GroundItemsOn { .. }
@@ -887,7 +893,8 @@ impl GameState {
     /// the final save writes: the recovery event changes the points on the world's own pulse,
     /// after the descriptor's last step, and a trade the partner closes the quickslots. Its
     /// event ends with the character (`event_cancel` in `CHARACTER::Destroy`), and so does its
-    /// trade, cancelled for both sides (`CHARACTER::Destroy`'s `Cancel`).
+    /// trade, cancelled for both sides (`CHARACTER::Destroy`'s `Cancel`), and its running quest
+    /// script (`CQuestManager::DisconnectPC`, `G/char.cpp:1802`).
     ///
     /// Returns `None` when the world did not hold that character, which is reported
     /// rather than treated as fatal because a disconnect that finds nobody is
@@ -898,6 +905,7 @@ impl GameState {
         let _event = self.recovering.remove(&vid);
         self.stop_browsing(vid);
         self.close_storage(vid);
+        self.end_quests(vid);
         let character = self.characters.find_by_vid(vid).ok()?;
         let kept = Kept {
             points: character.points().cloned(),
@@ -1035,8 +1043,8 @@ impl GameState {
         Ok(moved)
     }
 
-    /// Apply one of the steps a character takes with its own items: a move, a use, a shop step
-    /// or a trade step.
+    /// Apply one of the steps a character takes with its own items or an NPC: a move, a use, a
+    /// shop, trade or safebox step, or a quest step.
     fn apply_item_step(&mut self, command: GameCommand) {
         match command {
             GameCommand::MoveItem {
@@ -1091,6 +1099,22 @@ impl GameState {
             } => {
                 if reply.send(self.safebox(vid, step, mover)).is_err() {
                     warn!(?vid, "a safebox step ran and nobody was left to store it");
+                }
+            }
+            GameCommand::Quest {
+                vid,
+                step,
+                place,
+                mover,
+                reply,
+            } => {
+                // Nothing is stored; the client only misses the dialog.
+                if reply.send(self.quest(vid, &step, place, mover)).is_err() {
+                    debug!(
+                        ?vid,
+                        ?step,
+                        "a quest step ran and nobody was left to see it"
+                    );
                 }
             }
             _ => debug_assert!(false, "only item steps reach apply_item_step"),
@@ -1163,6 +1187,7 @@ impl GameState {
             x: place.x,
             y: place.y,
             owner_id,
+            questing: self.quest_running(vid),
         };
         let mut dropped = None;
         let moved = self.run_item_step(vid, actor, |items, ids, _rules, _gear, _protos| {
@@ -1212,6 +1237,7 @@ impl GameState {
         if distance_approx(dx, dy) > PICKUP_DISTANCE {
             return Err(MoveItemRefused::Refused(MoveRefused::TooFar));
         }
+        let questing = self.quest_running(vid);
         let character = self
             .characters
             .find_by_vid_mut(vid)
@@ -1224,6 +1250,7 @@ impl GameState {
             count_limit: self.item_count_limit,
             usable_cells: usable_inventory_cells(character.inven_point()),
             belt_grade: belt_grade(character.items(), &self.protos),
+            questing,
         };
         let mut picker = Picker {
             owner_id,
@@ -1324,6 +1351,7 @@ impl GameState {
             &ItemProtos,
         ) -> Result<world::character::MoveDone, world::character::MoveRefused>,
     ) -> Result<MovedItems, MoveItemRefused> {
+        let questing = self.quest_running(vid);
         let character = self
             .characters
             .find_by_vid_mut(vid)
@@ -1333,6 +1361,7 @@ impl GameState {
             count_limit: self.item_count_limit,
             usable_cells: usable_inventory_cells(character.inven_point()),
             belt_grade: belt_grade(character.items(), &self.protos),
+            questing,
         };
         let protos = &self.protos;
         let (items, points) = character.items_and_points_mut();
@@ -2644,6 +2673,72 @@ mod tests {
             Err(MoveItemRefused::Refused(MoveRefused::NoRoomToPickUp))
         );
         assert_eq!(state.ground_items_on(1, 41).len(), 1);
+    }
+
+    /// A character that leaves the world ends its waiting script (`CQuestManager::DisconnectPC`,
+    /// `G/char.cpp:1802`).
+    #[test]
+    fn a_character_that_leaves_the_world_ends_its_waiting_script() {
+        let mut state = a_state();
+        let (outbox, _inbox) = a_live_outbox();
+        state
+            .enter_world(Vid::new(7), 7, "Shaman", outbox)
+            .expect("the character is admitted");
+        state.start_a_quest(Vid::new(7));
+        let running = |state: &GameState| state.quests().expect("loaded").manager().is_running(7);
+        assert!(running(&state));
+        assert!(state.leave_world(Vid::new(7)).is_some());
+        assert!(!running(&state));
+    }
+
+    /// While a script waits (`@fixme150`, `G/char_item.cpp:7350`, `:7479`, `:7987`) the
+    /// character uses and drops nothing and picks up no quest item; once it ends, it does.
+    #[test]
+    fn a_character_whose_script_waits_uses_drops_and_picks_up_no_quest_item() {
+        /// An `ITEM_QUEST` the owner's table lets be dropped.
+        const LETTER: u32 = 25_104;
+        let (mut state, _inbox) = a_hurt_drinker();
+        let items = state
+            .characters_mut()
+            .find_by_vid_mut(Vid::new(7))
+            .unwrap()
+            .items_mut();
+        items.set(inventory(5), &a_plain_item(12, LETTER)).unwrap();
+        let plain = a_plain_item(13, a_plain_vnum());
+        items.set(inventory(6), &plain).unwrap();
+        drop_at(&mut state, 5, 0);
+        drop_at(&mut state, 6, 0);
+        state.start_a_quest(Vid::new(7));
+        let refused = |reason| Err(MoveItemRefused::Refused(reason));
+        let used = state.use_item(Vid::new(7), inventory(0), a_mover());
+        assert_eq!(
+            used.map(|moved| moved.kind),
+            refused(MoveRefused::UsedWhileQuesting)
+        );
+        let place = a_place(41, 500, 700);
+        let dropped = state.drop_item(Vid::new(7), inventory(0), 0, place, a_mover());
+        let kind = dropped.map(|moved| moved.kind);
+        assert_eq!(kind, refused(MoveRefused::DroppedWhileQuesting));
+        let picked = state.pickup_item(Vid::new(7), 1, place, a_mover());
+        let kind = picked.map(|moved| moved.kind);
+        assert_eq!(kind, refused(MoveRefused::PickedUpWhileQuesting));
+        assert_eq!(state.ground_items_on(1, 41).len(), 2, "the letter stays");
+        let picked = state.pickup_item(Vid::new(7), 2, place, a_mover());
+        assert_eq!(
+            picked.map(|moved| moved.kind),
+            Ok(world::character::MoveKind::PickedUp)
+        );
+        state.end_the_quest(Vid::new(7));
+        let picked = state.pickup_item(Vid::new(7), 1, place, a_mover());
+        assert_eq!(
+            picked.map(|moved| moved.kind),
+            Ok(world::character::MoveKind::PickedUp)
+        );
+        let used = state.use_item(Vid::new(7), inventory(0), a_mover());
+        assert_eq!(
+            used.map(|moved| moved.kind),
+            Ok(world::character::MoveKind::Used)
+        );
     }
 
     #[test]

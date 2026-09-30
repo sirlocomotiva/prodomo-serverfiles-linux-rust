@@ -40,8 +40,8 @@
 //! A dragon soul stone, an item outside the `INVENTORY` window and an item with no prototype
 //! cannot be offered: the offer is refused silently, after every legacy check, so no trade
 //! moves one (legacy gives a stone a cell of the dragon soul inventory). The item lock, the
-//! quest check at the accept (`@fixme150`), the DB-cache check, `SetExchangeTime` (the portal
-//! guard) and the item and gold logs are not ported either.
+//! DB-cache check, `SetExchangeTime` (the portal guard) and the item and gold logs are not
+//! ported either.
 
 use common::item_slots::EWindows;
 use gamedata::item_custom_category::{is_custom_category, CATEGORY_NUM};
@@ -87,6 +87,13 @@ pub const PARTNER_FULL_NOTICE: &str = "There are no empty spaces in the opponent
 
 /// The side with no room for the other's items (`G/exchange.cpp:646`).
 pub const FULL_NOTICE: &str = "There are no empty spaces in your inventory.";
+
+/// The side whose script waits for its client when both accept (`@fixme150`,
+/// `G/exchange.cpp:620`, `:626`).
+pub const QUESTING_NOTICE: &str = "You cannot trade if you're using quests";
+
+/// The other side of [`QUESTING_NOTICE`] (`G/exchange.cpp:621`, `:627`).
+pub const PARTNER_QUESTING_NOTICE: &str = "You cannot trade if the other part using quests";
 
 /// `LC_TEXT("You have reached the yang limit.")` (`G/input_main.cpp:1441`): a trade cannot
 /// start, or settle, with gold at [`GOLD_MAX_MAX`].
@@ -491,6 +498,8 @@ pub struct Trader {
     pub gold: u64,
     /// The base inventory cells it has unlocked: `Inventory_Size()`.
     pub usable_cells: u16,
+    /// Whether a script of it waits for its client (`quest::PC::IsRunning`).
+    pub questing: bool,
 }
 
 /// A trade that went through.
@@ -540,9 +549,10 @@ struct Party {
 ///
 /// # Errors
 ///
-/// [`Unsettled`] with the lines of the first check that fails, in legacy's order for the closer
-/// and then the other side: an item moved or the gold short ([`OUT_OF_PLACE_NOTICE`]), then no
-/// room for the side's items ([`PARTNER_FULL_NOTICE`]); then gold that would take a receiver to
+/// [`Unsettled`] with the lines of the first check that fails: a script waiting for the closer's
+/// client and then the other side's ([`QUESTING_NOTICE`]); in legacy's order for the closer and
+/// then the other side, an item moved or the gold short ([`OUT_OF_PLACE_NOTICE`]), then no room
+/// for the side's items ([`PARTNER_FULL_NOTICE`]); then gold that would take a receiver to
 /// [`GOLD_MAX_MAX`], the other side first, as `Done` pays it; then an item `Done` finds no cell
 /// for.
 pub fn settle(
@@ -553,6 +563,12 @@ pub fn settle(
     dice: &mut dyn Dice,
 ) -> Result<Settled, Unsettled> {
     let partner = closer.other();
+    for side in [closer, partner] {
+        if traders[side.index()].questing {
+            let partner_line = Some(PARTNER_QUESTING_NOTICE);
+            return Err(Unsettled::told(side, QUESTING_NOTICE, partner_line));
+        }
+    }
     for (giver, receiver) in [(closer, partner), (partner, closer)] {
         let offer = &trade.offers[giver.index()];
         let giving = &traders[giver.index()];
@@ -783,6 +799,7 @@ mod tests {
             quickslots: Quickslots::default(),
             gold,
             usable_cells: 90,
+            questing: false,
         }
     }
 
@@ -1173,6 +1190,50 @@ mod tests {
         let bank = inv(CUSTOM_INVENTORY_SLOT_START);
         assert!(matches!(banked, ItemChange::Given { id: 9, to: 2, pos } if *pos == bank));
         assert_eq!(settled.traders[1].items.cell_of(7), Some(costumes));
+    }
+
+    /// `@fixme150` (`G/exchange.cpp:617-630`): a side whose script waits refuses the trade before
+    /// anything else is checked, the closer first.
+    #[test]
+    fn a_side_whose_script_waits_refuses_first_the_closer_first() {
+        let (trade, [starter, asked]) = both_ways();
+        let questing = |trader: &Trader| Trader {
+            questing: true,
+            ..trader.clone()
+        };
+        let told = |side| Unsettled::told(side, QUESTING_NOTICE, Some(PARTNER_QUESTING_NOTICE));
+        let pair = [questing(&starter), asked.clone()];
+        let refused = settle(&trade, Side::Asked, pair, &protos(), &mut Fixed(0));
+        assert_eq!(refused, Err(told(Side::Starter)));
+        let both = [questing(&starter), questing(&asked)];
+        let refused = settle(&trade, Side::Asked, both.clone(), &protos(), &mut Fixed(0));
+        assert_eq!(
+            refused,
+            Err(told(Side::Asked)),
+            "the closer is checked first"
+        );
+        let refused = settle(&trade, Side::Starter, both, &protos(), &mut Fixed(0));
+        assert_eq!(refused, Err(told(Side::Starter)));
+        // Before an item that moved.
+        let mut moved = questing(&asked);
+        let _gone = moved.items.release(8).expect("held");
+        let refused = settle(
+            &trade,
+            Side::Starter,
+            [starter, moved],
+            &protos(),
+            &mut Fixed(0),
+        );
+        assert_eq!(refused, Err(told(Side::Asked)));
+        // `LC_TEXT` of `G/exchange.cpp:620-621`.
+        assert_eq!(
+            told(Side::Asked).notice(Side::Asked),
+            Some("You cannot trade if you're using quests")
+        );
+        assert_eq!(
+            told(Side::Asked).notice(Side::Starter),
+            Some("You cannot trade if the other part using quests")
+        );
     }
 
     #[test]

@@ -24501,3 +24501,510 @@ workspace has 230 Rust files and 168,517 lines, outside `server/` and `.scratch/
 fetched, and `Cargo.lock` is unchanged. `psql` is not installed, so the store was read
 through the tests' own queries. The i686 `g++` is not installed either, so the i686 probe was
 not run.
+
+## 227. The quest runtime: the `qc` port, the Lua 5.1 host, the NPC chat menu and `GC_SCRIPT`
+
+A click on an NPC now runs its quests. Legacy compiles every quest source with `qc`
+(`server/server/quest/qc.cpp`) into the files of `object/`, loads them with its libraries into
+one Lua 5.0 state (`CQuestManager::InitializeLua`, `G/questlua.cpp:644-827`), and runs them
+from `CQuestManager` (`G/questmanager.cpp`), `quest::NPC` (`G/questnpc.cpp`) and `quest::PC`
+(`G/questpc.cpp`). A running script sends its dialog as `GC_SCRIPT`. The client answers with
+`CG_SCRIPT_ANSWER` and `CG_QUEST_INPUT_STRING` (`CInputMain::ScriptAnswer` and
+`QuestInputString`, `G/input_main.cpp:2200-2234`). ADR-0004 puts the quests on `mlua`'s
+Lua 5.1 and keeps their sources unchanged. This section ports `qc`, loads every script and
+library into a Lua 5.1 state, ports the manager's click, chat menu and dialog state machine,
+and adds the quest checks that the items, the trade and the safebox were waiting for. Until
+this section the `quest` crate was an 8-line scaffold, and a click on an NPC that kept no
+shop answered nothing.
+
+### 227.1 What landed
+
+- **ADR-0006.** `docs/adr/0006-quest-dialect-and-host.md` records how the quests keep their
+  dialect and load the way legacy loads them. `docs/STATUS.md` cites it. `AGENTS.md` lists only
+  the decisions the owner settled, so ADR-0006 joins that list only once the owner accepts it.
+  - **The count.** Besides its four lists, the Game data holds 61 quest files outside
+    `object/`: 51 scripts (25 in `_basic`, 10 in `_basic/guild`, 13 in `event`, 1 in `dungeon`
+    and 2 in `rank`) and 10 libraries. The lists are `quest_list`, `questnpc.txt`,
+    `questcategory.txt` and `quest_functions`.
+  - **The controls.** All 51 scripts open with `quest NAME begin` (the positive control), and
+    no library does (the negative control). ADR-0004's "51 quest scripts and 10 Lua library
+    files" holds. The goal's "35 in `_basic`" counts `_basic/guild` with `_basic`. `quest_list`
+    names 16 scripts, not the goal's 15. They are one per line, and its last line has no line
+    end.
+  - **One script is not Lua.** In `_basic/change_empire.lua` an `end` on line 132 closes the
+    `if ret == 1` chain before its `elseif ret == 4`. Legacy's `qc` aborts on it
+    (`expecting 'when' or 'function'`, line 139), so it never reached `object/`. The Rewrite
+    refuses it too and loads the other 50.
+  - **The decisions.** The Rust `qc` prints legacy's output byte for byte. Every chunk is
+    translated from the dialect to Lua 5.1 at load, never on disk. Shims give back the
+    Lua 5.0 behaviour the sources use. The library chain is legacy's. `io` and `debug` are left
+    out. The quests are numbered in a fixed order. The Lua state is `Send` through `mlua`'s
+    `send` feature. All 699 API names are registered. The quest flags live in memory.
+- **The lexer.** `quest::lex` is legacy's Lua 5.0 lexer (`server/server/liblua/llex.c`), which
+  every quest chunk is read with.
+  - `quest`, `state`, `with` and `when` are reserved, `begin` is `do`, `!` is `not` and `!=`
+    is `~=`.
+  - A name takes the bytes from 0xa0 up. A byte above 0x7f in a string takes the next byte
+    along, even a quote or a line end, and that line end is not counted.
+  - A long string nests and skips a first line end.
+  - A numeral follows `strtod`, so `20011.chat` is the number `20011.` and the name `chat`, and
+    `0x10` is `0` and `x10`.
+  - `isspace` and `iscntrl` of the C locale decide what is space and what is refused.
+- **The compiler.** `quest::qc` is `qc`. A source is `quest NAME [with COND] begin`, its
+  `state NAME begin` blocks of `when` blocks and `function`s, and `end`.
+  - **The bodies.** Every `when` body and function is printed back token by token: a name as
+    written, a number as C++ streams a `double` (`%g`, six digits), a string between double
+    quotes with its bytes unescaped, `do` as `begin`, and a space after every token. A line end
+    goes wherever the lexer moved to another line between two tokens, one token late where
+    legacy's look-ahead moved it late.
+  - **The files.**
+    - `state/QUEST` holds the state table. Each state's number is its name's CRC-32 read as an
+      `int`, and on a clash the next free number. `start` is 0.
+    - `begin_condition/QUEST` holds the `with` condition.
+    - `WHO/EVENT/QUEST.STATE` holds the bodies of the `when` blocks without an argument, each
+      inside `if COND then ... return end` when it has a condition.
+    - Each `when` block with an argument gets three files: `.script`, `.when` and `.arg`.
+  - **The names.** `when a or b or c` compiles the body once per name, in the order c, a, b.
+    `when X.target.Y` names the event `target` with the argument `X.Y`. The event name is
+    lowered and the target keeps its case. The argument of `set_state`, `newstate` and
+    `setstate` must name a state of the quest.
+  - **The checks.** Every condition and body is parsed with Lua 5.1 after the translation below.
+  - **What is refused.** Where the printed text would read back as something else, the source
+    is refused instead of printed. That covers a number `%g` rounds, a string holding a `"`, a
+    line end or a zero byte, and a string that ends in a byte above 0x7f. None of the 999
+    numbers and 1056 strings of the 51 scripts does any of these; a synthetic `1234567` and
+    `'a"b'` are the positive controls.
+- **The translation.** `quest::dialect::translate` reads a chunk with the legacy lexer and
+  writes the same tokens back in Lua 5.1.
+  - `begin` becomes `do`, `!` becomes `not` and `!=` becomes `~=`.
+  - Every string becomes a double-quoted Lua 5.1 literal holding the bytes legacy read.
+    Numerals stay as written, and comments become whitespace.
+  - Each token stays on the line where it started, so a Lua 5.1 error names the line legacy
+    would name, and `ambiguous syntax` still holds.
+  - Every generic `for` list is wrapped in `__compat_iter( ... )`. A list holding a `function`
+    is refused, because its `do` could not be told from the loop's.
+  - What legacy's parser refuses is refused here too: `quest`, `state`, `with` and `when`
+    outside a header, and `#` and `%`, which Lua 5.1 would read as operators. A name holding a
+    byte above 0x7f is refused as well: legacy reads it, Lua 5.1 does not, and no quest file
+    holds one.
+- **The sources.** `quest::sources` lists the scripts. Every file below a subdirectory of
+  `quest/` is a script, except the compiled `object/` and the libraries of `luaLibrary/`.
+  - `quest_list` is read one trimmed line at a time (CRLF in the Game data). A path that
+    leaves the quest directory is refused.
+  - The load order is `quest_list`, then every other script sorted by path, each once. A
+    `quest_list` line that names no script is refused.
+- **The API names.** `quest::api` holds the 699 names of the `questlua_*.cpp` tables and the
+  global table, in the order of `.scratch/parity/quest-api.md`, and a test holds the two
+  equal.
+- **The host.** `quest::host::Host::load` builds the Lua state as `InitializeLua` did.
+  - **The standard libraries.** It opens base (with `coroutine`), `table`, `string` and
+    `math`, and an `os` that holds only `date`, `time`, `clock` and `difftime`. The base
+    library loses `load` and `loadfile`, which would read code the translation never sees, and
+    `package` is not opened.
+  - **The API names.** Every name is registered as a function:
+    - the load-time recorders that `settings.lua` calls: `add_bgm_info`, `add_goto_info`,
+      `set_bgm_volume_enable` and `arena.add_map`;
+    - `q.yield`, which is `coroutine.yield`;
+    - `get_locale_base_path`;
+    - the 18 bridged names, which reach the game while the manager runs a script;
+    - a "not ported" refusal for every other name.
+  - **The prelude.** `__compat_iter` gives `next, t` for a table and passes anything else
+    through, as Lua 5.0's `TFORPREP` walked a table. `table.getn`, `setn`, `insert`, `remove`
+    and `foreachi` use Lua 5.0's length. It is a numeric `n` field, then the size `setn` or
+    `insert` recorded, then a count up to the first nil.
+  - **The library chain.**
+    - `settings.lua` first, with its `dofile`s of `BlueDragon.lua` and `quest/GFquestlib.lua`.
+    - Then `quest/questlib.lua`, with its `dofile`s of the four `luaLibrary/` files and of
+      `multiLocale.lua`.
+    - Then `translate.lua` and `quest/locale.lua`.
+
+    A library that fails fails the load, as legacy's `return false` did.
+  - **The chunks.** Every chunk goes through the translation. That covers the libraries, the
+    state tables, `dofile` and `loadstring`. `dofile` reads only below the locale directory.
+  - **The scripts.** Every script of the load order is compiled with the port of `qc`. A script
+    `qc` refuses is logged and left out. Each quest's state table is run and indexed both ways
+    (`BuildStateIndexToName`). The compiled `when` scripts are compiled once and kept by their
+    `object/` path, as legacy's `__codecache` kept them.
+  - **The shared quest.** `_basic/guild/guild_building.lua` and `guild_manage.lua` both declare
+    the quest `guild_building`. As in legacy, they share one index and one state table, and each
+    keeps its own `when` scripts.
+- **The manager.** `quest::manager::Manager` is `CQuestManager` with `quest::NPC` and
+  `quest::PC`, and the running half of `questlua.cpp`.
+  - **The NPCs.** `Manager::new` indexes the compiled scripts by NPC, event, quest and state. It
+    takes the NPCs `questnpc.txt` names, then `notarget` as NPC 0, then every directory of
+    `object/` named by a number. That last group is what legacy's `RegisterNPCVnum` added for
+    every monster and item it loaded.
+  - **The click.** `Manager::click` is `CQuestManager::Click`. An NPC with `chat` scripts
+    offers a menu of every entry whose condition holds, plus `Inchide`, the entry every menu
+    ends with (`G/questnpc.cpp:909-955`). It runs its `click` scripts when it offers no entry
+    or has no `chat` scripts. The click answers whether a quest took it. A character whose
+    script waits starts no other script.
+  - **A running script.** A script runs in a Lua thread (`OpenState` and `RunState`,
+    `G/questlua.cpp:970-1056`). It suspends on `select`, `wait` and `input`. Each suspension
+    sends the dialog built so far, ending in `[QUESTION ...]`, `[NEXT]` or `[INPUT]`. The end
+    of a script sends `[DONE]`. `SendScript`'s rule decides the skin: a bare `[DONE]` or
+    `[NEXT]` after an answer closes the window in skin 0 (`QUEST_SKIN_NOWINDOW`), and a bare
+    `[DONE]` nobody waits for is not sent.
+  - **The answers.** `Manager::answer` is `CG_SCRIPT_ANSWER`. An answer above 250 continues a
+    `wait`, and any other picks a menu entry. `Manager::input` is `CG_QUEST_INPUT_STRING`, cut
+    at its first NUL. An answer the running script is not waiting for is logged and changes
+    nothing. `Manager::logout` is `DisconnectPC`: the running script ends unfinished.
+  - **The event flags.** They start with legacy's two defaults, `guild_withdraw_delay` and
+    `guild_disband_delay`, both 1.
+- **The API that runs.** 24 of the 699 names do something:
+  - the 18 bridged names: `say`, `chat`, `cmdchat`, `syschat`, `notice`, `set_skin`,
+    `setskin`, `setleftimage`, `settopimage`, `raw_script`, `getnpcid`, `number`, `mob_name`,
+    `get_time`, `get_global_time`, `game.get_event_flag`, `npc.get_race` and `npc.getrace`;
+  - the four recorders;
+  - `q.yield`;
+  - `get_locale_base_path`.
+
+  The bridge borrows the game state for one call into the manager, through `Lua::scope`, so it
+  needs no `unsafe` and no `'static` data. Each name reads its arguments by legacy's rules. A
+  `DWORD` is the low half of the 64-bit conversion.
+- **The record.** `protocol::gc_script` is `HEADER_GC_SCRIPT` (45): a `WORD` size, the skin, a
+  `WORD` script size, and the script's bytes with no NUL, so the size is the script's plus 6.
+  The encoder refuses a script longer than 65529 bytes (227.3). The codec inventory goes from
+  106 to 107 of 134 game-to-client records.
+- **The world.** A script that waits for its client now refuses what legacy's `IsRunning`
+  checks refuse:
+  - `MoveRules.questing` refuses a use with `UsedWhileQuesting`
+    (`G/char_item.cpp:7349-7354`), after the job and sex checks and before `UseItemEx`'s
+    limits.
+  - `DropAt.questing` refuses a drop silently (`G/char_item.cpp:7479`), after the trade check.
+  - A pickup of an `ITEM_QUEST` (18, new in `gamedata::item_kind`) is refused with its line
+    (`G/char_item.cpp:7984-7993`). Any other item is picked up.
+  - `Trader.questing` refuses a trade when both sides accept, before anything else is
+    checked, the closer first (`G/exchange.cpp:617-630`). The waiting side is told
+    `QUESTING_NOTICE` and the other side `PARTNER_QUESTING_NOTICE`.
+  - A safebox checkin stores nothing, silently (`G/input_main.cpp:2278`).
+- **The game state.** `prodomo::game_state::quests` is the world around the manager.
+  - A click on an NPC records it and runs its quests with the NPC's race before the click
+    trigger (`G/char.cpp:6333-6338`). A keeper whose quest takes the click opens no shop.
+  - `GameState::quest` runs a `CG_SCRIPT_ANSWER` or a `CG_QUEST_INPUT_STRING`. The input is
+    cut as `strlcpy` into 65 bytes cut it: at most 64 bytes, up to the first NUL.
+  - What a script sends becomes records in the order it was sent. Each dialog is a `GC_SCRIPT`,
+    and each chat line is a `GC_CHAT` whose text is formatted as `ChatPacket(type, "%s", text)`.
+  - `npc.get_race` finds the clicked NPC on the character's own map. `mob_name` names a monster
+    only when its proto exists, in the character's language.
+  - Leaving the world ends the character's running script. `questing` is passed to the move
+    rules, the drop, the pickup and the trade.
+- **The mob names.** `gamedata::mob_locale_names::MobNamesByLanguage` reads every language's
+  `mob_names.txt` (`LocaleService_LoadMobNameFile`, `G/locale_service.cpp:502-522`), because
+  `mob_name` is the one reader that asks in the player's own language.
+- **The wiring.**
+  - `main.rs` loads the quests at boot with `Manager::load` on `ServerConfig::locale_dir`,
+    before any port opens. A failed library, state table or file stops the server, and so does
+    a missing `questnpc.txt`. The load logs the quests, the files and the refused scripts.
+  - `CG_SCRIPT_ANSWER` (29) and `CG_QUEST_INPUT_STRING` (30) are routed in the game phase with
+    the shop's records. A malformed record closes the connection.
+  - `mlua` gains the `send` feature, which adds no crate. `Cargo.lock` is unchanged.
+
+### 227.2 What the client sees
+
+- A click on Uriel, map 1's OX manager (vnum 20011), is answered with
+  `GC_SCRIPT` skin 1 `[QUESTION 1;OX Contest |2;Inchide]`.
+- Picking the entry sends the OX title and the first page ending in `[ENTER][NEXT]`. Continuing
+  (an answer above 250) sends the last page ending in `[ENTER][DONE]`, and the script ends.
+- `Inchide` closes the window with `[DONE]` in skin 0.
+- While a menu waits, a second click, an input and a continue answer nothing. While a page
+  waits, a menu pick answers nothing.
+- While a script waits:
+  - a use is refused with `@@(char_item.cpp)tradus:You cannot use this item if you're using
+    quests`;
+  - a drop and a safebox checkin are refused silently;
+  - a pickup of a quest item is refused with `You cannot pickup this item if you're using
+    quests`;
+  - a trade is refused when both accept, with `You cannot trade if you're using quests` to the
+    waiting side and `You cannot trade if the other part using quests` to the other.
+- A keeper no quest takes still opens its shop. No keeper in the owner's Game data has a quest
+  `click` or `chat` script.
+
+### 227.3 Divergences and Defects
+
+Twelve new Divergences, each a row in `docs/STATUS.md`:
+
+- **The quest flags live in memory.** A quest's flags and state last while its character is
+  logged in and end with it (ADR-0006). No ported API writes one, so no script can change
+  what a later login would see. `Loading quest. Please wait a moment.` is never said. Legacy
+  loads the `quest` table with the character and saves it with the character
+  (`D/ClientManagerPlayer.cpp:352-394`).
+- **`change_empire.lua` is not loaded**, until the owner fixes its line 132. Legacy's `qc`
+  aborts on it too.
+- **Only `click` and `chat` run.** No ported system raises `login`, `logout`, `levelup`,
+  `kill`, `timer`, `target` or any other event. The hide-and-seek reward of `OnClick`
+  (`G/char.cpp:6299-6330`) is not ported.
+- **"Not ported".** An API name whose system is not ported raises an error, which ends the
+  script as any Lua error does. 24 of the 699 names are backed.
+- **No `io` or `debug`**, an `os` holding only `date`, `time`, `clock` and `difftime`, and no
+  `loadfile`, `load` or `require`. Legacy opened `io` and `debug` (`G/questlua.cpp:652-654`,
+  marked `TEMP`), and `luaopen_io` opened all of `os`. Lua 5.0's base library holds `loadfile`
+  and `require`. No loaded file calls a removed name:
+  - Only the loggers of `luaFunctions.lua` open a file, and no script calls them.
+  - Only the unloaded `questing.lua` and `quest_functions` name `os.execute` and the other
+    removed `os` names. `os.date` and `os.time` are found in `luaFunctions.lua` as the
+    control.
+  - No file names `loadfile`, `load` or `require`. The same search finds the 9 `dofile`
+    calls and the 5 `loadstring` calls.
+- **The quest numbers.** A quest's number is its place in `quest_list` and then in the other
+  scripts sorted by path, and an event's files run in byte order. Legacy uses the `readdir`
+  order, which the file system chooses.
+- **A failing condition is false.** A `when` condition or a `begin_condition` that raises an
+  error is false, and a chat menu label that raises one is empty. `IsScriptTrue` read the error
+  message as the result, which made a failing condition true (`G/questlua.cpp:173-189`).
+- **`confirm` and `select_item` are not ported.** A script that suspends on either ends.
+- **`questnpc.txt`** is required, and a sign before a number ends the file as any other
+  non-digit does. Legacy logs a missing file and loads no NPC, and its `>>` reads `-1` as
+  NPC 4294967295 (`G/questmanager.cpp:114-158`).
+- **The dialog lives for one call.** A running script's text, skin and error flag live for one
+  call into the manager, and a quest's errors go to the log, not to the player. Legacy kept
+  them process-wide, so text a script added and never sent went out with the next character's
+  dialog (`G/questmanager.cpp:1113-1151`).
+- **The quest commands** of `cmd_info` (`/qf`, `/setqf`, `/set_state`, `/eventflag`,
+  `/reload q` and the rest) answer nothing, as every GM command does for a `GM_PLAYER`.
+- **The drop limit.** The only file that sets `item_drop_limit_time`, `questlib_extra.lua`, is
+  never loaded, so the owner's limit is the stored event flag, which the snapshot lacks.
+  Legacy's `g_ItemDropTimeLimitValue` is 0 unless the flag is stored
+  (`G/questmanager.cpp:35`, `:1603-1606`). The Rewrite keeps ledger 217's 1000 ms until the
+  owner decides.
+
+Three rows changed and one went:
+
+- The click row says the quests run before the keeper's shop.
+- The trade's unported-checks row says two things. `GiveItemToPC` runs only a quest's `target`
+  click, and no quest can set a target while `target.*` is not ported. A waiting script now
+  refuses a trade when both sides accept.
+- The safebox row no longer lists the running-quest check.
+- The row "The quest click is not run before a keeper's shop opens" (ledger 224) is gone.
+
+The `quest` crate's row and the step-4 row name the runtime.
+
+Three legacy Defects are not reproduced, each in `docs/STATUS.md`'s list:
+
+- **A dialog longer than a `WORD`.** `SendScript` assigns the script's length to both `WORD`
+  fields, so a dialog longer than 65529 bytes is sent with sizes that have wrapped around. The
+  client then reads a cut record and garbage. The Rewrite logs such a dialog and does not send
+  it.
+- **A script whose first result is not text** reaches `strcmp(NULL)`, and a `select` whose last
+  result is not a table reaches an unprotected `luaL_getn` (`G/questlua.cpp:970-1056`). The
+  Rewrite ends the script as a Lua error.
+- **`getnpcid` with no name** builds a `std::string` from `NULL`. The Rewrite answers 0.
+
+The generated inventory also recorded a finding for the owner in `.scratch/parity/spec.md`.
+`questlib_extra.lua` and `questing.lua` are never loaded, and only `qc` reads
+`quest_functions`. The loaders of `settings.lua`, `questlib.lua` and `translate.lua` are found
+(`G/questlua.cpp:737-765`) as the control, and the only line naming `questlib_extra.lua` is its
+own commented `dofile`.
+
+### 227.4 Not ported yet
+
+- **The other `IsRunning` checks.** They sit in the personal shop (`OpenMyShop`,
+  `G/char.cpp:831` and `:9246`, and `BuildPrivateShop`, `:12034`), `SortInventoryItems`
+  (`:10804`), `DestroyItem` and `GiveItem` (`G/char_item.cpp:7424`, `:9232`), the sash and
+  change-look windows (`G/input_main.cpp:3396`, `:3432`), the guild invite (`G/guild.cpp:2036`,
+  `:2043`) and the messenger (`G/messenger_manager.cpp:289`, `:295`). None of their systems is
+  ported.
+- **`GiveItemToPC`'s quest click**, until `target.*` is.
+- **`pc.warp`**, **`game.set_safebox_level`** and the other 673 unbacked API names.
+- **Every event but `click` and `chat`**, with the quest timers and the `login` scripts.
+- **`confirm` and `select_item`**, and the quest letter, the item and the target windows they
+  drive.
+- **The `quest` table** in the store, and the GM quest commands.
+
+### 227.5 Scenario and Parity inventory
+
+`a_quest_npc_answers_a_click_with_its_dialog_and_runs_it` stands Alpha (alice) on map 1, finds
+the one OX manager (vnum 20011) in the enter-game burst, and clicks it.
+
+- The click is answered with `GC_SCRIPT` skin 1 `[QUESTION 1;OX Contest |2;Inchide]`, and with
+  nothing else.
+- A second click, the input `abc` and the answer 254 are unanswered while the menu waits.
+- The answer 0 sends the OX title, the first page and `[ENTER][NEXT]`. A second 0 is
+  unanswered while the page waits. The answer 254 sends the title, the last page and
+  `[ENTER][DONE]`, and a further 254 is unanswered.
+- The next click offers the menu again. The answer 1 (`Inchide`) sends `[DONE]` in skin 0.
+
+The harness reads `GC_SCRIPT` at its `WORD` size. After this section there are 57 scenarios.
+
+In the Parity inventory:
+
+- These rows are `ported`, and each names the scenario: `cg.game.script_answer`, `gc.script`,
+  and the API rows `lua.say`, `lua.mob_name`, `lua.npc.get_race` and `lua.q.yield`.
+- These rows are `partial`:
+  - `cg.game.quest_input_string` and `sys.quest.runtime`;
+  - the other 20 backed API rows;
+  - 58 rows of `quests.md`: the 50 scripts that load and the 8 libraries of the chain. The 50
+    are the 16 `quest_list` names, which compile byte for byte to the 95 files of `object/`
+    (`ox_event`, which the scenario runs, among them), and the 34 it does not name.
+- `questlib.questlib_extra`, `questlib.questing` and `questlib.quest_functions` are `unused`.
+- `quest.change_empire` stays `missing`, with the reason in its note.
+- The notes of `cg.game.on_click` (still `partial`), `cg.game.item_use`, `cg.game.item_drop`,
+  `cg.game.item_pickup`, `cg.game.exchange`, `cg.game.safebox_checkin`, `sys.item.core`,
+  `sys.npc.safebox` and `sys.trade.exchange` name the quest checks.
+
+| | ported | partial | missing | unused | codec | total |
+|---|---|---|---|---|---|---|
+| after 226 | 107 | 44 | 1432 | 3 | 59 | 1645 |
+| after 227 | 113 | 124 | 1343 | 6 | 59 | 1645 |
+
+`spec.md` said 109 client-packet rows and 1,643 in all. The tables held 111 and 1,645 before
+this section, and it now says so.
+
+### 227.6 Mutation sweep
+
+112 mutants. `mutate227.py` applied and restored each of them as in 215.7. Each run checked
+that the mutation landed in code that runs, and that each file's checksum came back afterwards:
+
+- The `quest` mutants ran `quest`'s library and tests and `prodomo`'s library.
+- The `world` and `protocol` mutants ran their crate's library.
+- Each prodomo mutant ran `prodomo`'s library.
+- The `quest`, `protocol` and prodomo mutants also ran the quest scenario and the shop
+  scenario, with `DATABASE_URL` set.
+
+No mutant failed to compile.
+
+| group | mutants | result |
+|---|---|---|
+| `quest/src/qc.rs`: the `target` event, the `set_state` check, a moved line, the `when` wrapper, the `.arg` file's first byte, a `when` number's range, the lowered event, a CRC clash's next number, the CRC polynomial, `%g`'s exponent and `start`'s number | 11 | 8 killed, 2 killed on the rerun, 1 in dead code, removed |
+| `quest/src/dialect.rs`: a quote, a line end and a control byte in a string, `%`, the `for` list's `do` and an empty list, and the space between tokens | 7 | 4 killed, 3 killed on the rerun |
+| `quest/src/lex.rs`: a name's first and later bytes, `\f`, `DEL`, the first line's `#`, `!=`, `begin`, a high byte's next byte, the decimal escape's digits, an escaped line end and any other escape, a long string's depth and first line, a long comment, an exponent's sign and `ambiguous syntax` | 16 | 14 killed, 2 killed on the rerun |
+| `quest/src/sources.rs`: the skipped directories, the trimmed line, a path that leaves the directory, the sort, a listed file that is no script and the dedupe | 6 | 4 killed, 2 killed on the rerun |
+| `quest/src/host.rs`: the shims' `int` and `checkint`, `getn`'s `n`, the runnable chat window, the state files, an empty `.when`, `dofile`'s containment, the C `int` of a large number and of `NaN`, the C string's cut, the music's default volume, the kept `os` names and the removed base names | 13 | 13 killed |
+| `quest/src/manager.rs`: the resume bound, the chosen entry, the clicked NPC, `chat` before `click`, a running script at a chat and at a click, a condition that is missing, the suppressed `[DONE]`, skin 0, the end of a script with no result, `[ENTER]`, the menu's separator, `[NEXT]`, `[INPUT]`, `Inchide`, the state flag, an entry out of range, both numbers, the skin, `[LEFTIMAGE`, `cmdchat`, the input's NUL, the input's suspension, `questnpc.txt`'s zero, the menu index, hidden and `CVS` files, the event flags, a `DWORD`, the numeric directories and `strtol`'s `+` | 31 | 21 killed, 10 killed on the rerun |
+| `prodomo/src/game_state/quests.rs` and `game_state.rs`: the input's cut and NUL, the NPC's race, a missing proto, `INFO` chat, the skin, the running check, the logout, the leave, and the drop's, pickup's and item step's check | 12 | 8 killed, 4 killed on the rerun |
+| `prodomo/src/game_state/shop.rs`, `safebox.rs` and `trade.rs`: a keeper whose quest takes the click, the checkin and the trade's check | 3 | 2 killed, 1 killed on the rerun |
+| `prodomo/src/main.rs`: the routed headers and a malformed record | 2 | 1 killed, 1 equivalent |
+| `world/src/character/equip.rs`, `ground.rs`, `trade.rs` and `item_move.rs`: the use, the drop, the pickup's item type, the trade's check, its second side, its notice and the pickup's line | 7 | 6 killed, 1 killed on the rerun |
+| `protocol/src/gc_script.rs`: the size, the skin, the header's size and the longest script | 4 | 4 killed |
+
+The first run left 27 survivors. 25 were test gaps that a new or extended test killed on the
+rerun:
+
+- **`qc`'s numbers.** `qc_when_number` read a `when` number as a signed `int`. `qc` reads it
+  with `strtoul` into an `unsigned int`, and every test used a small number. The new
+  `a_when_number_is_an_unsigned_int` compiles 3000000000. `qc_clash` skipped two numbers on a
+  CRC clash. No state of the Game data clashes, and the new
+  `a_state_whose_crc_is_taken_takes_the_next_number` makes one.
+- **The translation.** `dialect_control` wrote `DEL` into a string as itself, and
+  `strings_become_lua_51_literals` now writes it as `\127`. `dialect_do_depth` and
+  `dialect_empty_list` took the wrong `do` for a `for` list. The only list without its own `do`
+  in the tests was unfinished. `a_list_without_its_own_do_is_left_alone` now translates an empty
+  list and a list whose parenthesis never closes.
+- **The lexer and the sources.** `lex_space_ff` and `lex_control_del` refused `\f` and let
+  `DEL` through. The control-byte test, now `control_bytes_are_refused_but_c_space_is_space`,
+  reads `\v`, `\f` and `\t` as space and refuses 0x01, 0x1f and 0x7f. `src_contained` and
+  `src_missing` let a `quest_list` path leave the quest directory and let it name what is no
+  script. The Game data's list does neither. The two new `sources` tests build a quest
+  directory of their own.
+- **The answers.** `mgr_answer_resume` let 250 continue a `wait`. The OX test now answers 250
+  and then 251 at the first page. `mgr_handle_running`, `mgr_input_tag` and `mgr_input_zero`
+  let a click start a second script, changed `[INPUT]` and kept an input's bytes past its NUL.
+  No test clicked or typed while a script waited. The new
+  `a_click_while_a_script_waits_starts_no_other` and
+  `an_input_waits_for_the_text_and_nothing_else` do.
+- **The NPC index.** Seven survivors hid in the loader, and no test read anything but the Game
+  data:
+  - `mgr_questnpc_skip` kept a `questnpc.txt` line whose name is a negative number;
+  - `mgr_arg_index` refused menu entry 65535;
+  - `mgr_hidden_dot` and `mgr_hidden_cvs` loaded hidden and `cvs` files;
+  - `mgr_numeric_dirs` took `020011` as a number;
+  - `mgr_strtol_plus` read `+5` as negative.
+
+  The index, the hidden-file check and the directory's number are now functions of their
+  own. `questnpc_txt_reads_as_istream_did` and `file_names_split_as_load_state_script_did` now
+  hold these cases. The new `a_chat_menu_index_is_0_to_65535`,
+  `hidden_and_cvs_files_are_skipped` and `a_numeric_directory_is_a_number_as_printed` test the
+  rest.
+- **The world around the manager.** `qs_mob_proto` named a monster without a proto, and
+  `qs_chat_info` sent `INFO` lines as notices. The new
+  `a_script_names_existing_monsters_and_chats_in_its_lines_type` kills both. `qs_logout` and
+  `gs_leave` left a waiting script running after its character left. The new
+  `a_character_that_leaves_the_world_ends_its_waiting_script` checks that it ends.
+  `shop_quest_first` opened a keeper's shop after its quest took the click. No keeper of the
+  Game data has a quest. The new `a_keeper_whose_quest_takes_the_click_opens_no_shop` gives
+  one a quest.
+- **The trade's notice.** `trade_notice` changed `QUESTING_NOTICE`. The test compared against
+  the constant, so any text passed. It now compares against legacy's sentence.
+
+The other two:
+
+- **`qc_start_zero`** gave `start` the number 1 in a map that nothing read. `qc` writes
+  `["start"]=0` itself and leaves `start` out of the numbered states, so the dead line was
+  removed with the mutant. `quest_list_compiles_to_the_reference_objects` compares each state
+  table with `object/`, `start`'s 0 included.
+- **`main_quest_malformed`** kept the connection open after a malformed quest record. It is
+  equivalent: the framer hands the decoders only frames of their exact size, 2 and 66 bytes,
+  so a decode cannot fail. The defect it would hide is a framer size that disagrees with the
+  decoder. `the_micro_records_agree_with_the_checked_in_inventory_widths` and
+  `the_two_quest_text_records_resolve_to_66_bytes_from_one_shared_field` pin both sizes.
+
+### 227.7 Receipt
+
+101 new tests:
+
+- `quest/src/lex.rs`: 16, for `begin` and `do`, the reserved words, `!` and `!=`, a number
+  before a name, `strtod`'s numerals, a hex numeral, the escapes, an escaped line end, a high
+  byte's next byte, an open string, the long strings, the comments, the first line's `#`, the
+  names' bytes, the control bytes and the operators.
+- `quest/src/qc.rs`: 18, for the CRC-32, `%g`, a rounded number, a string that would read back
+  otherwise, the printed bodies, the three files of a numbered `when`, the condition's wrapper,
+  the `or` names, the event's case, `target`, the state numbers and the checked states, a CRC
+  clash, a `when` number, the functions, `begin_condition`, the syntax errors, an unfinished
+  source and the spotted calls.
+- `quest/src/dialect.rs`: 10, for `begin`, `!` and `!=`, the lines and comments, the strings, a
+  line end in a string, the numerals, the wrapped `for` lists, a list without its own `do`, a
+  function in a list, the refused words and operators, and a lex error's line.
+- `quest/src/host.rs`: 6, for `getn`, `insert` and `remove`, `foreachi`, a generic `for` over a
+  table, the recorders' arguments and `dofile`'s directory.
+- `quest/src/manager.rs`: 15, for the events, the OX manager's menu and entry, `Inchide`, a
+  click and an input while a script waits, an unported name, an NPC without quests, the NPC
+  index, `questnpc.txt`, the file names, the hidden files, the menu index, the numeric
+  directories, the bridged names' arguments and a `DWORD`.
+- `quest/src/sources.rs`: 2, for `quest_list`'s paths and the load order.
+- `quest/tests/host.rs`: 8, over the Game data, for the 50 scripts that load, a chat argument,
+  the state index, `settings.lua`'s records, the 699 names, the libraries legacy never loads,
+  the missing `io`, `os.execute` and `debug`, and `loadstring`'s dialect.
+- `quest/tests/reference.rs`: 3, for the 16 listed scripts against the 95 files of `object/`,
+  the 50 scripts that compile and the 10 libraries that do not, and the load order.
+- `protocol/src/gc_script.rs`: 9, for the header, the golden bytes, an empty script, the round
+  trip, NULs and high bytes, and the refusals.
+- `prodomo/src/game_state/quests.rs`: 2, for the input's cut and the monster names and chat
+  types.
+- `gamedata/src/mob_locale_names.rs`: 2, for every language's file and a language past the
+  last.
+- `prodomo/src/game_state.rs`: 2, for the leave and the use, drop and pickup of a character
+  whose script waits.
+- `prodomo/src/game_state/safebox.rs`, `shop.rs` and `trade.rs`: 1 each, for the checkin, a
+  keeper whose quest takes the click and a trade.
+- `world/src/character/equip.rs`: 1, `ground.rs`: 2, `trade.rs`: 1, for the use, the drop, the
+  pickup of a quest item and the trade of a character whose script waits.
+- `prodomo/tests/parity.rs`: the scenario in 227.5.
+
+These tests changed:
+
+- The `MoveRules`, `DropAt` and `Trader` literals in the tests of `equip.rs`, `ground.rs`,
+  `item_move.rs`, `safebox.rs`, `shop.rs` and `trade.rs`, which now name `questing: false`.
+- The game-to-client inventory counts in `gc_inventory` and `cg_wiring`, which go from 106 and
+  28 to 107 and 27.
+
+The count went from 2938 to 3039. These gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 3039 passed, 0 failed |
+| the same with `DATABASE_URL` set | 3039 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 19 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+The 19th ignored doc block is `gc_script`'s quote of `packet_script`, written as `gc_safebox`'s
+is. The tests added after the sweep's first run are in the count.
+
+After the run, no `prodomo_%` database remains, no `*.core` file is outside `target/`, and the
+`sources` tests left no directory in the temporary directory. The workspace has 241 Rust files
+and 176,565 lines, outside `server/` and `.scratch/`. No crate was fetched: `mlua`'s `send`
+feature needs none, and `Cargo.lock` is unchanged. `psql` is not installed, so the store was
+read through `podman exec` into the database's container. The i686 `g++` is not installed
+either, so the i686 probe was not run.

@@ -172,6 +172,13 @@ pub const DEFAULT_GAME_TABLES: &str = "legacy/sql/gamedata";
 pub const LOCALE_DIR: &str = "locale/europe";
 
 impl ServerConfig {
+    /// The Locale folder: `<game_data>/locale/europe`, holding `settings.lua`, `translate.lua`
+    /// and the `quest` folder.
+    #[must_use]
+    pub fn locale_dir(&self) -> PathBuf {
+        self.game_data.join(LOCALE_DIR)
+    }
+
     /// The map folder: `<game_data>/locale/europe/map`, holding the `index` file and one folder
     /// per map.
     #[must_use]

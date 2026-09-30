@@ -73,6 +73,7 @@ pub mod gc_nested;
 pub mod gc_npc_position;
 pub mod gc_position;
 pub mod gc_safebox;
+pub mod gc_script;
 pub mod gc_shop;
 pub mod gc_small;
 pub mod gc_vid;

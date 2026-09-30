@@ -30,6 +30,8 @@ pub const ITEM_METIN: i32 = 10;
 pub const ITEM_ROD: i32 = 13;
 /// `ITEM_UNIQUE`.
 pub const ITEM_UNIQUE: i32 = 16;
+/// `ITEM_QUEST`, an item a quest reads.
+pub const ITEM_QUEST: i32 = 18;
 /// `ITEM_PICK`, a pickaxe.
 pub const ITEM_PICK: i32 = 24;
 /// `ITEM_TOTEM`, which `FindEquipCell` refuses whatever its wear flags say.
@@ -202,6 +204,7 @@ mod tests {
             (ITEM_METIN, "ITEM_METIN"),
             (ITEM_ROD, "ITEM_ROD"),
             (ITEM_UNIQUE, "ITEM_UNIQUE"),
+            (ITEM_QUEST, "ITEM_QUEST"),
             (ITEM_PICK, "ITEM_PICK"),
             (ITEM_TOTEM, "ITEM_TOTEM"),
             (ITEM_BLEND, "ITEM_BLEND"),

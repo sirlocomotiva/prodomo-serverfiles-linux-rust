@@ -56,10 +56,13 @@
 //!
 //! # Not ported
 //!
-//! The quest check on `START` (`GiveItemToPC`), the spectator check, `IsSecured`, the
-//! exchange-block mode, the personal shop, the cube and the aura window are not in the Rewrite,
-//! so none refuses a trade. An open safebox refuses as an open shop does (`exchange.cpp:92-98`).
-//! The mall does not: `IsOpenSafebox` is the safebox only.
+//! The spectator check, `IsSecured`, the exchange-block mode, the personal shop, the cube and the
+//! aura window are not in the Rewrite, so none refuses a trade. An open safebox refuses as an
+//! open shop does (`exchange.cpp:92-98`). The mall does not: `IsOpenSafebox` is the safebox only.
+//! The quest check on `START` (`CQuestManager::GiveItemToPC`, `G/questmanager.cpp:892-916`) runs
+//! a quest's `target` click on the player asked, and no quest can set a target (`target.*` is not
+//! ported), so it never takes the trade, as in the Rewrite. A script that waits for either
+//! side's client refuses the trade when both accept ([`world::character::QUESTING_NOTICE`]).
 
 use common::item_slots::usable_inventory_cells;
 use common::vid::Vid;
@@ -564,6 +567,7 @@ impl GameState {
             quickslots: character.quickslots().clone(),
             gold: character.gold(),
             usable_cells: usable_inventory_cells(character.inven_point()),
+            questing: self.quest_running(vid),
         })
     }
 
@@ -1549,6 +1553,42 @@ mod tests {
         assert_eq!(square.character(Y).gold(), 400);
         assert!(square.character(A).items().item_at(inventory(3)).is_some());
         assert_eq!(sent(square.step(Y, start(ALPHA))).len(), 1);
+    }
+
+    /// `@fixme150` (`G/exchange.cpp:617-630`): both accept while a script of Alpha waits for
+    /// its client, and the trade ends with each side told why; once the script ends it settles.
+    #[test]
+    fn a_script_that_waits_refuses_the_trade_when_both_accept() {
+        let mut square = a_square(&[(inventory(3), potions(ALPHAS, 5))], &[]);
+        square.state.start_a_quest(ALPHA);
+        square.started();
+        let add = TradeStep::AddItem {
+            at: inventory(3),
+            display: 0,
+        };
+        let _item = sent(square.step(A, add));
+        let _accepted = sent(square.step(A, TradeStep::Accept));
+        let _told = square.heard(Y);
+        let answer = square.step(Y, TradeStep::Accept);
+        // `LC_TEXT("You cannot trade if the other part using quests")` and
+        // `LC_TEXT("You cannot trade if you're using quests")` (`G/exchange.cpp:620-621`).
+        let told = vec![
+            line(2, "You cannot trade if the other part using quests"),
+            end(),
+        ];
+        assert_eq!(declined(answer), (TradeDeclined::Unsettled, told));
+        let own = line(1, "You cannot trade if you're using quests");
+        assert_eq!(square.heard(A), vec![own, end()]);
+        assert!(square.is_idle());
+        assert!(!square.is_offered(A, ALPHAS));
+        square.state.end_the_quest(ALPHA);
+        square.started();
+        let _item = sent(square.step(A, add));
+        let _accepted = sent(square.step(A, TradeStep::Accept));
+        assert!(matches!(
+            square.step(Y, TradeStep::Accept),
+            TradeAnswer::Settled(_)
+        ));
     }
 
     #[test]

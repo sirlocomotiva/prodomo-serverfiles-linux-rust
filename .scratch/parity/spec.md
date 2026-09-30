@@ -10,7 +10,7 @@ porting status. Build step 2 (`docs/STATUS.md`). The Rewrite reaches Parity when
 
 | file | rows | kept by | what one row is |
 |---|---|---|---|
-| `client-packets.md` | 109 | generated | A client header handled in one phase, plus the two framing rules (`cg.any.*`) |
+| `client-packets.md` | 111 | generated | A client header handled in one phase, plus the two framing rules (`cg.any.*`) |
 | `sub-headers.md` | 113 | generated | One sub-command a game-phase handler dispatches on |
 | `server-records.md` | 134 | generated | A record the client decodes (from the client's registration table) |
 | `commands.md` | 267 | generated | A chat command in the live `cmd_info` table |
@@ -19,7 +19,7 @@ porting status. Build step 2 (`docs/STATUS.md`). The Rewrite reaches Parity when
 | `quests.md` | 62 | generated | A quest script (51) or a quest library (11) |
 | `systems.md` | 115 | by hand | A system: the behaviour behind the entry points above |
 | `gamedata.md` | 45 | by hand | A Game data file or table and its reader |
-| **total** | **1,643** | | |
+| **total** | **1,645** | | |
 
 The generated rows come from the **live** legacy source only: `tools/active.py` runs the C
 preprocessor over each file with the legacy build's defines (FreeBSD, clang, i386, `NDEBUG`,
@@ -70,6 +70,10 @@ scenarios need a store and run only when `DATABASE_URL` is set, like every datab
   always runs on its fallbacks. `MapProperty.txt`, `charset.txt`, and `pet_skill_names.txt`
   have no reader either. Rows `data.lua.unread`, `data.map.property`, `data.locale.charset`,
   `data.locale.names`.
+- **`questlib_extra.lua` and `questing.lua` are never loaded, and only `qc` reads
+  `quest_functions`** (ledger 227). Rows `questlib.questlib_extra`, `questlib.questing`,
+  `questlib.quest_functions`. `questlib_extra.lua` holds the only setter of
+  `item_drop_limit_time`, so ledger 217's one-second drop limit waits for the owner's value.
 - **`HEADER_CG_STATE_CHECKER` (0xce) is served in the handshake phase**, before auth: it is the
   Channel status list on the login screen. Row `sys.net.channel_status`.
 - **`ENVANTER_BLACK` (0xe2)** is a client header without the `HEADER_CG_` prefix

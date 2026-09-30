@@ -386,6 +386,7 @@ mod tests {
         count_limit: 200,
         usable_cells: 90,
         belt_grade: None,
+        questing: false,
     };
 
     fn inv(cell: u16) -> ItemPos {
