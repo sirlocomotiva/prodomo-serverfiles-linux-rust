@@ -17,6 +17,7 @@ mod model;
 mod points;
 mod potion;
 mod quickslot;
+mod safebox;
 mod shop;
 mod state;
 mod trade;
@@ -69,6 +70,11 @@ pub use potion::{is_recovering, update_recovery, SE_HPUP_RED, SE_SPUP_BLUE};
 pub use quickslot::{
     add_from_client, chains_when_used_up, find_specify_item, sync_quickslots, Quickslot,
     QuickslotRecord, QuickslotSync, Quickslots, SyncTo, QUICKSLOT_MAX_NUM,
+};
+pub use safebox::{
+    checkin, checkout, move_stored, Safebox, SafeboxRefused, StoreChange, StoreMove, StoreRecord,
+    IRREMOVABLE_NOTICE, MALL_ROWS, SAFEBOX_PAGE_SIZE, SAFEBOX_ROWS, SAFEBOX_WIDTH,
+    UNIQUE_ITEM_SAFEBOX_EXPAND, WRONG_BANK_NOTICE,
 };
 pub use shop::{
     buy_item, sale_price, sell_item, unported_creation, ShopRefused, UnportedCreation,

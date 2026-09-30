@@ -24083,3 +24083,421 @@ and `Cargo.lock` is unchanged. `psql` is not installed, so the store was read th
 tests' own queries. The i686 `g++` is not installed either, so the i686 probe was not run.
 `GC_EXCHANGE`'s 74 bytes are summed from the packed `packet_exchange` in `gc_exchange`'s module
 doc, with `long` four bytes wide on the 32-bit target.
+
+## 226. The safebox and the mall: `CSafebox`, the command interpreter and the account's Transfer
+
+An account can now keep items in its safebox behind a password and take items from its mall. In
+legacy no client record opens either window. The client sends the chat line `/click_safebox`,
+the server answers the command line `ShowMeSafeboxPassword`, and the client sends
+`/safebox_password <password>`. So this section also ports `interpret_command`
+(`G/cmd.cpp:610-717`), the walk that runs every chat line starting with `/`. The windows are
+`CSafebox` (`G/safebox.cpp`), opened and closed by `CHARACTER::ReqSafeboxLoad`, `LoadSafebox`,
+`CloseSafebox`, `LoadMall` and `CloseMall` (`G/char.cpp:7041-7345`). The three records that act
+on them are `CInputMain::SafeboxCheckin`, `SafeboxCheckout` and `SafeboxItemMove`
+(`G/input_main.cpp:2276-2474`). The stored items belong to the account, not to a character
+(ADR-0005, new in this section), so a checkin or a checkout is a Transfer between a character
+and its account. Until this section the Rewrite decoded the three records and the move and
+answered nothing, and a slash line was logged and dropped.
+
+### 226.1 What landed
+
+- **ADR-0005.** `docs/adr/0005-account-owned-safebox.md` records the owner's decision. Safebox
+  and mall rows carry `item.account_id` and never `owner_id`. A checkin or checkout is one
+  Transfer between a character and its account. The `safebox` table holds only an argon2id
+  hash of the password. `AGENTS.md` and `docs/STATUS.md` name it with the other four.
+- **The records.** `protocol::gc_safebox` writes `GC_SAFEBOX_SET` (85) and `GC_MALL_SET` (128).
+  Each is the 72-byte `TPacketGCItemSet` under its own header, and `StoreWindow` keeps the
+  header and the cell's window together, so one record cannot carry the safebox's header and
+  the mall's window. `CSafebox::Add` never writes the highlight; the Rewrite sends 0 (226.3).
+  The delete (86, 129), size (88), mall-open (122) and wrong-password (87) records use the small
+  shapes that already had codecs. The codec inventory goes from 104 to 106 of 134
+  game-to-client records.
+- **The store.** Migration `0008_safebox.sql`:
+  - adds `item.account_id`, which references `account` and is removed with it;
+  - replaces `0005_items.sql`'s ground check with `item_holder_check`. A ground row (window 10)
+    has no holder, a `SAFEBOX` (3) or `MALL` (4) row has only the account, and every other row
+    has only the character;
+  - adds `item_account_cell_key`, one row per account, window and cell, deferrable as the
+    character's cell key is;
+  - creates `safebox (account_id, password_hash)`, whose check requires the argon2id prefix.
+    Legacy's size and gold columns are not carried over (226.3).
+- **The password.** `db::safebox` keeps the password.
+  - `SafeboxPassword::new` takes 1 to 6 bytes, as `ReqSafeboxLoad` and
+    `do_safebox_change_password` check them (`[LS;526]`). Its `Debug` never shows the bytes.
+  - `verify_password` compares with the stored hash off the async threads. An account without
+    a row opens only with `000000`, as legacy answers (`D/ClientManager.cpp:746-766`).
+  - `change_password` reads the row `FOR UPDATE`, checks the old password and writes the new
+    hash in one transaction. For an account without a row it inserts one, and it answers
+    `false` when another change created the row first (226.3).
+  - The hash is `credentials::hash_bytes`, the argon2id of the login passwords (ADR-0003).
+- **The account's rows.** `db::items` knows the account's two windows.
+  - `ItemRow` carries `account_id`. `load_account_items` reads one window of an account, as
+    legacy's `owner_id = account AND window = SAFEBOX|MALL` does (`D/ClientManager.cpp:790-814`).
+  - `RowChange::Stored` moves a character's row into its account's safebox. `RowChange::Retrieved`
+    moves an account's row from the safebox or the mall into the character's inventory. Both
+    run inside `apply_transfer`'s transaction, which first reads the character's account and
+    refuses a change that names another account (`ItemError::ForeignAccount`).
+  - `apply_account_changes` writes one move inside a window in one transaction under the
+    account: `AccountChange::Moved`, `Count` and `Destroyed`. The cell check names the change
+    that landed on a taken cell, as it does for a character.
+- **The windows.** `world::character::safebox` is `CSafebox` and the three input arms.
+  - A `Safebox` is one open window of `SAFEBOX_ROWS` (9) or `MALL_ROWS` (27) rows, five cells
+    wide. An item takes a column as tall as its size, as `CGrid(5, rows)` places it.
+    `Safebox::open` places each loaded row and skips one whose cells are taken or run past the
+    last row (226.3).
+  - `checkin` runs `SafeboxCheckin`'s checks in legacy's order. It refuses:
+    - an empty cell, silently;
+    - an item offered in a trade, silently (226.3);
+    - an irremovable item outside the cells it may leave, with the `input_main.cpp:2297` line;
+    - safebox cells that are taken or run past the last row, with `[LS;666]`;
+    - the expansion scroll 71009 and `ITEM_ANTIFLAG_SAFEBOX`, with `[LS;667]`;
+    - a belt whose inventory holds items, with `[LS;1095]`.
+
+    A worn item, a dragon soul stone and an item outside `INVENTORY` are refused silently
+    (226.4). Otherwise the item leaves its cell, the slots that named the cell are deleted, and
+    the safebox shows it.
+  - `checkout` refuses an empty cell silently, a custom bank the item does not belong to with
+    `Nu poti plasa acest obiect aici.`, inventory cells that are taken silently, and a belt cell
+    that does not take the item with `[LS;1097]`. The item then reaches the inventory. It is
+    highlighted unless it was checked in during this opening, and a sash rolls its absorption,
+    as `AddToCharacter` does.
+  - `move_stored` is `CSafebox::MoveItem`. A cell outside the window, an empty cell and a count
+    above the stack are refused. A stackable item of the same vnum at the destination is a
+    merge, which needs equal sockets and moves at most what the stack still takes. Otherwise
+    the item moves when its column is free, and is refused silently when it is not.
+- **The command interpreter.** `prodomo::command::interpret` is `interpret_command`.
+  - **The flood.** A character that is not a GM counts its slash lines. Once a line arrives
+    more than 25 Pulses after the count started, the count starts again. The tenth line of one
+    count closes the connection (`ENABLE_ANTI_CMD_FLOOD`, `G/cmd.cpp:612-625`).
+  - **The walk.** The line is copied with each `$` doubled, and its first word is lowered.
+    `command::table::COMMANDS` holds the 267 walked entries of `cmd_info` under the owner's
+    defines. The walk takes the first entry the word names: a `do_cmd` entry by its whole name,
+    any other by a prefix, so an empty word names `who`.
+  - **The position check** runs before the walk's end is checked, so a word that names nothing
+    can still get a position line: `[LS;917]` mounted, `[LS;918]` dead, `[LS;919]` asleep and
+    `[LS;920]` resting or sitting.
+  - **The end of the walk.** A word that names nothing, and an entry above the character's GM
+    level, answer `This command does not exist.`
+  - **The ported commands.** The seven `do_inputall` entries (`safebox_passwor` and the rest)
+    answer `[LS;916]`. `click_safebox` and `click_mall` answer their command lines. The five
+    safebox and mall commands open, close and change the password. Every other entry is
+    `Command::NotPorted`, which is logged and answers nothing (226.3).
+- **The game state.** `prodomo::game_state::safebox` keeps what legacy keeps on the character:
+  the open windows, the pending load and the Pulse of the last load of each window.
+  - `BeginOpen` and `BeginMall` refuse an open window with `[LS;527]`, and a load within 250
+    Pulses of the last load or close with `[LS;828]` (the safebox) or `[LS;528]` (the mall).
+    Otherwise they start the wait and ask the connection to check the password.
+  - A wrong password sends `GC_SAFEBOX_WRONG_PASSWORD` and keeps the wait.
+  - `Open` and `OpenMall` refuse, with `[LS;773]`, a character that now trades or browses a
+    shop. Otherwise they send the size and each item.
+  - `Close` and `CloseMall` send the `CloseSafebox` or `CloseMall` command line and restart the
+    wait. Leaving the world forgets both windows silently.
+  - `Checkin`, `Checkout` and `Move` run the world's reducers on the open window. The checkin
+    and checkout answer `Moved`, the same store step as an inventory move. A move inside the
+    window answers `Rearranged` with the account's row changes.
+- **The other windows.** An open safebox refuses a shop click with `[LS;876]`, a trade `START`
+  with the other-transaction line, and a partner's `START` with the busy line. For 250 Pulses
+  after its safebox loads or closes, a character's trade steps are refused with
+  `[LS;661;10]`. The player a `START` asks is sent the line when its own wait runs.
+- **The wiring.** `main.rs` sends a chat line whose text starts with `/` to `run_command`, which
+  runs the interpreter and the command.
+  - `/safebox_password` and `/mall_password` take the first argument as `one_argument` does,
+    check its length, ask the game thread to begin, and then check the hash and load the rows.
+    `/safebox_change_password` answers `[LS;774]` when the change is done and `[LS;775]` when
+    the old password is wrong.
+  - `CG_SAFEBOX_CHECKIN` (70), `CG_SAFEBOX_CHECKOUT` (71), `CG_MALL_CHECKOUT` (69) and
+    `CG_SAFEBOX_ITEM_MOVE` (77) are routed in the game phase. A malformed record closes the
+    connection.
+  - Each step is stored before its records are sent. A store that fails closes the
+    connection, as an inventory move's does.
+  - The interpreter is told the character's GM level, `GM_PLAYER` for now, and its position,
+    sitting or standing (226.3).
+
+### 226.2 What the client sees
+
+- `/click_safebox` is answered with the command line `ShowMeSafeboxPassword`, and
+  `/click_mall` with `ShowMeMallPassword`.
+- A password longer than six bytes, or none, is answered with `[LS;526]` before the store is
+  asked.
+- The right password sends `GC_SAFEBOX_SIZE` with 9, then one `GC_SAFEBOX_SET` for each stored
+  item. The mall sends `GC_MALL_OPEN` with 27 and a `GC_MALL_SET` for each item.
+- A wrong password sends `GC_SAFEBOX_WRONG_PASSWORD`. Within ten seconds of any load or close,
+  the next load is answered with `[LS;828]` for the safebox and `[LS;528]` for the mall, and an
+  open window with `[LS;527]`.
+- A checkin clears the inventory cell, deletes the quickslots that named it, and sends
+  `GC_SAFEBOX_SET`. A checkout sends the window's delete record, then the item set in the
+  inventory, highlighted unless it went in during this opening. A move sends the delete of the
+  source and the set of the destination. A merge sends the source's delete or its new count,
+  then `GC_ITEM_UPDATE` for the stack in the safebox.
+- `/safebox_close` and `/mall_close` send the command lines `CloseSafebox` and `CloseMall`.
+- A short `do_inputall` word such as `/mall_passwor` sends `[LS;916]`. A command this build does
+  not port answers nothing. The tenth slash line within a second closes the connection.
+- A relog, or another character of the same account, finds the stored items where they were
+  left.
+
+### 226.3 Divergences and Defects
+
+Seven new Divergences, each a row in `docs/STATUS.md`:
+
+- **The account's own column.** Safebox and mall rows carry `item.account_id`, and the
+  `safebox` table holds only the argon2id hash (ADR-0005). Legacy keeps the account id in
+  `owner_id` and the password in plain text next to a size and a gold column. The size is
+  never read in the owner's build, which always opens one page (`G/input_db.cpp:1135-1150`),
+  and the gold is never shown.
+- **The password change.** A change creates the account's row when it is missing, and the old
+  password must match exactly. Legacy answers 0 for an account without a row, which only a
+  size change creates, and no quest of the owner's makes one. It also compares the old
+  password without case (`strcasecmp`, `D/ClientManager.cpp:1101`), which a hash cannot do.
+- **The first load.** A character whose safebox never loaded opens it and trades at once.
+  `m_iSafeboxLoadTime` starts at 0 (`G/char.cpp:278`) and is compared with the Pulse, so for
+  the first ten seconds after the process starts every load waits and every trade step is
+  refused.
+- **One size.** The safebox opens one page of nine rows and the mall 27 rows for every account,
+  and the mall opens with what the account holds in it. What is not ported is in 226.4.
+- **The dungeon check.** `/click_safebox` is never refused on a dungeon or war map
+  (`G/cmd_general.cpp:3494-3498`): no map of the Rewrite is one yet.
+- **The interpreter.** A command this build does not port answers nothing, every character is
+  `GM_PLAYER`, and a character is either standing or sitting. Legacy runs every entry of
+  `cmd_info` for a high enough GM level and checks eight positions. The GM audit will give the
+  levels, and each system's commands arrive with it.
+- **An offered item.** A checkin of an item offered in a trade is refused silently. Legacy
+  cannot reach one, because an open safebox refuses a trade and an open trade refuses the
+  safebox's load (`G/input_db.cpp:1140`).
+
+Three rows of 224 and 225 now name the safebox. The shop's other-window row says that only an
+open safebox refuses a shop. The trade's unported-checks row says that an open safebox refuses a
+trade and that a load or close holds back the character's steps. The custom-bank Defect of 211
+also covers a checkout into a bank (`G/input_main.cpp:2392-2396`).
+
+Four legacy Defects are not reproduced, each in `docs/STATUS.md`'s list:
+
+- **A merge loses items.** `CSafebox::MoveItem` takes the source out of the safebox before it
+  subtracts the merged count (`G/safebox.cpp:216-220`). A partial merge therefore loses the
+  part that did not fit, and a merge onto a full stack loses the whole source. Its count is
+  also a `BYTE`, although the client sends a `WORD`. The Rewrite destroys the source only when
+  every item moved, leaves the rest in its cell, changes nothing when none fits, and counts the
+  whole `WORD`.
+- **Two items share a cell.** `CSafebox::Add` ignores the answer of `Put`
+  (`G/safebox.cpp:69`), so a loaded row whose cells are taken or run past the last row shares
+  a cell with another item. The Rewrite skips the row and logs it.
+- **The highlight is garbage.** `CSafebox::Add` never writes the set record's highlight, so the
+  client reads whatever the stack held. The Rewrite sends 0.
+- **The wait line reaches the wrong player.** `CInputMain::Exchange` looks up `arg1` for every
+  subheader (`G/input_main.cpp:1377-1383`). When the character it names loaded or closed its
+  safebox within ten seconds, that character is sent the trade-wait line, even when `arg1` is
+  an amount of gold or a cell that happens to be a VID. The Rewrite checks the wait of the
+  player a `START` asks, and no other.
+
+### 226.4 Not ported yet
+
+- **The larger safebox.** The six pages of a premium account, and the large-safebox item
+  (`UNIQUE_GROUP_LARGE_SAFEBOX`, which none of the owner's special item groups holds).
+- **The mall's item awards** (`item_award`, `D/ClientManager.cpp:726-900`).
+- **A worn item and a dragon soul stone** into the safebox, and a checkout into the dragon soul
+  inventory.
+- **The item lock, `IsSecured`, `CanHandleItem`, the running-quest check** and the item log.
+- **The other readers of the load time**: `IsHack` (`G/char.cpp:8226-8240`), `CanWarp`
+  (`:8788-8793`) and the summoning items (`G/char_item.cpp:7254-7261`). None of their commands
+  or items is ported.
+- **`game.set_safebox_level`**, the quest function that sizes the safebox. None of the owner's
+  quests calls it.
+- **Every other command** of `cmd_info`, and the GM levels.
+
+### 226.5 Scenario and Parity inventory
+
+`an_account_keeps_items_in_its_safebox_and_takes_them_from_its_mall` stands the trade
+scenario's Alpha (alice) and Yankee (bob) on map 1, and adds alice's Echo in slot 2, who holds
+nothing. Alpha holds 7 of the stackable `ITEM_USE` vnum at cell 5, in item row 30, with every
+relayed field distinct. Alice's mall holds 3 of the same vnum at cell 2, in item row 31, whose
+fields nothing wrote. The vnum carries no `ITEM_ANTIFLAG_SAFEBOX`.
+
+- Alpha sets slot 2 on cell 5, then clicks the safebox and is sent `ShowMeSafeboxPassword`.
+- Seven bytes are refused with `[LS;526]`. `000000` opens one empty page of nine rows, because
+  alice has no `safebox` row. A second open is refused with `[LS;527]`.
+- Alpha checks the item in at safebox cell 6. The inventory cell is cleared, slot 2 is deleted
+  and the safebox shows the item. By then the store holds row 30 under alice's account, in the
+  safebox at cell 6. A move to cell 11 deletes cell 6 and sets cell 11.
+- Alpha opens the mall with `000000`: 27 rows and the item at cell 2. A checkout to cell 10
+  deletes mall cell 2 and sets the item highlighted, and row 31 is then Alpha's.
+- A second on, Alpha closes both windows and is sent `CloseSafebox` and `CloseMall`. Each
+  reload is refused, with `[LS;828]` and `[LS;528]`, and a second close answers nothing.
+- Alpha changes the password from `000000` to `s3cret` (`[LS;774]`) and tries the same change
+  again (`[LS;775]`). The store holds an argon2id hash that does not contain the password.
+- Alpha leaves. Echo opens the safebox with `s3cret` at once, sees the item at cell 11, and
+  takes it to cell 0 highlighted, because it went in during another opening. Row 30 is then
+  Echo's.
+- Echo clicks the mall and is sent `ShowMeMallPassword`. `/safebox_passwor`,
+  `/safebox_change_passwor` and `/mall_passwor` each answer `[LS;916]`.
+- Yankee tries `s3cret`, which is wrong for bob's account, and is sent
+  `GC_SAFEBOX_WRONG_PASSWORD`. `000000` is then refused with `[LS;828]`, because the wrong
+  password started the wait.
+- A second on, Yankee types `/mall_passwor` ten times. Nine are answered, and the tenth closes
+  the connection.
+
+Two scenarios changed. The chat scenario's slash line is now `/restart_here`, which reaches
+the interpreter and answers nothing, because `do_restart` is not ported. The pose scenario
+types `/dance1` while sitting, and is sent `[LS;920]`, and again while standing, which answers
+nothing, because `do_emotion` is not ported. Yankee hears neither. The harness reads the
+safebox's and the mall's records at their lengths.
+
+In the Parity inventory:
+
+- These rows are `ported`, and each names the scenario:
+  - `cg.game.safebox_checkin`, `cg.game.safebox_checkout`, `cg.game.safebox_item_move` and
+    `cg.game.mall_checkout`;
+  - `cmd.click_safebox`, `cmd.click_mall`, `cmd.safebox_password`, `cmd.safebox_close`,
+    `cmd.safebox_change_password`, `cmd.mall_password`, `cmd.mall_close` and the three
+    `do_inputall` rows, `cmd.safebox_passwor`, `cmd.safebox_change_passwor` and
+    `cmd.mall_passwor`;
+  - `gc.safebox_set`, `gc.safebox_del`, `gc.safebox_wrong_password`, `gc.safebox_size`,
+    `gc.mall_open`, `gc.mall_set` and `gc.mall_del`.
+- `sys.npc.safebox` and `sys.net.flood` are `partial`. Their notes name what 226.4 leaves out,
+  and the packet flood (`ENABLE_FLOOD_PRETECTION`).
+
+### 226.6 Mutation sweep
+
+99 mutants. `mutate226.py` applied and restored each of them as in 215.7:
+
+- The `world` and `protocol` mutants ran their crate's library. The `db` mutants, the
+  migration's among them, ran `db`'s library and its `items` and `safebox` tests with
+  `DATABASE_URL` set.
+- Each prodomo mutant ran `prodomo`'s library.
+- Mutants in `world/src/character/safebox.rs`, `db/src/safebox.rs`, `db/src/items.rs`,
+  `db/src/credentials.rs`, the migration, `gc_safebox.rs`, `gc_inventory.rs`, `command.rs`,
+  `command/table.rs`, `game_state.rs`, `game_state/safebox.rs`, `game_state/trade.rs`,
+  `game_state/shop.rs`, `item_move.rs`, `item_load.rs` and `main.rs` also ran every Parity
+  scenario, with `DATABASE_URL` set.
+- Mutants in `main.rs` also ran `process.rs`'s start-up test.
+
+No mutant failed to compile.
+
+| group | mutants | result |
+|---|---|---|
+| `prodomo/src/command.rs` and `command/table.rs`: the flood's limit, count, window, GM exemption and restart; the prefix match, the entry that needs its whole name, the position check, an unknown word's position, the GM level, the `$` line's cut, the lowered word and the `[LS;916]` line; the click entries' handlers | 14 | 13 killed, 1 killed on the rerun |
+| `prodomo/src/main.rs`: the sitting position read and passed on, the kept flood count, the `[LS;916]` line's type and its send, the click's command and its chat type | 7 | 7 killed |
+| `prodomo/src/game_state/safebox.rs`: the trade wait's bound, load time and mall fallback; the begin's open check, wait bound and both wait lines; the wrong password's wait; the open during a trade or a browse; each close's load time; the size, mall and wrong-password records and a moved row's window | 16 | 13 killed, 3 killed on the rerun |
+| `prodomo/src/game_state/trade.rs`, `shop.rs` and `game_state.rs`: the partner's wait guard and line, the wait line's receiver, the sender's wait and its line, and either side's open safebox; a shop click with the safebox open; the leave's close | 9 | 9 killed |
+| `prodomo/src/item_move.rs` and `item_load.rs`: the store's set record and delete cell, and the stored and retrieved rows' account; the stored items loaded and their window | 6 | 6 killed |
+| `db/src/safebox.rs` and `credentials.rs`: the password's bounds, the default, a missing row, the old password, the insert against the update, the written count, the SQLSTATE and the hash's case | 9 | 9 killed |
+| `db/src/items.rs` and `0008_safebox.sql`: the account load's window, a stored row's account, a retrieved row's owner and account check, a foreign account, the stored conflict's window and the holder column; the mall's holder rule and the cell key | 9 | 8 killed, 1 killed on the rerun |
+| `protocol/src/gc_safebox.rs` and `gc_inventory.rs`: the window byte, the three headers, the header's offset, the highlight, the decoder's window check and the inventory row | 8 | 8 killed |
+| `world/src/character/safebox.rs` and `world/src/item.rs`: the checkin's anti-flag, exchange, pinned cells, worn item, height, quickslot and deposit mark; the room's last row and column; the load's window; the checkout's bank, any bank, belt and taken cell; the move's refusal; the merge's destroy record, rest, full stack and count; the safebox anti-flag's bit | 21 | 14 killed, 7 killed on the rerun |
+
+The first run left 12 survivors. None was equivalent. Each was a test gap that a new or
+extended test killed on the rerun:
+
+- **The flood's window.** `cm_flood_window_reset_ge` started a new count on the 25th Pulse.
+  Legacy starts one only when `thecore_pulse() > pulse + PASSES_PER_SEC(1)`
+  (`G/cmd.cpp:615`). The tests sent their lines on one Pulse or far apart. The new
+  `the_count_lasts_through_its_twenty_fifth_pulse` sends nine more lines on the 25th Pulse,
+  and the ninth, the count's tenth, disconnects. After one line, nine on the 26th Pulse start a
+  new count and do not.
+- **A shop at the load.** `gs_open_while_browsing_opens` opened a safebox that arrived while
+  its character browsed a shop. `CInputDB::SafeboxLoad` refuses it with `[LS;773]` when a shop
+  or a trade is open (`G/input_db.cpp:1137-1142`), and only the trade was tested. The new
+  `a_safebox_that_arrives_while_its_character_browses_a_shop_is_not_opened` browses first.
+- **The mall's close.** `gs_close_mall_keeps_mall_load_time` left the mall's load time alone
+  at a close. `do_mall_close` sets it before it closes the mall
+  (`G/cmd_general.cpp:1050-1058`). The test closed the mall on the Pulse it loaded, so the
+  load time was already that Pulse. `the_mall_opens_27_rows_and_is_not_the_safebox` now closes
+  it later, and then a reload of the mall waits and a load of the safebox does not.
+- **The mall's load and a trade.** `req_trade_gate_mall` let a mall's load hold back a trade
+  when the safebox had never loaded. `CInputMain::Exchange` reads only `GetSafeboxLoadTime`
+  (`G/input_main.cpp:1379`, `:1393`). Every test that loaded a mall had loaded the safebox
+  first. The new `a_mall_that_loads_as_the_trade_starts_holds_nothing_back` loads only the
+  malls.
+- **The stored row's account.** `db_stored_account_is_character` stored a checked-in row
+  under the character's ID instead of the account's. The test's account and character both
+  had ID 1. `a_checkin_hands_the_row_to_the_account` now creates a spare account first, so the
+  two differ.
+- **The safebox anti-flag's bit.** `ws_item_antiflag_safebox_wrong_bit` gave
+  `ITEM_ANTIFLAG_SAFEBOX` bit 16, which is `ANTI_MYSHOP`'s. The test's prototype used the
+  constant itself, so any bit passed. The new
+  `every_anti_flag_is_the_bit_its_proto_name_reads_as` in `world/src/item.rs` checks each
+  anti-flag against its name's place in the proto reader's table
+  (`D/ProtoReader.cpp:365-393`).
+- **The first locked cell.** `ws_checkin_irremovable_first_locked_cell_free` let an
+  irremovable item leave cell 90, the first locked cell. The test pinned it only at 95. The
+  refusal test now also refuses cell 90 and takes the item from cell 89.
+- **The column.** `ws_has_room_column_stride` looked for room along the row instead of down
+  the column. Every tall item in the tests stood where both were free. The new
+  `room_is_looked_for_down_the_column_not_along_the_row` fills the cell below, and then the
+  cell beside.
+- **The loaded row's window.** `ws_open_window_unchecked` loaded a row of the other window.
+  The only such row in the tests lay on a taken cell. The load-order test now adds a mall row
+  at a free cell.
+- **The bank's number.** `ws_checkout_bank_only_first` checked every bank as bank 0. The
+  leather belongs to both of its banks, so the test passed. The checkout refusal test now
+  takes an item of bank 0 alone into the leather's bank.
+- **The merge's rest.** `ws_merge_small_remainder_destroyed` destroyed the source when less
+  stayed than moved, a part of the merge Defect in 226.3. Each partial merge in the tests left
+  more than it moved. The new `a_rest_smaller_than_the_moved_count_stays_where_it_was` moves 8
+  of 10.
+- **The count's byte.** `ws_merge_count_truncated_to_byte` cut the asked count to a byte, as
+  `CSafebox::MoveItem` does (the same Defect). No test asked for more than 255. The new
+  `an_asked_count_past_a_byte_is_not_cut_to_one` asks for 300.
+
+### 226.7 Receipt
+
+83 new tests:
+
+- `world/src/character/safebox.rs`: 23, for the windows' sizes, an item's column, room down a
+  column, the load order, the opening's records, a checkin, every refused checkin, the custom
+  banks, a belt, a worn, offered or foreign item, a checkout's highlight, a sash, every refused
+  checkout, the belt cells, a move, a refused move, a whole merge, a partial merge, an asked
+  count, a small rest, a count past a byte, a moved item's mark and the refusals' sentences.
+- `world/src/item.rs`: 1, for the anti-flags' bits.
+- `prodomo/src/command.rs`: 12, for the table, the prefix, the type-in-full entries,
+  `do_cmd`'s whole name, an unknown word, the GM level, the position, the flood and its 25th
+  Pulse, the `$` and the cut, the word's length and the arguments.
+- `prodomo/src/game_state/safebox.rs`: 13, for a character not online, a first load, the
+  pending load and the wait, an open, a load during a trade, a close, the mall, a step without
+  its window, a checkin and a checkout, a refused checkin, a move, a move onto taken cells and
+  the leave.
+- `prodomo/src/game_state/trade.rs`: 6, for an open safebox on either side, the sender's
+  wait, the asked side's wait, a load during a trade, a mall's load and a load while browsing.
+- `prodomo/src/game_state/shop.rs`: 1, for a click with the safebox open.
+- `db/src/safebox.rs`: 4, for the password's length, the default, the `Debug` and the hash.
+- `db/tests/safebox.rs`: 16. Fifteen are for the holder rule, one item per cell, an account's
+  load, no row, a change without a row, the exact old password, no account, a checkin, a checkin
+  to another account, a taken cell, a checkout by any character, a checkout of a row not held, a
+  move, a move checked before the store and the account's deletion. The sixteenth is the shared
+  `support` module's own `a_database_url_keeps_its_credentials_host_and_options`, which every
+  suite that includes the module runs.
+- `protocol/src/gc_safebox.rs`: 6, for the headers, the safebox record's bytes, the mall
+  record, the round trip, the refusals and the two records that refuse each other.
+- `prodomo/tests/parity.rs`: the scenario in 226.5.
+
+These tests changed:
+
+- The chat and pose scenarios, as 226.5 says.
+- The `ItemRow` literals in `db/tests/items.rs`, `item_row.rs` and `item_load`'s tests, which
+  now name `account_id`. `item_row.rs` pins it as the thirteenth field, and the three
+  `NotOwned` matches in `db/tests/items.rs` also check it.
+- The game-to-client inventory counts in `gc_inventory` and `cg_wiring`, which go from 104 and
+  30 to 106 and 28.
+
+The count went from 2855 to 2938. These gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2938 passed, 0 failed |
+| the same with `DATABASE_URL` set | 2938 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 18 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+The first run of these gates failed `cargo doc`. The `command` module's doc linked
+`interpret`, `Command` and `Command::NotPorted` by bare names, which its outer doc in `lib.rs`
+resolves from the crate root. It also linked the private `table::COMMANDS` and `ARGUMENT_MAX`.
+The links now name `crate::command::…`, the private items are plain code, and every gate ran
+again. The 18th ignored doc block is `gc_safebox`'s quote of `CSafebox::Add`, written as
+`gc_exchange`'s wire layout is.
+
+After the run, no `prodomo_%` database remains, and no `*.core` file is outside `target/`. The
+workspace has 230 Rust files and 168,517 lines, outside `server/` and `.scratch/`. No crate was
+fetched, and `Cargo.lock` is unchanged. `psql` is not installed, so the store was read
+through the tests' own queries. The i686 `g++` is not installed either, so the i686 probe was
+not run.

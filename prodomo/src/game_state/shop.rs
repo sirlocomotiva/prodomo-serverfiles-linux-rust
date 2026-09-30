@@ -10,11 +10,12 @@
 //!
 //! A click (`CHARACTER::OnClick`, `G/char.cpp:6181-6352`, then `StartShopping`,
 //! `G/shop_manager.cpp:115-161`) is ignored when the VID names no NPC, when the character trades
-//! (`G/char.cpp:6210-6217`), when the NPC's click trigger is not the shop's, when the character
-//! already browses that keeper, when the keeper
-//! is `SHOP_MAX_DISTANCE` or farther, when no shop names the keeper's vnum, and when the
-//! character browses another keeper. Otherwise the window opens with each price tripled for a
-//! stranger unless `disable_shop_price_3x` is set.
+//! (`G/char.cpp:6210-6217`), when the NPC's click trigger is not the shop's, and when the character
+//! already browses that keeper. Then an open safebox refuses it with `[LS;876]`
+//! (`G/shop_manager.cpp:124-127`), and it is ignored when the keeper is `SHOP_MAX_DISTANCE` or
+//! farther, when no shop names the keeper's vnum, and when the character browses another keeper.
+//! Otherwise the window opens with each price tripled for a stranger unless `disable_shop_price_3x`
+//! is set.
 //!
 //! A buy or a sale is ignored with no keeper, and refused with `[LS;877]` from more than 2000
 //! away (`G/shop_manager.cpp:385-454`, `:456-594`). A buy of a position past the window answers
@@ -34,11 +35,11 @@
 //! - **The tripled price.** A stranger is shown each price tripled, but `CShop::Buy` charges
 //!   the price untripled (the tripling is commented out, `G/shop.cpp:658-659`). The Rewrite
 //!   charges the price it showed.
-//! - **Unported gates.** The other-window check (`[LS;876]`), which a trade never reaches
-//!   because `OnClick` has already ignored the click, `IsSecured`, `CanHandleItem`, a locked
-//!   item, the quest click that runs first and the buy-and-sell throttle belong to systems the
-//!   Rewrite does not have: none of them is open, secured, locked, scripted or set, so none
-//!   refuses.
+//! - **Unported gates.** Of the other-window check (`[LS;876]`) only the safebox refuses: a trade
+//!   never reaches it because `OnClick` has already ignored the click, and the personal shop, the
+//!   cube and the aura window are not in the Rewrite. `IsSecured`, `CanHandleItem`, a locked item,
+//!   the quest click that runs first and the buy-and-sell throttle belong to systems the Rewrite
+//!   does not have: none of them is open, secured, locked, scripted or set, so none refuses.
 
 use std::sync::Arc;
 
@@ -155,6 +156,8 @@ pub enum ShopDeclined {
     },
     /// The character already browses that keeper.
     AlreadyBrowsing,
+    /// The character has its safebox open (`[LS;876]`, `shop_manager.cpp:124`).
+    SafeboxOpen,
     /// The keeper stands `SHOP_MAX_DISTANCE` or farther.
     OutOfReach {
         /// `DISTANCE_APPROX` to the keeper.
@@ -275,6 +278,12 @@ impl GameState {
         let open = self.browsing.get(&vid).copied();
         if open.is_some_and(|open| open.keeper == target) {
             return ShopAnswer::silent(ShopDeclined::AlreadyBrowsing);
+        }
+        if self.safebox_open(vid) {
+            return ShopAnswer::Declined {
+                reason: ShopDeclined::SafeboxOpen,
+                records: vec![notice(SAFEBOX_OPEN_NOTICE, mover, &self.locale)],
+            };
         }
         let distance =
             distance_approx(place.x.saturating_sub(npc.x), place.y.saturating_sub(npc.y));
@@ -459,6 +468,9 @@ fn refusal(refused: ShopRefused, mover: Mover, locale: &LocaleStrings) -> ShopAn
     }
 }
 
+/// A shop opened while the safebox is open (`shop_manager.cpp:124-127`).
+pub const SAFEBOX_OPEN_NOTICE: &str = "[LS;876]";
+
 /// A `CHAT_TYPE_INFO` line to the mover.
 pub(super) fn notice(text: &str, mover: Mover, locale: &LocaleStrings) -> Vec<u8> {
     chat_packet(
@@ -510,6 +522,7 @@ mod tests {
 
     use crate::client_registry::ClientOutbox;
     use crate::game_loop_messages::GameCommand;
+    use crate::game_state::SafeboxStep;
 
     const SHOPPER: Vid = Vid::new(7);
     /// 9007, whose shop sells weapons.
@@ -885,6 +898,45 @@ mod tests {
         let bought = moved(buy(&mut state, 1));
         assert_eq!(bought.gold, Some(-3000));
         assert_eq!(held(&state, 0), Some((5020, 1)));
+    }
+
+    /// Open the shopper's safebox, or its mall, with nothing in it.
+    fn open_store(state: &mut GameState, mall: bool) {
+        let account = 3;
+        let items = Vec::new();
+        let steps = if mall {
+            [
+                SafeboxStep::BeginMall,
+                SafeboxStep::OpenMall { account, items },
+            ]
+        } else {
+            [SafeboxStep::BeginOpen, SafeboxStep::Open { account, items }]
+        };
+        for step in steps {
+            let _answer = state.safebox(SHOPPER, step, of(1)).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_open_safebox_refuses_a_shop_before_its_distance_and_the_mall_does_not() {
+        let mut state = a_market(10_000, &[], true);
+        open_store(&mut state, false);
+        let refused = ShopAnswer::Declined {
+            reason: ShopDeclined::SafeboxOpen,
+            records: vec![line(&state, SAFEBOX_OPEN_NOTICE.as_bytes())],
+        };
+        assert_eq!(click(&mut state, WEAPONS, at(5000)), refused);
+        assert_eq!(click(&mut state, WEAPONS, at(0)), refused);
+        let talk = ShopAnswer::silent(ShopDeclined::NotAShop { on_click: 2 });
+        assert_eq!(
+            click(&mut state, TALKER, at(0)),
+            talk,
+            "the trigger comes first"
+        );
+        assert!(state.browsing.is_empty());
+        let _closed = state.safebox(SHOPPER, SafeboxStep::Close, of(1)).unwrap();
+        open_store(&mut state, true);
+        let _window = open(&mut state, WEAPONS);
     }
 
     #[test]

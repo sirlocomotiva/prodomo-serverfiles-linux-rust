@@ -14,7 +14,8 @@ use world::npc::MapNpcs;
 
 use crate::client_registry::ClientOutbox;
 use crate::game_state::{
-    EnterWorldRefused, Released, RevokeRefused, ShopAnswer, ShopStep, TradeAnswer, TradeStep,
+    EnterWorldRefused, Released, RevokeRefused, SafeboxAnswer, SafeboxStep, ShopAnswer, ShopStep,
+    TradeAnswer, TradeStep,
 };
 use crate::item_grant::{GrantOutcome, GrantRefusal, GrantRequest};
 use crate::item_move::{MoveItemRefused, MovedItems, Mover};
@@ -425,6 +426,17 @@ pub enum GameCommand {
         mover: Mover,
         /// Where the game thread reports what the step did.
         reply: oneshot::Sender<Result<TradeAnswer, MoveItemRefused>>,
+    },
+    /// Runs one safebox or mall step for the character online under `vid`.
+    Safebox {
+        /// The VID of the character whose client sent the step.
+        vid: common::vid::Vid,
+        /// The step.
+        step: SafeboxStep,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the step did.
+        reply: oneshot::Sender<Result<SafeboxAnswer, MoveItemRefused>>,
     },
     /// Requests terminal loop shutdown.
     Stop,
@@ -1191,6 +1203,29 @@ impl GameLoopController {
             vid,
             step,
             place,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one safebox or mall step, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn safebox(
+        &self,
+        vid: common::vid::Vid,
+        step: SafeboxStep,
+        mover: Mover,
+    ) -> Result<Result<SafeboxAnswer, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Safebox {
+            vid,
+            step,
             mover,
             reply,
         })

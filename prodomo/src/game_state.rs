@@ -56,10 +56,15 @@ use crate::save::PASSES_PER_SEC;
 use crate::sync_position::distance_approx;
 use world::character::{add_from_client, sync_quickslots};
 
+mod safebox;
 mod shop;
 mod trade;
 
-pub use shop::{ShopAnswer, ShopDeclined, ShopStep};
+pub use safebox::{
+    SafeboxAnswer, SafeboxStep, ALREADY_OPEN_NOTICE, LOAD_WAIT_PULSES, MALL_WAIT_NOTICE,
+    OTHER_WINDOW_NOTICE, SAFEBOX_WAIT_NOTICE, TRADE_WAIT_NOTICE, TRADE_WAIT_SECONDS,
+};
+pub use shop::{ShopAnswer, ShopDeclined, ShopStep, SAFEBOX_OPEN_NOTICE};
 pub use trade::{
     TradeAnswer, TradeDeclined, TradeSettled, TradeStep, EXCHANGE_SUBHEADER_CG_ACCEPT,
     EXCHANGE_SUBHEADER_CG_CANCEL, EXCHANGE_SUBHEADER_CG_ELK_ADD, EXCHANGE_SUBHEADER_CG_ITEM_ADD,
@@ -379,6 +384,8 @@ pub struct GameState {
     trades: BTreeMap<u32, trade::Deal>,
     /// The trade each trading character is in and its side of it, keyed by its VID.
     trading: HashMap<common::vid::Vid, (u32, Side)>,
+    /// The safebox and mall of each character that has opened one, keyed by its VID.
+    storages: HashMap<common::vid::Vid, safebox::Storage>,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -445,6 +452,7 @@ impl GameState {
             positions: None,
             trades: BTreeMap::new(),
             trading: HashMap::new(),
+            storages: HashMap::new(),
         }
     }
 
@@ -683,7 +691,8 @@ impl GameState {
             command @ (GameCommand::MoveItem { .. }
             | GameCommand::UseItem { .. }
             | GameCommand::Shop { .. }
-            | GameCommand::Trade { .. }) => self.apply_item_step(command),
+            | GameCommand::Trade { .. }
+            | GameCommand::Safebox { .. }) => self.apply_item_step(command),
             command @ (GameCommand::DropItem { .. }
             | GameCommand::PickupItem { .. }
             | GameCommand::GroundItemsOn { .. }
@@ -888,6 +897,7 @@ impl GameState {
         let _outbox = self.outboxes.remove(&vid);
         let _event = self.recovering.remove(&vid);
         self.stop_browsing(vid);
+        self.close_storage(vid);
         let character = self.characters.find_by_vid(vid).ok()?;
         let kept = Kept {
             points: character.points().cloned(),
@@ -1071,6 +1081,16 @@ impl GameState {
                         ?step,
                         "a trade step ran and nobody was left to store it"
                     );
+                }
+            }
+            GameCommand::Safebox {
+                vid,
+                step,
+                mover,
+                reply,
+            } => {
+                if reply.send(self.safebox(vid, step, mover)).is_err() {
+                    warn!(?vid, "a safebox step ran and nobody was left to store it");
                 }
             }
             _ => debug_assert!(false, "only item steps reach apply_item_step"),

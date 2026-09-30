@@ -45,6 +45,9 @@ owner.
 - **ADR-0004: quests run on Lua 5.1** through `mlua`, and `qc` is ported to Rust. All 51 quest
   scripts in `legacy/gamedata/locale/europe/quest` are live. A 5.0 idiom that 5.1 lacks gets a
   shim; a quest source is never edited.
+- **ADR-0005: the safebox and the mall belong to the account.** Their item rows carry
+  `item.account_id`, never `owner_id`; a checkin or checkout is one Transfer between a character
+  and its account. The `safebox` table holds only an argon2id password hash.
 
 Further owner decisions, recorded in `CONTEXT.md` and `docs/STATUS.md`:
 
@@ -144,7 +147,7 @@ Key every coverage metric on the **wire byte**, never on an identifier name.
 | direction | registered | implemented | missing |
 |---|---|---|---|
 | client to game | 92 | 91 | 1 (`KEY_AGREEMENT`, dead: `_IMPROVED_PACKET_ENCRYPTION_` is never defined) |
-| game to client | 134 | 104 | 30 (15 fixed-size, 15 dynamic) |
+| game to client | 134 | 106 | 28 (13 fixed-size, 15 dynamic) |
 
 - The game-to-client registration table was taken from the client's `PythonNetworkStream.cpp`
   while the client source was in the repository. It is recorded in `protocol/src/gc_inventory.rs`.

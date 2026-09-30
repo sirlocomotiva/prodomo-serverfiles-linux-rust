@@ -22,6 +22,8 @@ pub mod chat;
 
 /// `CHARACTER::ChatPacket`: a server line, in the descriptor's language, to one character.
 pub mod chat_line;
+/// The command interpreter (`interpret_command`) and its table.
+pub mod command;
 
 /// The Channel status list answered to `STATE_CHECKER`.
 pub mod channel_status;

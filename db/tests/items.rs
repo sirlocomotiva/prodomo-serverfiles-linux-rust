@@ -28,6 +28,7 @@ fn row(id: u32, owner_id: u32, window_type: u8, pos: u32) -> ItemRow {
     ItemRow {
         id,
         owner_id: Some(owner_id),
+        account_id: None,
         window_type,
         pos,
         vnum: 30_000,
@@ -352,9 +353,14 @@ async fn a_destroy_is_refused_for_an_item_another_character_holds() {
     save_item(store, &row(1_000_014, one, 1, 2)).await.unwrap();
 
     match destroy_item(store, 1_000_014, two).await {
-        Err(ItemError::NotOwned { id, owner_id }) => {
+        Err(ItemError::NotOwned {
+            id,
+            owner_id,
+            account_id,
+        }) => {
             assert_eq!(id, 1_000_014);
             assert_eq!(owner_id, Some(one));
+            assert_eq!(account_id, None);
         }
         other => panic!("expected NotOwned, got {other:?}"),
     }
@@ -1048,7 +1054,8 @@ async fn an_exchange_gives_the_rows_both_ways_and_moves_the_gold_with_them() {
             refused,
             Err(ItemError::NotOwned {
                 id: 1_000_252,
-                owner_id: Some(holder)
+                owner_id: Some(holder),
+                account_id: None,
             }) if holder == two
         ),
         "{refused:?}"
@@ -1301,7 +1308,8 @@ async fn a_change_the_owner_cannot_make_rolls_back_the_whole_move() {
                 refused,
                 Err(ItemError::NotOwned {
                     id: 1_000_211,
-                    owner_id: Some(owner)
+                    owner_id: Some(owner),
+                    account_id: None,
                 }) if owner == two
             ),
             "{theirs:?} gave {refused:?}"

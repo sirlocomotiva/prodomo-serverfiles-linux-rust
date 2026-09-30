@@ -11,12 +11,18 @@
 //!
 //! # The order
 //!
+//! First the safebox wait (`G/input_main.cpp:1377-1397`): a `START` whose VID names another
+//! player on the map whose safebox loaded or closed within
+//! [`LOAD_WAIT_PULSES`](crate::game_state::LOAD_WAIT_PULSES) tells that player the wait line
+//! and the sender nothing, and any step of a character whose own safebox did is refused with
+//! that line. The mall's loads do not count.
+//!
 //! A `START` is ignored while the character trades already, and when the VID names nobody on
 //! its map. Then gold at `GOLD_MAX_MAX` is refused with the yang-limit line, and a browsed shop
-//! with the other-transaction line; then `ExchangeStart` ignores the character itself and an
-//! NPC, refuses a player who browses a shop with the busy line, ignores one
-//! `EXCHANGE_MAX_DISTANCE` or farther away, and answers `ALREADY` when that player trades
-//! already. Otherwise both windows open.
+//! or an open safebox with the other-transaction line; then `ExchangeStart` ignores the
+//! character itself and an NPC, refuses a player who browses a shop or has its safebox open
+//! with the busy line, ignores one `EXCHANGE_MAX_DISTANCE` or farther away, and answers
+//! `ALREADY` when that player trades already. Otherwise both windows open.
 //!
 //! An offer (`ITEM_ADD`, `ITEM_DEL`, `ELK_ADD`) runs only while the other side does not accept.
 //! The accept that completes the trade settles it: the store writes both sides' rows in one
@@ -36,9 +42,14 @@
 //!   the process and `DISTANCE_APPROX` ignores the map, so a client naming a player on another
 //!   map at the same coordinates starts a trade with it. Only a modified client names one: a
 //!   Defect. The Rewrite looks on the character's own Channel and map.
-//! - **The dead partner.** `CInputMain::Exchange` looks up `arg1` and refuses a dead character
-//!   for every subheader, although only `START` names a character (a Defect). The Rewrite looks
-//!   up the character for `START` alone; nobody dies yet, so neither refuses.
+//! - **The partner of every step.** `CInputMain::Exchange` looks up `arg1` for every subheader,
+//!   although only `START` names a character (a Defect): the step is ignored when that
+//!   character waits after a safebox load, which tells it the wait line, or is dead. The
+//!   Rewrite checks the wait of the player a `START` asks alone. Nobody dies yet, so no step is
+//!   ignored for a dead character.
+//! - **A safebox never loaded.** Legacy's load time starts at 0 (`G/char.cpp:278`), so every
+//!   trade step waits for the first 10 seconds after the process starts. A character whose
+//!   safebox never loaded does not wait in the Rewrite.
 //! - **A failed store.** The world settles first and the store writes after, as every item move
 //!   does. When the write fails the character whose accept completed the trade is disconnected,
 //!   and its partner keeps the world's side of the trade until it relogs.
@@ -46,8 +57,9 @@
 //! # Not ported
 //!
 //! The quest check on `START` (`GiveItemToPC`), the spectator check, `IsSecured`, the
-//! exchange-block mode, the safebox, the personal shop, the cube and the aura window are not in
-//! the Rewrite, so none refuses a trade.
+//! exchange-block mode, the personal shop, the cube and the aura window are not in the Rewrite,
+//! so none refuses a trade. An open safebox refuses as an open shop does (`exchange.cpp:92-98`).
+//! The mall does not: `IsOpenSafebox` is the safebox only.
 
 use common::item_slots::usable_inventory_cells;
 use common::vid::Vid;
@@ -174,6 +186,13 @@ impl TradeStep {
 /// Why a trade step changed nothing, or ended the trade unsettled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TradeDeclined {
+    /// The character's safebox loaded or closed within
+    /// [`LOAD_WAIT_PULSES`](crate::game_state::LOAD_WAIT_PULSES).
+    SafeboxWait,
+    /// The player a `START` asks had its safebox load or close within
+    /// [`LOAD_WAIT_PULSES`](crate::game_state::LOAD_WAIT_PULSES); that player is told why, and
+    /// the sender nothing.
+    PartnerSafeboxWait,
     /// The character trades already.
     Trading,
     /// No character on the character's map has the VID asked.
@@ -282,6 +301,9 @@ impl GameState {
         if self.characters.find_by_vid(vid).is_err() {
             return Err(MoveItemRefused::NoSuchCharacter { vid });
         }
+        if let Some(waits) = self.safebox_wait(vid, step, place, mover) {
+            return Ok(waits);
+        }
         Ok(match step {
             TradeStep::Start { target } => self.start_trade(vid, target, place, mover),
             TradeStep::AddItem { at, display } => {
@@ -333,6 +355,33 @@ impl GameState {
         }
     }
 
+    /// The safebox wait of `CInputMain::Exchange` (`G/input_main.cpp:1377-1397`): the other
+    /// player a `START` asks, then the sender.
+    fn safebox_wait(
+        &self,
+        vid: Vid,
+        step: TradeStep,
+        place: GroundPlace,
+        mover: Mover,
+    ) -> Option<TradeAnswer> {
+        if let TradeStep::Start { target } = step {
+            let partner = Vid::new(target);
+            let asked = match self.find_target(target, place) {
+                Some(Found::Player { mover: asked, .. }) if partner != vid => Some(asked),
+                _ => None,
+            };
+            if let Some(asked) = asked.filter(|_| self.safebox_loaded_recently(partner)) {
+                let _sent = self.write_to_client(partner, self.trade_wait_line(asked));
+                return Some(TradeAnswer::silent(TradeDeclined::PartnerSafeboxWait));
+            }
+        }
+        self.safebox_loaded_recently(vid)
+            .then(|| TradeAnswer::Declined {
+                reason: TradeDeclined::SafeboxWait,
+                records: vec![self.trade_wait_line(mover)],
+            })
+    }
+
     /// The `START` arm of `CInputMain::Exchange`, then `ExchangeStart`.
     fn start_trade(
         &mut self,
@@ -351,7 +400,7 @@ impl GameState {
         if gold >= GOLD_MAX_MAX {
             return self.told(TradeDeclined::YangLimit, YANG_LIMIT_NOTICE, mover);
         }
-        if self.browsing.contains_key(&vid) {
+        if self.browsing.contains_key(&vid) || self.safebox_open(vid) {
             return self.told(
                 TradeDeclined::OtherTransaction,
                 OTHER_TRANSACTION_NOTICE,
@@ -365,7 +414,7 @@ impl GameState {
             return TradeAnswer::silent(TradeDeclined::NotAPlayer);
         };
         let partner = Vid::new(target);
-        if self.browsing.contains_key(&partner) {
+        if self.browsing.contains_key(&partner) || self.safebox_open(partner) {
             return self.told(TradeDeclined::PartnerBusy, PARTNER_BUSY_NOTICE, mover);
         }
         let distance = distance_approx(place.x.saturating_sub(x), place.y.saturating_sub(y));
@@ -710,6 +759,9 @@ mod tests {
     use crate::client_registry::{ClientEntry, Lease};
     use crate::game_loop::PulseProcessor;
     use crate::game_loop_messages::GameCommand;
+    use crate::game_state::{
+        SafeboxAnswer, SafeboxStep, LOAD_WAIT_PULSES, OTHER_WINDOW_NOTICE, TRADE_WAIT_SECONDS,
+    };
     use crate::game_state::{ShopAnswer, ShopStep};
     use crate::sync_position::SyncPositionVictimKind;
 
@@ -789,9 +841,42 @@ mod tests {
             assert!(matches!(answer, ShopAnswer::Sent(_)), "{answer:?}");
         }
 
+        /// Open `who`'s safebox, or its mall, with nothing in it.
+        fn open_store(&mut self, who: usize, mall: bool) {
+            let (vid, _, _, empire) = PEOPLE[who];
+            let account = 3;
+            let items = Vec::new();
+            let steps = if mall {
+                [
+                    SafeboxStep::BeginMall,
+                    SafeboxStep::OpenMall { account, items },
+                ]
+            } else {
+                [SafeboxStep::BeginOpen, SafeboxStep::Open { account, items }]
+            };
+            for step in steps {
+                let _answer = self.state.safebox(vid, step, of(empire)).unwrap();
+            }
+        }
+
+        fn close_store(&mut self, who: usize, mall: bool) {
+            let (vid, _, _, empire) = PEOPLE[who];
+            let step = if mall {
+                SafeboxStep::CloseMall
+            } else {
+                SafeboxStep::Close
+            };
+            let _answer = self.state.safebox(vid, step, of(empire)).unwrap();
+        }
+
         fn leave_shop(&mut self, who: usize) {
             let (vid, _, _, empire) = PEOPLE[who];
             let _ended = self.state.shop(vid, ShopStep::End, at(0), of(empire));
+        }
+
+        /// Let every load so far stop holding back a trade.
+        fn wait_out(&mut self) {
+            self.state.last_pulse += LOAD_WAIT_PULSES;
         }
 
         /// Alpha asks Yankee, and both windows open.
@@ -934,6 +1019,18 @@ mod tests {
     /// A `CHAT_TYPE_INFO` line of `text` to a player of `empire`.
     fn line(empire: u8, text: &str) -> Vec<u8> {
         notice(text, of(empire), &LocaleStrings::default())
+    }
+
+    /// The safebox-wait line, `[LS;661;10]`, to a player of `empire`.
+    fn wait_line(empire: u8) -> Vec<u8> {
+        let locale = LocaleStrings::default();
+        let seconds = [Arg::Int(TRADE_WAIT_SECONDS)];
+        chat_packet(
+            of(empire).recipient(&locale),
+            CHAT_TYPE_INFO,
+            b"[LS;661;%d]",
+            &seconds,
+        )
     }
 
     fn gold_change(vid: Vid, value: u64, amount: i64) -> Vec<u8> {
@@ -1094,6 +1191,133 @@ mod tests {
         assert_eq!(declined(again), silent(TradeDeclined::Trading));
         assert!(!square.state.trading.contains_key(&ALPHA));
         assert!(square.heard(A).is_empty());
+    }
+
+    #[test]
+    fn an_open_safebox_on_either_side_refuses_a_start_and_the_mall_does_not() {
+        let mut square = a_square(&[], &[]);
+        square.open_store(A, false);
+        square.wait_out();
+        let busy = square.step(A, start(YANKEE));
+        let told = vec![line(1, OTHER_TRANSACTION_NOTICE)];
+        assert_eq!(declined(busy), (TradeDeclined::OtherTransaction, told));
+        square.close_store(A, false);
+        square.open_store(Y, false);
+        square.wait_out();
+        let partner_busy = square.step(A, start(YANKEE));
+        let told = vec![line(1, PARTNER_BUSY_NOTICE)];
+        assert_eq!(declined(partner_busy), (TradeDeclined::PartnerBusy, told));
+        square.close_store(Y, false);
+        square.wait_out();
+        // Both malls load on the Pulse the trade starts: their loads hold nothing back.
+        square.open_store(A, true);
+        square.open_store(Y, true);
+        square.started();
+    }
+
+    #[test]
+    fn every_step_waits_ten_seconds_after_the_senders_safebox_loads_or_closes() {
+        let mut square = a_square(&[], &[]);
+        square.state.last_pulse = 1_000;
+        square.open_store(A, false);
+        square.close_store(A, false);
+        square.state.last_pulse = 1_000 + LOAD_WAIT_PULSES - 1;
+        for target in [YANKEE, ALPHA] {
+            let held = square.step(A, start(target));
+            assert_eq!(
+                declined(held),
+                (TradeDeclined::SafeboxWait, vec![wait_line(1)])
+            );
+        }
+        assert!(square.heard(A).is_empty() && square.heard(Y).is_empty());
+        assert!(square.state.trades.is_empty());
+        square.state.last_pulse = 1_000 + LOAD_WAIT_PULSES;
+        square.started();
+    }
+
+    #[test]
+    fn a_start_is_ignored_while_the_player_asked_waits_after_its_safebox_loads() {
+        let mut square = a_square(&[], &[]);
+        square.state.last_pulse = 1_000;
+        square.open_store(Y, false);
+        square.close_store(Y, false);
+        let _closed = square.heard(Y);
+        square.state.last_pulse = 1_000 + LOAD_WAIT_PULSES - 1;
+        let held = square.step(A, start(YANKEE));
+        assert_eq!(declined(held), silent(TradeDeclined::PartnerSafeboxWait));
+        assert_eq!(square.heard(Y), vec![wait_line(2)]);
+        assert!(square.heard(A).is_empty());
+        assert!(square.state.trades.is_empty());
+        // Yankee's own steps wait as well; Alpha's do not.
+        let own = square.step(Y, start(ALPHA));
+        assert_eq!(
+            declined(own),
+            (TradeDeclined::SafeboxWait, vec![wait_line(2)])
+        );
+        square.state.last_pulse = 1_000 + LOAD_WAIT_PULSES;
+        square.started();
+    }
+
+    #[test]
+    fn a_safebox_that_loads_during_a_trade_holds_back_its_accept_and_its_cancel() {
+        let mut square = a_square(&[], &[]);
+        square.state.last_pulse = 1_000;
+        square.started();
+        let (vid, _, _, empire) = PEOPLE[A];
+        let begun = square
+            .state
+            .safebox(vid, SafeboxStep::BeginOpen, of(empire));
+        assert!(matches!(begun, Ok(SafeboxAnswer::Proceed)), "{begun:?}");
+        for step in [TradeStep::Accept, TradeStep::Cancel] {
+            let held = square.step(A, step);
+            assert_eq!(
+                declined(held),
+                (TradeDeclined::SafeboxWait, vec![wait_line(1)])
+            );
+        }
+        assert!(square.state.trading.contains_key(&ALPHA));
+        assert!(square.heard(Y).is_empty());
+        // Yankee's steps name no character: they do not wait on Alpha's safebox.
+        let accepted = sent(square.step(Y, TradeStep::Accept));
+        assert_eq!(
+            accepted,
+            vec![exchange(EXCHANGE_SUBHEADER_GC_ACCEPT, true, 1)]
+        );
+        let _heard = square.heard(A);
+        square.state.last_pulse = 1_000 + LOAD_WAIT_PULSES;
+        let cancelled = sent(square.step(A, TradeStep::Cancel));
+        assert_eq!(cancelled, vec![end()]);
+        assert!(square.is_idle());
+    }
+
+    #[test]
+    fn a_mall_that_loads_as_the_trade_starts_holds_nothing_back() {
+        // `CInputMain::Exchange` waits on `GetSafeboxLoadTime` alone (`G/input_main.cpp:1379`,
+        // `:1393`), and neither safebox ever loaded here.
+        let mut square = a_square(&[], &[]);
+        square.open_store(A, true);
+        square.open_store(Y, true);
+        square.started();
+    }
+
+    #[test]
+    fn a_safebox_that_arrives_while_its_character_browses_a_shop_is_not_opened() {
+        let mut square = a_square(&[], &[]);
+        let (vid, _, _, empire) = PEOPLE[A];
+        let begun = square
+            .state
+            .safebox(vid, SafeboxStep::BeginOpen, of(empire));
+        assert!(matches!(begun, Ok(SafeboxAnswer::Proceed)), "{begun:?}");
+        square.browse(A);
+        let (account, items) = (3, Vec::new());
+        let open = SafeboxStep::Open { account, items };
+        let answer = square.state.safebox(vid, open, of(empire)).unwrap();
+        let told = vec![line(1, OTHER_WINDOW_NOTICE)];
+        assert!(
+            matches!(&answer, SafeboxAnswer::Sent(records) if *records == told),
+            "{answer:?}"
+        );
+        assert!(!square.state.safebox_open(ALPHA));
     }
 
     #[test]

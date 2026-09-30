@@ -11,6 +11,7 @@ pub mod item_id_range;
 pub mod items;
 pub mod players;
 pub mod quickslots;
+pub mod safebox;
 pub mod store;
 
 pub use store::{Store, StoreConfig, StoreError};

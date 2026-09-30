@@ -75,6 +75,7 @@ use super::inventory::{
 use super::items::{CharacterItems, CountRefused, Rejected};
 use super::points::PointRecord;
 use super::quickslot::{QuickslotRecord, QuickslotSync, SyncTo};
+use super::safebox::StoreRecord;
 use crate::item::{gc_item_clear, Item, ItemId, ItemIds, ITEM_FLAG_IRREMOVABLE};
 use common::enums::EWearPositions;
 
@@ -148,6 +149,10 @@ pub enum MoveKind {
     Sold,
     /// A trade went through: the offered items and gold changed hands (`CExchange::Done`).
     Traded,
+    /// An item went into the safebox (`SafeboxCheckin`).
+    Stored,
+    /// An item came out of the safebox or the mall (`SafeboxCheckout`).
+    Retrieved,
 }
 
 /// A record the client is sent, in the order legacy sends it.
@@ -201,6 +206,8 @@ pub enum MoveRecord {
         /// The gold held now.
         value: u64,
     },
+    /// A safebox or mall record, which only the owner is sent.
+    Store(StoreRecord),
 }
 
 /// A record about a ground item (`CItem::EncodeInsertPacket`, `EncodeRemovePacket`,
@@ -263,6 +270,24 @@ pub enum ItemChange {
         /// The store id of the character that holds it now.
         to: u32,
         /// Where that character stores it.
+        pos: ItemPos,
+    },
+    /// The item left the character for the account's safebox.
+    Stored {
+        /// The item.
+        id: ItemId,
+        /// The store id of the account.
+        account: u32,
+        /// The safebox cell.
+        pos: u32,
+    },
+    /// The item left the account's safebox or mall for the character.
+    Retrieved {
+        /// The item.
+        id: ItemId,
+        /// The store id of the account it left.
+        account: u32,
+        /// Where the character stores it.
         pos: ItemPos,
     },
 }

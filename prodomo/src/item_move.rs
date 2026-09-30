@@ -32,7 +32,7 @@ use protocol::gc_vid::{GcHeaderAndDword, GcSpecialEffect, HEADER_GC_ITEM_GROUND_
 use protocol::item_pos::ItemPos;
 use world::character::{
     CharacterItems, CharacterLook, GroundRecord, ItemChange, MoveDone, MoveFacts, MoveKind,
-    MoveRecord, MoveRefused, Points, Quickslots,
+    MoveRecord, MoveRefused, Points, Quickslots, StoreRecord,
 };
 use world::item::Item;
 
@@ -155,6 +155,10 @@ impl MovedItems {
                 MoveRecord::QuickslotSync(_) => continue,
                 MoveRecord::Gold { amount, value } => {
                     GcCharacterGoldChange::new(vid, amount, value).encode_into(&mut frame);
+                    false
+                }
+                MoveRecord::Store(record) => {
+                    frame = store_record(record);
                     false
                 }
             };
@@ -281,6 +285,20 @@ pub fn row_changes(owner_id: u32, changes: &[ItemChange]) -> Vec<RowChange> {
                 id: *id,
                 sockets: *sockets,
             },
+            ItemChange::Stored { id, account, pos } => RowChange::Stored {
+                id: *id,
+                account: *account,
+                pos: *pos,
+            },
+            ItemChange::Retrieved { id, account, pos } => {
+                let (window_type, pos) = stored_row_position(*pos);
+                RowChange::Retrieved {
+                    id: *id,
+                    account: *account,
+                    window_type,
+                    pos,
+                }
+            }
             ItemChange::Given { id, to, pos } => {
                 let (window_type, pos) = stored_row_position(*pos);
                 RowChange::Given {
@@ -294,12 +312,26 @@ pub fn row_changes(owner_id: u32, changes: &[ItemChange]) -> Vec<RowChange> {
         .collect()
 }
 
+/// A safebox or mall record's wire bytes.
+#[must_use]
+pub fn store_record(record: StoreRecord) -> Vec<u8> {
+    let mut frame = Vec::new();
+    match record {
+        StoreRecord::Set(set) => set.encode_into(&mut frame),
+        StoreRecord::Del { window, pos } => {
+            GcHeaderAndDword::new(window.del_header(), pos).encode_into(&mut frame);
+        }
+    }
+    frame
+}
+
 /// The row a split's new item is stored as.
 fn item_row(owner_id: u32, item: &Item) -> ItemRow {
     let (window_type, pos) = stored_row_position(item.pos);
     ItemRow {
         id: item.id,
         owner_id: Some(owner_id),
+        account_id: None,
         window_type,
         pos,
         vnum: item.vnum,

@@ -10,7 +10,9 @@
 //!
 //! * `ItemRow` has `owner_id` and `window_type` where `Item` has `pos: ItemPos`.
 //!   `ItemPos` is the packed `BYTE window_type` + `WORD cell`, so the split is at the
-//!   storage boundary and is a shape difference, not drift.
+//!   storage boundary and is a shape difference, not drift. `ItemRow` also has
+//!   `account_id`, the holder of a safebox or mall row (ADR-0005), which the world keeps
+//!   with the safebox and not on the item.
 //! * `Item` has `size: u8` and `ItemRow` has no such column, because the grid
 //!   footprint is `TItemTable::bSize`, a **prototype** fact. The table does not store it
 //!   and legacy does not either; the world reads it from `gamedata::item_proto` when it
@@ -46,9 +48,10 @@ const SHARED: [&str; 9] = [
 /// A derive or a macro would make this list generate itself, and then it would prove
 /// nothing: the failure guarded against is one side being changed and the other
 /// forgotten, and only a literal on each side can catch that.
-const ROW_FIELDS: [&str; 12] = [
+const ROW_FIELDS: [&str; 13] = [
     "id",
     "owner_id",
+    "account_id",
     "window_type",
     "pos",
     "vnum",
@@ -100,8 +103,9 @@ fn the_nine_shared_field_names_are_pinned_on_both_sides() {
     // is a deliberate act rather than an accident.
     assert_eq!(
         ROW_FIELDS.len() - SHARED.len(),
-        3,
-        "ItemRow should carry exactly owner_id, window_type and pos beyond the shared nine"
+        4,
+        "ItemRow should carry exactly owner_id, account_id, window_type and pos beyond the \
+         shared nine"
     );
     assert_eq!(
         ITEM_FIELDS.len() - SHARED.len(),
@@ -157,6 +161,7 @@ fn an_id_from_the_world_is_usable_as_a_row_id() {
     let row = ItemRow {
         id,
         owner_id: Some(7),
+        account_id: None,
         window_type: 1,
         pos: 0,
         vnum: 30_000,

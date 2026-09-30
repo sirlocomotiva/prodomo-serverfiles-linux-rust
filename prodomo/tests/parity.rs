@@ -1353,14 +1353,16 @@ fn game_len(header: u8) -> usize {
         GC_CHARACTER_POSITION => CHARACTER_POSITION_LEN,
         GC_SYNC_POSITION => usize::MAX,
         GC_OWNERSHIP => OWNERSHIP_LEN,
-        ITEM_SET => ITEM_SET_LEN,
+        ITEM_SET | GC_SAFEBOX_SET | GC_MALL_SET => ITEM_SET_LEN,
         ITEM_UPDATE => ITEM_UPDATE_LEN,
         GROUND_ADD => GROUND_ADD_LEN,
         GROUND_DEL => GROUND_DEL_LEN,
         GC_QUICKSLOT_ADD => 1 + 1 + 2,
-        GC_QUICKSLOT_DEL => 1 + 1,
+        GC_QUICKSLOT_DEL | GC_SAFEBOX_SIZE | GC_MALL_OPEN => 1 + 1,
         GC_QUICKSLOT_SWAP => 1 + 2,
         GC_EXCHANGE => EXCHANGE_LEN,
+        GC_SAFEBOX_DEL | GC_MALL_DEL => 1 + 4,
+        GC_SAFEBOX_WRONG_PASSWORD => 1,
         other => panic!("unexpected loading or enter-game header {other}"),
     }
 }
@@ -3024,8 +3026,9 @@ fn a_talking_line_reaches_the_map_including_its_sender() {
     yankee.quiet("exactly two more records");
 
     // `if (buflen > 1 && *buf == '/')` is checked before the counter, so a slash line costs
-    // nothing and is consumed: the Rewrite has no command interpreter yet.
-    alice.unanswered(&client_chat(CHAT_TALKING, b"/who"));
+    // nothing and goes to the interpreter instead. `do_restart` is not ported, so it answers
+    // nothing.
+    alice.unanswered(&client_chat(CHAT_TALKING, b"/restart_here"));
 
     // A declared size under the record's own prefix cannot be framed. Legacy's
     // `if (size < sizeof(TPacketCGChat)) return -1;` stops consuming without
@@ -3399,6 +3402,10 @@ fn a_pose_reaches_the_map_including_its_sender() {
 
     // Sitting while already sitting is the `if (IsPosition(POS_SITTING)) return;` arm.
     alice.unanswered(&client_position(POSITION_SITTING_CHAIR));
+    // `/dance1` needs `POS_FIGHTING`, and `interpret_command` tells a sitting character so
+    // (`G/cmd.cpp:679`). Only the one who typed it is told.
+    alice.send_record(&slash(b"/dance1"));
+    assert_eq!(alice.read_game(), info_to_alpha(b"[LS;920]"));
 
     // Standing from the ground is a third record, and it leaves the character standing.
     alice.send_record(&client_position(POSITION_GENERAL));
@@ -3408,6 +3415,10 @@ fn a_pose_reaches_the_map_including_its_sender() {
 
     // Standing while already standing is the `if (!IsPosition(POS_SITTING)) return;` arm.
     alice.unanswered(&client_position(POSITION_GENERAL));
+    // Standing, `/dance1` passes the position check and reaches `do_emotion`, which this build
+    // does not port, so nothing is sent.
+    alice.unanswered(&slash(b"/dance1"));
+    yankee.quiet("a command line reaches only the one who typed it");
     // An unknown pose byte is not a legacy arm, so nothing is sent.
     alice.unanswered(&client_position(0x7f));
 }
@@ -5673,4 +5684,321 @@ fn a_trade_moves_an_item_and_gold_between_two_players_in_one_transaction() {
         "(SELECT array_agg((slot, kind, pos) ORDER BY slot)::text FROM quickslot WHERE \
          player_id = (SELECT id FROM player WHERE name = 'Alpha')) = '{\"(6,2,3)\"}'",
     );
+}
+
+// ---------------------------------------------------------------------------
+// `sys.npc.safebox`: the safebox and the mall an account keeps (ADR-0005).
+// ---------------------------------------------------------------------------
+
+/// `HEADER_CG_MALL_CHECKOUT` (`G/packet.h:53`).
+const CG_MALL_CHECKOUT: u8 = 69;
+/// `HEADER_CG_SAFEBOX_CHECKIN` (`G/packet.h:54`).
+const CG_SAFEBOX_CHECKIN: u8 = 70;
+/// `HEADER_CG_SAFEBOX_CHECKOUT` (`G/packet.h:55`).
+const CG_SAFEBOX_CHECKOUT: u8 = 71;
+/// `HEADER_CG_SAFEBOX_ITEM_MOVE` (`G/packet.h:61`).
+const CG_SAFEBOX_ITEM_MOVE: u8 = 77;
+/// `HEADER_GC_SAFEBOX_SET` (`G/packet.h:171`).
+const GC_SAFEBOX_SET: u8 = 85;
+/// `HEADER_GC_SAFEBOX_DEL` (`G/packet.h:172`).
+const GC_SAFEBOX_DEL: u8 = 86;
+/// `HEADER_GC_SAFEBOX_WRONG_PASSWORD` (`G/packet.h:173`).
+const GC_SAFEBOX_WRONG_PASSWORD: u8 = 87;
+/// `HEADER_GC_SAFEBOX_SIZE` (`G/packet.h:174`).
+const GC_SAFEBOX_SIZE: u8 = 88;
+/// `HEADER_GC_MALL_OPEN` (`G/packet.h:199`).
+const GC_MALL_OPEN: u8 = 122;
+/// `HEADER_GC_MALL_SET` (`G/packet.h:200`).
+const GC_MALL_SET: u8 = 128;
+/// `HEADER_GC_MALL_DEL` (`G/packet.h:201`).
+const GC_MALL_DEL: u8 = 129;
+/// The `SAFEBOX` window (`common/length.h`).
+const SAFEBOX_WINDOW: u8 = 3;
+/// The `MALL` window (`common/length.h`).
+const MALL_WINDOW: u8 = 4;
+
+/// A `TPacketCGSafeboxCheckin` or `TPacketCGSafeboxCheckout` as this build's
+/// `__EXTENDED_SAFEBOX__` lays it out: the header, a `DWORD` store cell, and a `TItemPos` of the
+/// base inventory at `cell`.
+fn client_store(header: u8, safe_pos: u32, cell: u16) -> Vec<u8> {
+    let mut record = vec![header];
+    record.extend_from_slice(&safe_pos.to_le_bytes());
+    record.push(common::item_slots::EWindows::Inventory as u8);
+    record.extend_from_slice(&cell.to_le_bytes());
+    assert_eq!(record.len(), 8, "sizeof(TPacketCGSafeboxCheckin)");
+    record
+}
+
+/// A `CG_SAFEBOX_ITEM_MOVE`: a `TPacketCGItemMove` between two safebox cells.
+fn client_store_move(from: u16, to: u16, count: u16) -> Vec<u8> {
+    let mut record = vec![CG_SAFEBOX_ITEM_MOVE, SAFEBOX_WINDOW];
+    record.extend_from_slice(&from.to_le_bytes());
+    record.push(SAFEBOX_WINDOW);
+    record.extend_from_slice(&to.to_le_bytes());
+    record.extend_from_slice(&count.to_le_bytes());
+    assert_eq!(record.len(), 9, "sizeof(TPacketCGItemMove)");
+    record
+}
+
+/// `CSafebox::Remove`'s `TPacketGCItemDel` under `header`: the header and a `DWORD` cell
+/// (`G/safebox.cpp:117-121`).
+fn store_del(header: u8, pos: u32) -> Vec<u8> {
+    let mut record = vec![header];
+    record.extend_from_slice(&pos.to_le_bytes());
+    record
+}
+
+/// `CSafebox::Add`'s `TPacketGCItemSet` under `header`, of `count` of `proto` carrying `fields`
+/// in `window` at `pos` (`G/safebox.cpp:72-88`). Legacy never writes the highlight; the
+/// Rewrite sends 0.
+fn store_set(
+    fields: &RelayedFields,
+    proto: &gamedata::item_proto::ItemProto,
+    (header, window): (u8, u8),
+    pos: u16,
+    count: u16,
+) -> Vec<u8> {
+    let mut record = fields.item_set(proto, pos, count);
+    record[0] = header;
+    record[1] = window;
+    record
+}
+
+/// The fields of a row nothing wrote them into.
+const fn no_fields() -> RelayedFields {
+    RelayedFields {
+        refine_element: 0,
+        transmutation: 0,
+        sockets: [0; 6],
+        attributes: [(0, 0); 7],
+    }
+}
+
+/// The account ID of alice, as a subquery.
+const ALICES: &str = "(SELECT id FROM account WHERE login = 'alice')";
+
+/// The safebox scenario's cast: [`seat_the_traders`]' Alpha, holding seven of `vnum` at cell 5
+/// in item row 30, and Yankee; alice's Echo, with nothing; and three of `vnum` at cell 2 of
+/// alice's mall in item row 31, whose fields nothing wrote.
+fn seat_the_depositors(database: &ScratchDatabase, vnum: u32) {
+    seat_the_traders(database, vnum);
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 2, 'Echo', 0, \
+         470000, 950000 FROM account WHERE login = 'alice'",
+    );
+    sql(
+        database,
+        &format!(
+            "INSERT INTO item (id, account_id, window_type, pos, count, vnum) SELECT 31, id, 4, \
+             2, 3, {vnum} FROM account WHERE login = 'alice'"
+        ),
+    );
+}
+
+/// A slash line as the client sends it.
+fn slash(text: &[u8]) -> Vec<u8> {
+    client_chat(CHAT_TALKING, text)
+}
+
+/// A `CHAT_TYPE_INFO` line to a character of empire 1.
+fn info_to_alpha(text: &[u8]) -> Vec<u8> {
+    chat_packet(prodomo::chat::CHAT_INFO, 1, text)
+}
+
+/// Alpha checks the item at cell 5 in at safebox cell 6, then moves it to cell 11. The
+/// inventory cell is cleared before its slot is deleted (`G/input_main.cpp:2357-2360`), the
+/// safebox shows the item, and the row is the account's.
+fn check_in_and_move(
+    alice: &mut Keyed,
+    database: &ScratchDatabase,
+    proto: &gamedata::item_proto::ItemProto,
+) {
+    let safebox = (GC_SAFEBOX_SET, SAFEBOX_WINDOW);
+    let fields = RelayedFields::distinct();
+    alice.send_record(&client_store(CG_SAFEBOX_CHECKIN, 6, 5));
+    assert_eq!(alice.read_game(), a_clear_record(5));
+    assert_eq!(alice.read_game(), [GC_QUICKSLOT_DEL, 2]);
+    assert_eq!(alice.read_game(), store_set(&fields, proto, safebox, 6, 7));
+    check(
+        database,
+        &format!(
+            "EXISTS (SELECT 1 FROM item WHERE id = 30 AND owner_id IS NULL AND account_id = \
+             {ALICES} AND window_type = 3 AND pos = 6 AND count = 7)"
+        ),
+    );
+    alice.send_record(&client_store_move(6, 11, 0));
+    assert_eq!(alice.read_game(), store_del(GC_SAFEBOX_DEL, 6));
+    assert_eq!(alice.read_game(), store_set(&fields, proto, safebox, 11, 7));
+    check(
+        database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 30 AND window_type = 3 AND pos = 11)",
+    );
+}
+
+/// Alpha opens the mall and takes its item to cell 10. The mall shows 27 rows and the item,
+/// and the inventory shows it highlighted, because Alpha never held it.
+fn take_from_the_mall(
+    alice: &mut Keyed,
+    database: &ScratchDatabase,
+    proto: &gamedata::item_proto::ItemProto,
+) {
+    alice.send_record(&slash(b"/mall_password 000000"));
+    assert_eq!(alice.read_game(), [GC_MALL_OPEN, 27]);
+    let mall = (GC_MALL_SET, MALL_WINDOW);
+    assert_eq!(
+        alice.read_game(),
+        store_set(&no_fields(), proto, mall, 2, 3)
+    );
+    alice.send_record(&client_store(CG_MALL_CHECKOUT, 2, 10));
+    assert_eq!(alice.read_game(), store_del(GC_MALL_DEL, 2));
+    let mut taken = no_fields().item_set(proto, 10, 3);
+    taken[26] = 1;
+    assert_eq!(alice.read_game(), taken);
+    check(
+        database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 31 AND owner_id = (SELECT id FROM player WHERE \
+         name = 'Alpha') AND account_id IS NULL AND window_type = 1 AND pos = 10 AND count = 3)",
+    );
+}
+
+/// Alpha closes both windows and opens each again at once: each close is a command line, and
+/// each reload waits. Then Alpha changes the password, and changes it again from the old one:
+/// the first is done, the second refused, and the store keeps a hash, not the password.
+///
+/// The tenth slash line within a second disconnects (`ENABLE_ANTI_CMD_FLOOD`,
+/// `G/cmd.cpp:612`), so Alpha lets a second pass first.
+fn close_and_change_the_password(alice: &mut Keyed, database: &ScratchDatabase) {
+    let command = |text: &[u8]| chat_packet(prodomo::chat::CHAT_COMMAND, 1, text);
+    std::thread::sleep(Duration::from_millis(1200));
+    alice.send_record(&slash(b"/safebox_close"));
+    assert_eq!(alice.read_game(), command(b"CloseSafebox"));
+    alice.send_record(&slash(b"/mall_close"));
+    assert_eq!(alice.read_game(), command(b"CloseMall"));
+    alice.send_record(&slash(b"/safebox_password 000000"));
+    assert_eq!(alice.read_game(), info_to_alpha(b"[LS;828]"));
+    alice.send_record(&slash(b"/mall_password 000000"));
+    assert_eq!(alice.read_game(), info_to_alpha(b"[LS;528]"));
+    alice.unanswered(&slash(b"/safebox_close"));
+    alice.send_record(&slash(b"/safebox_change_password 000000 s3cret"));
+    assert_eq!(alice.read_game(), info_to_alpha(b"[LS;774]"));
+    alice.send_record(&slash(b"/safebox_change_password 000000 other"));
+    assert_eq!(alice.read_game(), info_to_alpha(b"[LS;775]"));
+    check(
+        database,
+        &format!(
+            "(SELECT starts_with(password_hash, chr(36) || 'argon2id' || chr(36)) AND \
+             strpos(password_hash, 's3cret') = 0 FROM safebox WHERE account_id = {ALICES})"
+        ),
+    );
+}
+
+/// `sys.npc.safebox`, the safebox and mall commands and the four store records
+/// (`G/cmd_general.cpp`, `G/input_main.cpp:2276-2472`, `G/safebox.cpp`): the password opens the
+/// account's one page of nine rows, a checkin, a move inside and a checkout carry the item and
+/// its row, the mall shows its 27 rows and gives its item up, a close is a command line, and a
+/// reload waits ten seconds after the last load or close, even when the password was wrong.
+///
+/// The store rows belong to the account, not the character (ADR-0005): what Alpha checks in,
+/// Echo, on the same account, takes out, and bob's account has a safebox of its own. Every step
+/// is stored before its records are sent (ADR-0003), so the store is checked as soon as they
+/// arrive. The tenth slash line within a second closes the connection (`sys.net.flood`).
+#[test]
+fn an_account_keeps_items_in_its_safebox_and_takes_them_from_its_mall() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    let protos = owners_protos();
+    let vnum = a_stackable_use_vnum(&protos);
+    let proto = protos.get(vnum).expect("a proto");
+    assert_eq!(
+        proto.anti_flags & world::item::ITEM_ANTIFLAG_SAFEBOX,
+        0,
+        "an item that may be stored"
+    );
+    seat_the_depositors(&database, vnum);
+    let (mut alice, _alpha) = enter_world(&server, b"alice", 0);
+    // Given: Alpha's slot 2 names the item's cell 5.
+    alice.send_record(&client_quickslot_add(2, 1, 5));
+    assert_eq!(alice.read_game(), [GC_QUICKSLOT_ADD, 2, 1, 5]);
+
+    // When: Alpha clicks the safebox, types seven bytes, then the password of an account with no
+    // row, then opens it again. Then: the client is asked for the password, the long one is
+    // refused before the store is asked, the default opens one empty page, and a second open is
+    // refused.
+    alice.send_record(&slash(b"/click_safebox"));
+    let asked = chat_packet(prodomo::chat::CHAT_COMMAND, 1, b"ShowMeSafeboxPassword");
+    assert_eq!(alice.read_game(), asked);
+    alice.send_record(&slash(b"/safebox_password 0000000"));
+    assert_eq!(alice.read_game(), info_to_alpha(b"[LS;526]"));
+    alice.send_record(&slash(b"/safebox_password 000000"));
+    assert_eq!(alice.read_game(), [GC_SAFEBOX_SIZE, 9]);
+    alice.send_record(&slash(b"/safebox_password 000000"));
+    let open = info_to_alpha(b"[LS;527]");
+    assert_eq!(alice.read_game(), open, "the safebox is empty");
+    check_in_and_move(&mut alice, &database, proto);
+    take_from_the_mall(&mut alice, &database, proto);
+    close_and_change_the_password(&mut alice, &database);
+
+    // When: Alpha leaves, and Echo opens the safebox with the new password and takes the item
+    // to cell 0. Then: the account's safebox shows it, and Echo's inventory shows it
+    // highlighted, because it was checked in during another opening.
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    let (mut echo, _echo) = enter_world(&server, b"alice", 2);
+    echo.send_record(&slash(b"/safebox_password s3cret"));
+    assert_eq!(echo.read_game(), [GC_SAFEBOX_SIZE, 9]);
+    let (safebox, fields) = ((GC_SAFEBOX_SET, SAFEBOX_WINDOW), RelayedFields::distinct());
+    assert_eq!(echo.read_game(), store_set(&fields, proto, safebox, 11, 7));
+    echo.send_record(&client_store(CG_SAFEBOX_CHECKOUT, 11, 0));
+    assert_eq!(echo.read_game(), store_del(GC_SAFEBOX_DEL, 11));
+    let mut taken = fields.item_set(proto, 0, 7);
+    taken[26] = 1;
+    assert_eq!(echo.read_game(), taken);
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item WHERE id = 30 AND owner_id = (SELECT id FROM player WHERE \
+         name = 'Echo') AND account_id IS NULL AND window_type = 1 AND pos = 0 AND count = 7)",
+    );
+    echo.quiet("the checkout is over");
+
+    // When: Echo clicks the mall, and types three commands short of their last letter. Then: the
+    // client is asked for the mall password, and each short one asks for the whole command
+    // (`do_inputall`, `G/cmd.cpp:327-331`), which the walk reaches before the longer entry.
+    echo.send_record(&slash(b"/click_mall"));
+    let asked = chat_packet(prodomo::chat::CHAT_COMMAND, 1, b"ShowMeMallPassword");
+    assert_eq!(echo.read_game(), asked);
+    for short in [
+        &b"/safebox_passwor"[..],
+        b"/safebox_change_passwor",
+        b"/mall_passwor",
+    ] {
+        echo.send_record(&slash(short));
+        assert_eq!(echo.read_game(), info_to_alpha(b"[LS;916]"), "{short:?}");
+    }
+
+    // When: bob's Yankee tries alice's password, then the default. Then: bob's account has no
+    // row, so alice's password is wrong, and the wrong one starts the wait all the same.
+    let (mut bob, _yankee) = enter_world(&server, b"bob", 0);
+    bob.send_record(&slash(b"/safebox_password s3cret"));
+    assert_eq!(bob.read_game(), [GC_SAFEBOX_WRONG_PASSWORD]);
+    bob.send_record(&slash(b"/safebox_password 000000"));
+    assert_eq!(
+        bob.read_game(),
+        chat_packet(prodomo::chat::CHAT_INFO, 2, b"[LS;828]")
+    );
+
+    // When: Yankee lets a second pass and types ten lines. Then: nine are answered, and the
+    // tenth within the second closes the connection (`ENABLE_ANTI_CMD_FLOOD`,
+    // `G/cmd.cpp:612-625`).
+    std::thread::sleep(Duration::from_millis(1200));
+    let whole = chat_packet(prodomo::chat::CHAT_INFO, 2, b"[LS;916]");
+    for _ in 0..9 {
+        bob.send_record(&slash(b"/mall_passwor"));
+        assert_eq!(bob.read_game(), whole);
+    }
+    bob.closed_by(&slash(b"/mall_passwor"));
 }

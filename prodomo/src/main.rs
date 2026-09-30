@@ -60,11 +60,16 @@ use prodomo::client_live::{
 };
 use prodomo::client_registry::{ChannelClients, ClientEntry, Lease, PositionTable};
 use prodomo::client_session::ClientPhase;
+use prodomo::command::{
+    interpret, one_argument, Caller, Command as LineCommand, CommandFlood, Interpreted, GM_PLAYER,
+    POS_SITTING, POS_STANDING, TYPE_IN_FULL,
+};
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
 use prodomo::game_loop_messages::{GameLoopController, GameLoopTerminal, GroundPlace, Kept};
 use prodomo::game_state::{
     world_item_id_range, GameState, ShopAnswer, ShopStep, TradeAnswer, TradeSettled, TradeStep,
 };
+use prodomo::game_state::{SafeboxAnswer, SafeboxStep};
 use prodomo::handshake::HandshakeServerKind;
 use prodomo::item_load::plan_item_load;
 use prodomo::item_move::{MoveItemRefused, Mover};
@@ -118,10 +123,13 @@ use protocol::cg_position::CgCharacterPosition;
 use protocol::cg_quickslot_add::CgQuickslotAdd;
 use protocol::cg_quickslot_del::CgQuickslotDel;
 use protocol::cg_quickslot_swap::CgQuickslotSwap;
+use protocol::cg_safebox::{CgSafeBoxItem, SafeBoxKind};
+use protocol::cg_safebox_move::CgSafeboxItemMove;
 use protocol::cg_shop::CgShop;
 use protocol::cg_vid::CgOnClick;
 use protocol::cg_wire::ClientFrame;
 use protocol::gc::{GcAuthSuccess, GcLoginFailure};
+use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO};
 use protocol::gc_inventory::HEADER_GC_EMPIRE;
 use protocol::gc_small::GcHeaderAndByte;
 use protocol::item_pos::ItemPos;
@@ -312,6 +320,8 @@ struct Held {
     /// `m_bChatCounter` (`server/server/game/char.cpp:8759`), which is per character and
     /// therefore per descriptor.
     chat: ChatState,
+    /// `m_pulseCommandFlood` and `m_iCommandFloodCount` of the interpreter.
+    command_flood: CommandFlood,
     /// The registry entry this descriptor occupies on its map, taken when the game phase is
     /// entered and released when the descriptor ends.
     presence: Option<Lease>,
@@ -1253,11 +1263,11 @@ where
                 return false;
             }
             ChatEffect::Command { argument } => {
-                // `interpret_command(ch, buf + 1, buflen - 1)`. The Rewrite has no command
-                // interpreter, so a slash line is consumed and logged. It is still a
-                // distinct effect from the rest, because it costs no chat counter and so a
+                // `interpret_command(ch, buf + 1, buflen - 1)`. It costs no chat counter, so a
                 // client may send it between two normal lines.
-                info!(%addr, bytes = argument.len(), "Command line received; no interpreter yet");
+                if !run_command(session, addr, context, held, argument).await {
+                    return false;
+                }
             }
             ChatEffect::DelayedDisconnect => {
                 // `ch->GetDesc()->DelayedDisconnect(0)`: no record, the frame is consumed,
@@ -1854,9 +1864,9 @@ where
         }
         // `CG_EXCHANGE` (27) in the game phase.
         LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && frame.header == HEADER_CG_EXCHANGE.value() =>
+            if phase == ClientPhase::Game && is_transaction_record(frame.header) =>
         {
-            trade_step(session, addr, context, held, &frame).await
+            transaction_record(session, addr, context, held, &frame).await
         }
         step => report_step(addr, step),
     }
@@ -4014,4 +4024,306 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
             Err(format!("Game loop terminated with failure: {reason:?}").into())
         }
     }
+}
+
+/// `interpret_command` for a slash line, with the commands this build ports.
+async fn run_command<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    line: &[u8],
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // GM levels are not wired yet, so every caller is `GM_PLAYER`. Sitting is the one position
+    // besides standing this build tracks.
+    let sitting = held.avatar.as_ref().is_some_and(|avatar| avatar.sitting);
+    let caller = Caller {
+        pulse: context.game.pulse(),
+        gm_level: GM_PLAYER,
+        position: if sitting { POS_SITTING } else { POS_STANDING },
+    };
+    let (entry, rest) = match interpret(line, &mut held.command_flood, caller) {
+        Interpreted::Nothing => return true,
+        Interpreted::Disconnect => {
+            info!(%addr, "Command lines flooded; closing");
+            return false;
+        }
+        Interpreted::Notice(text) => {
+            return send_line(session, addr, context, held, CHAT_TYPE_INFO, text).await;
+        }
+        Interpreted::Run { entry, rest } => (entry, rest),
+    };
+    match entry.command() {
+        LineCommand::TypeInFull => {
+            send_line(session, addr, context, held, CHAT_TYPE_INFO, TYPE_IN_FULL).await
+        }
+        LineCommand::ClickSafebox => {
+            let text = "ShowMeSafeboxPassword";
+            send_line(session, addr, context, held, CHAT_TYPE_COMMAND, text).await
+        }
+        LineCommand::ClickMall => {
+            let text = "ShowMeMallPassword";
+            send_line(session, addr, context, held, CHAT_TYPE_COMMAND, text).await
+        }
+        LineCommand::SafeboxClose => {
+            let step = SafeboxStep::Close;
+            safebox_step(session, addr, context, held, step)
+                .await
+                .unwrap_or(true)
+        }
+        LineCommand::MallClose => {
+            let step = SafeboxStep::CloseMall;
+            safebox_step(session, addr, context, held, step)
+                .await
+                .unwrap_or(true)
+        }
+        LineCommand::SafeboxPassword => {
+            open_store(session, addr, context, held, false, &rest).await
+        }
+        LineCommand::MallPassword => open_store(session, addr, context, held, true, &rest).await,
+        LineCommand::SafeboxChangePassword => {
+            change_store_password(session, addr, context, held, &rest).await
+        }
+        LineCommand::NotPorted(handler) => {
+            info!(%addr, handler, "Command not ported; ignoring");
+            true
+        }
+    }
+}
+
+/// One server line to this descriptor, in its language.
+async fn send_line<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    chat_type: u8,
+    text: &str,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let to = item_actor(held).recipient(&context.locale);
+    let line = prodomo::chat_line::chat_packet(to, chat_type, text.as_bytes(), &[]);
+    send_shop_records(session, addr, &[line]).await
+}
+
+/// `do_safebox_password` or `do_mall_password`: check the password, then load the rows.
+async fn open_store<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    mall: bool,
+    rest: &[u8],
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (word, _) = one_argument(rest);
+    let Ok(password) = db::safebox::SafeboxPassword::new(&word) else {
+        return send_line(session, addr, context, held, CHAT_TYPE_INFO, "[LS;526]").await;
+    };
+    let Some(account) = held.account.as_ref().map(|account| account.id) else {
+        return true;
+    };
+    let begin = if mall {
+        SafeboxStep::BeginMall
+    } else {
+        SafeboxStep::BeginOpen
+    };
+    if let Some(alive) = safebox_step(session, addr, context, held, begin).await {
+        return alive;
+    }
+    let step = match db::safebox::verify_password(&context.store, account, &password).await {
+        Ok(false) => SafeboxStep::WrongPassword { mall },
+        Ok(true) => {
+            let window = if mall {
+                db::items::MALL
+            } else {
+                db::items::SAFEBOX
+            };
+            let rows =
+                match db::items::load_account_items(&context.store, account.get(), window).await {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        warn!(%addr, %error, "The stored items could not be loaded; closing");
+                        return false;
+                    }
+                };
+            let (items, refused) = prodomo::item_load::stored_items(&rows, &context.protos);
+            for refusal in &refused {
+                warn!(%addr, ?refusal, "A stored item was not loaded");
+            }
+            let account = account.get();
+            if mall {
+                SafeboxStep::OpenMall { account, items }
+            } else {
+                SafeboxStep::Open { account, items }
+            }
+        }
+        Err(error) => {
+            warn!(%addr, %error, "The safebox password could not be checked; closing");
+            return false;
+        }
+    };
+    safebox_step(session, addr, context, held, step)
+        .await
+        .unwrap_or(true)
+}
+
+/// `do_safebox_change_password`.
+async fn change_store_password<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    rest: &[u8],
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (old, rest) = one_argument(rest);
+    let (new, _) = one_argument(rest);
+    let checked = (
+        db::safebox::SafeboxPassword::new(&old),
+        db::safebox::SafeboxPassword::new(&new),
+    );
+    let (Ok(old), Ok(new)) = checked else {
+        return send_line(session, addr, context, held, CHAT_TYPE_INFO, "[LS;526]").await;
+    };
+    let Some(account) = held.account.as_ref().map(|account| account.id) else {
+        return true;
+    };
+    let text = match db::safebox::change_password(&context.store, account, &old, &new).await {
+        Ok(true) => "[LS;774]",
+        Ok(false) => "[LS;775]",
+        Err(error) => {
+            warn!(%addr, %error, "The safebox password could not be changed; closing");
+            return false;
+        }
+    };
+    send_line(session, addr, context, held, CHAT_TYPE_INFO, text).await
+}
+
+/// Whether the header is a trade record or a safebox record.
+fn is_transaction_record(header: u8) -> bool {
+    header == HEADER_CG_EXCHANGE.value()
+        || SafeBoxKind::from_header(header).is_some()
+        || header == CgSafeboxItemMove::header().value()
+}
+
+/// A trade record or a safebox record.
+async fn transaction_record<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if frame.header == HEADER_CG_EXCHANGE.value() {
+        trade_step(session, addr, context, held, frame).await
+    } else {
+        store_record(session, addr, context, held, frame).await
+    }
+}
+
+/// A checkin, a checkout or a move inside the safebox, as its client record asks.
+async fn store_record<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let step = if frame.header == CgSafeboxItemMove::header().value() {
+        match CgSafeboxItemMove::decode_frame(frame) {
+            Ok(record) => SafeboxStep::Move {
+                from: u32::from(record.from.cell),
+                to: u32::from(record.to.cell),
+                count: record.count,
+            },
+            Err(error) => {
+                warn!(%addr, %error, "Client sent a malformed safebox move; closing");
+                return false;
+            }
+        }
+    } else {
+        match CgSafeBoxItem::decode_frame(frame) {
+            Ok(record) if record.kind.is_deposit() => SafeboxStep::Checkin {
+                from: record.item_pos,
+                safe_pos: record.container_pos,
+            },
+            Ok(record) => SafeboxStep::Checkout {
+                safe_pos: record.container_pos,
+                to: record.item_pos,
+                mall: record.kind == SafeBoxKind::MallCheckout,
+            },
+            Err(error) => {
+                warn!(%addr, %error, "Client sent a malformed safebox record; closing");
+                return false;
+            }
+        }
+    };
+    safebox_step(session, addr, context, held, step)
+        .await
+        .unwrap_or(true)
+}
+
+/// Run one safebox step: `None` when the connection is to check the password and load the
+/// rows, else whether the connection lives on.
+async fn safebox_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    step: SafeboxStep,
+) -> Option<bool>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Safebox step without a character in the world; ignoring");
+        return Some(true);
+    };
+    let actor = item_actor(held);
+    let answer = match context.game.safebox(vid, step, actor).await {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(refused)) => {
+            warn!(%addr, %refused, "The world does not hold this descriptor's character; closing");
+            return Some(false);
+        }
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a safebox step; closing");
+            return Some(false);
+        }
+    };
+    Some(match answer {
+        SafeboxAnswer::Proceed => return None,
+        SafeboxAnswer::Sent(records) => send_shop_records(session, addr, &records).await,
+        SafeboxAnswer::Moved(moved) => {
+            finish_item_step(session, addr, context, held, actor, Ok(Ok(moved))).await
+        }
+        SafeboxAnswer::Rearranged {
+            account,
+            changes,
+            records,
+        } => {
+            let stored = db::items::apply_account_changes(&context.store, account, &changes);
+            if let Err(error) = stored.await {
+                warn!(%addr, %error, "The safebox move could not be stored; closing");
+                return Some(false);
+            }
+            send_shop_records(session, addr, &records).await
+        }
+    })
 }

@@ -12,7 +12,7 @@
 //! | | `ItemRow` | `world::item::Item` |
 //! |---|---|---|
 //! | the nine instance fields | the same names, the same widths | the same |
-//! | where it is | `owner_id` and `window_type` separately | `pos: ItemPos`, which bundles both |
+//! | where it is | `owner_id` or `account_id`, and `window_type` | `pos: ItemPos`, which bundles both |
 //! | the grid footprint | **absent** | `size: u8` |
 //!
 //! `Item::size` is a prototype fact (`TItemTable::bSize`), not a stored one, so the
@@ -36,6 +36,11 @@
 //!   `DELETE FROM item%s WHERE id=%u`. It is handed the owning pid, uses it only for
 //!   the log line and the branch, and then deletes on the id alone across a global id
 //!   space. [`destroy_item`] takes the owner and puts it in the `WHERE` clause.
+//!
+//! A `SAFEBOX` or `MALL` row belongs to the account and not to a character (ADR-0005): it
+//! carries `account_id` and no `owner_id`. A checkin or a checkout is one Transfer between a
+//! character and its account ([`RowChange::Stored`] and [`RowChange::Retrieved`]), and a move
+//! inside the safebox is [`apply_account_changes`].
 
 use std::error::Error;
 use std::fmt;
@@ -93,6 +98,15 @@ pub const MAX_ITEM_ID: u32 = 4_290_000_000;
 /// The window byte for an item lying on the ground (`EWindows::GROUND`).
 pub const GROUND: u8 = 10;
 
+/// The window byte of an account's safebox (`EWindows::SAFEBOX`).
+pub const SAFEBOX: u8 = 3;
+
+/// The window byte of an account's item mall (`EWindows::MALL`).
+pub const MALL: u8 = 4;
+
+/// How many columns [`all_columns`] names, which is how many values an insert binds.
+const COLUMN_COUNT: usize = 31;
+
 /// One attribute: an unsigned type and a signed value (`TPlayerItemAttribute`,
 /// `tables.h:426-430`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,8 +127,11 @@ pub struct Attribute {
 pub struct ItemRow {
     /// The id the client sees. Never 0.
     pub id: u32,
-    /// The owning character, or `None` for an item on the ground.
+    /// The owning character, or `None` for an item on the ground or in an account's window.
     pub owner_id: Option<u32>,
+    /// The owning account of a `SAFEBOX` or `MALL` row (ADR-0005), and `None` for every other
+    /// window. A row has at most one of `owner_id` and `account_id`.
+    pub account_id: Option<u32>,
     /// The window byte, 0 to 10.
     pub window_type: u8,
     /// The cell, or whatever the window says it is.
@@ -149,6 +166,7 @@ impl ItemRow {
         Self {
             id,
             owner_id: None,
+            account_id: None,
             window_type: GROUND,
             pos: map_index,
             vnum,
@@ -190,12 +208,22 @@ pub enum ItemError {
     /// No row has the id. Distinct from [`ItemError::NotOwned`], which means the id
     /// exists and belongs to somebody else.
     NoSuchItem(u32),
-    /// A row for the id exists and belongs to a different character.
+    /// A row for the id exists and belongs to a different character or account.
     NotOwned {
         /// The id.
         id: u32,
-        /// The character that holds it, or `None` when it is on the ground.
+        /// The character that holds it, or `None` when it is on the ground or in an account's
+        /// window.
         owner_id: Option<u32>,
+        /// The account that holds it, or `None` when it is not in an account's window.
+        account_id: Option<u32>,
+    },
+    /// A checkin or a checkout named an account the character does not belong to.
+    ForeignAccount {
+        /// The character.
+        owner_id: u32,
+        /// The account the change named.
+        account: u32,
     },
     /// The configured item-id span has fewer than
     /// [`MINIMUM_REMAIN_COUNT`] ids left above the id the allocator would start at.
@@ -271,13 +299,24 @@ impl fmt::Display for ItemError {
             }
             Self::IdOutOfRange(id) => write!(f, "id {id} is not 1 to {MAX_ITEM_ID}"),
             Self::NoSuchItem(id) => write!(f, "no item with id {id}"),
-            Self::NotOwned { id, owner_id } => match owner_id {
-                Some(owner) => write!(
+            Self::NotOwned {
+                id,
+                owner_id,
+                account_id,
+            } => match (owner_id, account_id) {
+                (Some(owner), _) => write!(
                     f,
                     "item {id} is owned by character {owner}, not by this one"
                 ),
-                None => write!(f, "item {id} is on the ground"),
+                (None, Some(account)) => {
+                    write!(f, "item {id} is held by account {account}, not by this one")
+                }
+                (None, None) => write!(f, "item {id} is on the ground"),
             },
+            Self::ForeignAccount { owner_id, account } => write!(
+                f,
+                "character {owner_id} does not belong to account {account}"
+            ),
             Self::ItemIdRangeExhausted { first, last, next } => write!(
                 f,
                 "item id range {first}..={last} would start at {next}, which leaves fewer than \
@@ -410,8 +449,8 @@ pub async fn resolve_item_id_range(
 }
 
 /// The plain columns, in the order the load reads them.
-const PLAIN_COLUMNS: &str = "id, owner_id, window_type, pos, vnum, count, refine_element, \
-                            transmutation, flags, anti_flags";
+const PLAIN_COLUMNS: &str = "id, owner_id, account_id, window_type, pos, vnum, count, \
+                            refine_element, transmutation, flags, anti_flags";
 
 /// The six socket columns joined for a `SELECT`.
 fn socket_columns() -> String {
@@ -457,7 +496,7 @@ fn placeholders(count: usize, first: usize) -> String {
     out
 }
 
-/// The one `SELECT` every load here runs: the thirty columns, named in the order
+/// The one `SELECT` every load here runs: the thirty-one columns, named in the order
 /// [`row_from`] reads them.
 ///
 /// # Ordered?
@@ -506,6 +545,10 @@ fn row_from(row: &PgRow) -> Result<ItemRow, ItemError> {
         owner_id: row
             .try_get::<Option<i32>, _>("owner_id")?
             .map(|id| narrow(id, "owner_id"))
+            .transpose()?,
+        account_id: row
+            .try_get::<Option<i32>, _>("account_id")?
+            .map(|id| narrow(id, "account_id"))
             .transpose()?,
         window_type: u8::try_from(row.try_get::<i16, _>("window_type")?).map_err(|_| {
             corrupt(
@@ -576,8 +619,9 @@ fn read_i16(row: &PgRow, column: &str) -> Result<i16, ItemError> {
 /// function does not repeat that: the only filter is the owner, and a row this build cannot
 /// decode is an [`ItemError::Corrupt`] rather than a missing item.
 ///
-/// Ground items are not returned, and that is not a filter: the migration's biconditional
-/// makes a row with an owner never a ground row. The ground load is `sys.item.ground`, a
+/// Ground items are not returned, and that is not a filter: the holder rule
+/// (`item_holder_check`) makes a row with an owner never a ground row, and never a `SAFEBOX` or
+/// `MALL` row either; [`load_account_items`] loads those. The ground load is `sys.item.ground`, a
 /// later unit.
 ///
 /// # Errors
@@ -585,8 +629,8 @@ fn read_i16(row: &PgRow, column: &str) -> Result<i16, ItemError> {
 /// Returns [`ItemError::Corrupt`] for a row that cannot be decoded, or
 /// [`ItemError::Database`].
 pub async fn load_owner_items(store: &Store, owner_id: u32) -> Result<Vec<ItemRow>, ItemError> {
-    // `owner_id = $1` is the only filter, and that is deliberate: the migration's
-    // biconditional makes a row with an owner never a ground row, so adding
+    // `owner_id = $1` is the only filter, and that is deliberate: the holder rule makes a
+    // row with an owner never a ground row, so adding
     // `AND window_type <> 10` would be a second copy of a rule that already holds.
     //
     // The order is window, then cell, then id, so the load is deterministic: a world
@@ -617,6 +661,33 @@ pub async fn load_item(store: &Store, id: u32) -> Result<Option<ItemRow>, ItemEr
     row.as_ref().map(row_from).transpose()
 }
 
+/// Load one window of an account: its safebox (`SAFEBOX`) or its item mall (`MALL`).
+///
+/// Legacy reads the same rows with `owner_id = account AND window = SAFEBOX|MALL`
+/// (`db/ClientManager.cpp:790-814`), where `owner_id` means an account for these two windows;
+/// here the account has its own column (ADR-0005). The order is cell, then id.
+///
+/// # Errors
+///
+/// Returns [`ItemError::Corrupt`] for a row that cannot be decoded, or
+/// [`ItemError::Database`].
+pub async fn load_account_items(
+    store: &Store,
+    account_id: u32,
+    window_type: u8,
+) -> Result<Vec<ItemRow>, ItemError> {
+    let sql = format!(
+        "{} WHERE account_id = $1 AND window_type = $2 ORDER BY pos, id",
+        select_sql()
+    );
+    let rows = sqlx::query(&sql)
+        .bind(i64::from(account_id))
+        .bind(i16::from(window_type))
+        .fetch_all(store.pool())
+        .await?;
+    rows.iter().map(row_from).collect()
+}
+
 /// Write one item, creating it when the id is new and replacing it when it is not.
 ///
 /// This is an upsert on the primary key, so an item that moves between cells and keeps
@@ -627,14 +698,15 @@ pub async fn load_item(store: &Store, id: u32) -> Result<Option<ItemRow>, ItemEr
 /// # Errors
 ///
 /// Returns [`ItemError::IdOutOfRange`], [`ItemError::WindowOutOfRange`],
-/// [`ItemError::CountOutOfRange`], [`ItemError::Corrupt`] for a broken ground/owner
-/// biconditional, or [`ItemError::Database`] -- which is what an occupied cell is, since
+/// [`ItemError::CountOutOfRange`], [`ItemError::Corrupt`] for a row whose holders do not fit
+/// its window, or [`ItemError::Database`] -- which is what an occupied cell is, since
 /// the cell index is the database's rule and not a Rust one.
 pub async fn save_item(store: &Store, item: &ItemRow) -> Result<(), ItemError> {
     let count = check(item)?;
     let sql = format!(
         "INSERT INTO item ({}) VALUES ({}) ON CONFLICT (id) DO UPDATE SET \
-         owner_id = EXCLUDED.owner_id, window_type = EXCLUDED.window_type, \
+         owner_id = EXCLUDED.owner_id, account_id = EXCLUDED.account_id, \
+         window_type = EXCLUDED.window_type, \
          pos = EXCLUDED.pos, count = EXCLUDED.count, vnum = EXCLUDED.vnum, \
          refine_element = EXCLUDED.refine_element, transmutation = EXCLUDED.transmutation, \
          flags = EXCLUDED.flags, anti_flags = EXCLUDED.anti_flags, \
@@ -649,7 +721,7 @@ pub async fn save_item(store: &Store, item: &ItemRow) -> Result<(), ItemError> {
          attrtype5 = EXCLUDED.attrtype5, attrvalue5 = EXCLUDED.attrvalue5, \
          attrtype6 = EXCLUDED.attrtype6, attrvalue6 = EXCLUDED.attrvalue6",
         all_columns(),
-        placeholders(30, 1)
+        placeholders(COLUMN_COUNT, 1)
     );
     bind_item(sqlx::query(&sql), item, count)
         .execute(store.pool())
@@ -682,7 +754,7 @@ pub async fn insert_item(store: &Store, item: &ItemRow) -> Result<(), ItemError>
     let sql = format!(
         "INSERT INTO item ({}) VALUES ({})",
         all_columns(),
-        placeholders(30, 1)
+        placeholders(COLUMN_COUNT, 1)
     );
     bind_item(sqlx::query(&sql), item, count)
         .execute(store.pool())
@@ -709,8 +781,8 @@ fn classify_insert(error: sqlx::Error, item: &ItemRow) -> ItemError {
             return ItemError::ItemIdAlreadyStored { id: item.id };
         }
         if database.code().as_deref() == Some("23505") {
-            // The other unique index is `(owner_id, window_type, pos)`, so this is a
-            // cell that is already taken. It carries both facts an Operator needs and
+            // The other unique indexes are the cell keys, `(owner_id, window_type, pos)`
+            // and `(account_id, window_type, pos)`, so this is a cell that is already taken. It carries both facts an Operator needs and
             // neither one is guessable from the id alone.
             return ItemError::CellAlreadyTaken {
                 id: item.id,
@@ -739,7 +811,8 @@ pub async fn save_owner_items(store: &Store, items: &[ItemRow]) -> Result<(), It
     }
     let sql = format!(
         "INSERT INTO item ({}) VALUES ({}) ON CONFLICT (id) DO UPDATE SET \
-         owner_id = EXCLUDED.owner_id, window_type = EXCLUDED.window_type, \
+         owner_id = EXCLUDED.owner_id, account_id = EXCLUDED.account_id, \
+         window_type = EXCLUDED.window_type, \
          pos = EXCLUDED.pos, count = EXCLUDED.count, vnum = EXCLUDED.vnum, \
          refine_element = EXCLUDED.refine_element, transmutation = EXCLUDED.transmutation, \
          flags = EXCLUDED.flags, anti_flags = EXCLUDED.anti_flags, \
@@ -754,7 +827,7 @@ pub async fn save_owner_items(store: &Store, items: &[ItemRow]) -> Result<(), It
          attrtype5 = EXCLUDED.attrtype5, attrvalue5 = EXCLUDED.attrvalue5, \
          attrtype6 = EXCLUDED.attrtype6, attrvalue6 = EXCLUDED.attrvalue6",
         all_columns(),
-        placeholders(30, 1)
+        placeholders(COLUMN_COUNT, 1)
     );
     let mut transaction = store.pool().begin().await?;
     for item in items {
@@ -794,6 +867,7 @@ pub async fn destroy_item(store: &Store, id: u32, owner_id: u32) -> Result<bool,
         Some(item) => Err(ItemError::NotOwned {
             id,
             owner_id: item.owner_id,
+            account_id: item.account_id,
         }),
     }
 }
@@ -832,6 +906,7 @@ pub async fn set_count(store: &Store, id: u32, owner_id: u32, count: u16) -> Res
         Some(item) => Err(ItemError::NotOwned {
             id,
             owner_id: item.owner_id,
+            account_id: item.account_id,
         }),
     }
 }
@@ -886,7 +961,87 @@ pub enum RowChange {
         /// The cell the row is stored under.
         pos: u32,
     },
+    /// A checkin put the character's item into its account's safebox, at this cell
+    /// (`CInputMain::SafeboxCheckin`, `input_main.cpp`; ADR-0005).
+    Stored {
+        /// The item.
+        id: u32,
+        /// The account the character belongs to.
+        account: u32,
+        /// The safebox cell.
+        pos: u32,
+    },
+    /// A checkout took an item of the character's account out of its safebox or its mall,
+    /// into this window and cell of the character, in stored terms
+    /// (`CInputMain::SafeboxCheckout`, `input_main.cpp`; ADR-0005).
+    Retrieved {
+        /// The item.
+        id: u32,
+        /// The account the character belongs to.
+        account: u32,
+        /// The window byte the row is stored under.
+        window_type: u8,
+        /// The cell the row is stored under.
+        pos: u32,
+    },
 }
+
+/// One change a move inside an account's safebox or mall makes to the account's rows
+/// (`CSafebox::MoveItem`, `safebox.cpp`), for [`apply_account_changes`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountChange {
+    /// The item now sits in this window and cell.
+    Moved {
+        /// The item.
+        id: u32,
+        /// `SAFEBOX` or `MALL`.
+        window_type: u8,
+        /// The cell.
+        pos: u32,
+    },
+    /// The item's stack size changed.
+    Count {
+        /// The item.
+        id: u32,
+        /// Its new count.
+        count: u16,
+    },
+    /// A stack merge used this item up.
+    Destroyed {
+        /// The item.
+        id: u32,
+    },
+}
+
+/// Whose rows a statement names: a character's, or an account's safebox and mall.
+#[derive(Debug, Clone, Copy)]
+enum Holder {
+    /// `owner_id`.
+    Character(u32),
+    /// `account_id` (ADR-0005).
+    Account(u32),
+}
+
+impl Holder {
+    /// The holder's id, which is bound as `$2`.
+    const fn id(self) -> u32 {
+        match self {
+            Self::Character(id) | Self::Account(id) => id,
+        }
+    }
+
+    /// The column that names the holder. It is part of the statement's text and comes from
+    /// this fixed pair, never from a value.
+    const fn column(self) -> &'static str {
+        match self {
+            Self::Character(_) => "owner_id",
+            Self::Account(_) => "account_id",
+        }
+    }
+}
+
+/// The statement that defers both cell keys to a transaction's commit.
+const DEFER_CELL_KEYS: &str = "SET CONSTRAINTS item_owner_cell_key, item_account_cell_key DEFERRED";
 
 /// One character's part of a Transfer: its row changes, and how far its gold moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -978,6 +1133,10 @@ pub async fn apply_exchange(store: &Store, sides: &[TransferSide<'_>]) -> Result
 }
 
 /// [`apply_exchange`], and without `gold` no `player` row is touched.
+///
+/// A [`RowChange::Stored`] or [`RowChange::Retrieved`] names the account its side's character
+/// belongs to, which is read inside the transaction before any row is written: a change that
+/// names another account is [`ItemError::ForeignAccount`], and nothing is written.
 async fn apply_sides(
     store: &Store,
     sides: &[TransferSide<'_>],
@@ -1001,13 +1160,19 @@ async fn apply_sides(
     let insert = format!(
         "INSERT INTO item ({}) VALUES ({})",
         all_columns(),
-        placeholders(30, 1)
+        placeholders(COLUMN_COUNT, 1)
     );
     let set_sockets = set_sockets_statement();
     let mut transaction = store.pool().begin().await?;
-    sqlx::query("SET CONSTRAINTS item_owner_cell_key DEFERRED")
+    sqlx::query(DEFER_CELL_KEYS)
         .execute(&mut *transaction)
         .await?;
+    for side in sides {
+        if let Err(error) = check_accounts(&mut transaction, side).await {
+            transaction.rollback().await?;
+            return Err(error);
+        }
+    }
     for side in sides {
         for change in side.changes {
             let (id, touched) = write_change(
@@ -1045,8 +1210,245 @@ async fn apply_sides(
             return Err(taken_cell(owner_id, sides, &shared));
         }
     }
+    let stored = sides
+        .iter()
+        .flat_map(|side| side.changes)
+        .filter_map(|change| match change {
+            RowChange::Stored { id, account, pos } => Some((*account, *id, SAFEBOX, *pos)),
+            _ => None,
+        });
+    let stored: Vec<(u32, u32, u8, u32)> = stored.collect();
+    let mut accounts: Vec<u32> = stored.iter().map(|(account, ..)| *account).collect();
+    accounts.sort_unstable();
+    accounts.dedup();
+    for account in accounts {
+        let shared = shared_account_cells(&mut transaction, account).await?;
+        if !shared.is_empty() {
+            transaction.rollback().await?;
+            return Err(taken_account_cell(account, &stored, &shared));
+        }
+    }
     transaction.commit().await?;
     Ok(())
+}
+
+/// Refuse a side whose checkin or checkout names an account its character does not belong to.
+async fn check_accounts(
+    connection: &mut sqlx::PgConnection,
+    side: &TransferSide<'_>,
+) -> Result<(), ItemError> {
+    let named = side.changes.iter().filter_map(|change| match change {
+        RowChange::Stored { account, .. } | RowChange::Retrieved { account, .. } => Some(*account),
+        _ => None,
+    });
+    let named: Vec<u32> = named.collect();
+    if named.is_empty() {
+        return Ok(());
+    }
+    let player = i32::try_from(side.owner_id).map_err(|_| ItemError::NoSuchOwner(side.owner_id))?;
+    let held: Option<i32> = sqlx::query_scalar("SELECT account_id FROM player WHERE id = $1")
+        .bind(player)
+        .fetch_optional(&mut *connection)
+        .await?;
+    let held = held.ok_or(ItemError::NoSuchOwner(side.owner_id))?;
+    let held: u32 = narrow(held, "player.account_id")?;
+    match named.into_iter().find(|account| *account != held) {
+        Some(account) => Err(ItemError::ForeignAccount {
+            owner_id: side.owner_id,
+            account,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The cells of one account that hold more than one row, inside a transaction whose cell keys
+/// are deferred.
+async fn shared_account_cells(
+    connection: &mut sqlx::PgConnection,
+    account: u32,
+) -> Result<Vec<(i16, i64)>, ItemError> {
+    Ok(sqlx::query_as(
+        "SELECT window_type, pos::bigint FROM item WHERE account_id = $1 \
+         GROUP BY window_type, pos HAVING count(*) > 1",
+    )
+    .bind(i64::from(account))
+    .fetch_all(&mut *connection)
+    .await?)
+}
+
+/// The change that put a row on a cell another row of `account` holds: the last one to land
+/// there, as [`taken_cell`] names for a character. `landed` is every `(account, id, window,
+/// cell)` a change put a row on, in order.
+fn taken_account_cell(
+    account: u32,
+    landed: &[(u32, u32, u8, u32)],
+    shared: &[(i16, i64)],
+) -> ItemError {
+    let last = landed.iter().rev().find(|(holder, _, window_type, pos)| {
+        *holder == account && shared.contains(&(i16::from(*window_type), i64::from(*pos)))
+    });
+    match last {
+        Some((_, id, window_type, pos)) => ItemError::CellAlreadyTaken {
+            id: *id,
+            window_type: *window_type,
+            pos: *pos,
+        },
+        None => ItemError::Corrupt(format!(
+            "account {account} holds two rows in one cell that no change touched: {shared:?}"
+        )),
+    }
+}
+
+/// Write one move inside an account's safebox or mall as one transaction, under the account
+/// (ADR-0005).
+///
+/// `CSafebox::MoveItem` (`safebox.cpp`) moves a row to an empty cell or merges it into a
+/// stack, and the rows it touches belong to the account, not to the character that moved
+/// them. Each change is checked before the store is reached, each statement names the
+/// account, and a statement that touches no row rolls the call back, as
+/// [`apply_row_changes`] does for a character.
+///
+/// # Errors
+///
+/// [`ItemError::WindowOutOfRange`] or [`ItemError::Corrupt`] for a move out of the account's
+/// windows and [`ItemError::CountOutOfRange`] for a count that cannot be stored, all before
+/// the store is reached. [`ItemError::NoSuchItem`] or [`ItemError::NotOwned`] when a change
+/// names an id the account does not hold, [`ItemError::CellAlreadyTaken`] when a moved row
+/// ends on a cell another row holds, and [`ItemError::Database`].
+pub async fn apply_account_changes(
+    store: &Store,
+    account_id: u32,
+    changes: &[AccountChange],
+) -> Result<(), ItemError> {
+    for change in changes {
+        match change {
+            AccountChange::Moved {
+                id, window_type, ..
+            } => {
+                if *window_type > GROUND {
+                    return Err(ItemError::WindowOutOfRange(*window_type));
+                }
+                if *window_type != SAFEBOX && *window_type != MALL {
+                    return Err(ItemError::Corrupt(format!(
+                        "item {id} of account {account_id} would be moved to window \
+                         {window_type}, which an account does not hold"
+                    )));
+                }
+            }
+            AccountChange::Count { count, .. } => check_count(*count)?,
+            AccountChange::Destroyed { .. } => {}
+        }
+    }
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let holder = Holder::Account(account_id);
+    let mut transaction = store.pool().begin().await?;
+    sqlx::query(DEFER_CELL_KEYS)
+        .execute(&mut *transaction)
+        .await?;
+    for change in changes {
+        let (id, touched) = match *change {
+            AccountChange::Moved {
+                id,
+                window_type,
+                pos,
+            } => (
+                id,
+                move_row(&mut transaction, holder, id, window_type, pos).await?,
+            ),
+            AccountChange::Count { id, count } => {
+                (id, count_row(&mut transaction, holder, id, count).await?)
+            }
+            AccountChange::Destroyed { id } => {
+                (id, destroy_row(&mut transaction, holder, id).await?)
+            }
+        };
+        if touched == 0 {
+            transaction.rollback().await?;
+            return Err(missing(store, id).await);
+        }
+    }
+    let shared = shared_account_cells(&mut transaction, account_id).await?;
+    if !shared.is_empty() {
+        transaction.rollback().await?;
+        let landed: Vec<(u32, u32, u8, u32)> = changes
+            .iter()
+            .filter_map(|change| match *change {
+                AccountChange::Moved {
+                    id,
+                    window_type,
+                    pos,
+                } => Some((account_id, id, window_type, pos)),
+                AccountChange::Count { .. } | AccountChange::Destroyed { .. } => None,
+            })
+            .collect();
+        return Err(taken_account_cell(account_id, &landed, &shared));
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Move one row of `holder` to a window and cell: how many rows it touched.
+async fn move_row(
+    connection: &mut sqlx::PgConnection,
+    holder: Holder,
+    id: u32,
+    window_type: u8,
+    pos: u32,
+) -> Result<u64, ItemError> {
+    let sql = format!(
+        "UPDATE item SET window_type = $3, pos = $4 WHERE id = $1 AND {} = $2",
+        holder.column()
+    );
+    Ok(sqlx::query(&sql)
+        .bind(i64::from(id))
+        .bind(i64::from(holder.id()))
+        .bind(i16::from(window_type))
+        .bind(i64::from(pos))
+        .execute(&mut *connection)
+        .await?
+        .rows_affected())
+}
+
+/// Set the count of one row of `holder`: how many rows it touched.
+async fn count_row(
+    connection: &mut sqlx::PgConnection,
+    holder: Holder,
+    id: u32,
+    count: u16,
+) -> Result<u64, ItemError> {
+    // A `smallint` bind for a `smallint` column, as `set_count` explains.
+    let column = i16::try_from(count).map_err(|_| ItemError::CountOutOfRange(count))?;
+    let sql = format!(
+        "UPDATE item SET count = $3 WHERE id = $1 AND {} = $2",
+        holder.column()
+    );
+    Ok(sqlx::query(&sql)
+        .bind(i64::from(id))
+        .bind(i64::from(holder.id()))
+        .bind(column)
+        .execute(&mut *connection)
+        .await?
+        .rows_affected())
+}
+
+/// Delete one row of `holder`: how many rows it touched.
+async fn destroy_row(
+    connection: &mut sqlx::PgConnection,
+    holder: Holder,
+    id: u32,
+) -> Result<u64, ItemError> {
+    let sql = format!(
+        "DELETE FROM item WHERE id = $1 AND {} = $2",
+        holder.column()
+    );
+    Ok(sqlx::query(&sql)
+        .bind(i64::from(id))
+        .bind(i64::from(holder.id()))
+        .execute(&mut *connection)
+        .await?
+        .rows_affected())
 }
 
 /// Add `change` to one character's `player.gold` inside a Transfer's transaction.
@@ -1092,44 +1494,18 @@ async fn write_change(
     insert: &str,
     set_sockets: &str,
 ) -> Result<(u32, u64), ItemError> {
+    let holder = Holder::Character(owner_id);
     Ok(match change {
         RowChange::Moved {
             id,
             window_type,
             pos,
-        } => {
-            let touched = sqlx::query(
-                "UPDATE item SET window_type = $3, pos = $4 WHERE id = $1 AND owner_id = $2",
-            )
-            .bind(i64::from(*id))
-            .bind(i64::from(owner_id))
-            .bind(i16::from(*window_type))
-            .bind(i64::from(*pos))
-            .execute(&mut *connection)
-            .await?
-            .rows_affected();
-            (*id, touched)
-        }
-        RowChange::Count { id, count } => {
-            let column = i16::try_from(*count).map_err(|_| ItemError::CountOutOfRange(*count))?;
-            let touched = sqlx::query("UPDATE item SET count = $3 WHERE id = $1 AND owner_id = $2")
-                .bind(i64::from(*id))
-                .bind(i64::from(owner_id))
-                .bind(column)
-                .execute(&mut *connection)
-                .await?
-                .rows_affected();
-            (*id, touched)
-        }
-        RowChange::Destroyed { id } => {
-            let touched = sqlx::query("DELETE FROM item WHERE id = $1 AND owner_id = $2")
-                .bind(i64::from(*id))
-                .bind(i64::from(owner_id))
-                .execute(&mut *connection)
-                .await?
-                .rows_affected();
-            (*id, touched)
-        }
+        } => (
+            *id,
+            move_row(connection, holder, *id, *window_type, *pos).await?,
+        ),
+        RowChange::Count { id, count } => (*id, count_row(connection, holder, *id, *count).await?),
+        RowChange::Destroyed { id } => (*id, destroy_row(connection, holder, *id).await?),
         RowChange::Created(row) => {
             let count = check(row)?;
             bind_item(sqlx::query(insert), row, count)
@@ -1161,6 +1537,41 @@ async fn write_change(
             .bind(i64::from(*id))
             .bind(i64::from(owner_id))
             .bind(receiver)
+            .bind(i16::from(*window_type))
+            .bind(i64::from(*pos))
+            .execute(&mut *connection)
+            .await?
+            .rows_affected();
+            (*id, touched)
+        }
+        RowChange::Stored { id, account, pos } => {
+            let touched = sqlx::query(
+                "UPDATE item SET owner_id = NULL, account_id = $3, window_type = $4, pos = $5 \
+                 WHERE id = $1 AND owner_id = $2",
+            )
+            .bind(i64::from(*id))
+            .bind(i64::from(owner_id))
+            .bind(i64::from(*account))
+            .bind(i16::from(SAFEBOX))
+            .bind(i64::from(*pos))
+            .execute(&mut *connection)
+            .await?
+            .rows_affected();
+            (*id, touched)
+        }
+        RowChange::Retrieved {
+            id,
+            account,
+            window_type,
+            pos,
+        } => {
+            let touched = sqlx::query(
+                "UPDATE item SET account_id = NULL, owner_id = $2, window_type = $4, pos = $5 \
+                 WHERE id = $1 AND account_id = $3",
+            )
+            .bind(i64::from(*id))
+            .bind(i64::from(owner_id))
+            .bind(i64::from(*account))
             .bind(i16::from(*window_type))
             .bind(i64::from(*pos))
             .execute(&mut *connection)
@@ -1206,6 +1617,12 @@ fn taken_cell(owner_id: u32, sides: &[TransferSide<'_>], shared: &[(i16, i64)]) 
                     id,
                     window_type,
                     pos,
+                }
+                | RowChange::Retrieved {
+                    id,
+                    window_type,
+                    pos,
+                    ..
                 } => (side, *id, *window_type, *pos),
                 RowChange::Created(row) => (side, row.id, row.window_type, row.pos),
                 RowChange::Given {
@@ -1216,7 +1633,8 @@ fn taken_cell(owner_id: u32, sides: &[TransferSide<'_>], shared: &[(i16, i64)]) 
                 } => (*to, *id, *window_type, *pos),
                 RowChange::Count { .. }
                 | RowChange::Destroyed { .. }
-                | RowChange::Sockets { .. } => return None,
+                | RowChange::Sockets { .. }
+                | RowChange::Stored { .. } => return None,
             };
             (holder == owner_id).then_some((id, window_type, pos))
         })
@@ -1258,11 +1676,10 @@ fn check_change(owner_id: u32, change: &RowChange, owners: &[u32]) -> Result<(),
                 )));
             }
         }
-        RowChange::Count { count, .. } => {
-            if *count == 0 || u32::from(*count) > ITEM_MAX_COUNT {
-                return Err(ItemError::CountOutOfRange(*count));
-            }
-        }
+        RowChange::Retrieved {
+            id, window_type, ..
+        } => check_window(*id, *window_type)?,
+        RowChange::Count { count, .. } => check_count(*count)?,
         RowChange::Created(row) => {
             let _count = check(row)?;
             if row.owner_id != Some(owner_id) {
@@ -1272,13 +1689,21 @@ fn check_change(owner_id: u32, change: &RowChange, owners: &[u32]) -> Result<(),
                 )));
             }
         }
-        RowChange::Destroyed { .. } | RowChange::Sockets { .. } => {}
+        RowChange::Destroyed { .. } | RowChange::Sockets { .. } | RowChange::Stored { .. } => {}
     }
     Ok(())
 }
 
-/// A moved or given row stays in a window a character holds: not past the ground, and not
-/// on it.
+/// A stack size a row can hold: 1 to [`ITEM_MAX_COUNT`].
+fn check_count(count: u16) -> Result<(), ItemError> {
+    if count == 0 || u32::from(count) > ITEM_MAX_COUNT {
+        return Err(ItemError::CountOutOfRange(count));
+    }
+    Ok(())
+}
+
+/// A moved, given or retrieved row stays in a window a character holds: not past the ground,
+/// not on it, and not in an account's safebox or mall, which only a checkin reaches.
 fn check_window(id: u32, window_type: u8) -> Result<(), ItemError> {
     if window_type > GROUND {
         return Err(ItemError::WindowOutOfRange(window_type));
@@ -1286,6 +1711,11 @@ fn check_window(id: u32, window_type: u8) -> Result<(), ItemError> {
     if window_type == GROUND {
         return Err(ItemError::Corrupt(format!(
             "item {id} would be moved to the ground window through its owner"
+        )));
+    }
+    if window_type == SAFEBOX || window_type == MALL {
+        return Err(ItemError::Corrupt(format!(
+            "item {id} would be moved to the account window {window_type} through its owner"
         )));
     }
     Ok(())
@@ -1298,6 +1728,7 @@ async fn missing(store: &Store, id: u32) -> ItemError {
         Ok(Some(item)) => ItemError::NotOwned {
             id,
             owner_id: item.owner_id,
+            account_id: item.account_id,
         },
         Err(error) => error,
     }
@@ -1328,7 +1759,7 @@ pub async fn max_id_in_range(
     max.map(|value| narrow(value, "MAX(id)")).transpose()
 }
 
-/// Bind one item's thirty columns, in the order [`all_columns`] lists them.
+/// Bind one item's thirty-one columns, in the order [`all_columns`] lists them.
 ///
 /// `count` is the validated `smallint` that [`check`] returned. It is passed in
 /// rather than converted here so there is one conversion, and it is the value that
@@ -1341,6 +1772,7 @@ fn bind_item<'q>(
     let mut query = query
         .bind(i64::from(item.id))
         .bind(item.owner_id.map(i64::from))
+        .bind(item.account_id.map(i64::from))
         .bind(i16::from(item.window_type))
         .bind(i64::from(item.pos))
         .bind(i64::from(item.vnum))
@@ -1377,19 +1809,24 @@ fn check(item: &ItemRow) -> Result<i16, ItemError> {
     } else {
         i16::try_from(item.count).map_err(|_| ItemError::CountOutOfRange(item.count))?
     };
-    // The biconditional, checked before the statement so a caller learns which half
-    // it broke rather than reading a constraint name.
-    if item.owner_id.is_none() != (item.window_type == GROUND) {
+    // The holder rule (`item_holder_check`), checked before the statement so a caller
+    // learns which holder it broke rather than reading a constraint name.
+    if !holder_fits(item.owner_id, item.account_id, item.window_type) {
         return Err(ItemError::Corrupt(format!(
-            "item {} is {} but its window is {}",
-            item.id,
-            if item.owner_id.is_none() {
-                "on the ground"
-            } else {
-                "owned"
-            },
-            item.window_type
+            "item {} is held by character {:?} and account {:?} but its window is {}",
+            item.id, item.owner_id, item.account_id, item.window_type
         )));
     }
     Ok(count)
+}
+
+/// Whether a row's holders fit its window: a ground row has none, a `SAFEBOX` or `MALL` row
+/// has only the account, and every other window has only the character (migration `0008`).
+const fn holder_fits(owner_id: Option<u32>, account_id: Option<u32>, window_type: u8) -> bool {
+    match (owner_id, account_id) {
+        (None, None) => window_type == GROUND,
+        (None, Some(_)) => window_type == SAFEBOX || window_type == MALL,
+        (Some(_), None) => window_type != GROUND && window_type != SAFEBOX && window_type != MALL,
+        (Some(_), Some(_)) => false,
+    }
 }

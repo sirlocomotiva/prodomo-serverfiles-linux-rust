@@ -262,6 +262,7 @@ pub fn grant_item(
     let row = ItemRow {
         id,
         owner_id: Some(owner_id),
+        account_id: None,
         window_type: placed.pos.window_type,
         pos: u32::from(placed.pos.cell),
         vnum: item.vnum,

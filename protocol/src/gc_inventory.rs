@@ -863,7 +863,7 @@ pub const LEGACY_GC_PACKET_INVENTORY: &[LegacyGcPacket] = &[
         server_name: Some("HEADER_GC_SAFEBOX_SET"),
         cpp_type: "TPacketGCItemSet",
         framing: GcFraming::StaticSize,
-        implemented_in_rust: false,
+        implemented_in_rust: true,
     },
     LegacyGcPacket {
         header: HEADER_GC_SAFEBOX_DEL,
@@ -1095,7 +1095,7 @@ pub const LEGACY_GC_PACKET_INVENTORY: &[LegacyGcPacket] = &[
         server_name: Some("HEADER_GC_MALL_SET"),
         cpp_type: "TPacketGCItemSet",
         framing: GcFraming::StaticSize,
-        implemented_in_rust: false,
+        implemented_in_rust: true,
     },
     LegacyGcPacket {
         header: HEADER_GC_MALL_DEL,
@@ -1567,8 +1567,8 @@ mod tests {
             .filter(|entry| entry.implemented_in_rust)
             .map(|entry| entry.client_name)
             .collect();
-        assert_eq!(done.len(), 104);
-        assert_eq!(gc_missing_codec_count(), 30);
+        assert_eq!(done.len(), 106);
+        assert_eq!(gc_missing_codec_count(), 28);
         for name in [
             "HEADER_GC_AFFECT_ADD",
             "HEADER_GC_PLAYER_POINT_CHANGE",
@@ -1670,6 +1670,6 @@ mod tests {
             !six.implemented_in_rust,
             "byte 6 has no server producer and must not claim a codec"
         );
-        assert_eq!(gc_missing_codec_count(), 30);
+        assert_eq!(gc_missing_codec_count(), 28);
     }
 }

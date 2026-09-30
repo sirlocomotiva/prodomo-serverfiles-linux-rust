@@ -99,6 +99,10 @@ pub const ITEM_ANTIFLAG_SELL: u32 = 1 << 8;
 /// either (`char_item.cpp:7481`).
 pub const ITEM_ANTIFLAG_GIVE: u32 = 1 << 13;
 
+/// `ITEM_ANTIFLAG_SAFEBOX` (`item_length.h:395`): the item may not go in a safebox
+/// (`input_main.cpp:2322`).
+pub const ITEM_ANTIFLAG_SAFEBOX: u32 = 1 << 17;
+
 /// An item instance's unique id.
 ///
 /// Legacy's is a `DWORD` from a monotonic counter that is never rewound, so a
@@ -686,6 +690,7 @@ mod tests {
     use super::*;
     use common::constants::ITEM_LIMIT_MAX_NUM;
     use common::item_slots::ITEM_COUNT_LIMIT;
+    use gamedata::item_proto_value::ANTI_FLAG;
 
     /// A range with room to spare, for the tests that are not about exhaustion.
     const fn test_range() -> ItemIdRange {
@@ -947,6 +952,22 @@ mod tests {
         assert_eq!(common::constants::ITEM_SOCKET_UNIQUE_SAVE_TIME, 4);
         assert_eq!(common::constants::ITEM_SOCKET_UNIQUE_REMAIN_TIME, 5);
         assert_eq!(common::constants::ITEM_SOCKET_REMAIN_SEC, 0);
+    }
+
+    #[test]
+    fn every_anti_flag_is_the_bit_its_proto_name_reads_as() {
+        // `get_Item_AntiFlag_Value` reads the n-th name as `1 << n` (`D/ProtoReader.cpp:365-393`),
+        // and `item_length.h:378-396` gives each flag the same bit.
+        for (flag, name) in [
+            (ITEM_ANTIFLAG_DROP, "ANTI_DROP"),
+            (ITEM_ANTIFLAG_SELL, "ANTI_SELL"),
+            (ITEM_ANTIFLAG_GIVE, "ANTI_GIVE"),
+            (ITEM_ANTIFLAG_STACK, "ANTI_STACK"),
+            (ITEM_ANTIFLAG_SAFEBOX, "ANTI_SAFEBOX"),
+        ] {
+            let at = ANTI_FLAG.iter().position(|known| *known == name);
+            assert_eq!(at.map(|at| 1_u32 << at), Some(flag), "{name}");
+        }
     }
 
     #[test]

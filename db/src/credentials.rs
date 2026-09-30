@@ -135,12 +135,18 @@ impl NewPassword {
     ///
     /// Returns [`CredentialError::Hash`] if hashing fails.
     pub fn hash(&self) -> Result<PasswordDigest, CredentialError> {
-        let salt = SaltString::generate(&mut OsRng);
-        let hash = Argon2::default()
-            .hash_password(&self.0, &salt)
-            .map_err(|error| CredentialError::Hash(error.to_string()))?;
-        Ok(PasswordDigest(hash.to_string()))
+        hash_bytes(&self.0)
     }
+}
+
+/// Hash any password with argon2id and a fresh random salt: a login password or a safebox
+/// password ([`crate::safebox`]), each checked by its own rules first.
+pub(crate) fn hash_bytes(raw: &[u8]) -> Result<PasswordDigest, CredentialError> {
+    let salt = SaltString::generate(&mut OsRng);
+    let hash = Argon2::default()
+        .hash_password(raw, &salt)
+        .map_err(|error| CredentialError::Hash(error.to_string()))?;
+    Ok(PasswordDigest(hash.to_string()))
 }
 
 impl fmt::Debug for NewPassword {

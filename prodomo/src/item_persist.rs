@@ -426,6 +426,7 @@ pub async fn destroy_and_delete(
             error: ItemError::NotOwned {
                 id,
                 owner_id: Some(owner),
+                account_id: None,
             },
         },
         Err(error) => {

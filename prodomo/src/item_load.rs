@@ -309,6 +309,31 @@ pub fn plan_item_load(
     load
 }
 
+/// The items of an account's safebox or mall rows, each at its stored cell, and the rows that
+/// are not items (ADR-0005). Which of them fit is [`world::character::Safebox::open`]'s
+/// question; a cell past `u16` is outside every safebox, and it skips one.
+#[must_use]
+pub fn stored_items(rows: &[ItemRow], protos: &ItemProtos) -> (Vec<Item>, Vec<LoadRefusal>) {
+    let mut items = Vec::with_capacity(rows.len());
+    let mut refused = Vec::new();
+    for row in rows {
+        match item_from_row(row, protos) {
+            Ok(mut item) => {
+                item.pos =
+                    ItemPos::new(row.window_type, u16::try_from(row.pos).unwrap_or(u16::MAX));
+                items.push(item);
+            }
+            Err(why) => refused.push(LoadRefusal {
+                id: row.id,
+                window: row.window_type,
+                pos: row.pos,
+                why,
+            }),
+        }
+    }
+    (items, refused)
+}
+
 /// The item a row describes, with its prototype's size and flags.
 fn item_from_row(row: &ItemRow, protos: &ItemProtos) -> Result<Item, Refused> {
     let proto = protos.get(row.vnum).ok_or(Refused::UnknownVnum)?;
@@ -467,6 +492,7 @@ mod tests {
         ItemRow {
             id,
             owner_id: Some(7),
+            account_id: None,
             window_type: window,
             pos,
             vnum,
