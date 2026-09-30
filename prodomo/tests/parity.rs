@@ -1362,8 +1362,9 @@ fn game_len(header: u8) -> usize {
         GC_QUICKSLOT_DEL | GC_SAFEBOX_SIZE | GC_MALL_OPEN => 1 + 1,
         GC_QUICKSLOT_SWAP => 1 + 2,
         GC_EXCHANGE => EXCHANGE_LEN,
-        GC_SAFEBOX_DEL | GC_MALL_DEL => 1 + 4,
+        GC_SAFEBOX_DEL | GC_MALL_DEL | GC_CHARACTER_DEL => 1 + 4,
         GC_SAFEBOX_WRONG_PASSWORD => 1,
+        GC_WARP => WARP_LEN,
         other => panic!("unexpected loading or enter-game header {other}"),
     }
 }
@@ -1510,7 +1511,14 @@ fn load_with_quickslots_on(
     language: u8,
 ) -> (Keyed, Listed, Vec<Vec<u8>>, Vec<Vec<u8>>) {
     let (mut keyed, _empire, list) = select_screen_on(server, channel, login, language);
-    let character = listed(&list, usize::from(slot));
+    let (character, quickslots, items) = load_selected(&mut keyed, &list, slot);
+    (keyed, character, quickslots, items)
+}
+
+/// Select slot `slot` of the character list `list` from the select phase and read what
+/// [`load_with_quickslots`] reads: the character, its quickslot records and its item records.
+fn load_selected(keyed: &mut Keyed, list: &[u8], slot: u8) -> (Listed, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let character = listed(list, usize::from(slot));
     keyed.send_record(&client_select(slot));
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
     assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
@@ -1538,7 +1546,7 @@ fn load_with_quickslots_on(
     };
     assert_eq!(tail, gold, "the item load ends with the gold record");
     assert_eq!(keyed.read_game(), points, "then the points record");
-    (keyed, character, quickslots, items)
+    (character, quickslots, items)
 }
 
 /// Send `CG_ENTER_GAME` from the loading phase and read the enter-game burst, leaving the
@@ -2506,6 +2514,366 @@ fn map_72_is_shown_on_the_shared_channel(server: &Server, database: &ScratchData
     assert_eq!(shown.records.len(), 9 + 7, "a summary for each NPC alone");
     let list = shown.list.expect("map 72 lists its NPCs");
     assert_eq!(&list[3..5], &9u16.to_le_bytes(), "count");
+}
+
+/// `HEADER_GC_CHARACTER_DEL`: the header and the removed `dwVID`, `TPacketGCCharacterDelete`.
+const GC_CHARACTER_DEL: u8 = 2;
+/// `HEADER_GC_WARP`: `TPacketGCWarp`, the header, `lX`, `lY`, `lAddr` and `wPort`.
+const GC_WARP: u8 = 0x41;
+const WARP_LEN: usize = 1 + 4 + 4 + 4 + 2;
+/// `HEADER_CG_WARP`: `TPacketCGWarp`, the header alone.
+const CG_WARP: u8 = 0x41;
+
+/// Where map 1's warp, vnum 10001, stands (`metin2_map_a1/npc.txt:48`'s point plus map 1's
+/// base), and where its name, `tinutul_Yayang 4002 8995`, sends a player: a point on map 3,
+/// which Channel 1 hosts.
+const A1_WARP: (i32, i32) = (450_100, 903_300);
+const A1_WARP_TARGET: (i32, i32) = (400_200, 899_500);
+
+/// The x and y of a `GC_CHARACTER_ADD`, which follow the header, `dwVID` and `angle`.
+fn inserted_at(insert: &[u8]) -> (i32, i32) {
+    let word = |at: usize| {
+        i32::from_le_bytes([insert[at], insert[at + 1], insert[at + 2], insert[at + 3]])
+    };
+    (word(9), word(13))
+}
+
+/// The `GC_WARP` a client is sent for `(x, y)` on `port` of the public address.
+fn a_warp_record((x, y): (i32, i32), port: u16) -> Vec<u8> {
+    let mut record = vec![GC_WARP];
+    record.extend_from_slice(&x.to_le_bytes());
+    record.extend_from_slice(&y.to_le_bytes());
+    record.extend_from_slice(&PUBLIC_ADDR);
+    record.extend_from_slice(&port.to_le_bytes());
+    record
+}
+
+/// `event.char.warp_npc_event`, `gc.warp`, `sys.world.warp`, `cg.game.warp`: a character
+/// standing within 300 of map 1's warp is sent through `WarpSet` on the event's next fire
+/// (`FuncCheckWarp`, `G/char.cpp:7893-8015`; `WarpSet`, `:6694-6792`). Its own client is sent
+/// the `GC_CHARACTER_DEL` of its own VID (`EncodeRemovePacket(this)`, `:6754`) and then the
+/// `GC_WARP` naming the target and the address and port that host map 3, and the row holds the
+/// target before either record is sent.
+///
+/// The old connection is left for the client to close and reads nothing more. The login was
+/// released at the departure, so the key the client holds logs in again at once, while the old
+/// connection is still open; the character list shows the target, and the character enters
+/// map 3 there. A `CG_WARP` then finds no warp
+/// pending and is consumed (`WarpEnd`, `:6800-6801`).
+///
+/// The old descriptor acts no more: a shout it is sent reaches nobody, and its close writes
+/// nothing, so the position the new descriptor saves is the one the row keeps.
+///
+/// The warp fires within a few Pulses of the server starting. Legacy's `IsHack` would refuse
+/// every player for the first ten seconds of uptime (a Defect the Rewrite does not reproduce).
+#[test]
+fn a_warp_npc_sends_its_neighbour_away_and_the_client_comes_back_at_the_target() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    // 100 north of the warp: `DISTANCE_APPROX(0, 100)` is 96, within 300.
+    sql(
+        &database,
+        "UPDATE player SET x = 450100, y = 903400 WHERE name = 'Alpha'",
+    );
+
+    let (_auth, key) = login_key(&server, b"alice");
+    let mut alice = Keyed::channel(server.channel(1));
+    let (_empire, list) = login_by_key(&mut alice, b"alice", key, CLIENT_KEY).expect("logs in");
+    let (alpha, _quickslots, _items) = load_selected(&mut alice, &list, 0);
+    let own = enter_game_records(&mut alice);
+    assert_eq!(
+        inserted_at(&own),
+        (450_100, 903_400),
+        "Alpha enters beside the warp"
+    );
+
+    // Within one fire, the own character's removal and then the warp. The row was written first.
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha.id.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(alice.read_game(), a_warp_record(A1_WARP_TARGET, port));
+    check(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Alpha') = 400200 AND (SELECT y FROM player WHERE \
+         name = 'Alpha') = 899500",
+    );
+    // The departed descriptor drops what it reads, and the next fires find nobody to send.
+    alice.send_record(&client_chat(CHAT_TALKING, b"hello"));
+    alice.quiet("a departed descriptor drops a talking line");
+    alice.quiet("and the warp does not fire again");
+
+    // The key logs in again while the old descriptor is still open.
+    let mut again = Keyed::channel(server.channel(1));
+    let (_empire, list) =
+        login_by_key(&mut again, b"alice", key, CLIENT_KEY).expect("the key logs in again");
+    let listed_alpha = listed(&list, 0);
+    assert_eq!(
+        (
+            listed_alpha.x,
+            listed_alpha.y,
+            listed_alpha.addr,
+            listed_alpha.port
+        ),
+        (A1_WARP_TARGET.0, A1_WARP_TARGET.1, PUBLIC_ADDR, port)
+    );
+    let _loaded = load_selected(&mut again, &list, 0);
+    let own = enter_game_burst(&mut again);
+    assert_eq!(
+        inserted_at(&own),
+        A1_WARP_TARGET,
+        "Alpha enters map 3 at the target"
+    );
+    // A shout would reach every client on every Channel, the new connection among them.
+    alice.send_record(&client_chat(prodomo::chat::CHAT_SHOUT, b"gone"));
+    again.quiet("the departed descriptor drops a shout");
+
+    // Nothing is pending on the new descriptor, so `CG_WARP` is consumed and the connection kept.
+    again.send_record(&[CG_WARP]);
+    again.quiet("WarpEnd with no warp pending");
+    again.send_record(&client_chat(prodomo::chat::CHAT_SHOUT, b"hello"));
+    assert_eq!(
+        again.read_game(),
+        chat_packet(prodomo::chat::CHAT_SHOUT, 1, b"|Len|l Alpha : hello"),
+        "the connection still answers"
+    );
+    alice.quiet("the old descriptor left the client set and hears no shout");
+
+    // The new descriptor saves where Alpha steps to at its close; the old one's close, after
+    // it, writes nothing over that.
+    let old = alice.client.local_addr();
+    again.send_record(&client_move(3, 7, 40, 400_300, 899_500, 0x5eed));
+    again.quiet("PacketAround excludes the mover");
+    drop(again);
+    wait_for(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Alpha') = 400300",
+    );
+    drop(alice);
+    server.wait_for(&format!("Client connection closed addr={old}"));
+    std::thread::sleep(QUIET_WINDOW);
+    check(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Alpha') = 400300",
+    );
+}
+
+/// `event.char.warp_npc_event`: map 3's warp 10067 is named `TemnitaMaimute 7752 4477`, and
+/// (775200, 447700) is on no map, so `WarpSet` finds no location and returns before any record
+/// (`G/char.cpp:6703-6707`), fire after fire. A character standing on it stays, and its
+/// connection answers.
+#[test]
+fn a_warp_to_no_map_sends_nothing_and_the_character_stays() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 407400, y = 875700 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    alice.send_record(&client_enter_game());
+    assert_eq!(alice.read_game()[0], GC_CHARACTER_ADD);
+    assert_eq!(alice.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    let (shown, affect) = read_shown(&mut alice);
+    assert_eq!(affect[0], GC_AFFECT_ADD);
+    assert!(
+        shown.inserts().iter().any(|insert| {
+            insert[21] == 3
+                && insert[22..24] == 10_067u16.to_le_bytes()
+                && inserted_at(insert) == (407_400, 875_700)
+        }),
+        "the warp stands where Alpha stands"
+    );
+    assert_eq!(alice.read_game(), [GC_PHASE, PHASE_GAME]);
+    assert_eq!(alice.read_game()[0], GC_TIME);
+    assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
+    assert_eq!(alice.read_game()[0], GC_CHAT);
+
+    // Four quiet windows are 1.2 seconds, at least two fires.
+    for _ in 0..4 {
+        alice.quiet("a warp to no map");
+    }
+    alice.send_record(&client_chat(prodomo::chat::CHAT_SHOUT, b"hello"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(prodomo::chat::CHAT_SHOUT, 1, b"|Len|l Alpha : hello"),
+        "the connection still answers"
+    );
+}
+
+/// `WarpSet`'s departure writes the row with the destination before `GC_WARP` leaves, so a
+/// client is never sent to a row that does not name it. When the write fails, the descriptor
+/// closes without the character's removal and without `GC_WARP`; the close's own save still
+/// holds the destination and fails the same way, and the row keeps the position Alpha was
+/// loaded at. A trigger that refuses any write of the target's x stands in for a store that
+/// refuses the write.
+#[test]
+fn a_warp_whose_save_fails_closes_without_sending_the_client_away() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 450100, y = 903400 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "CREATE FUNCTION refuse_the_target() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE \
+         EXCEPTION 'the store refuses the write'; END $$",
+    );
+    sql(
+        &database,
+        "CREATE TRIGGER refuse_the_target BEFORE UPDATE ON player FOR EACH ROW WHEN (NEW.x = \
+         400200) EXECUTE FUNCTION refuse_the_target()",
+    );
+
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let own = enter_game_records(&mut alice);
+    assert_eq!(
+        inserted_at(&own),
+        (450_100, 903_400),
+        "Alpha enters beside the warp"
+    );
+    assert_eq!(
+        alice.client.expect_closed(),
+        Vec::<u8>::new(),
+        "no GC_CHARACTER_DEL and no GC_WARP"
+    );
+    server.wait_for("The warp could not save the character; closing without GC_WARP");
+    server.wait_for("Character disconnected; wrote the row");
+    assert!(
+        server.logged("written=false"),
+        "the close's save fails too:\n{}",
+        server.console()
+    );
+    check(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Alpha') = 450100 AND (SELECT y FROM player WHERE \
+         name = 'Alpha') = 903400",
+    );
+}
+
+/// Where the goto NPC of [`a_goto_npc_shows_its_neighbour_at_its_target_on_the_same_map`] shows
+/// a character: its name's numbers times 100 past map 1's base, 409600 and 896000.
+const GOTO_TARGET: (i32, i32) = (444_100, 932_100);
+
+/// `event.char.warp_npc_event` for a goto NPC, which the owner's data spawns on no map it hosts
+/// (ledger 228): the scenario spawns 10601 of `metin2_map_monkey_dungeon2`, `CHAR_TYPE_GOTO`
+/// and named `. 345 361`, on map 1 at (470000, 950100), 100 north of Alpha, with a line the
+/// owner's `npc.txt` does not have.
+///
+/// On the event's next fire Alpha is shown on its own map at the target (`FuncCheckWarp`,
+/// `G/char.cpp:7971-7972`), which is in another sectree, so its own client is sent the insert
+/// pair alone (`Show`, `:1847-1917`) and no reconnect. Alpha then stands out of the NPC's reach,
+/// so the next fires send nothing, and the logout saves the target.
+#[test]
+fn a_goto_npc_shows_its_neighbour_at_its_target_on_the_same_map() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t604\t541\t0\t0\t0\t1\t1s\t100\t1\t10601\n",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+
+    let (mut alice, alpha, _items) = load_character(&server, b"alice", 0);
+    let own = enter_game_records(&mut alice);
+    assert_eq!(inserted_at(&own), (470_000, 950_000));
+    let shown = alice.read_game();
+    assert_eq!(shown[0], GC_CHARACTER_ADD);
+    assert_eq!(shown[1..5], alpha.id.to_le_bytes(), "Alpha itself");
+    assert_eq!(inserted_at(&shown), GOTO_TARGET);
+    assert_eq!(alice.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    // Two quiet windows are 0.6 seconds, at least one fire.
+    alice.quiet("Alpha stands out of the goto's reach");
+    alice.quiet("and the next fire finds nobody");
+
+    drop(alice);
+    wait_for(
+        &database,
+        "(SELECT x FROM player WHERE name = 'Alpha') = 444100 AND (SELECT y FROM player WHERE \
+         name = 'Alpha') = 932100",
+    );
+}
+
+/// `IsHack` (`G/char.cpp:8226-8293`), which `FuncCheckWarp` runs before `WarpSet`
+/// (`:7961-7962`): a player that comes within 300 of a warp with a trade open is told `[LS;851]`
+/// on every fire and stays. Once the trade is cancelled, the trade it started is within the
+/// portal limit, and the line is `[LS;852;10]`. The trader who stays away is told nothing.
+#[test]
+fn a_trader_beside_a_warp_is_told_why_and_stays() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE account SET empire = 2 WHERE login = 'bob'",
+    );
+    // Alpha is 500 north of the warp and Yankee 800: `DISTANCE_APPROX` gives 480 and 768.
+    sql(
+        &database,
+        "UPDATE player SET x = 450100, y = 903800 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         450100, 904100 FROM account WHERE login = 'bob'",
+    );
+    let (mut alice, alpha) = enter_world(&server, b"alice", 0);
+    let (mut bob, yankee) = enter_world(&server, b"bob", 0);
+    alice.quiet("Alpha is out of the warp's reach");
+
+    alice.send_record(&client_exchange(0, u64::from(yankee.id), 0, 0));
+    assert_eq!(
+        bob.read_game(),
+        exchange_record(0, false, u64::from(alpha.id), NO_CELL)
+    );
+    assert_eq!(
+        alice.read_game(),
+        exchange_record(0, false, u64::from(yankee.id), NO_CELL)
+    );
+
+    // Alpha steps to 100 north of the warp. `FUNC_COMBO` steps without a duration.
+    alice.send_record(&client_move(3, 7, 40, A1_WARP.0, A1_WARP.1 + 100, 0x5eed));
+    assert_eq!(bob.read_game()[0], GC_MOVE, "the neighbour sees the step");
+    let window = chat_packet(prodomo::chat::CHAT_INFO, 1, b"[LS;851]");
+    assert_eq!(alice.read_game(), window, "a fire refuses the open trade");
+    assert_eq!(alice.read_game(), window, "and so does the next");
+
+    // The cancel may cross a fire, which is told the window line once more.
+    alice.send_record(&client_exchange(5, 0, 0, 0));
+    let cancelled = exchange_record(5, false, 0, NO_CELL);
+    let mut next = alice.read_game();
+    while next == window {
+        next = alice.read_game();
+    }
+    assert_eq!(next, cancelled);
+    assert_eq!(bob.read_game(), cancelled);
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(prodomo::chat::CHAT_INFO, 1, b"[LS;852;10]"),
+        "the trade Alpha started is within the portal limit"
+    );
+    bob.quiet("Yankee stands out of the warp's reach");
 }
 
 /// `HEADER_GC_SCRIPT`: `TPacketGCScript`, a `WORD size` covering the whole record, the `skin`

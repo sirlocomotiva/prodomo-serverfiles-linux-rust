@@ -41,6 +41,18 @@ impl Client {
         Self { stream, address }
     }
 
+    /// The address this end of the connection is bound to, which the server logs as its peer.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the socket has no local address, which a connected socket always has.
+    #[must_use]
+    pub fn local_addr(&self) -> SocketAddr {
+        self.stream
+            .local_addr()
+            .expect("a connected socket has a local address")
+    }
+
     /// Send `bytes` as they are.
     ///
     /// # Panics

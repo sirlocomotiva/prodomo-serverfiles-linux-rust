@@ -163,13 +163,15 @@ fn banked_minutes(elapsed_ms: u32) -> i32 {
     i32::try_from(elapsed_ms / 60_000).unwrap_or(i32::MAX)
 }
 
-/// The position a save writes, which is the avatar's live position and not the row's.
+/// The position a save writes: the avatar's live position or its pending Warp destination, never
+/// the row's.
 ///
 /// Legacy writes `m_posWarp` when either axis is nonzero and the live position otherwise
 /// (`G/char.cpp:1551-1565`), so a character with a pending Warp is stored at its destination
-/// and a character without one at where it stands. The Rewrite has no pending Warp outside the
-/// login home move of ledger 189, which writes its own row, so the live position is the whole
-/// rule here and the pending case is left to the Warp that sets one.
+/// and a character without one at where it stands. The choice is the caller's: the
+/// descriptor's save passes the destination of the in-game Warp it holds (ledger 228) through
+/// [`crate::warp::save_position`], and the live position otherwise. The login home move of
+/// ledger 189 writes its own row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SavePosition {
     /// `GetX()`.

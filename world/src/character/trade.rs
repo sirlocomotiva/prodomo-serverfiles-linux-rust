@@ -40,8 +40,9 @@
 //! A dragon soul stone, an item outside the `INVENTORY` window and an item with no prototype
 //! cannot be offered: the offer is refused silently, after every legacy check, so no trade
 //! moves one (legacy gives a stone a cell of the dragon soul inventory). The item lock, the
-//! DB-cache check, `SetExchangeTime` (the portal guard) and the item and gold logs are not
-//! ported either.
+//! DB-cache check and the item and gold logs are not ported either. `SetExchangeTime`, the
+//! portal guard, is the game thread's, which stamps both sides when a trade starts and when
+//! both accept.
 
 use common::item_slots::EWindows;
 use gamedata::item_custom_category::{is_custom_category, CATEGORY_NUM};

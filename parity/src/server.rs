@@ -95,7 +95,32 @@ impl Server {
         game: &str,
     ) -> Self {
         let root = unique_root();
-        Self::start_in(root, binary, store_url, channels, game)
+        Self::start_in(root, binary, &config_text(store_url, channels, game))
+    }
+
+    /// A server on [`default_channels`] whose Game data is the owner's with `lines` appended to
+    /// the `npc.txt` of the map folder `map`, for a spawn the owner's data does not have.
+    ///
+    /// The Game data folder is built in the server's own directory as links to the owner's
+    /// files, with the one `npc.txt` copied and extended, so the owner's data is never written
+    /// and `Drop` removes the links with the directory.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owner's data has no such map folder or the links cannot be made, and as
+    /// [`Server::start`].
+    #[must_use]
+    pub fn start_with_npcs(binary: &Path, store_url: &str, map: &str, lines: &str) -> Self {
+        let root = unique_root();
+        let owner = legacy_dir().join("gamedata");
+        let data = root.join("gamedata");
+        let npc = Path::new("locale/europe/map").join(map).join("npc.txt");
+        link_all_but(&owner, &data, &npc);
+        let mut text = fs::read(owner.join(&npc)).expect("the map folder should have an npc.txt");
+        text.extend_from_slice(lines.as_bytes());
+        fs::write(data.join(&npc), text).expect("the extended npc.txt should be writable");
+        let config = config_text_on(&data, store_url, &default_channels(), "");
+        Self::start_in(root, binary, &config)
     }
 
     /// A server whose Operator console reads a named pipe, and the path of that pipe.
@@ -133,23 +158,18 @@ impl Server {
             lines.push('\n');
             lines.push_str(game);
         }
-        let server = Self::start_in(root, binary, store_url, channels, &lines);
+        let config = config_text(store_url, channels, &lines);
+        let server = Self::start_in(root, binary, &config);
         (server, console)
     }
 
-    /// The rest of [`Server::start_configured`], for a root this method chose itself.
-    fn start_in(
-        root: PathBuf,
-        binary: &Path,
-        store_url: &str,
-        channels: &[ChannelSpec],
-        game: &str,
-    ) -> Self {
+    /// The rest of [`Server::start_configured`], for a root this method chose itself and the
+    /// text of its `prodomo.toml`.
+    fn start_in(root: PathBuf, binary: &Path, text: &str) -> Self {
         let log_dir = root.join("log");
         fs::create_dir_all(&log_dir).expect("the scenario directory should be creatable");
         let config = root.join("prodomo.toml");
-        fs::write(&config, config_text(store_url, channels, game))
-            .expect("the scenario configuration should be writable");
+        fs::write(&config, text).expect("the scenario configuration should be writable");
         let mut child = Command::new(binary)
             .arg("--config")
             .arg(&config)
@@ -344,22 +364,57 @@ fn unique_root() -> PathBuf {
     ))
 }
 
-/// The keys naming the owner's legacy Game data folder and table dumps, read in place.
-fn data_keys() -> String {
-    let legacy = Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy");
+/// The owner's `legacy` folder.
+fn legacy_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy")
+}
+
+/// Make `to` a copy of `from` made of links, except along `path`: each folder on it is made,
+/// and every entry beside it linked, down to the last component, which is left for the caller
+/// to write.
+fn link_all_but(from: &Path, to: &Path, path: &Path) {
+    let mut from = from.to_owned();
+    let mut to = to.to_owned();
+    for component in path.components() {
+        fs::create_dir_all(&to).expect("the linked Game data folder should be creatable");
+        let entries = fs::read_dir(&from).expect("the owner's Game data folder should be readable");
+        for entry in entries {
+            let entry = entry.expect("the owner's Game data folder should be readable");
+            if entry.file_name() != component.as_os_str() {
+                std::os::unix::fs::symlink(entry.path(), to.join(entry.file_name()))
+                    .expect("a link to the owner's Game data should be creatable");
+            }
+        }
+        from.push(component);
+        to.push(component);
+    }
+}
+
+/// The keys naming `game_data` as the Game data folder and the owner's table dumps.
+fn data_keys_on(game_data: &Path) -> String {
     format!(
         "game_data = \"{}\"\ngame_tables = \"{}\"\n",
-        legacy.join("gamedata").display(),
-        legacy.join("sql/gamedata").display()
+        game_data.display(),
+        legacy_dir().join("sql/gamedata").display()
     )
 }
 
 /// The `prodomo.toml` for a scenario: every port 0, so the operating system picks free ones, and
 /// the legacy Game data.
 fn config_text(store_url: &str, channels: &[ChannelSpec], game: &str) -> String {
+    config_text_on(&legacy_dir().join("gamedata"), store_url, channels, game)
+}
+
+/// [`config_text`] with `game_data` as the Game data folder.
+fn config_text_on(
+    game_data: &Path,
+    store_url: &str,
+    channels: &[ChannelSpec],
+    game: &str,
+) -> String {
     let mut text = format!(
         "bind_ip = \"127.0.0.1\"\n{}\n[store]\nurl = \"{store_url}\"\n\n[auth]\nport = 0\n",
-        data_keys()
+        data_keys_on(game_data)
     );
     if !game.is_empty() {
         write!(text, "\n[game]\n{game}\n").expect("writing to a String cannot fail");
@@ -394,6 +449,11 @@ fn forward_lines(stdout: ChildStdout) -> Receiver<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The keys naming the owner's legacy Game data folder and table dumps, read in place.
+    fn data_keys() -> String {
+        data_keys_on(&legacy_dir().join("gamedata"))
+    }
 
     #[test]
     fn the_configuration_names_every_channel_with_port_zero() {

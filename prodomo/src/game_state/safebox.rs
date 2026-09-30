@@ -11,11 +11,13 @@
 //! a character trades nothing (`GameState::safebox_loaded_recently`); the mall's loads do not
 //! count.
 //!
+//! `IsHack` (`char.cpp:8234-8241`) reads the load time too, for a warp NPC (`warp_npc`).
+//!
 //! # Not ported
 //!
-//! The other checks that read the safebox's load time: `IsHack` (`char.cpp:8226-8240`), which
-//! `do_cmd` and `do_restart` call, `CanWarp` (`:8788-8793`) and the summoning items
-//! (`char_item.cpp:7254-7261`). None of their commands or items is ported.
+//! The other checks that read the safebox's load time: `IsHack` as `do_cmd` and `do_restart`
+//! call it, `CanWarp` (`:8788-8793`) and the summoning items (`char_item.cpp:7254-7261`). None of
+//! their commands or items is ported.
 
 use common::item_slots::usable_inventory_cells;
 use common::vid::Vid;

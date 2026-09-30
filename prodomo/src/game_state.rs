@@ -18,11 +18,13 @@
 //! # What is deliberately absent
 //!
 //! There is no Channel map set. The NPCs the regen files stand up at boot are here, but they
-//! never move or respawn, and a click reaches their quests and then a keeper's shop. This holds
-//! the pieces the item path, the shops, the quests and the map view need and nothing more, because
-//! each of the rest is a separate unit with its own decision to record. [`PulseProcessor::process_pulse`](crate::game_loop::PulseProcessor::process_pulse) therefore
-//! steps nothing yet; it counts, and the count is what proves the thread is running
-//! this value rather than an empty closure.
+//! never move or respawn; a click reaches their quests and then a keeper's shop, and a warp NPC
+//! sends the players near it on. This holds the pieces the item path, the shops, the quests, the
+//! warp NPCs and the map view need and nothing more, because each of the rest is a separate unit
+//! with its own decision to record.
+//! [`PulseProcessor::process_pulse`](crate::game_loop::PulseProcessor::process_pulse) steps
+//! only the events those pieces have: the ground items, the recovery, the distant trades and the
+//! warp NPCs.
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{BuildHasher, RandomState};
@@ -60,6 +62,7 @@ mod quests;
 mod safebox;
 mod shop;
 mod trade;
+mod warp_npc;
 
 pub use quests::{QuestStep, Quests};
 pub use safebox::{
@@ -390,6 +393,10 @@ pub struct GameState {
     storages: HashMap<common::vid::Vid, safebox::Storage>,
     /// The quests boot loaded, when it did.
     quests: Option<Quests>,
+    /// The warp and goto NPCs standing on each map of each Channel, keyed as `npcs` is.
+    warp_npcs: BTreeMap<(u8, i32), Vec<warp_npc::WarpNpc>>,
+    /// When each character last traded or shopped, keyed by its VID, which `IsHack` reads.
+    portal_times: HashMap<common::vid::Vid, warp_npc::PortalTimes>,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -458,6 +465,8 @@ impl GameState {
             trading: HashMap::new(),
             storages: HashMap::new(),
             quests: None,
+            warp_npcs: BTreeMap::new(),
+            portal_times: HashMap::new(),
         }
     }
 
@@ -511,7 +520,9 @@ impl GameState {
         entries: &[RegenEntry],
     ) -> Result<(), NpcVidsExhausted> {
         let npcs = spawner.spawn_map(region, entries, &mut self.dice)?;
+        let warps = warp_npc::warp_npcs(&npcs.npcs, region);
         self.npcs.insert((channel, region.index), Arc::new(npcs));
+        self.warp_npcs.insert((channel, region.index), warps);
         Ok(())
     }
 
@@ -906,6 +917,7 @@ impl GameState {
         self.stop_browsing(vid);
         self.close_storage(vid);
         self.end_quests(vid);
+        self.forget_portal_times(vid);
         let character = self.characters.find_by_vid(vid).ok()?;
         let kept = Kept {
             points: character.points().cloned(),
@@ -1410,18 +1422,17 @@ impl PulseProcessor for GameState {
 
     /// Step one pulse.
     ///
-    /// Counts, and nothing else. An empty body that only counts is the honest state
-    /// of this unit: the world has characters and item ids, but no map set to step
-    /// and no script to run, so there is no work a pulse could do that a pulse does
-    /// not already do. The count is not decoration either -- it is the only way a
-    /// test can tell that the game thread owns this value rather than the empty
-    /// closure it replaced.
+    /// Counts the Pulse, then runs the events that are due on it: the ground items whose
+    /// lifetime ran out, the recovery of each character, the trades whose sides stand too far
+    /// apart, and the warp NPCs. The count is also the only way a test can tell that the game
+    /// thread owns this value.
     fn process_pulse(&mut self, pulse: u64) {
         self.last_pulse = pulse;
         self.metrics.pulses.store(pulse, Ordering::SeqCst);
         self.destroy_expired(pulse);
         self.run_recovery(pulse);
         self.cancel_distant_trades(pulse);
+        self.run_warp_npcs(pulse);
     }
 }
 

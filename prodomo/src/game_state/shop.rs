@@ -24,6 +24,10 @@
 //! `SHOP_SUBHEADER_GC_INVALID_POS`; the rest are the world's. Closing answers
 //! `SHOP_SUBHEADER_GC_END` when a window is open and nothing when none is.
 //!
+//! A buy that passes the distance check and a close of an open window stamp `SetMyShopTime`, the
+//! portal guard a warp NPC's `IsHack` reads (`G/shop_manager.cpp:377`, `:439`). A sale does not,
+//! as in legacy.
+//!
 //! # Divergences
 //!
 //! - **A keeper on another map.** `CHARACTER_MANAGER::Find` looks a VID up across every map
@@ -364,6 +368,7 @@ impl GameState {
             Ok(browsing) => browsing,
             Err(declined) => return Ok(declined),
         };
+        self.set_shop_time(vid);
         let slot = usize::from(pos);
         if slot >= SHOP_HOST_ITEM_MAX_NUM {
             return Ok(ShopAnswer::Declined {
@@ -470,6 +475,7 @@ impl GameState {
     /// `StopShopping` and `CShop::RemoveGuest`.
     fn close_shop(&mut self, vid: Vid) -> ShopAnswer {
         if self.browsing.remove(&vid).is_some() {
+            self.set_shop_time(vid);
             ShopAnswer::Sent(vec![GcShop::new(SHOP_SUBHEADER_GC_END).encode()])
         } else {
             ShopAnswer::silent(ShopDeclined::NotBrowsing)

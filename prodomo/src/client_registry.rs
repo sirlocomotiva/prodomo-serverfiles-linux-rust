@@ -61,11 +61,35 @@ pub struct ClientEntry {
     pub language: u8,
 }
 
+/// What the game thread asks a descriptor to do to its own character.
+///
+/// The world owns no descriptor, so a step that ends in the descriptor's own state is sent as
+/// an order, and the descriptor runs it on its next turn. A warp NPC's `WarpSet` saves the
+/// character and sends `GC_WARP`, and its goto `Show` moves the character the descriptor holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientOrder {
+    /// `WarpSet(x, y)` from a warp NPC (`FuncCheckWarp`, `G/char.cpp:7967-7968`).
+    Warp {
+        /// The target x.
+        x: i32,
+        /// The target y.
+        y: i32,
+    },
+    /// `Show(GetMapIndex(), x, y)` then `Stop()` from a goto NPC (`G/char.cpp:7971-7972`).
+    Goto {
+        /// The target x, the map's base included.
+        x: i32,
+        /// The target y, the map's base included.
+        y: i32,
+    },
+}
+
 #[derive(Debug)]
 struct Member {
     id: u64,
     entry: ClientEntry,
     outbox: ClientOutbox,
+    orders: mpsc::UnboundedSender<ClientOrder>,
 }
 
 /// A sender the game thread writes records to for one client.
@@ -138,6 +162,7 @@ impl ChannelClients {
     /// `DESC_MANAGER` does when a descriptor is destroyed.
     pub fn join(self: &Arc<Self>, entry: ClientEntry) -> Lease {
         let (tx, inbox) = mpsc::unbounded_channel();
+        let (orders, ordered) = mpsc::unbounded_channel();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let channel = entry.channel;
         if let Ok(mut channels) = self.inner.lock() {
@@ -145,6 +170,7 @@ impl ChannelClients {
                 id,
                 entry,
                 outbox: ClientOutbox::new(tx.clone()),
+                orders,
             });
         }
         Lease {
@@ -153,7 +179,40 @@ impl ChannelClients {
             outbox: ClientOutbox::new(tx),
             registry: Arc::clone(self),
             inbox: Some(inbox),
+            orders: Some(ordered),
         }
+    }
+
+    /// The clients on one map of one Channel with their lease identifiers, in join order.
+    ///
+    /// A warp NPC needs both: the entry for the empire and the language of the line it sends,
+    /// and the lease for the position table and for the order.
+    #[must_use]
+    pub fn members_on_map(&self, channel: u8, map: i32) -> Vec<(u64, ClientEntry)> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&channel)
+            .map(|members| {
+                members
+                    .iter()
+                    .filter(|member| member.entry.map == map)
+                    .map(|member| (member.id, member.entry.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Hand one order to the descriptor that holds lease `id` on `channel`.
+    ///
+    /// Returns `false` when no such member is left or its descriptor has stopped taking orders.
+    pub fn order(&self, channel: u8, id: u64, order: ClientOrder) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&channel)
+            .and_then(|members| members.iter().find(|member| member.id == id))
+            .is_some_and(|member| member.orders.send(order).is_ok())
     }
 
     /// The clients on one map of one Channel, in join order.
@@ -289,6 +348,7 @@ pub struct Lease {
     outbox: ClientOutbox,
     registry: Arc<ChannelClients>,
     inbox: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    orders: Option<mpsc::UnboundedReceiver<ClientOrder>>,
 }
 
 impl Lease {
@@ -330,6 +390,20 @@ impl Lease {
             // borrow rather than leaving a live queue nobody reads, and a member whose
             // receiver is gone stops being a recipient.
             drop(inbox);
+        }
+    }
+
+    /// Lend the order queue to a caller's `select!` arm, as [`Lease::take_receiver`] lends the
+    /// record queue. Returns `None` when it is already lent out.
+    pub fn take_orders(&mut self) -> Option<mpsc::UnboundedReceiver<ClientOrder>> {
+        self.orders.take()
+    }
+
+    /// Take the order queue back after a [`Lease::take_orders`] arm. A lease that already holds
+    /// one drops the other, as [`Lease::put_receiver`] does.
+    pub fn put_orders(&mut self, orders: mpsc::UnboundedReceiver<ClientOrder>) {
+        if self.orders.is_none() {
+            self.orders = Some(orders);
         }
     }
 
@@ -459,6 +533,15 @@ impl PositionTable {
             entry.x = x;
             entry.y = y;
             entry.last_sync = Some(now);
+        }
+    }
+
+    /// Move a character without stamping its last-sync time, which `CHARACTER::Show` does: it
+    /// sets the position (`SetXYZ`, `G/char.cpp:1890`) and leaves `m_fSyncTime` alone.
+    pub fn place(&self, id: u64, x: i32, y: i32) {
+        if let Some(entry) = self.lock().get_mut(&id) {
+            entry.x = x;
+            entry.y = y;
         }
     }
 
@@ -615,6 +698,70 @@ mod tests {
     }
 
     #[test]
+    fn the_members_on_a_map_come_in_join_order_with_their_leases() {
+        let registry = Arc::new(ChannelClients::new());
+        let first = registry.join(entry(1, 100, "First"));
+        let _elsewhere = registry.join(entry(1, 200, "Elsewhere"));
+        let _other = registry.join(entry(2, 100, "Other"));
+        let second = registry.join(ClientEntry {
+            empire: 3,
+            ..entry(1, 100, "Second")
+        });
+
+        let members = registry.members_on_map(1, 100);
+
+        let seen: Vec<(u64, &str, u8)> = members
+            .iter()
+            .map(|(id, client)| (*id, client.name.as_str(), client.empire))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![(first.id(), "First", 1), (second.id(), "Second", 3)]
+        );
+        assert!(registry.members_on_map(3, 100).is_empty());
+    }
+
+    #[test]
+    fn an_order_reaches_only_the_lease_it_names_on_its_channel() {
+        let registry = Arc::new(ChannelClients::new());
+        let mut named = registry.join(entry(1, 100, "Named"));
+        let mut beside = registry.join(entry(1, 100, "Beside"));
+        let warp = ClientOrder::Warp {
+            x: 400_200,
+            y: 899_500,
+        };
+
+        assert!(registry.order(1, named.id(), warp));
+        assert!(!registry.order(2, named.id(), warp), "another Channel");
+
+        let mut orders = named.take_orders().expect("the queue is home");
+        assert_eq!(orders.try_recv().ok(), Some(warp));
+        assert!(orders.try_recv().is_err(), "exactly one order");
+        assert!(named.take_orders().is_none(), "lent out");
+        named.put_orders(orders);
+        assert!(named.take_orders().is_some(), "taken back");
+        let mut beside_orders = beside.take_orders().expect("the queue is home");
+        assert!(beside_orders.try_recv().is_err());
+    }
+
+    #[test]
+    fn an_order_to_a_departed_or_deaf_client_reports_failure() {
+        let registry = Arc::new(ChannelClients::new());
+        let mut deaf = registry.join(entry(1, 100, "Deaf"));
+        let departed = registry.join(entry(1, 100, "Departed"));
+        let departed_id = departed.id();
+        drop(departed);
+        drop(deaf.take_orders());
+        let goto = ClientOrder::Goto {
+            x: 162_500,
+            y: 676_100,
+        };
+
+        assert!(!registry.order(1, departed_id, goto));
+        assert!(!registry.order(1, deaf.id(), goto));
+    }
+
+    #[test]
     fn dropping_a_lease_deregisters_the_client() {
         let registry = Arc::new(ChannelClients::new());
         let watcher = registry.join(entry(1, 100, "Watcher"));
@@ -714,5 +861,33 @@ mod tests {
         table.sync(lease.id(), 11, 21, std::time::Duration::from_millis(500));
         assert_eq!(table.find_on_map(&registry, 1, 0, 3_000_007), None);
         assert_eq!(table.sync_owner(lease.id()), None);
+    }
+
+    #[test]
+    fn placing_a_character_moves_it_and_keeps_its_sync_stamp_and_owner() {
+        let registry = Arc::new(ChannelClients::new());
+        let lease = registry.join(entry(1, 0, "Jumper"));
+        let table = PositionTable::new();
+        table.track(lease.id(), SyncPositionVictimKind::Player, 7, 10, 20);
+        table.sync(lease.id(), 11, 21, std::time::Duration::from_millis(500));
+        table.set_sync_owner(lease.id(), 9, std::time::Duration::from_millis(40));
+        table.place(lease.id(), 35_500, 38_100);
+        let placed = table.get(lease.id()).expect("still tracked");
+        assert_eq!((placed.x, placed.y), (35_500, 38_100));
+        assert_eq!(
+            placed.last_sync,
+            Some(std::time::Duration::from_millis(500))
+        );
+        assert_eq!(
+            placed.sync_owner,
+            Some((9, std::time::Duration::from_millis(40)))
+        );
+        table.forget(lease.id());
+        table.place(lease.id(), 1, 2);
+        assert_eq!(
+            table.get(lease.id()),
+            None,
+            "a place never brings a row back"
+        );
     }
 }

@@ -63,6 +63,10 @@
 //! a quest's `target` click on the player asked, and no quest can set a target (`target.*` is not
 //! ported), so it never takes the trade, as in the Rewrite. A script that waits for either
 //! side's client refuses the trade when both accept ([`world::character::QUESTING_NOTICE`]).
+//!
+//! `SetExchangeTime`, the portal guard, is ported: a trade that starts, and a trade both sides
+//! accept, stamp both characters, and a warp NPC refuses either for 10 seconds after
+//! (`IsHack`, in `warp_npc`).
 
 use common::item_slots::usable_inventory_cells;
 use common::vid::Vid;
@@ -442,6 +446,8 @@ impl GameState {
         let _replaced = self.trades.insert(key, deal);
         let _starter = self.trading.insert(vid, (key, Side::Starter));
         let _asked = self.trading.insert(partner, (key, Side::Asked));
+        self.set_exchange_time(vid);
+        self.set_exchange_time(partner);
         TradeAnswer::Sent(self.tell_both(Side::Starter, mover, (partner, asked), said))
     }
 
@@ -541,6 +547,9 @@ impl GameState {
         let Some(deal) = self.close_deal(key) else {
             return TradeAnswer::silent(TradeDeclined::NotTrading);
         };
+        for vid in deal.vids {
+            self.set_exchange_time(vid);
+        }
         let [starter, asked] = deal.vids.map(|vid| self.trader(vid));
         let (Some(starter), Some(asked)) = (starter, asked) else {
             return TradeAnswer::Declined {
@@ -760,7 +769,7 @@ mod tests {
     use world::npc::{MapNpcs, Npc};
 
     use super::*;
-    use crate::client_registry::{ClientEntry, Lease};
+    use crate::client_registry::{ClientEntry, ClientOrder, Lease};
     use crate::game_loop::PulseProcessor;
     use crate::game_loop_messages::GameCommand;
     use crate::game_state::{
@@ -1755,5 +1764,350 @@ mod tests {
             refused.err(),
             Some(MoveItemRefused::NoSuchCharacter { vid: nobody })
         );
+    }
+
+    /// A warp NPC of `empire` at the spot on map 41, named `name`.
+    fn a_warp_npc(vid: u32, empire: u8, name: &[u8]) -> Npc {
+        Npc {
+            vid,
+            vnum: 10_001,
+            race: 10_001,
+            char_type: gamedata::mob_proto::CHAR_TYPE_WARP,
+            on_click: 0,
+            empire,
+            name: name.to_vec(),
+            ..keeper()
+        }
+    }
+
+    /// Where [`a_warp_npc`] named `a3 4002 8995` sends a player.
+    const TO_A3: ClientOrder = ClientOrder::Warp {
+        x: 400_200,
+        y: 899_500,
+    };
+
+    impl Square {
+        /// Stand `npcs` up on Channel 1's map 41, whose base is (1000, 2000).
+        fn stand_up(&mut self, npcs: &[Npc]) {
+            let region = gamedata::map_atlas::MapRegion {
+                index: 41,
+                name: b"metin2_map_b_desert".to_vec(),
+                sx: 1_000,
+                sy: 2_000,
+                ex: 26_600,
+                ey: 27_600,
+                spawn: (0, 0),
+                empire_spawns: None,
+            };
+            let kept = super::super::warp_npc::warp_npcs(npcs, &region);
+            let _replaced = self.state.warp_npcs.insert((1, 41), kept);
+        }
+
+        /// The orders `who`'s descriptor has been handed since the last look.
+        fn ordered(&mut self, who: usize) -> Vec<ClientOrder> {
+            let mut orders = self.leases[who].take_orders().expect("the queue is home");
+            let got = std::iter::from_fn(|| orders.try_recv().ok()).collect();
+            self.leases[who].put_orders(orders);
+            got
+        }
+    }
+
+    /// `IsHack`'s line `text`, with the 10 seconds when `seconds` says so, to a player of
+    /// `empire`.
+    fn hack_line(empire: u8, text: &[u8], seconds: bool) -> Vec<u8> {
+        let locale = LocaleStrings::default();
+        let limit = [Arg::Int(10)];
+        let args: &[Arg<'_>] = if seconds { &limit } else { &[] };
+        chat_packet(of(empire).recipient(&locale), CHAT_TYPE_INFO, text, args)
+    }
+
+    #[test]
+    fn a_warp_npc_orders_every_player_within_reach_on_every_twelfth_pulse() {
+        let mut square = a_square(&[], &[]);
+        square.stand_up(&[a_warp_npc(0x8000_0002, 0, b"a3 4002 8995")]);
+        square.stand(Z, 313);
+
+        square.state.process_pulse(11);
+        for who in [A, Y, Z, 3] {
+            assert!(square.ordered(who).is_empty(), "not a twelfth Pulse");
+        }
+        square.state.process_pulse(12);
+        assert_eq!(square.ordered(A), vec![TO_A3]);
+        assert_eq!(square.ordered(Y), vec![TO_A3]);
+        assert_eq!(square.ordered(Z), vec![TO_A3], "313 east is 300 away");
+        assert!(square.ordered(3).is_empty(), "Faraway stands on map 42");
+
+        square.stand(Z, 314);
+        square.state.process_pulse(24);
+        assert_eq!(square.ordered(A), vec![TO_A3], "the event fires again");
+        assert!(square.ordered(Z).is_empty(), "314 east is 301 away");
+        assert!(square.heard(Z).is_empty(), "out of reach is silent");
+        square.stand_at(Z, 0, 314);
+        square.state.process_pulse(36);
+        assert!(square.ordered(Z).is_empty(), "the reach along y");
+        square.positions.forget(square.leases[Z].id());
+        square.state.process_pulse(48);
+        assert!(square.ordered(Z).is_empty(), "a player off the map");
+        assert_eq!(square.ordered(Y), vec![TO_A3, TO_A3, TO_A3]);
+    }
+
+    #[test]
+    fn a_warp_npc_passes_over_what_is_not_a_player_in_the_world() {
+        let mut square = a_square(&[], &[]);
+        square.stand_up(&[a_warp_npc(0x8000_0002, 0, b"a3 4002 8995")]);
+        let clients = square
+            .state
+            .clients
+            .clone()
+            .expect("the square has clients");
+        let mut entering = clients.join(ClientEntry {
+            channel: 1,
+            map: 41,
+            name: "Entering".to_owned(),
+            vid: 15,
+            empire: 1,
+            language: 1,
+        });
+        let kind = SyncPositionVictimKind::Player;
+        square.positions.track(entering.id(), kind, 15, SPOT, SPOT);
+        let id = square.leases[A].id();
+        let kind = SyncPositionVictimKind::Monster;
+        square
+            .positions
+            .track(id, kind, PEOPLE[A].0.raw(), SPOT, SPOT);
+
+        square.state.process_pulse(0);
+        assert!(
+            square.ordered(Y).is_empty(),
+            "the event first fires 12 Pulses after the stand-up"
+        );
+        square.state.process_pulse(12);
+
+        assert_eq!(square.ordered(Y), vec![TO_A3]);
+        assert!(square.ordered(A).is_empty(), "not a player (`IsPC`)");
+        let mut orders = entering.take_orders().expect("the queue is home");
+        assert!(
+            orders.try_recv().is_err(),
+            "a player whose character has not entered the world"
+        );
+    }
+
+    #[test]
+    fn a_trade_or_shop_stamp_holds_a_player_back_249_pulses_and_not_250() {
+        /// `SetExchangeTime` or `SetMyShopTime`.
+        type Stamp = fn(&mut GameState, Vid);
+        let mut square = a_square(&[], &[]);
+        let (vid, _, _, empire) = PEOPLE[A];
+        let recent = hack_line(empire, b"[LS;852;%d]", true);
+        let stamps: [(&str, Stamp); 2] = [
+            ("SetExchangeTime", GameState::set_exchange_time),
+            ("SetMyShopTime", GameState::set_shop_time),
+        ];
+        for (at, (name, stamp)) in [1_000, 2_000].into_iter().zip(stamps) {
+            square.state.process_pulse(at);
+            stamp(&mut square.state, vid);
+            square.state.process_pulse(at + 249);
+            assert_eq!(
+                square.state.is_hack(vid, of(empire)),
+                Some(recent.clone()),
+                "{name} 249 Pulses ago"
+            );
+            square.state.process_pulse(at + 250);
+            assert_eq!(
+                square.state.is_hack(vid, of(empire)),
+                None,
+                "{name} 250 Pulses ago"
+            );
+        }
+    }
+
+    #[test]
+    fn a_warp_npc_of_an_empire_passes_over_the_other_empires_without_a_word() {
+        let mut square = a_square(&[], &[]);
+        square.stand_up(&[a_warp_npc(0x8000_0002, 1, b"a3 4002 8995")]);
+        square.browse(Y);
+        let _window = square.heard(Y);
+
+        square.state.process_pulse(12);
+
+        assert_eq!(square.ordered(A), vec![TO_A3]);
+        assert_eq!(square.ordered(Z), vec![TO_A3]);
+        assert!(square.ordered(Y).is_empty());
+        assert!(square.heard(Y).is_empty(), "the empire is checked first");
+    }
+
+    #[test]
+    fn a_goto_npc_orders_a_show_past_its_maps_base_and_a_player_takes_one_order_a_pulse() {
+        let mut square = a_square(&[], &[]);
+        let goto = Npc {
+            char_type: gamedata::mob_proto::CHAR_TYPE_GOTO,
+            ..a_warp_npc(0x8000_0002, 0, b". 345 361")
+        };
+        let bad = a_warp_npc(0x8000_0003, 0, b"Gatekeeper");
+        let warp = a_warp_npc(0x8000_0004, 0, b"a3 4002 8995");
+        square.stand_up(&[goto, bad, warp]);
+        assert_eq!(
+            square.state.warp_npc_vids_on(1, 41),
+            vec![0x8000_0002, 0x8000_0004],
+            "a name that does not parse stands no warp NPC"
+        );
+        let shown = ClientOrder::Goto {
+            x: 35_500,
+            y: 38_100,
+        };
+        assert_eq!(square.state.warp_npcs_on(1, 41), vec![shown, TO_A3]);
+
+        square.state.process_pulse(12);
+
+        assert_eq!(square.ordered(A), vec![shown], "the first NPC orders it");
+        assert_eq!(square.ordered(Y), vec![shown]);
+    }
+
+    #[test]
+    fn a_safebox_holds_its_owner_back_with_the_load_line_before_the_window_line() {
+        let mut square = a_square(&[], &[]);
+        square.stand_up(&[a_warp_npc(0x8000_0002, 0, b"a3 4002 8995")]);
+        square.open_store(A, false);
+        let _opened = square.heard(A);
+
+        square.state.process_pulse(12);
+        assert!(square.ordered(A).is_empty());
+        assert_eq!(
+            square.heard(A),
+            vec![hack_line(1, b"[LS;850;%d]", true)],
+            "loaded 12 Pulses ago, and open"
+        );
+        assert_eq!(square.ordered(Z), vec![TO_A3]);
+        square.state.process_pulse(252);
+        assert!(square.ordered(A).is_empty());
+        assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;851]", false)]);
+        square.close_store(A, false);
+        let _closed = square.heard(A);
+        square.state.process_pulse(492);
+        assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;850;%d]", true)]);
+        square.state.process_pulse(504);
+        assert!(square.heard(A).is_empty());
+        assert_eq!(square.ordered(A), vec![TO_A3], "closed 252 Pulses ago");
+    }
+
+    #[test]
+    fn a_mall_holds_nobody_back() {
+        let mut square = a_square(&[], &[]);
+        square.stand_up(&[a_warp_npc(0x8000_0002, 0, b"a3 4002 8995")]);
+        square.open_store(A, true);
+        let _opened = square.heard(A);
+
+        square.state.process_pulse(12);
+
+        assert!(square.heard(A).is_empty());
+        assert_eq!(square.ordered(A), vec![TO_A3]);
+    }
+
+    #[test]
+    fn a_trade_holds_both_sides_back_while_open_and_ten_seconds_after_it_starts_or_settles() {
+        let mut square = a_square(&[], &[]);
+        square.stand_up(&[a_warp_npc(0x8000_0002, 0, b"a3 4002 8995")]);
+        square.started();
+
+        square.state.process_pulse(12);
+        assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;851]", false)]);
+        assert_eq!(square.heard(Y), vec![hack_line(2, b"[LS;851]", false)]);
+        assert!(square.ordered(A).is_empty() && square.ordered(Y).is_empty());
+        assert_eq!(square.ordered(Z), vec![TO_A3]);
+        let _ended = sent(square.step(Y, TradeStep::Cancel));
+        let _told = square.heard(A);
+        square.state.process_pulse(240);
+        assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;852;%d]", true)]);
+        assert_eq!(square.heard(Y), vec![hack_line(2, b"[LS;852;%d]", true)]);
+        square.state.process_pulse(252);
+        assert_eq!(square.ordered(A), vec![TO_A3], "started 252 Pulses ago");
+        assert_eq!(square.ordered(Y), vec![TO_A3]);
+
+        square.started();
+        square.state.process_pulse(600);
+        let _open = (square.heard(A), square.heard(Y));
+        let _accepted = sent(square.step(A, TradeStep::Accept));
+        let _told = square.heard(Y);
+        let settled = square.step(Y, TradeStep::Accept);
+        assert!(matches!(settled, TradeAnswer::Settled(_)), "{settled:?}");
+        let _told = square.heard(A);
+        square.state.process_pulse(840);
+        assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;852;%d]", true)]);
+        assert_eq!(square.heard(Y), vec![hack_line(2, b"[LS;852;%d]", true)]);
+        square.state.process_pulse(852);
+        assert_eq!(square.ordered(A), vec![TO_A3], "settled 252 Pulses ago");
+        assert_eq!(square.ordered(Y), vec![TO_A3]);
+
+        square.state.process_pulse(1_010);
+        square.started();
+        let _ended = sent(square.step(Y, TradeStep::Cancel));
+        let _told = square.heard(A);
+        square.state.process_pulse(1_248);
+        assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;852;%d]", true)]);
+        square.state.process_pulse(1_260);
+        assert_eq!(
+            square.ordered(A),
+            vec![TO_A3],
+            "started exactly 250 Pulses ago"
+        );
+    }
+
+    #[test]
+    fn a_shop_holds_its_buyer_back_while_open_and_ten_seconds_after_a_buy_or_a_close() {
+        let mut square = a_square(&[(inventory(0), potions(ALPHAS, 2))], &[]);
+        square.stand_up(&[a_warp_npc(0x8000_0002, 0, b"a3 4002 8995")]);
+        square.browse(A);
+        let _window = square.heard(A);
+        square.state.process_pulse(12);
+        assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;851]", false)]);
+        square.leave_shop(A);
+        square.state.process_pulse(252);
+        assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;852;%d]", true)]);
+        square.state.process_pulse(264);
+        assert_eq!(square.ordered(A), vec![TO_A3], "closed 252 Pulses ago");
+
+        let buy = ShopStep::Buy { pos: 200 };
+        square.browse(A);
+        square.state.process_pulse(600);
+        let _window = square.heard(A);
+        let far = square.state.shop(ALPHA, buy, at(2100), of(1)).unwrap();
+        assert!(matches!(far, ShopAnswer::Declined { .. }), "{far:?}");
+        square.state.stop_browsing(ALPHA);
+        square.state.process_pulse(612);
+        assert_eq!(
+            square.ordered(A),
+            vec![TO_A3],
+            "a buy from afar stamps nothing"
+        );
+
+        square.browse(A);
+        let sold = ShopStep::Sell { cell: 0, count: 0 };
+        let sale = square.state.shop(ALPHA, sold, at(0), of(1)).unwrap();
+        assert!(matches!(sale, ShopAnswer::Moved(_)), "{sale:?}");
+        square.state.stop_browsing(ALPHA);
+        let _heard = square.heard(A);
+        square.state.process_pulse(624);
+        assert_eq!(square.ordered(A), vec![TO_A3], "a sale stamps nothing");
+
+        square.browse(A);
+        let bought = square.state.shop(ALPHA, buy, at(0), of(1)).unwrap();
+        assert!(matches!(bought, ShopAnswer::Declined { .. }), "{bought:?}");
+        square.state.stop_browsing(ALPHA);
+        let _heard = square.heard(A);
+        square.state.process_pulse(864);
+        assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;852;%d]", true)]);
+        square.state.process_pulse(876);
+        assert_eq!(square.ordered(A), vec![TO_A3], "bought 252 Pulses ago");
+    }
+
+    #[test]
+    fn leaving_the_world_forgets_the_portal_times() {
+        let mut square = a_square(&[], &[]);
+        square.started();
+        let _ended = sent(square.step(Y, TradeStep::Cancel));
+        assert!(square.state.portal_times.contains_key(&ALPHA));
+        let _kept = square.state.leave_world(ALPHA);
+        assert!(!square.state.portal_times.contains_key(&ALPHA));
+        assert!(square.state.portal_times.contains_key(&YANKEE));
     }
 }

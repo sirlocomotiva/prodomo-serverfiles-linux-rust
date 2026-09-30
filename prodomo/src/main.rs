@@ -58,7 +58,7 @@ use prodomo::chat_line::Recipient;
 use prodomo::client_live::{
     handshake_token, BootLiveClock, LiveClientSession, LiveClock, LiveError, LiveOutcome, LiveStep,
 };
-use prodomo::client_registry::{ChannelClients, ClientEntry, Lease, PositionTable};
+use prodomo::client_registry::{ChannelClients, ClientEntry, ClientOrder, Lease, PositionTable};
 use prodomo::client_session::ClientPhase;
 use prodomo::command::{
     interpret, one_argument, Caller, Command as LineCommand, CommandFlood, Interpreted, GM_PLAYER,
@@ -109,6 +109,7 @@ use protocol::cg_inventory::{
     HEADER_CG_LOGIN3, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_QUEST_INPUT_STRING,
     HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP,
     HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYNC_POSITION,
+    HEADER_CG_WARP,
 };
 use protocol::cg_item_drop::CgItemDrop;
 use protocol::cg_item_drop2::CgItemDrop2;
@@ -117,7 +118,7 @@ use protocol::cg_item_pickup::CgItemPickup;
 use protocol::cg_item_use::CgItemUse;
 use protocol::cg_login::CgEmpire;
 use protocol::cg_login3::CgLogin3;
-use protocol::cg_micro::CgScriptAnswer;
+use protocol::cg_micro::{CgScriptAnswer, CgWarp};
 use protocol::cg_move::CgMove;
 use protocol::cg_name::CgChangeName;
 use protocol::cg_position::CgCharacterPosition;
@@ -138,7 +139,7 @@ use protocol::item_pos::ItemPos;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::signal;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use world::character::MoveRequest;
 use world::item::Item;
 use world::npc::{NpcSpawner, NpcVids};
@@ -350,6 +351,13 @@ struct Held {
     /// `m_dwLastItemDropTime`: when a drop last passed the drop limit
     /// (`G/char_item.cpp:7465`), whatever the rest of the drop then did.
     last_item_drop: Option<tokio::time::Instant>,
+    /// `m_lWarpMapIndex` and `m_posWarp`: the destination a `WarpSet` stored, which the save
+    /// writes instead of the position (`G/char.cpp:1551-1565`).
+    warp: Option<prodomo::warp::WarpTarget>,
+    /// Whether this descriptor has sent `GC_WARP`. Its character is saved at the destination
+    /// and released by then, so the descriptor only waits for the client to close, dropping
+    /// whatever the client still sends.
+    departed: bool,
 }
 
 /// The per-descriptor half of legacy's save cycle.
@@ -486,28 +494,7 @@ async fn handle_connection(
     // items hold, so a save that ran first would name a cell another character can
     // already have been given, and a grant that arrived between the two would be
     // placed into an inventory the world is about to release.
-    if let Some(world_vid) = held.world.take() {
-        match context.game.leave_world(world_vid).await {
-            // The world's points and quickslots are the ones the save writes: the potion
-            // recovery changes the points on the world's pulse, after the last step this
-            // descriptor held, and a trade the partner closed the quickslots.
-            Ok(Some(departed)) => {
-                hold_kept(&mut held, departed);
-                info!(%addr, vid = world_vid.raw(), "Character left the world");
-            }
-            // A leave that found nobody is a descriptor that never entered, which the
-            // `Option` already rules out, so this is a world that lost the character
-            // some other way. The disconnect continues either way.
-            Ok(None) => {
-                warn!(%addr, vid = world_vid.raw(), "The world did not hold this character at disconnect");
-            }
-            // A leave with no answer means the game thread is gone. The process is
-            // losing the world with it, so the descriptor still closes.
-            Err(error) => {
-                warn!(%addr, vid = world_vid.raw(), %error, "The world could not be told this character left");
-            }
-        }
-    }
+    leave_the_world(&context, addr, &mut held).await;
     // `CHARACTER::Disconnect` flushes the queued save and, if the character was not queued,
     // calls `SaveReal` itself (`G/char.cpp:1786-1789`), then sets `m_bSkipSave` so nothing
     // writes after (`G/char.cpp:1800`). Both arms write the row, so the branch is the log line
@@ -535,6 +522,38 @@ async fn handle_connection(
     }
     // `held` drops here, which releases the lease and deregisters the character.
     drop(held);
+}
+
+/// Take this descriptor's character out of the game thread's world, if it is in it, and hold
+/// the points and quickslots the world kept, which the save then writes.
+///
+/// A disconnect reaches here (`DESC::SetPlayer(NULL)`), and so does a `WarpSet`, whose
+/// `RemoveEntity` takes the character out of its sectree before `GC_WARP` is sent
+/// (`G/char.cpp:6749-6755`).
+async fn leave_the_world(context: &ConnectionContext, addr: SocketAddr, held: &mut Held) {
+    let Some(world_vid) = held.world.take() else {
+        return;
+    };
+    match context.game.leave_world(world_vid).await {
+        // The world's points and quickslots are the ones the save writes: the potion
+        // recovery changes the points on the world's pulse, after the last step this
+        // descriptor held, and a trade the partner closed the quickslots.
+        Ok(Some(departed)) => {
+            hold_kept(held, departed);
+            info!(%addr, vid = world_vid.raw(), "Character left the world");
+        }
+        // A leave that found nobody is a descriptor that never entered, which the
+        // `Option` already rules out, so this is a world that lost the character
+        // some other way. The disconnect continues either way.
+        Ok(None) => {
+            warn!(%addr, vid = world_vid.raw(), "The world did not hold this character at disconnect");
+        }
+        // A leave with no answer means the game thread is gone. The process is
+        // losing the world with it, so the descriptor still closes.
+        Err(error) => {
+            warn!(%addr, vid = world_vid.raw(), %error, "The world could not be told this character left");
+        }
+    }
 }
 
 /// The per-connection values the read loop needs, none of which change while it runs.
@@ -579,35 +598,23 @@ async fn pump_descriptor<S>(
     // ever awaits a socket. The queue is lent out of the lease for the duration of one
     // `select!`, because the lease itself belongs to `held` and the analyzer may replace it.
     let mut outbox: Option<mpsc::UnboundedReceiver<Vec<u8>>> = None;
+    // The game thread's orders to this client are lent out the same way.
+    let mut orders: Option<mpsc::UnboundedReceiver<ClientOrder>> = None;
     let mut pending: Vec<Vec<u8>> = Vec::new();
 
     loop {
-        // Take the queue back from the previous turn and lend it out again for this turn's
-        // select. A lease the analyzer created still has its queue in place, so
-        // `take_receiver` hands that one straight over.
-        match held.presence.as_mut() {
-            Some(lease) => {
-                if let Some(inbox) = outbox.take() {
-                    lease.put_receiver(inbox);
-                }
-                outbox = lease.take_receiver();
-            }
-            None => outbox = None,
-        }
+        lend_queues(held, &mut outbox, &mut orders);
         // A burst another client caused while this one was thinking is written before the
         // next read, so a record can never sit behind a frame the client already sent.
-        let mut wrote = true;
-        for record in pending.drain(..) {
-            if let Err(error) = session.send(&record).await {
-                warn!(%addr, %error, "Client session stopped while writing a broadcast");
-                wrote = false;
-                break;
-            }
-        }
-        if !wrote {
+        if !write_pending(session, addr, &mut pending).await {
             break;
         }
         match session.next_buffered(clock.now()).await {
+            // A descriptor that sent `GC_WARP` has released its character, so there is
+            // nothing left for a record to act on. Legacy would still analyze it against the
+            // character it keeps until the close; the Rewrite drops it, which is recorded as
+            // a Divergence of the departure.
+            Ok(Some(_)) if held.departed => continue,
             Ok(Some(step)) => {
                 let seat = locations.map(|locations| ChannelSeat {
                     locations,
@@ -669,6 +676,18 @@ async fn pump_descriptor<S>(
                 info!(%addr, "Another client logged in with this login; closing");
                 break;
             }
+            // An order from the game thread: a warp or goto NPC this character stands by.
+            order = next_order(&mut orders) => {
+                if let Some(order) = order {
+                    if !follow_order(session, addr, context, locations, held, order).await {
+                        break;
+                    }
+                } else {
+                    // As for the broadcast queue: the lease is held, so the queue closed.
+                    info!(%addr, "Order queue closed; no more orders");
+                    orders = None;
+                }
+            }
             // A record another character caused: chat on this map, or a move around it. The
             // arm only receives; the write happens after the select, because `session` is
             // borrowed mutably by the other arms.
@@ -685,6 +704,47 @@ async fn pump_descriptor<S>(
             }
         }
     }
+}
+
+/// Take the lease's queues back from the previous turn and lend them out again for this turn's
+/// select. A lease the analyzer created still has its queues in place, so the takes hand those
+/// straight over; a descriptor with no lease lends nothing.
+fn lend_queues(
+    held: &mut Held,
+    outbox: &mut Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    orders: &mut Option<mpsc::UnboundedReceiver<ClientOrder>>,
+) {
+    let Some(lease) = held.presence.as_mut() else {
+        *outbox = None;
+        *orders = None;
+        return;
+    };
+    if let Some(inbox) = outbox.take() {
+        lease.put_receiver(inbox);
+    }
+    *outbox = lease.take_receiver();
+    if let Some(queue) = orders.take() {
+        lease.put_orders(queue);
+    }
+    *orders = lease.take_orders();
+}
+
+/// Write the broadcast records queued during the last turn; `false` when the session stopped.
+async fn write_pending<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    pending: &mut Vec<Vec<u8>>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    for record in pending.drain(..) {
+        if let Err(error) = session.send(&record).await {
+            warn!(%addr, %error, "Client session stopped while writing a broadcast");
+            return false;
+        }
+    }
+    true
 }
 
 /// Hold a character's points, and the pools and parts the save writes from the held row.
@@ -1202,6 +1262,237 @@ async fn next_broadcast(outbox: &mut Option<mpsc::UnboundedReceiver<Vec<u8>>>) -
     }
 }
 
+/// Wait for the next order the game thread gives this descriptor's client. As with
+/// [`next_broadcast`], a descriptor with no lease never completes.
+async fn next_order(
+    orders: &mut Option<mpsc::UnboundedReceiver<ClientOrder>>,
+) -> Option<ClientOrder> {
+    match orders.as_mut() {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Carry out an order of the game thread; `false` when the connection must close.
+///
+/// The game thread owns no socket (ADR-0002), so the two effects of `FuncCheckWarp` that
+/// write to the client run here: `WarpSet` for a warp NPC and `Show` for a goto NPC
+/// (`G/char.cpp:7967-7973`).
+async fn follow_order<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    locations: Option<&MapLocations>,
+    held: &mut Held,
+    order: ClientOrder,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match order {
+        ClientOrder::Warp { x, y } => {
+            warp_set(session, addr, context, locations, held, (x, y)).await
+        }
+        ClientOrder::Goto { x, y } => goto_show(session, addr, context, held, (x, y)).await,
+    }
+}
+
+/// `CHARACTER::WarpSet(x, y)` for this descriptor's character (`G/char.cpp:6694-6792`);
+/// `false` when the connection must close.
+///
+/// The refusals come first and send nothing: a position no map on any Channel serves is
+/// `CMapLocation::Get` failing, which legacy logs as an error and the warp NPC then retries
+/// every 12 Pulses. The Rewrite logs it at debug level for the same reason it is retried:
+/// ten of the owner's warp NPCs name such a position, and a player standing by one would
+/// otherwise fill the log. The private map and the sort-inventory refusals cannot be reached:
+/// a warp NPC passes no private map, and the Rewrite has no inventory sort.
+///
+/// # The departure
+///
+/// Legacy queues a save (`G/char.cpp:1472-1476`), takes the character out of its sectree,
+/// which sends its own client the delete of itself, stores the destination, sends `GC_WARP`,
+/// and keeps the descriptor until the client closes it. The queued save runs after the
+/// destination is stored, at the next 29-Pulse drain or at the close
+/// (`CHARACTER::Disconnect`, `:1786-1789`), and either writes the destination
+/// (`:1551-1557`); `GC_WARP` does not wait for it. The
+/// Rewrite does the same work in an order a login on the new address can rely on: it takes the
+/// character out of the world, writes the row **with the destination** before `GC_WARP`
+/// leaves, and releases the login and the client-set entry, so the client's login by key finds
+/// the row saved and the login free. The descriptor then waits for the client to close,
+/// dropping what it sends. A save that fails closes the descriptor without `GC_WARP`, which
+/// legacy never withholds: the destination stays held, so the close tries the save again, and
+/// the row it writes is the one legacy's writes.
+async fn warp_set<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    locations: Option<&MapLocations>,
+    held: &mut Held,
+    (x, y): (i32, i32),
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if held.departed || held.world.is_none() {
+        return true;
+    }
+    let (Some(locations), Some(map)) = (locations, held.avatar.as_ref().map(|avatar| avatar.map))
+    else {
+        return true;
+    };
+    // `CMapLocation::Get`: the atlas says which map holds the position, and the map is a
+    // destination only when a Channel serves it.
+    let resolve = |x: i32, y: i32| {
+        context
+            .atlas
+            .index_at(x, y)
+            .filter(|&index| locations.get(index).is_some())
+    };
+    let request = prodomo::warp::WarpSetRequest {
+        x,
+        y,
+        private_map_index: 0,
+        sort_inventory_pulse: 0,
+        now_ms: 0,
+    };
+    let outcome = prodomo::warp::judge_warp_set(&request, map, true, &resolve);
+    let prodomo::warp::WarpSetOutcome::Accepted {
+        resolved_map_index,
+        stored_map_index,
+        ..
+    } = outcome
+    else {
+        debug!(%addr, x, y, map, ?outcome, "WarpSet refused");
+        return true;
+    };
+    let Some((address, port)) = locations.get(resolved_map_index) else {
+        return true;
+    };
+    leave_the_world(context, addr, held).await;
+    let target = prodomo::warp::WarpTarget {
+        map_index: stored_map_index,
+        x,
+        y,
+    };
+    held.warp = Some(target);
+    // `Stop()`.
+    if let Some(avatar) = held.avatar.as_mut() {
+        avatar.destination = None;
+    }
+    if !save_held(context, held, std::time::Instant::now()).await {
+        warn!(%addr, x, y, "The warp could not save the character; closing without GC_WARP");
+        return false;
+    }
+    // The row is the new descriptor's to write from here on.
+    held.save = None;
+    if let Some(lease) = held.presence.take() {
+        context.positions.forget(lease.id());
+    }
+    held.logon = None;
+    held.departed = true;
+    let vid = held.character.as_ref().map_or(0, character_vid);
+    let records = prodomo::warp::departure_records(vid, &target, address, port);
+    if let Err(error) = send_all(session, &records).await {
+        warn!(%addr, %error, "Client session stopped while writing GC_WARP");
+        return false;
+    }
+    // `LogManager::CharLog(this, 0, "WARP", ...)`, whose `DestMapIdx` is the private map
+    // argument, which a warp NPC leaves at 0 (`G/char.cpp:6787-6789`).
+    info!(
+        %addr,
+        name = held.character.as_ref().map_or("", |character| character.name.as_str()),
+        map,
+        dest_map = request.private_map_index,
+        x,
+        y,
+        empire = held.character.as_ref().map_or(0, |character| character.empire),
+        "WARP"
+    );
+    true
+}
+
+/// A goto NPC's `Show(GetMapIndex(), x, y)` and `Stop()` for this descriptor's character
+/// (`G/char.cpp:7971-7972`); `false` when the connection must close.
+///
+/// `Show` fails, sending nothing, when no sectree of the character's map holds the position
+/// (`G/char.cpp:1849-1854`), and `Stop` runs either way. When it succeeds the character stands
+/// at the position, and its own client is sent the records of
+/// [`prodomo::warp::show_records`].
+async fn goto_show<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    to: (i32, i32),
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if held.departed {
+        return true;
+    }
+    let language = descriptor_language(held.account.as_ref());
+    let (Some(character), Some(points), Some(avatar), Some(lease)) = (
+        held.character.as_ref(),
+        held.points.as_ref(),
+        held.avatar.as_mut(),
+        held.presence.as_ref(),
+    ) else {
+        return true;
+    };
+    avatar.destination = None;
+    if context.atlas.index_at(to.0, to.1) != Some(avatar.map) {
+        debug!(
+            %addr,
+            x = to.0,
+            y = to.1,
+            map = avatar.map,
+            "Show found no sectree; the goto stops"
+        );
+        return true;
+    }
+    let from = (avatar.x, avatar.y);
+    let vid = character_vid(character);
+    let records = prodomo::warp::show_records(
+        character,
+        points,
+        (vid, language),
+        avatar.rotation,
+        from,
+        to,
+    );
+    avatar.x = to.0;
+    avatar.y = to.1;
+    context.positions.place(lease.id(), to.0, to.1);
+    info!(%addr, name = %character.name.as_str(), x = to.0, y = to.1, "SHOW");
+    if let Err(error) = send_all(session, &records).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    true
+}
+
+/// `CG_WARP` (65) in the game phase: `CInputMain::Warp`, whose whole body is `ch->WarpEnd()`
+/// (`G/input_main.cpp:2271-2274`).
+///
+/// `WarpEnd` returns at its first line unless `m_posWarp` is set (`G/char.cpp:6800-6801`). A
+/// character a login loaded never holds one, and the one descriptor that stores one, the
+/// `WarpSet` departure, drops every record after `GC_WARP`. So on every descriptor that
+/// reaches this arm `WarpEnd` returns at once: nothing is sent and the connection stays open.
+/// Before ledger 228 the header had no arm and closed the connection.
+fn warp_end(addr: SocketAddr, frame: &ClientFrame) -> bool {
+    match CgWarp::decode_frame(frame) {
+        Ok(CgWarp) => {
+            debug!(%addr, "CG_WARP with no pending Warp");
+            true
+        }
+        Err(error) => {
+            warn!(%addr, %error, "CG_WARP did not decode; closing");
+            false
+        }
+    }
+}
+
 /// `CG_CHAT` (3) in the game phase: `CInputMain::Chat` (`input_main.cpp:781-991`).
 ///
 /// The judge owns the legacy order, so this function only applies the effects. The three
@@ -1513,7 +1804,7 @@ where
 }
 
 /// The live ports for `CG_SYNC_POSITION` (8): `CInputMain::SyncPosition`
-/// (`input_main.cpp:2088-2171`).
+/// (`input_main.cpp:2010-2165`).
 ///
 /// The policy in [`prodomo::sync_position`] is already complete, so this adapter supplies
 /// the six things it deliberately does not own: the victim lookup, the sync-ownership
@@ -1837,26 +2128,12 @@ where
         {
             belongings_step(session, addr, context, held, &frame).await
         }
-        // `CG_MOVE` (7) in the game phase: `CInputMain::Move` (`G/input_main.cpp:1757`).
+        // `CG_MOVE` (7), `CG_SYNC_POSITION` (8) and `CG_CHARACTER_POSITION` (28) in the game
+        // phase.
         LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && frame.header == HEADER_CG_MOVE.value() =>
+            if phase == ClientPhase::Game && is_motion_step(frame.header) =>
         {
-            move_character(session, addr, context, held, &frame)
-        }
-        // `CG_CHARACTER_POSITION` (28) in the game phase: `CInputMain::Position`
-        // (`G/input_main.cpp:1530`).
-        LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game
-                && frame.header == HEADER_CG_CHARACTER_POSITION.value() =>
-        {
-            character_pose(session, addr, context, held, &frame)
-        }
-        // `CG_SYNC_POSITION` (8) in the game phase: `CInputMain::SyncPosition`
-        // (`G/input_main.cpp:2088`).
-        LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && frame.header == HEADER_CG_SYNC_POSITION.value() =>
-        {
-            sync_positions(session, addr, context, held, &frame)
+            motion_step(session, addr, context, held, &frame)
         }
         // `CG_ON_CLICK` (26), `CG_SHOP` (50), `CG_SCRIPT_ANSWER` (29) and
         // `CG_QUEST_INPUT_STRING` (30) in the game phase.
@@ -1871,7 +2148,45 @@ where
         {
             transaction_record(session, addr, context, held, &frame).await
         }
+        // `CG_WARP` (65) in the game phase: `CInputMain::Warp` (`G/input_main.cpp:2271-2274`),
+        // which `CInputMain::Analyze` calls (`:3801-3802`).
+        LiveStep::Record { phase, frame }
+            if phase == ClientPhase::Game && frame.header == HEADER_CG_WARP.value() =>
+        {
+            warp_end(addr, &frame)
+        }
         step => report_step(addr, step),
+    }
+}
+
+/// Whether `header` is one of the records that move a character.
+fn is_motion_step(header: u8) -> bool {
+    header == HEADER_CG_MOVE.value()
+        || header == HEADER_CG_SYNC_POSITION.value()
+        || header == HEADER_CG_CHARACTER_POSITION.value()
+}
+
+/// Run a step [`is_motion_step`] accepts:
+///
+/// - `CG_MOVE` (7): `CInputMain::Move` (`G/input_main.cpp:1757`).
+/// - `CG_SYNC_POSITION` (8): `CInputMain::SyncPosition` (`G/input_main.cpp:2010`).
+/// - `CG_CHARACTER_POSITION` (28): `CInputMain::Position` (`G/input_main.cpp:1530`).
+fn motion_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if frame.header == HEADER_CG_MOVE.value() {
+        move_character(session, addr, context, held, frame)
+    } else if frame.header == HEADER_CG_SYNC_POSITION.value() {
+        sync_positions(session, addr, context, held, frame)
+    } else {
+        character_pose(session, addr, context, held, frame)
     }
 }
 
@@ -2908,12 +3223,26 @@ async fn save_held(context: &ConnectionContext, held: &Held, at: std::time::Inst
     // travel, it is a clock this Rewrite does not have.
     let elapsed = u32::try_from(at.saturating_duration_since(event.play_start).as_millis())
         .unwrap_or(u32::MAX);
+    // `CHARACTER::Save` writes the pending Warp destination, when there is one, instead of
+    // the position (`G/char.cpp:1551-1565`). The store keeps no map column, so the map of
+    // either is the one the atlas finds at the load.
+    let live = prodomo::warp::LivePoint {
+        x: avatar.x,
+        y: avatar.y,
+        z: 0,
+        map_index: avatar.map,
+    };
+    let (x, y) = match held
+        .warp
+        .map_or(prodomo::warp::SavePosition::Live(live), |warp| {
+            prodomo::warp::save_position(&warp, &live)
+        }) {
+        prodomo::warp::SavePosition::Warp(target) => (target.x, target.y),
+        prodomo::warp::SavePosition::Live(point) => (point.x, point.y),
+    };
     let save = prodomo::save::player_save(
         character,
-        prodomo::save::SavePosition {
-            x: avatar.x,
-            y: avatar.y,
-        },
+        prodomo::save::SavePosition { x, y },
         prodomo::save::playtime(character.playtime_minutes, elapsed),
     );
     match db::players::save_character(&context.store, account.id, character.id, &save).await {

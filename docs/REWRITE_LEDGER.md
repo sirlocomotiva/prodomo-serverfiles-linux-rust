@@ -25008,3 +25008,572 @@ and 176,565 lines, outside `server/` and `.scratch/`. No crate was fetched: `mlu
 feature needs none, and `Cargo.lock` is unchanged. `psql` is not installed, so the store was
 read through `podman exec` into the database's container. The i686 `g++` is not installed
 either, so the i686 probe was not run.
+
+## 228. The in-game Warp: the warp NPC event, `WarpSet`, `GC_WARP`, the reconnect and `CG_WARP`
+
+A player who stands by a warp NPC is now sent to the map the NPC names. Legacy starts
+`warp_npc_event` for every warp and goto NPC (`StartWarpNPCEvent`, `G/char.cpp:8017-8030`), and
+the event fires every 12 Pulses (`passes_per_sec / 2`, `:8013`). Each fire parses the NPC's name
+as `" %s %ld %ld "`, multiplies the two numbers by 100 and, for a goto NPC, adds its map's base
+(`FuncCheckWarp`, `:7895-7933`). It then checks each character around the NPC, in this order
+(`:7940-7974`): a PC, within 300 (`DISTANCE_APPROX`), of the NPC's empire when both have one,
+passed by `IsHack` (`:8226-8293`), and passed by `CanHandleItem(false, true)`. A warp NPC calls
+`WarpSet(x, y)` on the player. A goto NPC calls `Show` on the player's own map, then `Stop`.
+
+`WarpSet` (`:6694-6792`) finds the Core that hosts the target (`CMapLocation::Get`), stops the
+character and queues its save (`:6746-6747`). `Save` only queues it (`:1472-1476`,
+`G/char_manager.cpp:798-801`). `WarpSet` then takes the character out of its sectree, which
+sends its own client a `GC_CHARACTER_DEL` of itself (`:6749-6755`). It stores the destination
+and sends `GC_WARP` with the target and that Core's address and port (`:6757-6785`). The queued
+`SaveReal` runs after the destination is stored, at the next drain of the queue (every 29
+Pulses, `G/main.cpp:276-277`) or at the close's `FlushDelayedSave` (`:1786-1789`), whichever
+comes first. So it writes the destination (`:1551-1557`), and `GC_WARP` does not wait for it.
+Legacy keeps the descriptor until the client closes it.
+
+The client then connects to that address and port, logs in with the login key auth gave it,
+selects the same character and loads at the destination. The Reference client's source is not
+in the repo, so this step is the research's reading of the protocol and what the scripted
+client does; the owner's play test confirms it. A `CG_WARP` runs `WarpEnd`
+(`G/input_main.cpp:2271-2274`), which returns at once when no Warp is pending
+(`G/char.cpp:6800-6801`).
+
+This section ports the event with `IsHack` and the portal times the trade and the shop stamp,
+`WarpSet`'s departure and a goto NPC's `Show` on the descriptor, and the routing of `CG_WARP`.
+Until this section the warp and goto NPCs that ledger 223 stood up warped nobody, and the pure
+Warp policy that ledger 189 put in `prodomo::warp` had no caller in the game. It finishes
+step 3.
+
+### 228.1 What landed
+
+- **228a: the warp NPC event.** `prodomo/src/game_state/warp_npc.rs` is new. It is
+  `warp_npc_event` and `FuncCheckWarp` with the `IsHack` they run.
+  - **The NPCs.** `GameState::spawn_npcs` keeps the warp and goto NPCs of each map, by Channel
+    and map, next to the NPCs it stands up (`warp_npc::warp_npcs`). `parse_warp_name` reads a
+    name as glibc's `sscanf` reads `" %s %ld %ld "`: C white space (`\f` and `\v` among it)
+    separates the fields, the name ends at its first NUL, and a number too large for 64 bits
+    does not parse. `warp_npc_order` gives a warp NPC a `ClientOrder::Warp` to its numbers
+    times 100 (`WARP_LOCATION_SCALE`). It gives a goto NPC a `ClientOrder::Goto` with its map's
+    base added. A target that does not fit 32 bits gives no order. An NPC with no order is
+    logged once, as `Warp NPC name wrong`, and left out.
+  - **The event.** `GameState::run_warp_npcs` runs from `process_pulse`, after
+    `cancel_distant_trades`. It fires on every Pulse that is a nonzero multiple of 12
+    (`WARP_NPC_PULSES`). For each NPC it walks the clients on the NPC's map in join order. It
+    checks each in `FuncCheckWarp`'s order: a player the world holds (`IsPC`, `:7950`); within
+    300 (`WARP_NPC_REACH`, by `distance_approx` from the position table); the empire
+    (`empire_refuses`); and `is_hack`. A player `is_hack` refuses is sent its line and stays. A
+    player that passes gets one order per Pulse. The orders go out through
+    `ChannelClients::order` after the walk, and an order to a client that is gone is logged.
+  - **`IsHack`.** `GameState::is_hack` is `IsHack` with its defaults (`G/char.h:1958`), in
+    legacy's order:
+    - a safebox loaded or closed within 250 Pulses (`safebox_loaded_recently`) gives
+      `[LS;850;10]` (`SAFEBOX_HACK_NOTICE`);
+    - an open trade, shop window or safebox gives `[LS;851]` (`WINDOW_HACK_NOTICE`);
+    - a trade or a shop stamped within 250 Pulses gives `[LS;852;10]` (`RECENT_HACK_NOTICE`).
+
+    The limit is `PORTAL_LIMIT_SECONDS`, 10, which is `g_nPortalLimitTime`, and each test is
+    legacy's strict `<`: a stamp 249 Pulses old holds the player back and one 250 Pulses old
+    does not. The mall holds nobody back, as in legacy: its load sets no safebox time and opens
+    no safebox.
+  - **The portal times.** `PortalTimes` keeps `m_iExchangeTime` and `m_iMyShopTime` for each
+    character. `set_exchange_time` and `set_shop_time` stamp them with the current Pulse.
+    - A trade that starts stamps both sides (`G/exchange.cpp:148-149`). A trade both sides
+      accept stamps both again, once the deal is closed (`:613-614`).
+    - A buy that passes the distance check stamps the buyer (`G/shop_manager.cpp:439`). A close
+      of an open shop window stamps it too (`:377`). A sale stamps nothing, as in legacy.
+    - `leave_world` forgets the times (`forget_portal_times`).
+  - **Not ported.** The `[TestOnly]` line of `test_server` is not sent. The refine timer
+    (`[LS;437;%d]`), the personal shop, the cube and the aura window refuse nobody, and
+    `CanHandleItem(false, true)` passes every player. None of those systems exists in the
+    Rewrite yet. The module doc lists every window `CanHandleItem` reads
+    (`G/char_item.cpp:213-247`), so each port of one gates the warp NPC here.
+  - **The tests.** `warp_npc.rs` has 8 unit tests of the parser, the orders, the kept NPCs and
+    the empire rule. The 10 tests of the event on the game thread are in the test module of
+    `prodomo/src/game_state/trade.rs`, from
+    `a_warp_npc_orders_every_player_within_reach_on_every_twelfth_pulse` to
+    `leaving_the_world_forgets_the_portal_times`.
+- **228b: `WarpSet`'s departure and a goto's `Show`.** The world owns no socket (ADR-0002). So
+  the game thread hands the player's descriptor an order, and the descriptor runs it.
+  - **The order queue.** `client_registry::ClientOrder` is `Warp { x, y }` or `Goto { x, y }`.
+    - Each member of `ChannelClients` gets an order sender when it joins, and its `Lease` holds
+      the receiver.
+    - `ChannelClients::members_on_map` gives the clients of one map with their lease
+      identifiers, in join order.
+    - `ChannelClients::order` hands one order to one lease. It returns `false` when the member
+      is gone or its queue is closed.
+    - `Lease::take_orders` and `Lease::put_orders` lend the queue to the descriptor's
+      `select!`, as `take_receiver` and `put_receiver` lend the record queue.
+    - `PositionTable::place` moves a character and keeps its sync time, as `Show` does
+      (`SetXYZ`, `G/char.cpp:1890`).
+    - 4 new tests cover these.
+  - **The descriptor.** `pump_descriptor` lends both queues each turn (`lend_queues`) and writes
+    the queued broadcasts first (`write_pending`). It waits on a new `select!` arm,
+    `next_order`. `follow_order` runs a `Warp` as `warp_set` and a `Goto` as `goto_show`
+    (`G/char.cpp:7967-7973`). A closed order queue is logged, and the descriptor stops waiting
+    on it.
+  - **`warp_set`.** It is `WarpSet(x, y)` (`G/char.cpp:6694-6792`).
+    - A descriptor that has already departed, or whose character is not in the world, does
+      nothing.
+    - `judge_warp_set` decides. Its resolver is `CMapLocation::Get`: the atlas's `index_at`,
+      kept only when a Channel serves that map. A warp NPC passes no private map and the
+      Rewrite has no inventory sort, so the one refusal that can happen is a position no
+      served map holds. It sends nothing and is logged at debug level as `WarpSet refused`.
+      The owner's data has 10 such NPCs among its 55 placed warp NPCs.
+    - `MapLocations::get` gives the address and port of the target map.
+    - Then the departure runs in this order:
+      1. `leave_the_world`, which the disconnect path now shares, takes the character out of
+         the game thread's world;
+      2. the destination goes into `Held::warp`, and `Stop` clears the avatar's destination;
+      3. `save_held` writes the row with the destination;
+      4. `held.save` is cleared, and the lease is dropped after the position table forgets
+         it;
+      5. `held.logon` is released, which frees the login;
+      6. `held.departed` is set;
+      7. `departure_records` are sent;
+      8. an info line `WARP` stands in for the `CharLog` row.
+    - A save that fails closes the connection without the removal and without `GC_WARP`. The
+      destination stays in `Held::warp`, so the close's save tries it again.
+  - **After `GC_WARP`.** A departed descriptor drops every frame it reads
+    (`Ok(Some(_)) if held.departed => continue`) until the client closes it. Its close writes
+    nothing more: the save event, the world entry and the lease are gone already.
+  - **The save.** `save_held` passes `prodomo::warp::save_position` the held destination and
+    the live point (`LivePoint`), so a pending Warp is stored at its destination
+    (`G/char.cpp:1551-1565`). `prodomo::save::SavePosition`'s doc now says the caller chooses.
+  - **`goto_show`.** It is `Show(GetMapIndex(), x, y)` then `Stop()`
+    (`G/char.cpp:7971-7972`). It clears the avatar's destination either way. When the target
+    is not on the character's own map, `Show` finds no sectree (`:1849-1854`): nothing is sent
+    and `Show found no sectree; the goto stops` is logged at debug level. Otherwise it sends
+    `prodomo::warp::show_records`, moves the avatar and the position table
+    (`PositionTable::place`) and logs `SHOW`.
+  - **`prodomo::warp`.** It gains the records of both orders, with 4 new tests.
+    - `departure_records(vid, target, addr, port)` is the `GC_CHARACTER_DEL` of the
+      character's own VID (`EncodeRemovePacket(this)`, `G/char.cpp:6754`), then the 15-byte
+      `GC_WARP` (`:6763-6785`).
+    - `show_records` is `GC_CHARACTER_DEL`, `GC_CHARACTER_ADD` and `GC_CHAR_ADDITIONAL_INFO`
+      when the target is in the same sectree (`ViewReencode`, `G/entity_view.cpp:28-29`, from
+      `G/char.cpp:1909`). It is the insert pair alone when the target is in another sectree
+      (`:1863-1906`).
+    - `same_sectree` reads both positions as `DWORD`s over `SECTREE_SIZE` (6400,
+      `G/sectree.h:8`).
+    - `SHOW_Z` is `i32::MAX`, the `LONG_MAX` default `z` of `Show` (`G/char.h:879`).
+    - The module doc gains "The Rewrite's departure", and its `docs/PROTOCOL_NOTES.md`
+      references now point at `docs/STATUS.md`.
+- **228c: `CG_WARP`.** `CG_WARP` (65) in the game phase is routed to `warp_end`, which is
+  `CInputMain::Warp` (`G/input_main.cpp:2271-2274`). The record decodes as `CgWarp`. Nothing is
+  sent, the connection stays open, and `CG_WARP with no pending Warp` is logged at debug level:
+  no descriptor that reads records ever holds a pending Warp. A record that does not decode
+  closes the connection. Before this section `CG_WARP` had no arm and closed the connection.
+  The three motion arms (`CG_MOVE`, `CG_SYNC_POSITION` and `CG_CHARACTER_POSITION`) become one
+  arm, through `is_motion_step` and `motion_step`, and route as before.
+- **The docs of the neighbours.** These change in their docs only.
+  - `world/src/character/trade.rs`: `SetExchangeTime` is the game thread's now.
+  - `prodomo/src/game_state/safebox.rs`: `IsHack` reads the safebox load time for a warp NPC
+    (`G/char.cpp:8234-8241`). `IsHack` as `do_cmd` and `do_restart` call it stays unported.
+  - `prodomo/src/save.rs`: see "The save" above.
+  - The legacy citations the review found wrong are corrected in `main.rs`, `warp.rs`,
+    `client_registry.rs`, `safebox.rs` and `docs/STATUS.md`: `SyncPosition` is
+    `G/input_main.cpp:2010-2165`, the loading phase's refusal is `G/input_db.cpp:424-435`,
+    `get_global_time` is `time(0)` plus the DB's clock offset (`G/utils.cpp:5-10`), and the
+    `FuncCheckWarp`, `WarpEnd` and `CMapLocation::Get` ranges end where their code does.
+
+### 228.2 What the client sees
+
+- **A player by a warp NPC.** A player within 300 of a warp NPC that passes every check is sent
+  two records within one fire: `GC_CHARACTER_DEL` of its own VID, then `GC_WARP` with the
+  target, the address and the port. By then the row holds the target.
+  - On map 1, Alpha stands 100 north of the warp NPC at (450100, 903300), vnum 10001
+    (`metin2_map_a1/npc.txt:48`), named `tinutul_Yayang 4002 8995`. `DISTANCE_APPROX` gives 96.
+    Alpha is sent `GC_WARP` to (400200, 899500) on map 3, which Channel 1 hosts, with the
+    public address and the Channel 1 port she is connected to.
+  - The old connection is sent nothing more. A line she types on it is dropped, a shout she
+    sends on it reaches nobody, and the warp does not fire on her again. Its close writes
+    nothing, so the position the new connection saves is the one the row keeps.
+- **The reconnect.** The client connects to the address and port in `GC_WARP` and logs in with
+  the same key. The login was released at the departure, so the login by key succeeds at once,
+  even while the old connection is still open. The character list shows her at the target,
+  with the same address and port. The select and the loading burst follow, and she enters map 3
+  at (400200, 899500).
+- **`CG_WARP`.** A `CG_WARP` on the new connection is answered with nothing, and the connection
+  still answers her shout.
+- **A warp whose save fails.** The connection closes with nothing sent: no removal and no
+  `GC_WARP`. The row keeps the position the player was loaded at, so the client is never sent
+  to a row that does not name its target.
+- **A warp to no map.** Map 3's warp NPC 10067, named `TemnitaMaimute 7752 4477`, names
+  (775200, 447700), which is on no map. A player on it is sent nothing and stays.
+- **A player of another empire.** A warp NPC of an empire passes over a player of another
+  empire without a word.
+- **A player by a goto NPC.** Once `Show` has moved the character, its own client is sent
+  `GC_CHARACTER_DEL` of its own VID, `GC_CHARACTER_ADD` and `GC_CHAR_ADDITIONAL_INFO` when the
+  target is in the same sectree. It is sent the insert pair alone when the target is in another
+  sectree. The insert is at the target, with `z` = `i32::MAX`. There is no reconnect, and the
+  logout saves the target.
+- **A player `IsHack` holds back.** The player stays, and on every fire (12 Pulses, half a
+  second) it is sent one `CHAT_TYPE_INFO` line:
+  - `[LS;850;10]` for 10 seconds after its safebox loads or closes. This comes before the
+    window line;
+  - `[LS;851]` while a trade, a shop window or its safebox is open;
+  - `[LS;852;10]` for 10 seconds after a trade starts or both sides accept, and after a buy or
+    a shop close.
+
+  In the parity scenario, Alpha steps to 100 north of the map 1 warp NPC with a trade open. She
+  is told `[LS;851]` on each fire. After the cancel she is told `[LS;852;10]`, because she
+  started the trade within 10 seconds. Yankee, her partner, stands 800 north, 768 by
+  `DISTANCE_APPROX`, and is told nothing.
+
+### 228.3 Divergences and Defects
+
+Fourteen new Divergences, each a row in `docs/STATUS.md`:
+
+- **Every twelfth Pulse.** Every warp and goto NPC's event fires on the Pulses that are a
+  multiple of 12. The Rewrite stands every such NPC up at start-up, before the first Pulse.
+  Legacy fires each NPC's event 12 Pulses after that NPC was created, and every 12 after that
+  (`StartWarpNPCEvent`, `G/char.cpp:8017-8030`).
+- **Join order, one order per Pulse.** A warp NPC judges the players of its map in the order they
+  entered the game. A player that one NPC has sent is judged by no other NPC on that Pulse.
+  Legacy walks the sectrees around the NPC (`ForEachAround`, `:8011`), whose sets are hashed by
+  pointer, so its order is unspecified. `WarpSet` takes a sent player out of its sectree at
+  once (`G/char.cpp:7940-7974`, `:6749-6755`).
+- **The name is parsed once.** A warp or goto NPC's name is parsed when the NPC stands up. A name
+  that does not parse, or whose target overflows 32 bits, is logged once, and that NPC sends
+  nobody. Legacy parses the name with `" %s %ld %ld "` on every fire, logs a failure when
+  `number(1, 100)` draws below 5, and lets an overflowing target wrap in its 32-bit `long`
+  (`G/char.cpp:7909-7922`). All 55 placed warp NPCs of the owner's data parse, and none
+  overflows. The 4 goto protos whose names do not parse (10814, 10817, 10818 and 20039) are
+  placed nowhere.
+- **`IsHack` is partial.** It has no `[TestOnly]` line. Its refine, personal shop, cube and aura
+  checks refuse nobody, and neither does `CanHandleItem(false, true)`: none of those systems
+  exists yet. This shrinks as each is ported. Legacy adds `[TestOnly]Pulse %d LoadTime %d PASS
+  %d` under `test_server`, and each of those windows and timers refuses the player
+  (`G/char.cpp:8226-8293`, `G/char_item.cpp:213-247`).
+- **The port in `GC_WARP`.** It names the port the client is connected to when the client's
+  Channel hosts the target map, and the Shared Channel's first port otherwise. Any port of a
+  Channel admits that Channel's players. Legacy names the port of the Core that hosts the map
+  (`CMapLocation::Get`, `G/map_location.cpp:10-41`). On each of Channels 1 to 4, 14 warp NPCs
+  send to a map on the other Core, so legacy's `GC_WARP` names the other port. The Shared
+  Channel runs one Core.
+- **Leaving a Shared Channel map.** A Warp from a Shared Channel map to a map the Shared Channel
+  does not host is refused as a position no map serves. That lasts until the return in the
+  first row of the Divergence table is built. No warp NPC leaves a Shared Channel map for
+  another Channel. Legacy's Shared Channel Core knows Channel 1's maps, so the player goes to
+  Channel 1 (`D/ClientManager.cpp:1343-1369`).
+- **The save before `GC_WARP`.** `WarpSet` writes the row with the destination before `GC_WARP`
+  leaves. A failed save closes the connection without `GC_WARP`. Legacy's `Save` only queues
+  the character (`G/char.cpp:1472-1476`, `:6747`). The queued `SaveReal` runs after `m_posWarp`
+  is set, at the next drain (`G/main.cpp:276-277`) or at the close (`G/char.cpp:1786-1789`), and
+  writes the destination too (`:1551-1557`). `GC_WARP` leaves without waiting for the store, so
+  no failed write holds it back. Both write the destination; the Rewrite writes it before the
+  client can reconnect, which ADR-0003 asks of a store write a record depends on.
+- **The login is released at once.** `WarpSet` releases the login as it sends `GC_WARP`, so the
+  client's login by key at the new address is never answered `ALREADY`. Legacy holds the login
+  until the old descriptor is destroyed and sends `HEADER_GD_LOGOUT` (`G/desc.cpp:133-143`). A
+  login by key that arrives first is answered `ALREADY` (`D/ClientManagerLogin.cpp:98-105`).
+- **The departed descriptor.** After `GC_WARP` the descriptor sends nothing more. It drops every
+  frame until the client closes it, a `CG_WARP` included. Legacy keeps the descriptor in the
+  game phase with the character out of the world, so its frames are handled. A `CG_WARP` there
+  runs `WarpEnd` on the pending target (`G/char.cpp:6795-6846`).
+- **`CG_WARP` in the game phase.** It is answered with nothing and keeps the connection. The
+  play test confirms whether the Reference client sends it, and on which connection. Legacy
+  does the same on every descriptor whose character holds no pending target: `WarpEnd` returns
+  at once (`G/input_main.cpp:2271-2274`, `G/char.cpp:6800-6801`).
+- **No private map.** A Warp keeps no private map. The row has no `map_index` column, so a
+  character is stored by its position alone. No warp NPC names a private map. Legacy's
+  `WarpSet` stores `lPrivateMapIndex` as the warp map, and the save writes it
+  (`G/char.cpp:6727-6737`, `:6757`, `:1557`).
+- **What `WarpSet` leaves out.** It sends no Supplementary Data Block, uses no proxy address,
+  hands nothing to the switchbot and writes no `CharLog` row. The `WARP` line goes to the log
+  instead. Legacy sends the SDB when the map changes, replaces `lAddr` with `g_stProxyIP` when
+  one is set, marks the switchbot as warping, and writes a `WARP` `CharLog` row
+  (`G/char.cpp:6709-6725`, `:6769-6783`, `:6787-6789`).
+- **A refused warp logs at debug level.** A warp NPC's `WarpSet` to a position no map serves is
+  logged at debug level. Legacy logs it with `sys_err` on every fire, so a player standing by
+  one of the ten such NPCs of the owner's data logs an error every half second
+  (`G/char.cpp:6703-6707`). Nine of the ten stand on maps of Channels 1 to 4, and one stands on
+  map 72 of the Shared Channel.
+- **No viewers.** A warp NPC measures the distance to where the player last stepped. Only the
+  own client of a player that a goto NPC sends is told. The viewers get neither the removal of
+  `WarpSet` nor the inserts of `Show`. These come with the view model. Legacy measures each
+  player's live position, which `StateMove` moves along the walk (`G/char_state.cpp:782-793`),
+  and the view sends each viewer the removal and the inserts (`G/char.cpp:6749-6755`,
+  `:1847-1917`).
+
+Two rows changed and one went:
+
+- The enter-game, movement and chat row no longer lacks the warp and goto NPC event. Its
+  post-phase gap is now every NPC click trigger but the quests' and the shop's.
+- The Warp row names what is live: the warp NPC event and its `IsHack` check
+  (`prodomo::game_state::warp_npc`), `WarpSet` with the destination saved before `GC_WARP`
+  (`prodomo::warp::departure_records`), the reconnect by login key, `CG_WARP` (65), and the
+  goto NPC's `Show` (`prodomo::warp::show_records`) with a scenario on a synthetic goto NPC.
+  Its "not yet" cell names the other callers, the private map, the Shared Channel return, the
+  switchbot, the `CharLog` table, the viewers' records, the war- and wedding-map login Warp,
+  the OX-map login Warp and the play test of `CG_WARP`.
+- The row "A warp or goto NPC warps nobody" (ledger 223) is gone.
+
+The step-3 row says done (228). The step-4 row names the five scenarios and the monsters as the
+next step-4 work (229). The summary and the header say a client can log in and play the vertical
+slice.
+
+Four legacy Defects are not reproduced, each in `docs/STATUS.md`'s list. The first is new.
+Ledger 189 answered the other three in `prodomo::warp`, and this section records them:
+
+- **The boot window.** For the first 10 seconds after the process starts, `IsHack` refuses every
+  player a warp NPC finds with `[LS;850;10]`. `m_iSafeboxLoadTime` starts at 0 and is compared
+  with the Pulse (`G/char.cpp:278`, `:8234-8241`). The Rewrite refuses nothing for a timer that
+  was never set, as ledger 226 did for the safebox.
+- **The empire-0 loop.** The login's map refusal sends a character of empire 0 home with
+  `EMPIRE_START_MAP(0)` and `EMPIRE_START_X(0)`. That target is `(0, 0)`, which is not a
+  pending Warp. The save writes the position unchanged, and every later login refuses the same
+  map again (`G/input_db.cpp:424-435`, `G/start_position.h:24-38`, `G/char.cpp:1551-1565`). The
+  Rewrite gives no target for empire 0 and stores nothing, which leaves the same row
+  (`prodomo::warp::home_warp_location`).
+- **The `WarpEnd` fold.** `WarpEnd` folds a private map with `index > 10000`
+  (`G/char.cpp:6805`). `WarpSet` 78 lines above and the loading phase fold with `>= 10000`
+  (`:6727`, `G/input_db.cpp:418`), so `WarpEnd` checks map 10000 as itself. The Rewrite folds
+  with `>=` (`prodomo::warp::warp_map_for_check`).
+- **The `SetWarpLocation` overflow.** `SetWarpLocation` multiplies both axes by 100 in a 32-bit
+  `long` with no overflow check (`G/char.cpp:6672-6677`), so a large coordinate wraps. The
+  Rewrite refuses it (`prodomo::warp::set_warp_location_checked`).
+
+This section wires what three earlier passages describe as not wired: **Not wired, and why** in
+189.3, the Warp bullet of 190.5, and **A warp or goto warps nobody** in 223.4. The ledger is
+append-only, so those passages are not edited; this section supersedes them. The caller that
+reaches `WarpSet` is the warp NPC event, not the quests 189.3 names. Those end their scripts as
+not ported (227). 190.5 expected the save `WarpSet` runs (`G/char.cpp:6747`) to cover the row.
+In legacy it does, because that save is only queued and runs after the destination is stored.
+The Rewrite writes the destination itself before `GC_WARP`, which is the Divergence above.
+
+### 228.4 Not ported yet
+
+- **The other callers of `WarpSet`.** `pc.warp` (`G/questlua_pc.cpp:235`), `pc.warp_local`
+  (`:308`), `pc.warp_to_guild_war_observer_position` (`:441`), `d.new_jump`
+  (`G/questlua_dungeon.cpp:345`) and `warp_to_village` (`G/questlua_global.cpp:1067`) land with
+  their quest systems. `GUILD_SKILL_TELEPORT` (158, `G/guild.cpp:1352`) lands with the guild,
+  `/mto` with the monarch, and `GoHome` (`G/char.cpp:8616-8619`) with the systems that call it.
+- **The war- and wedding-map login Warp** (`G/input_login.cpp:876-885`). It is gated on
+  `!test_server`, so it is off under the owner's `test_server = true`.
+- **The OX-map login Warp** (`G/input_login.cpp:853-874`), which no earlier section recorded.
+  A `GM_PLAYER` who enters map 113 while the OX event is finished, or off its two spots, is
+  `WarpSet` to the empire start (`G/OXEvent.cpp:91-115`). Map 113 is in the Shared Channel's
+  `MAP_ALLOW`. It lands with the OX event, and the note of `sys.event.ox` says so. Until then a
+  row at map 113 loads there.
+- **The Shared Channel return.** It is a Divergence, and no warp NPC reaches it.
+- **A private map.** The row has no `map_index` column.
+- **The rest of `WarpSet`:** the SDB, the proxy address, the switchbot hand-over and the
+  `CharLog` row.
+- **The viewers' records.** The removal `WarpSet` sends each viewer, the inserts of a goto's
+  `Show`, and the distance to the live position go with the view model.
+- **The rest of `IsHack`.** The `[TestOnly]` line is left to the `test_server` audit the owner
+  decides on. The refine timer (`[LS;437;%d]`, `G/char.cpp:8284-8289`) and the personal shop,
+  cube and aura window checks wait for their systems.
+- **`CanHandleItem(false, true)`** (`G/char_item.cpp:213-247`). It reads the personal shop, the
+  refine, the cube, the dragon soul refine window and `IsWarping`, and under this build's
+  `__SASH_SYSTEM__`, `__AURA_SYSTEM__` and `__CHANGELOOK_SYSTEM__` the sash windows, the aura
+  refine window and the change-look window. The Rewrite has none of them, so every player
+  passes.
+- **Whether the Reference client sends `CG_WARP`**, and on which connection. The owner's play
+  test confirms it. No descriptor the Rewrite keeps holds a pending target, so `WarpEnd`'s
+  `Show` at the target stays policy only (`prodomo::warp::judge_warp_end`).
+
+### 228.5 Scenario and Parity inventory
+
+`a_warp_npc_sends_its_neighbour_away_and_the_client_comes_back_at_the_target` stands Alpha
+(alice) on map 1 at (450100, 903400). That is 100 north of map 1's warp, vnum 10001
+(`metin2_map_a1/npc.txt:48`), and `DISTANCE_APPROX` gives 96. The warp's name,
+`tinutul_Yayang 4002 8995`, sends a player to (400200, 899500) on map 3, which Channel 1 hosts.
+
+- Alpha logs in by key on Channel 1 and enters the game beside the warp.
+- Within one fire, the client is sent the `GC_CHARACTER_DEL` of Alpha itself, then a `GC_WARP`
+  naming (400200, 899500), the public address and Channel 1's port. The row already holds the
+  target.
+- The old connection drops a talking line, and the warp does not fire again.
+- A new connection logs in with the same key while the old one is still open. The character
+  list shows Alpha at the target with the same address and port, and Alpha enters map 3 there.
+- A shout sent on the old connection reaches nobody: the new connection, which a shout would
+  reach on any Channel, hears nothing.
+- A `CG_WARP` on the new connection is answered with nothing. A shout is then answered with
+  `|Len|l Alpha : hello`, and the old connection hears nothing.
+- Alpha steps to (400300, 899500) on the new connection and drops it, and the row holds 400300.
+  The old connection is then dropped, the server logs its close by the client's own address
+  (`Client::local_addr`), and the row still holds 400300 a quiet window later.
+
+`a_warp_whose_save_fails_closes_without_sending_the_client_away` stands Alpha at the same place
+beside the same warp, with a trigger that refuses any write of the player row with x = 400200,
+which stands in for a store that refuses the write.
+
+- Alpha enters the game beside the warp.
+- The connection closes with nothing sent after the enter-game burst: no `GC_CHARACTER_DEL` and
+  no `GC_WARP`.
+- The server logs `The warp could not save the character; closing without GC_WARP`, then the
+  close's save, which fails the same way (`written=false`).
+- The row keeps (450100, 903400).
+
+`a_goto_npc_shows_its_neighbour_at_its_target_on_the_same_map` covers the goto arm. No goto NPC
+stands on a map the owner's Channels host: the one goto NPC the owner's data places, 10601,
+named `. 345 361`, is in `metin2_map_monkey_dungeon2/npc.txt:8`, a folder no Channel loads. The
+scenario starts the server with `Server::start_with_npcs`, which gives it a Game data folder of
+links to the owner's files with map 1's `npc.txt` copied and extended by one line. The line
+places 10601 on map 1 at (470000, 950100).
+
+- Alpha enters at (470000, 950000), 100 south of the goto NPC.
+- On the next fire Alpha's own client is sent `GC_CHARACTER_ADD` of Alpha at (444100, 932100),
+  which is the name's numbers times 100 past map 1's base, then `GC_CHAR_ADDITIONAL_INFO`. The
+  target is in another sectree, so no `GC_CHARACTER_DEL` comes first, and no `GC_WARP` comes
+  at all.
+- Two quiet windows bring nothing: Alpha now stands out of the NPC's reach.
+- The logout writes (444100, 932100).
+
+`a_warp_to_no_map_sends_nothing_and_the_character_stays` stands Alpha on map 3 at
+(407400, 875700), where warp 10067 stands (`metin2_map_a3/npc.txt:28`). Its name,
+`TemnitaMaimute 7752 4477`, sends a player to (775200, 447700), which no map holds.
+
+- The enter-game burst shows the warp, vnum 10067 of type 3, at Alpha's own position.
+- Four quiet windows, 1.2 seconds and at least two fires, bring nothing.
+- A shout is still answered.
+
+`a_trader_beside_a_warp_is_told_why_and_stays` stands Alpha (alice) 500 north of map 1's warp and
+Yankee (bob, on an account of empire 2) 800 north. `DISTANCE_APPROX` gives 480 and 768.
+
+- Alpha is told nothing while out of reach.
+- Alpha starts a trade with Yankee, and both are sent the start.
+- Alpha steps to 100 north of the warp with `FUNC_COMBO`, which steps without a duration. Bob
+  sees the move. The next two fires each tell Alpha `[LS;851]`, the open-trade refusal.
+- Alpha cancels. After any further `[LS;851]` a fire sends in between, both are sent the
+  cancel. Alpha is then told `[LS;852;10]`: the trade Alpha started is within the portal limit.
+- Yankee, out of reach, is told nothing.
+
+All 55 placed warp NPCs have empire 0, so the empire refusal has unit tests only
+(`only_two_different_empires_refuse` and
+`a_warp_npc_of_an_empire_passes_over_the_other_empires_without_a_word`).
+
+The harness reads `GC_CHARACTER_DEL` at 5 bytes and `GC_WARP` at 15. It gains
+`Server::start_with_npcs` (with `start_in`, `link_all_but` and `config_text_on` under it) and
+`Client::local_addr`. After this section there are 62 scenarios.
+
+In the Parity inventory:
+
+- These rows are `ported`, and each names
+  `a_warp_npc_sends_its_neighbour_away_and_the_client_comes_back_at_the_target`:
+  `cg.game.warp` (was `missing`), `gc.warp` (was `codec`) and `event.char.warp_npc_event` (was
+  `missing`). The note of `gc.warp` names the scenario of the warp to no map. The note of
+  `event.char.warp_npc_event` names both refusal scenarios and the goto scenario, and how that
+  scenario places its NPC.
+- `gc.character_del` goes from `codec` to `partial`. Its note names the first scenario for the
+  own client's removal, and says a viewer's removal needs the view model (`sys.world.view`).
+- The notes of `sys.login.by_key`, `sys.world.view`, `sys.world.warp`, `sys.world.regen` and
+  `sys.char.save` name the Warp, and each row stays `partial`. `sys.world.warp` and
+  `sys.char.save` name the failed-save scenario, and `sys.world.warp` the goto scenario.
+  `sys.world.warp` lists what is left: the quest and command callers, a private map, the Shared
+  Channel return, the switchbot and the `CharLog` line.
+- `sys.event.ox` stays `missing`, and its note records the OX-map login Warp.
+
+| | ported | partial | missing | unused | codec | total |
+|---|---|---|---|---|---|---|
+| after 227 | 113 | 124 | 1343 | 6 | 59 | 1645 |
+| after 228 | 116 | 125 | 1341 | 6 | 57 | 1645 |
+
+### 228.6 Mutation sweep
+
+81 mutants. `mutate228.py` applied and restored each of them as in 215.7, in a second worktree
+so the main tree was never mutated. Each run checked that the mutation landed in code that runs
+and outside the tests, and that each file's checksum came back afterwards. Each prodomo mutant
+ran `prodomo`'s library and the section's scenarios, with `DATABASE_URL` set; the run asserted
+that the scenario filter ran every scenario it named. The first run named the three scenarios
+of the first draft, and the rerun the five of this section.
+
+No mutant failed to compile.
+
+| group | mutants | result |
+|---|---|---|
+| `prodomo/src/game_state/warp_npc.rs`: the name's NUL and white space, `strtol`'s sign, digits, overflow and rest, the scale, a target that does not fit, the warp and goto orders and the goto's base, the kept NPCs and their position and empire, the empire rule, the reach, the cadence and Pulse 0, the player and in-world checks, one order per Pulse, a refused player's line, the send, each `IsHack` test, its line, its `<` and its limit, and the two portal stamps and their forgetting | 45 | 38 killed, 7 killed on the rerun |
+| `prodomo/src/main.rs`: the order's axes, the leave, the held target, the save before the records, the released save, the lease, the login, the departed flag, the departure's VID, the dropped frames, the lent order queue, the goto's map and place, `CG_WARP`'s answer and phase, and the saved destination | 16 | 10 killed, 6 killed on the rerun |
+| `prodomo/src/warp.rs`: the sectree size and its unsigned read, `Show`'s removal, `z` and rotation, and the departure's order and VID | 7 | 7 killed |
+| `prodomo/src/client_registry.rs`: the map filter, the order's lease, a failed send, the lent queue and `place`'s axes | 5 | 5 killed |
+| `prodomo/src/game_state.rs`, `trade.rs` and `shop.rs`: the Pulse's call, the NPCs kept at stand-up, the leave's forgetting, both sides of a trade start, the settlement, a buy and a shop close | 8 | 8 killed |
+
+The first run left 13 survivors. Each was a test gap that a new or extended test killed on the
+rerun, and none was equivalent:
+
+- **The name's bytes.** `name_nul` read a name past its first NUL, `name_space_ff` did not take
+  `\f` as white space, and `scan_wrap` let a number too large for 64 bits wrap. The defects are
+  a tokenizer that disagrees with glibc's and a target that wraps. The new
+  `a_name_ends_at_its_first_nul_and_a_number_must_fit` and the extended
+  `a_name_parses_as_a_token_then_two_decimal_longs` read a name with a NUL before its numbers,
+  one separated by `\f` and `\v`, and a number of 20 digits.
+- **What the event judges.** `pulse_zero` fired on Pulse 0, `run_kind` judged a tracked
+  position that is no player, and `run_in_world` judged a player the world no longer holds. The
+  defects are a fire before the first period and an order to what is not a PC in the world
+  (`IsPC`, `G/char.cpp:7950`). The new `a_warp_npc_passes_over_what_is_not_a_player_in_the_world`
+  stands a non-player and a player out of the world by a warp NPC, and runs Pulse 0.
+- **The portal limit's boundary.** `hack_recent_le` turned `IsHack`'s `<` into `<=`, which holds
+  a player back 12 Pulses longer when a stamp is exactly 250 Pulses old on a fire. The trade
+  test now stamps at Pulse 1010, is refused at 1248 and ordered at 1260. The new
+  `a_trade_or_shop_stamp_holds_a_player_back_249_pulses_and_not_250` asks `is_hack` at 249 and
+  250 Pulses after each stamp, the trade's and the shop's. Two hand-made mutants checked it: the
+  `<=` fails it at 250, and dropping the shop's stamp from the test fails it at 249.
+- **The departure's order.** `mn_save_first` sent the records although the save failed. The new
+  `a_warp_whose_save_fails_closes_without_sending_the_client_away` kills it. The defect is a
+  client sent to a row that does not name its target.
+- **The old descriptor.** `mn_save_released` kept the old descriptor's save, so its close wrote
+  the old position over the new one. `mn_not_departed` and `mn_linger` let the old descriptor
+  act on its frames. The warp scenario now sends a shout on the old connection, which nobody
+  may hear, and closes the old connection after the new one has saved, which must leave the
+  row as the new one wrote it.
+- **The goto.** `mn_goto_map` showed a goto's player only when the target was on another map,
+  and `mn_goto_place` left the position table at the old place, so the save wrote the old
+  position. No goto NPC stands on a hosted map, so nothing ran the arm end to end. The new
+  `a_goto_npc_shows_its_neighbour_at_its_target_on_the_same_map` does.
+
+An eight-agent review of the section confirmed the citation and wording fixes above and
+refuted four findings:
+
+- **`IsHack` is judged before the descriptor runs `WarpSet`**, so a trade frame the descriptor
+  reads in between could open a window before the departure. Legacy's `idle()` runs the
+  heartbeat, and with it the warp event and `WarpSet`, before `io_loop` reads any input
+  (`G/main.cpp:776-787`), and `WarpSet` blocks no later frame. So legacy warps that player too,
+  and a trade opened afterwards is cancelled at the close. Only the records' order differs,
+  which the departure's Divergences cover.
+- **The own client of a goto's player gets view inserts it should not**, twice. The view model's
+  gap is recorded (STATUS, ledger 224), and no path reaches it.
+- **The boot window's wording** and **the `SECTREE_MAP::Find` citation** were right as written.
+
+### 228.7 Receipt
+
+31 new tests:
+
+- `prodomo/src/game_state/warp_npc.rs`: 8, for the name's token and two longs, a name without
+  three fields, the NUL and a number that must fit, a warp's scale, a goto's base, an NPC with
+  no order, the kept NPCs and the empire rule.
+- `prodomo/src/game_state/trade.rs`: 10, for the event's reach and cadence, what is not a player
+  in the world, the 249 and 250 Pulses of a stamp, another empire, a goto's order and one order
+  a Pulse, the safebox's two lines, the mall, the trade, the shop and the leave.
+- `prodomo/src/client_registry.rs`: 4, for the members of a map in join order, an order's lease,
+  an order to a departed or deaf client and `place`.
+- `prodomo/src/warp.rs`: 4, for the sectree size, a goto in the same sectree and in another, and
+  the departure's records.
+- `prodomo/tests/parity.rs`: the five scenarios in 228.5.
+
+No existing test changed. The harness's `game_len` reads `GC_CHARACTER_DEL` at 5 bytes and
+`GC_WARP` at 15, and `load_with_quickslots_on` hands its select and load to a new
+`load_selected`, which the warp scenario calls on both of its connections.
+
+The count went from 3039 to 3070. These gates ran on the final working tree:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 3070 passed, 0 failed |
+| the same with `DATABASE_URL` set | 3070 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 19 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+`cargo-clippy` and `cargo-fmt` are the system's 1.85.1 toolchain, `clippy 0.1.85` and
+`rustfmt 1.8.0`, and are called by their `/usr/bin` paths. The tests added after the sweep's
+first run are in the count. After the gates, three citations of `IsHack`'s end went from
+`:8292` to `:8293`, in `warp_npc.rs`'s module doc, a scenario's doc and `docs/STATUS.md`; fmt,
+build, `prodomo`'s clippy with its tests and `prodomo`'s rustdoc ran again, clean.
+
+After the run, no `prodomo_%` database remains and no `*.core` file is outside `target/`. The
+workspace has 242 Rust files and 178,705 lines, outside `server/` and `.scratch/`. No crate was
+fetched, and `Cargo.lock` is unchanged. `psql` is not installed, so the store was read through
+`podman exec` into the database's container.

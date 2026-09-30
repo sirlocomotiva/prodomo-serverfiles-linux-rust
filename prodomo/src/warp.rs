@@ -16,9 +16,20 @@
 //!    checks the target map against the Channel's allow set, then either goes home or calls
 //!    `Show` at the pending position and clears the pending target.
 //!
-//! The client is what drives step 2. It re-connects to the address `GC_WARP` named and sends
-//! `CG_WARP`, whose handler is `CInputMain::Warp` (`G/input_main.cpp:2271-2274`), a `void`
-//! function whose whole body is `ch->WarpEnd()`.
+//! Step 2 runs when the character's own descriptor receives `CG_WARP`, whose handler is
+//! `CInputMain::Warp` (`G/input_main.cpp:2271-2274`), a `void` function whose whole body is
+//! `ch->WarpEnd()`. Only the descriptor that sent `GC_WARP` holds a pending target: the
+//! descriptor the client opens at the new address loads the character from the row, where
+//! `m_posWarp` is zero. Whether the client sends `CG_WARP` at all, and on which connection, is
+//! not in the server source; the owner's play test answers it.
+//!
+//! # The Rewrite's departure
+//!
+//! The Rewrite runs `WarpSet` on the character's descriptor (`warp_set` in the binary). It
+//! writes the row with the destination **before** `GC_WARP` leaves, instead of on the close,
+//! so the login at the new address always loads the destination; [`departure_records`] are the
+//! two records the client receives. Step 2 is therefore never pending on a descriptor that
+//! analyzes records, and `CG_WARP` completes nothing (`docs/STATUS.md`, Divergences).
 //!
 //! # Three different "home" numbers
 //!
@@ -27,7 +38,7 @@
 //!
 //! | route | map | position | source |
 //! |---|---|---|---|
-//! | [`home_warp_location`] | `EMPIRE_START_MAP` | `EMPIRE_START` divided by 100 | `G/input_db.cpp:344-347` |
+//! | [`home_warp_location`] | `EMPIRE_START_MAP` | `EMPIRE_START` divided by 100 | `G/input_db.cpp:424-435` |
 //! | [`go_home`] | resolved from the atlas | `EMPIRE_START` as stored | `G/char.cpp:8616-8619` |
 //! | [`save_position`] | `m_lWarpMapIndex` | `m_posWarp` | `G/char.cpp:1551-1565` |
 //!
@@ -65,8 +76,13 @@
 //! character on the home map.
 
 use crate::channel_login::{EMPIRE_START, EMPIRE_START_MAP};
-use crate::loading_phase::{map_is_allowed, public_map_index, INSTANCE_MAP_BASE};
+use crate::loading_phase::{
+    character_add, character_additional, map_is_allowed, public_map_index, INSTANCE_MAP_BASE,
+};
+use db::players::Character;
 use protocol::gc_nested::GcWarp;
+use protocol::gc_vid::{GcHeaderAndDword, HEADER_GC_CHARACTER_DEL};
+use world::character::Points;
 
 /// A map index at or above this is a private (instance) map, `G/char.cpp:2289`.
 ///
@@ -160,8 +176,7 @@ pub fn save_position(warp: &WarpTarget, live: &LivePoint) -> SavePosition {
 /// This is that wrapping form, using [`i32::wrapping_mul`], and it exists to pin the legacy
 /// behaviour rather than to be called. A wrapped coordinate is a position on the wrong side of
 /// the world, so the Rewrite refuses that case instead: [`set_warp_location_checked`] is the
-/// shape callers use, and the refusal is a deliberate difference recorded in
-/// `docs/PROTOCOL_NOTES.md`.
+/// shape callers use, and the refusal is a Divergence recorded in `docs/STATUS.md`.
 #[must_use]
 pub fn set_warp_location(map_index: i32, x: i32, y: i32) -> WarpTarget {
     WarpTarget {
@@ -184,7 +199,7 @@ pub fn set_warp_location_checked(map_index: i32, x: i32, y: i32) -> Option<WarpT
 }
 
 /// The pending target the loading-phase map refusal sets
-/// (`CInputDB::PlayerLoad`, `G/input_db.cpp:344-347`):
+/// (`CInputDB::PlayerLoad`, `G/input_db.cpp:424-435`):
 ///
 /// ```ignore
 /// SetWarpLocation(EMPIRE_START_MAP(bEmpire), EMPIRE_START_X(bEmpire) / 100, EMPIRE_START_Y(bEmpire) / 100);
@@ -208,7 +223,7 @@ pub fn set_warp_location_checked(map_index: i32, x: i32, y: i32) -> Option<WarpT
 /// which [`WarpTarget::is_pending`] calls not pending, and `Save` then writes the character's
 /// unchanged position. The character is never moved and the next login refuses the same map
 /// again. The Rewrite returns `None` and stores nothing, which is the same stored row; the
-/// resulting refusal loop is recorded as a legacy Defect in `docs/PROTOCOL_NOTES.md`.
+/// resulting refusal loop is recorded as a legacy Defect in `docs/STATUS.md`.
 #[must_use]
 pub fn home_warp_location(empire: u8) -> Option<WarpTarget> {
     let index = usize::from(empire);
@@ -249,8 +264,8 @@ pub fn go_home(empire: u8) -> Option<(i32, i32)> {
 /// private map `1000` of the `1` parent, and a Channel that hosts `1` refuses the warp. Five
 /// sibling tests in the same tree fold with `>=` (`G/input_db.cpp:418`, `G/char.cpp:1968`,
 /// `G/char.cpp:2289`, `G/char.cpp:6727`, `G/char.cpp:8902`), and `WarpSet` gates the same
-/// family on `lPrivateMapIndex >= 10000` (`G/char.cpp:6727`) two hundred lines above the `>`
-/// it contradicts. It is recorded as a Defect in `docs/PROTOCOL_NOTES.md` and not reproduced:
+/// family on `lPrivateMapIndex >= 10000` (`G/char.cpp:6727`) 78 lines above the `>`
+/// it contradicts. It is recorded as a Defect in `docs/STATUS.md` and not reproduced:
 /// reproducing it would refuse a warp to a valid parent map.
 ///
 /// # Panics
@@ -319,9 +334,13 @@ pub struct WarpSetRequest {
     /// `lPrivateMapIndex`, legacy's third argument, defaulted to `0` by `GoHome`
     /// (`G/char.h:980`).
     pub private_map_index: i32,
-    /// `GetSortInventoryPulse()`.
+    /// `GetSortInventoryPulse()`, which despite its name is a `time(0)` second: the sort sets
+    /// it to `get_global_time() + 15` (`G/char.cpp:10861`).
     pub sort_inventory_pulse: i64,
-    /// `get_global_time()`, in milliseconds. Legacy compares the pulse to it with `>`.
+    /// `get_global_time()`, which is `time(0)` plus the DB's clock offset (`global_time_gap`),
+    /// in seconds (`G/utils.cpp:5-10`). Legacy compares the pulse to it with `>`. The name is
+    /// older than that reading and is kept so the tests that pin the comparison keep their
+    /// meaning.
     pub now_ms: i64,
 }
 
@@ -364,8 +383,8 @@ pub enum WarpSetOutcome {
 /// `GetMapIndex()`.
 ///
 /// Legacy's `ENABLE_NEWSTUFF` block replaces `p.lAddr` with the configured proxy address when
-/// one is set (`G/char.cpp:6764-6767`). The Rewrite has no proxy feature, so the address is
-/// always the resolved one; the difference is recorded in `docs/PROTOCOL_NOTES.md`.
+/// one is set (`G/char.cpp:6769-6772`). The Rewrite has no proxy feature, so the address is
+/// always the resolved one; the difference is a Divergence recorded in `docs/STATUS.md`.
 #[must_use]
 pub fn judge_warp_set(
     request: &WarpSetRequest,
@@ -394,6 +413,96 @@ pub fn judge_warp_set(
         stored_map_index,
         sends_sdb: current_map_index != resolved_map_index,
     }
+}
+
+/// `SECTREE_SIZE` (`G/sectree.h:8`): the side of one sectree, in world units.
+pub const SECTREE_SIZE: u32 = 6400;
+
+/// The `z` `CHARACTER::Show` is given when the caller names none: the default `LONG_MAX` of
+/// its declaration (`G/char.h:879`), which is `i32::MAX` on the 32-bit legacy target. A goto
+/// NPC names none (`G/char.cpp:7971`), so the insert record the client then receives carries
+/// it.
+pub const SHOW_Z: i32 = i32::MAX;
+
+/// Whether two positions fall in the same sectree: `SECTREE_MAP::Find` keys a sectree by
+/// `x / SECTREE_SIZE` and `y / SECTREE_SIZE` over `DWORD`s (`G/sectree_manager.cpp:71-77`), so
+/// the coordinates are read as unsigned, as legacy reads them.
+#[must_use]
+pub fn same_sectree(from: (i32, i32), to: (i32, i32)) -> bool {
+    let cell = |(x, y): (i32, i32)| {
+        (
+            u32::from_ne_bytes(x.to_ne_bytes()) / SECTREE_SIZE,
+            u32::from_ne_bytes(y.to_ne_bytes()) / SECTREE_SIZE,
+        )
+    };
+    cell(from) == cell(to)
+}
+
+/// The records a PC's own client receives when a goto NPC moves it: `Show(GetMapIndex(), x, y)`
+/// then `Stop()` (`G/char.cpp:7971-7972`, `:1847-1917`).
+///
+/// `Show` inserts the character into its own view again, and which records that takes depends
+/// on whether the sectree changed:
+///
+/// - **Same sectree.** `ViewReencode` sends the character `EncodeRemovePacket(this)` and then
+///   `EncodeInsertPacket(this)` (`G/entity_view.cpp:28-29`, from `G/char.cpp:1909`):
+///   `GC_CHARACTER_DEL`, `GC_CHARACTER_ADD` and `GC_CHAR_ADDITIONAL_INFO`.
+/// - **New sectree.** `ViewCleanup` empties the view without sending the character anything,
+///   and `EncodeInsertPacket(this)` sends the insert pair alone (`G/char.cpp:1863-1906`).
+///
+/// The insert is the one the enter-game burst sends, at the new position, with the rotation the
+/// character has (`pack.angle = GetRotation()`, `G/char.cpp:1078`) and `z` = [`SHOW_Z`]. After
+/// `Show` the destination is the position, so `iDur` is zero and no move record follows
+/// (`G/char.cpp:1099-1108`, `:1211-1223`). The walk-mode and shop-sign records are not sent: the
+/// first needs a walking character, which `Stop` leaves standing, and the second a personal shop,
+/// which the Rewrite has not ported.
+///
+/// What the other clients see is not here: the Rewrite has no view of other characters yet, so
+/// the `UpdateSectree` inserts and the viewers' `GC_CHARACTER_DEL` and insert are not sent. That
+/// is a Divergence of the missing view model, recorded with it.
+#[must_use]
+pub fn show_records(
+    character: &Character,
+    state: &Points,
+    identity: (u32, u8),
+    rotation: f32,
+    from: (i32, i32),
+    to: (i32, i32),
+) -> Vec<Vec<u8>> {
+    let (vid, language) = identity;
+    let mut records = Vec::with_capacity(3);
+    if same_sectree(from, to) {
+        let mut removed = Vec::new();
+        GcHeaderAndDword::new(HEADER_GC_CHARACTER_DEL, vid).encode_into(&mut removed);
+        records.push(removed);
+    }
+    let mut add = character_add(character, state, vid);
+    add.angle = rotation;
+    add.x = to.0;
+    add.y = to.1;
+    add.z = SHOW_Z;
+    let mut inserted = Vec::new();
+    add.encode_into(&mut inserted);
+    records.push(inserted);
+    let mut summary = Vec::new();
+    character_additional(character, state, vid, language).encode_into(&mut summary);
+    records.push(summary);
+    records
+}
+
+/// The records the character's own client receives when `WarpSet` succeeds: the
+/// `EncodeRemovePacket(this)` of leaving its sectree, which is a `GC_CHARACTER_DEL` of its own
+/// VID (`G/char.cpp:6749-6755`, `:1256-1273`), then `GC_WARP` (`:6763-6785`).
+///
+/// The viewers' `GC_CHARACTER_DEL` from `ViewCleanup` is not here: the Rewrite has no view of
+/// other characters yet, which is a Divergence recorded with the view model.
+#[must_use]
+pub fn departure_records(vid: u32, target: &WarpTarget, addr: i32, port: u16) -> Vec<Vec<u8>> {
+    let mut removed = Vec::new();
+    GcHeaderAndDword::new(HEADER_GC_CHARACTER_DEL, vid).encode_into(&mut removed);
+    let mut warp = Vec::new();
+    target.to_record(addr, port).encode_into(&mut warp);
+    vec![removed, warp]
 }
 
 #[cfg(test)]
@@ -834,5 +943,150 @@ mod tests {
         assert_eq!(hosted.map_index, 21);
         assert!(map_is_allowed(hosted.map_index, &[1, 21]));
         assert_eq!(save_position(&hosted, &refused), SavePosition::Warp(hosted));
+    }
+
+    /// A standing character whose VID, rotation and parts are easy to find in the bytes.
+    fn traveller() -> Character {
+        Character {
+            id: 0x0102_0304,
+            slot: 0,
+            name: "Wander".to_string(),
+            empire: 1,
+            job: 2,
+            level: 30,
+            exp: 0,
+            conqueror_level: 0,
+            sungma_str: 0,
+            sungma_hp: 0,
+            sungma_move: 0,
+            sungma_immune: 0,
+            st: 6,
+            ht: 4,
+            dx: 3,
+            iq: 3,
+            hp: 500,
+            sp: 200,
+            stamina: 800,
+            gold: 0,
+            conqueror_exp: 0,
+            voice: 0,
+            part_base: 0,
+            main_part: 0,
+            hair_part: 0,
+            sash_part: 0,
+            x: 129_000,
+            y: 641_000,
+            skill_group: 0,
+            playtime_minutes: 0,
+            change_name: false,
+        }
+    }
+
+    const FROM: (i32, i32) = (129_000, 641_000);
+
+    #[test]
+    fn a_sectree_is_6400_units_on_each_axis_read_as_unsigned() {
+        assert!(same_sectree((0, 0), (6_399, 6_399)));
+        assert!(!same_sectree((6_399, 0), (6_400, 0)), "x crosses at 6400");
+        assert!(!same_sectree((0, 6_399), (0, 6_400)), "y crosses at 6400");
+        assert!(same_sectree((12_800, 19_200), (19_199, 25_599)));
+        // `DWORD` division: -1 is 4294967295, whose cell is 671088, not 0 and not -1. That
+        // cell starts at 4294963200, which is -4096, so -4097 is in the cell before it. Signed
+        // division would put all four positions in cell 0.
+        assert!(!same_sectree((-1, 0), (0, 0)));
+        assert!(
+            same_sectree((-1, 0), (-4_096, 0)),
+            "both fall in cell 671088"
+        );
+        assert!(
+            !same_sectree((-4_096, 0), (-4_097, 0)),
+            "-4097 is in cell 671087"
+        );
+    }
+
+    #[test]
+    fn a_goto_in_the_same_sectree_removes_the_character_before_inserting_it() {
+        let hero = traveller();
+        let state = crate::loading_phase::load_points(&hero, 0);
+        let to = (130_000, 642_000);
+        assert!(same_sectree(FROM, to), "the fixture stays in one sectree");
+        let records = show_records(&hero, &state, (0x0102_0304, 2), 45.0, FROM, to);
+        assert_eq!(records.len(), 3);
+        assert_eq!(
+            records[0],
+            vec![2, 4, 3, 2, 1],
+            "GC_CHARACTER_DEL of the own VID"
+        );
+        let add = &records[1];
+        assert_eq!(add[0], 1, "GC_CHARACTER_ADD");
+        assert_eq!(&add[1..5], &0x0102_0304_u32.to_le_bytes());
+        assert_eq!(
+            &add[5..9],
+            &45.0_f32.to_le_bytes(),
+            "the rotation the character has"
+        );
+        assert_eq!(&add[9..13], &130_000_i32.to_le_bytes(), "the new x");
+        assert_eq!(&add[13..17], &642_000_i32.to_le_bytes(), "the new y");
+        assert_eq!(
+            &add[17..21],
+            &i32::MAX.to_le_bytes(),
+            "Show's default LONG_MAX z"
+        );
+        let mut expected = Vec::new();
+        character_additional(&hero, &state, 0x0102_0304, 2).encode_into(&mut expected);
+        assert_eq!(
+            records[2], expected,
+            "the summary the enter-game burst sends"
+        );
+        let mut add_only = character_add(&hero, &state, 0x0102_0304);
+        add_only.angle = 45.0;
+        add_only.x = to.0;
+        add_only.y = to.1;
+        add_only.z = SHOW_Z;
+        let mut add_bytes = Vec::new();
+        add_only.encode_into(&mut add_bytes);
+        assert_eq!(
+            records[1], add_bytes,
+            "every other field is the enter-game insert's"
+        );
+    }
+
+    #[test]
+    fn a_goto_to_another_sectree_sends_the_insert_pair_alone() {
+        let hero = traveller();
+        let state = crate::loading_phase::load_points(&hero, 0);
+        let to = (162_500, 676_100);
+        assert!(!same_sectree(FROM, to));
+        let records = show_records(&hero, &state, (7, 1), 0.0, FROM, to);
+        assert_eq!(records.len(), 2, "ViewCleanup sends the character nothing");
+        assert_eq!(records[0][0], 1, "GC_CHARACTER_ADD first");
+        assert_eq!(&records[0][9..13], &162_500_i32.to_le_bytes());
+        assert_eq!(&records[0][13..17], &676_100_i32.to_le_bytes());
+        assert_eq!(&records[1][1..5], &7_u32.to_le_bytes(), "then the summary");
+    }
+
+    #[test]
+    fn a_departure_deletes_the_character_for_its_own_client_and_then_names_the_destination() {
+        let target = WarpTarget {
+            map_index: 3,
+            x: 400_200,
+            y: 899_500,
+        };
+        let records = departure_records(
+            0x0A0B_0C0D,
+            &target,
+            i32::from_le_bytes([127, 0, 0, 1]),
+            0x7533,
+        );
+        assert_eq!(
+            records,
+            vec![
+                vec![2, 0x0D, 0x0C, 0x0B, 0x0A],
+                vec![
+                    0x41, 0x48, 0x1B, 0x06, 0x00, 0xAC, 0xB9, 0x0D, 0x00, 127, 0, 0, 1, 0x33, 0x75
+                ],
+            ],
+            "GC_CHARACTER_DEL of the own VID, then the 15-byte GC_WARP"
+        );
     }
 }
