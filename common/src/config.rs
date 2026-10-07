@@ -259,7 +259,8 @@ impl ChannelSettings {
 /// Each key keeps the TOML name ledger section 169.5 gave it, and its default is the legacy
 /// compiled-in value from `game/config.cpp`, except where a field says otherwise. The keys that
 /// described the legacy process layout, SQL connections, and logging are gone; ledger section
-/// 178 lists them. No field is read by gameplay code yet.
+/// 178 lists them. Gameplay code reads only the fields a ported system uses, such as the ping
+/// cycle, the shout settings and `view_range` (ledger 229b); the rest wait for their systems.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -416,8 +417,14 @@ pub struct GameSettings {
     pub protect_normal_player: bool,
     /// Notice battle zone.
     pub notice_battle_zone: bool,
-    /// PK protect level.
-    pub pk_protect_level: i32,
+    /// A character below this level is in the protect PK mode (`PK_MODE_PROTECT`), which other
+    /// clients show and which `SetLevel` and `SetPlayerProto` set (`G/char.cpp:2211-2222`,
+    /// `:2378-2379`). Legacy's `PK_PROTECT_LEVEL` is a `BYTE` of 30
+    /// (`G/locale_service.cpp:24`), and the europe locale sets it to 15 (`:1158`). The owner's
+    /// `common.locale` is `europe` (`legacy/sql/gamedata/common.sql:156`) and legacy reads it
+    /// before the `pk_protect_level` key (`G/config.cpp:599`, then `:1407-1411`), so 15 is the
+    /// default here. A value past 255, which legacy wraps, is refused.
+    pub pk_protect_level: u8,
     /// Player max level.
     pub max_level: i32,
     /// Player max conqueror level.
@@ -497,7 +504,7 @@ impl Default for GameSettings {
             mantie_permanent: false,
             protect_normal_player: false,
             notice_battle_zone: false,
-            pk_protect_level: 0,
+            pk_protect_level: 15,
             max_level: 99,
             max_conqueror_level: 30,
             block_char_creation: false,

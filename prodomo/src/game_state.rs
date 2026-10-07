@@ -26,7 +26,7 @@
 //! only the events those pieces have: the ground items, the recovery, the distant trades and the
 //! warp NPCs.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{BuildHasher, RandomState};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -36,6 +36,7 @@ use gamedata::item_proto::ItemProtos;
 use gamedata::locale_string::LocaleStrings;
 use gamedata::map_atlas::MapRegion;
 use gamedata::regen::RegenEntry;
+use gamedata::server_attr::SectreeGrid;
 use world::character::{
     drop_item, is_recovering, move_item, pickup_item, update_recovery, use_item, CharacterManager,
     CharacterManagerError, DropAt, Gear, GroundItem, GroundRecord, MoveRefused, MoveRequest,
@@ -47,9 +48,10 @@ use world::npc::{MapNpcs, NpcSpawner, NpcVidsExhausted};
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
-use crate::client_registry::{ChannelClients, ClientOutbox, PositionTable};
+use crate::client_live::LiveClock;
+use crate::client_registry::{ChannelClients, ClientOutbox};
 use crate::game_loop::PulseProcessor;
-use crate::game_loop_messages::{GameCommand, GroundPlace, Kept};
+use crate::game_loop_messages::{GameCommand, GroundPlace, Kept, Shown};
 use crate::item_grant::{grant_item, GrantOutcome, GrantRefusal, GrantRequest};
 use crate::item_move::{belt_grade, ground_record, move_facts, MoveItemRefused, MovedItems, Mover};
 use crate::loading_phase::point_changes;
@@ -58,10 +60,16 @@ use crate::save::PASSES_PER_SEC;
 use crate::sync_position::distance_approx;
 use world::character::{add_from_client, sync_quickslots};
 
+#[cfg(test)]
+mod fixtures;
+mod motion;
 mod quests;
 mod safebox;
 mod shop;
+mod sync;
 mod trade;
+mod view;
+mod view_encode;
 mod warp_npc;
 
 pub use quests::{QuestStep, Quests};
@@ -382,9 +390,6 @@ pub struct GameState {
     shop_price_3x_disabled: bool,
     /// The keeper each character browses, keyed by its VID.
     browsing: HashMap<common::vid::Vid, shop::Browsing>,
-    /// Where every player of the process stands, which a trade finds and measures the other
-    /// player in.
-    positions: Option<Arc<PositionTable>>,
     /// The open trades, keyed by the VID of the character that started each.
     trades: BTreeMap<u32, trade::Deal>,
     /// The trade each trading character is in and its side of it, keyed by its VID.
@@ -397,6 +402,18 @@ pub struct GameState {
     warp_npcs: BTreeMap<(u8, i32), Vec<warp_npc::WarpNpc>>,
     /// When each character last traded or shopped, keyed by its VID, which `IsHack` reads.
     portal_times: HashMap<common::vid::Vid, warp_npc::PortalTimes>,
+    /// The sectrees, spots and views of each map of each Channel, keyed as `npcs` is.
+    maps: BTreeMap<(u8, i32), view::MapIndex>,
+    /// The body of every player standing on a map, keyed by its VID.
+    bodies: HashMap<common::vid::Vid, motion::Body>,
+    /// The players in the Move state, by VID: the ones each Pulse steps.
+    movers: BTreeSet<u32>,
+    /// `get_dword_time()`, shared with the connections in production.
+    clock: motion::WorldClock,
+    /// `VIEW_RANGE + VIEW_BONUS_RANGE`, the radius a view takes an entity in within.
+    view_radius: i64,
+    /// Where each NPC is listed: its map's key and its place in that map's list.
+    npc_of: HashMap<u32, (u8, i32, usize)>,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -460,14 +477,41 @@ impl GameState {
             shops: Arc::default(),
             shop_price_3x_disabled: false,
             browsing: HashMap::new(),
-            positions: None,
             trades: BTreeMap::new(),
             trading: HashMap::new(),
             storages: HashMap::new(),
             quests: None,
             warp_npcs: BTreeMap::new(),
             portal_times: HashMap::new(),
+            maps: BTreeMap::new(),
+            bodies: HashMap::new(),
+            movers: BTreeSet::new(),
+            clock: motion::WorldClock::default(),
+            view_radius: view_radius_of(DEFAULT_VIEW_RANGE),
+            npc_of: HashMap::new(),
         }
+    }
+
+    /// Read `get_dword_time()` from `clock`. Production passes the connections' clock, so the
+    /// world and the connections share one epoch.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Box<dyn LiveClock + Send>) -> Self {
+        self.clock = motion::WorldClock::new(clock);
+        self
+    }
+
+    /// Set `VIEW_RANGE`, the configured `game.view_range`; the view's radius is it plus
+    /// `VIEW_BONUS_RANGE` (`G/entity_view.cpp:94`), in 64 bits so no range can overflow it.
+    #[must_use]
+    pub fn with_view_range(mut self, view_range: i32) -> Self {
+        self.view_radius = view_radius_of(view_range);
+        self
+    }
+
+    /// Hosts one map of one Channel over the sectrees `grid` builds (`SECTREE_MAP::Build`).
+    /// A map hosted again keeps no spot or view; call this before anyone enters it.
+    pub fn host_map(&mut self, channel: u8, map: i32, grid: SectreeGrid) {
+        self.maps.insert((channel, map), view::MapIndex::new(grid));
     }
 
     /// Share the locale strings, which the chat lines a move sends are looked up in. Without
@@ -520,10 +564,39 @@ impl GameState {
         entries: &[RegenEntry],
     ) -> Result<(), NpcVidsExhausted> {
         let npcs = spawner.spawn_map(region, entries, &mut self.dice)?;
-        let warps = warp_npc::warp_npcs(&npcs.npcs, region);
-        self.npcs.insert((channel, region.index), Arc::new(npcs));
-        self.warp_npcs.insert((channel, region.index), warps);
+        self.stand_npcs(channel, region, npcs);
         Ok(())
+    }
+
+    /// Stands one map's NPCs up on one Channel: each enters the map's view where a sectree
+    /// holds it, and the warp and goto NPCs among them start their event. The NPCs a map held
+    /// before leave it.
+    fn stand_npcs(&mut self, channel: u8, region: &MapRegion, npcs: MapNpcs) {
+        let warps = warp_npc::warp_npcs(&npcs.npcs, region);
+        let key = (channel, region.index);
+        let index = self.maps.entry(key).or_insert_with(|| {
+            SectreeGrid::of(region).map_or_else(view::MapIndex::treeless, view::MapIndex::new)
+        });
+        // Nobody stands on a map at boot, so the shows have no record to deliver.
+        let mut effects = Vec::new();
+        if let Some(replaced) = self.npcs.get(&key) {
+            for npc in &replaced.npcs {
+                index.remove(view::EntityKey::Npc(npc.vid), &mut effects);
+                self.npc_of.remove(&npc.vid);
+            }
+        }
+        for (at, npc) in npcs.npcs.iter().enumerate() {
+            // `SpawnMob` places an NPC only where a sectree stands (`world/src/npc.rs:367`).
+            let _shown = index.show(
+                view::EntityKey::Npc(npc.vid),
+                (npc.x, npc.y, npc.z),
+                self.view_radius,
+                &mut effects,
+            );
+            self.npc_of.insert(npc.vid, (channel, region.index, at));
+        }
+        self.npcs.insert(key, Arc::new(npcs));
+        self.warp_npcs.insert(key, warps);
     }
 
     /// The NPCs standing on one map of one Channel, or none for a map boot stood none up on.
@@ -663,13 +736,17 @@ impl GameState {
                 reply,
             } => {
                 let answer = self.enter_world_with_items(vid, player_id, &name, &items, outbox);
-                if answer.is_ok() {
+                let answer = answer.map(|()| {
                     if let Some(character) = self.characters.find_player_mut(&name) {
                         character.set_points(loaded.points);
                         character.set_quickslots(loaded.quickslots);
                         character.set_gold(loaded.gold);
                     }
-                }
+                    let records = loaded
+                        .show
+                        .map_or_else(Vec::new, |show| self.place_body(vid, show.place, show.card));
+                    Shown { records }
+                });
                 // A dropped admit answer means the descriptor is already closing, and a
                 // character nobody will play is not a state worth warning about: the
                 // close path runs the leave, which finds nobody and says so at debug.
@@ -696,9 +773,11 @@ impl GameState {
                 }
             }
             GameCommand::KeptOf { vid, reply } => {
+                let place = self.kept_place(vid);
                 let kept = self.characters.find_by_vid(vid).ok().map(|character| Kept {
                     points: character.points().cloned(),
                     quickslots: character.quickslots().clone(),
+                    place,
                 });
                 if reply.send(kept).is_err() {
                     debug!(?vid, "nobody was left to hear a character's points");
@@ -714,6 +793,9 @@ impl GameState {
             | GameCommand::PickupItem { .. }
             | GameCommand::GroundItemsOn { .. }
             | GameCommand::NpcsOn { .. }) => self.apply_ground(command),
+            command @ (GameCommand::Move { .. }
+            | GameCommand::SyncPosition { .. }
+            | GameCommand::Relay { .. }) => self.apply_motion(command),
             GameCommand::Stop => {
                 // The loop handles `Stop` itself, before a command ever reaches a
                 // processor. Reaching here would mean the loop and the state
@@ -905,7 +987,9 @@ impl GameState {
     /// after the descriptor's last step, and a trade the partner closes the quickslots. Its
     /// event ends with the character (`event_cancel` in `CHARACTER::Destroy`), and so does its
     /// trade, cancelled for both sides (`CHARACTER::Destroy`'s `Cancel`), and its running quest
-    /// script (`CQuestManager::DisconnectPC`, `G/char.cpp:1802`).
+    /// script (`CQuestManager::DisconnectPC`, `G/char.cpp:1802`). Then its body leaves its map
+    /// and every player that saw it is sent its removal (`G/char.cpp:786-789`), and the answer
+    /// carries where the body stood.
     ///
     /// Returns `None` when the world did not hold that character, which is reported
     /// rather than treated as fatal because a disconnect that finds nobody is
@@ -918,10 +1002,12 @@ impl GameState {
         self.close_storage(vid);
         self.end_quests(vid);
         self.forget_portal_times(vid);
+        let place = self.remove_body(vid);
         let character = self.characters.find_by_vid(vid).ok()?;
         let kept = Kept {
             points: character.points().cloned(),
             quickslots: character.quickslots().clone(),
+            place,
         };
         self.characters.destroy(vid).ok()?;
         Some(kept)
@@ -1079,6 +1165,7 @@ impl GameState {
                 reply,
             } => {
                 // As with a move, a dropped answer leaves the world ahead of the store.
+                let place = self.live_place(vid, place);
                 if reply.send(self.shop(vid, step, place, mover)).is_err() {
                     warn!(
                         ?vid,
@@ -1095,6 +1182,7 @@ impl GameState {
                 reply,
             } => {
                 // A dropped settlement leaves both characters' worlds ahead of the store.
+                let place = self.live_place(vid, place);
                 if reply.send(self.trade(vid, step, place, mover)).is_err() {
                     warn!(
                         ?vid,
@@ -1121,6 +1209,7 @@ impl GameState {
                 reply,
             } => {
                 // Nothing is stored; the client only misses the dialog.
+                let place = self.live_place(vid, place);
                 if reply.send(self.quest(vid, &step, place, mover)).is_err() {
                     debug!(
                         ?vid,
@@ -1144,14 +1233,20 @@ impl GameState {
                 place,
                 mover,
                 reply,
-            } => answer_item_step(vid, reply, self.drop_item(vid, at, count, place, mover)),
+            } => {
+                let place = self.live_place(vid, place);
+                answer_item_step(vid, reply, self.drop_item(vid, at, count, place, mover));
+            }
             GameCommand::PickupItem {
                 vid,
                 ground,
                 place,
                 mover,
                 reply,
-            } => answer_item_step(vid, reply, self.pickup_item(vid, ground, place, mover)),
+            } => {
+                let place = self.live_place(vid, place);
+                answer_item_step(vid, reply, self.pickup_item(vid, ground, place, mover));
+            }
             GameCommand::GroundItemsOn {
                 channel,
                 map,
@@ -1364,6 +1459,14 @@ impl GameState {
         ) -> Result<world::character::MoveDone, world::character::MoveRefused>,
     ) -> Result<MovedItems, MoveItemRefused> {
         let questing = self.quest_running(vid);
+        // `IsPC() && 1500 > now - GetLastAttackTime()` (`G/char_item.cpp:8416-8422`): the world
+        // holds the attack stamp, and the descriptor the target selection. The world also holds
+        // the PK mode a look carries.
+        let actor = Mover {
+            recently_fought: actor.recently_fought || self.attacked_recently(vid),
+            pk_mode: self.pk_mode_of(vid.raw()),
+            ..actor
+        };
         let character = self
             .characters
             .find_by_vid_mut(vid)
@@ -1423,21 +1526,30 @@ impl PulseProcessor for GameState {
     /// Step one pulse.
     ///
     /// Counts the Pulse, then runs the events that are due on it: the ground items whose
-    /// lifetime ran out, the recovery of each character, the trades whose sides stand too far
-    /// apart, and the warp NPCs. The count is also the only way a test can tell that the game
+    /// lifetime ran out, the recovery of each character and the warp NPCs. Last, as
+    /// `CHARACTER_MANAGER::Update` comes after the heartbeat's events (`G/main.cpp:777-782`),
+    /// each moving player steps. The count is also the only way a test can tell that the game
     /// thread owns this value.
     fn process_pulse(&mut self, pulse: u64) {
         self.last_pulse = pulse;
         self.metrics.pulses.store(pulse, Ordering::SeqCst);
         self.destroy_expired(pulse);
         self.run_recovery(pulse);
-        self.cancel_distant_trades(pulse);
         self.run_warp_npcs(pulse);
+        self.step_motion(pulse);
     }
 }
 
 /// Legacy's `item_destroy_time_dropitem` default, in seconds (`G/config.cpp:56`).
 const DEFAULT_DROP_LIFETIME_SECS: i32 = 300;
+
+/// `VIEW_RANGE`'s default (`G/config.cpp:123`), which the configured `game.view_range` replaces.
+const DEFAULT_VIEW_RANGE: i32 = 5000;
+
+/// The view's radius for `view_range`: `VIEW_RANGE + VIEW_BONUS_RANGE` (`G/entity_view.cpp:94`).
+fn view_radius_of(view_range: i32) -> i64 {
+    i64::from(view_range) + view::VIEW_BONUS_RANGE
+}
 
 /// A lifetime in seconds as pulses, at least one.
 fn drop_lifetime_pulses(seconds: i32) -> u64 {
@@ -2277,7 +2389,55 @@ mod tests {
             recently_fought: false,
             empire: 1,
             language: 1,
+            pk_mode: crate::loading_phase::PK_MODE_PEACE,
         }
+    }
+
+    /// A look carries the PK mode of the body's card, not the descriptor's mover's
+    /// (`UpdatePacket`, `G/char.cpp:1315`): the fixture body is level 10, in `PK_MODE_PROTECT`.
+    #[test]
+    fn a_look_carries_the_pk_mode_of_the_body() {
+        let clock = fixtures::TestClock::default();
+        let mut world = fixtures::a_world(&clock);
+        let _viewer = fixtures::enter(&mut world, 8, (3300, 3200), 820);
+        let card = world.bodies[&Vid::new(8)].card.clone();
+        let (tx, _inbox) = tokio::sync::mpsc::unbounded_channel();
+        let mut sword = world::item::Item::new(11, 10);
+        sword.set_size(2).expect("a two-cell sword");
+        world
+            .enter_world_with_items(
+                Vid::new(7),
+                7,
+                "Warrior",
+                &[(inventory(0), sword)],
+                ClientOutbox::new(tx),
+            )
+            .expect("the player enters");
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(7))
+            .expect("the player is in the world")
+            .set_points(Some(fixtures::points(820)));
+        let (channel, map) = fixtures::PLACE;
+        let place = crate::game_loop_messages::EnterPlace {
+            channel,
+            map,
+            x: 3200,
+            y: 3200,
+            z: 0,
+        };
+        let _shown = world.place_body(Vid::new(7), place, card);
+        let weapon = INVENTORY_MAX_NUM + common::enums::EWearPositions::Weapon as u16;
+        let worn = world
+            .move_item(Vid::new(7), a_move(0, weapon, 0), a_mover())
+            .expect("the sword is worn");
+        let look = worn
+            .records
+            .iter()
+            .find(|frame| frame.first() == Some(&19))
+            .expect("a GC_CHARACTER_UPDATE");
+        assert_eq!(a_mover().pk_mode, crate::loading_phase::PK_MODE_PEACE);
+        assert_eq!(look[42], crate::loading_phase::PK_MODE_PROTECT, "bPKMode");
     }
 
     fn held_at(state: &GameState, pos: ItemPos) -> Lookup {
@@ -3034,15 +3194,20 @@ mod tests {
             player_id: 7,
             name: "Shaman".to_string(),
             items: Vec::new(),
-            loaded: crate::game_loop_messages::Loaded {
+            loaded: Box::new(crate::game_loop_messages::Loaded {
                 points: None,
                 quickslots,
                 gold: 1_200_000_000_000_000_000 - 1,
-            },
+                show: None,
+            }),
             outbox,
             reply,
         });
-        assert_eq!(answer.blocking_recv().unwrap(), Ok(()));
+        assert_eq!(
+            answer.blocking_recv().unwrap(),
+            Ok(crate::game_loop_messages::Shown::default()),
+            "an entry with no body shows nothing"
+        );
         let character = state.characters().find_by_vid(Vid::new(7)).unwrap();
         assert_eq!(character.gold(), 1_200_000_000_000_000_000 - 1);
         let swapped = slot_answer(&mut state, QuickslotStep::Swap { slot: 6, with: 0 });
@@ -3125,5 +3290,163 @@ mod tests {
             Arc::ptr_eq(&shared, &first),
             "the table is shared, not copied"
         );
+    }
+
+    /// A player's body on Channel 1's map 41 at `(x, y)`.
+    fn stand_seven(state: &mut GameState, (x, y): (i32, i32)) {
+        let card = crate::loading_phase::PcCard {
+            name: "Shaman".to_owned(),
+            job: 3,
+            empire: 1,
+            level: 10,
+            conqueror_level: 0,
+            language: 1,
+            pk_mode: crate::loading_phase::PK_MODE_PROTECT,
+        };
+        let place = crate::game_loop_messages::EnterPlace {
+            channel: 1,
+            map: 41,
+            x,
+            y,
+            z: 0,
+        };
+        let _own = state.place_body(Vid::new(7), place, card);
+    }
+
+    /// A drop and a pick-up are judged where the body stands, not at the point the descriptor
+    /// last stored; the store's place gives only the Channel and the map.
+    #[test]
+    fn a_ground_place_carries_the_bodys_live_point() {
+        let vnum = a_plain_vnum();
+        let mut state = a_holder(&[(inventory(3), a_plain_item(11, vnum))], true);
+        stand_seven(&mut state, (500, 700));
+        let stored = a_place(41, 90_000, 90_000);
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        state.apply(GameCommand::DropItem {
+            vid: Vid::new(7),
+            at: inventory(3),
+            count: 0,
+            place: stored,
+            mover: a_mover(),
+            reply,
+        });
+        let _dropped = answer.blocking_recv().unwrap().expect("the drop happened");
+        let shown = GroundRecord::Add {
+            vid: 1,
+            vnum,
+            x: 500,
+            y: 700,
+        };
+        assert_eq!(state.ground_items_on(1, 41), vec![ground_record(shown)]);
+        assert_eq!(
+            state.pickup_item(Vid::new(7), 1, stored, a_mover()),
+            Err(MoveItemRefused::Refused(MoveRefused::TooFar)),
+            "the stored point is out of reach"
+        );
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        state.apply(GameCommand::PickupItem {
+            vid: Vid::new(7),
+            ground: 1,
+            place: stored,
+            mover: a_mover(),
+            reply,
+        });
+        let picked = answer.blocking_recv().unwrap();
+        assert!(picked.is_ok(), "{picked:?}");
+        assert_eq!(held_at(&state, inventory(0)), Lookup::Occupied(11));
+    }
+
+    fn an_npc(vid: u32, x: i32, y: i32) -> world::npc::Npc {
+        world::npc::Npc {
+            vid,
+            vnum: 20_016,
+            race: 20_016,
+            char_type: 1,
+            on_click: 1,
+            x,
+            y,
+            z: 0,
+            rotation: 0,
+            empire: 1,
+            moving_speed: 0,
+            attack_speed: 0,
+            name: Vec::new(),
+        }
+    }
+
+    fn standing(npcs: Vec<world::npc::Npc>) -> MapNpcs {
+        MapNpcs {
+            npcs,
+            positions: Vec::new(),
+        }
+    }
+
+    /// Boot shows every NPC a sectree holds in the map's view at its point, and the shows
+    /// reach no client; an NPC outside every sectree still stands in the table.
+    #[test]
+    fn npc_spawn_indexes_every_npc_and_delivers_nothing() {
+        let mut state = a_state();
+        let (outbox, mut inbox) = a_live_outbox();
+        state
+            .enter_world_with_items(Vid::new(7), 7, "Shaman", &[], outbox)
+            .expect("the character is admitted");
+        let npcs = vec![
+            an_npc(901, 10_100, 20_100),
+            an_npc(902, 10_300, 20_100),
+            an_npc(903, 13_000, 20_100),
+        ];
+        state.stand_npcs(1, &an_npc_map(41), standing(npcs));
+        let index = &state.maps[&(1, 41)];
+        for vid in [901, 902] {
+            let spot = index.spot(view::EntityKey::Npc(vid)).expect("indexed");
+            assert!(spot.tree.is_some(), "{vid}");
+            assert_eq!(
+                state.npc_of[&vid],
+                (1, 41, usize::try_from(vid - 901).unwrap())
+            );
+        }
+        assert_eq!((index.spot(view::EntityKey::Npc(902)).unwrap().x), 10_300);
+        assert!(index.sees(view::EntityKey::Npc(901), view::EntityKey::Npc(902)));
+        assert!(
+            index.spot(view::EntityKey::Npc(903)).is_none(),
+            "no sectree holds it"
+        );
+        assert_eq!(state.npc_of[&903], (1, 41, 2));
+        assert_eq!(state.npcs_on(1, 41).npcs.len(), 3);
+        assert!(inbox.try_recv().is_err(), "nothing was delivered");
+    }
+
+    /// Standing a map up again takes its old NPCs out of the view and the VID table, and the
+    /// new ones in.
+    #[test]
+    fn a_replaced_maps_old_npcs_are_unindexed() {
+        let mut state = a_state();
+        let first = vec![an_npc(901, 10_100, 20_100), an_npc(902, 10_300, 20_100)];
+        state.stand_npcs(1, &an_npc_map(41), standing(first));
+        state.stand_npcs(
+            1,
+            &an_npc_map(41),
+            standing(vec![an_npc(911, 10_200, 20_100)]),
+        );
+        let index = &state.maps[&(1, 41)];
+        for old in [901, 902] {
+            assert!(index.spot(view::EntityKey::Npc(old)).is_none(), "{old}");
+            assert!(!state.npc_of.contains_key(&old), "{old}");
+            assert!(!index.sees(view::EntityKey::Npc(911), view::EntityKey::Npc(old)));
+        }
+        assert!(index.spot(view::EntityKey::Npc(911)).is_some());
+        assert_eq!(state.npc_of[&911], (1, 41, 0));
+        assert_eq!(state.npcs_on(1, 41).npcs.len(), 1);
+    }
+
+    /// `VIEW_RANGE + VIEW_BONUS_RANGE` (`G/entity_view.cpp:94`) is taken in 64 bits, so the
+    /// largest configured range does not wrap (D4).
+    #[test]
+    fn the_radius_is_view_range_plus_500_in_64_bits() {
+        assert_eq!(view_radius_of(i32::MAX), 2_147_484_147);
+        assert_eq!(view_radius_of(DEFAULT_VIEW_RANGE), 5_500);
+        assert_eq!(view_radius_of(0), 500);
+        assert_eq!(a_state().view_radius, 5_500, "legacy's default range");
+        assert_eq!(a_state().with_view_range(10_000).view_radius, 10_500);
     }
 }

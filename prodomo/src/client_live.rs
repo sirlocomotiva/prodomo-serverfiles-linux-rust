@@ -38,7 +38,7 @@ use std::fmt;
 use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use protocol::cg_handshake::CgHandshakeHeader;
 use protocol::cg_inventory::{CG_KEEP_ALIVE, HEADER_CG_PONG};
@@ -73,6 +73,14 @@ pub trait LiveClock {
     /// The legacy heartbeat compares signed 32-bit differences, so this is a
     /// `u32` that wraps, not a `u64` that does not.
     fn now(&self) -> u32;
+
+    /// The time since the clock's start, for a span longer than the 49.7 days `now` wraps at.
+    ///
+    /// The default reads `now` as milliseconds, so it wraps as `now` does; a clock with a real
+    /// start overrides it.
+    fn elapsed(&self) -> Duration {
+        Duration::from_millis(u64::from(self.now()))
+    }
 }
 
 /// The legacy descriptor clock: milliseconds since the server started, as a wrapping `u32`.
@@ -107,6 +115,10 @@ impl LiveClock for BootLiveClock {
         // Keep the low 32 bits: the legacy clock is a wrapping `u32`.
         let [a, b, c, d, ..] = self.boot.elapsed().as_millis().to_le_bytes();
         u32::from_le_bytes([a, b, c, d])
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.boot.elapsed()
     }
 }
 
@@ -783,6 +795,25 @@ mod tests {
 
     const TOKEN: u32 = 0x0102_0304;
     const NOW: u32 = 1_700_000_000;
+
+    #[test]
+    fn the_boot_clock_elapsed_is_its_instant_and_the_default_is_now_in_milliseconds() {
+        let manual = ManualLiveClock::new(0x0001_2345);
+        assert_eq!(manual.elapsed(), Duration::from_millis(0x0001_2345));
+        let boot = BootLiveClock {
+            boot: Instant::now()
+                .checked_sub(Duration::from_secs(5_000_000))
+                .unwrap_or_else(Instant::now),
+        };
+        // 5,000,000 s is past the 49.7 days a `u32` of milliseconds holds, so only the instant
+        // keeps the whole span.
+        if boot.boot.elapsed() >= Duration::from_secs(5_000_000) {
+            assert!(boot.elapsed() >= Duration::from_secs(5_000_000));
+            assert!(u64::from(boot.now()) < 5_000_000_000);
+        }
+        let fresh = BootLiveClock::new();
+        assert!(fresh.elapsed() < Duration::from_secs(60));
+    }
 
     fn started() -> ClientLifecycle {
         ClientLifecycle::start(TOKEN, HandshakeServerKind::Game, NOW).state

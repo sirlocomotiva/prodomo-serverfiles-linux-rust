@@ -580,7 +580,7 @@ async fn a_client_admitted_from_tokio_lands_on_the_thread_that_owns_the_world() 
     // Then: the world holds the character, and a grant addressed to its Name finds
     // it. That second half is the point of the whole unit: before this, nothing a
     // client did could put a character where a grant could reach it.
-    assert_eq!(admitted, Ok(()));
+    assert_eq!(admitted, Ok(prodomo::game_loop_messages::Shown::default()));
     let granted = tokio::time::timeout(
         Duration::from_secs(5),
         controller.request_grant(prodomo::item_grant::GrantRequest {
@@ -642,7 +642,7 @@ async fn a_client_that_enters_the_world_twice_is_refused_by_the_thread_that_owns
             )
             .await
             .expect("the answer crossed back"),
-        Ok(())
+        Ok(prodomo::game_loop_messages::Shown::default())
     );
 
     // When: a second descriptor claims the same VID.
@@ -750,7 +750,10 @@ async fn a_client_that_leaves_the_world_frees_its_name_for_a_later_login() {
         )
         .await
         .expect("the answer crossed back");
-    assert_eq!(readmitted, Ok(()));
+    assert_eq!(
+        readmitted,
+        Ok(prodomo::game_loop_messages::Shown::default())
+    );
     // And the new session's inventory starts empty, so the first grant takes the
     // same cell the departed session held. A world that kept the old character's
     // items would hand the cell to somebody else and the player would see a hole.

@@ -89,8 +89,6 @@
 //!   (`G/char.cpp:1847-1854`), so the client never gets its own insert (a Defect). The Rewrite
 //!   keeps the saved position, where legacy's character stays.
 
-use std::sync::Arc;
-
 use common::levels;
 use common::point_slot as point;
 use db::players::{Character, PLAYER_SLOTS};
@@ -134,25 +132,45 @@ pub const REVIVE_INVISIBLE_SECONDS: i32 = 5;
 /// and the line is `letters_event 0` for a character that is not in the event.
 pub const LETTERS_EVENT_CHAT: &[u8] = b"letters_event 0";
 
-/// The angle `EncodeInsertPacket` reports for a character that is not moving.
-///
-/// `CHARACTER::updatePacket` starts from the character's own `lX`/`lY`, and its `m_posDest`
-/// equals the current position, so `iDur` stays 0 and the angle stays 0
-/// (`G/char.cpp:1097-1105`).
+/// The rotation a player's body enters with: `GetRotation()` is 0 until the first move turns it
+/// (`SetRotation` in `Sync` and in the move handler, `G/char.cpp:3413`, `G/input_main.cpp:1876`).
+/// `EncodeInsertPacket` writes the live rotation (`G/char.cpp:1078`).
 pub const IDLE_ANGLE_BITS: u32 = 0;
 
 /// The `bMovingSpeed` and `bAttackSpeed` a character has with no affect on it:
 /// `SetPoint(POINT_MOV_SPEED, 100)` and `SetPoint(POINT_ATT_SPEED, 100)` plus the haste
 /// bonus, which is 0 with no party (`G/char.cpp:2969-2972`).
 ///
-/// The entering character's own insert record reads its speeds from its points. A
-/// [`VisibleCharacter`] is described with these, because the Rewrite does not hold another
-/// character's points yet.
+/// Every insert record reads its speeds from the character's limited points; these are what
+/// those points give a character with no affect and no item bonus.
 pub const BASE_SPEED: u8 = 100;
+
+/// `PK_MODE_PEACE` (`EPKModes`, `G/char.h:348-356`), the mode `CHARACTER::Initialize` gives
+/// every character (`G/char.cpp:323`).
+pub const PK_MODE_PEACE: u8 = 0;
 
 /// `PK_MODE_FREE` (`EPKModes`, `G/char.h:348-356`), the mode `CHARACTER::SetProto` gives every
 /// mob (`G/char.cpp:2474`).
 pub const PK_MODE_FREE: u8 = 2;
+
+/// `PK_MODE_PROTECT` (`EPKModes`, `G/char.h:348-356`), the mode of a player below the PK protect
+/// level.
+pub const PK_MODE_PROTECT: u8 = 3;
+
+/// The PK mode a loaded player has: `SetPlayerProto` sets `PK_MODE_PROTECT` when its level is
+/// below `PK_PROTECT_LEVEL`, through `SetLevel` and again after it (`G/char.cpp:2211-2222`,
+/// `:2378-2379`), and leaves `Initialize`'s `PK_MODE_PEACE` otherwise. Legacy also protects
+/// every character above `GM_PLAYER` (`:2362-2375`, compiled in by `ENABLE_GM_FLAG_IF_TEST_SERVER`
+/// at `:2231`, and `SetLevel`'s `GetGMLevel() != GM_PLAYER` arm); every character is `GM_PLAYER`
+/// here until the GM audit, so that rule gives nothing yet.
+#[must_use]
+pub const fn pk_mode(level: u8, protect_level: u8) -> u8 {
+    if level < protect_level {
+        PK_MODE_PROTECT
+    } else {
+        PK_MODE_PEACE
+    }
+}
 
 /// What the descriptor should do with a `CG_CHARACTER_SELECT`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,35 +269,24 @@ pub fn map_is_allowed(public_map: i32, channel_maps: &[u32]) -> bool {
         .any(|&map| i64::from(map) == i64::from(public_map))
 }
 
-/// A character the world can see, and the records it is described by.
+/// A character the loading burst's `GC_ENTITY` lists, with the five fields it carries.
 ///
-/// The loading burst describes a visible character with `GC_ENTITY`, which is five fields; the
-/// enter-game burst describes the same character with `GC_CHARACTER_ADD` and
-/// `GC_CHAR_ADDITIONAL_INFO`, which need its Name, level and race. One type carries all of
-/// them so a caller cannot build a list that one burst can send and the other cannot.
+/// The list the Rewrite sends is empty: legacy's lists every player on the Core, the loading
+/// one included (`G/sectree_manager.cpp:1697-1746`, `G/input_db.cpp:415`), a Divergence (V7).
+/// The enter-game burst does not use this type: the world's view inserts describe the
+/// characters in view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VisibleCharacter {
     /// The character's VID.
     pub vid: u32,
     /// The race, which the client turns into a `dwRaceVNum`.
     pub job: u8,
-    /// The Name, for `GC_CHAR_ADDITIONAL_INFO`.
-    pub name: [u8; NAME_LEN],
-    /// The level, for `GC_CHAR_ADDITIONAL_INFO`.
-    pub level: u8,
-    /// The conqueror level.
-    pub conqueror_level: u8,
-    /// The empire.
-    pub empire: u8,
     /// The six equipment parts, in `ECharacterEquipmentPart` order.
     pub parts: [u16; ENTITY_PART_NUM],
     /// The x the character stands at.
     pub x: i32,
     /// The y the character stands at.
     pub y: i32,
-    /// Its descriptor's language, which its `GC_CHAR_ADDITIONAL_INFO` carries
-    /// (`GetDesc()->GetLanguage()`, `G/char.cpp:1174`).
-    pub language: u8,
 }
 
 impl VisibleCharacter {
@@ -288,59 +295,13 @@ impl VisibleCharacter {
     pub fn entity(&self) -> GcEntityInfo {
         GcEntityInfo::new(self.vid, self.job.into(), self.parts, self.x, self.y)
     }
-
-    /// The `GC_CHARACTER_ADD` for this character standing still.
-    #[must_use]
-    pub fn add(&self) -> GcCharacterAdd {
-        GcCharacterAdd::new(
-            self.vid,
-            f32::from_bits(IDLE_ANGLE_BITS),
-            self.x,
-            self.y,
-            0,
-            CHAR_TYPE_PC,
-            u16::from(self.job),
-            BASE_SPEED,
-            BASE_SPEED,
-            0,
-            [0, 0],
-        )
-    }
-
-    /// The `GC_CHAR_ADDITIONAL_INFO` for this character, with no guild, mount or alignment.
-    #[must_use]
-    pub fn additional(&self) -> GcCharacterAdditionalInfo {
-        GcCharacterAdditionalInfo::new(
-            self.vid,
-            self.name,
-            self.parts,
-            self.empire,
-            0,
-            u32::from(self.level),
-            u32::from(self.conqueror_level),
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            self.language,
-        )
-    }
 }
 
-/// The characters and NPCs the world can see from a position.
-///
-/// The characters are empty until the world holds another character's points. The NPCs are the
-/// map's: the Rewrite's view is the whole map, where legacy's is the sectrees around the
-/// character (a Divergence), so every NPC on the map is in view.
+/// The characters the loading burst's `GC_ENTITY` lists (V7).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Neighbourhood {
-    /// The other characters in view.
+    /// The characters listed.
     pub characters: Vec<VisibleCharacter>,
-    /// The map's NPCs and its mini-map list.
-    pub npcs: Arc<MapNpcs>,
 }
 
 /// The `GC_CHARACTER_ADD` for an NPC standing where it spawned
@@ -559,25 +520,76 @@ pub fn main_character(character: &Character, vid: u32) -> GcMainCharacter2Empire
     )
 }
 
-/// The `GC_CHARACTER_ADD` for the character that is entering, standing still.
+/// The parts of a player's ADD and INFO that walking does not change, built on the descriptor
+/// from the loaded [`Character`] and sent to the world with the entry. The field types follow
+/// [`Character`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PcCard {
+    /// `GetName()`.
+    pub name: String,
+    /// The race, `GetRaceNum()`.
+    pub job: u8,
+    /// `GetEmpire()`.
+    pub empire: u8,
+    /// `GetLevel()`.
+    pub level: u8,
+    /// The conqueror level.
+    pub conqueror_level: u8,
+    /// The client language the INFO carries.
+    pub language: u8,
+    /// `m_bPKMode`, from [`pk_mode`].
+    pub pk_mode: u8,
+}
+
+impl PcCard {
+    /// The card of a loaded character whose client speaks `language`, on a Channel whose PK
+    /// protect level is `pk_protect_level`.
+    #[must_use]
+    pub fn of(character: &Character, language: u8, pk_protect_level: u8) -> Self {
+        Self {
+            name: character.name.clone(),
+            job: character.job,
+            empire: character.empire,
+            level: character.level,
+            conqueror_level: character.conqueror_level,
+            language,
+            pk_mode: pk_mode(character.level, pk_protect_level),
+        }
+    }
+}
+
+/// The live fields `EncodeInsertPacket` writes into the ADD (`G/char.cpp:1080-1105`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InsertAt {
+    /// `GetRotation()`, the angle in degrees.
+    pub angle: f32,
+    /// The x the ADD reports.
+    pub x: i32,
+    /// The y the ADD reports.
+    pub y: i32,
+    /// The z the ADD reports.
+    pub z: i32,
+}
+
+/// A player's `GC_CHARACTER_ADD` (`CHARACTER::EncodeInsertPacket`, `G/char.cpp:1071-1109`).
 ///
 /// `bType` is `GetCharType()` (`G/char.cpp:1077`), which `SetPlayerProto` makes `CHAR_TYPE_PC`
 /// for every PC (`G/char.cpp:2240`). Until ledger 223 the Rewrite sent 1, which is
-/// `CHAR_TYPE_NPC`.
+/// `CHAR_TYPE_NPC`. The angle and the point are `at`, which the view reads from the body.
 ///
 /// The two speeds are `GetLimitPoint(POINT_MOV_SPEED)` and `GetLimitPoint(POINT_ATT_SPEED)`
 /// (`G/char.cpp:1089-1091`), which the limit holds to 0..200 and 0..170, so each fits the
 /// record's byte.
 #[must_use]
-pub fn character_add(character: &Character, state: &Points, vid: u32) -> GcCharacterAdd {
+pub fn character_add(card: &PcCard, state: &Points, vid: u32, at: InsertAt) -> GcCharacterAdd {
     GcCharacterAdd::new(
         vid,
-        f32::from_bits(IDLE_ANGLE_BITS),
-        character.x,
-        character.y,
-        0,
+        at.angle,
+        at.x,
+        at.y,
+        at.z,
         CHAR_TYPE_PC,
-        u16::from(character.job),
+        u16::from(card.job),
         speed_byte(state.limit_point(point::POINT_MOV_SPEED)),
         speed_byte(state.limit_point(point::POINT_ATT_SPEED)),
         0,
@@ -591,34 +603,29 @@ fn speed_byte(speed: i32) -> u8 {
     u8::try_from(speed).unwrap_or(u8::MAX)
 }
 
-/// The `GC_CHAR_ADDITIONAL_INFO` for the character that is entering, with no guild, mount or
-/// alignment (`EncodeAdditionalInfo`, `G/char.cpp:1236-1300`).
+/// A player's `GC_CHAR_ADDITIONAL_INFO`, with no guild, mount or alignment
+/// (`G/char.cpp:1111-1200`). `bPKMode` is `m_bPKMode` (`G/char.cpp:1128`).
 ///
 /// The parts are the ones the last `ComputePoints` left (`GetPart`), which after the item load
 /// are the worn armour, weapon, hair costume and sash over the base part.
 #[must_use]
-pub fn character_additional(
-    character: &Character,
-    state: &Points,
-    vid: u32,
-    language: u8,
-) -> GcCharacterAdditionalInfo {
+pub fn character_additional(card: &PcCard, state: &Points, vid: u32) -> GcCharacterAdditionalInfo {
     GcCharacterAdditionalInfo::new(
         vid,
-        name_field(&character.name),
+        name_field(&card.name),
         state.parts(),
-        character.empire,
+        card.empire,
         0,
-        u32::from(character.level),
-        u32::from(character.conqueror_level),
+        u32::from(card.level),
+        u32::from(card.conqueror_level),
         0,
-        0,
-        0,
-        0,
+        card.pk_mode,
         0,
         0,
         0,
-        language,
+        0,
+        0,
+        card.language,
     )
 }
 
@@ -796,7 +803,7 @@ pub fn entering_position(
 /// descriptor, then sends the second half.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnterGameBurst {
-    /// The own-character pair, the visible characters' pairs, the NPCs, and the affect.
+    /// What the world's `Show` wrote, the NPC list, and the affect.
     pub before_phase: Vec<Vec<u8>>,
     /// The time, Channel, and `letters_event` records, written after the phase change.
     pub after_phase: Vec<Vec<u8>>,
@@ -804,12 +811,11 @@ pub struct EnterGameBurst {
 
 /// The records the enter-game burst sends, in legacy order.
 ///
-/// `state` is the character's points, which give its own insert record its two speeds.
+/// `shown` is what the world's `Show` of the entering character wrote to it: its own pair, then
+/// the pair of every character and NPC its view took in, in walk order
+/// (`G/input_login.cpp:590`, `G/char.cpp:1905`). `npcs` is the map's mini-map list.
 /// `channel` is `g_bChannel`, and `now` is `get_global_time()`, which is `time(0)` plus a gap
-/// the Rewrite does not yet carry. `language` is the entering descriptor's, which its own
-/// summary carries; a visible character's summary carries its own descriptor's. The time and
-/// channel records are unconditional; every other record here is about the character or about a
-/// list that is empty today.
+/// the Rewrite does not yet carry. The time and channel records are unconditional.
 ///
 /// # Panics
 ///
@@ -819,42 +825,16 @@ pub struct EnterGameBurst {
 #[must_use]
 pub fn enter_game_burst(
     character: &Character,
-    state: &Points,
-    vid: u32,
-    view: &Neighbourhood,
+    shown: Vec<Vec<u8>>,
+    npcs: &MapNpcs,
     channel: u8,
     now: u32,
-    language: u8,
 ) -> EnterGameBurst {
-    // `ch->Show` sends the entering character's own pair, then the pair for every character
-    // that can see it (`G/char.cpp:1905`, `G/entity_view.cpp:137`).
-    let mut before = Vec::with_capacity(7);
-    before.push(encoded(
-        &mut character_add(character, state, vid),
-        "the own-character insert",
-    ));
-    before.push(encoded(
-        &mut character_additional(character, state, vid, language),
-        "the own-character summary",
-    ));
-    for other in &view.characters {
-        before.push(encoded(&mut other.add(), "a visible character insert"));
-        before.push(encoded(
-            &mut other.additional(),
-            "a visible character summary",
-        ));
-    }
-    // The NPCs arrive through the same view insert, in VID order after the characters.
-    for npc in &view.npcs.npcs {
-        before.push(encoded(&mut npc_add(npc), "an NPC insert"));
-        if let Some(mut additional) = npc_additional(npc) {
-            before.push(encoded(&mut additional, "an NPC summary"));
-        }
-    }
+    let mut before = shown;
     // `SECTREE_MANAGER::SendNPCPosition` returns without writing when the map has no NPC, so
     // an empty list sends nothing at all (`G/sectree_manager.cpp:1089-1098`).
-    if !view.npcs.positions.is_empty() {
-        let entries = view.npcs.positions.iter().map(npc_position).collect();
+    if !npcs.positions.is_empty() {
+        let entries = npcs.positions.iter().map(npc_position).collect();
         before.push(encoded(&mut GcNpcPosition::new(entries), "the NPC list"));
     }
     // `ch->ReviveInvisible(5)` adds an affect, and `AddAffect` sends `GC_AFFECT_ADD` for
@@ -1056,21 +1036,62 @@ mod tests {
         VisibleCharacter {
             vid: 0x0a0b_0c0d,
             job: 7,
-            name: name_field("Spectre"),
-            level: 21,
-            conqueror_level: 1,
-            empire: 1,
             parts: [0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666],
             x: 0x0000_1000,
             y: -0x0000_2000,
-            language: 5,
         }
     }
 
     fn with_neighbour() -> Neighbourhood {
         Neighbourhood {
             characters: vec![neighbour()],
-            npcs: Arc::default(),
+        }
+    }
+
+    /// Where the hero's body stands as it enters: its saved point, at angle 0.
+    fn hero_at() -> InsertAt {
+        let hero = hero();
+        InsertAt {
+            angle: 0.0,
+            x: hero.x,
+            y: hero.y,
+            z: 0,
+        }
+    }
+
+    /// The hero's own pair as the world's `Show` writes it to a client speaking `language`.
+    fn own_pair(language: u8) -> Vec<Vec<u8>> {
+        let card = PcCard::of(&hero(), language, 15);
+        let mut add = Vec::new();
+        character_add(&card, &hero_points(), 0x1122_3344, hero_at()).encode_into(&mut add);
+        let mut info = Vec::new();
+        character_additional(&card, &hero_points(), 0x1122_3344).encode_into(&mut info);
+        vec![add, info]
+    }
+
+    /// A map with no NPC.
+    fn no_npcs() -> MapNpcs {
+        MapNpcs::default()
+    }
+
+    /// A map whose mini-map lists a gate and a smith.
+    fn npcs_listed() -> MapNpcs {
+        MapNpcs {
+            npcs: Vec::new(),
+            positions: vec![
+                NpcPosition {
+                    char_type: CHAR_TYPE_GOTO,
+                    name: b"Poarta".to_vec(),
+                    x: 62_200,
+                    y: 55_600,
+                },
+                NpcPosition {
+                    char_type: CHAR_TYPE_NPC,
+                    name: b"Fierar".to_vec(),
+                    x: 12_345,
+                    y: 23_456,
+                },
+            ],
         }
     }
 
@@ -1417,7 +1438,7 @@ mod tests {
         assert_eq!(slots[point::POINT_MOV_SPEED], 50);
         assert_eq!(slots[point::POINT_MAX_HP], 585);
         let mut bytes = Vec::new();
-        character_add(&hero, &state, 1).encode_into(&mut bytes);
+        character_add(&PcCard::of(&hero, 0, 15), &state, 1, hero_at()).encode_into(&mut bytes);
         assert_eq!(bytes[24], 50, "bMovingSpeed");
         assert_eq!(bytes[25], 100, "bAttackSpeed");
     }
@@ -1511,7 +1532,13 @@ mod tests {
     fn character_add_is_35_bytes_under_byte_one() {
         let hero = hero();
         let mut bytes = Vec::new();
-        character_add(&hero, &hero_points(), 0x1122_3344).encode_into(&mut bytes);
+        character_add(
+            &PcCard::of(&hero, 0, 15),
+            &hero_points(),
+            0x1122_3344,
+            hero_at(),
+        )
+        .encode_into(&mut bytes);
         assert_eq!(bytes.len(), 35, "1 header byte plus the 34-byte payload");
         assert_eq!(bytes[0], 1, "HEADER_GC_CHARACTER_ADD is byte 1");
         assert_ne!(bytes[0], 68, "byte 68 is GC_CHARACTER_POSITION");
@@ -1519,7 +1546,7 @@ mod tests {
         assert_eq!(
             &bytes[5..9],
             &0u32.to_le_bytes(),
-            "the angle is 0 when not moving"
+            "the angle is the body's rotation, 0 as it enters"
         );
         assert_eq!(&bytes[9..13], &hero.x.to_le_bytes(), "x");
         assert_eq!(&bytes[13..17], &hero.y.to_le_bytes(), "y");
@@ -1542,7 +1569,8 @@ mod tests {
     fn character_additional_is_70_bytes_over_byte_136() {
         let hero = hero();
         let mut bytes = Vec::new();
-        character_additional(&hero, &hero_points(), 0x1122_3344, 3).encode_into(&mut bytes);
+        character_additional(&PcCard::of(&hero, 3, 15), &hero_points(), 0x1122_3344)
+            .encode_into(&mut bytes);
         assert_eq!(bytes.len(), 70);
         assert_eq!(bytes[0], 136, "GC_CHAR_ADDITIONAL_INFO");
         assert_eq!(&bytes[1..5], &0x1122_3344u32.to_le_bytes(), "dwVID");
@@ -1562,7 +1590,7 @@ mod tests {
         assert_eq!(&bytes[47..51], &9u32.to_le_bytes(), "dwLevel");
         assert_eq!(&bytes[51..55], &3u32.to_le_bytes(), "dwConquerorLevel");
         assert_eq!(&bytes[55..57], &0i16.to_le_bytes(), "sAlignment");
-        assert_eq!(bytes[57], 0, "bPKMode");
+        assert_eq!(bytes[57], 3, "bPKMode: PROTECT, level 9 is below 15");
         assert_eq!(&bytes[58..62], &0u32.to_le_bytes(), "dwMountVnum");
         assert_eq!(bytes[62], 0, "bRefineElementType");
         assert_eq!(bytes[63], 0, "dwNewIsGuildName is a BYTE");
@@ -1571,20 +1599,58 @@ mod tests {
         assert_eq!(bytes[69], 3, "bLanguage comes from the descriptor");
     }
 
+    /// A player below the PK protect level is in `PK_MODE_PROTECT` and one at it in
+    /// `PK_MODE_PEACE` (`G/char.cpp:2211-2222`, `:2378-2379`), and the INFO carries the mode.
+    #[test]
+    fn the_pk_mode_is_protect_only_below_the_protect_level() {
+        assert_eq!(pk_mode(14, 15), PK_MODE_PROTECT);
+        assert_eq!(pk_mode(15, 15), PK_MODE_PEACE);
+        assert_eq!(pk_mode(99, 15), PK_MODE_PEACE);
+        assert_eq!(
+            pk_mode(1, 0),
+            PK_MODE_PEACE,
+            "a protect level of 0 protects no one"
+        );
+        assert_eq!(
+            pk_mode(29, 30),
+            PK_MODE_PROTECT,
+            "the BYTE default without a locale"
+        );
+        let mut hero = hero();
+        for (level, mode) in [(14, PK_MODE_PROTECT), (15, PK_MODE_PEACE)] {
+            hero.level = level;
+            let card = PcCard::of(&hero, 0, 15);
+            assert_eq!(card.pk_mode, mode, "level {level}");
+            let mut bytes = Vec::new();
+            character_additional(&card, &hero_points(), 1).encode_into(&mut bytes);
+            assert_eq!(bytes[57], mode, "bPKMode at level {level}");
+        }
+    }
+
+    /// The insert reports the point and the angle the view gives it, not the stored row's:
+    /// a body that walked or turned is shown where it stands.
+    #[test]
+    fn the_insert_reports_the_point_and_angle_it_is_given() {
+        let at = InsertAt {
+            angle: 135.0,
+            x: 0x0102_0304,
+            y: -0x0506_0708,
+            z: 0x0a0b,
+        };
+        let mut bytes = Vec::new();
+        character_add(&PcCard::of(&hero(), 0, 15), &hero_points(), 1, at).encode_into(&mut bytes);
+        assert_eq!(&bytes[5..9], &135f32.to_le_bytes(), "angle");
+        assert_eq!(&bytes[9..13], &0x0102_0304i32.to_le_bytes(), "x");
+        assert_eq!(&bytes[13..17], &(-0x0506_0708i32).to_le_bytes(), "y");
+        assert_eq!(&bytes[17..21], &0x0a0bi32.to_le_bytes(), "z");
+    }
+
     /// The enter-game burst, one record per frame, in the order `CInputLogin::Entergame`
-    /// writes them. With an empty map and nobody in view it is six records around the
-    /// descriptor's own `SetPhase(PHASE_GAME)`.
+    /// writes them. With an empty map and nobody in view the world shows only the own pair, so
+    /// it is six records around the descriptor's own `SetPhase(PHASE_GAME)`.
     #[test]
     fn enter_game_burst_headers_are_in_legacy_order() {
-        let burst = enter_game_burst(
-            &hero(),
-            &hero_points(),
-            0x1122_3344,
-            &empty_view(),
-            1,
-            1_600_000_000,
-            3,
-        );
+        let burst = enter_game_burst(&hero(), own_pair(3), &no_npcs(), 1, 1_600_000_000);
         assert_eq!(
             headers(&burst.before_phase),
             vec![1, 136, 126],
@@ -1601,7 +1667,7 @@ mod tests {
     /// and writing it as content as well would put two on the wire.
     #[test]
     fn no_enter_game_half_carries_a_phase_record() {
-        let burst = enter_game_burst(&hero(), &hero_points(), 1, &empty_view(), 1, 0, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 1, 0);
         for frame in all(&burst.before_phase, &burst.after_phase) {
             assert_ne!(
                 frame[0], 253,
@@ -1672,7 +1738,7 @@ mod tests {
     /// after the NPC records and before `SetPhase(PHASE_GAME)`.
     #[test]
     fn the_revive_invisible_affect_is_sent_once_with_five_seconds() {
-        let burst = enter_game_burst(&hero(), &hero_points(), 1, &empty_view(), 1, 0, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 1, 0);
         let affects: Vec<&Vec<u8>> = all(&burst.before_phase, &burst.after_phase)
             .into_iter()
             .filter(|f| f[0] == 126)
@@ -1701,7 +1767,7 @@ mod tests {
     /// after it.
     #[test]
     fn the_affect_is_the_last_record_before_the_phase_change() {
-        let burst = enter_game_burst(&hero(), &hero_points(), 1, &empty_view(), 1, 0, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 1, 0);
         assert_eq!(
             burst.before_phase.last().map(|f| f[0]),
             Some(126),
@@ -1716,15 +1782,7 @@ mod tests {
 
     #[test]
     fn time_then_channel_carry_their_whole_values() {
-        let burst = enter_game_burst(
-            &hero(),
-            &hero_points(),
-            1,
-            &empty_view(),
-            4,
-            1_600_000_000,
-            0,
-        );
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 4, 1_600_000_000);
         let frames = all(&burst.before_phase, &burst.after_phase);
         let time_at = frames.iter().position(|f| f[0] == 106).unwrap();
         let channel_at = frames.iter().position(|f| f[0] == 121).unwrap();
@@ -1741,7 +1799,7 @@ mod tests {
     /// command line, and the text is the unterminated tail.
     #[test]
     fn the_letters_event_line_is_the_last_record() {
-        let burst = enter_game_burst(&hero(), &hero_points(), 1, &empty_view(), 1, 0, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 1, 0);
         let last = burst.after_phase.last().unwrap();
         assert_eq!(last[0], 4, "GC_CHAT is byte 4");
         assert_eq!(
@@ -1767,7 +1825,7 @@ mod tests {
     /// `SEventLetters` writes; the sent bytes must keep the space.
     #[test]
     fn the_letters_event_line_keeps_its_space() {
-        let burst = enter_game_burst(&hero(), &hero_points(), 1, &empty_view(), 1, 0, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 1, 0);
         let last = burst.after_phase.last().unwrap();
         let text = &last[10..];
         assert_eq!(text, b"letters_event 0");
@@ -1777,7 +1835,7 @@ mod tests {
     /// An empty NPC list sends nothing at all: `SendNPCPosition` returns before it writes.
     #[test]
     fn an_empty_npc_list_sends_no_record() {
-        let burst = enter_game_burst(&hero(), &hero_points(), 1, &empty_view(), 1, 0, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 1, 0);
         assert!(
             !all(&burst.before_phase, &burst.after_phase)
                 .into_iter()
@@ -1876,32 +1934,60 @@ mod tests {
         assert_eq!(long[24], 0, "the 25th byte is the terminator");
     }
 
-    /// A character already in view adds two records, its insert and its summary, after the
-    /// entering character's own pair.
+    /// What the world's `Show` wrote leads the burst byte for byte and in its order: the burst
+    /// adds no insert of its own, so a neighbour's pair stays where the view put it.
     #[test]
-    fn a_visible_character_adds_its_pair_after_the_own_pair() {
-        let burst = enter_game_burst(&hero(), &hero_points(), 1, &with_neighbour(), 1, 0, 3);
+    fn the_shown_records_lead_the_burst_unchanged() {
+        let mut shown = own_pair(3);
+        let neighbour = PcCard {
+            name: "Spectre".to_string(),
+            job: 7,
+            empire: 1,
+            level: 21,
+            conqueror_level: 1,
+            language: 5,
+            pk_mode: PK_MODE_PEACE,
+        };
+        let at = InsertAt {
+            angle: 90.0,
+            x: 0x0000_1000,
+            y: -0x0000_2000,
+            z: 0,
+        };
+        let mut add = Vec::new();
+        character_add(&neighbour, &hero_points(), 0x0a0b_0c0d, at).encode_into(&mut add);
+        let mut info = Vec::new();
+        character_additional(&neighbour, &hero_points(), 0x0a0b_0c0d).encode_into(&mut info);
+        shown.extend([add, info]);
+        let burst = enter_game_burst(&hero(), shown.clone(), &no_npcs(), 1, 0);
         assert_eq!(
             headers(&burst.before_phase),
             vec![1, 136, 1, 136, 126],
-            "the neighbour's pair sits between the own pair and the affect",
+            "the shown pairs, then the affect",
         );
-        assert_eq!(
-            burst.before_phase[2][21], CHAR_TYPE_PC,
-            "every PC's insert carries CHAR_TYPE_PC, the neighbour's too"
-        );
-        let summary = &burst.before_phase[3];
-        assert_eq!(
-            &summary[1..5],
-            &0x0a0b_0c0du32.to_le_bytes(),
-            "the neighbour's VID"
-        );
-        assert_eq!(&summary[5..12], b"Spectre");
-        assert_eq!(summary[69], 5, "the neighbour's own descriptor's language");
-        assert_eq!(
-            burst.before_phase[1][69], 3,
-            "the entering descriptor's language"
-        );
+        assert_eq!(&burst.before_phase[..4], &shown[..], "byte for byte");
+    }
+
+    /// The burst writes no insert itself: a world that showed nothing leaves only the affect
+    /// before the phase change, so the own pair can never reach the client twice.
+    #[test]
+    fn the_burst_adds_no_insert_of_its_own() {
+        let burst = enter_game_burst(&hero(), Vec::new(), &no_npcs(), 1, 0);
+        assert_eq!(headers(&burst.before_phase), vec![126]);
+    }
+
+    /// A map with a mini-map list sends it once, after what the world showed and before the
+    /// affect (`G/input_login.cpp:590-593`), with every entry in list order.
+    #[test]
+    fn the_mini_map_sits_between_the_shown_records_and_the_affect() {
+        let npcs = npcs_listed();
+        let burst = enter_game_burst(&hero(), own_pair(0), &npcs, 1, 0);
+        assert_eq!(headers(&burst.before_phase), vec![1, 136, 115, 126]);
+        let mut expected = Vec::new();
+        GcNpcPosition::new(npcs.positions.iter().map(npc_position).collect())
+            .encode_into(&mut expected)
+            .expect("two entries fit");
+        assert_eq!(burst.before_phase[2], expected);
     }
 
     /// A second character in view is described by `GC_ENTITY` at load. `wSize` is a `WORD`
@@ -1958,7 +2044,7 @@ mod tests {
     #[test]
     fn the_package_sdb_is_absent_from_both_bursts() {
         let loading = loading_burst(&hero(), &hero_points(), 1, &with_neighbour());
-        let entering = enter_game_burst(&hero(), &hero_points(), 1, &with_neighbour(), 1, 0, 0);
+        let entering = enter_game_burst(&hero(), own_pair(0), &npcs_listed(), 1, 0);
         assert!(
             !all(&loading.before_map_test, &loading.after_map_test)
                 .into_iter()
@@ -1976,7 +2062,7 @@ mod tests {
     /// A hard-coded welcome would be a Divergence: the snapshot has no `GREET` row.
     #[test]
     fn no_hard_coded_greeting_is_sent() {
-        let burst = enter_game_burst(&hero(), &hero_points(), 1, &empty_view(), 1, 0, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 1, 0);
         let lines: Vec<&Vec<u8>> = all(&burst.before_phase, &burst.after_phase)
             .into_iter()
             .filter(|f| f[0] == 4)
@@ -1990,7 +2076,7 @@ mod tests {
     #[test]
     fn every_record_is_its_own_frame() {
         let loading = loading_burst(&hero(), &hero_points(), 1, &with_neighbour());
-        let entering = enter_game_burst(&hero(), &hero_points(), 1, &with_neighbour(), 1, 0, 0);
+        let entering = enter_game_burst(&hero(), own_pair(0), &npcs_listed(), 1, 0);
         for half in [
             &loading.before_map_test,
             &loading.after_map_test,

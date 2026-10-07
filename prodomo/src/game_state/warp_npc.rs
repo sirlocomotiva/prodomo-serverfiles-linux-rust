@@ -15,8 +15,9 @@
 //! 4. `CanHandleItem(false, true)` passes it.
 //!
 //! A player that passes is sent through `WarpSet` by a warp NPC, and shown at the target on its
-//! own map and stopped by a goto NPC. The world owns no descriptor, so both are
-//! [`ClientOrder`]s that the player's descriptor runs on its next turn.
+//! own map and stopped by a goto NPC. The world owns no descriptor, so a warp is a
+//! [`ClientOrder`] that the player's descriptor runs on its next turn; a goto moves the body in
+//! the world at once, as legacy's `Show` and `Stop` do.
 //!
 //! # `IsHack`
 //!
@@ -32,13 +33,15 @@
 //! - **The phase.** Legacy fires each NPC's event 12 Pulses after that NPC was created. Every warp
 //!   NPC the Rewrite has stands up at boot, before the first Pulse, so every event fires on the
 //!   Pulses that are a multiple of 12.
-//! - **The order of the players.** Legacy walks the NPC's sectree view, an `unordered_set` hashed
-//!   by pointer, so its order is unspecified. The Rewrite walks the map's clients in join order.
-//!   Only the order of the lines and orders differs; each player is judged alone.
-//! - **One order per Pulse.** A player that `WarpSet` accepts leaves its sectree, so no other NPC
-//!   finds it on the same Pulse. The descriptor runs the order after the Pulse, so the Rewrite
-//!   checks a player that one NPC has ordered against no other NPC on that Pulse, whatever the
-//!   order then does.
+//! - **The order of the players.** Legacy walks the sectrees around the NPC's in `Build` order,
+//!   each an `unordered_set` hashed by pointer, so the order inside a sectree is unspecified. The
+//!   Rewrite walks each sectree in VID order (V1). Only the order of the lines and orders
+//!   differs; each player is judged alone.
+//! - **One warp per Pulse.** A player that `WarpSet` accepts leaves its sectree, so no other NPC
+//!   finds it on the same Pulse. The descriptor runs the warp after the Pulse, so the Rewrite
+//!   checks a player that one NPC has warped against no other NPC on that Pulse, whatever the
+//!   warp then does. A goto moves the body at once, so a later NPC of the same Pulse judges it
+//!   again at its new spot, as legacy's later event would.
 //! - **An invalid name.** Legacy re-parses the name on every fire and, for a name that does not
 //!   parse, draws `number(1, 100)` and logs when it is below 5. The Rewrite parses the name
 //!   once, when the NPC stands up, and logs an invalid name once. A number whose target
@@ -71,11 +74,12 @@ use tracing::warn;
 use world::npc::Npc;
 
 use super::safebox::LOAD_WAIT_PULSES;
+use super::view::EntityKey;
 use super::GameState;
 use crate::chat_line::{chat_packet, Arg};
 use crate::client_registry::ClientOrder;
 use crate::item_move::Mover;
-use crate::sync_position::{distance_approx, SyncPositionVictimKind};
+use crate::sync_position::distance_approx;
 use crate::warp::WARP_LOCATION_SCALE;
 
 /// `passes_per_sec / 2`: the Pulses between two fires of `warp_npc_event` (`G/char.cpp:8013`).
@@ -96,6 +100,33 @@ pub const WINDOW_HACK_NOTICE: &[u8] = b"[LS;851]";
 /// `IsHack`'s third and fourth refusals: a trade, or a shop, within the portal limit.
 pub const RECENT_HACK_NOTICE: &[u8] = b"[LS;852;%d]";
 
+/// The `z` `CHARACTER::Show` is given when the caller names none: the default `LONG_MAX` of
+/// its declaration (`G/char.h:879`), which is `i32::MAX` on the 32-bit legacy target. A goto
+/// NPC names none (`G/char.cpp:7971`), so the insert record the client then receives carries
+/// it.
+pub const SHOW_Z: i32 = i32::MAX;
+
+/// What a warp or goto NPC does to a player that passes `FuncCheckWarp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NpcOrder {
+    /// `WarpSet(x, y)` from a warp NPC (`G/char.cpp:7967-7968`), which the player's descriptor
+    /// runs as a [`ClientOrder::Warp`].
+    Warp {
+        /// The target x.
+        x: i32,
+        /// The target y.
+        y: i32,
+    },
+    /// `Show(GetMapIndex(), x, y)` then `Stop()` from a goto NPC (`G/char.cpp:7971-7972`),
+    /// which the world runs.
+    Goto {
+        /// The target x, the map's base included.
+        x: i32,
+        /// The target y, the map's base included.
+        y: i32,
+    },
+}
+
 /// A warp or goto NPC whose name parsed, and what it does to a player that passes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WarpNpc {
@@ -108,7 +139,7 @@ pub(super) struct WarpNpc {
     /// `m_bEmpire`: its own empire, 0 for none.
     empire: u8,
     /// The `WarpSet` or `Show` a player that passes is sent.
-    order: ClientOrder,
+    order: NpcOrder,
 }
 
 /// The pulses `IsHack` measures the portal limit from, for one character.
@@ -188,14 +219,14 @@ fn scan_long(input: &[u8]) -> Option<(i64, &[u8])> {
 /// A warp NPC's target is the name's numbers times 100. A goto NPC adds `iBaseX` and `iBaseY`,
 /// the map's base, which the region's left and top edges are.
 #[must_use]
-pub fn warp_npc_order(npc: &Npc, region: &MapRegion) -> Option<ClientOrder> {
+pub fn warp_npc_order(npc: &Npc, region: &MapRegion) -> Option<NpcOrder> {
     let (x, y) = parse_warp_name(&npc.name)?;
     let scale = i64::from(WARP_LOCATION_SCALE);
     let x = i32::try_from(x.checked_mul(scale)?).ok()?;
     let y = i32::try_from(y.checked_mul(scale)?).ok()?;
     match npc.char_type {
-        CHAR_TYPE_WARP => Some(ClientOrder::Warp { x, y }),
-        CHAR_TYPE_GOTO => Some(ClientOrder::Goto {
+        CHAR_TYPE_WARP => Some(NpcOrder::Warp { x, y }),
+        CHAR_TYPE_GOTO => Some(NpcOrder::Goto {
             x: x.checked_add(region.sx)?,
             y: y.checked_add(region.sy)?,
         }),
@@ -279,41 +310,56 @@ impl GameState {
         None
     }
 
-    /// Fire every warp NPC's event on the Pulses it fires on, and order each player that passes
-    /// `FuncCheckWarp`.
-    pub(super) fn run_warp_npcs(&self, pulse: u64) {
+    /// Fire every warp NPC's event on the Pulses it fires on, and run `FuncCheckWarp` on each
+    /// player around it (`G/char.cpp:7988-8014`). An NPC that stands in no sectree fires on
+    /// nobody (`:7998-8002`).
+    pub(super) fn run_warp_npcs(&mut self, pulse: u64) {
         if pulse == 0 || pulse % WARP_NPC_PULSES != 0 {
             return;
         }
-        let (Some(clients), Some(positions)) = (self.clients.as_deref(), self.positions.as_deref())
-        else {
+        let Some(clients) = self.clients.clone() else {
             return;
         };
-        let mut ordered: HashSet<u64> = HashSet::new();
-        let mut orders: Vec<(u8, u64, ClientOrder)> = Vec::new();
-        for (&(channel, map), npcs) in &self.warp_npcs {
+        let mut warped: HashSet<u32> = HashSet::new();
+        let mut warps: Vec<(u8, u64, ClientOrder)> = Vec::new();
+        let maps: Vec<(u8, i32)> = self.warp_npcs.keys().copied().collect();
+        for (channel, map) in maps {
             let members = clients.members_on_map(channel, map);
             if members.is_empty() {
                 continue;
             }
+            let npcs = self
+                .warp_npcs
+                .get(&(channel, map))
+                .cloned()
+                .unwrap_or_default();
             for npc in npcs {
-                for (id, entry) in &members {
-                    if ordered.contains(id) {
-                        continue;
-                    }
-                    let vid = Vid::new(entry.vid);
-                    let Some(tracked) = positions.get(*id) else {
+                // `ForEachAround` collects the entities before it calls the check on any.
+                let around = self
+                    .maps
+                    .get(&(channel, map))
+                    .map(|index| index.around_of(EntityKey::Npc(npc.vid)))
+                    .unwrap_or_default();
+                for key in around {
+                    let EntityKey::Character(raw) = key else {
                         continue;
                     };
-                    if tracked.kind != SyncPositionVictimKind::Player
-                        || self.characters.find_by_vid(vid).is_err()
-                    {
+                    if warped.contains(&raw) {
                         continue;
                     }
-                    let distance = distance_approx(
-                        tracked.x.saturating_sub(npc.x),
-                        tracked.y.saturating_sub(npc.y),
-                    );
+                    let Some((id, entry)) = members.iter().find(|(_, entry)| entry.vid == raw)
+                    else {
+                        continue;
+                    };
+                    let vid = Vid::new(raw);
+                    if self.characters.find_by_vid(vid).is_err() {
+                        continue;
+                    }
+                    let Some(spot) = self.spot_of(raw) else {
+                        continue;
+                    };
+                    let distance =
+                        distance_approx(spot.x.saturating_sub(npc.x), spot.y.saturating_sub(npc.y));
                     if distance > WARP_NPC_REACH || empire_refuses(npc.empire, entry.empire) {
                         continue;
                     }
@@ -321,17 +367,28 @@ impl GameState {
                         recently_fought: false,
                         empire: entry.empire,
                         language: entry.language,
+                        pk_mode: self.pk_mode_of(raw),
                     };
                     if let Some(line) = self.is_hack(vid, mover) {
                         let _sent = self.write_to_client(vid, line);
                         continue;
                     }
-                    let _first = ordered.insert(*id);
-                    orders.push((channel, *id, npc.order));
+                    match npc.order {
+                        NpcOrder::Warp { x, y } => {
+                            let _first = warped.insert(raw);
+                            warps.push((channel, *id, ClientOrder::Warp { x, y }));
+                        }
+                        NpcOrder::Goto { x, y } => {
+                            // `Show` changes nothing when no sectree holds the target; `Stop`
+                            // runs either way.
+                            let _shown = self.show_body(raw, (x, y, SHOW_Z), None);
+                            self.stop(raw);
+                        }
+                    }
                 }
             }
         }
-        for (channel, id, order) in orders {
+        for (channel, id, order) in warps {
             if !clients.order(channel, id, order) {
                 warn!(
                     channel,
@@ -345,7 +402,7 @@ impl GameState {
 
     /// The warp and goto NPCs standing on one map of one Channel, with their orders.
     #[cfg(test)]
-    pub(super) fn warp_npcs_on(&self, channel: u8, map: i32) -> Vec<ClientOrder> {
+    pub(super) fn warp_npcs_on(&self, channel: u8, map: i32) -> Vec<NpcOrder> {
         self.warp_npcs
             .get(&(channel, map))
             .map(|npcs| npcs.iter().map(|npc| npc.order).collect())
@@ -470,7 +527,7 @@ mod tests {
         let npc = an_npc(CHAR_TYPE_WARP, b"a3 4002 8995");
         assert_eq!(
             warp_npc_order(&npc, &a_region()),
-            Some(ClientOrder::Warp {
+            Some(NpcOrder::Warp {
                 x: 400_200,
                 y: 899_500
             })
@@ -482,7 +539,7 @@ mod tests {
         let npc = an_npc(CHAR_TYPE_GOTO, b". 345 361");
         assert_eq!(
             warp_npc_order(&npc, &a_region()),
-            Some(ClientOrder::Goto {
+            Some(NpcOrder::Goto {
                 x: 162_500,
                 y: 676_100
             })
@@ -501,7 +558,7 @@ mod tests {
         let edge = an_npc(CHAR_TYPE_WARP, b"a 21474836 -21474836");
         assert_eq!(
             warp_npc_order(&edge, &region),
-            Some(ClientOrder::Warp {
+            Some(NpcOrder::Warp {
                 x: 2_147_483_600,
                 y: -2_147_483_600
             })
@@ -538,14 +595,14 @@ mod tests {
                     x: 5,
                     y: 6,
                     empire: 2,
-                    order: ClientOrder::Warp { x: 100, y: 200 },
+                    order: NpcOrder::Warp { x: 100, y: 200 },
                 },
                 WarpNpc {
                     vid: 2,
                     x: 450_100,
                     y: 903_300,
                     empire: 0,
-                    order: ClientOrder::Goto {
+                    order: NpcOrder::Goto {
                         x: 128_300,
                         y: 640_400
                     },

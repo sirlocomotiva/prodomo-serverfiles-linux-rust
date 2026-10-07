@@ -1,25 +1,23 @@
-//! The in-process client registry that talking chat and movement broadcasts need.
+//! The in-process client registry: the process-wide descriptor set, the outbox the world
+//! writes a client's records into, and the orders it gives a descriptor.
 //!
 //! Legacy has no such type because it does not need one: `DESC_MANAGER::GetClientSet()`
 //! (`server/server/game/desc_manager.cpp:310-313`) is the process-wide set of
-//! descriptors, and `FEmpireChatPacket` walks it directly. The Rewrite runs every
-//! Channel in one process (ADR-0002), so that set has to be built explicitly.
+//! descriptors. The Rewrite runs every Channel in one process (ADR-0002), so that set has to
+//! be built explicitly.
 //!
 //! # Why one registry keyed by Channel
 //!
-//! Legacy's talking-chat scope is *the whole map*, and the filter is
-//! `d->GetCharacter()->GetMapIndex() == iMapIndex` (`server/server/game/input_main.cpp:691-692`)
-//! applied to every descriptor in the process. Legacy only gets away with walking the
-//! process set because one process hosted one Channel. Keying this registry by Channel
-//! number and then by map reproduces that scope exactly: a client on Channel 1 never
-//! receives a line from Channel 2, even when both host the same map index.
+//! A map index names a map on one Channel only. Keying this registry by Channel number and
+//! then by map keeps a client on Channel 1 from receiving a record about Channel 2, even when
+//! both host the same map index.
 //!
-//! # The sender is a recipient
+//! # What reaches a client through here
 //!
-//! `FEmpireChatPacket` has no self-exclusion, so the speaker receives their own line and
-//! [`ChannelClients::broadcast_on_map`] delivers to every member of the map. Movement is
-//! the opposite: `PacketAround` passes the moving character as `except`
-//! (`input_main.cpp:1891`), so [`ChannelClients::broadcast_excluding`] is what a move needs.
+//! The world sends the records about bodies (moves, poses, talking chat, the view) itself,
+//! through each client's [`ClientOutbox`]. What still walks this registry is the ground-item
+//! record a map's clients are sent ([`ChannelClients::broadcast_on_map`], V8), the client a
+//! warp NPC orders ([`ChannelClients::members_on_map`]), and the shout.
 //!
 //! # The shout crosses every Channel
 //!
@@ -37,7 +35,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::sync_position::SyncPositionVictimKind;
 use tokio::sync::mpsc;
 
 /// One client as the registry knows it. The socket lives in the descriptor task; this is
@@ -65,7 +62,8 @@ pub struct ClientEntry {
 ///
 /// The world owns no descriptor, so a step that ends in the descriptor's own state is sent as
 /// an order, and the descriptor runs it on its next turn. A warp NPC's `WarpSet` saves the
-/// character and sends `GC_WARP`, and its goto `Show` moves the character the descriptor holds.
+/// character and sends `GC_WARP`. A goto NPC's `Show` moves the body, which the world owns, so
+/// it is no order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientOrder {
     /// `WarpSet(x, y)` from a warp NPC (`FuncCheckWarp`, `G/char.cpp:7967-7968`).
@@ -73,13 +71,6 @@ pub enum ClientOrder {
         /// The target x.
         x: i32,
         /// The target y.
-        y: i32,
-    },
-    /// `Show(GetMapIndex(), x, y)` then `Stop()` from a goto NPC (`G/char.cpp:7971-7972`).
-    Goto {
-        /// The target x, the map's base included.
-        x: i32,
-        /// The target y, the map's base included.
         y: i32,
     },
 }
@@ -186,7 +177,7 @@ impl ChannelClients {
     /// The clients on one map of one Channel with their lease identifiers, in join order.
     ///
     /// A warp NPC needs both: the entry for the empire and the language of the line it sends,
-    /// and the lease for the position table and for the order.
+    /// and the lease for the order.
     #[must_use]
     pub fn members_on_map(&self, channel: u8, map: i32) -> Vec<(u64, ClientEntry)> {
         self.inner
@@ -235,26 +226,6 @@ impl ChannelClients {
             .unwrap_or_default()
     }
 
-    /// The lease identifiers on one map of one Channel.
-    ///
-    /// The position table needs the lease, not the client entry, because that is the key it
-    /// tracks a position under.
-    #[must_use]
-    pub fn ids_on_map(&self, channel: u8, map: i32) -> Vec<u64> {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&channel)
-            .map(|members| {
-                members
-                    .iter()
-                    .filter(|member| member.entry.map == map)
-                    .map(|member| member.id)
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     /// How many clients are on one map of one Channel.
     #[must_use]
     pub fn count_on_map(&self, channel: u8, map: i32) -> usize {
@@ -263,22 +234,24 @@ impl ChannelClients {
 
     /// Deliver one record to every client on the map, **including** the sender.
     ///
-    /// This is the talking-chat scope.
-    ///
     /// A send to a member whose receiver is gone is skipped rather than failing the
     /// broadcast. The public API cannot produce that state, because dropping a lease is
     /// the only way to close its receiver and dropping also deregisters, so the branch
     /// is defensive rather than covered by a test.
     pub fn broadcast_on_map(&self, channel: u8, map: i32, record: &[u8]) -> usize {
-        self.deliver(channel, Some(map), None, record)
-    }
-
-    /// Deliver one record to every client on the map except one lease.
-    ///
-    /// This is the `PacketAround` scope: `except` is the moving character
-    /// (`input_main.cpp:1891`), and the moving client must not receive an echo.
-    pub fn broadcast_excluding(&self, channel: u8, map: i32, except: u64, record: &[u8]) -> usize {
-        self.deliver(channel, Some(map), Some(except), record)
+        let Ok(channels) = self.inner.lock() else {
+            return 0;
+        };
+        let Some(members) = channels.get(&channel) else {
+            return 0;
+        };
+        let mut sent = 0;
+        for member in members.iter().filter(|member| member.entry.map == map) {
+            if member.outbox.send(record.to_vec()) {
+                sent += 1;
+            }
+        }
+        sent
     }
 
     /// Deliver a line built for each client to every client on every Channel, and answer how
@@ -297,30 +270,6 @@ impl ChannelClients {
                 if member.outbox.send(record) {
                     sent += 1;
                 }
-            }
-        }
-        sent
-    }
-
-    fn deliver(&self, channel: u8, map: Option<i32>, except: Option<u64>, record: &[u8]) -> usize {
-        let Ok(channels) = self.inner.lock() else {
-            return 0;
-        };
-        let Some(members) = channels.get(&channel) else {
-            return 0;
-        };
-        let mut sent = 0;
-        for member in members {
-            if let Some(map) = map {
-                if member.entry.map != map {
-                    continue;
-                }
-            }
-            if except == Some(member.id) {
-                continue;
-            }
-            if member.outbox.send(record.to_vec()) {
-                sent += 1;
             }
         }
         sent
@@ -407,7 +356,7 @@ impl Lease {
         }
     }
 
-    /// The lease's own identifier, which `broadcast_excluding` takes as `except`.
+    /// The lease's own identifier, which [`ChannelClients::order`] takes to name its client.
     #[must_use]
     pub const fn id(&self) -> u64 {
         self.id
@@ -434,160 +383,6 @@ impl Lease {
 impl Drop for Lease {
     fn drop(&mut self) {
         self.registry.leave(self.channel, self.id);
-    }
-}
-
-/// One tracked actor's position, which is what a sync-position claim is checked against.
-///
-/// The Rewrite has no world, so the client set is the world stand-in: a character's
-/// position is held here rather than in a sector, and `input_main.cpp`'s victim lookup
-/// (`FindCharacter`) becomes a lookup in this table. The table is keyed by lease, because
-/// the lease is what a descriptor owns for as long as it is in the game phase, and it is
-/// released on drop like everything else on a descriptor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Tracked {
-    /// The character's VID, which is what a claim names.
-    pub vid: u32,
-    /// `CHARTYPE_*`, which decides whether the legacy switch skips the claim.
-    pub kind: SyncPositionVictimKind,
-    /// The authoritative x.
-    pub x: i32,
-    /// The authoritative y.
-    pub y: i32,
-    /// `m_dwLastSync`, which the 100 ms interval check reads.
-    pub last_sync: Option<std::time::Duration>,
-    /// `m_pkChrSyncOwner`, the character allowed to move this one, and `m_fSyncTime`, the
-    /// stamp that lets a different character take the ownership over once it is old
-    /// enough. `ENABLE_FLY_FIX` selects the 100-unit form of `IsSyncOwner`.
-    pub sync_owner: Option<(u32, std::time::Duration)>,
-}
-
-/// Every position in the process, grouped by Channel and map so a claim can only name a
-/// character on the claimer's own map.
-///
-/// `LEGACY` finds a victim through the process character map, which holds every Channel's
-/// characters, so the Rewrite keeps one table for the whole process and filters by Channel
-/// and map when it answers, exactly as the legacy lookup does.
-#[derive(Debug, Default)]
-pub struct PositionTable {
-    entries: std::sync::Mutex<std::collections::HashMap<u64, Tracked>>,
-}
-
-impl PositionTable {
-    /// An empty table.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Start tracking a character, replacing any earlier entry for the same lease.
-    pub fn track(&self, id: u64, kind: SyncPositionVictimKind, vid: u32, x: i32, y: i32) {
-        self.lock().insert(
-            id,
-            Tracked {
-                vid,
-                kind,
-                x,
-                y,
-                last_sync: None,
-                // `CHARACTER::CHARACTER` seeds `m_fSyncTime` with `get_float_time() - 3`,
-                // so a character that has never been claimed is already claimable.
-                sync_owner: None,
-            },
-        );
-    }
-
-    /// One tracked character.
-    #[must_use]
-    pub fn get(&self, id: u64) -> Option<Tracked> {
-        self.lock().get(&id).copied()
-    }
-
-    /// The tracked character on one map of one Channel with a given VID, if any.
-    ///
-    /// The legacy lookup is by VID alone and then checks the map, so a VID is unique in the
-    /// process and this returns the first match. A duplicate is a Defect of the Rewrite's
-    /// own making, so the first match is the deterministic answer.
-    #[must_use]
-    pub fn find_on_map(
-        &self,
-        registry: &ChannelClients,
-        channel: u8,
-        map: i32,
-        vid: u32,
-    ) -> Option<(u64, Tracked)> {
-        let entries = self.lock();
-        for member in registry.ids_on_map(channel, map) {
-            if let Some(tracked) = entries.get(&member) {
-                if tracked.vid == vid {
-                    return Some((member, *tracked));
-                }
-            }
-        }
-        None
-    }
-
-    /// Move a character and stamp its last-sync time.
-    pub fn sync(&self, id: u64, x: i32, y: i32, now: std::time::Duration) {
-        if let Some(entry) = self.lock().get_mut(&id) {
-            entry.x = x;
-            entry.y = y;
-            entry.last_sync = Some(now);
-        }
-    }
-
-    /// Move a character without stamping its last-sync time, which `CHARACTER::Show` does: it
-    /// sets the position (`SetXYZ`, `G/char.cpp:1890`) and leaves `m_fSyncTime` alone.
-    pub fn place(&self, id: u64, x: i32, y: i32) {
-        if let Some(entry) = self.lock().get_mut(&id) {
-            entry.x = x;
-            entry.y = y;
-        }
-    }
-
-    /// The last-sync stamp alone, which `SetSyncOwner` resets.
-    #[must_use]
-    pub fn last_sync(&self, id: u64) -> Option<std::time::Duration> {
-        self.lock().get(&id).and_then(|entry| entry.last_sync)
-    }
-
-    /// Clear a character's last-sync stamp, which `SetSyncOwner` does.
-    pub fn forget_sync(&self, id: u64) {
-        if let Some(entry) = self.lock().get_mut(&id) {
-            entry.last_sync = None;
-        }
-    }
-
-    /// The `(owner, claim stamp)` pair, which `IsSyncOwner` reads.
-    #[must_use]
-    pub fn sync_owner(&self, id: u64) -> Option<(u32, std::time::Duration)> {
-        self.lock().get(&id).and_then(|entry| entry.sync_owner)
-    }
-
-    /// Set the sync owner and the claim stamp, which a successful `SetSyncOwner` does.
-    pub fn set_sync_owner(&self, id: u64, owner: u32, now: std::time::Duration) {
-        if let Some(entry) = self.lock().get_mut(&id) {
-            entry.sync_owner = Some((owner, now));
-        }
-    }
-
-    /// Drop a character's sync owner, which `SetSyncOwner(NULL)` does.
-    pub fn release_sync_owner(&self, id: u64) {
-        if let Some(entry) = self.lock().get_mut(&id) {
-            entry.sync_owner = None;
-        }
-    }
-
-    /// Forget a character. The lease drop calls this so a disconnected client cannot be
-    /// claimed as a sync victim.
-    pub fn forget(&self, id: u64) {
-        self.lock().remove(&id);
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<u64, Tracked>> {
-        self.entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -643,17 +438,6 @@ mod tests {
         assert_eq!(registry.broadcast_on_map(1, 100, b"line"), 1);
         assert_eq!(drained(&mut one), vec!["line".to_string()]);
         assert!(drained(&mut two).is_empty());
-    }
-
-    #[test]
-    fn excluding_a_lease_leaves_the_mover_without_an_echo() {
-        let registry = Arc::new(ChannelClients::new());
-        let mut mover = registry.join(entry(1, 100, "Mover"));
-        let mut watcher = registry.join(entry(1, 100, "Watcher"));
-
-        assert_eq!(registry.broadcast_excluding(1, 100, mover.id(), b"move"), 1,);
-        assert!(drained(&mut mover).is_empty(), "a move never echoes");
-        assert_eq!(drained(&mut watcher), vec!["move".to_string()]);
     }
 
     #[test]
@@ -752,13 +536,13 @@ mod tests {
         let departed_id = departed.id();
         drop(departed);
         drop(deaf.take_orders());
-        let goto = ClientOrder::Goto {
+        let warp = ClientOrder::Warp {
             x: 162_500,
             y: 676_100,
         };
 
-        assert!(!registry.order(1, departed_id, goto));
-        assert!(!registry.order(1, deaf.id(), goto));
+        assert!(!registry.order(1, departed_id, warp));
+        assert!(!registry.order(1, deaf.id(), warp));
     }
 
     #[test]
@@ -800,94 +584,5 @@ mod tests {
         let registry = Arc::new(ChannelClients::new());
         let mut lease = registry.join(entry(1, 100, "A"));
         assert!(lease.try_next().is_none());
-    }
-
-    #[test]
-    fn forgetting_a_character_removes_its_position_and_its_ownership() {
-        let registry = Arc::new(ChannelClients::new());
-        let lease = registry.join(entry(1, 0, "Victim"));
-        let table = PositionTable::new();
-        table.track(
-            lease.id(),
-            SyncPositionVictimKind::Player,
-            3_000_007,
-            10,
-            20,
-        );
-        table.set_sync_owner(lease.id(), 3_000_009, std::time::Duration::from_millis(40));
-        table.sync(lease.id(), 11, 21, std::time::Duration::from_millis(500));
-        let found = table
-            .find_on_map(&registry, 1, 0, 3_000_007)
-            .expect("tracked");
-        assert_eq!(found.0, lease.id());
-        assert_eq!(found.1.vid, 3_000_007);
-        assert_eq!(
-            table.sync_owner(lease.id()),
-            Some((3_000_009, std::time::Duration::from_millis(40)))
-        );
-        assert_eq!(
-            table.last_sync(lease.id()),
-            Some(std::time::Duration::from_millis(500))
-        );
-
-        // What `handle_connection` does as the descriptor ends: a disconnect takes the
-        // character out of the world, so `FindCharacter` must find nobody afterwards.
-        table.forget(lease.id());
-
-        assert_eq!(table.find_on_map(&registry, 1, 0, 3_000_007), None);
-        assert_eq!(table.sync_owner(lease.id()), None);
-        assert_eq!(table.last_sync(lease.id()), None);
-    }
-
-    #[test]
-    fn a_forgotten_character_is_not_reclaimable() {
-        let registry = Arc::new(ChannelClients::new());
-        let lease = registry.join(entry(1, 0, "Victim"));
-        let table = PositionTable::new();
-        table.track(
-            lease.id(),
-            SyncPositionVictimKind::Player,
-            3_000_007,
-            10,
-            20,
-        );
-        table.forget(lease.id());
-        assert_eq!(table.find_on_map(&registry, 1, 0, 3_000_007), None);
-
-        // A late answer for a closed descriptor must not put a phantom character back in
-        // the world: `set_sync_owner` and `sync` write through `get_mut`, so a row that is
-        // gone stays gone.
-        table.set_sync_owner(lease.id(), 3_000_009, std::time::Duration::from_millis(40));
-        table.sync(lease.id(), 11, 21, std::time::Duration::from_millis(500));
-        assert_eq!(table.find_on_map(&registry, 1, 0, 3_000_007), None);
-        assert_eq!(table.sync_owner(lease.id()), None);
-    }
-
-    #[test]
-    fn placing_a_character_moves_it_and_keeps_its_sync_stamp_and_owner() {
-        let registry = Arc::new(ChannelClients::new());
-        let lease = registry.join(entry(1, 0, "Jumper"));
-        let table = PositionTable::new();
-        table.track(lease.id(), SyncPositionVictimKind::Player, 7, 10, 20);
-        table.sync(lease.id(), 11, 21, std::time::Duration::from_millis(500));
-        table.set_sync_owner(lease.id(), 9, std::time::Duration::from_millis(40));
-        table.place(lease.id(), 35_500, 38_100);
-        let placed = table.get(lease.id()).expect("still tracked");
-        assert_eq!((placed.x, placed.y), (35_500, 38_100));
-        assert_eq!(
-            placed.last_sync,
-            Some(std::time::Duration::from_millis(500))
-        );
-        assert_eq!(
-            placed.sync_owner,
-            Some((9, std::time::Duration::from_millis(40)))
-        );
-        table.forget(lease.id());
-        table.place(lease.id(), 1, 2);
-        assert_eq!(
-            table.get(lease.id()),
-            None,
-            "a place never brings a row back"
-        );
     }
 }

@@ -25953,3 +25953,613 @@ After the run, no `prodomo_%` database remains and no `*.core` file is outside `
 workspace has 245 Rust files and 181,295 lines, outside `server/` and `.scratch/`. No crate was
 fetched, and `Cargo.lock` is unchanged. `psql` is not installed, so the store was read through
 `podman exec` into the database's container.
+
+## 229b. The view: `CEntity`'s view, the sectree neighbours, `Goto`, `Move`, `Sync`, `StateMove` and `PacketAround`
+
+229a gave every hosted map its cells. 229b gives each player what legacy's view shows it, and
+moves the bodies into the world so the view can be computed where legacy computes it.
+
+In legacy each map is a `SECTREE_MAP`, a grid of 6400-unit sectrees, and each sectree keeps the
+entities standing in it (`m_set_entity`). Each `CEntity` keeps a view, `m_map_view`: the
+entities whose insert it has been sent, each with the age of the last recompute that found it
+(`G/entity.h:62`). Four verbs keep it (`G/entity_view.cpp:8-83`): `ViewInsert` inserts an entity
+both ways (or only refreshes its age when it is already seen), `ViewRemove` removes it both
+ways, `ViewCleanup` removes the entity from every viewer, and `ViewReencode` sends every insert
+again. `UpdateSectree` (`:122-236`) recomputes a view: it raises the entity's age, inserts every
+entity within `VIEW_RANGE + VIEW_BONUS_RANGE` (5000 + 500 by default; `DISTANCE_APPROX`, strictly
+greater is out) in the nine sectrees around it, walked in `SECTREE_MAP::Build`'s neighbour order
+(`G/sectree_manager.cpp:79-120`), and then removes every entry older than the new age. A
+recompute runs when a character is shown (`Show`, `G/char.cpp:1847-1917`: entering the game, a
+goto NPC, a refused move), when an NPC spawns, and every sixteenth Pulse while a player moves
+(`StateMove`, `G/char_state.cpp:782-810`). A step (`Sync`, `G/char.cpp:3384-3458`) changes the
+sectree but never the view. `PacketAround` (`G/entity.cpp:88-105`) sends one record to every
+viewer with a client and then to the entity itself, and `EncodeInsertPacket`
+(`G/char.cpp:1060-1254`) writes what a viewer is sent for a player or an NPC: the
+`GC_CHARACTER_ADD`, the `GC_CHAR_ADDITIONAL_INFO`, and for a mover the rest of its walk as a
+`GC_MOVE` and its `GC_WALK_MODE`.
+
+Until this section the Rewrite had none of it: each connection kept its character's position in
+a process-wide `PositionTable`, a move was relayed to the whole map, and a client entering a map
+was sent every NPC on it (ledger 223's Divergence). Monsters need the view before anything else:
+a monster's state machine starts when a player's view inserts it (`G/entity_view.cpp:110-117`),
+and every hit, death and drop is sent to the view. So the view comes before the spawns.
+
+### 229b.1 What landed
+
+- **`prodomo::game_state::view`** (new) is the view model. `MapIndex` holds one map of one
+  Channel: its `SectreeGrid` from 229a, the entities each sectree holds, each entity's `Spot`
+  (its sectree, x, y and z) and its view (`m_map_view` and `m_iViewAge`). An entity is an
+  `EntityKey`, `Character(vid)` or `Npc(vid)`. The four verbs, `UpdateSectree` with its radius in
+  64 bits, the around walk in `BUILD_ORDER`, and `Show`, `Sync`'s sectree change and `Destroy`
+  (`show`, `move_body`, `remove`) are ported as legacy runs them, and each returns what it did as
+  an `Effect` list (`Insert { of, to }`, `Remove { of, to }`) in legacy's order. Where legacy
+  walks a set hashed by pointer, the Rewrite walks players by VID and then NPCs by VID (V1).
+- **`prodomo::game_state::view_encode`** (new) turns the effects into records when they are
+  delivered, so an insert reads the live motion. `encode_pc_insert` is `EncodeInsertPacket` for
+  a player: the ADD at the live point (the destination when no time is left), the INFO, a
+  `GC_MOVE` with the walk's remaining duration and `GC_WALK_MODE` while time is left, and the
+  viewer's own walk mode back to the mover's client when the viewer walks (`:1225-1236`). An NPC
+  is sent the pair 223 already built; an NPC has no client, so nothing is sent to it.
+  `packet_around` sends one copy to each viewer and then one to the sender, and `relay` takes a
+  record with its `RelayScope`: the map, the map without the sender, the view and the sender, or
+  the view without the sender.
+- **`prodomo::game_state::motion`** (new) moves the bodies in the world. Each player has a `Body`
+  on the game thread (its Channel, map, card, rotation, motion and last attack). `run_move` is
+  `CInputMain::Move` after its judgement (which `prodomo::movement::judge_move` already ported in
+  ledger 188): `FUNC_MOVE` calls `goto`, which sets a destination and the duration
+  `CalculateMoveDuration` gives it; every other function `sync_body`s and `stop`s at once; a move
+  refused for its distance `show`s the body where it stands and stops it; and the accepted move
+  is relayed to the mover's view without the mover, with the `Goto`'s duration for `FUNC_MOVE`
+  and 0 otherwise (`G/input_main.cpp:1879-1891`). `step_motion` is `StateMove`: each Pulse every
+  moving body is put at the point the elapsed share of its duration reaches, in `f32` as legacy
+  computes it; on a Pulse whose low four bits are 0 the body's view is recomputed and its own
+  trade measured; and at the end of the walk it arrives and stops. The motion speed is legacy's
+  fall-back, 300 units a second (V2). An attack or combo step stamps the attack time that blocks
+  an equip for 1500 ms (`OnMove(true)`, `G/char.cpp:6148-6179`, `G/char_item.cpp:8416-8422`);
+  until now the connection kept it.
+- **`prodomo::game_state::sync`** (new) runs `CG_SYNC_POSITION` in the world. The policy is
+  ledger 188's `sync_position::process`; its ports now read the world's bodies and NPCs on the
+  claimer's Channel and map, the ownership record goes to the victim's view and the victim, and
+  the accepted batch goes to the claimer's view without the claimer.
+- **The world's commands.** `GameCommand` gains `Move`, `SyncPosition` and `Relay`.
+  `EnterWorld` carries where the body stands and its `PcCard` (the name, race, empire, levels
+  and language an insert needs), and answers with the `Shown` records: the entrant's own pair and
+  every insert its view starts with, which lead the enter-game burst. The queue keeps 1024
+  commands and drains up to 512 a Pulse (it kept 256 and drained 64), because every move, sync,
+  pose and relayed record now passes it (owner question 11). The `Loaded` an entry carries is
+  boxed, so the futures that send a command stay small.
+- **The Pulse.** `process_pulse` runs the ground items' expiry, the recovery and the warp NPCs,
+  and then `step_motion`, as `CHARACTER_MANAGER::Update` comes after the heartbeat's events
+  (`G/main.cpp:777-782`). The warp NPCs of each map run in the order they were stood up, judge
+  the players around them through the view at their live spots, and skip a player an earlier NPC
+  of the same Pulse has warped (V1). A goto NPC's `Show` and `Stop` now run in the world.
+- **Leaving.** `leave_world` ends the trade first, as legacy's `Destroy` does, and last takes
+  the body out of its map, which sends its removal to every player that saw it.
+- **The relays.** A move, a pose, a sync batch and its ownership, an equip's look, effect and
+  broadcast points go to the view; a talking line still goes to the whole map but through the
+  world, so it keeps its order with the sender's moves. A ground item's add and removal still go
+  to the map (V8).
+- **Deleted.** `PositionTable` and `Tracked` (which also fixes F2, 229b.6),
+  `ChannelClients::broadcast_excluding` and `ids_on_map`, `warp::same_sectree`, `show_records`
+  and the enter-game burst's own NPC inserts.
+- **F3.** A `CG_ENTER_GAME` in the game phase is consumed with nothing sent
+  (`G/input_main.cpp:4126-4127`); it had sent the enter-game burst again.
+- **Smaller pieces.** `common::cfloat::u32_to_f32` converts a millisecond count to `float`
+  rounding to the nearest, ties to even, as the C conversion does. `LiveClock` gains `elapsed`
+  for the sync owner's span. The binary's `serve` hands its world building and its clean-up after
+  an error to `build_world` and `clean_up_after_error`. The descriptor follows a world order
+  through `take_order`, which first writes what the world queued before it (229b.7).
+- **F25.** `world::character::dice::number` takes the draw's modulus and the sum in `u32`, as
+  legacy's `DWORD` arithmetic does (`libthecore/utils.cpp:346-375`). No caller in the owner's
+  data passes a width past `INT_MAX`; a quest's `number` can. F21 needed no change: the regen
+  spawn draws a direction only when its row's is 0.
+
+### 229b.2 What the client sees
+
+**Entering.** A player entering the game is sent its own pair, then the pair of every player and
+NPC within the radius in the nine sectrees around it, in the neighbour order and by key within a
+sectree, then the rest of the burst. Each player in view of the entrant is sent the entrant's
+pair. At the default range of 5000, Alpha entering at (470100, 950000) on map 1 is sent 15 NPC
+pairs, where until now it was sent every NPC of the map in VID order. A player saved at stamina
+0, which every fixture row is, is walking for the view, so its own walk mode follows its own
+pair and rides with each insert both ways (V3).
+
+**Walking.** A `FUNC_MOVE` is relayed to the mover's view with the walk's duration, which had
+been 0 since ledger 188 (F1). Every sixteenth Pulse of the walk the mover's view is recomputed:
+a player or NPC that comes into reach is inserted both ways, the mover's insert carrying its live
+point, a `GC_MOVE` with the rest of its walk and its walk mode; one that leaves is removed both
+ways. A step (attack, combo, skill) moves at once and recomputes nothing.
+
+**Leaving.** Only the players that saw a leaving player are sent its removal.
+
+**A refused move.** A move past the distance limit is answered with `ViewReencode`: the mover is
+sent its own removal and pair and every pair in its view, and each viewer the mover's removal and
+pair.
+
+**Chat.** A talking line still reaches the whole map, including players out of view, as
+`FEmpireChatPacket` does.
+
+### 229b.3 Divergences and Defects
+
+Divergences (STATUS rows):
+
+- **V1, key order.** The sectrees around a point are walked in legacy's neighbour order; the
+  entities of one sectree, the entries of a view and the moving players of each Pulse in key
+  order. A warp NPC judges the players around it in that order, and a player one NPC has warped
+  is judged by no other NPC on that Pulse (owner question 12).
+- **V2, one speed** (transitional, 229e). Every player moves at 300 units a second, legacy's
+  speed without a motion file (owner question 14).
+- **V3, stamina.** A running player's stamina is not consumed and a walking player's is not
+  restored; nobody is set walking or reset; stamina at or below 0 means walking for
+  `GC_WALK_MODE`.
+- **V4, a treeless entrant** (provisional, owner question 13). A player entering at a point no
+  sectree holds is shown to itself and placed on its first move into a sectree; legacy's `Show`
+  returns before placing it and `Sync` refuses every move.
+- **V6.** The view holds no observer or object, and an insert sends no guild name, shop sign or
+  ownership.
+- **V7.** The loading `GC_ENTITY` list is empty (ledger 187, recorded now).
+- **V8, ground items** (transitional, 229c). A ground item's add and removal reach the map, and
+  an entering player gets the map's items after `GC_PHASE`.
+- **V9, revive-invisible** (transitional, 229d). Entering sends no `GC_CHARACTER_UPDATE` for the
+  affect, and an insert's affect flags are 0.
+- **V10, the wait for the world** (owner question 15). A descriptor reads a client's next frame
+  only once the world has run its move, pose or talking line, at the world's next Pulse, so
+  every record keeps the order of the frames that caused it. A read holding N such frames is
+  applied over up to N Pulses; legacy runs a whole read in one pass (`G/desc.cpp:252-349`).
+- **V11, a warp's removal.** A warped player's viewers are sent its removal when its connection
+  leaves the world, a few milliseconds after the warp is decided; legacy's `WarpSet` removes it
+  at once.
+
+Ledger 223's row "A client entering a map is sent every NPC, warp and goto on the map, in VID
+order" and ledger 228's row on the warp NPC's distance and the goto's own-client-only insert are
+retired. Ledger 228's row on the order the warp NPCs judge players in becomes V1. Ledger 223's
+row "An NPC never moves and has no state machine" stays, and says that the view calls the hook
+where legacy starts the state machine. Ledger 225's row on the trade distance is deleted, because
+it no longer differs from legacy: a moving trader's own trade is measured every 16 Pulses against
+its partner's live position, as `StateMove` measures it (`G/char_state.cpp:795-809`; the row
+cited `G/char.cpp:6962-6973`), and a trade survives the other side walking away while this one
+stands.
+
+Defects not reproduced (STATUS, "Legacy defects not to reproduce"):
+
+- **D1, a zero-duration walk.** `StateMove` on a walk of duration 0 in its start millisecond
+  divides 0 by 0, and `(int)NaN` is `INT_MIN`, so `Sync` logs a hack and keeps the spot
+  (`G/char_state.cpp:784-793`). The Rewrite skips the Pulse's move and arrives on the next.
+- **D2, an arrival not yet applied.** `EncodeInsertPacket` sends a `GC_MOVE` whenever `iDur` is
+  not 0, so a walk whose time ran out before the Pulse applied its arrival is sent with a
+  duration near 2^32 (`G/char.cpp:1097-1108`, `:1211-1223`). The Rewrite sends the `GC_MOVE` and
+  its walk mode only when `iDur > 0`, and the destination in the ADD otherwise, as legacy does
+  for `iDur <= 0`.
+- **D4, the radius.** `int dwViewRange(VIEW_RANGE + VIEW_BONUS_RANGE)` overflows for a
+  `VIEW_RANGE` near `INT_MAX` (`G/entity_view.cpp:85-95`). The Rewrite adds in 64 bits.
+
+The 229a Defects on a treeless entrant and on the 16-bit sectree id gain a sentence each: the
+view treats such an entrant as V4 says, and the view's grid does not alias.
+
+Kept as legacy: the strict `>` against the radius, the age prune, the recursive insert's order,
+a step that recomputes nothing, the 16-Pulse sample and its mask, the refusal's `Show` at the
+current point, the stale duration a `Goto` to the same destination relays
+(`G/char.cpp:3478-3490`), the 1500 ms attack window, the 300-unit warp NPC reach, and the
+distance check whatever `test_server` says (its guard is commented out,
+`G/input_main.cpp:1784`). The view draws no random number, so the boot spawns' draws are
+unchanged.
+
+### 229b.4 Not ported yet
+
+- Ground items in the view and their `EntityKey` (V8): 229c. The revive-invisible update and
+  flag (V9): 229d. The `.msa` motions (V2): 229e. `sys.world.view` stays `partial` until 229d.
+- The loading `GC_ENTITY` list (V7), observers and objects (V6).
+- Stamina in `StateMove` and `SetNowWalking` (V3).
+- The monsters' state machine: the view calls the hook point where a player's view inserts a
+  non-player that is not a warp or goto (`G/entity_view.cpp:110-117`), and nothing fills it until
+  229f. `SpatialIndex` (X14) stays unused; its fate is decided with the state machine.
+
+### 229b.5 Scenario and Parity inventory
+
+Ten new scenarios, at a view range of 10000 (a radius of 10500) unless noted, with Alpha on
+`GOTO_TARGET` in sectree row 145, idx18 (the 9009) 2280 from Yankee, and Charlie out of every
+view:
+
+- `players_and_npcs_within_view_range_see_each_other_on_entry`: Alpha enters and sees idx18;
+  Yankee, 5092 away, sees idx18 and then Alpha in neighbour order, and Alpha sees Yankee arrive;
+  Charlie, 13228 and 11116 away, sees nobody and nobody sees Charlie.
+- `a_player_in_another_row_of_sectrees_is_not_seen_even_within_range`: Yankee in row 147 is
+  9128 from Alpha, within reach, but row 145 is outside its 3x3, so neither sees the other.
+- `a_lone_player_far_from_everyone_sees_only_itself`.
+- `a_walk_into_view_inserts_both_ways_at_the_sample_and_a_walk_out_removes_both`: Yankee walks
+  from row 147 into row 146; at the first sample there each is shown the other, Alpha seeing
+  Yankee's live point, the rest of its walk and its walk mode; the walk back is relayed whole,
+  and at the first sample in row 147 each is removed from the other.
+- `an_npc_appears_and_disappears_as_a_player_walks`: Alpha walks from row 144 into row 145 and
+  back, and idx18 is inserted and removed at the samples.
+- `a_step_never_recomputes_the_view_and_a_goto_does_at_its_sample`: a combo step into a shared
+  3x3, 7591 away, shows nobody; the next walk does at its first sample.
+- `talking_chat_reaches_the_whole_map_including_players_out_of_view`.
+- `a_leaving_player_is_removed_from_its_viewers_only`.
+- `at_zero_stamina_the_walk_mode_rides_with_each_insert`: the three walk-mode records of
+  `EncodeInsertPacket`, in their places.
+- `a_game_phase_enter_game_is_consumed_silently` (F3).
+
+Existing scenarios changed with the view:
+
+- `entering_a_map_shows_its_npcs_and_a_click_keeps_the_connection` runs at the default range and
+  expects legacy's 15 inserts in walk order. The oracle computes the view from `npc.txt` with
+  100 units of slack for the three NPCs whose entry has a box (`BOXED_NPCS`), which stand up at a
+  random point within 100 of their centre, and checks that the inserts follow the neighbour
+  order and VID order within a sectree.
+- `a_move_reaches_the_map_around_the_mover_and_not_the_mover` is renamed
+  `a_move_reaches_the_view_around_the_mover_and_not_a_character_out_of_view`: both movers are at
+  stamina 12345, Charlie out of view gets nothing, the `FUNC_MOVE` relay carries its duration and
+  the combo's 0, and the refusal's `ViewReencode` is read record by record.
+- `a_pose_reaches_the_map_including_its_sender` is renamed
+  `a_pose_reaches_the_view_including_its_sender`. Charlie, out of view, is sent none of the
+  poses, and one write of a sit and `/dance1` reads the pose before the refusal `[LS;920]`
+  (`G/cmd.cpp:679`).
+- `a_sync_batch_is_relayed_around_the_claimer_only` adds Charlie, who hears no claim and no
+  batch.
+- The goto scenario expects the own client's `Show` at the target with `z = INT_MAX`, its walk
+  mode, and idx18's pair.
+- The trade, talking and self-line scenarios read the other player's pair first. The talking
+  scenario's third listener is a real client on map 3, where the old `UPDATE` put Zulu on map 1
+  and never logged it in. In one write, Yankee's talking line and a party line with no party
+  read the line before the refusal `[LS;655]`, and the neighbour reads only the line
+  (`G/input_main.cpp:926-966`). The quest NPC scenario stands Alpha by the OX manager, which is
+  now in view; the map-72 helper places its character where the view reaches its NPC.
+- `a_claim_on_a_character_who_has_left_finds_nobody` waits for the leave's log line, because a
+  leave now passes the world.
+- `a_dropped_stack_lies_on_the_map_until_someone_picks_it_up` seats Charlie out of Alpha's view.
+  Charlie is shown the lying item on entering and hears the second drop's add and both pick-ups'
+  dels, the map scope of V8 until 229c. One write of a drop and a shout reads the fall before the
+  shout, for Alpha, Zulu and Charlie.
+
+The harness reads whether a character walks from its loading burst's `POINT_STAMINA` slot and
+expects its walk mode after its own pair exactly when it walks, so a regression either way fails
+every scenario. `enter_world_seeing` and `enter_game_shown` read the inserts an entry leads with;
+`sees_arrive` and `sees_leave` read one view change; `assert_alphas_main_character`,
+`first_npcs_records` and `assert_alphas_npcs_in_view` keep two scenarios under clippy's line
+limit, as `seat_alpha_and_zulu` and `enter_game_unread` keep the drop scenario, sharing its setup
+with the destroy scenario.
+
+Parity rows:
+
+- `gc.character_del` is `ported` with `a_leaving_player_is_removed_from_its_viewers_only`.
+- `gc.walk_mode` goes from `codec` to `partial`: it rides with the inserts, never on a stamina
+  change (V3).
+- Notes change on `sys.login.enter` (the burst carries the `Show` inserts; its "left" list no
+  longer names `SendNPCPosition`, sent since ledger 223), `sys.world.map`, `sys.world.view`,
+  `sys.world.move`, `sys.world.regen`, `sys.char.chat`, `sys.mob.ai`, `sys.skill.affect`,
+  `gc.character_add`, `gc.character_move`, `gc.sync_position`, `gc.character_update`, the two
+  ground records, `gc.character_position`, `gc.char_additional_info`, `gc.entity`, `cg.game.move`,
+  `cg.game.character_position` and `cg.game.sync_position`.
+
+The counts went from 119 to 120 `ported` and from 57 to 56 `codec`; `partial` stays 125,
+`missing` 1338 and `unused` 6 (1645 rows).
+
+### 229b.6 Corrections, findings and controls
+
+Findings in the Rewrite, each fixed here:
+
+- **F1.** The `GC_MOVE` relay's duration had been 0 since ledger 188: the connection's
+  `move_duration` was set to 0 at entry and never written (`prodomo/src/main.rs:414`, `:1664`,
+  `:3043` at 229a's commit). The relay now carries the `Goto`'s duration.
+- **F2.** A step stamped the sync time (`client_registry.rs:531-535`, called from `main.rs:1717`
+  at 229a's commit); legacy stamps it only in `SyncPosition` (`G/input_main.cpp:2150`). It went
+  with `PositionTable`.
+- **F3.** A game-phase `CG_ENTER_GAME` sent the burst again (229b.1).
+- **F25** (229b.1).
+
+Corrections to the plan and the earlier record:
+
+- The plan's draft placed `step_motion` first in the Pulse; it runs last, after the warp NPCs.
+  It had called the queue's latency a Divergence; it is not one, because legacy also handles a
+  client's input once per Pulse. It had put `ViewCleanup` first on leaving; the trade ends first.
+- The plan expected 27 NPC inserts on map 1 at a range of 10000 for the NPC scenario; it runs at
+  the default 5000, which gives 15.
+- The kick-hack cite is `G/char.cpp:3391-3410`, not `:3416-3430`. A `Body`'s rotation starts at
+  `IDLE_ANGLE_BITS`, which is 0.
+- STATUS's hook row cited `G/entity_view.cpp:113-115`; it is `:110-117`. The trade row cited
+  `G/char.cpp:6962-6973`; `StateMove`'s check is `G/char_state.cpp:795-809`.
+- Stale docs fixed: the angle and duration of `loading_phase`'s insert, `common::config`'s claim
+  that no field is read by gameplay (`view_range` now is), and `client_registry`'s module doc,
+  which described the move broadcast it no longer makes.
+
+A kept deviation from the plan: a warp NPC still orders the player's descriptor through
+`ChannelClients::members_on_map` (`ClientOrder::Warp`), because the Warp's save and reconnect
+belong to the connection; the world only decides it.
+
+Controls for the negative claims, each run on the final tree (searches over the workspace's
+`*.rs` outside `server/`, with `bash -c 'grep ... --include="*.rs"'`):
+
+| claim | search | result | positive control | nonsense control |
+|---|---|---|---|---|
+| `PositionTable` and `Tracked` are gone | `PositionTable\|\bTracked\b` | 0 | `struct MapIndex`: 1; `pub struct PositionTable` at 229a's commit: 1 | `zzqx_ledger_nonsense_229b1`: 0 |
+| F1: `move_duration` was only ever 0 | `git grep move_duration` at 229a's commit | 6: the field, the read, the `0`, the context field, its read and a test's 1234 | the same search finds the read at `main.rs:1664` | 0 |
+| No `GC_WALK_MODE` was sent before | `GcWalkMode\|WALK_MODE` in `prodomo/src` at 229a's commit | 0 (3 now) | `pub struct GcCharacterMove` in `protocol` at that commit: 1 | 0 |
+| `view_range` had no gameplay consumer | `view_range` in `prodomo`, `common`, `world` at 229a's commit | the config's field, its default and a config test | now `with_view_range` and its callers | 0 |
+| `broadcast_around_victim` had no call site | that name at 229a's commit | the trait, a test double and `main.rs`'s empty implementation | now called in `game_state/sync.rs:112` | 0 |
+| `CannotMove` cannot come from `run_move` | `can_move:` in `prodomo/src` | the field, a test's `true` and `run_move`'s `true` | `CannotMove`: `judge_move` returns it at `movement.rs:221` | 0 |
+| The view draws no number | `dice\|Dice\|number(\|thecore_random\|rand` in `view.rs`, `view_encode.rs`, `motion.rs`, `sync.rs` | 1, a test's name (`views_stay_symmetric_over_a_random_walk`) | `world/src/npc.rs`: 47 | `zzqx_ledger_nonsense_229b2`: 0 |
+| The deleted registry calls have no user | `broadcast_excluding\|ids_on_map` in `prodomo` | 0 | 7 at 229a's commit | 0 |
+
+### 229b.7 Review and mutation sweep
+
+A review workflow read the change against legacy in four parts (the view, the motion and sync,
+the descriptor's integration, the documents), and one skeptic per part tried to refute each
+finding (8 agents). All 12 findings stood, one in part, and each is fixed here:
+
+- **The PK mode** (medium). Every insert's `GC_CHAR_ADDITIONAL_INFO` and every look's
+  `GC_CHARACTER_UPDATE` sent `bPKMode` 0. Legacy's `SetPlayerProto` puts a player below
+  `PK_PROTECT_LEVEL` in `PK_MODE_PROTECT` (3), through `SetLevel` and again after it
+  (`G/char.cpp:2211-2222`, `:2378-2379`), and `EncodeInsertPacket` and `UpdatePacket` send the
+  mode (`:1128`, `:1315`). Until 229b only the entrant's own pair carried the byte; the view sends
+  it to every viewer. `loading_phase::pk_mode` derives the mode from the level, the `PcCard`
+  carries it, and an item step's look reads the body's mode on the game thread.
+  `[game] pk_protect_level`, unread until now, becomes a `u8` with the europe locale's 15
+  (`G/locale_service.cpp:1158`; legacy's own default is 30, `:24`). The review also found that
+  legacy compiles in `ENABLE_GM_FLAG_IF_TEST_SERVER` (`G/char.cpp:2231`): under `test_server`,
+  which legacy defaults on, every character is `GM_IMPLEMENTOR` and so gets `AFF_YMIR` and the
+  protect mode at load (`:2362-2375`). The Rewrite keeps every character at `GM_PLAYER`, as it
+  does for every other GM rule until the GM audit; owner question 5 now names this rule.
+- **The overflow in `move_distance`** (medium). `(from_x - to_x) / 100` overflowed for a client
+  x or y far from the character, and a debug build, which the README runs, panicked. Since 229b
+  `judge_move` runs on the game thread, so the panic stopped the whole game loop, not one
+  connection. Legacy subtracts on a 32-bit `long` and wraps (`G/input_main.cpp:1786`). The
+  subtraction now wraps (`a_far_axis_wraps_as_a_32_bit_long`).
+- **A far owner's claim** (medium). An owner that claims its victim again from more than 250
+  units away was answered `Accepted`: the claim was stamped again and `GC_OWNERSHIP` went to the
+  victim's view. Legacy returns true before both (`G/char.cpp:5510-5518`, then `:5539-5555`). The
+  new `SyncOwnershipOutcome::Kept` holds the claim with no stamp and no record
+  (`the_current_owner_keeps_a_claim_past_the_approximate_distance`,
+  `an_owner_past_the_claim_range_keeps_the_claim_without_a_record`).
+- **The skill motion check** (medium, in part). `CInputMain::Move` refuses a skill motion the
+  character's job and skill group cannot use with a hack log and a delayed disconnect
+  (`IsUsableSkillMotion`, `G/input_main.cpp:1841-1866`). It waits for the skills, and STATUS's
+  movement gap list now names it. The finding's other half, `CheckComboHack`, is refuted: it
+  returns at once unless `enable_hack_check` is set (`G/input_main.cpp:1562`), which defaults to
+  false (`G/config.cpp:154`) and is in none of the owner's `CONFIG` files.
+- **A sync at the victim's own point** (low). The sync port returned before turning the victim,
+  because `sync_body` carried `CHARACTER::Move`'s same-point return. Legacy's `Sync` has none:
+  the body turns to 90 degrees (`GetDegreeFromPositionXY` of a zero vector) and z becomes 0
+  (`G/char.cpp:3384-3458`). `sync_body` is now `Sync` and `move_to` is `Move` with its same-point
+  return (`:3610-3622`); a step and `StateMove` call `move_to`, the sync port `sync_body`
+  (`a_sync_sets_z_to_zero_and_turns_toward_the_target` pins both).
+- **A refused move's records and the next frame** (low). The re-encode a refused move sends its
+  own client went through the outbox, while the descriptor answered the next frame of the same
+  read directly, so an item step's answer could reach the client first. Legacy writes the
+  re-encode before it reads the next frame (`G/input_main.cpp:1800-1802`). Each `Move` and
+  `Relay` command now carries a `Settled` sender the world drops once it has run the command, so
+  every record the command sent is queued; the descriptor waits for it, writes its outbox, and
+  only then analyzes the next frame, and an order from the world is followed only after the
+  records queued before it. The same wait keeps a shout behind the same sender's earlier move,
+  which the plan had recorded as V10; V10 now records the wait itself (owner question 15). The
+  move scenario gains a move and a shout in one write from each of two players: Yankee's own
+  re-encode reaches it before the refusal of its shout, and Alpha's viewers read Alpha's
+  re-encode before its shout. With the wait removed, each half fails on its own.
+- **`judge_sync_ownership`'s doc** (low). It said `AIFLAG_NOMOVE` and `battle_is_attackable`
+  cannot refuse a pair of players, which ledger 188.4 also says ("two player characters are
+  always attackable"). Both are wrong: `battle_is_attackable` refuses a dead victim, either side on
+  an `ATTR_BANPK` cell, a stunned or dead attacker, and what `CPVPManager::CanAttack` refuses, such
+  as a protected player of one's own empire (`G/battle.cpp:99-151`, `G/pvp.cpp:378-432`), and
+  `SetSyncOwner` then sends `DAMAGE_BLOCK` and refuses (`G/char.cpp:5476-5481`). The doc now says
+  so; the arm stays in STATUS's gap list. This corrects ledger 188.4.
+- **V1's citation** (low). STATUS cited `m_set_pkChrState` (`G/char_manager.cpp:716-725`) as the
+  loop over the moving players. It holds only the state machines of non-players; the players run
+  from `m_map_pkPCChr`, an `unordered_map` keyed by name (`G/char_manager.h:122`, walked at
+  `G/char_manager.cpp:689-708`). The conclusion, an order no client can rely on, stands.
+- **The labels** (low). The code and the inventory cite V1 to V11 and D1, D2 and D4, which only
+  the untracked plan defined. Each 229b row in STATUS now starts with its label.
+- **A test that proved less than its name** (low). `the_snapshot_is_taken_before_any_insert`
+  could not see a missing snapshot, because nothing in the walk changes a sectree's entities yet.
+  It is renamed `the_inserts_follow_the_build_order_of_the_sectrees_around`; the snapshot
+  (`FCollectEntity`, `G/sectree.h:79-90`) becomes testable when the state-machine hook can move an
+  entity (229f).
+- **Two citations** (low). `view_encode.rs` and the walk-mode scenario cited `G/char.cpp:1099-1135`
+  and `:1104-1132` for the `GC_MOVE` and walk mode of `EncodeInsertPacket`; they are sent at
+  `:1211-1223`, after `iDur` at `:1097-1108`.
+- **A stale scenario comment** (low). The sync scenario said the ownership record goes around the
+  map; it goes to the victim's view and the victim, which the same scenario's Charlie proves.
+
+The mutation sweep came after the review. A design workflow and its critic wrote 91 mutants,
+and 21 more were written against the review's fixes, 112 in all. Each one was applied and
+restored in a copy of the tree, so the main tree was never mutated. Each run checked that the
+mutation changed code, not a comment, before the file's test module, and that the file's
+checksum came back afterwards. A mutant ran its own crate's library tests, `prodomo`'s, and,
+with `DATABASE_URL` set, every parity scenario.
+
+No mutant failed to compile.
+
+The first run logged all 112 as killed, which was a flaw in the driver. The copies were made
+without `.scratch/parity`, so `inventory_rows_keep_the_rules` failed on every run, mutated or
+not, and every mutant whose scenarios ran read as killed. The 74 mutants that library tests
+killed were not touched by the flaw. The driver, now `mutate_v2.py`, does four new things:
+
+- it asserts that the inventory is in the copy;
+- it runs every suite once unmutated and stops unless all of it passes;
+- it confirms each scenario that kills a mutant by running that scenario alone;
+- for a `main.rs` mutant, it also runs the binary's own tests.
+
+38 mutants had been killed by scenarios alone. Two of them, which 52 and 12 scenarios killed,
+were clearly real kills. The other 36 were run again with the new driver: 12 were killed and 24
+survived. The 24 are exactly the mutants whose only killer had been the inventory test.
+
+| file | mutants | result |
+|---|---|---|
+| `prodomo/src/game_state/view.rs`: the insert's recursion, its order and the age it refreshes; the radius's bound, bonus and width; the prune's bound and the other side's removal; the diagonals' build order; the entrant's own insert; a new sectree's recompute; the leaver's cleanup; the del before a re-encode; the old sectree's membership; the `z`; the viewers' sectree | 17 | 16 killed, 1 killed by a new test |
+| `prodomo/src/game_state/view_encode.rs`: `PacketAround`'s order and the map relay's Channel; `iDur`'s guard, bounds and destination; the walk mode's flag and reverse; the add's info and `z`; the del's VID and header; the move's start time; the NPC's additional info | 15 | 13 killed, 1 killed on the rerun, 1 equivalent |
+| `prodomo/src/game_state/motion.rs`: the sample's mask, test and place in the step; the arrival; a NaN; the trade's distance and partner; the rate's width; the equip check; the attack's stamps; the speed in the relay; a move the body cannot make; the stop on a far move and on a step; a stale goto; `Stop`'s and `Show`'s destination; the rotation; the walking test; an off-map sync and its records; `Sync`'s and `Move`'s same point; the step arm's and `StateMove`'s `Move`; a sample never taken; the settle released before a move and before a relay | 30 | 21 killed, 8 killed by a new test, 1 equivalent |
+| `prodomo/src/game_state.rs`: the Pulse's order of motion and the warp NPCs; the leave's cleanup and trade; the stored place; the kept position; the radius's bonus; the standing NPCs; the item step's PK mode | 8 | 8 killed |
+| `prodomo/src/game_state/sync.rs`: the hack count; the ownership's records and their victim; a new owner's last sync; the kept flag | 5 | 3 killed, 2 killed by a new test |
+| `prodomo/src/game_state/warp_npc.rs`: the reach's bound; the warped mark and its judgement; Pulse 0; the goto's stop; the empire check; the `z` | 7 | 6 killed, 1 killed by a new test |
+| `prodomo/src/main.rs`: the talking line's and the pose's scopes; the burst's phase; the kept position's axes; the item relay; the view range; a second `CG_ENTER_GAME`; the settle and the flush; an order's flush; the unsettled chat, pose, item step and move | 16 | 11 killed, 5 killed by a new test |
+| `prodomo/src/item_move.rs`: the ground record's scopes; the look's recipients and PK mode | 4 | 3 killed, 1 killed by a new test |
+| `prodomo/src/movement.rs`: the duration of every function; both limits' bounds; the distance | 4 | 2 killed, 2 killed by a new test |
+| `prodomo/src/loading_phase.rs`, `sync_position.rs`: the NPC list's place in the burst; the PK mode's bound; a refused sync's kept flag | 3 | 3 killed |
+| `common/src/config.rs`, `common/src/cfloat.rs`, `world/src/character/dice.rs`: the view range's default; a `u32` through `f64`; the signed modulus | 3 | 2 killed, 1 equivalent |
+
+Of the 24 survivors, three are equivalent and 21 were test gaps, one of them in code no client
+reaches yet. A new or extended test killed each gap, checked by hand in a copy with the mutant
+applied and the file restored by checksum, and again in the final run below. Each test also
+passes unmutated.
+
+- **The equivalents.** `enc_packet_around_self_first` served the sender before the others
+  within one `packet_around`. Each client reads its own stream, so no client can see that
+  order. The defect it could hide, a recipient that reads records out of the order they were
+  sent, is tested by `packet_around_keeps_each_recipients_order`. `mo_arrive_before_sample` ended
+  a walk before its sample in the same step. `arrive` clears only `moving` and the mover entry,
+  and the sample still runs at the last point. The defect class, a walk that ends on a sampled
+  Pulse and is not sampled at its last point, is tested by
+  `a_walk_ending_on_a_sampled_pulse_is_sampled_at_its_last_point`. `cf_u32_via_f64` converted
+  through `f64`. A `u32` is exact in `f64`, so the value is rounded once either way, and the tie
+  tests of `u32_to_f32` cover the rounding.
+- **A move the body cannot make.** `mo_cannot_move_shows` showed the body after a move it cannot
+  make. No client reaches that arm yet: `can_move` is `true` until a stun or a private shop is
+  ported. `run_move`'s outcome match is now `apply_judged_move`, and
+  `a_move_the_body_cannot_make_changes_and_sends_nothing` gives it `CannotMove` and
+  `InvalidFunction` directly (`G/input_main.cpp:1759-1768`), which kills it.
+- **The attack's stamps.** `mo_attack_stamp_attack_only` stamped only `FUNC_ATTACK`. The test ran
+  the attack and the combo in the same millisecond, so the attack's stamp passed for the
+  combo's. Each function now runs at its own millisecond.
+- **A step's stop.** `mo_step_no_stop` let a walk go on after a step in the middle of it, where
+  legacy's `Move` and `Stop` end it (`G/input_main.cpp:1874-1875`).
+  `only_func_move_relays_a_duration` now checks that the walk ended.
+- **The rotation.** `mo_move_rotation_dropped` dropped the client's rotation byte. Every test
+  walked east, byte 18 (90 degrees), which is also where the first step's `Sync` turns the body.
+  The new `an_accepted_move_turns_the_body_to_the_clients_byte` sends byte 30 (150 degrees) and
+  steps a byte 40 to the body's own point. The same test kills `fix_step_arm_sync_body`, the step
+  arm through `Sync` in place of `Move`, which differs only at the point the body stands on
+  (`CHARACTER::Move` returns before `Sync` there, `G/char.cpp:3610-3621`). It now also steps the
+  walk in the millisecond it begins, which kills `fix_step_motion_sync_body`, the same change in
+  `StateMove`'s `Move` (`G/char_state.cpp:793`).
+- **The limits.** `mv_soft_limit_ge` and `mv_hard_limit_ge` refused a move of exactly a limit.
+  No test moved exactly 750. The new `a_move_of_exactly_either_limit_is_allowed` accepts 750,
+  75,099 and -75,000 and refuses 751; a rider is accepted at 999 and refused at 1000.
+- **The hack count.** `sync_hack_count_not_kept` reset the body's count after every frame, and no
+  test sent refusals over several frames. The new `the_sync_hack_count_outlives_its_frame` sends
+  one accepted frame and ten too soon, each counted, and the eleventh closes with
+  `SyncIntervalHackLimit` (`m_iSyncHackCount`, `G/char.h:2206`, `G/input_main.cpp:2117-2127`).
+- **A new owner's sync.** `sync_new_owner_keeps_last_sync` kept the old owner's sync time when the
+  claim changed hands. Legacy zeroes `m_tvLastSyncTime` there (`G/char.cpp:5521-5534`), so a new
+  owner's first sync is never too soon. The tests changed owners only with no stamp. The new
+  `a_new_owners_first_sync_is_not_too_soon` has the old owner stamp a sync just before its claim
+  lapses, and checks that the new owner's first sync is accepted and its second, too soon, is
+  counted.
+- **A goto's stop.** `wnpc_goto_no_stop` left a walk running under the goto's `Show`, so the
+  body stepped in place in `StateMove` until the old walk's time ran out. The tests set the clock
+  past the walk's end. The new `a_goto_ends_the_walk_it_finds_under_way` fires the goto 100 ms
+  into a long walk and expects the body idle at the target.
+- **The pose's scope.** `main_pose_map_scope` sent a pose to the whole map. The pose scenario's
+  two players stood at one point. It now seats Charlie out of view, who is sent none of the
+  poses.
+- **The ground record's scope.** `im_ground_view_scope` sent a moved item's ground record to the
+  view, not the map (V8). Every watcher in the drop scenario stood in Alpha's view. Charlie now
+  watches from out of view: shown the lying item on entering, sent the second drop's add and
+  both pick-ups' dels, and nothing else. 229c turns these records into silence.
+- **An off-map body's records.** `mo_sync_no_deliver` dropped the records a sync makes. Only a
+  body outside every sectree (V4) synced into one has any, and no test moved one. The new
+  `a_treeless_body_synced_into_a_sectree_and_its_view_are_sent_each_other` does.
+- **The old sectree.** `view_move_body_keeps_old_index` left a body moved to another sectree in
+  the old one's list. `InsertEntity` erases it there (`G/sectree.cpp:133-134`). The stale entry
+  shows only to an update that reaches the old sectree and not the new one, with the body in
+  range. The new `a_body_moved_to_another_sectree_leaves_the_old_ones_membership` has that shape,
+  with the body found from the old side before it moves as the control.
+- **The Channel.** `enc_relay_map_ignores_channel` compared only the map in the map relay's
+  filter. One `GameState` serves every Channel, so a body on channel 2 shares the table with
+  channel 1's, while legacy runs each Channel as its own core. No test entered a body on a
+  second Channel. A new fixture, `enter_on`, does, and `a_map_relay_stays_on_the_senders_channel`
+  checks that a body on the next Channel at the sender's point is sent nothing.
+- **The settle's release.** `fix_drop_settled_before_relay` released the descriptor's wait before
+  the relay queued its copies. Then a frame answered next can pass the relay's own copy. The
+  scenarios relay a few small records, which are queued before the waiter wakes. The new
+  `a_relay_settles_only_once_its_records_are_queued` relays a 1 MiB record to 200 bodies on the
+  world's own thread, and checks that the sender's copy is queued when the wait ends. Correct
+  code releases after the queueing, so the test cannot fail falsely (30 of 30 runs). The mutant's
+  copies take far longer than a wake.
+- **A relay and an answer in one write.** `fix_chat_unsettled`, `fix_pose_unsettled` and
+  `fix_item_step_unsettled` each stopped the descriptor waiting after a relay. Then the next
+  frame of the same read could be answered before the world queued the relay. Legacy writes a
+  relay while it reads its frame (`PacketAround` and `ChatPacket` run in `Analyze`), so a second
+  frame's records follow the first's. Only the move had a scenario of that shape, a move and a
+  shout, which is why `fix_move_unsettled` was killed. The talking, pose and drop scenarios now
+  each send a relay and a frame with a direct answer in one write (229b.5). The talking
+  scenario's write comes from Yankee, because Alice's three lines leave her one short of the
+  chat counter's limit (`ENABLE_CHAT_SPAMLIMIT`: four lines in a 5 s window), which would drop
+  the line unheard.
+- **An order's records.** `fix_orders_no_flush` followed a world order without writing what the
+  world queued before it. The descriptor reaches the order only after its own flush, so the queue
+  is empty unless the world queued a record and the order between the two, a window no scenario
+  can hit. The order arm now calls a new `take_order`, which flushes and then follows the order
+  through an async closure. The mutant drops that flush. The new binary test
+  `an_order_follows_the_records_queued_before_it` writes a pending record, a queued record and
+  an order's byte, and the peer reads them in that order.
+
+The 24 were run again in a copy of the final tree: the 21 gaps were killed and the three
+equivalents survived.
+
+### 229b.8 Receipt
+
+109 tests added and 13 removed, 96 more in all:
+
+- `prodomo/src/game_state/view.rs` (new): 23, for the nine sectrees' build order and the
+  neighbours an edge or a corner lacks, the walk within a sectree, the radius in 64 bits,
+  `UpdateSectree`'s bound and its prune, the view's insert of a new, a seen and the own entity,
+  its remove, re-encode and cleanup, a `Show` within a sectree, into another and to a point no
+  sectree holds, an entrant with no sectree, a treeless body moved into one, a body moved to
+  another sectree, the viewers, and symmetric views over a random walk.
+- `prodomo/src/game_state/view_encode.rs` (new): 13, for `EncodeInsertPacket`'s records for an
+  idle player, a walking recipient, a player mid-move, a non-positive `iDur`, a warp NPC and an
+  NPC recipient, the del, `PacketAround`'s copies, its except, each recipient's order and a body
+  with no sectree, the entrant's reply, and the map relay's Channel.
+- `prodomo/src/game_state/motion.rs` (new): 31, for `Goto` and its stale start, `Stop`, the
+  duration, the rate and the interpolated point, the elapsed time's wrap, the zero durations,
+  the movers' order and samples, a walk ending on a sample, `Sync`'s `z` and rotation, a sync to
+  no sectree and a treeless body's sync, `Move`'s refusals (too far, past the long range, an
+  invalid function, a move the body cannot make) and its rotation, the relayed duration, the
+  attack's and the step's equip block, the motion speed, the walking test, the live point, and a
+  relay's settle.
+- `prodomo/src/game_state/sync.rs` (new): 3, for the hack count across frames, a new owner's
+  first sync, and an owner past the claim range.
+- `prodomo/src/game_state/trade.rs`: 8, of which 2 replace older tests, for a mover's trade
+  measured at the sample, a NaN Pulse, only the mover's own trade, a trade's and a shop step's
+  live point, a goto player judged again in the same Pulse, a warped player and the later NPCs,
+  the Pulse's order, and a goto that ends a walk.
+- `prodomo/src/game_state.rs`: 5, for the radius, a replaced map's NPCs, the spawn's index, the
+  look's PK mode and a ground place's live point.
+- `prodomo/src/loading_phase.rs`: 5, of which 1 replaces an older test, for the burst's shown
+  records, the mini map's place, the insert's point and angle, the PK mode's bound, and a burst
+  with no insert of its own.
+- `prodomo/src/movement.rs`: 2, for both limits exactly and a far axis's wrap.
+- `common/src/cfloat.rs`: 2, for `u32_to_f32` below 2^24 and its ties.
+- `world/src/character/dice.rs`: 2, of which 1 replaces an older test (F25), for a width past
+  `INT_MAX` and a negative low bound.
+- `prodomo/src/client_live.rs`: 1, `LiveClock::elapsed`.
+- `prodomo/src/item_move.rs`: 1, the look's PK mode and language.
+- `prodomo/src/main.rs`: 1, an order after the records queued before it (229b.7).
+- `prodomo/tests/parity.rs`: 12, the ten scenarios in 229b.5 and the two it renames.
+
+Of the 13 removed, four are replaced as above and two are the renamed scenarios' old names. The
+other seven went with the code they tested: four in `client_registry.rs` with `PositionTable`,
+and three in `warp.rs` with `same_sectree` and `show_records`.
+Existing tests changed as 229b.5 says. In `game_loop_thread.rs`, three tests expect the enter
+answer's `Shown` records in place of `()`.
+
+The count went from 3101 to 3197. These gates ran on the final working tree, with
+`DATABASE_URL` set in the first test row, as `gates.sh` exports it:
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 3197 passed, 0 failed |
+| the same with `DATABASE_URL` unset | 3197 passed, 0 failed |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 19 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+`cargo-clippy` and `cargo-fmt` are the system's 1.85.1 toolchain, `clippy 0.1.85` and
+`rustfmt 1.8.0`, and are called by their `/usr/bin` paths. The tests added after the sweep's
+first run and after the review are in the count.
+
+After the run, no `prodomo_%` database remains and no `*.core` file is outside `target/`. The
+workspace has 250 Rust files and 186,014 lines, outside `server/` and `.scratch/`. No crate was
+fetched, and `Cargo.lock` is unchanged. `psql` is not installed, so the store was read through
+`podman exec` into the database's container.

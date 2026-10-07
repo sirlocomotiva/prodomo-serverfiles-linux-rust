@@ -787,6 +787,10 @@ struct Keyed {
     language: u8,
     /// The number of the Channel the connection is on, which `GC_CHANNEL` carries.
     channel_number: u8,
+    /// Whether the character this connection enters walks, its stamina at or below 0: then
+    /// its own insert is followed by its walk mode. [`Keyed::loaded`] sets it from the loading
+    /// burst's `POINT_STAMINA`; every fixture row is stored at 0.
+    walking: bool,
 }
 
 impl Keyed {
@@ -800,6 +804,7 @@ impl Keyed {
             output: SETUP_KEY,
             language: ENGLISH,
             channel_number: 1,
+            walking: true,
         }
     }
 
@@ -1297,6 +1302,9 @@ const GC_QUICKSLOT_DEL: u8 = 29;
 const GC_QUICKSLOT_SWAP: u8 = 30;
 const GC_CHARACTER_ADD: u8 = 1;
 const GC_CHAR_ADDITIONAL_INFO: u8 = 136;
+/// `HEADER_GC_WALK_MODE`: the header, `vid` and `mode` (`G/packet.h:2383-2388`).
+const GC_WALK_MODE: u8 = 0x6f;
+const WALK_MODE_LEN: usize = 1 + 4 + 1;
 /// `HEADER_GC_NPC_POSITION`: `TPacketGCNPCPosition`, a `WORD wSize` and a `WORD count`, then
 /// `count` 34-byte `TNPCPosition` entries (`G/packet.h`).
 const GC_NPC_POSITION: u8 = 115;
@@ -1338,6 +1346,9 @@ const GC_POINT_CHANGE: u8 = 17;
 /// (`G/packet.h:1064-1071`).
 const POINT_CHANGE_LEN: usize = 4 + 4 + 1 + 8 + 8;
 
+/// `POINT_STAMINA`, the points record's slot of the current stamina.
+const POINT_STAMINA: usize = 9;
+
 /// The length of each loading and enter-game record. A variable record reports `usize::MAX`, and
 /// the caller sizes it from its own `WORD wSize`.
 fn game_len(header: u8) -> usize {
@@ -1370,6 +1381,7 @@ fn game_len(header: u8) -> usize {
         GC_SAFEBOX_DEL | GC_MALL_DEL | GC_CHARACTER_DEL => 1 + 4,
         GC_SAFEBOX_WRONG_PASSWORD => 1,
         GC_WARP => WARP_LEN,
+        GC_WALK_MODE => WALK_MODE_LEN,
         other => panic!("unexpected loading or enter-game header {other}"),
     }
 }
@@ -1416,6 +1428,18 @@ fn client_move(function: u8, argument: u8, rotation: u8, x: i32, y: i32, time: u
     fixed.extend_from_slice(&time.to_le_bytes());
     assert_eq!(fixed.len(), MOVE_LEN, "TPacketCGMove has no dwDuration");
     fixed
+}
+
+/// The `GC_MOVE` a viewer is sent for the client `MOVE` `sent`: its function, argument and
+/// rotation, the mover's `vid`, its position and time as sent, then the `duration`.
+fn relayed_move(sent: &[u8], vid: u32, duration: u32) -> Vec<u8> {
+    let mut relay = vec![GC_MOVE];
+    relay.extend_from_slice(&sent[1..4]);
+    relay.extend_from_slice(&vid.to_le_bytes());
+    relay.extend_from_slice(&sent[4..MOVE_LEN]);
+    relay.extend_from_slice(&duration.to_le_bytes());
+    assert_eq!(relay.len(), GC_MOVE_LEN, "TPacketGCMove");
+    relay
 }
 
 /// The 4 header bytes plus the text of a client `CHAT`. `size` counts the whole record.
@@ -1465,11 +1489,29 @@ fn enter_world_on(
     slot: u8,
     language: u8,
 ) -> (Keyed, Listed) {
+    let (keyed, character, _entered) =
+        enter_world_seeing_on(server, channel, login, slot, language);
+    (keyed, character)
+}
+
+/// [`enter_world`], answering what the burst showed.
+fn enter_world_seeing(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed, Entered) {
+    enter_world_seeing_on(server, 1, login, slot, ENGLISH)
+}
+
+/// [`enter_world_on`], answering what the burst showed.
+fn enter_world_seeing_on(
+    server: &Server,
+    channel: u8,
+    login: &[u8],
+    slot: u8,
+    language: u8,
+) -> (Keyed, Listed, Entered) {
     let (mut keyed, character, quickslots, _items) =
         load_with_quickslots_on(server, channel, login, slot, language);
     assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
-    enter_game_burst(&mut keyed);
-    (keyed, character)
+    let entered = enter_game_view(&mut keyed);
+    (keyed, character, entered)
 }
 
 /// Log `login` in and select slot `slot`, reading the loading burst and the item load behind
@@ -1558,6 +1600,7 @@ fn read_loading_burst(keyed: &mut Keyed, list: &[u8], slot: u8) -> LoadingBurst 
     assert_eq!(gold[0], GC_CHARACTER_GOLD);
     let points = keyed.read_game();
     assert_eq!(points[0], GC_PLAYER_POINTS);
+    keyed.loaded(&points);
     assert_eq!(keyed.read_game()[0], GC_SKILL_LEVEL_NEW);
     let mut items = Vec::new();
     let tail = loop {
@@ -1581,35 +1624,64 @@ fn read_loading_burst(keyed: &mut Keyed, list: &[u8], slot: u8) -> LoadingBurst 
 /// connection in the game phase with nothing unread. Answers the character's own
 /// `GC_CHARACTER_ADD`.
 fn enter_game_burst(keyed: &mut Keyed) -> Vec<u8> {
-    let add = enter_game_records(keyed);
+    enter_game_view(keyed).add
+}
+
+/// [`enter_game_burst`], answering what the burst showed.
+fn enter_game_view(keyed: &mut Keyed) -> Entered {
+    let entered = enter_game_shown(keyed);
     assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
-    add
+    entered
 }
 
 /// [`enter_game_burst`] without the final quiet check, for a map whose ground is not empty.
 fn enter_game_records(keyed: &mut Keyed) -> Vec<u8> {
+    enter_game_shown(keyed).add
+}
+
+/// What the enter-game burst showed the entrant.
+struct Entered {
+    /// Its own `GC_CHARACTER_ADD`.
+    add: Vec<u8>,
+    /// Its own `GC_CHAR_ADDITIONAL_INFO`.
+    info: Vec<u8>,
+    /// Everything in view, after its own pair and walk mode.
+    shown: Shown,
+}
+
+/// [`enter_game_records`], answering what the burst showed.
+fn enter_game_shown(keyed: &mut Keyed) -> Entered {
     keyed.send_record(&client_enter_game());
     let add = keyed.read_game();
     assert_eq!(add[0], GC_CHARACTER_ADD);
-    let additional = keyed.read_game();
-    assert_eq!(additional[0], GC_CHAR_ADDITIONAL_INFO);
+    let info = keyed.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
     assert_eq!(
-        additional[69], keyed.language,
+        info[69], keyed.language,
         "bLanguage from the descriptor: the language the auth login chose"
     );
-    let (_shown, affect) = read_shown(keyed);
+    let own_walk = walk_mode_of(&add[1..5]);
+    if keyed.walking {
+        assert_eq!(keyed.read_game(), own_walk, "a spent stamina walks");
+    }
+    let (shown, affect) = read_shown(keyed);
+    assert!(
+        !shown.records.contains(&own_walk),
+        "its own walk mode once at most"
+    );
     assert_eq!(affect[0], GC_AFFECT_ADD);
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, keyed.channel_number]);
     let notice = keyed.read_game();
     assert_eq!(notice[0], GC_CHAT);
-    add
+    Entered { add, info, shown }
 }
 
 /// What `Show` and `SendNPCPosition` send after the own-character pair: every character in view,
-/// each as its `GC_CHARACTER_ADD` and, for a PC or an NPC, its `GC_CHAR_ADDITIONAL_INFO`, and then
-/// the map's NPC list when the map has one.
+/// each as its `GC_CHARACTER_ADD` and, for a PC or an NPC, its `GC_CHAR_ADDITIONAL_INFO`, a
+/// moving player's `GC_MOVE` and walk mode, the walk mode of a walking entrant, and then the map's
+/// NPC list when the map has one.
 struct Shown {
     /// The insert and summary records, in the order they arrived.
     records: Vec<Vec<u8>>,
@@ -1626,13 +1698,96 @@ impl Shown {
             .map(Vec::as_slice)
             .collect()
     }
+
+    /// The insert of the character `vid` and the summary right behind it.
+    fn pair_of(&self, vid: u32) -> (Vec<u8>, Vec<u8>) {
+        let id = vid.to_le_bytes();
+        let at = self
+            .records
+            .iter()
+            .position(|record| record[0] == GC_CHARACTER_ADD && record[1..5] == id)
+            .unwrap_or_else(|| panic!("{vid} is shown"));
+        let info = self.records[at + 1].clone();
+        assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO, "{info:02x?}");
+        assert_eq!(info[1..5], id, "the summary's vid");
+        (self.records[at].clone(), info)
+    }
+}
+
+/// `[6f, vid, 00]`: the run walk mode of the character under the little-endian `vid`, the only
+/// mode the view sends.
+fn walk_mode_of(vid: &[u8]) -> Vec<u8> {
+    let mut record = vec![GC_WALK_MODE];
+    record.extend_from_slice(vid);
+    record.push(0);
+    record
+}
+
+impl Keyed {
+    /// Note the loading burst's points record `points`: the character walks when its
+    /// `POINT_STAMINA` is at or below 0.
+    fn loaded(&mut self, points: &[u8]) {
+        self.walking = point_slot(points, POINT_STAMINA) <= 0;
+    }
+
+    /// Read the view insert of the character `vid`, which walks when `walking`: its walk mode
+    /// first, which the viewer's own insert to it sends back (`G/char.cpp:1225-1236`), then its
+    /// `GC_CHARACTER_ADD` and `GC_CHAR_ADDITIONAL_INFO`.
+    fn sees_arrive(&mut self, vid: u32, walking: bool) -> (Vec<u8>, Vec<u8>) {
+        let id = vid.to_le_bytes();
+        if walking {
+            assert_eq!(self.read_game(), walk_mode_of(&id), "the newcomer walks");
+        }
+        let add = self.read_game();
+        assert_eq!(add[0], GC_CHARACTER_ADD, "{add:02x?}");
+        assert_eq!(&add[1..5], &id, "the insert's vid");
+        let info = self.read_game();
+        assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO, "{info:02x?}");
+        assert_eq!(&info[1..5], &id, "the summary's vid");
+        (add, info)
+    }
+
+    /// Read the view removal of the character `vid`: `[02, vid]`.
+    fn sees_leave(&mut self, vid: u32) {
+        let mut removal = vec![GC_CHARACTER_DEL];
+        removal.extend_from_slice(&vid.to_le_bytes());
+        assert_eq!(self.read_game(), removal, "the removal of {vid}");
+    }
+
+    /// Read a refused move's re-encode up to the chat line it is answered with: the VIDs of
+    /// its inserts, then the line. Any other record first fails.
+    fn reencode_then_line(&mut self) -> (Vec<u32>, Vec<u8>) {
+        let mut inserted = Vec::new();
+        loop {
+            let record = self.read_game();
+            match record.first().copied() {
+                Some(GC_CHAT) => return (inserted, record),
+                Some(GC_CHARACTER_ADD) => {
+                    inserted.push(u32::from_le_bytes(record[1..5].try_into().expect("a VID")));
+                }
+                Some(GC_CHAR_ADDITIONAL_INFO) => {}
+                other => panic!("only the re-encode precedes the line, not {other:02x?}"),
+            }
+        }
+    }
+}
+
+/// Store `value` as the stamina of the character `name`.
+fn stamina(database: &ScratchDatabase, name: &str, value: i32) {
+    sql(
+        database,
+        &format!("UPDATE player SET stamina = {value} WHERE name = '{name}'"),
+    );
 }
 
 /// Read what [`Shown`] describes, answering it with the record that follows it.
 fn read_shown(keyed: &mut Keyed) -> (Shown, Vec<u8>) {
     let mut records = Vec::new();
     let mut next = keyed.read_game();
-    while matches!(next[0], GC_CHARACTER_ADD | GC_CHAR_ADDITIONAL_INFO) {
+    while matches!(
+        next[0],
+        GC_CHARACTER_ADD | GC_CHAR_ADDITIONAL_INFO | GC_MOVE | GC_WALK_MODE
+    ) {
         records.push(next);
         next = keyed.read_game();
     }
@@ -2237,6 +2392,21 @@ fn a_character_asked_to_rename_takes_a_free_name() {
     alice.closed_by(&client_rename(4, b"Delta"));
 }
 
+/// `MainCharacterPacket` is the 46-byte empire variant, carrying the VID, the job, the Name,
+/// the position, the empire, and the skill group, in source field order.
+fn assert_alphas_main_character(main: &[u8], alpha: &Listed) {
+    assert_eq!(main[0], GC_MAIN_CHARACTER2_EMPIRE);
+    assert_eq!(main.len(), MAIN_CHARACTER_LEN);
+    assert_eq!(&main[1..5], &alpha.id.to_le_bytes(), "dwVID");
+    assert_eq!(&main[5..7], &3u16.to_le_bytes(), "wJob");
+    assert_eq!(&main[7..32], &name_field(b"Alpha"), "szName");
+    assert_eq!(&main[32..36], &470_000i32.to_le_bytes(), "x");
+    assert_eq!(&main[36..40], &950_000i32.to_le_bytes(), "y");
+    assert_eq!(&main[40..44], &0i32.to_le_bytes(), "z");
+    assert_eq!(main[44], 1, "bEmpire");
+    assert_eq!(main[45], 49, "bSkillGroup");
+}
+
 /// `cg.login.character_select`, `sys.login.enter`: `CG_CHARACTER_SELECT` loads the character
 /// and answers the loading burst, and `CG_ENTER_GAME` answers the enter-game burst, each in
 /// `CInputDB::PlayerLoad` and `CInputLogin::Entergame` order with `SetPhase` in the middle. An
@@ -2269,19 +2439,7 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
         "wSize is the record"
     );
     assert_eq!(entity, [GC_ENTITY, 3, 0]);
-    // `MainCharacterPacket` is the 46-byte empire variant, carrying the VID, the job, the Name,
-    // the position, the empire, and the skill group, in source field order.
-    let main = keyed.read_game();
-    assert_eq!(main[0], GC_MAIN_CHARACTER2_EMPIRE);
-    assert_eq!(main.len(), MAIN_CHARACTER_LEN);
-    assert_eq!(&main[1..5], &alpha.id.to_le_bytes(), "dwVID");
-    assert_eq!(&main[5..7], &3u16.to_le_bytes(), "wJob");
-    assert_eq!(&main[7..32], &name_field(b"Alpha"), "szName");
-    assert_eq!(&main[32..36], &470_000i32.to_le_bytes(), "x");
-    assert_eq!(&main[36..40], &950_000i32.to_le_bytes(), "y");
-    assert_eq!(&main[40..44], &0i32.to_le_bytes(), "z");
-    assert_eq!(main[44], 1, "bEmpire");
-    assert_eq!(main[45], 49, "bSkillGroup");
+    assert_alphas_main_character(&keyed.read_game(), &alpha);
     // `PointsPacket` writes the gold record immediately before the points record, because
     // `ENABLE_REMOVE_LIMIT_GOLD` is on.
     let gold = keyed.read_game();
@@ -2291,6 +2449,7 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
     let points = keyed.read_game();
     assert_eq!(points.len(), POINTS_LEN);
     assert_eq!(points[0], GC_PLAYER_POINTS);
+    keyed.loaded(&points);
     // The 255 eight-byte slots start one byte after the header. Slot 0 is `POINT_NONE`, written
     // as zero rather than the stack garbage `TPacketGCPoints` would carry, and slot 1 is
     // `POINT_LEVEL`, whose value is the character's level.
@@ -2461,6 +2620,41 @@ const FIRST_NPC_NAME: &[u8] = b"Invatator Lupta de Corp";
 /// Where map 1's warp, vnum 10001, is in `npc.txt`, counting from 0.
 const WARP_INDEX: u32 = 37;
 
+/// Map 1's base, the point its `npc.txt` and its mini-map list count from.
+const MAP1_BASE: (i32, i32) = (409_600, 896_000);
+
+/// The NPC indices on map 1 whose `npc.txt` entry has a box, half widths 1 and 1, so each stands
+/// up at a random point within 100 of its listed centre (`SpawnMobRange`): `:34` and `:42`'s 20005
+/// and `:43`'s 20006.
+const BOXED_NPCS: [usize; 3] = [27, 33, 34];
+
+/// `SECTREE_SIZE` (`G/sectree.h:8`): the side of one sectree.
+const SECTREE_SIZE: i32 = 6400;
+
+/// `SECTREE_MAP::Build`'s walk of the sectrees around one (`G/sectree_manager.cpp:79-120`), as
+/// (column, row) steps: the sectree itself, then its eight neighbours.
+const BUILD_ORDER: [(i32, i32); 9] = [
+    (0, 0),
+    (-1, 0),
+    (1, 0),
+    (0, -1),
+    (0, 1),
+    (-1, 1),
+    (1, -1),
+    (-1, -1),
+    (1, 1),
+];
+
+/// `DISTANCE_APPROX` (`G/utils.h:17-41`): 123/128 of the longer side plus 51/128 of the shorter,
+/// in shifts.
+fn distance_approx(dx: i32, dy: i32) -> i32 {
+    let (dx, dy) = (dx.abs(), dy.abs());
+    let (min, max) = if dx < dy { (dx, dy) } else { (dy, dx) };
+    ((max << 8) + (max << 3) - (max << 4) - (max << 1) + (min << 7) - (min << 5) + (min << 3)
+        - (min << 1))
+        >> 8
+}
+
 /// `CG_ON_CLICK`: the header and the clicked `dwVID`, `TPacketCGOnClick`.
 fn client_click(vid: u32) -> Vec<u8> {
     let mut record = vec![CG_ON_CLICK];
@@ -2468,13 +2662,97 @@ fn client_click(vid: u32) -> Vec<u8> {
     record
 }
 
+/// Alpha's view on entering map 1, given the mini-map list's entries: 15 of the 48 are within
+/// `VIEW_RANGE + 500` in the 3x3 sectrees around Alpha, and the warp is not one of them. Each
+/// is shown as an NPC with its summary, at its listed point or, for one with a regen box, within
+/// 100 of it, in `Build` order and then VID order in each sectree.
+fn assert_alphas_npcs_in_view(shown: &Shown, entries: &[&[u8]], warp: usize) {
+    let point_of = |entry: &[u8]| {
+        let word = |at: usize| i32::from_le_bytes(entry[at..at + 4].try_into().expect("four"));
+        (MAP1_BASE.0 + word(26), MAP1_BASE.1 + word(30))
+    };
+    let tree_of = |(x, y): (i32, i32)| (x / SECTREE_SIZE, y / SECTREE_SIZE);
+    let (column, row) = tree_of(ALPHA_ENTERS_AT);
+    let walk = |at: (i32, i32)| {
+        BUILD_ORDER.iter().position(|&(step_column, step_row)| {
+            tree_of(at) == (column + step_column, row + step_row)
+        })
+    };
+    let in_view: Vec<usize> = (0..entries.len())
+        .filter(|&index| {
+            let at = point_of(entries[index]);
+            let gap = distance_approx(at.0 - ALPHA_ENTERS_AT.0, at.1 - ALPHA_ENTERS_AT.1);
+            walk(at).is_some() && gap <= 5500
+        })
+        .collect();
+    assert_eq!(in_view.len(), 15, "15 of the 48 are in view");
+    assert!(!in_view.contains(&warp), "the warp stands out of view");
+
+    // Each in view is an NPC, each with its summary, at its listed point or, for one with a box,
+    // within 100 of it. Each box keeps every point of it in view, but the two 20005s' boxes cross
+    // a sectree border, so the walk is checked against where each one stood up.
+    assert_eq!(shown.inserts().len(), 15);
+    let mut records = shown.records.iter();
+    let mut walked = Vec::new();
+    for _ in 0..in_view.len() {
+        let insert = records.next().expect("an insert");
+        assert_eq!(insert[0], GC_CHARACTER_ADD);
+        let vid = u32::from_le_bytes(insert[1..5].try_into().expect("four"));
+        let index =
+            usize::try_from(vid.checked_sub(FIRST_NPC_VID).expect("an NPC")).expect("small");
+        assert!(in_view.contains(&index), "insert {index} is in view");
+        let at = inserted_at(insert);
+        let listed = point_of(entries[index]);
+        let slack = if BOXED_NPCS.contains(&index) { 100 } else { 0 };
+        assert!(
+            (at.0 - listed.0).abs() <= slack && (at.1 - listed.1).abs() <= slack,
+            "insert {index} at {at:?}, listed at {listed:?}"
+        );
+        assert_eq!(insert[21], 1, "bType CHAR_TYPE_NPC");
+        let summary = records.next().expect("a summary");
+        assert_eq!(summary[0], GC_CHAR_ADDITIONAL_INFO, "summary {index}");
+        assert_eq!(&summary[1..5], &vid.to_le_bytes(), "summary {index}");
+        walked.push((walk(at).expect("in the 3x3"), index));
+    }
+    assert!(
+        walked.windows(2).all(|pair| pair[0] < pair[1]),
+        "Build order, then VID order in each sectree: {walked:?}"
+    );
+    assert_eq!(records.next(), None, "nobody else is in view");
+}
+
+/// The `GC_CHARACTER_ADD` and `GC_CHAR_ADDITIONAL_INFO` `npc.txt`'s first NPC is shown with:
+/// at its point, vnum 20300, both speeds 100, no state; then its en name, map 1's empire and
+/// `PK_MODE_FREE`.
+fn first_npcs_records() -> (Vec<u8>, Vec<u8>) {
+    let mut insert = vec![GC_CHARACTER_ADD];
+    insert.extend_from_slice(&FIRST_NPC_VID.to_le_bytes());
+    insert.extend_from_slice(&0f32.to_le_bytes());
+    insert.extend_from_slice(&471_800i32.to_le_bytes());
+    insert.extend_from_slice(&951_600i32.to_le_bytes());
+    insert.extend_from_slice(&0i32.to_le_bytes());
+    insert.push(1);
+    insert.extend_from_slice(&20_300u16.to_le_bytes());
+    insert.extend_from_slice(&[100, 100, 0]);
+    insert.extend_from_slice(&[0; 8]);
+    let mut summary = vec![0; CHAR_ADDITIONAL_INFO_LEN];
+    summary[0] = GC_CHAR_ADDITIONAL_INFO;
+    summary[1..5].copy_from_slice(&FIRST_NPC_VID.to_le_bytes());
+    summary[5..30].copy_from_slice(&name_field(FIRST_NPC_NAME));
+    summary[42] = 1;
+    summary[57] = 2;
+    (insert, summary)
+}
+
 /// `sys.world.regen`, `sys.world.view`, `cg.game.on_click`: map 1's regen files stand its NPCs up
-/// at boot, and entering the map shows every one of them as `EncodeInsertPacket` writes it
-/// (`G/char.cpp:1060-1110`), then lists them for the mini-map (`SendNPCPosition`,
-/// `G/sectree_manager.cpp:1089-1128`). The first is `npc.txt`'s first entry, vnum 20300, at its
-/// point with direction 1, so rotation 0. Its summary carries its `en` name, its map's empire and
-/// `PK_MODE_FREE`, and no level, because only a PC's level is sent. The map's warp is inserted
-/// and listed like an NPC, with no summary.
+/// at boot, and entering the map shows each one in view as `EncodeInsertPacket` writes it
+/// (`G/char.cpp:1060-1110`), then lists every one of them for the mini-map (`SendNPCPosition`,
+/// `G/sectree_manager.cpp:1089-1128`). In view is within `VIEW_RANGE + 500` (5500 at the default
+/// range) in the 3x3 sectrees around Alpha (`CEntity::UpdateSectree`, `G/entity_view.cpp:122-236`),
+/// walked in `Build` order and, in each sectree, in VID order (V1). The first is `npc.txt`'s first
+/// entry, vnum 20300, at its point with direction 1, so rotation 0. Its summary carries its `en`
+/// name, its map's empire and `PK_MODE_FREE`, and no level, because only a PC's level is sent.
+/// The map's warp stands out of view, and is listed like an NPC.
 ///
 /// A click on an NPC, or on a VID nobody holds, answers nothing and keeps the connection
 /// (`G/input_main.cpp:1305-1316`). Only a keeper whose click trigger is the shop's opens a window
@@ -2502,55 +2780,29 @@ fn entering_a_map_shows_its_npcs_and_a_click_keeps_the_connection() {
         "the own insert comes first"
     );
     assert_eq!(alice.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    assert_eq!(
+        alice.read_game(),
+        walk_mode_of(&alpha.id.to_le_bytes()),
+        "the fixture row's stamina is 0"
+    );
     let (shown, affect) = read_shown(&mut alice);
     assert_eq!(affect[0], GC_AFFECT_ADD, "the NPCs come before the affect");
 
-    // `npc.txt`'s 48 characters, numbered in the order they were stood up. 47 are NPCs, each
-    // with its summary. The 38th, vnum 10001, is a warp, and `EncodeInsertPacket` sends a summary
-    // only for a PC or an NPC.
-    assert_eq!(shown.inserts().len(), 48);
-    let mut records = shown.records.iter();
-    for index in 0..48 {
-        let vid = (FIRST_NPC_VID + index).to_le_bytes();
-        let insert = records.next().expect("an insert");
-        assert_eq!(insert[0], GC_CHARACTER_ADD, "insert {index}");
-        assert_eq!(&insert[1..5], &vid, "insert {index}");
-        if index == WARP_INDEX {
-            assert_eq!(insert[21], 3, "bType CHAR_TYPE_WARP");
-            assert_eq!(&insert[22..24], &10_001u16.to_le_bytes());
-            continue;
-        }
-        assert_eq!(insert[21], 1, "bType CHAR_TYPE_NPC");
-        let summary = records.next().expect("a summary");
-        assert_eq!(summary[0], GC_CHAR_ADDITIONAL_INFO, "summary {index}");
-        assert_eq!(&summary[1..5], &vid, "summary {index}");
-    }
-    assert_eq!(records.next(), None, "nobody else is in view");
+    // The list holds `npc.txt`'s 48 characters in the order they were stood up, so entry `i` is
+    // the VID `FIRST_NPC_VID + i`, each at its point less map 1's base.
+    let list = shown.list.as_ref().expect("map 1 lists its NPCs");
+    let entries: Vec<&[u8]> = list[5..].chunks(NPC_POSITION_LEN).collect();
+    assert_eq!(entries.len(), 48);
+    let warp = usize::try_from(WARP_INDEX).expect("small");
+    assert_alphas_npcs_in_view(&shown, &entries, warp);
 
-    let mut insert = vec![GC_CHARACTER_ADD];
-    insert.extend_from_slice(&FIRST_NPC_VID.to_le_bytes());
-    insert.extend_from_slice(&0f32.to_le_bytes());
-    insert.extend_from_slice(&471_800i32.to_le_bytes());
-    insert.extend_from_slice(&951_600i32.to_le_bytes());
-    insert.extend_from_slice(&0i32.to_le_bytes());
-    insert.push(1);
-    insert.extend_from_slice(&20_300u16.to_le_bytes());
-    insert.extend_from_slice(&[100, 100, 0]);
-    insert.extend_from_slice(&[0; 8]);
+    let (insert, summary) = first_npcs_records();
     assert_eq!(shown.records[0], insert, "npc.txt's first NPC");
-
-    let mut summary = vec![0; CHAR_ADDITIONAL_INFO_LEN];
-    summary[0] = GC_CHAR_ADDITIONAL_INFO;
-    summary[1..5].copy_from_slice(&FIRST_NPC_VID.to_le_bytes());
-    summary[5..30].copy_from_slice(&name_field(FIRST_NPC_NAME));
-    summary[42] = 1;
-    summary[57] = 2;
     assert_eq!(
         shown.records[1], summary,
         "its en name, map 1's empire, PK_MODE_FREE and nothing else"
     );
 
-    let list = shown.list.expect("map 1 lists its NPCs");
     assert_eq!(list.len(), 5 + 48 * NPC_POSITION_LEN);
     assert_eq!(&list[1..3], &1637u16.to_le_bytes(), "wSize");
     assert_eq!(&list[3..5], &48u16.to_le_bytes(), "count");
@@ -2563,14 +2815,12 @@ fn entering_a_map_shows_its_npcs_and_a_click_keeps_the_connection() {
         first.as_slice(),
         "the point less map 1's base, 409600 and 896000"
     );
-    let entries: Vec<&[u8]> = list[5..].chunks(NPC_POSITION_LEN).collect();
     assert!(
         entries
             .iter()
             .any(|entry| entry[1..26] == name_field(b"Fierar")),
         "the smith is on the mini-map"
     );
-    let warp = usize::try_from(WARP_INDEX).expect("small");
     assert_eq!(entries[warp][0], 3, "the warp is listed as a warp");
 
     assert_eq!(alice.read_game(), [GC_PHASE, PHASE_GAME]);
@@ -2595,7 +2845,8 @@ fn entering_a_map_shows_its_npcs_and_a_click_keeps_the_connection() {
     map_72_is_shown_on_the_shared_channel(&server, &database);
 }
 
-/// Charlie enters map 72 on the Shared Channel and is shown map 72's `npc.txt` alone.
+/// Charlie enters map 72 on the Shared Channel beside its warp at (99, 33), which is all that is in
+/// view, and the mini-map lists map 72's `npc.txt` alone, in its order.
 fn map_72_is_shown_on_the_shared_channel(server: &Server, database: &ScratchDatabase) {
     create_account(server, "carol");
     sql(
@@ -2607,11 +2858,16 @@ fn map_72_is_shown_on_the_shared_channel(server: &Server, database: &ScratchData
         "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
          10000, 1210000 FROM account WHERE login = 'carol'",
     );
-    let (mut carol, _charlie, _quickslots, _items) =
+    let (mut carol, charlie, _quickslots, _items) =
         load_with_quickslots_on(server, 99, b"carol", 0, ENGLISH);
     carol.send_record(&client_enter_game());
     assert_eq!(carol.read_game()[0], GC_CHARACTER_ADD);
     assert_eq!(carol.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    assert_eq!(
+        carol.read_game(),
+        walk_mode_of(&charlie.id.to_le_bytes()),
+        "a new row's stamina is 0"
+    );
     let (shown, affect) = read_shown(&mut carol);
     assert_eq!(affect[0], GC_AFFECT_ADD);
     let races: Vec<u16> = shown
@@ -2621,12 +2877,21 @@ fn map_72_is_shown_on_the_shared_channel(server: &Server, database: &ScratchData
         .collect();
     assert_eq!(
         races,
-        [10_080, 10_078, 30_123, 30_124, 30_124, 30_125, 30_126, 30_127, 30_128],
-        "map 72's npc.txt on the Shared Channel, two warps and seven NPCs"
+        [10_078],
+        "map 72's second warp, and nobody from another map"
     );
-    assert_eq!(shown.records.len(), 9 + 7, "a summary for each NPC alone");
+    assert_eq!(shown.records.len(), 1, "a warp has no summary");
     let list = shown.list.expect("map 72 lists its NPCs");
     assert_eq!(&list[3..5], &9u16.to_le_bytes(), "count");
+    let types: Vec<u8> = list[5..]
+        .chunks(NPC_POSITION_LEN)
+        .map(|entry| entry[0])
+        .collect();
+    assert_eq!(
+        types,
+        [3, 3, 1, 1, 1, 1, 1, 1, 1],
+        "map 72's npc.txt on the Shared Channel, two warps and seven NPCs"
+    );
 }
 
 /// `HEADER_GC_CHARACTER_DEL`: the header and the removed `dwVID`, `TPacketGCCharacterDelete`.
@@ -2881,15 +3146,20 @@ fn a_warp_whose_save_fails_closes_without_sending_the_client_away() {
 /// a character: its name's numbers times 100 past map 1's base, 409600 and 896000.
 const GOTO_TARGET: (i32, i32) = (444_100, 932_100);
 
+/// Where map 1's 9009 of `metin2_map_a1/npc.txt:25` stands, its NPC index 18: (325, 405) times
+/// 100 past map 1's base.
+const IDX18_AT: (i32, i32) = (442_100, 936_500);
+
 /// `event.char.warp_npc_event` for a goto NPC, which the owner's data spawns on no map it hosts
 /// (ledger 228): the scenario spawns 10601 of `metin2_map_monkey_dungeon2`, `CHAR_TYPE_GOTO`
 /// and named `. 345 361`, on map 1 at (470000, 950100), within reach of [`ALPHA_ENTERS_AT`], with
 /// a line the owner's `npc.txt` does not have.
 ///
 /// On the event's next fire Alpha is shown on its own map at the target (`FuncCheckWarp`,
-/// `G/char.cpp:7971-7972`), which is in another sectree, so its own client is sent the insert
-/// pair alone (`Show`, `:1847-1917`) and no reconnect. Alpha then stands out of the NPC's reach,
-/// so the next fires send nothing, and the logout saves the target.
+/// `G/char.cpp:7971-7972`), which is in another sectree, so its own client is sent its insert
+/// pair at `z` `INT_MAX` and its walk mode, then the one character in view there, the 9009 of
+/// [`IDX18_AT`] (`Show`, `:1847-1917`), and no reconnect. Alpha then stands out of the NPC's
+/// reach, so the next fires send nothing, and the logout saves the target.
 #[test]
 fn a_goto_npc_shows_its_neighbour_at_its_target_on_the_same_map() {
     let Some(database) = ScratchDatabase::create() else {
@@ -2911,7 +3181,21 @@ fn a_goto_npc_shows_its_neighbour_at_its_target_on_the_same_map() {
     assert_eq!(shown[0], GC_CHARACTER_ADD);
     assert_eq!(shown[1..5], alpha.id.to_le_bytes(), "Alpha itself");
     assert_eq!(inserted_at(&shown), GOTO_TARGET);
+    assert_eq!(&shown[17..21], &i32::MAX.to_le_bytes(), "Show's z, SHOW_Z");
     assert_eq!(alice.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    assert_eq!(
+        alice.read_game(),
+        walk_mode_of(&alpha.id.to_le_bytes()),
+        "the fixture row's stamina is 0"
+    );
+    let neighbour = alice.read_game();
+    assert_eq!(neighbour[0], GC_CHARACTER_ADD);
+    assert_eq!(neighbour[21], 1, "CHAR_TYPE_NPC");
+    assert_eq!(&neighbour[22..24], &9009u16.to_le_bytes(), "wRaceNum");
+    assert_eq!(inserted_at(&neighbour), IDX18_AT, "5025 from the target");
+    let summary = alice.read_game();
+    assert_eq!(summary[0], GC_CHAR_ADDITIONAL_INFO);
+    assert_eq!(summary[1..5], neighbour[1..5], "the NPC's summary");
     // Two quiet windows are 0.6 seconds, at least one fire.
     alice.quiet("Alpha stands out of the goto's reach");
     alice.quiet("and the next fire finds nobody");
@@ -2953,6 +3237,7 @@ fn a_trader_beside_a_warp_is_told_why_and_stays() {
     );
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
     let (mut bob, yankee) = enter_world(&server, b"bob", 0);
+    alice.sees_arrive(yankee.id, true);
     alice.quiet("Alpha is out of the warp's reach");
 
     alice.send_record(&client_exchange(0, u64::from(yankee.id), 0, 0));
@@ -3062,6 +3347,12 @@ fn a_quest_npc_answers_a_click_with_its_dialog_and_runs_it() {
     let server = Server::start(binary(), database.url());
     create_account(&server, "alice");
     add_characters(&database);
+    // The OX manager stands within 100 of (480900, 956500), `npc.txt:44`'s point past map 1's
+    // base; Alpha enters 1000 from it, in its view.
+    sql(
+        &database,
+        "UPDATE player SET x = 480900, y = 955500 WHERE name = 'Alpha'",
+    );
     let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
     alice.send_record(&client_enter_game());
     assert_eq!(alice.read_game()[0], GC_CHARACTER_ADD);
@@ -3359,6 +3650,7 @@ fn the_points_are_computed_at_load_and_the_item_load_clamps_the_pools() {
     assert_eq!(gold[0], GC_CHARACTER_GOLD);
     let loaded = keyed.read_game();
     assert_eq!(loaded[0], GC_PLAYER_POINTS);
+    keyed.loaded(&loaded);
     for (slot, value, what) in [
         (5, 100_000, "POINT_HP, as stored: the load does not clamp"),
         (6, 1420, "POINT_MAX_HP: 700 + 18 x 40"),
@@ -3456,6 +3748,7 @@ fn a_conqueror_below_the_map_will_is_sent_half_its_speed_and_hit_points() {
     assert_eq!(gold[0], GC_CHARACTER_GOLD);
     let loaded = keyed.read_game();
     assert_eq!(loaded[0], GC_PLAYER_POINTS);
+    keyed.loaded(&loaded);
     for (slot, value, what) in [
         (5, 700, "POINT_HP, as stored"),
         (6, 380, "POINT_MAX_HP, halved under the hit-point will"),
@@ -3575,9 +3868,9 @@ fn a_map_the_channel_does_not_host_warps_home_and_closes_silently_after_the_reco
 }
 
 /// `sys.char.chat`: a talking line reaches every client on the sender's map, including the
-/// sender, and no client on another Channel or another map. A line that is only whitespace, an
-/// empty line, and a line whose declared size is under the fixed part are all consumed without a
-/// record, and the tenth line in a run schedules a disconnect.
+/// sender, and no client on another map. A line that is only whitespace, an empty line, and a
+/// line whose declared size is under the fixed part are all consumed without a record, and the
+/// tenth line in a run schedules a disconnect.
 #[test]
 fn a_talking_line_reaches_the_map_including_its_sender() {
     let Some(database) = ScratchDatabase::create() else {
@@ -3586,20 +3879,25 @@ fn a_talking_line_reaches_the_map_including_its_sender() {
     let server = Server::start(binary(), database.url());
     create_account(&server, "alice");
     create_account(&server, "bob");
+    create_account(&server, "carol");
     add_characters(&database);
-    // Bob's character stands on another map, so the map filter has something to exclude.
-    sql(
-        &database,
-        "UPDATE player SET x = 470000, y = 950000 WHERE name = 'Zulu'",
-    );
     sql(
         &database,
         "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
          470000, 950000 FROM account WHERE login = 'bob'",
     );
+    // Carol's character stands on map 3 of the same Channel, so the map filter has something to
+    // exclude.
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         350000, 870000 FROM account WHERE login = 'carol'",
+    );
 
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
-    let (mut yankee, _) = enter_world(&server, b"bob", 0);
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, true);
+    let (mut charlie, _) = enter_world(&server, b"carol", 0);
 
     alice.send_record(&client_chat(CHAT_TALKING, b"hello"));
     // The sender gets its own line: `FEmpireChatPacket` filters by map index only.
@@ -3613,6 +3911,7 @@ fn a_talking_line_reaches_the_map_including_its_sender() {
     let heard = yankee.read_game();
     assert_eq!(heard, own, "the same record reaches the neighbour");
     yankee.quiet("exactly one record");
+    charlie.quiet("another map hears nothing");
 
     // `strlcpy` copies at most `iExtraLen + 1` bytes and stops at the first NUL, then
     // `snprintf` builds `"%s : %s"`. There is no `strlen(buf) < 1` arm, so an empty payload
@@ -3636,6 +3935,28 @@ fn a_talking_line_reaches_the_map_including_its_sender() {
     // nothing and goes to the interpreter instead. `do_restart` is not ported, so it answers
     // nothing.
     alice.unanswered(&client_chat(CHAT_TALKING, b"/restart_here"));
+
+    // One write holding a talking line and then a party line with no party: legacy writes the
+    // talking line to the map while it reads it, before it reads the party line, so the sender
+    // hears its own line before the refusal it is answered with (`G/input_main.cpp:926-966`).
+    // Yankee sends it, because Alice's three lines leave her one short of the chat counter's
+    // limit, which would drop the line unheard.
+    let mut both = client_chat(CHAT_TALKING, b"again");
+    both.extend(client_chat(prodomo::chat::CHAT_PARTY, b"hi"));
+    yankee.send_record(&both);
+    let again = yankee.read_game();
+    assert_eq!(
+        &again[10..],
+        b"Yankee : again",
+        "its own line first: {again:02x?}"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(prodomo::chat::CHAT_INFO, again[8], b"[LS;655]"),
+        "then the refusal, in the speaker's empire"
+    );
+    assert_eq!(alice.read_game(), again);
+    alice.quiet("the neighbour hears the line and not the refusal");
 
     // A declared size under the record's own prefix cannot be framed. Legacy's
     // `if (size < sizeof(TPacketCGChat)) return -1;` stops consuming without
@@ -3675,7 +3996,8 @@ fn a_line_legacy_answers_itself_comes_back_to_the_sender_alone() {
          470000, 950000 FROM account WHERE login = 'bob'",
     );
     let (mut alice, _) = enter_world(&server, b"alice", 0);
-    let (mut yankee, _) = enter_world_in(&server, b"bob", 0, GERMAN);
+    let (mut yankee, yankee_listed) = enter_world_in(&server, b"bob", 0, GERMAN);
+    alice.sees_arrive(yankee_listed.id, true);
 
     let info = |empire: u8, text: &[u8]| {
         let mut line = vec![GC_CHAT];
@@ -3899,85 +4221,192 @@ fn the_chat_counter_is_reset_every_five_seconds_of_pulses() {
     }
 }
 
-/// `cg.world.move`: an accepted move reaches the clients around the mover and never the mover,
-/// and a move past the legacy distance limit is refused without a record. The moved position is
-/// the client's own bytes, so the broadcast relays `lX` and `lY` unchanged and carries the
-/// duration only on the `FUNC_MOVE` branch.
+/// Seat the move scenario's other two: Yankee in Alpha's empire at its point, so it hears
+/// Alpha's shout, and Charlie of an account with no empire on map 1, 15700 west and 9300 north
+/// of Alpha, out of view. Neither Alpha nor Yankee runs out of stamina, so neither sends a walk
+/// mode.
+fn seat_yankee_and_charlie(database: &ScratchDatabase) {
+    sql(
+        database,
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         454300, 940700 FROM account WHERE login = 'carol'",
+    );
+    stamina(database, "Alpha", 12_345);
+    stamina(database, "Yankee", 12_345);
+}
+
+/// `cg.world.move`: an accepted move reaches the characters in the mover's view and never the
+/// mover, and nobody out of view. The moved position is the client's own bytes, so the relay
+/// carries `lX` and `lY` unchanged, and a duration only on the `FUNC_MOVE` branch, the one that
+/// calls `Goto`. A move past the legacy distance limit is refused with a `Show` at the mover's
+/// own point and a `Stop` (`G/input_main.cpp:1786-1811`). In the same sectree that `Show` is
+/// `ViewReencode` (`G/entity_view.cpp:23-45`): every viewer is sent the mover's removal and its
+/// insert pair, and the mover its own removal and pair and then the pair of each one it sees,
+/// players before NPCs and each by VID (V1), with no removal first.
 #[test]
-fn a_move_reaches_the_map_around_the_mover_and_not_the_mover() {
+fn a_move_reaches_the_view_around_the_mover_and_not_a_character_out_of_view() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
     let server = Server::start(binary(), database.url());
     create_account(&server, "alice");
     create_account(&server, "bob");
+    create_account(&server, "carol");
     add_characters(&database);
-    sql(
-        &database,
-        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
-         470000, 950000 FROM account WHERE login = 'bob'",
-    );
+    seat_yankee_and_charlie(&database);
 
-    let (mut alice, alpha) = enter_world(&server, b"alice", 0);
-    let (mut yankee, _) = enter_world(&server, b"bob", 0);
+    let (mut alice, alpha, alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    let (_, alpha_info) = yankee_entered.shown.pair_of(alpha.id);
+    assert_eq!(
+        alpha_info, alpha_entered.info,
+        "the summary Alpha got of itself"
+    );
+    let (_, yankee_info) = alice.sees_arrive(yankee_listed.id, false);
+    assert_eq!(
+        yankee_info, yankee_entered.info,
+        "the summary Yankee got of itself"
+    );
+    // `bPKMode` is `m_bPKMode` (`G/char.cpp:1128`): Yankee, at level 1, is below the europe
+    // `PK_PROTECT_LEVEL` of 15 and in `PK_MODE_PROTECT`; Alpha, at 154, is in `PK_MODE_PEACE`
+    // as a `GM_PLAYER` (`test_server`'s GM protect rule waits for its audit, STATUS Topology).
+    assert_eq!(yankee_info[57], 3, "Yankee's bPKMode");
+    assert_eq!(alpha_info[57], 0, "Alpha's bPKMode");
+    let (mut charlie, _) = enter_world(&server, b"carol", 0);
+    alice.quiet("Charlie enters out of Alpha's view");
+    yankee.quiet("and out of Yankee's");
 
     // `FUNC_COMBO` is 3. A step lands at the position, and the record carries no duration.
-    alice.send_record(&client_move(3, 7, 40, 470_100, 950_100, 0x5eed));
-    let seen = yankee.read_game();
-    assert_eq!(seen.len(), GC_MOVE_LEN);
-    assert_eq!(seen[0], GC_MOVE);
-    assert_eq!(seen[1], 3, "bFunc is relayed");
-    assert_eq!(seen[2], 7, "bArg is relayed");
-    assert_eq!(seen[3], 40, "bRot is relayed, not multiplied, on the wire");
-    assert_eq!(&seen[4..8], &alpha.id.to_le_bytes(), "dwVID");
-    assert_eq!(&seen[8..12], &470_100i32.to_le_bytes(), "lX");
-    assert_eq!(&seen[12..16], &950_100i32.to_le_bytes(), "lY");
-    assert_eq!(&seen[16..20], &0x5eedu32.to_le_bytes(), "dwTime");
-    assert_eq!(&seen[20..24], &0u32.to_le_bytes(), "dwDuration");
+    let step = client_move(3, 7, 40, 470_100, 950_100, 0x5eed);
+    alice.send_record(&step);
+    assert_eq!(
+        yankee.read_game(),
+        relayed_move(&step, alpha.id, 0),
+        "bFunc, bArg, bRot unmultiplied, lX, lY and dwTime are the client's; dwDuration is 0"
+    );
     alice.quiet("PacketAround excludes the mover");
 
-    // `FUNC_MOVE` is 1 and it is the branch that calls `Goto`, so the record carries the duration
-    // the client sent. The distance test compares against 999 units of 100, so 200000 is refused.
-    alice.send_record(&client_move(1, 0, 0, 470_200, 950_200, 0x5eee));
-    let stepped = yankee.read_game();
-    assert_eq!(stepped[1], 1, "bFunc");
-    assert_eq!(&stepped[8..12], &470_200i32.to_le_bytes(), "lX");
+    // `FUNC_MOVE` is 1 and it is the branch that calls `Goto`, so the record carries the
+    // duration `Goto` computed: the diagonal of (100, 100) at 300 a second is 471 ms.
+    let walk = client_move(1, 0, 0, 470_200, 950_200, 0x5eee);
+    alice.send_record(&walk);
+    assert_eq!(yankee.read_game(), relayed_move(&walk, alpha.id, 471));
     alice.quiet("the mover is still excluded");
+
+    // The distance test compares against 999 units of 100, so 200000 is refused.
     alice.send_record(&client_move(1, 0, 0, 470_000 + 200_000, 950_000, 0x5eef));
-    yankee.quiet("a refused move sends nothing to anyone");
-    alice
-        .quiet("and the mover only has the legacy Show record, which the Rewrite has no world for");
+    // The viewer: Alpha's removal.
+    yankee.sees_leave(alpha.id);
+    let (shown_again, info_again) = yankee.sees_arrive(alpha.id, false);
+    assert_eq!(&shown_again[17..21], &0i32.to_le_bytes(), "at its own z");
+    assert_eq!(info_again, alpha_entered.info, "then its pair");
+    yankee.quiet("no move follows: the refusal stopped Alpha");
+    // The mover: its own removal.
+    alice.sees_leave(alpha.id);
+    let (own_again, _) = alice.sees_arrive(alpha.id, false);
+    assert_eq!(own_again[21], 6, "CHAR_TYPE_PC");
+    alice.sees_arrive(yankee_listed.id, false);
+    // Entering walked the NPCs sectree by sectree; the re-encode sends them in key order, by VID.
+    let mut npcs: Vec<u32> = alpha_entered
+        .shown
+        .inserts()
+        .iter()
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+        .collect();
+    assert!(!npcs.is_empty(), "map 1's NPCs around Alpha");
+    npcs.sort_unstable();
+    for npc in npcs {
+        let (insert, _) = alice.sees_arrive(npc, false);
+        assert_eq!(insert[21], 1, "CHAR_TYPE_NPC");
+    }
+    alice.quiet("the refusal's records are over");
 
     // A function byte of 6 is past `FUNC_MAX_NUM`, which is the first refused value.
     alice.unanswered(&client_move(6, 0, 0, 470_100, 950_100, 0x5ef0));
+    yankee.quiet("an invalid function sends nothing to anyone");
     // A function byte with the skill bit set passes the range test and steps.
-    alice.send_record(&client_move(0x80, 0, 0, 470_300, 950_300, 0x5ef1));
-    let skill = yankee.read_game();
-    assert_eq!(skill[1], 0x80, "bFunc is relayed");
-    assert_eq!(&skill[8..12], &470_300i32.to_le_bytes(), "lX");
+    let skill = client_move(0x80, 0, 0, 470_300, 950_300, 0x5ef1);
+    alice.send_record(&skill);
+    assert_eq!(
+        yankee.read_game(),
+        relayed_move(&skill, alpha.id, 0),
+        "bFunc is relayed, and a step relays no duration"
+    );
+
+    // One write holding a move refused for its distance and then a shout under the level
+    // limit: legacy writes the refusal's records while it reads the move, before it reads the
+    // shout, so the mover's whole re-encode comes before the info line it is answered with.
+    let mut both = client_move(1, 0, 0, 470_000 + 200_000, 950_000, 0x5ef2);
+    both.extend(client_chat(prodomo::chat::CHAT_SHOUT, b"hi"));
+    yankee.send_record(&both);
+    // The mover's own removal first.
+    yankee.sees_leave(yankee_listed.id);
+    let (inserted, line) = yankee.reencode_then_line();
+    assert!(inserted.contains(&yankee_listed.id), "itself: {inserted:?}");
+    assert!(inserted.contains(&alpha.id), "and Alpha: {inserted:?}");
+    assert_eq!(line[3], prodomo::chat::CHAT_INFO, "{line:02x?}");
+    assert!(line.ends_with(b"level 15 or higher."), "{line:02x?}");
+    yankee.quiet("nothing follows the line");
+    alice.sees_leave(yankee_listed.id);
+    alice.sees_arrive(yankee_listed.id, false);
+    alice.quiet("the viewer hears the refusal and not the shout");
+
+    // The same write from a character above the limit: the viewer hears the refusal's removal
+    // and insert before the shout, and the shouter hears its own re-encode first.
+    let mut both = client_move(1, 0, 0, 470_000 + 200_000, 950_000, 0x5ef3);
+    both.extend(client_chat(prodomo::chat::CHAT_SHOUT, b"hi"));
+    alice.send_record(&both);
+    let shout = chat_packet(prodomo::chat::CHAT_SHOUT, 1, b"|Len|l Alpha : hi");
+    yankee.sees_leave(alpha.id);
+    yankee.sees_arrive(alpha.id, false);
+    assert_eq!(yankee.read_game(), shout, "the shout after the refusal");
+    yankee.quiet("the viewer hears nothing more");
+    alice.sees_leave(alpha.id);
+    let (_, own_line) = alice.reencode_then_line();
+    assert_eq!(own_line, shout, "the shouter hears itself last");
+    alice.quiet("nothing follows the shout");
+    charlie.quiet("out of view and of another empire, Charlie hears none of it");
 }
 
-/// `sys.char.position`: sitting and standing reach every client on the map including the
-/// sender, because `Standup` and `Sitdown` call `PacketAround` with no `except`. A pose the
-/// character is already in is ignored, and legacy collapses the ground pose onto the chair
-/// value, which is a Defect the Rewrite does not reproduce.
+/// `sys.char.position`: sitting and standing reach every client in the sender's view and the
+/// sender, because `Standup` and `Sitdown` call `PacketAround` with no `except`, and nobody out
+/// of view on the map. A pose the character is already in is ignored, and legacy collapses the
+/// ground pose onto the chair value, which is a Defect the Rewrite does not reproduce.
 #[test]
-fn a_pose_reaches_the_map_including_its_sender() {
+fn a_pose_reaches_the_view_including_its_sender() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
     let server = Server::start(binary(), database.url());
     create_account(&server, "alice");
     create_account(&server, "bob");
+    create_account(&server, "carol");
     add_characters(&database);
     sql(
         &database,
         "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
          470000, 950000 FROM account WHERE login = 'bob'",
     );
+    // Charlie stands on map 1, 15700 west and 9300 north of Alpha, out of view.
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         454300, 940700 FROM account WHERE login = 'carol'",
+    );
 
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
-    let (mut yankee, _) = enter_world(&server, b"bob", 0);
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, true);
+    let (mut carol, _charlie) = enter_world(&server, b"carol", 0);
 
     // Legacy `Sitdown` writes `POSITION_SITTING_GROUND` for both chair and ground and drops
     // its `is_ground` argument, so the chair request is a recorded Divergence: the Rewrite
@@ -4001,18 +4430,23 @@ fn a_pose_reaches_the_map_including_its_sender() {
     assert_eq!(stood[5], POSITION_GENERAL);
     assert_eq!(yankee.read_game(), stood);
 
-    // `Sitdown(1)` is the other arm of the same switch and reaches the same state.
-    alice.send_record(&client_position(POSITION_SITTING_GROUND));
+    // `Sitdown(1)` is the other arm of the same switch and reaches the same state. `/dance1`
+    // needs `POS_FIGHTING`, and `interpret_command` tells a sitting character so
+    // (`G/cmd.cpp:679`); only the one who typed it is told. In one write, the pose comes first:
+    // legacy writes it to the view and the sender while it reads it, before it reads the line.
+    let mut both = client_position(POSITION_SITTING_GROUND);
+    both.extend(slash(b"/dance1"));
+    alice.send_record(&both);
     let ground = alice.read_game();
-    assert_eq!(ground[5], POSITION_SITTING_GROUND);
+    assert_eq!(
+        ground[5], POSITION_SITTING_GROUND,
+        "the pose first: {ground:02x?}"
+    );
+    assert_eq!(alice.read_game(), info_to_alpha(b"[LS;920]"));
     assert_eq!(yankee.read_game(), ground);
 
     // Sitting while already sitting is the `if (IsPosition(POS_SITTING)) return;` arm.
     alice.unanswered(&client_position(POSITION_SITTING_CHAIR));
-    // `/dance1` needs `POS_FIGHTING`, and `interpret_command` tells a sitting character so
-    // (`G/cmd.cpp:679`). Only the one who typed it is told.
-    alice.send_record(&slash(b"/dance1"));
-    assert_eq!(alice.read_game(), info_to_alpha(b"[LS;920]"));
 
     // Standing from the ground is a third record, and it leaves the character standing.
     alice.send_record(&client_position(POSITION_GENERAL));
@@ -4028,11 +4462,12 @@ fn a_pose_reaches_the_map_including_its_sender() {
     yankee.quiet("a command line reaches only the one who typed it");
     // An unknown pose byte is not a legacy arm, so nothing is sent.
     alice.unanswered(&client_position(0x7f));
+    carol.quiet("out of view, Charlie is sent none of the poses");
 }
 
-/// `sys.world.move`: a sync batch is relayed around the claimer and never to the claimer, and an
-/// unknown VID or a victim of the wrong kind is skipped while the rest of the batch still goes
-/// out.
+/// `sys.world.move`: a sync batch is relayed to the claimer's view and never to the claimer or
+/// anyone out of view, and an unknown VID or a victim of the wrong kind is skipped while the rest
+/// of the batch still goes out.
 #[test]
 fn a_sync_batch_is_relayed_around_the_claimer_only() {
     let Some(database) = ScratchDatabase::create() else {
@@ -4041,15 +4476,24 @@ fn a_sync_batch_is_relayed_around_the_claimer_only() {
     let server = Server::start(binary(), database.url());
     create_account(&server, "alice");
     create_account(&server, "bob");
+    create_account(&server, "carol");
     add_characters(&database);
     sql(
         &database,
         "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
          470000, 950000 FROM account WHERE login = 'bob'",
     );
+    // Charlie stands on map 1 out of everyone's view.
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         454300, 940700 FROM account WHERE login = 'carol'",
+    );
 
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
     let (mut yankee, yankee_id) = enter_world(&server, b"bob", 0);
+    alice.sees_arrive(yankee_id.id, true);
+    let (mut charlie, _) = enter_world(&server, b"carol", 0);
 
     // A claim on Yankee from a position 10 units away, inside every limit.
     //
@@ -4089,8 +4533,8 @@ fn a_sync_batch_is_relayed_around_the_claimer_only() {
     yankee.quiet("a self claim sends nothing");
 
     // The other direction works the same way: Yankee claims Alpha, and the ownership record
-    // goes around the map with no exception, so Alice reads it and Yankee does not read the
-    // position batch that follows it.
+    // goes to the view around Alpha and to Alpha with no exception, so Alice reads it and
+    // Yankee does not read the position batch that follows it.
     yankee.send_record(&client_sync_position(&[(alpha.id, 470_020, 950_020)]));
     let seen = alice.read_game();
     assert_eq!(seen.len(), OWNERSHIP_LEN);
@@ -4123,6 +4567,420 @@ fn a_sync_batch_is_relayed_around_the_claimer_only() {
     alice.send_record(&client_sync_position(&[(alpha.id, 470_030, 950_030)]));
     alice.quiet("a refused claim writes no record to the claimer");
     yankee.quiet("a refused claim writes no record to the victim");
+    charlie.quiet("a character out of view hears no claim and no batch");
+}
+
+/// Where Yankee stands in the view scenarios: 5092 from Alpha on [`GOTO_TARGET`] and 2280 from
+/// idx18, in sectree row 146.
+const VIEW_B: (i32, i32) = (444_100, 937_400);
+/// Where Charlie stands in the view scenarios: 13228 from Alpha, 11116 from Yankee and 13396
+/// from idx18, so out of every view at a range of 10000.
+const VIEW_C: (i32, i32) = (454_300, 940_700);
+/// A point in sectree row 147, outside the 3x3 around Alpha's row 145 and 9128 from Alpha, so
+/// within reach but not in a sectree Alpha's view walks.
+const ROW_147: (i32, i32) = (444_100, 941_600);
+/// The VID of idx18, the 9009 at [`IDX18_AT`].
+const IDX18_VID: u32 = FIRST_NPC_VID + 18;
+/// `FUNC_MOVE` and `FUNC_COMBO`, `TPacketCGMove`'s `bFunc`.
+const FUNC_MOVE: u8 = 1;
+const FUNC_COMBO: u8 = 3;
+/// A walk of 1600 at the default speed, 300 a second: 5333 ms.
+const LONG_WALK_MS: u32 = 5333;
+
+/// A Server whose view range is 10000, so its radius is 10500, with alice's Alpha, bob's Yankee
+/// and carol's Charlie on map 1 at `points`, each stored at `stamina_value`.
+fn view_cast(database: &ScratchDatabase, points: [(i32, i32); 3], stamina_value: i32) -> Server {
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "view_range = 10000",
+    );
+    for login in ["alice", "bob", "carol"] {
+        create_account(&server, login);
+    }
+    add_characters(database);
+    let [(x, y), yankee, charlie] = points;
+    sql(
+        database,
+        &format!("UPDATE player SET x = {x}, y = {y} WHERE name = 'Alpha'"),
+    );
+    for (login, name, job, (x, y)) in [
+        ("bob", "Yankee", 1, yankee),
+        ("carol", "Charlie", 2, charlie),
+    ] {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, '{name}', \
+                 {job}, {x}, {y} FROM account WHERE login = '{login}'"
+            ),
+        );
+    }
+    for name in ["Alpha", "Yankee", "Charlie"] {
+        stamina(database, name, stamina_value);
+    }
+    server
+}
+
+/// The bytes of a `GC_CHARACTER_ADD` between its angle and its affect flags: the point, z,
+/// type, race, both speeds and the state flag. The angle and the flags are masked (R5, V9).
+fn insert_body(insert: &[u8]) -> &[u8] {
+    &insert[9..27]
+}
+
+/// Assert that `insert` is idx18's `GC_CHARACTER_ADD`: an NPC of race 9009 at [`IDX18_AT`].
+fn assert_idx18(insert: &[u8]) {
+    assert_eq!(&insert[1..5], &IDX18_VID.to_le_bytes(), "idx18's VID");
+    assert_eq!(inserted_at(insert), IDX18_AT, "at its point");
+    assert_eq!(insert[21], 1, "CHAR_TYPE_NPC");
+    assert_eq!(&insert[22..24], &9009u16.to_le_bytes(), "race 9009");
+}
+
+/// Assert that the `GC_MOVE` an insert carries for `vid` walks to `dest` with some time left
+/// of a walk of `walk_ms`: `FUNC_MOVE`, argument 0, and a duration from 1 to `walk_ms - 1`. The
+/// rotation and the start time are masked.
+fn assert_insert_move(record: &[u8], vid: u32, dest: (i32, i32), walk_ms: u32) {
+    assert_eq!(record.len(), GC_MOVE_LEN);
+    assert_eq!(&record[..3], &[GC_MOVE, FUNC_MOVE, 0], "{record:02x?}");
+    assert_eq!(&record[4..8], &vid.to_le_bytes(), "the mover's VID");
+    assert_eq!(&record[8..12], &dest.0.to_le_bytes(), "the destination's x");
+    assert_eq!(
+        &record[12..16],
+        &dest.1.to_le_bytes(),
+        "the destination's y"
+    );
+    let left = u32::from_le_bytes(record[20..24].try_into().expect("four bytes"));
+    assert!(
+        (1..walk_ms).contains(&left),
+        "iDur {left} is the walk's remainder"
+    );
+}
+
+/// Wait until a walk sent at `sent` of `walk_ms` has ended, and 1.3 seconds more for its last
+/// Pulses.
+fn wait_out_walk(sent: std::time::Instant, walk_ms: u32) {
+    let end = sent + Duration::from_millis(u64::from(walk_ms) + 1300);
+    std::thread::sleep(end.saturating_duration_since(std::time::Instant::now()));
+}
+
+/// `sys.world.view`: at a view range of 10000, entering shows each character within 10500 in the
+/// 3x3 sectrees around the entrant (`CEntity::UpdateSectree`, `G/entity_view.cpp:122-236`), and
+/// the entrant to each player among them. Alpha enters first and sees idx18 alone, Yankee 5092
+/// away sees idx18 and then Alpha in `Build` order, and Alpha sees Yankee arrive. Charlie, 13228
+/// and 11116 away, sees nobody and nobody sees Charlie. No row walks, so no walk mode is sent.
+#[test]
+fn players_and_npcs_within_view_range_see_each_other_on_entry() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = view_cast(&database, [GOTO_TARGET, VIEW_B, VIEW_C], 12_345);
+
+    let (mut alice, alpha, alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+    let own = &alpha_entered.add;
+    assert_eq!(inserted_at(own), GOTO_TARGET);
+    assert_eq!(&own[17..21], &0i32.to_le_bytes(), "z 0");
+    assert_eq!(own[21], 6, "CHAR_TYPE_PC");
+    assert_eq!(own[24], 100, "bMovingSpeed");
+    assert_eq!(alpha_entered.shown.inserts().len(), 1, "idx18 alone");
+    assert_idx18(&alpha_entered.shown.records[0]);
+    assert_eq!(alpha_entered.shown.records[1][0], GC_CHAR_ADDITIONAL_INFO);
+    assert_eq!(alpha_entered.shown.records.len(), 2);
+    assert!(alpha_entered.shown.list.is_some(), "then map 1's list");
+
+    let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    assert_eq!(inserted_at(&yankee_entered.add), VIEW_B);
+    let seen = &yankee_entered.shown.records;
+    assert_eq!(seen.len(), 4, "idx18's pair and Alpha's");
+    assert_idx18(&seen[0]);
+    assert_eq!(
+        &seen[1][..5],
+        &[&[GC_CHAR_ADDITIONAL_INFO][..], &IDX18_VID.to_le_bytes()].concat()
+    );
+    assert_eq!(
+        &seen[2][1..5],
+        &alpha.id.to_le_bytes(),
+        "Alpha's sectree comes second"
+    );
+    assert_eq!(
+        insert_body(&seen[2]),
+        insert_body(own),
+        "as Alpha saw itself"
+    );
+    assert_eq!(
+        seen[3], alpha_entered.info,
+        "the summary Alpha got of itself"
+    );
+    let (add, info) = alice.sees_arrive(yankee_listed.id, false);
+    assert_eq!(insert_body(&add), insert_body(&yankee_entered.add));
+    assert_eq!(info, yankee_entered.info);
+    alice.quiet("Yankee's pair alone");
+
+    let (mut charlie, charlie_listed, charlie_entered) = enter_world_seeing(&server, b"carol", 0);
+    assert_eq!(inserted_at(&charlie_entered.add), VIEW_C);
+    assert_eq!(&charlie_entered.add[1..5], &charlie_listed.id.to_le_bytes());
+    assert!(
+        charlie_entered.shown.records.is_empty(),
+        "nobody within reach"
+    );
+    assert!(charlie_entered.shown.list.is_some());
+    alice.quiet("Charlie is 13228 away");
+    yankee.quiet("and 11116 from Yankee");
+    charlie.quiet("Charlie's burst is over");
+}
+
+/// `sys.world.view`: reach is not enough. Yankee enters in sectree row 147, 9128 from Alpha, and
+/// sees idx18 at 5697, but Alpha's row 145 is outside the 3x3 around row 147, so neither sees the
+/// other.
+#[test]
+fn a_player_in_another_row_of_sectrees_is_not_seen_even_within_range() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = view_cast(&database, [GOTO_TARGET, ROW_147, VIEW_C], 12_345);
+    let (mut alice, _alpha, _) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, _, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    assert_eq!(inserted_at(&yankee_entered.add), ROW_147);
+    let seen = &yankee_entered.shown.records;
+    assert_eq!(seen.len(), 2, "idx18's pair alone");
+    assert_idx18(&seen[0]);
+    assert!(yankee_entered.shown.list.is_some());
+    alice.quiet("Yankee's sectree is not around Alpha's");
+    yankee.quiet("Yankee's burst is over");
+}
+
+/// `sys.world.view`: a player with nobody within reach is shown itself and the map's list.
+#[test]
+fn a_lone_player_far_from_everyone_sees_only_itself() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = view_cast(&database, [GOTO_TARGET, VIEW_B, VIEW_C], 12_345);
+    let (mut charlie, _, entered) = enter_world_seeing(&server, b"carol", 0);
+    assert!(entered.shown.records.is_empty(), "its own pair alone");
+    let list = entered.shown.list.expect("map 1's list");
+    assert_eq!(
+        &list[1..5],
+        &[&1637u16.to_le_bytes()[..], &48u16.to_le_bytes()].concat()
+    );
+    charlie.quiet("nothing else");
+}
+
+/// `sys.world.view`: a moving player's view is recomputed every 16 Pulses
+/// (`G/char_state.cpp:797`), and only then. Yankee walks from row 147 into row 146; at the first
+/// sample there, Yankee is shown Alpha, and Alpha is shown Yankee at its live point with the
+/// rest of its walk and the run walk mode (`EncodeInsertPacket`, `G/char.cpp:1097-1108`,
+/// `:1211-1223`). The walk back is relayed to Alpha whole, and at the first sample in row 147
+/// again each is removed from the other.
+#[test]
+fn a_walk_into_view_inserts_both_ways_at_the_sample_and_a_walk_out_removes_both() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = view_cast(&database, [GOTO_TARGET, ROW_147, VIEW_C], 12_345);
+    let (mut alice, alpha, alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    let yankee_id = yankee_listed.id;
+    alice.quiet("out of view");
+
+    let row_146 = (444_100, 940_000);
+    let sent = std::time::Instant::now();
+    yankee.send_record(&client_move(FUNC_MOVE, 0, 10, row_146.0, row_146.1, 0x6000));
+    let (add, info) = yankee.sees_arrive(alpha.id, false);
+    assert_eq!(insert_body(&add), insert_body(&alpha_entered.add));
+    assert_eq!(info, alpha_entered.info);
+    let (add, info) = alice.sees_arrive(yankee_id, false);
+    let (x, y) = inserted_at(&add);
+    assert_eq!(x, 444_100);
+    assert!(
+        (940_000..940_800).contains(&y),
+        "the live point in row 146: {y}"
+    );
+    assert_eq!(info, yankee_entered.info);
+    assert_insert_move(&alice.read_game(), yankee_id, row_146, LONG_WALK_MS);
+    assert_eq!(
+        alice.read_game(),
+        walk_mode_of(&yankee_id.to_le_bytes()),
+        "a moving insert's mode"
+    );
+    alice.quiet("one insert");
+    yankee.quiet("one insert");
+
+    wait_out_walk(sent, LONG_WALK_MS);
+    yankee.send_record(&client_move(FUNC_MOVE, 2, 30, ROW_147.0, ROW_147.1, 0x6001));
+    let mut relay = vec![GC_MOVE, FUNC_MOVE, 2, 30];
+    relay.extend_from_slice(&yankee_id.to_le_bytes());
+    relay.extend_from_slice(&ROW_147.0.to_le_bytes());
+    relay.extend_from_slice(&ROW_147.1.to_le_bytes());
+    relay.extend_from_slice(&0x6001u32.to_le_bytes());
+    relay.extend_from_slice(&LONG_WALK_MS.to_le_bytes());
+    assert_eq!(alice.read_game(), relay, "from where the first walk ended");
+    alice.sees_leave(yankee_id);
+    yankee.sees_leave(alpha.id);
+    alice.quiet("one removal");
+    yankee.quiet("one removal");
+}
+
+/// `sys.world.view`: an NPC is shown when a walker's sample finds it, and removed at the first
+/// sample that does not. Alpha enters in row 144 with no NPC in view, walks into row 145, where
+/// idx18 in row 146 is within the 3x3 and 10500, and walks back.
+#[test]
+fn an_npc_appears_and_disappears_as_a_player_walks() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let row_144 = (444_100, 927_200);
+    let server = view_cast(&database, [row_144, VIEW_B, VIEW_C], 12_345);
+    let (mut alice, _alpha, entered) = enter_world_seeing(&server, b"alice", 0);
+    assert!(entered.shown.records.is_empty(), "no NPC in view");
+    let list = entered.shown.list.expect("map 1's list");
+    assert_eq!(
+        &list[1..5],
+        &[&1637u16.to_le_bytes()[..], &48u16.to_le_bytes()].concat()
+    );
+
+    let sent = std::time::Instant::now();
+    alice.send_record(&client_move(FUNC_MOVE, 0, 0, 444_100, 928_800, 0x6100));
+    let (add, _) = alice.sees_arrive(IDX18_VID, false);
+    assert_idx18(&add);
+    alice.quiet("idx18 alone");
+
+    wait_out_walk(sent, LONG_WALK_MS);
+    alice.send_record(&client_move(FUNC_MOVE, 0, 0, row_144.0, row_144.1, 0x6101));
+    alice.sees_leave(IDX18_VID);
+    alice.quiet("one removal");
+}
+
+/// `sys.world.view`: a step lands at once (`Sync`) and never recomputes the view
+/// (`G/input_main.cpp:1859-1868`), while a `Goto` does at its next sample. Yankee steps from row
+/// 147 into row 146, 7591 from Alpha in a shared 3x3, and neither is shown the other; Yankee's
+/// next walk is, at its first sample.
+#[test]
+fn a_step_never_recomputes_the_view_and_a_goto_does_at_its_sample() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = view_cast(&database, [GOTO_TARGET, ROW_147, VIEW_C], 12_345);
+    let (mut alice, alpha, alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    let yankee_id = yankee_listed.id;
+
+    yankee.send_record(&client_move(FUNC_COMBO, 0, 0, 444_100, 940_000, 0x6200));
+    yankee.quiet("a step shows the stepper nobody");
+    alice.quiet("and nobody the stepper");
+
+    let dest = (444_100, 938_400);
+    yankee.send_record(&client_move(FUNC_MOVE, 0, 0, dest.0, dest.1, 0x6201));
+    let (add, info) = alice.sees_arrive(yankee_id, false);
+    let (x, y) = inserted_at(&add);
+    assert_eq!(x, 444_100);
+    assert!((dest.1..=940_000).contains(&y), "the live point: {y}");
+    assert_eq!(info, yankee_entered.info);
+    assert_insert_move(&alice.read_game(), yankee_id, dest, LONG_WALK_MS);
+    assert_eq!(alice.read_game(), walk_mode_of(&yankee_id.to_le_bytes()));
+    let (add, info) = yankee.sees_arrive(alpha.id, false);
+    assert_eq!(insert_body(&add), insert_body(&alpha_entered.add));
+    assert_eq!(info, alpha_entered.info);
+    alice.quiet("one insert");
+    yankee.quiet("one insert");
+}
+
+/// `sys.chat` with `sys.world.view`: a talking line reaches the whole map
+/// (`FEmpireChatPacket`), so Charlie, out of every view, hears Alpha too.
+#[test]
+fn talking_chat_reaches_the_whole_map_including_players_out_of_view() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = view_cast(&database, [GOTO_TARGET, VIEW_B, VIEW_C], 12_345);
+    let (mut alice, _alpha, _) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, false);
+    let (mut charlie, _, _) = enter_world_seeing(&server, b"carol", 0);
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"hello"));
+    let own = alice.read_game();
+    assert_eq!(own[0], GC_CHAT);
+    assert_eq!(&own[10..], b"Alpha : hello");
+    assert_eq!(yankee.read_game(), own, "Yankee, in view");
+    assert_eq!(charlie.read_game(), own, "Charlie, 13228 away");
+    for (client, note) in [
+        (&mut alice, "Alpha"),
+        (&mut yankee, "Yankee"),
+        (&mut charlie, "Charlie"),
+    ] {
+        client.quiet(note);
+    }
+}
+
+/// `sys.world.view`: a player who leaves is removed from each viewer (`CEntity::Destroy`'s
+/// `ViewCleanup`, `G/entity.cpp:33-40`, `G/entity_view.cpp:8-21`) and from nobody else.
+#[test]
+fn a_leaving_player_is_removed_from_its_viewers_only() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = view_cast(&database, [GOTO_TARGET, VIEW_B, VIEW_C], 12_345);
+    let (mut alice, alpha, _) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, false);
+    let (mut charlie, _, _) = enter_world_seeing(&server, b"carol", 0);
+    alice.quiet("Charlie is out of view");
+
+    drop(alice);
+    server.wait_for("Character left the world");
+    yankee.sees_leave(alpha.id);
+    yankee.quiet("one removal");
+    charlie.quiet("Charlie never saw Alpha");
+}
+
+/// `sys.world.view`: a walking player's walk mode rides with its insert. Each entrant at no
+/// stamina is sent its own walk mode after its own pair; the entrant's insert to a viewer sends
+/// the viewer's walk mode back after the viewer's pair, and the viewer's insert to the entrant
+/// sends the entrant's walk mode first (`G/char.cpp:1225-1236`).
+#[test]
+fn at_zero_stamina_the_walk_mode_rides_with_each_insert() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = view_cast(&database, [GOTO_TARGET, VIEW_B, VIEW_C], 0);
+    let (mut alice, alpha, alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+    assert!(alice.walking, "the burst carried no stamina");
+    let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    let seen = &yankee_entered.shown.records;
+    assert_eq!(
+        seen.len(),
+        5,
+        "idx18's pair, Alpha's, and Alpha's walk mode"
+    );
+    assert_idx18(&seen[0]);
+    assert_eq!(&seen[2][1..5], &alpha.id.to_le_bytes());
+    assert_eq!(seen[3], alpha_entered.info);
+    assert_eq!(seen[4], walk_mode_of(&alpha.id.to_le_bytes()));
+    alice.sees_arrive(yankee_listed.id, true);
+    alice.quiet("Yankee's walk mode and pair alone");
+    yankee.quiet("Yankee's burst is over");
+}
+
+/// A `CG_ENTER_GAME` in the game phase is in the main table and its handler does nothing
+/// (`G/input_main.cpp:4126-4127`), so it is consumed without a record, it shows nobody again,
+/// and the connection keeps answering.
+#[test]
+fn a_game_phase_enter_game_is_consumed_silently() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = view_cast(&database, [GOTO_TARGET, VIEW_B, VIEW_C], 12_345);
+    let (mut alice, _alpha, _) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, false);
+
+    alice.unanswered(&client_enter_game());
+    yankee.quiet("Alpha is not shown again");
+    alice.send_record(&client_chat(CHAT_TALKING, b"still here"));
+    let own = alice.read_game();
+    assert_eq!(&own[10..], b"Alpha : still here");
+    assert_eq!(yankee.read_game(), own);
 }
 
 /// `FindCharacter` looks a sync victim up in the world, and a disconnect removes the
@@ -4138,7 +4996,7 @@ fn a_claim_on_a_character_who_has_left_finds_nobody() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let server = Server::start(binary(), database.url());
+    let mut server = Server::start(binary(), database.url());
     create_account(&server, "alice");
     create_account(&server, "bob");
     add_characters(&database);
@@ -4154,6 +5012,9 @@ fn a_claim_on_a_character_who_has_left_finds_nobody() {
         let (_alice, listed) = enter_world(&server, b"alice", 0);
         listed.id
     };
+    // The leave reaches the game thread after the socket closes, so Yankee enters once the
+    // world has let Alpha go, and is never shown it.
+    server.wait_for("Character left the world");
     let (mut yankee, _yankee_id) = enter_world(&server, b"bob", 0);
 
     // `if (!victim) continue;` skips an element whose VID is not in the world, so the batch
@@ -4952,6 +5813,7 @@ fn a_relogged_character_wears_its_equipment_and_its_points_count_it() {
     assert_eq!(gold[0], GC_CHARACTER_GOLD);
     let loaded = keyed.read_game();
     assert_eq!(loaded[0], GC_PLAYER_POINTS);
+    keyed.loaded(&loaded);
     for (slot, value, what) in [
         (5, 1500, "POINT_HP, as stored"),
         (6, 1420, "POINT_MAX_HP, before the items: 700 + 18 x 40"),
@@ -5665,6 +6527,30 @@ fn an_info_line(text: &[u8]) -> Vec<u8> {
     record
 }
 
+/// Accounts for alice, bob and each of `others`, all in empire 1: Alpha for alice
+/// ([`add_characters`]) and Zulu for bob, standing where Alpha stands.
+fn seat_alpha_and_zulu(server: &Server, database: &ScratchDatabase, others: &[&str]) {
+    create_account(server, "alice");
+    create_account(server, "bob");
+    for login in others {
+        create_account(server, login);
+    }
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, 470000, \
+         950000 FROM account WHERE login = 'bob'",
+    );
+}
+
+/// Load `login`'s first character and enter the game with [`enter_game_records`].
+fn enter_game_unread(server: &Server, login: &[u8]) -> (Keyed, Listed) {
+    let (mut keyed, character, _items) = load_character(server, login, 0);
+    enter_game_records(&mut keyed);
+    (keyed, character)
+}
+
 /// A `CG_ITEM_DROP2` of `count` from the inventory cell `cell`, or a `CG_ITEM_DROP` when
 /// `count` is `None`.
 fn client_item_drop(cell: u16, count: Option<u16>) -> Vec<u8> {
@@ -5679,7 +6565,7 @@ fn client_item_drop(cell: u16, count: Option<u16>) -> Vec<u8> {
 /// `cg.game.item_drop`, `cg.game.item_drop2`, `cg.game.item_pickup`: part of a stack is
 /// dropped, a drop inside the second after it is refused, the rest is dropped whole, and each
 /// part is picked up again, one by a character that entered the map after it fell. Every client
-/// on the map sees each item fall and go, and the store follows each step.
+/// on the map sees each item fall and go, out of view too (V8), and the store follows each step.
 #[test]
 fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     let Some(database) = ScratchDatabase::create() else {
@@ -5687,14 +6573,12 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     };
     let (mut server, console) =
         Server::start_with_console(binary(), database.url(), &default_channels());
-    create_account(&server, "alice");
-    create_account(&server, "bob");
-    add_characters(&database);
-    sql(&database, "UPDATE account SET empire = 1");
+    seat_alpha_and_zulu(&server, &database, &["carol"]);
+    // Charlie stands on map 1 but 15700 west and 9300 north of Alpha, out of view.
     sql(
         &database,
-        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, 470000, \
-         950000 FROM account WHERE login = 'bob'",
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         454300, 940700 FROM account WHERE login = 'carol'",
     );
     let protos = owners_protos();
     let stackable = a_stackable_vnum(&protos);
@@ -5732,23 +6616,38 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     let dropped_at = std::time::Instant::now();
 
     // When: Zulu enters the map.
-    let (mut zulu, _items) = {
-        let (mut keyed, _character, items) = load_character(&server, b"bob", 0);
-        enter_game_records(&mut keyed);
-        (keyed, items)
-    };
-    // Then: the item lying there is shown.
+    let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
+    // Then: the item lying there is shown, and Alpha sees Zulu arrive.
     assert_eq!(zulu.read_game(), a_ground_add(1, stackable));
+    alpha.sees_arrive(zulu_listed.id, true);
+    // When: Charlie enters out of view. Then: every item lying on the map is shown after
+    // `GC_PHASE` (V8), and nobody sees Charlie arrive.
+    let (mut charlie, _character) = enter_game_unread(&server, b"carol");
+    assert_eq!(charlie.read_game(), a_ground_add(1, stackable));
+    alpha.quiet("Charlie enters out of Alpha's view");
+    zulu.quiet("and out of Zulu's");
 
-    // When: once the second has passed, Alpha drops the rest whole.
+    // When: once the second has passed, Alpha drops the rest whole and shouts, in one write.
     std::thread::sleep(Duration::from_millis(1100).saturating_sub(dropped_at.elapsed()));
-    alpha.send_record(&client_item_drop(0, None));
+    let mut both = client_item_drop(0, None);
+    both.extend(client_chat(prodomo::chat::CHAT_SHOUT, b"hi"));
+    alpha.send_record(&both);
     // Then: the cell is cleared, the six fall under ground VID 2, Zulu sees them fall, and the
-    // row is gone.
+    // row is gone. Legacy writes the fall to the map while it reads the drop, before it reads
+    // the shout, so everyone hears the shout after the fall.
+    let shout = chat_packet(prodomo::chat::CHAT_SHOUT, 1, b"|Len|l Alpha : hi");
     assert_eq!(alpha.read_game(), a_clear_record(0));
     assert_eq!(alpha.read_game(), a_ground_add(2, stackable));
     assert_eq!(alpha.read_game(), an_info_line(b"[LS;443]"));
+    assert_eq!(alpha.read_game(), shout);
     assert_eq!(zulu.read_game(), a_ground_add(2, stackable));
+    assert_eq!(zulu.read_game(), shout, "the shout after the fall");
+    assert_eq!(
+        charlie.read_game(),
+        a_ground_add(2, stackable),
+        "the whole map (V8)"
+    );
+    assert_eq!(charlie.read_game(), shout);
     check(&database, "NOT EXISTS (SELECT 1 FROM item)");
 
     // When: Zulu picks up the four.
@@ -5761,6 +6660,7 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     assert_eq!(set[26], 1, "the pick-up highlight");
     assert_eq!(zulu.read_game(), an_info_line(&picked_up));
     assert_eq!(alpha.read_game(), a_ground_del(1));
+    assert_eq!(charlie.read_game(), a_ground_del(1), "the whole map (V8)");
     check(
         &database,
         "EXISTS (SELECT 1 FROM item JOIN player ON player.id = item.owner_id WHERE item.id = \
@@ -5776,6 +6676,7 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     assert_eq!(set[26], 0, "Alpha was the last holder");
     assert_eq!(alpha.read_game(), an_info_line(&picked_up));
     assert_eq!(zulu.read_game(), a_ground_del(2));
+    assert_eq!(charlie.read_game(), a_ground_del(2), "the whole map (V8)");
     check(
         &database,
         "EXISTS (SELECT 1 FROM item JOIN player ON player.id = item.owner_id WHERE item.id = \
@@ -5784,6 +6685,7 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     // And: an item already picked up is not there to pick up, and nobody is told.
     alpha.unanswered(&protocol::cg_item_pickup::CgItemPickup::new(1).encode());
     assert_eq!(zulu.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    charlie.quiet("nothing more reaches Charlie");
 }
 
 /// `event.item.item_destroy_event`: with a two-second lifetime, an item nobody picks up is
@@ -5800,15 +6702,7 @@ fn a_dropped_item_nobody_picks_up_is_destroyed_on_time_and_the_map_sees_it_go() 
         &default_channels(),
         "item_destroy_time_dropitem = 2",
     );
-    create_account(&server, "alice");
-    create_account(&server, "bob");
-    add_characters(&database);
-    sql(&database, "UPDATE account SET empire = 1");
-    sql(
-        &database,
-        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, 470000, \
-         950000 FROM account WHERE login = 'bob'",
-    );
+    seat_alpha_and_zulu(&server, &database, &[]);
     let stackable = a_stackable_vnum(&owners_protos());
     let inventory = common::item_slots::EWindows::Inventory as u8;
 
@@ -5817,11 +6711,8 @@ fn a_dropped_item_nobody_picks_up_is_destroyed_on_time_and_the_map_sees_it_go() 
     Server::write_console(&console, &format!("item give Alpha {stackable} 3"));
     server.wait_for("id 100000000; the client has it");
     assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, stackable, 3));
-    let mut zulu = {
-        let (mut keyed, _character, _items) = load_character(&server, b"bob", 0);
-        enter_game_records(&mut keyed);
-        keyed
-    };
+    let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
+    alpha.sees_arrive(zulu_listed.id, true);
 
     // When: Alpha drops gold. Then: nothing answers, and the drop limit is not started.
     alpha.unanswered(
@@ -6216,6 +7107,7 @@ fn a_trade_moves_an_item_and_gold_between_two_players_in_one_transaction() {
     seat_the_traders(&database, vnum);
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
     let (mut bob, yankee) = enter_world(&server, b"bob", 0);
+    alice.sees_arrive(yankee.id, true);
     // Given: Alpha's slot 2 names the item's cell 5, and slot 6 skill 3.
     alice.send_record(&client_quickslot_add(2, 1, 5));
     assert_eq!(alice.read_game(), [GC_QUICKSLOT_ADD, 2, 1, 5]);

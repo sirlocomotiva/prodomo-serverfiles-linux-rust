@@ -7,6 +7,8 @@ use std::thread::Thread;
 
 use tokio::sync::{mpsc, oneshot};
 
+use protocol::cg_move::CgMove;
+use protocol::cg_variable::SyncPositionPacket;
 use protocol::item_pos::ItemPos;
 use world::character::{Points, Quickslots};
 use world::item::Item;
@@ -19,16 +21,18 @@ use crate::game_state::{
 };
 use crate::item_grant::{GrantOutcome, GrantRefusal, GrantRequest};
 use crate::item_move::{MoveItemRefused, MovedItems, Mover};
+use crate::loading_phase::PcCard;
 use crate::quickslot::{QuickslotAnswer, QuickslotStep};
+use crate::sync_position::SyncPositionResult;
 
 /// Default capacity of the Tokio-to-game command queue.
-pub const DEFAULT_COMMAND_CAPACITY: usize = 256;
+pub const DEFAULT_COMMAND_CAPACITY: usize = 1024;
 
 /// Default capacity of the game-to-Tokio effect queue.
 pub const DEFAULT_EFFECT_CAPACITY: usize = 256;
 
 /// Default maximum commands drained at the start of each pulse.
-pub const DEFAULT_MAX_COMMANDS_PER_PULSE: usize = 64;
+pub const DEFAULT_MAX_COMMANDS_PER_PULSE: usize = 512;
 
 /// Bounded channel and command-drain settings for a game-loop thread.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -254,7 +258,10 @@ pub enum GameCommand {
         /// item holds.
         items: Vec<(ItemPos, Item)>,
         /// The points the load computed with those items worn, and the quickslots it set.
-        loaded: Loaded,
+        ///
+        /// Boxed because it is most of the command's size, and every future that sends a
+        /// command holds one.
+        loaded: Box<Loaded>,
         /// Where the game thread writes records addressed to this client.
         ///
         /// The world has no socket. It holds this sender and the descriptor drains
@@ -262,13 +269,14 @@ pub enum GameCommand {
         /// [`crate::client_registry`] and is what lets a grant be delivered without
         /// the game thread owning a file descriptor.
         outbox: ClientOutbox,
-        /// Where the game thread reports whether it admitted the character.
+        /// Where the game thread reports whether it admitted the character, and the
+        /// records the show sent its own client.
         ///
         /// Closed, not sent, when the world could not act at all. The caller closes
         /// the descriptor rather than entering the game with a character the world
         /// does not hold, because a later grant would find nobody and the inventory
         /// would silently diverge.
-        reply: oneshot::Sender<Result<(), EnterWorldRefused>>,
+        reply: oneshot::Sender<Result<Shown, EnterWorldRefused>>,
     },
     /// Takes a live client's character out of the world.
     ///
@@ -451,11 +459,95 @@ pub enum GameCommand {
         /// Where the game thread reports the records the step's script sent.
         reply: oneshot::Sender<Result<Vec<Vec<u8>>, MoveItemRefused>>,
     },
+    /// Runs one `CG_MOVE` of the player online under `vid` (`G/input_main.cpp:1757-1891`): the
+    /// world judges it against the body, moves the body and relays the record to the body's
+    /// view. Nothing answers; the world logs what it did.
+    Move {
+        /// The VID of the character whose client sent the move.
+        vid: common::vid::Vid,
+        /// The move as the client sent it.
+        record: CgMove,
+        /// Dropped once the move has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// Runs one `CG_SYNC_POSITION` of the player online under `vid`
+    /// (`G/input_main.cpp:2010-2165`).
+    SyncPosition {
+        /// The VID of the character whose client sent the claims.
+        vid: common::vid::Vid,
+        /// The claims as the client sent them.
+        packet: SyncPositionPacket,
+        /// Where the game thread reports what the frame did, `None` when the character has no
+        /// body. A close reason in it closes the descriptor.
+        reply: oneshot::Sender<Option<SyncPositionResult>>,
+    },
+    /// Sends records the descriptor built for the players around the character online under
+    /// `vid`, in order. The world sends nothing for a character with no body.
+    Relay {
+        /// The VID of the character the records are about.
+        vid: common::vid::Vid,
+        /// Each record with whom it goes to.
+        records: Vec<(RelayScope, Vec<u8>)>,
+        /// Dropped once the records are sent, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
     /// Requests terminal loop shutdown.
     Stop,
 }
 
-/// Where a character stands, as the descriptor holds it: the world keeps no position.
+/// Resolves, its sender dropped, once the world has run a command that answers nothing: every
+/// record the command sent the client is then queued in that client's outbox, so a descriptor
+/// that drains its outbox after it writes them before anything it answers later.
+pub type Settled = oneshot::Receiver<()>;
+
+/// Whom a relayed record goes to, around the character it is about.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RelayScope {
+    /// Every player standing on the character's map of its Channel, the character included,
+    /// as `FEmpireChatPacket` walks the client set by map (`G/input_main.cpp:926-953`).
+    Map,
+    /// The same, without the character.
+    MapExceptSelf,
+    /// `PacketAround(record)`: the character's view, then the character (`G/entity.cpp:88-105`).
+    ViewAndSelf,
+    /// `PacketAround(record, this)`: the character's view, without the character.
+    ViewExceptSelf,
+}
+
+/// Where a character enters the world.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EnterPlace {
+    /// The Channel.
+    pub channel: u8,
+    /// `GetMapIndex()`.
+    pub map: i32,
+    /// `GetX()`.
+    pub x: i32,
+    /// `GetY()`.
+    pub y: i32,
+    /// `GetZ()`.
+    pub z: i32,
+}
+
+/// The body an entering character shows: where it stands, and what its insert names.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Showing {
+    /// Where it enters.
+    pub place: EnterPlace,
+    /// The parts of its ADD and INFO that walking does not change.
+    pub card: PcCard,
+}
+
+/// The records the show of an entering character sent its own client: its own insert, then
+/// every entity its view took in, in walk order (`G/sectree.h:100-160`).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Shown {
+    /// The records, in order.
+    pub records: Vec<Vec<u8>>,
+}
+
+/// Where a character stands, as the descriptor holds it. The world reads the point of a
+/// character with a body from the body, and only the Channel and map from here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GroundPlace {
     /// The Channel.
@@ -701,6 +793,10 @@ pub struct Loaded {
     pub quickslots: Quickslots,
     /// The gold the load read, `player.gold`, which a shop spends and pays.
     pub gold: u64,
+    /// The body the character shows, `CHARACTER::Show` at the end of `PlayerLoad`
+    /// (`G/input_login.cpp:590`). `None` admits the character with no body, which nobody
+    /// sees and which sees nobody.
+    pub show: Option<Showing>,
 }
 
 /// What the world holds of a character that a save writes: asked for before a save, and
@@ -712,6 +808,9 @@ pub struct Kept {
     pub points: Option<Points>,
     /// Its quickslots, which a trade the partner closes changes.
     pub quickslots: Quickslots,
+    /// Where its body stands, as (map, x, y), which a save writes. `None` for a character
+    /// that entered with no body.
+    pub place: Option<(i32, i32, i32)>,
 }
 
 /// Why installing the item id allocator did not succeed.
@@ -932,7 +1031,7 @@ impl GameLoopController {
         player_id: u32,
         name: String,
         outbox: ClientOutbox,
-    ) -> Result<Result<(), EnterWorldRefused>, EnterWorldError> {
+    ) -> Result<Result<Shown, EnterWorldRefused>, EnterWorldError> {
         self.enter_world_with_items(vid, player_id, name, Vec::new(), Loaded::default(), outbox)
             .await
     }
@@ -941,6 +1040,8 @@ impl GameLoopController {
     ///
     /// `items` is [`crate::item_load::ItemLoad::placed`] in its own order. The world
     /// places them before it answers, so the admission and the inventory are one step.
+    /// [`Loaded::show`] places the character's body, and the answer carries what its own
+    /// client was sent.
     ///
     /// # Errors
     ///
@@ -953,14 +1054,14 @@ impl GameLoopController {
         items: Vec<(ItemPos, Item)>,
         loaded: Loaded,
         outbox: ClientOutbox,
-    ) -> Result<Result<(), EnterWorldRefused>, EnterWorldError> {
+    ) -> Result<Result<Shown, EnterWorldRefused>, EnterWorldError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::EnterWorld {
             vid,
             player_id,
             name,
             items,
-            loaded,
+            loaded: Box::new(loaded),
             outbox,
             reply,
         })
@@ -1270,6 +1371,67 @@ impl GameLoopController {
         .await
         .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Hands the world one `CG_MOVE`, without waiting: the move has no answer. The
+    /// [`Settled`] resolves once the world has run it.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn move_character(
+        &self,
+        vid: common::vid::Vid,
+        record: CgMove,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::Move {
+            vid,
+            record,
+            settled,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Asks the world to run one `CG_SYNC_POSITION`, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn sync_positions(
+        &self,
+        vid: common::vid::Vid,
+        packet: SyncPositionPacket,
+    ) -> Result<Option<SyncPositionResult>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SyncPosition { vid, packet, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Hands the world records to send around the character online under `vid`, without
+    /// waiting. The [`Settled`] resolves once they are sent.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn relay(
+        &self,
+        vid: common::vid::Vid,
+        records: Vec<(RelayScope, Vec<u8>)>,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::Relay {
+            vid,
+            records,
+            settled,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
     }
 
     /// Asks the world for the NPCs standing on one map, which a client entering it is shown.

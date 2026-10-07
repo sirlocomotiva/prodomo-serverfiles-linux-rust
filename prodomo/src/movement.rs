@@ -5,7 +5,8 @@
 //!
 //! `CInputMain::Move` is `server/server/game/input_main.cpp:1757-1915` and
 //! `CInputMain::Position` is `:1530-1548`. This module decides what the Rewrite does
-//! with those two records; the descriptor writes the answer and broadcasts it.
+//! with those two records; the world moves the body and relays the record
+//! (`prodomo/src/game_state/motion.rs`).
 //!
 //! # The order of the checks is the behaviour
 //!
@@ -108,16 +109,16 @@ pub fn move_distance(from_x: i32, from_y: i32, to_x: i32, to_y: i32) -> f64 {
     // differs from legacy only in the last bit of a value that is either far below or far
     // above the limit. Taking it in `f32` instead would round an axis above 16,777,216,
     // which is a delta of more than 1.6 million world units.
-    let dx = f64::from((from_x - to_x) / MOVE_DISTANCE_DIVISOR);
-    let dy = f64::from((from_y - to_y) / MOVE_DISTANCE_DIVISOR);
+    // Legacy is built `-m32`, so `long` is 32 bits and a client's far x or y wraps the
+    // subtraction (`G/input_main.cpp:1786`); the wrap is kept, and a debug build does not panic.
+    let dx = f64::from(from_x.wrapping_sub(to_x) / MOVE_DISTANCE_DIVISOR);
+    let dy = f64::from(from_y.wrapping_sub(to_y) / MOVE_DISTANCE_DIVISOR);
     (dx * dx + dy * dy).sqrt()
 }
 
 /// What the sender must be known by before a move can be judged.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MoveContext {
-    /// `ch->GetVID()`, the `dwVID` of the outgoing record.
-    pub vid: u32,
     /// `ch->GetMapIndex()`, which selects the OX-event exemption. Legacy's
     /// `GetMapIndex()` returns `int`, and the atlas lookup that produced it is signed.
     pub map: i32,
@@ -135,8 +136,6 @@ pub struct MoveContext {
     /// The legacy signature takes a `BYTE` index but returns an `int`
     /// (`server/server/game/char.h:829`), so the value is not a byte.
     pub move_speed: i32,
-    /// `ch->GetCurrentMoveDuration()`, the `dwDuration` of a `FUNC_MOVE` record.
-    pub move_duration: u32,
 }
 
 /// Why a move was consumed without moving.
@@ -161,14 +160,13 @@ pub enum MoveRefusal {
 /// What an accepted move asks the world to do.
 ///
 /// Legacy's two branches differ in more than speed: `FUNC_MOVE` calls `Goto`, which
-/// only records a destination, and never updates the authoritative position. Every
-/// other branch calls `Move` and then `Stop`, and `Move` calls `Sync`, which does
-/// update the position. The Rewrite keeps that difference, because a client that
-/// sends `FUNC_MOVE` and then asks for a sync is relying on the destination and the
-/// position being separate.
+/// records a destination and puts the character in the Move state, whose Pulses then walk
+/// the body there. Every other branch calls `Move` and then `Stop`, and `Move` calls
+/// `Sync`, which puts the body at the point at once. A client that sends `FUNC_MOVE` and
+/// then a farther move is measured from where the walk has brought the body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoveDisposition {
-    /// `Goto(x, y)`: record the destination, leave the position alone.
+    /// `Goto(x, y)`: record the destination, which the Pulses walk the body to.
     Goto {
         /// The requested x.
         x: i32,
@@ -192,8 +190,6 @@ pub struct MoveAccepted {
     pub rotation: f32,
     /// What the world should do with the position.
     pub disposition: MoveDisposition,
-    /// The `GC_MOVE` to broadcast around the mover, without the mover.
-    pub broadcast: GcCharacterMove,
 }
 
 /// The result of judging one `CG_MOVE`.
@@ -248,11 +244,6 @@ pub fn judge_move(record: &CgMove, context: &MoveContext) -> MoveOutcome {
             return MoveOutcome::Ignore("no movement speed");
         }
     }
-    let duration = if record.function == FUNC_MOVE {
-        context.move_duration
-    } else {
-        0
-    };
     let disposition = if record.function == FUNC_MOVE {
         MoveDisposition::Goto {
             x: record.x,
@@ -267,17 +258,30 @@ pub fn judge_move(record: &CgMove, context: &MoveContext) -> MoveOutcome {
     MoveOutcome::Accept(MoveAccepted {
         rotation: rotation_from_client(record.rotation),
         disposition,
-        broadcast: GcCharacterMove::new(
-            record.function,
-            record.argument,
-            record.rotation,
-            context.vid,
-            record.x,
-            record.y,
-            record.time,
-            duration,
-        ),
     })
+}
+
+/// The `GC_MOVE` `CInputMain::Move` relays around the mover, without the mover
+/// (`input_main.cpp:1879-1891`): the client's own bytes, the mover's VID, and
+/// `GetCurrentMoveDuration()` read after the `Goto` for `FUNC_MOVE`, 0 for every other
+/// function.
+#[must_use]
+pub fn move_relay(record: &CgMove, vid: u32, move_duration: u32) -> GcCharacterMove {
+    let duration = if record.function == FUNC_MOVE {
+        move_duration
+    } else {
+        0
+    };
+    GcCharacterMove::new(
+        record.function,
+        record.argument,
+        record.rotation,
+        vid,
+        record.x,
+        record.y,
+        record.time,
+        duration,
+    )
 }
 
 /// What `CInputMain::Position` asks for.
@@ -354,7 +358,6 @@ mod tests {
 
     fn context() -> MoveContext {
         MoveContext {
-            vid: VID,
             map: 1,
             x: 0,
             y: 0,
@@ -362,7 +365,6 @@ mod tests {
             dead: false,
             can_move: true,
             move_speed: 600,
-            move_duration: 1234,
         }
     }
 
@@ -386,14 +388,13 @@ mod tests {
 
     #[test]
     fn a_plain_walk_is_a_goto_and_carries_the_current_duration() {
-        let result = accepted(judge_move(&request(FUNC_MOVE, X, Y), &context()));
+        let record = request(FUNC_MOVE, X, Y);
+        let result = accepted(judge_move(&record, &context()));
         assert_eq!(result.disposition, MoveDisposition::Goto { x: X, y: Y });
-        assert_eq!(
-            result.broadcast.dw_duration, 1234,
-            "FUNC_MOVE keeps the duration"
-        );
-        assert_eq!(result.broadcast.dw_vid, VID);
-        assert_eq!(result.broadcast.dw_time, TIME);
+        let relay = move_relay(&record, VID, 1234);
+        assert_eq!(relay.dw_duration, 1234, "FUNC_MOVE keeps the duration");
+        assert_eq!(relay.dw_vid, VID);
+        assert_eq!(relay.dw_time, TIME);
         assert!(
             same_f32(result.rotation, 360.0),
             "the rotation byte is multiplied by five"
@@ -409,14 +410,16 @@ mod tests {
             FUNC_MOB_SKILL,
             FUNC_SKILL_UNUSED,
         ] {
-            let result = accepted(judge_move(&request(function, X, Y), &context()));
+            let record = request(function, X, Y);
+            let result = accepted(judge_move(&record, &context()));
             assert_eq!(
                 result.disposition,
                 MoveDisposition::Step { x: X, y: Y },
                 "bFunc {function} is not the walk"
             );
             assert_eq!(
-                result.broadcast.dw_duration, 0,
+                move_relay(&record, VID, 1234).dw_duration,
+                0,
                 "only FUNC_MOVE keeps a duration"
             );
         }
@@ -511,6 +514,41 @@ mod tests {
         ));
     }
 
+    /// Both limits are strict: legacy refuses `fDist > 750` and `fDist > 999`
+    /// (`G/input_main.cpp:1786-1788`), so a move of exactly the limit is allowed. The axis is
+    /// divided by 100 first, so 75,099 is still 750.
+    #[test]
+    fn a_move_of_exactly_either_limit_is_allowed() {
+        for x in [75_000, 75_099, -75_000] {
+            assert!(
+                matches!(
+                    judge_move(&request(FUNC_MOVE, x, 0), &context()),
+                    MoveOutcome::Accept(_)
+                ),
+                "{x}"
+            );
+        }
+        assert!(matches!(
+            judge_move(&request(FUNC_MOVE, 75_100, 0), &context()),
+            MoveOutcome::Refuse(MoveRefusal::TooFar { .. })
+        ));
+        let mut ctx = context();
+        ctx.riding = true;
+        for x in [99_900, 99_999] {
+            assert!(
+                matches!(
+                    judge_move(&request(FUNC_MOVE, x, 0), &ctx),
+                    MoveOutcome::Accept(_)
+                ),
+                "{x}"
+            );
+        }
+        assert!(matches!(
+            judge_move(&request(FUNC_MOVE, 100_000, 0), &ctx),
+            MoveOutcome::Refuse(MoveRefusal::TooFar { .. })
+        ));
+    }
+
     #[test]
     fn the_ox_event_map_is_exempt_from_every_distance_limit() {
         let mut ctx = context();
@@ -578,6 +616,17 @@ mod tests {
         assert!(close_to(move_distance(0, 0, -150, 0), 1.0));
     }
 
+    /// A client's x or y past the `long` range from the character wraps the subtraction, as
+    /// legacy's 32-bit `long` does: 1 - `i32::MIN` is -2147483647, and the division by 100
+    /// truncates toward zero.
+    #[test]
+    fn a_far_axis_wraps_as_a_32_bit_long() {
+        assert!(close_to(move_distance(1, 0, i32::MIN, 0), 21_474_836.0));
+        assert!(close_to(move_distance(0, 1, 0, i32::MIN), 21_474_836.0));
+        assert!(close_to(move_distance(-2, 0, i32::MAX, 0), 21_474_836.0));
+        assert!(close_to(move_distance(0, 0, i32::MIN, 0), 21_474_836.0));
+    }
+
     #[test]
     fn the_distance_is_euclidean_over_both_axes() {
         assert!(close_to(move_distance(0, 0, 300, 400), 5.0));
@@ -603,9 +652,9 @@ mod tests {
             y: 5678,
             time: TIME,
         };
-        let result = accepted(judge_move(&record, &context()));
+        let _accepted = accepted(judge_move(&record, &context()));
         let mut out = Vec::with_capacity(protocol::gc_actors::GC_CHARACTER_MOVE_WIRE_SIZE);
-        result.broadcast.encode_into(&mut out);
+        move_relay(&record, VID, 1234).encode_into(&mut out);
         assert_eq!(out.len(), 24, "GC_MOVE is 24 bytes on the wire");
         assert_eq!(out[0], 0x03, "HEADER_GC_MOVE is byte 3");
         assert_eq!(out[1], FUNC_COMBO);

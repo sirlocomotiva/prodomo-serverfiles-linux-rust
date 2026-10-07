@@ -18,17 +18,21 @@ pub trait Dice {
 ///
 /// Legacy swaps the bounds when `from` is the larger. It computes the width `to - from + 1` in
 /// `int`, and answers 0 without drawing when that width wraps to 0, which only the full `int`
-/// range does. Otherwise the answer is the draw modulo the width, plus `from`, in `int`
-/// arithmetic; a width past `INT_MAX` wraps negative there, and C's `%` then keeps the sign of
-/// the draw, which [`i32::wrapping_rem`] does too.
+/// range does. Otherwise it takes the draw, a `DWORD` (`thecore_random`, `:346-352`), modulo the
+/// width, so the `%` converts the width to `unsigned int` and is unsigned; `from` is added in
+/// `unsigned int` too, and the sum is stored back into an `int` (the 32-bit build's two's
+/// complement wrap). A width past `INT_MAX` is therefore more than any 31-bit draw, which comes
+/// back whole, plus `from`.
 pub fn number(dice: &mut dyn Dice, from: i32, to: i32) -> i32 {
     let (from, to) = if from > to { (to, from) } else { (from, to) };
     let width = to.wrapping_sub(from).wrapping_add(1);
     if width == 0 {
         return 0;
     }
-    let draw = i32::try_from(dice.random31() & 0x7fff_ffff).unwrap_or(0);
-    draw.wrapping_rem(width).wrapping_add(from)
+    let draw = dice.random31() & 0x7fff_ffff;
+    let width = u32::from_ne_bytes(width.to_ne_bytes());
+    let from = u32::from_ne_bytes(from.to_ne_bytes());
+    i32::from_ne_bytes((draw % width).wrapping_add(from).to_ne_bytes())
 }
 
 /// PCG-XSH-RR with 64 bits of state and 32 of output (O'Neill, `pcg32_random_r`).
@@ -142,13 +146,25 @@ mod tests {
     }
 
     #[test]
-    fn a_width_past_int_max_wraps_negative_as_in_c() {
-        // The width 3_000_000_000 is -1_294_967_296 as an `int`, and a draw of 1_300_000_000
-        // leaves 5_032_704 over it, plus the low bound.
-        let mut dice = Fixed(vec![1_300_000_000]);
+    fn a_width_past_int_max_takes_the_draw_whole_as_the_unsigned_modulus_does() {
+        // The width 3_000_000_000 is -1_294_967_296 as an `int`, which the `DWORD` draw's `%`
+        // reads back as 3_000_000_000: a draw of 1_300_000_000 is below it and comes back
+        // whole, plus the low bound. A signed `%` would leave 5_032_704 over it.
+        let mut dice = Fixed(vec![1_300_000_000, 2_147_483_647, 0]);
         let from = -1_000_000_000;
         let to = 1_999_999_999;
-        assert_eq!(number(&mut dice, from, to), 5_032_704 + from);
+        assert_eq!(number(&mut dice, from, to), 300_000_000);
+        assert_eq!(number(&mut dice, from, to), 1_147_483_647);
+        assert_eq!(number(&mut dice, from, to), from);
+    }
+
+    #[test]
+    fn a_negative_low_bound_wraps_through_the_unsigned_sum() {
+        // `(draw % width) + from` is `unsigned int` arithmetic stored into an `int`; within an
+        // `int` width the wrap lands where the signed sum does.
+        let mut dice = Fixed(vec![1_999_999_999, 1_999_999_999]);
+        assert_eq!(number(&mut dice, -10, 10), -10 + 4);
+        assert_eq!(number(&mut dice, i32::MIN, -1), i32::MIN + 1_999_999_999);
     }
 
     #[test]

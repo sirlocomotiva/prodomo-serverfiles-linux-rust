@@ -483,6 +483,7 @@ mod tests {
             recently_fought: false,
             empire,
             language: 1,
+            pk_mode: crate::loading_phase::PK_MODE_PEACE,
         }
     }
 

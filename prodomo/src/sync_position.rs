@@ -70,17 +70,22 @@ pub enum SyncOwnershipOutcome {
         /// `TPacketGCOwnership`, which the source sends after every accepted claim.
         record: Vec<u8>,
     },
+    /// The actor already holds the claim and the victim is past the distance limit: the claim
+    /// stands and the element is applied, but the claim's time is not refreshed and no record
+    /// is sent (`if (m_pkChrSyncOwner == ch) return true;`, `G/char.cpp:5510-5518`).
+    Kept,
     /// The claim was refused, and the element is skipped.
     Refused,
 }
 
 /// Judge one `CHARACTER::SetSyncOwner(actor)` call against a victim.
 ///
-/// `server/server/game/char.cpp:5469-5551`, in the source's own order. The two arms that
-/// need state the pure policy cannot own are left to the caller: `AIFLAG_NOMOVE` and
-/// `!battle_is_attackable`, which is the PK rule. Neither can refuse a pair of player
-/// characters, so neither is judged here and both are recorded as a `sys.char.pk`
-/// divergence.
+/// `server/server/game/char.cpp:5469-5551`, in the source's own order. Two arms are not
+/// ported: `AIFLAG_NOMOVE`, which only a monster carries, and `!battle_is_attackable`, which
+/// refuses with a `DAMAGE_BLOCK` record (`:5476-5481`). That one is the PK rule
+/// (`G/battle.cpp:99-151`, `CPVPManager::CanAttack`) and can refuse a pair of player
+/// characters, for one in the protect PK mode or two of one empire in the peace mode; it
+/// waits for the battle rules, and STATUS lists it among the movement gaps.
 #[must_use]
 pub fn judge_sync_ownership(
     actor: Vid,
@@ -105,10 +110,14 @@ pub fn judge_sync_ownership(
     }
     // `DISTANCE_APPROX(GetX() - ch->GetX(), GetY() - ch->GetY()) > 250`, on the raw
     // coordinates with no `/ 100`. A character that already holds the claim keeps it past
-    // the limit; a new owner does not get one.
+    // the limit, with no new stamp and no record; a new owner does not get one.
     let over = distance_approx(victim.x - actor_x, victim.y - actor_y) > SYNC_OWNER_APPROX_DISTANCE;
-    if over && !holds {
-        return SyncOwnershipOutcome::Refused;
+    if over {
+        return if holds {
+            SyncOwnershipOutcome::Kept
+        } else {
+            SyncOwnershipOutcome::Refused
+        };
     }
     SyncOwnershipOutcome::Accepted {
         owner_changed: !holds,
@@ -722,7 +731,7 @@ mod tests {
 
     #[test]
     fn the_current_owner_keeps_a_claim_past_the_approximate_distance() {
-        // `if (m_pkChrSyncOwner == ch) return true;`
+        // `if (m_pkChrSyncOwner == ch) return true;`, before the stamp and the record.
         let actor = Vid::new(1);
         let mut far = at_origin(2);
         far.x = 4000;
@@ -730,6 +739,12 @@ mod tests {
             owner: Some(actor),
             claimed_at: Duration::ZERO,
         };
+        assert_eq!(
+            judge_sync_ownership(actor, &far, state, 0, 0, Duration::from_millis(1)),
+            SyncOwnershipOutcome::Kept
+        );
+        // Just inside the limit the same owner is accepted again, with a record.
+        far.x = 261;
         assert_eq!(
             judge_sync_ownership(actor, &far, state, 0, 0, Duration::from_millis(1)),
             SyncOwnershipOutcome::Accepted {

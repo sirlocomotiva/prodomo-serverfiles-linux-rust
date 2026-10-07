@@ -37,13 +37,15 @@ use world::character::{
 use world::item::Item;
 
 use crate::chat_line::{chat_packet, Arg, Recipient};
+use crate::game_loop_messages::RelayScope;
 use crate::item_load::stored_row_position;
 use crate::loading_phase::point_changes;
 
 /// The flat cell of the worn belt: `INVENTORY_MAX_NUM + WEAR_BELT`, 180 + 27.
 pub const BELT_WEAR_CELL: u16 = INVENTORY_MAX_NUM + EWearPositions::Belt as u16;
 
-/// What the descriptor knows of the moving character that the move reads.
+/// What the move reads of the moving character: what the descriptor knows of it, and what the
+/// world adds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mover {
     /// Whether the character attacked, or was selected, in the last 1.5 s.
@@ -53,6 +55,9 @@ pub struct Mover {
     /// The descriptor's language: the one a chat line is looked up in, and the one
     /// `UpdatePacket` sends (`char.cpp:1321`).
     pub language: u8,
+    /// `m_bPKMode`, which `UpdatePacket` sends (`G/char.cpp:1315`). The descriptor does not
+    /// hold it: the world sets it from the body's card before an item step runs.
+    pub pk_mode: u8,
 }
 
 impl Mover {
@@ -76,9 +81,10 @@ pub struct MovedItems {
     pub owner_id: u32,
     /// The records the client is sent, each its own frame, in the order legacy sends them.
     pub records: Vec<Vec<u8>>,
-    /// The records the characters that see the mover are sent too (`PacketAround`), in
-    /// order: the look, the effects and the broadcast points.
-    pub around: Vec<Vec<u8>>,
+    /// The records others are sent too, in order, each with whom it reaches: the look, the
+    /// effects and the broadcast points reach the characters that see the mover
+    /// (`PacketAround`), and a ground record everyone else on the map (V8).
+    pub around: Vec<(RelayScope, Vec<u8>)>,
     /// The row changes, in the order they are applied.
     pub changes: Vec<RowChange>,
     /// The mover's points after the move, which the descriptor saves.
@@ -121,49 +127,49 @@ impl MovedItems {
             let shared = match record {
                 MoveRecord::Item(record) => {
                     record.encode_into(&mut frame);
-                    false
+                    None
                 }
                 MoveRecord::Point(record) => {
                     frame = point_changes(&[record], vid).concat();
-                    record.broadcast
+                    record.broadcast.then_some(RelayScope::ViewExceptSelf)
                 }
                 MoveRecord::Look(look) => {
-                    character_update(vid, &look, mover.language).encode_into(&mut frame);
-                    true
+                    character_update(vid, &look, mover).encode_into(&mut frame);
+                    Some(RelayScope::ViewExceptSelf)
                 }
                 MoveRecord::Effect(effect_type) => {
                     GcSpecialEffect { effect_type, vid }.encode_into(&mut frame);
-                    true
+                    Some(RelayScope::ViewExceptSelf)
                 }
                 MoveRecord::Notice(text) => {
                     frame = notice(text, to);
-                    false
+                    None
                 }
                 MoveRecord::Ground(record) => {
                     frame = ground_record(record);
-                    true
+                    Some(RelayScope::MapExceptSelf)
                 }
                 MoveRecord::PickedUp { vnum } => {
                     frame = picked_up_notice(protos, vnum, to);
-                    false
+                    None
                 }
                 MoveRecord::Quickslot(record) => {
                     frame = crate::quickslot::encode(&[record]).concat();
-                    false
+                    None
                 }
                 // The world runs every sync before it answers; one left here sends nothing.
                 MoveRecord::QuickslotSync(_) => continue,
                 MoveRecord::Gold { amount, value } => {
                     GcCharacterGoldChange::new(vid, amount, value).encode_into(&mut frame);
-                    false
+                    None
                 }
                 MoveRecord::Store(record) => {
                     frame = store_record(record);
-                    false
+                    None
                 }
             };
-            if shared {
-                around.push(frame.clone());
+            if let Some(scope) = shared {
+                around.push((scope, frame.clone()));
             }
             records.push(frame);
         }
@@ -181,11 +187,11 @@ impl MovedItems {
 }
 
 /// `CHARACTER::UpdatePacket` (`G/char.cpp:1277-1340`) for the look a move left, with the
-/// descriptor's `language` (`:1321`).
+/// mover's PK mode (`:1315`) and the descriptor's language (`:1321`).
 ///
-/// The state flags, the affects, the guild, the alignment, the PK mode, the mount and the
-/// premium come from systems this build does not have, and are 0.
-fn character_update(vid: u32, look: &CharacterLook, language: u8) -> GcCharacterUpdate {
+/// The state flags, the affects, the guild, the alignment, the mount and the premium come from
+/// systems this build does not have, and are 0.
+fn character_update(vid: u32, look: &CharacterLook, mover: Mover) -> GcCharacterUpdate {
     GcCharacterUpdate {
         dw_vid: vid,
         aw_part: look.parts,
@@ -197,13 +203,13 @@ fn character_update(vid: u32, look: &CharacterLook, language: u8) -> GcCharacter
         s_alignment: 0,
         dw_level: look.level,
         dw_conqueror_level: look.conqueror_level,
-        b_pk_mode: 0,
+        b_pk_mode: mover.pk_mode,
         dw_mount_vnum: 0,
         b_refine_element_type: look.refine_element_type,
         dw_new_is_guild_name: 0,
         by_premium: 0,
         i_premium_time: 0,
-        b_language: language,
+        b_language: mover.language,
     }
 }
 
@@ -598,6 +604,7 @@ mod tests {
             recently_fought: false,
             empire: 1,
             language: 1,
+            pk_mode: crate::loading_phase::PK_MODE_PEACE,
         };
         let strings = LocaleStrings::default();
         let moved = MovedItems::new(7, 7, done.clone(), actor, &owners(), &strings);
@@ -621,6 +628,43 @@ mod tests {
                 window_type: INVENTORY,
                 pos: 2
             }]
+        );
+    }
+
+    /// A look is `UpdatePacket` with the mover's PK mode and language (`G/char.cpp:1315`,
+    /// `:1321`), to the mover and to its view.
+    #[test]
+    fn a_look_carries_the_movers_pk_mode_and_language() {
+        let look = CharacterLook {
+            parts: [1, 2, 3, 4, 5, 6],
+            moving_speed: 98,
+            attack_speed: 100,
+            level: 9,
+            conqueror_level: 0,
+            refine_element_type: 0,
+        };
+        let done = MoveDone {
+            kind: MoveKind::Moved,
+            records: vec![MoveRecord::Look(look)],
+            changes: Vec::new(),
+        };
+        let actor = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 4,
+            pk_mode: crate::loading_phase::PK_MODE_PROTECT,
+        };
+        let strings = LocaleStrings::default();
+        let moved = MovedItems::new(7, 0x0102_0304, done, actor, &owners(), &strings);
+        let frame = &moved.records[0];
+        assert_eq!(frame.len(), 55);
+        assert_eq!(frame[0], 19, "GC_CHARACTER_UPDATE");
+        assert_eq!(&frame[1..5], &0x0102_0304u32.to_le_bytes());
+        assert_eq!(frame[42], 3, "bPKMode");
+        assert_eq!(frame[54], 4, "bLanguage");
+        assert_eq!(
+            moved.around,
+            vec![(RelayScope::ViewExceptSelf, frame.clone())]
         );
     }
 

@@ -30,14 +30,13 @@
 //! settlement that fails tells each side its line and ends the trade.
 //!
 //! A trade ends for both sides on `CANCEL`, when either character leaves the world
-//! (`CHARACTER::Destroy`), and when the two stand `EXCHANGE_MAX_DISTANCE` or farther apart.
+//! (`CHARACTER::Destroy`), and when a moving side's sixteenth-Pulse sample finds the two
+//! `EXCHANGE_MAX_DISTANCE` or farther apart (`G/char_state.cpp:799-808`, in
+//! [`GameState::step_motion`]). A trade whose two sides stand still survives any distance, as in
+//! legacy.
 //!
 //! # Divergences
 //!
-//! - **The distance.** Legacy measures it in `StateMove` every 16 Pulses while the character
-//!   that holds the exchange moves (`G/char.cpp:6962-6973`), so a trade survives the other side
-//!   walking away as long as this one stands still. The Rewrite measures every trade every 16
-//!   Pulses, and a side that is no longer on the trade's map ends it too.
 //! - **A player on another map.** `CHARACTER_MANAGER::Find` looks a VID up across every map of
 //!   the process and `DISTANCE_APPROX` ignores the map, so a client naming a player on another
 //!   map at the same coordinates starts a trade with it. Only a modified client names one: a
@@ -84,7 +83,7 @@ use world::character::{
 use super::shop::notice;
 use super::GameState;
 use crate::chat_line::{chat_packet, Arg};
-use crate::client_registry::{ChannelClients, ClientOutbox, PositionTable};
+use crate::client_registry::ClientOutbox;
 use crate::game_loop_messages::GroundPlace;
 use crate::item_move::{MoveItemRefused, MovedItems, Mover};
 use crate::sync_position::distance_approx;
@@ -107,10 +106,6 @@ pub const EXCHANGE_SUBHEADER_CG_ACCEPT: u8 = 4;
 /// `EXCHANGE_SUBHEADER_CG_CANCEL`.
 pub const EXCHANGE_SUBHEADER_CG_CANCEL: u8 = 5;
 
-/// `StateMove` measures the distance when the Pulse's low four bits are clear
-/// (`G/char.cpp:6962`).
-const DISTANCE_PULSE_MASK: u64 = 15;
-
 /// One open trade: the two characters and what each has offered.
 #[derive(Debug, Clone)]
 pub(super) struct Deal {
@@ -119,10 +114,6 @@ pub(super) struct Deal {
     vids: [Vid; 2],
     /// Who each side's lines are written for, by [`Side::index`].
     movers: [Mover; 2],
-    /// The Channel the trade started on.
-    channel: u8,
-    /// The map it started on.
-    map: i32,
 }
 
 impl Deal {
@@ -285,14 +276,6 @@ enum Found {
 }
 
 impl GameState {
-    /// Share the process's position table, which a trade finds and measures the other player
-    /// in. Without it no player can be asked to trade.
-    #[must_use]
-    pub fn with_positions(mut self, positions: std::sync::Arc<PositionTable>) -> Self {
-        self.positions = Some(positions);
-        self
-    }
-
     /// Run one trade step for the character online under `vid`, standing at `place`.
     ///
     /// # Errors
@@ -339,27 +322,10 @@ impl GameState {
         }
     }
 
-    /// End every trade whose two sides stand `EXCHANGE_MAX_DISTANCE` or farther apart, or no
-    /// longer on its map, on a Pulse `StateMove` measures on.
-    pub(super) fn cancel_distant_trades(&mut self, pulse: u64) {
-        if pulse & DISTANCE_PULSE_MASK != 0 {
-            return;
-        }
-        let (Some(positions), Some(clients)) = (self.positions.as_deref(), self.clients.as_deref())
-        else {
-            return;
-        };
-        let apart: Vec<u32> = self
-            .trades
-            .iter()
-            .filter(|(_, deal)| is_apart(deal, positions, clients))
-            .map(|(key, _)| *key)
-            .collect();
-        for key in apart {
-            if let Some(deal) = self.close_deal(key) {
-                self.write_ended(&deal, [None; 2]);
-            }
-        }
+    /// The other side of the trade of the character under `vid`, if it trades.
+    pub(super) fn trade_partner(&self, vid: Vid) -> Option<Vid> {
+        let &(key, side) = self.trading.get(&vid)?;
+        self.trades.get(&key).map(|deal| deal.partner(side).0)
     }
 
     /// The safebox wait of `CInputMain::Exchange` (`G/input_main.cpp:1377-1397`): the other
@@ -439,8 +405,6 @@ impl GameState {
             trade,
             vids: [vid, partner],
             movers: [mover, asked],
-            channel: place.channel,
-            map: place.map,
         };
         let key = vid.raw();
         let _replaced = self.trades.insert(key, deal);
@@ -470,20 +434,23 @@ impl GameState {
             return Some(Found::Npc);
         }
         let clients = self.clients.as_deref()?;
-        let positions = self.positions.as_deref()?;
-        let (_, tracked) = positions.find_on_map(clients, place.channel, place.map, target)?;
+        if self.place_of(target)? != (place.channel, place.map) {
+            return None;
+        }
+        let spot = self.spot_of(target)?;
         let entry = clients
             .on_map(place.channel, place.map)
             .into_iter()
             .find(|entry| entry.vid == target)?;
         self.characters.find_by_vid(Vid::new(target)).ok()?;
         Some(Found::Player {
-            x: tracked.x,
-            y: tracked.y,
+            x: spot.x,
+            y: spot.y,
             mover: Mover {
                 recently_fought: false,
                 empire: entry.empire,
                 language: entry.language,
+                pk_mode: self.pk_mode_of(target),
             },
         })
     }
@@ -732,26 +699,15 @@ fn encoded(records: Vec<TradeRecord>, mover: Mover, locale: &LocaleStrings) -> V
         .collect()
 }
 
-/// Whether a side of `deal` is no longer on its map, or the two stand
-/// `EXCHANGE_MAX_DISTANCE` or farther apart.
-fn is_apart(deal: &Deal, positions: &PositionTable, clients: &ChannelClients) -> bool {
-    let [one, other] = deal
-        .vids
-        .map(|vid| positions.find_on_map(clients, deal.channel, deal.map, vid.raw()));
-    let (Some((_, one)), Some((_, other))) = (one, other) else {
-        return true;
-    };
-    distance_approx(one.x.saturating_sub(other.x), one.y.saturating_sub(other.y))
-        >= EXCHANGE_MAX_DISTANCE
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use common::item_slots::EWindows;
     use db::items::RowChange;
+    use gamedata::map_atlas::MapRegion;
     use gamedata::npc_shop::{shops_from_dump, NpcShops};
+    use gamedata::server_attr::SectreeGrid;
     use protocol::gc_actors::GcCharacterGoldChange;
     use protocol::gc_exchange::{
         GcExchange, EXCHANGE_SUBHEADER_GC_ACCEPT, EXCHANGE_SUBHEADER_GC_ALREADY,
@@ -768,15 +724,18 @@ mod tests {
     use world::item::{Item, ITEM_ANTIFLAG_GIVE, ITEM_FLAG_STACKABLE};
     use world::npc::{MapNpcs, Npc};
 
+    use super::super::fixtures::TestClock;
+    use super::super::warp_npc::{NpcOrder, SHOW_Z};
     use super::*;
-    use crate::client_registry::{ClientEntry, ClientOrder, Lease};
+    use crate::client_registry::{ChannelClients, ClientEntry, ClientOrder, Lease};
     use crate::game_loop::PulseProcessor;
+    use crate::game_loop_messages::EnterPlace;
     use crate::game_loop_messages::GameCommand;
     use crate::game_state::{
         SafeboxAnswer, SafeboxStep, LOAD_WAIT_PULSES, OTHER_WINDOW_NOTICE, TRADE_WAIT_SECONDS,
     };
-    use crate::game_state::{ShopAnswer, ShopStep};
-    use crate::sync_position::SyncPositionVictimKind;
+    use crate::game_state::{ShopAnswer, ShopDeclined, ShopStep};
+    use crate::loading_phase::PcCard;
 
     const ALPHA: Vid = Vid::new(7);
     const YANKEE: Vid = Vid::new(9);
@@ -806,10 +765,10 @@ mod tests {
         (FARAWAY, 42, "Faraway", 1),
     ];
 
-    /// The world and the lease of each of [`PEOPLE`], which its records reach.
+    /// The world, its clock, and the lease of each of [`PEOPLE`], which its records reach.
     struct Square {
         state: GameState,
-        positions: Arc<PositionTable>,
+        clock: TestClock,
         leases: Vec<Lease>,
     }
 
@@ -823,17 +782,37 @@ mod tests {
             std::iter::from_fn(|| self.leases[who].try_next()).collect()
         }
 
-        /// Move `who` `dx` east of the spot.
-        fn stand(&self, who: usize, dx: i32) {
+        /// Stand `who` `dx` east of the spot.
+        fn stand(&mut self, who: usize, dx: i32) {
             self.stand_at(who, dx, 0);
         }
 
-        /// Move `who` `dx` along x and `dy` along y from the spot.
-        fn stand_at(&self, who: usize, dx: i32, dy: i32) {
-            let id = self.leases[who].id();
+        /// Stand `who` `dx` along x and `dy` along y from the spot, as a `Move`'s sync does:
+        /// the body is there, and it is not moving.
+        fn stand_at(&mut self, who: usize, dx: i32, dy: i32) {
             let vid = PEOPLE[who].0.raw();
-            let kind = SyncPositionVictimKind::Player;
-            self.positions.track(id, kind, vid, SPOT + dx, SPOT + dy);
+            assert!(
+                self.state.sync_body(vid, SPOT + dx, SPOT + dy),
+                "a sectree holds the point"
+            );
+        }
+
+        /// Send `who` toward `dx` along x and `dy` along y from the spot, and let the clock
+        /// pass its arrival: the next Pulse moves it there and it arrives.
+        fn walk(&mut self, who: usize, dx: i32, dy: i32) {
+            let vid = PEOPLE[who].0.raw();
+            self.clock.set(0);
+            assert!(
+                self.state.goto(vid, SPOT + dx, SPOT + dy),
+                "a new destination"
+            );
+            self.clock.set(1_000_000);
+        }
+
+        /// Where `who`'s body stands, as (x, y, z).
+        fn spot(&self, who: usize) -> (i32, i32, i32) {
+            let spot = self.state.spot_of(PEOPLE[who].0.raw()).unwrap();
+            (spot.x, spot.y, spot.z)
         }
 
         fn character(&mut self, who: usize) -> &mut Character {
@@ -928,17 +907,17 @@ mod tests {
         let dump = std::fs::read(root.join("sql/gamedata/player.sql")).unwrap();
         let shops = NpcShops::lay_out(&shops_from_dump(&dump).unwrap(), &protos);
         let clients = Arc::new(ChannelClients::new());
-        let positions = Arc::new(PositionTable::new());
+        let clock = TestClock::default();
         let mut state = GameState::new(protos)
             .with_npc_shops(Arc::new(shops))
             .with_clients(Arc::clone(&clients))
-            .with_positions(Arc::clone(&positions))
-            .with_locale_strings(Arc::new(strings));
-        let npcs = MapNpcs {
-            npcs: vec![keeper()],
-            positions: Vec::new(),
-        };
-        let _npcs = state.npcs.insert((1, 41), Arc::new(npcs));
+            .with_locale_strings(Arc::new(strings))
+            .with_clock(Box::new(clock.clone()))
+            .with_view_range(10_000);
+        for map in [41, 42] {
+            state.host_map(1, map, ten_by_ten());
+        }
+        state.stand_npcs(1, &desert(), with_keeper(&[]));
         let mut leases = Vec::new();
         for (at, (vid, map, name, empire)) in PEOPLE.into_iter().enumerate() {
             let lease = clients.join(ClientEntry {
@@ -949,22 +928,79 @@ mod tests {
                 empire,
                 language: if at == Y { yankee_language } else { 1 },
             });
-            let kind = SyncPositionVictimKind::Player;
-            positions.track(lease.id(), kind, vid.raw(), SPOT, SPOT);
             let items = [alpha, yankee].get(at).copied().unwrap_or_default();
             state
                 .enter_world_with_items(vid, vid.raw() * 10, name, items, lease.outbox())
                 .unwrap();
+            let _own = state.place_body(vid, standing_on(map), a_card(name, empire));
             leases.push(lease);
         }
         let mut square = Square {
             state,
-            positions,
+            clock,
             leases,
         };
         square.character(A).set_gold(1000);
         square.character(Y).set_gold(400);
         square
+    }
+
+    /// Ten by ten sectrees from the origin, which hold every point the tests stand on.
+    const fn ten_by_ten() -> SectreeGrid {
+        SectreeGrid {
+            x: 0,
+            y: 0,
+            columns: 10,
+            rows: 10,
+        }
+    }
+
+    /// Map 41, whose base is (1000, 2000).
+    fn desert() -> MapRegion {
+        MapRegion {
+            index: 41,
+            name: b"metin2_map_b_desert".to_vec(),
+            sx: 1_000,
+            sy: 2_000,
+            ex: 26_600,
+            ey: 27_600,
+            spawn: (0, 0),
+            empire_spawns: None,
+        }
+    }
+
+    /// The keeper, then `others`, as map 41's NPCs.
+    fn with_keeper(others: &[Npc]) -> MapNpcs {
+        MapNpcs {
+            npcs: std::iter::once(keeper())
+                .chain(others.iter().cloned())
+                .collect(),
+            positions: Vec::new(),
+        }
+    }
+
+    /// The spot on Channel 1's `map`.
+    const fn standing_on(map: i32) -> EnterPlace {
+        EnterPlace {
+            channel: 1,
+            map,
+            x: SPOT,
+            y: SPOT,
+            z: 0,
+        }
+    }
+
+    /// What a player named `name` of `empire` shows.
+    fn a_card(name: &str, empire: u8) -> PcCard {
+        PcCard {
+            name: name.to_owned(),
+            job: 0,
+            empire,
+            level: 1,
+            conqueror_level: 0,
+            language: 1,
+            pk_mode: crate::loading_phase::PK_MODE_PROTECT,
+        }
     }
 
     fn keeper() -> Npc {
@@ -1000,6 +1036,7 @@ mod tests {
             recently_fought: false,
             empire,
             language: 1,
+            pk_mode: crate::loading_phase::PK_MODE_PEACE,
         }
     }
 
@@ -1138,7 +1175,7 @@ mod tests {
             .clients
             .clone()
             .expect("the square has clients");
-        let entering = clients.join(ClientEntry {
+        let _entering = clients.join(ClientEntry {
             channel: 1,
             map: 41,
             name: "Entering".to_owned(),
@@ -1146,8 +1183,6 @@ mod tests {
             empire: 1,
             language: 1,
         });
-        let kind = SyncPositionVictimKind::Player;
-        square.positions.track(entering.id(), kind, 15, SPOT, SPOT);
         let unentered = square.step(A, start(Vid::new(15)));
         let target = 15;
         assert_eq!(
@@ -1691,42 +1726,91 @@ mod tests {
         let _item = sent(square.step(Y, add));
         let _told = square.heard(A);
         let _kept = square.state.leave_world(ALPHA);
-        assert_eq!(square.heard(Y), vec![end()]);
+        let removed = super::super::view_encode::remove_record(ALPHA.raw());
+        assert_eq!(
+            square.heard(Y),
+            vec![end(), removed],
+            "the trade ends before the viewers hear the removal"
+        );
         assert!(square.is_idle());
         assert!(!square.is_offered(Y, YANKEES));
         assert_eq!(sent(square.step(Y, start(ZULU))).len(), 1);
     }
 
+    /// `StateMove` measures a moving trader's own trade on a sixteenth Pulse, against its
+    /// partner's live spot (`G/char_state.cpp:799-808`). `DISTANCE_APPROX` 999 (1040 east) is in
+    /// reach and 1000 (1041 east) is not; a pair standing apart is never measured, and a mover
+    /// that arrives on another Pulse is measured by none.
     #[test]
-    fn a_trade_ends_on_a_sixteenth_pulse_once_its_sides_stand_apart() {
+    fn a_moving_trader_1000_apart_cancels_and_a_standing_pair_1000_apart_does_not() {
         let mut square = a_square(&[], &[]);
         square.started();
-        square.stand(Y, 1040);
-        square.state.process_pulse(16);
-        assert_eq!(square.state.trades.len(), 1, "999 apart is in reach");
         square.stand(Y, 1041);
-        square.state.process_pulse(24);
-        assert_eq!(square.state.trades.len(), 1, "a Pulse off the sixteenth");
-        assert!(square.heard(A).is_empty());
+        square.state.process_pulse(16);
+        assert_eq!(square.state.trades.len(), 1, "nobody moves");
+        square.walk(Y, 1040, 0);
         square.state.process_pulse(32);
+        assert_eq!(square.state.trades.len(), 1, "999 apart is in reach");
+        assert_eq!(square.spot(Y), (SPOT + 1040, SPOT, 0));
+        square.walk(Y, 1041, 0);
+        square.state.process_pulse(40);
+        square.state.process_pulse(48);
+        assert_eq!(
+            square.state.trades.len(),
+            1,
+            "it arrived a Pulse off the sixteenth, and stands"
+        );
+        assert!(square.heard(A).is_empty());
+        square.walk(Y, 1042, 0);
+        square.state.process_pulse(64);
         assert!(square.is_idle());
         assert_eq!(square.heard(A), vec![end()]);
         assert_eq!(square.heard(Y), vec![end()]);
         square.stand(Y, 0);
         square.started();
-        square.stand_at(Y, 0, 1041);
-        square.state.process_pulse(48);
+        square.walk(Y, 0, 1041);
+        square.state.process_pulse(80);
         assert!(square.is_idle(), "the distance along y");
         assert_eq!(square.heard(A), vec![end()]);
         assert_eq!(square.heard(Y), vec![end()]);
+    }
+
+    /// The partner's move is no measure: Alpha walking within reach does not save a trade its
+    /// partner stands out of, and the partner standing still is never measured for it.
+    #[test]
+    fn only_the_movers_own_trade_is_measured() {
+        let mut square = a_square(&[], &[]);
+        square.started();
+        square.stand(Y, 2000);
+        square.walk(A, 0, 1);
+        square.state.process_pulse(16);
+        assert!(
+            square.is_idle(),
+            "Alpha moved, and its partner stands 2000 away"
+        );
+        assert_eq!(square.heard(Y), vec![end()]);
         square.stand(Y, 0);
         square.started();
-        square.positions.forget(square.leases[Y].id());
-        square.state.process_pulse(63);
-        assert_eq!(square.state.trades.len(), 1);
-        square.state.process_pulse(64);
-        assert!(square.is_idle(), "a side off the map is apart");
-        assert_eq!(square.heard(A), vec![end()]);
+        square.walk(Z, 2000, 0);
+        square.state.process_pulse(32);
+        assert_eq!(square.state.trades.len(), 1, "Zulu trades with nobody");
+    }
+
+    /// A sample whose rate is not a number (0 / 0) moves nothing, and still measures the trade
+    /// (D1): a body sent back to the destination its motion still holds, on the motion's start
+    /// millisecond, keeps its spot 1041 east and loses its trade.
+    #[test]
+    fn a_nan_pulse_on_a_sample_still_checks_the_trade() {
+        let mut square = a_square(&[], &[]);
+        square.started();
+        square.stand(Y, 1041);
+        assert!(
+            !square.state.goto(YANKEE.raw(), SPOT, SPOT),
+            "the stale destination: the Move state, no new start"
+        );
+        square.state.process_pulse(16);
+        assert_eq!(square.spot(Y), (SPOT + 1041, SPOT, 0), "nothing moved");
+        assert!(square.is_idle());
     }
 
     #[test]
@@ -1766,6 +1850,58 @@ mod tests {
         );
     }
 
+    /// A trade and a shop step on the game thread are judged where the body stands, not at the
+    /// point the descriptor last stored; the stored point is only out of reach when used.
+    #[test]
+    fn a_trade_and_a_shop_step_carry_the_bodys_live_point() {
+        let mut square = a_square(&[], &[]);
+        let stale = at(5_000);
+        let refused = square
+            .state
+            .trade(ALPHA, start(YANKEE), stale, of(1))
+            .unwrap();
+        assert!(matches!(
+            declined(refused).0,
+            TradeDeclined::OutOfReach { .. }
+        ));
+        let (reply, answer) = oneshot::channel();
+        square.state.apply(GameCommand::Trade {
+            vid: ALPHA,
+            step: start(YANKEE),
+            place: stale,
+            mover: of(1),
+            reply,
+        });
+        let started = answer.blocking_recv().unwrap().unwrap();
+        assert_eq!(
+            sent(started),
+            vec![exchange(EXCHANGE_SUBHEADER_GC_START, false, 9)]
+        );
+
+        let click = ShopStep::Click { target: KEEPER };
+        let far = square.state.shop(ZULU, click, stale, of(1)).unwrap();
+        assert!(
+            matches!(
+                far,
+                ShopAnswer::Declined {
+                    reason: ShopDeclined::OutOfReach { .. },
+                    ..
+                }
+            ),
+            "{far:?}"
+        );
+        let (reply, answer) = oneshot::channel();
+        square.state.apply(GameCommand::Shop {
+            vid: ZULU,
+            step: click,
+            place: stale,
+            mover: of(1),
+            reply,
+        });
+        let opened = answer.blocking_recv().unwrap().unwrap();
+        assert!(matches!(opened, ShopAnswer::Sent(_)), "{opened:?}");
+    }
+
     /// A warp NPC of `empire` at the spot on map 41, named `name`.
     fn a_warp_npc(vid: u32, empire: u8, name: &[u8]) -> Npc {
         Npc {
@@ -1787,20 +1923,9 @@ mod tests {
     };
 
     impl Square {
-        /// Stand `npcs` up on Channel 1's map 41, whose base is (1000, 2000).
+        /// Stand `npcs` up beside the keeper on Channel 1's map 41, whose base is (1000, 2000).
         fn stand_up(&mut self, npcs: &[Npc]) {
-            let region = gamedata::map_atlas::MapRegion {
-                index: 41,
-                name: b"metin2_map_b_desert".to_vec(),
-                sx: 1_000,
-                sy: 2_000,
-                ex: 26_600,
-                ey: 27_600,
-                spawn: (0, 0),
-                empire_spawns: None,
-            };
-            let kept = super::super::warp_npc::warp_npcs(npcs, &region);
-            let _replaced = self.state.warp_npcs.insert((1, 41), kept);
+            self.state.stand_npcs(1, &desert(), with_keeper(npcs));
         }
 
         /// The orders `who`'s descriptor has been handed since the last look.
@@ -1845,12 +1970,14 @@ mod tests {
         square.stand_at(Z, 0, 314);
         square.state.process_pulse(36);
         assert!(square.ordered(Z).is_empty(), "the reach along y");
-        square.positions.forget(square.leases[Z].id());
+        let _left = square.state.remove_body(ZULU);
         square.state.process_pulse(48);
-        assert!(square.ordered(Z).is_empty(), "a player off the map");
+        assert!(square.ordered(Z).is_empty(), "a player with no body");
         assert_eq!(square.ordered(Y), vec![TO_A3, TO_A3, TO_A3]);
     }
 
+    /// A client whose character has not entered the world has no body, so no sectree holds it;
+    /// a body whose character is gone is passed over too.
     #[test]
     fn a_warp_npc_passes_over_what_is_not_a_player_in_the_world() {
         let mut square = a_square(&[], &[]);
@@ -1868,13 +1995,17 @@ mod tests {
             empire: 1,
             language: 1,
         });
-        let kind = SyncPositionVictimKind::Player;
-        square.positions.track(entering.id(), kind, 15, SPOT, SPOT);
-        let id = square.leases[A].id();
-        let kind = SyncPositionVictimKind::Monster;
-        square
-            .positions
-            .track(id, kind, PEOPLE[A].0.raw(), SPOT, SPOT);
+        let mut shown = clients.join(ClientEntry {
+            channel: 1,
+            map: 41,
+            name: "Shown".to_owned(),
+            vid: 17,
+            empire: 1,
+            language: 1,
+        });
+        let _own = square
+            .state
+            .place_body(Vid::new(17), standing_on(41), a_card("Shown", 1));
 
         square.state.process_pulse(0);
         assert!(
@@ -1883,13 +2014,15 @@ mod tests {
         );
         square.state.process_pulse(12);
 
+        assert_eq!(square.ordered(A), vec![TO_A3]);
         assert_eq!(square.ordered(Y), vec![TO_A3]);
-        assert!(square.ordered(A).is_empty(), "not a player (`IsPC`)");
-        let mut orders = entering.take_orders().expect("the queue is home");
-        assert!(
-            orders.try_recv().is_err(),
-            "a player whose character has not entered the world"
-        );
+        for (lease, why) in [
+            (&mut entering, "a client with no body"),
+            (&mut shown, "a body with no character"),
+        ] {
+            let mut orders = lease.take_orders().expect("the queue is home");
+            assert!(orders.try_recv().is_err(), "{why}");
+        }
     }
 
     #[test]
@@ -1936,31 +2069,118 @@ mod tests {
         assert!(square.heard(Y).is_empty(), "the empire is checked first");
     }
 
+    /// A goto NPC shows the player past its map's base at once, with `Show`'s default z, and
+    /// stops it; a warp NPC standing at the target, later in the same Pulse, judges it again
+    /// there.
     #[test]
-    fn a_goto_npc_orders_a_show_past_its_maps_base_and_a_player_takes_one_order_a_pulse() {
+    fn a_goto_player_is_judged_again_at_its_new_spot_in_the_same_pulse() {
         let mut square = a_square(&[], &[]);
         let goto = Npc {
             char_type: gamedata::mob_proto::CHAR_TYPE_GOTO,
             ..a_warp_npc(0x8000_0002, 0, b". 345 361")
         };
         let bad = a_warp_npc(0x8000_0003, 0, b"Gatekeeper");
-        let warp = a_warp_npc(0x8000_0004, 0, b"a3 4002 8995");
+        let warp = Npc {
+            x: 35_500,
+            y: 38_100,
+            ..a_warp_npc(0x8000_0004, 0, b"a3 4002 8995")
+        };
         square.stand_up(&[goto, bad, warp]);
         assert_eq!(
             square.state.warp_npc_vids_on(1, 41),
             vec![0x8000_0002, 0x8000_0004],
             "a name that does not parse stands no warp NPC"
         );
-        let shown = ClientOrder::Goto {
+        let shown = NpcOrder::Goto {
             x: 35_500,
             y: 38_100,
         };
-        assert_eq!(square.state.warp_npcs_on(1, 41), vec![shown, TO_A3]);
+        let warped = NpcOrder::Warp {
+            x: 400_200,
+            y: 899_500,
+        };
+        assert_eq!(square.state.warp_npcs_on(1, 41), vec![shown, warped]);
+        square.walk(Y, 100, 0);
 
         square.state.process_pulse(12);
 
-        assert_eq!(square.ordered(A), vec![shown], "the first NPC orders it");
-        assert_eq!(square.ordered(Y), vec![shown]);
+        for who in [A, Y, Z] {
+            assert_eq!(square.spot(who), (35_500, 38_100, SHOW_Z), "player {who}");
+            assert_eq!(square.ordered(who), vec![TO_A3], "player {who}");
+        }
+        assert!(
+            !square.state.movers.contains(&YANKEE.raw()),
+            "the goto stops a mover"
+        );
+    }
+
+    /// A player a warp NPC orders is judged by no later NPC of the Pulse: its descriptor runs
+    /// the warp after the Pulse, and legacy's `WarpSet` takes it off its sectree at once.
+    #[test]
+    fn a_warped_player_is_judged_by_no_later_npc_of_the_pulse() {
+        let mut square = a_square(&[], &[]);
+        let first = a_warp_npc(0x8000_0002, 0, b"a3 4002 8995");
+        let second = a_warp_npc(0x8000_0003, 0, b"b3 1 2");
+        square.stand_up(&[first, second]);
+
+        square.state.process_pulse(12);
+        assert_eq!(square.ordered(A), vec![TO_A3], "one order a Pulse");
+        square.state.process_pulse(24);
+        assert_eq!(
+            square.ordered(A),
+            vec![TO_A3],
+            "and one again on the next fire"
+        );
+    }
+
+    /// The warp NPCs judge each player before the movers step: a walker a goto NPC reaches
+    /// at the start of the Pulse is shown at the target and stopped, and does not walk out of
+    /// its reach first.
+    #[test]
+    fn step_motion_runs_after_the_warp_npcs_in_process_pulse() {
+        let mut square = a_square(&[], &[]);
+        let goto = Npc {
+            char_type: gamedata::mob_proto::CHAR_TYPE_GOTO,
+            ..a_warp_npc(0x8000_0002, 0, b". 345 361")
+        };
+        square.stand_up(&[goto]);
+        square.walk(Y, 2_000, 0);
+
+        square.state.process_pulse(12);
+
+        assert_eq!(square.spot(Y), (35_500, 38_100, SHOW_Z));
+        assert!(!square.state.movers.contains(&YANKEE.raw()));
+        square.state.process_pulse(13);
+        assert_eq!(square.spot(Y), (35_500, 38_100, SHOW_Z), "stopped there");
+    }
+
+    /// The goto's `Stop` (`G/char.cpp:7971-7972`, `:3460-3469`) ends a walk still under way:
+    /// the player is idle at the target, and the rest of the walk it was taking is not stepped.
+    #[test]
+    fn a_goto_ends_the_walk_it_finds_under_way() {
+        let mut square = a_square(&[], &[]);
+        let goto = Npc {
+            char_type: gamedata::mob_proto::CHAR_TYPE_GOTO,
+            ..a_warp_npc(0x8000_0002, 0, b". 345 361")
+        };
+        square.stand_up(&[goto]);
+        square.clock.set(0);
+        assert!(square.state.goto(YANKEE.raw(), SPOT - 20_000, SPOT));
+        square.clock.set(100);
+
+        square.state.process_pulse(12);
+
+        assert_eq!(square.spot(Y), (35_500, 38_100, SHOW_Z));
+        assert!(
+            !square.state.movers.contains(&YANKEE.raw()),
+            "the walk ended"
+        );
+        let motion = square.state.bodies[&YANKEE].motion;
+        assert!(!motion.moving);
+        assert_eq!(
+            (motion.start, motion.dest),
+            ((35_500, 38_100), (35_500, 38_100))
+        );
     }
 
     #[test]

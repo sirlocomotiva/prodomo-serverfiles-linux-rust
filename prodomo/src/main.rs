@@ -28,7 +28,6 @@ use clap::{Parser, Subcommand};
 use common::config::{load_server_config, ItemIdSpan, ServerConfig, DEFAULT_CONFIG_PATH};
 use common::enums::EParts;
 use common::logging::{init_from_env, init_logging, LogConfig};
-use common::vid::Vid;
 use db::accounts::{find_auth_account, record_login, AccountError};
 use db::players::{
     change_name, create_player, delete_player, load_character, lobby, select_empire, Created,
@@ -59,14 +58,16 @@ use prodomo::chat_line::Recipient;
 use prodomo::client_live::{
     handshake_token, BootLiveClock, LiveClientSession, LiveClock, LiveError, LiveOutcome, LiveStep,
 };
-use prodomo::client_registry::{ChannelClients, ClientEntry, ClientOrder, Lease, PositionTable};
+use prodomo::client_registry::{ChannelClients, ClientEntry, ClientOrder, Lease};
 use prodomo::client_session::ClientPhase;
 use prodomo::command::{
     interpret, one_argument, Caller, Command as LineCommand, CommandFlood, Interpreted, GM_PLAYER,
     POS_SITTING, POS_STANDING, TYPE_IN_FULL,
 };
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
-use prodomo::game_loop_messages::{GameLoopController, GameLoopTerminal, GroundPlace, Kept};
+use prodomo::game_loop_messages::{
+    GameLoopController, GameLoopTerminal, GroundPlace, Kept, RelayScope, Settled,
+};
 use prodomo::game_state::{
     world_item_id_range, GameState, ShopAnswer, ShopStep, TradeAnswer, TradeSettled, TradeStep,
 };
@@ -79,11 +80,9 @@ use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::loading_phase::{
     enter_game_burst, entering_position, item_load_points, judge_enter_game, judge_select,
     load_points, loading_burst, map_is_allowed, public_map_index, EnterGameBurst, EnterGameVerdict,
-    EnteringPosition, Neighbourhood, SelectVerdict,
+    EnteringPosition, Neighbourhood, PcCard, SelectVerdict, PK_MODE_PEACE,
 };
-use prodomo::movement::{
-    judge_move, judge_pose, MoveContext, MoveDisposition, MoveOutcome, MoveRefusal, PoseOutcome,
-};
+use prodomo::movement::{judge_pose, PoseOutcome};
 use prodomo::operator::{prepare, read_new_password, AccountCommand, GmCommand, OperatorCommand};
 use prodomo::quickslot::QuickslotStep;
 use prodomo::ready_gate::ReadyGate;
@@ -91,10 +90,6 @@ use prodomo::select_phase::{
     create_failure, create_offset, created, deleted, empire_selected, judge_create, judge_delete,
     judge_empire, judge_rename, renamed, CreateCooldown, DeleteVerdict, EmpireVerdict, NameRules,
     RenameVerdict, SelectAccount, CREATE_REFUSED, CREATE_TAKEN,
-};
-use prodomo::sync_position::{
-    judge_sync_ownership, SyncOwnershipOutcome, SyncOwnershipState, SyncPositionActor,
-    SyncPositionCloseReason, SyncPositionPorts, SyncPositionVictim,
 };
 use prodomo::ServerState;
 use protocol::cg_account::{
@@ -257,12 +252,9 @@ struct ConnectionContext {
     handles: Arc<AtomicU32>,
     /// The Names a character may not take.
     names: Arc<NameRules>,
-    /// The per-Channel client set that talking chat and movement broadcast through
-    /// (legacy `DESC_MANAGER::GetClientSet`).
+    /// The per-Channel client set that shouts go through and Warp orders reach a descriptor
+    /// by (legacy `DESC_MANAGER::GetClientSet`).
     clients: Arc<ChannelClients>,
-    /// Every character position in the process, which stands in for the sectree the legacy
-    /// `FindCharacter` and `Sync` walk.
-    positions: Arc<PositionTable>,
     /// When each account last created a character.
     creates: Arc<CreateCooldown>,
     /// `[game] block_char_creation`.
@@ -273,6 +265,8 @@ struct ConnectionContext {
     shout_limit_level: i32,
     /// `[game] enable_global_shout`: every empire hears a shout, not only the shouter's.
     global_shout: bool,
+    /// `[game] pk_protect_level`: below it a character is in the protect PK mode.
+    pk_protect_level: u8,
     /// The game thread that owns the world every live client is put into.
     ///
     /// Held by every descriptor because entering and leaving the world are both
@@ -349,9 +343,6 @@ struct Held {
     items: Vec<(ItemPos, Item)>,
     /// When the character was selected, which legacy's `m_dwLastSkillTime` starts at.
     selected_at: Option<tokio::time::Instant>,
-    /// When a `CG_MOVE` with an attack or combo function was last accepted
-    /// (`CHARACTER::OnMove(true)`, `G/char.cpp:6154`).
-    last_attack: Option<tokio::time::Instant>,
     /// `m_dwLastItemDropTime`: when a drop last passed the drop limit
     /// (`G/char_item.cpp:7465`), whatever the rest of the drop then did.
     last_item_drop: Option<tokio::time::Instant>,
@@ -362,6 +353,10 @@ struct Held {
     /// and released by then, so the descriptor only waits for the client to close, dropping
     /// whatever the client still sends.
     departed: bool,
+    /// The last move or relay handed to the world, until the world has run it. The records it
+    /// sent this client go out before the next frame is analyzed, as legacy writes them
+    /// before it reads that frame.
+    settling: Option<Settled>,
 }
 
 /// The per-descriptor half of legacy's save cycle.
@@ -385,35 +380,22 @@ struct SaveEvent {
     queued: bool,
 }
 
-/// The slice of `CHARACTER` that movement and chat need, kept on the descriptor rather than
-/// in a world, because one world per Channel has not been built yet.
+/// The slice of `CHARACTER` the descriptor keeps: the save's copy of the place, and the pose.
 ///
-/// # Where each field comes from
-///
-/// `map` is the atlas lookup of the loaded x and y, `x` and `y` are the saved columns,
-/// `sitting` starts false because a loaded character is always standing, and
-/// `move_speed` is `GetLimitPoint(POINT_MOV_SPEED)` from the same points the loading burst
-/// sends, so the movement gate and the record the client shows cannot disagree.
+/// The world owns the body, which moves, syncs and is seen there. `map`, `x` and `y` start at
+/// the entering place and take the body's place each time the world hands back what it holds
+/// ([`hold_kept`]), so a save writes the point the world last had. `sitting` starts false
+/// because a loaded character is always standing.
 #[derive(Debug, Clone, PartialEq)]
 struct Avatar {
     /// `GetMapIndex()`.
     map: i32,
-    /// `GetX()`, the authoritative x.
+    /// `GetX()`, as the world last reported it.
     x: i32,
-    /// `GetY()`, the authoritative y.
+    /// `GetY()`, as the world last reported it.
     y: i32,
-    /// `m_fRot`, from `SetRotation(pinfo->bRot * 5)`.
-    rotation: f32,
-    /// `m_posDest`, which `Goto` sets and `Stop` clears.
-    destination: Option<(i32, i32)>,
     /// `IsState(POS_SITTING)`.
     sitting: bool,
-    /// `GetLimitPoint(POINT_MOV_SPEED)`, which gates the `FUNC_MOVE` branch.
-    move_speed: i32,
-    /// `GetCurrentMoveDuration()`, the `dwDuration` a `FUNC_MOVE` record carries.
-    move_duration: u32,
-    /// `GetSyncHackCount()`, the per-character sync-position refusal counter.
-    sync_hack_count: u32,
 }
 
 /// Resolves when another descriptor has logged in with the login this one holds; never without
@@ -517,12 +499,6 @@ async fn handle_connection(
     }
     if let Some(lease) = held.presence.as_ref() {
         info!(%addr, presence = lease.id(), "Leaving the client set");
-        // `DESC::SetPlayer(NULL)` on a disconnect removes the character from the world, so a
-        // later `FindCharacter` in `CInputMain::SyncPosition` finds nobody. Releasing the
-        // lease takes the client out of the Channel set, but the position table stands in
-        // for the world, so it has to be told as well or a departed character would keep
-        // answering claims.
-        context.positions.forget(lease.id());
     }
     // `held` drops here, which releases the lease and deregisters the character.
     drop(held);
@@ -608,9 +584,12 @@ async fn pump_descriptor<S>(
 
     loop {
         lend_queues(held, &mut outbox, &mut orders);
-        // A burst another client caused while this one was thinking is written before the
-        // next read, so a record can never sit behind a frame the client already sent.
-        if !write_pending(session, addr, &mut pending).await {
+        // A move or relay this client sent is waited for, so the records the world sent this
+        // client for it are queued before anything a later frame answers directly. Then the
+        // queue is written, with whatever other characters caused meanwhile, before the next
+        // frame is analyzed: a record never sits behind an answer to a frame sent after it.
+        settle(held).await;
+        if !flush_outbox(session, addr, &mut outbox, &mut pending).await {
             break;
         }
         match session.next_buffered(clock.now()).await {
@@ -683,7 +662,10 @@ async fn pump_descriptor<S>(
             // An order from the game thread: a warp or goto NPC this character stands by.
             order = next_order(&mut orders) => {
                 if let Some(order) = order {
-                    if !follow_order(session, addr, context, locations, held, order).await {
+                    let follow = async |session: &mut LiveClientSession<S>| {
+                        follow_order(session, addr, context, locations, held, order).await
+                    };
+                    if !take_order(session, addr, &mut outbox, &mut pending, follow).await {
                         break;
                     }
                 } else {
@@ -733,6 +715,53 @@ fn lend_queues(
     *orders = lease.take_orders();
 }
 
+/// Wait until the world has run the last move or relay this client sent, so every record it
+/// sent this client is in the lease's queue.
+async fn settle(held: &mut Held) {
+    if let Some(settling) = held.settling.take() {
+        // An error only says the world dropped the command unrun, so it sent nothing.
+        let _ran = settling.await;
+    }
+}
+
+/// Write the pending records and then every record already in the lease's queue, in order,
+/// without waiting for more; `false` when the session stopped.
+async fn flush_outbox<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    outbox: &mut Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    pending: &mut Vec<Vec<u8>>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if let Some(queue) = outbox.as_mut() {
+        while let Ok(record) = queue.try_recv() {
+            pending.push(record);
+        }
+    }
+    write_pending(session, addr, pending).await
+}
+
+/// Write what the world queued before an order, then follow it; `false` when the session
+/// stopped or the connection must close.
+///
+/// The world queued those records before it ordered (a goto NPC's show earlier in the same
+/// turn, say), so they go out before what following the order writes, as legacy writes them
+/// before `WarpSet` runs.
+async fn take_order<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    outbox: &mut Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    pending: &mut Vec<Vec<u8>>,
+    follow: impl AsyncFnOnce(&mut LiveClientSession<S>) -> bool,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    flush_outbox(session, addr, outbox, pending).await && follow(session).await
+}
+
 /// Write the broadcast records queued during the last turn; `false` when the session stopped.
 async fn write_pending<S>(
     session: &mut LiveClientSession<S>,
@@ -765,17 +794,22 @@ fn hold_points(held: &mut Held, points: world::character::Points) {
     held.points = Some(points);
 }
 
-/// Hold the points and quickslots the world holds for a character.
+/// Hold the points, quickslots and place the world holds for a character.
 fn hold_kept(held: &mut Held, kept: Kept) {
     if let Some(points) = kept.points {
         hold_points(held, points);
     }
     held.quickslots = kept.quickslots;
+    if let (Some((map, x, y)), Some(avatar)) = (kept.place, held.avatar.as_mut()) {
+        avatar.map = map;
+        avatar.x = x;
+        avatar.y = y;
+    }
 }
 
-/// Hold the points and quickslots the world holds for this descriptor's character, which the
-/// save writes from. The world changes them on its own (the potion recovery on its pulse, a
-/// trade the partner closes), so the copy the last item step left can be stale. A world that
+/// Hold the points, quickslots and place the world holds for this descriptor's character, which
+/// the save writes from. The world changes them on its own (the potion recovery on its pulse, a
+/// trade the partner closes, every move), so the copy the last item step left can be stale. A world that
 /// cannot answer leaves the held copy, which is still a state the character was in.
 async fn hold_world_points(context: &ConnectionContext, addr: SocketAddr, held: &mut Held) {
     let Some(vid) = held.world else {
@@ -792,14 +826,12 @@ async fn hold_world_points(context: &ConnectionContext, addr: SocketAddr, held: 
 /// (`G/char_item.cpp:8418-8419`).
 const EQUIP_AFTER_FIGHT: std::time::Duration = std::time::Duration::from_millis(1500);
 
-/// Whether the character attacked, or was selected, within the last 1.5 s: `GetLastAttackTime`
-/// or `m_dwLastSkillTime` (`G/char_item.cpp:8418-8419`). The Rewrite has no skills yet, so
-/// the skill time is only ever the select's.
+/// Whether the character was selected within the last 1.5 s: `m_dwLastSkillTime`
+/// (`G/char_item.cpp:8418-8419`). The Rewrite has no skills yet, so the skill time is only
+/// ever the select's. The world adds `GetLastAttackTime`, which its moves keep.
 fn recently_fought(held: &Held) -> bool {
-    [held.selected_at, held.last_attack]
-        .into_iter()
-        .flatten()
-        .any(|at| at.elapsed() <= EQUIP_AFTER_FIGHT)
+    held.selected_at
+        .is_some_and(|at| at.elapsed() <= EQUIP_AFTER_FIGHT)
 }
 
 /// `CG_ITEM_MOVE` (13) in the game phase: `CHARACTER::MoveItem` (`G/char_item.cpp:7602`).
@@ -1092,20 +1124,18 @@ fn ground_place(held: &Held) -> Option<GroundPlace> {
     })
 }
 
-/// The enter-game burst for the character `held` has loaded, with the view of its map: the NPCs
-/// the world stood up there at boot.
+/// The enter-game burst for the character `held` has loaded: `shown`, the records the world's
+/// `Show` of it wrote to it, then its map's NPC list for the mini-map.
 ///
-/// Other characters are not in the view; that part is still the world system's to contribute.
 /// `None` when the world did not answer, and the connection closes.
 async fn entering_burst(
     context: &ConnectionContext,
     addr: SocketAddr,
     channel: u8,
     held: &Held,
+    shown: Vec<Vec<u8>>,
 ) -> Option<EnterGameBurst> {
-    let (Some(character), Some(points)) = (held.character.as_ref(), held.points.as_ref()) else {
-        return None;
-    };
+    let character = held.character.as_ref()?;
     let map = held.map.unwrap_or_default();
     let npcs = match context.game.npcs_on(channel, map).await {
         Ok(npcs) => npcs,
@@ -1114,18 +1144,12 @@ async fn entering_burst(
             return None;
         }
     };
-    let view = Neighbourhood {
-        characters: Vec::new(),
-        npcs,
-    };
     Some(enter_game_burst(
         character,
-        points,
-        character_vid(character),
-        &view,
+        shown,
+        &npcs,
         channel,
         global_time(),
-        descriptor_language(held.account.as_ref()),
     ))
 }
 
@@ -1168,6 +1192,8 @@ fn item_actor(held: &Held) -> Mover {
             .as_ref()
             .map_or(0, |character| character.empire),
         language: descriptor_language(held.account.as_ref()),
+        // The world sets it from the body's card (`GameState::run_item_step`).
+        pk_mode: PK_MODE_PEACE,
     }
 }
 
@@ -1239,17 +1265,23 @@ where
         warn!(%addr, %error, "Client session stopped");
         return false;
     }
+    info!(%addr, kind = ?moved.kind, rows = moved.changes.len(), "Item moved");
     // `PacketAround`: the look, the effects and the broadcast points reach the characters that
-    // see this one too.
-    if let (Some(lease), Some(avatar)) = (held.presence.as_ref(), held.avatar.as_ref()) {
-        for record in &moved.around {
-            let _recipients =
-                context
-                    .clients
-                    .broadcast_excluding(held.channel, avatar.map, lease.id(), record);
+    // see this one, and a ground record everyone else on the map (V8). The world sends them,
+    // after the rows are written, so nobody hears of a move the store did not take.
+    if moved.around.is_empty() {
+        return true;
+    }
+    let Some(vid) = held.world else {
+        return true;
+    };
+    match context.game.relay(vid, moved.around).await {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not relay the item step; closing");
+            return false;
         }
     }
-    info!(%addr, kind = ?moved.kind, rows = moved.changes.len(), "Item moved");
     true
 }
 
@@ -1279,9 +1311,9 @@ async fn next_order(
 
 /// Carry out an order of the game thread; `false` when the connection must close.
 ///
-/// The game thread owns no socket (ADR-0002), so the two effects of `FuncCheckWarp` that
-/// write to the client run here: `WarpSet` for a warp NPC and `Show` for a goto NPC
-/// (`G/char.cpp:7967-7973`).
+/// The game thread owns no socket (ADR-0002), so the effect of `FuncCheckWarp` that ends the
+/// descriptor's session runs here: `WarpSet` for a warp NPC (`G/char.cpp:7967-7968`). A goto
+/// NPC's `Show` and `Stop` (`:7971-7972`) move the body, which the world runs itself.
 async fn follow_order<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -1293,12 +1325,8 @@ async fn follow_order<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    match order {
-        ClientOrder::Warp { x, y } => {
-            warp_set(session, addr, context, locations, held, (x, y)).await
-        }
-        ClientOrder::Goto { x, y } => goto_show(session, addr, context, held, (x, y)).await,
-    }
+    let ClientOrder::Warp { x, y } = order;
+    warp_set(session, addr, context, locations, held, (x, y)).await
 }
 
 /// `CHARACTER::WarpSet(x, y)` for this descriptor's character (`G/char.cpp:6694-6792`);
@@ -1379,19 +1407,13 @@ where
         y,
     };
     held.warp = Some(target);
-    // `Stop()`.
-    if let Some(avatar) = held.avatar.as_mut() {
-        avatar.destination = None;
-    }
     if !save_held(context, held, std::time::Instant::now()).await {
         warn!(%addr, x, y, "The warp could not save the character; closing without GC_WARP");
         return false;
     }
     // The row is the new descriptor's to write from here on.
     held.save = None;
-    if let Some(lease) = held.presence.take() {
-        context.positions.forget(lease.id());
-    }
+    held.presence = None;
     held.logon = None;
     held.departed = true;
     let vid = held.character.as_ref().map_or(0, character_vid);
@@ -1412,67 +1434,6 @@ where
         empire = held.character.as_ref().map_or(0, |character| character.empire),
         "WARP"
     );
-    true
-}
-
-/// A goto NPC's `Show(GetMapIndex(), x, y)` and `Stop()` for this descriptor's character
-/// (`G/char.cpp:7971-7972`); `false` when the connection must close.
-///
-/// `Show` fails, sending nothing, when no sectree of the character's map holds the position
-/// (`G/char.cpp:1849-1854`), and `Stop` runs either way. When it succeeds the character stands
-/// at the position, and its own client is sent the records of
-/// [`prodomo::warp::show_records`].
-async fn goto_show<S>(
-    session: &mut LiveClientSession<S>,
-    addr: SocketAddr,
-    context: &ConnectionContext,
-    held: &mut Held,
-    to: (i32, i32),
-) -> bool
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    if held.departed {
-        return true;
-    }
-    let language = descriptor_language(held.account.as_ref());
-    let (Some(character), Some(points), Some(avatar), Some(lease)) = (
-        held.character.as_ref(),
-        held.points.as_ref(),
-        held.avatar.as_mut(),
-        held.presence.as_ref(),
-    ) else {
-        return true;
-    };
-    avatar.destination = None;
-    if context.atlas.index_at(to.0, to.1) != Some(avatar.map) {
-        debug!(
-            %addr,
-            x = to.0,
-            y = to.1,
-            map = avatar.map,
-            "Show found no sectree; the goto stops"
-        );
-        return true;
-    }
-    let from = (avatar.x, avatar.y);
-    let vid = character_vid(character);
-    let records = prodomo::warp::show_records(
-        character,
-        points,
-        (vid, language),
-        avatar.rotation,
-        from,
-        to,
-    );
-    avatar.x = to.0;
-    avatar.y = to.1;
-    context.positions.place(lease.id(), to.0, to.1);
-    info!(%addr, name = %character.name.as_str(), x = to.0, y = to.1, "SHOW");
-    if let Err(error) = send_all(session, &records).await {
-        warn!(%addr, %error, "Client session stopped");
-        return false;
-    }
     true
 }
 
@@ -1589,12 +1550,27 @@ where
                     warn!(%addr, "Talking record does not match its effect");
                 }
                 // `FEmpireChatPacket` walks the process client set and filters by map
-                // index, with no self-exclusion, so this reaches the speaker too.
+                // index, with no self-exclusion, so this reaches the speaker too. The world
+                // sends it, in order with the moves it relays.
                 let bytes = record
                     .encode()
                     .unwrap_or_else(|error| panic!("a talking record always fits: {error}"));
-                let sent = context.clients.broadcast_on_map(held.channel, map, &bytes);
-                info!(%addr, vid, map, recipients = sent, "Talking line sent to the map");
+                let Some(world_vid) = held.world else {
+                    warn!(%addr, vid, "Talking line from a character outside the world; dropped");
+                    continue;
+                };
+                match context
+                    .game
+                    .relay(world_vid, vec![(RelayScope::Map, bytes)])
+                    .await
+                {
+                    Ok(settling) => held.settling = Some(settling),
+                    Err(error) => {
+                        warn!(%addr, %error, "The world could not relay the talking line; closing");
+                        return false;
+                    }
+                }
+                info!(%addr, vid, map, "Talking line sent to the map");
             }
             ChatEffect::UnknownType { chat_type } => {
                 // The legacy default arm only logs. Nothing reaches the client.
@@ -1628,16 +1604,16 @@ fn shout(context: &ConnectionContext, empire: u8, text: &[u8]) -> usize {
 }
 
 /// `CG_MOVE` (7) in the game phase: `CInputMain::Move` (`input_main.cpp:1757-1915`).
-fn move_character<S>(
-    _session: &mut LiveClientSession<S>,
+///
+/// The world owns the body, so it judges the move, walks the body and relays the record to
+/// the characters that see it; a refusal it logs and, for a move too far or a dead mover,
+/// shows the body where it stands. Only a record that does not decode closes here.
+async fn move_character(
     addr: SocketAddr,
     context: &ConnectionContext,
     held: &mut Held,
     frame: &ClientFrame,
-) -> bool
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
+) -> bool {
     let record = match CgMove::decode_frame(frame) {
         Ok(record) => record,
         Err(error) => {
@@ -1645,93 +1621,15 @@ where
             return false;
         }
     };
-    let Some(avatar) = held.avatar.as_mut() else {
-        warn!(%addr, "MOVE without a character; ignoring");
+    let Some(vid) = held.world else {
+        warn!(%addr, "MOVE from a character outside the world; ignoring");
         return true;
     };
-    let move_context = MoveContext {
-        vid: held.character.as_ref().map_or(0, |character| character.id),
-        map: avatar.map,
-        x: avatar.x,
-        y: avatar.y,
-        // The Rewrite has no mount yet, so nothing is riding.
-        riding: false,
-        // The Rewrite has no death state yet.
-        dead: false,
-        // The Rewrite has no stun affect and no private shop, so `CanMove` always holds.
-        can_move: true,
-        move_speed: avatar.move_speed,
-        move_duration: avatar.move_duration,
-    };
-    let outcome = judge_move(&record, &move_context);
-    let Some(lease) = held.presence.as_ref() else {
-        // A move with no registry entry is a character that never entered the game phase,
-        // which the phase gate already prevents. Log it rather than broadcasting blind.
-        warn!(%addr, "MOVE without a registry lease; ignoring");
-        return true;
-    };
-    match outcome {
-        MoveOutcome::Ignore(reason) => {
-            info!(%addr, reason, "MOVE consumed without a record");
-        }
-        MoveOutcome::Refuse(refusal) => {
-            // `ch->Show(current)` and `ch->Stop()`: the client is pulled back. The
-            // Rewrite has no view record for a character to show itself, so the
-            // rejection is a log line; the position is already unchanged.
-            match refusal {
-                MoveRefusal::CannotMove => info!(%addr, "MOVE refused: cannot move"),
-                MoveRefusal::InvalidFunction { function } => {
-                    warn!(%addr, function, "MOVE refused: invalid function byte");
-                }
-                MoveRefusal::TooFar { distance } => {
-                    warn!(%addr, distance, "MOVE refused: too far");
-                }
-                MoveRefusal::Dead => info!(%addr, "MOVE refused: dead character"),
-            }
-        }
-        MoveOutcome::Accept(accepted) => {
-            // `FUNC_ATTACK` (2) and `FUNC_COMBO` (3) call `OnMove(true)`, which sets the last
-            // attack time (`G/input_main.cpp:1839-1840`).
-            if matches!(record.function, 2 | 3) {
-                held.last_attack = Some(tokio::time::Instant::now());
-            }
-            avatar.rotation = accepted.rotation;
-            match accepted.disposition {
-                MoveDisposition::Goto { x, y } => {
-                    // `Goto` only stores the destination. The authoritative position is not
-                    // updated, so the next move is measured from where the character still
-                    // is, which is what the legacy distance test reads.
-                    avatar.destination = Some((x, y));
-                }
-                MoveDisposition::Step { x, y } => {
-                    avatar.x = x;
-                    avatar.y = y;
-                    avatar.destination = Some((x, y));
-                }
-            }
-            // Only a step moves the character, so only a step updates the table a
-            // sync-position claim is measured against. A `Goto` leaves the position where it
-            // was, which is the legacy behaviour and the reason the next move is still
-            // measured from the old spot.
-            if let MoveDisposition::Step { x, y } = accepted.disposition {
-                context.positions.sync(lease.id(), x, y, sync_clock());
-            }
-            // `ch->PacketAround(&pack, sizeof(TPacketGCMove), ch)`: the mover is the
-            // `except` argument, so the record never echoes to its own sender.
-            let recipients = context.clients.broadcast_excluding(
-                held.channel,
-                avatar.map,
-                lease.id(),
-                &accepted.broadcast.encode(),
-            );
-            info!(
-                %addr,
-                function = record.function,
-                x = record.x,
-                y = record.y,
-                recipients,
-                "Move broadcast"
-            );
+    match context.game.move_character(vid, record).await {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not take the move; closing");
+            return false;
         }
     }
     true
@@ -1740,19 +1638,15 @@ where
 /// `CG_CHARACTER_POSITION` (28) in the game phase: `CInputMain::Position`
 /// (`input_main.cpp:1530-1548`).
 ///
-/// The pose record goes to everyone on the map **including** this character, because
-/// `CHARACTER::Standup` and `CHARACTER::Sitdown` call `PacketAround` with no `except`
-/// and `CEntity::PacketView` always finishes with a self-send.
-fn character_pose<S>(
-    _session: &mut LiveClientSession<S>,
+/// The pose record goes to the characters that see this one and then to this character,
+/// because `CHARACTER::Standup` and `CHARACTER::Sitdown` call `PacketAround` with no `except`
+/// (`G/char.cpp:3331`, `:3348`), and `PacketAround` finishes with the self-send.
+async fn character_pose(
     addr: SocketAddr,
     context: &ConnectionContext,
     held: &mut Held,
     frame: &ClientFrame,
-) -> bool
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
+) -> bool {
     let record = match CgCharacterPosition::decode(frame) {
         Ok(record) => record,
         Err(error) => {
@@ -1789,176 +1683,38 @@ where
             }
         }
     };
-    let Some(lease) = held.presence.as_ref() else {
-        warn!(%addr, "CHARACTER_POSITION without a registry lease; ignoring");
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "CHARACTER_POSITION from a character outside the world; ignoring");
         return true;
     };
-    let vid = held.character.as_ref().map_or(0, |character| character.id);
-    let recipients = context.clients.broadcast_on_map(
-        held.channel,
-        avatar.map,
-        &prodomo::movement::pose_record(vid, position).encode(),
-    );
-    info!(%addr, position, recipients, "Pose broadcast, including the sender");
-    // `PacketAround` with a `NULL` except still runs the trailing self-send, so the
-    // sender's own descriptor needs the record too. It is already in the map broadcast
-    // above, so the lease is only read for the map scope.
-    let _ = lease;
+    let record = prodomo::movement::pose_record(world_vid.raw(), position).encode();
+    match context
+        .game
+        .relay(world_vid, vec![(RelayScope::ViewAndSelf, record)])
+        .await
+    {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not relay the pose; closing");
+            return false;
+        }
+    }
+    info!(%addr, position, "Pose sent to the view and the sender");
     true
 }
 
-/// The live ports for `CG_SYNC_POSITION` (8): `CInputMain::SyncPosition`
+/// `CG_SYNC_POSITION` (8) in the game phase: `CInputMain::SyncPosition`
 /// (`input_main.cpp:2010-2165`).
 ///
-/// The policy in [`prodomo::sync_position`] is already complete, so this adapter supplies
-/// the six things it deliberately does not own: the victim lookup, the sync-ownership
-/// bookkeeping, the movement itself, the close, and the view broadcast.
-struct LiveSync<'a> {
-    /// The position table, which stands in for the process character map.
-    table: &'a PositionTable,
-    /// The client set, for the victim search and the broadcast.
-    clients: &'a ChannelClients,
-    /// The claimer's Channel.
-    channel: u8,
-    /// The claimer's map. A claim never leaves the claimer's map, which is how the
-    /// Rewrite keeps one process from answering for another Channel.
-    map: i32,
-    /// The claimer's own lease, which is the `except` of the broadcast.
-    actor: u64,
-    /// Every close the policy asked for, in order. The handler acts on them after the
-    /// policy returns, because the policy must not be able to end the descriptor
-    /// half-way through its own broadcast.
-    closes: Vec<SyncPositionCloseReason>,
-    /// The lease the last successful `resolve` found, so the ownership and stamp calls
-    /// that follow it do not each have to search again.
-    remembered: Option<u64>,
-    /// The clock reading the stamps are taken from, so every element in one frame carries
-    /// the same instant, as legacy's single `get_dword_time()` does.
-    now: Duration,
-    /// The claimer's own x, which `SetSyncOwner`'s `DISTANCE_APPROX` compares.
-    actor_x: i32,
-    /// The claimer's own y.
-    actor_y: i32,
-    /// One `TPacketGCOwnership` per accepted claim. `SetSyncOwner` writes each one with a
-    /// plain `PacketAround` as the claim is judged, which is before `CInputMain::SyncPosition`
-    /// sends its own position batch at the end of the handler.
-    ownership: Vec<Vec<u8>>,
-    /// The position batch, which is the handler's own `PacketAround(ch, ...)` and the only
-    /// record that excepts the claimer.
-    batch: Option<Vec<u8>>,
-}
-
-impl SyncPositionPorts for LiveSync<'_> {
-    fn resolve(&mut self, vid: Vid) -> Option<SyncPositionVictim> {
-        let (id, tracked) =
-            self.table
-                .find_on_map(self.clients, self.channel, self.map, vid.raw())?;
-        self.remembered = Some(id);
-        Some(SyncPositionVictim {
-            vid,
-            kind: tracked.kind,
-            x: tracked.x,
-            y: tracked.y,
-        })
-    }
-
-    fn set_sync_owner(&mut self, actor: Vid, victim: &SyncPositionVictim) -> bool {
-        // `CHARACTER::SetSyncOwner` (`server/server/game/char.cpp:5469-5551`) is judged by
-        // the pure policy; this applies the two state effects its acceptance asks for.
-        let Some(id) = self.remembered else {
-            return false;
-        };
-        let state = match self.table.sync_owner(id) {
-            Some((owner, claimed_at)) => SyncOwnershipState {
-                owner: Some(Vid::new(owner)),
-                claimed_at,
-            },
-            None => SyncOwnershipState {
-                owner: None,
-                claimed_at: Duration::ZERO,
-            },
-        };
-        let outcome =
-            judge_sync_ownership(actor, victim, state, self.actor_x, self.actor_y, self.now);
-        match outcome {
-            SyncOwnershipOutcome::Refused => false,
-            SyncOwnershipOutcome::Accepted {
-                owner_changed,
-                record,
-            } => {
-                // A new owner resets the victim's last-sync stamp, which is what lets its
-                // first accepted sync pass the 100 ms interval check. The claim stamp is
-                // refreshed on every accepted claim, which is what keeps the claim
-                // exclusive for as long as the other owner keeps claiming.
-                if owner_changed {
-                    self.table.forget_sync(id);
-                }
-                self.table.set_sync_owner(id, actor.raw(), self.now);
-                self.ownership.push(record);
-                true
-            }
-        }
-    }
-
-    fn broadcast_around_victim(&mut self, _victim: Vid, packet: &[u8]) {
-        self.ownership.push(packet.to_vec());
-    }
-
-    fn last_sync_time(&mut self, victim: Vid) -> Option<Duration> {
-        let (id, _) = self
-            .table
-            .find_on_map(self.clients, self.channel, self.map, victim.raw())?;
-        self.remembered = Some(id);
-        self.table.last_sync(id)
-    }
-
-    fn set_last_sync_time(&mut self, victim: Vid, now: Duration) {
-        if let Some((id, _)) =
-            self.table
-                .find_on_map(self.clients, self.channel, self.map, victim.raw())
-        {
-            self.table.sync(
-                id,
-                self.table.get(id).map_or(0, |t| t.x),
-                self.table.get(id).map_or(0, |t| t.y),
-                now,
-            );
-        }
-    }
-
-    fn sync(&mut self, victim: Vid, x: i32, y: i32) {
-        if let Some((id, _)) =
-            self.table
-                .find_on_map(self.clients, self.channel, self.map, victim.raw())
-        {
-            self.table.sync(id, x, y, self.now);
-        }
-    }
-
-    fn close(&mut self, _actor: Vid, reason: SyncPositionCloseReason) {
-        self.closes.push(reason);
-    }
-
-    fn broadcast(&mut self, _actor: Vid, packet: &[u8]) {
-        // `CInputMain::SyncPosition` passes `ch` as the `except`, and
-        // `FuncPacketAround::operator()` returns early for the excepted entity, so the
-        // claimer never receives its own accepted positions. The record is queued so the
-        // ownership records `SetSyncOwner` already wrote are delivered first.
-        self.batch = Some(packet.to_vec());
-    }
-}
-
-/// `CG_SYNC_POSITION` (8) in the game phase.
-fn sync_positions<S>(
-    _session: &mut LiveClientSession<S>,
+/// The world judges every claim against the bodies it holds, moves the victims, and sends the
+/// ownership and position records to the characters that see them. A claim the policy closes
+/// the client for closes the connection here.
+async fn sync_positions(
     addr: SocketAddr,
     context: &ConnectionContext,
-    held: &mut Held,
+    held: &Held,
     frame: &ClientFrame,
-) -> bool
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
+) -> bool {
     let packet = match protocol::cg_variable::decode_sync_position(frame) {
         Ok(packet) => packet,
         Err(error) => {
@@ -1966,71 +1722,32 @@ where
             return false;
         }
     };
-    let Some(avatar) = held.avatar.as_mut() else {
-        warn!(%addr, "SYNC_POSITION without a character; ignoring");
+    let Some(vid) = held.world else {
+        warn!(%addr, "SYNC_POSITION from a character outside the world; ignoring");
         return true;
     };
-    let Some(lease) = held.presence.as_ref() else {
-        warn!(%addr, "SYNC_POSITION without a registry lease; ignoring");
-        return true;
-    };
-    let mut actor = SyncPositionActor {
-        vid: held
-            .character
-            .as_ref()
-            .map_or_else(|| Vid::new(0), |character| Vid::new(character.id)),
-        x: avatar.x,
-        y: avatar.y,
-        sync_hack_count: avatar.sync_hack_count,
-    };
-    let now = sync_clock();
-    let mut port = LiveSync {
-        table: &context.positions,
-        clients: &context.clients,
-        channel: held.channel,
-        map: avatar.map,
-        actor: lease.id(),
-        closes: Vec::new(),
-        now,
-        remembered: None,
-        actor_x: avatar.x,
-        actor_y: avatar.y,
-        ownership: Vec::new(),
-        batch: None,
-    };
-    let result = prodomo::sync_position::process(&mut port, &packet, &mut actor, now);
-    // The policy counts a refusal on the actor, and that count survives the frame even
-    // though the descriptor stays open.
-    avatar.sync_hack_count = actor.sync_hack_count;
-    if !port.closes.is_empty() {
-        warn!(
-            %addr,
-            reason = ?port.closes,
-            "SYNC_POSITION refused the client; closing"
-        );
-        return false;
+    match context.game.sync_positions(vid, packet).await {
+        Ok(Some(result)) => {
+            if let Some(reason) = result.close_reason {
+                warn!(%addr, ?reason, "SYNC_POSITION refused the client; closing");
+                return false;
+            }
+            info!(
+                %addr,
+                processed = result.processed_elements,
+                accepted = result.accepted_elements.len(),
+                broadcast = result.gc_packet.is_some(),
+                "Sync positions judged"
+            );
+            true
+        }
+        // A character with no body has nothing to sync.
+        Ok(None) => true,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not judge the sync; closing");
+            false
+        }
     }
-    // `SetSyncOwner` writes `TPacketGCOwnership` with a plain `PacketAround`, so the
-    // victim and every other client on the map sees it, the claimer included. The
-    // position batch is written after every claim is judged and excepts the claimer.
-    for record in &port.ownership {
-        context
-            .clients
-            .broadcast_on_map(held.channel, port.map, record);
-    }
-    if let Some(batch) = &port.batch {
-        context
-            .clients
-            .broadcast_excluding(held.channel, port.map, port.actor, batch);
-    }
-    info!(
-        %addr,
-        processed = result.processed_elements,
-        accepted = result.accepted_elements.len(),
-        broadcast = result.gc_packet.is_some(),
-        "Sync positions judged"
-    );
-    true
 }
 
 /// Apply the analyzer of the descriptor's phase to one step; `false` when the connection must
@@ -2102,13 +1819,21 @@ where
         // `CG_ENTER_GAME` (10) in the loading phase: `CInputLogin::Entergame`
         // (`G/input_login.cpp:562-606`).
         LiveStep::Record { phase, frame }
-            if matches!(phase, ClientPhase::Loading | ClientPhase::Game)
-                && frame.header == HEADER_CG_ENTERGAME.value() =>
+            if phase == ClientPhase::Loading && frame.header == HEADER_CG_ENTERGAME.value() =>
         {
             match seat {
                 Some(seat) => enter_game(session, addr, context, &seat, &frame, held).await,
                 None => report_step(addr, LiveStep::Record { phase, frame }),
             }
+        }
+        // `CG_ENTER_GAME` (10) in the game phase: the header is in the main table
+        // (`G/packet_info.cpp:116`), and `CInputMain::Analyze` has no case for it, so its
+        // `default` consumes the record and sends nothing (`G/input_main.cpp:4126-4127`).
+        LiveStep::Record { phase, frame }
+            if phase == ClientPhase::Game && frame.header == HEADER_CG_ENTERGAME.value() =>
+        {
+            debug!(%addr, "ENTER_GAME in the game phase; consumed");
+            true
         }
         // `CG_CHAT` (3) in the game phase: `CInputMain::Chat` (`G/input_main.cpp:781`).
         // `CInputDead::Analyze` maps the same header, but a dead character cannot be
@@ -2137,7 +1862,7 @@ where
         LiveStep::Record { phase, frame }
             if phase == ClientPhase::Game && is_motion_step(frame.header) =>
         {
-            motion_step(session, addr, context, held, &frame)
+            motion_step(addr, context, held, &frame).await
         }
         // `CG_ON_CLICK` (26), `CG_SHOP` (50), `CG_SCRIPT_ANSWER` (29) and
         // `CG_QUEST_INPUT_STRING` (30) in the game phase.
@@ -2175,22 +1900,18 @@ fn is_motion_step(header: u8) -> bool {
 /// - `CG_MOVE` (7): `CInputMain::Move` (`G/input_main.cpp:1757`).
 /// - `CG_SYNC_POSITION` (8): `CInputMain::SyncPosition` (`G/input_main.cpp:2010`).
 /// - `CG_CHARACTER_POSITION` (28): `CInputMain::Position` (`G/input_main.cpp:1530`).
-fn motion_step<S>(
-    session: &mut LiveClientSession<S>,
+async fn motion_step(
     addr: SocketAddr,
     context: &ConnectionContext,
     held: &mut Held,
     frame: &ClientFrame,
-) -> bool
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
+) -> bool {
     if frame.header == HEADER_CG_MOVE.value() {
-        move_character(session, addr, context, held, frame)
+        move_character(addr, context, held, frame).await
     } else if frame.header == HEADER_CG_SYNC_POSITION.value() {
-        sync_positions(session, addr, context, held, frame)
+        sync_positions(addr, context, held, frame).await
     } else {
-        character_pose(session, addr, context, held, frame)
+        character_pose(addr, context, held, frame).await
     }
 }
 
@@ -2586,12 +2307,11 @@ const SELECT_HEADERS: [u8; 4] = [
     HEADER_CG_CHANGE_NAME.value(),
 ];
 
-/// The world view the loading burst describes.
+/// The characters the loading burst's `GC_ENTITY` lists: none (V7).
 ///
-/// It is empty. A second character in the same map is contributed by the world system, which
-/// has no store to read it from yet, and a map's NPCs are shown only when the character enters
-/// the game ([`entering_burst`]), as legacy's `Show` inserts them then. `Neighbourhood::default` is
-/// that empty view, and the burst takes it the same way it will take a populated one.
+/// The characters and NPCs around are shown when the character enters the game
+/// ([`entering_burst`]), as legacy's `Show` inserts them then. `Neighbourhood::default` is that
+/// empty list, and the burst takes it the same way it would take a populated one.
 fn empty_view() -> Neighbourhood {
     Neighbourhood::default()
 }
@@ -2602,19 +2322,6 @@ fn empty_view() -> Neighbourhood {
 /// `get_global_time` adds a gap that starts at zero and grows with uptime (`G/game.cpp:106`),
 /// which a client that shows a countdown would read differently; that is a Divergence until
 /// the world system owns the clock.
-/// The clock the sync-position policy reads.
-///
-/// The legacy stamps come from `get_dword_time()`, which is a 32-bit second count, but the
-/// policy's shortest interval is 100 ms, so the Rewrite passes a `Duration` read from the
-/// system clock at nanosecond resolution. A backwards clock step can only make a stamp look
-/// older, which lets a client through the interval check sooner, exactly as a second counter
-/// that rolls back would.
-fn sync_clock() -> Duration {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-}
-
 fn global_time() -> u32 {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2997,17 +2704,64 @@ where
         info!(%addr, "ENTER_GAME without a character; closing");
         return false;
     }
+    if held.presence.is_some() || held.world.is_some() {
+        // The loading phase is entered once per descriptor and left by this record, so a
+        // character already in the world cannot send it here.
+        warn!(%addr, "ENTER_GAME for a character already in the world; closing");
+        return false;
+    }
     place_entering_character(context, addr, held);
     // The reducer proved the character is there; the field is the only place it lives.
     let Some(character) = held.character.as_ref() else {
         return false;
     };
-    let Some(points) = held.points.as_ref() else {
-        return false;
-    };
     let vid = character_vid(character);
     let map = held.map.unwrap_or_default();
-    let Some(burst) = entering_burst(context, addr, seat.number, held).await else {
+    let language = descriptor_language(held.account.as_ref());
+    let (x, y) = (character.x, character.y);
+    // `DESC::SetPlayer` makes the descriptor one the others can reach, and `PlayerLoad` then
+    // shows the character on its map (`G/input_login.cpp:590`), so the view's records are
+    // ready before the burst that carries them is written.
+    let lease = context.clients.join(ClientEntry {
+        channel: seat.number,
+        map,
+        name: character.name.clone(),
+        vid,
+        empire: character.empire,
+        language,
+    });
+    info!(
+        %addr,
+        vid,
+        channel = seat.number,
+        map,
+        name = %character.name.as_str(),
+        presence = lease.id(),
+        "Character entered the game; registered on its map"
+    );
+    let outbox = lease.outbox();
+    held.presence = Some(lease);
+    let show = prodomo::game_loop_messages::Showing {
+        place: prodomo::game_loop_messages::EnterPlace {
+            channel: seat.number,
+            map,
+            x,
+            y,
+            z: 0,
+        },
+        card: PcCard::of(character, language, context.pk_protect_level),
+    };
+    let items = std::mem::take(&mut held.items);
+    let loaded = loaded_state(held, Some(show));
+    let Some((world_vid, shown)) =
+        join_the_world(context, addr, character, vid, (items, loaded), outbox).await
+    else {
+        return false;
+    };
+    held.world = Some(world_vid);
+    // From here a failed write closes the connection, whose close path takes the character
+    // out of the world, so the characters that see it are sent its removal.
+    let Some(burst) = entering_burst(context, addr, seat.number, held, shown.records).await else {
         return false;
     };
     info!(
@@ -3027,21 +2781,11 @@ where
         warn!(%addr, %error, "Client session stopped");
         return false;
     }
-    // The world state is created only once the game phase is on the wire, because a
-    // descriptor that never received `GC_PHASE(5)` never gets a lease and so never appears
-    // in another client's broadcast. `DESC::SetPlayer` is the legacy step that makes a
-    // descriptor visible to the others, and it happens at this same moment.
-    let speed = points.limit_point(common::point_slot::POINT_MOV_SPEED);
     held.avatar = Some(Avatar {
         map,
-        x: character.x,
-        y: character.y,
-        rotation: 0.0,
-        destination: None,
+        x,
+        y,
         sitting: false,
-        move_speed: speed,
-        move_duration: 0,
-        sync_hack_count: 0,
     });
     // `CInputLogin::Entergame` calls `ResetPlayTime()` and then `StartSaveEvent()`
     // (`G/input_login.cpp:653-656`), so the playtime clock and the save event both start when
@@ -3054,46 +2798,7 @@ where
             queued: false,
         });
     }
-    if held.presence.is_none() {
-        let lease = context.clients.join(ClientEntry {
-            channel: seat.number,
-            map,
-            name: character.name.clone(),
-            vid,
-            empire: character.empire,
-            language: descriptor_language(held.account.as_ref()),
-        });
-        info!(
-            %addr,
-            vid,
-            channel = seat.number,
-            map,
-            name = %character.name.as_str(),
-            presence = lease.id(),
-            "Character entered the game; registered on its map"
-        );
-        // `DESC::SetPlayer` also puts the character in the world, which is what a
-        // sync-position claim later looks it up in. The table stands in for the world.
-        context.positions.track(
-            lease.id(),
-            prodomo::sync_position::SyncPositionVictimKind::Player,
-            vid,
-            character.x,
-            character.y,
-        );
-        let outbox = lease.outbox();
-        held.presence = Some(lease);
-        let items = std::mem::take(&mut held.items);
-        let loaded = loaded_state(held);
-        let Some(world_vid) =
-            join_the_world(context, addr, character, vid, (items, loaded), outbox).await
-        else {
-            return false;
-        };
-        held.world = Some(world_vid);
-        return show_the_ground(session, addr, context, seat.number, map).await;
-    }
-    true
+    show_the_ground(session, addr, context, seat.number, map).await
 }
 
 /// Move the held character to where `CInputLogin::Entergame` shows it: the first movable point
@@ -3148,11 +2853,14 @@ fn place_entering_character(context: &ConnectionContext, addr: SocketAddr, held:
 }
 
 /// What the load left for the world besides the items: the points, the quickslots and the
-/// gold.
+/// gold, and the body it `show`s.
 ///
 /// The store's `CHECK` keeps `player.gold` from being negative, so the fall-back to 0 is not
 /// a path a row can reach.
-fn loaded_state(held: &Held) -> prodomo::game_loop_messages::Loaded {
+fn loaded_state(
+    held: &Held,
+    show: Option<prodomo::game_loop_messages::Showing>,
+) -> prodomo::game_loop_messages::Loaded {
     prodomo::game_loop_messages::Loaded {
         points: held.points.clone(),
         quickslots: held.quickslots.clone(),
@@ -3160,15 +2868,16 @@ fn loaded_state(held: &Held) -> prodomo::game_loop_messages::Loaded {
             .character
             .as_ref()
             .map_or(0, |character| u64::try_from(character.gold).unwrap_or(0)),
+        show,
     }
 }
 
 /// Puts a live client's character into the game thread's world, and records the entry.
 ///
 /// `DESC::SetPlayer` is the step that does this, and the world is where items live.
-/// The client set and the position table answer broadcasts; neither holds an
-/// inventory, so a grant would find nobody and a client that had been given an item
-/// would find it gone at relog (ADR-0002, which puts every world on one game thread).
+/// The client set answers shouts and orders; it holds no inventory, so a grant would find
+/// nobody and a client that had been given an item would find it gone at relog (ADR-0002,
+/// which puts every world on one game thread).
 ///
 /// The outbox is the same queue the broadcast path already uses, so the world writes
 /// into a queue this descriptor is already draining and there is no second delivery
@@ -3179,9 +2888,9 @@ fn loaded_state(held: &Held) -> prodomo::game_loop_messages::Loaded {
 /// one character from having two identities; legacy's own counter is a divergence
 /// recorded in ledger 205.
 ///
-/// Returns the entry's VID on success and `None` when the world refuses or cannot be
-/// reached, because in both cases this client must not go on playing in a world it is
-/// not part of.
+/// Returns the entry's VID and the records the world's `Show` of the character wrote to it on
+/// success, and `None` when the world refuses or cannot be reached, because in both cases this
+/// client must not go on playing in a world it is not part of.
 ///
 /// The VID is returned rather than stored, so the caller records it after the
 /// immutable borrow of `held.character` this call needs has ended.
@@ -3196,7 +2905,7 @@ async fn join_the_world(
     vid: u32,
     (items, loaded): (Vec<(ItemPos, Item)>, prodomo::game_loop_messages::Loaded),
     outbox: prodomo::client_registry::ClientOutbox,
-) -> Option<common::vid::Vid> {
+) -> Option<(common::vid::Vid, prodomo::game_loop_messages::Shown)> {
     let world_vid = common::vid::Vid::new(vid);
     let entered = context
         .game
@@ -3210,14 +2919,15 @@ async fn join_the_world(
         )
         .await;
     match entered {
-        Ok(Ok(())) => {
+        Ok(Ok(shown)) => {
             info!(
                 %addr,
                 vid,
                 name = %character.name.as_str(),
+                shown = shown.records.len(),
                 "Character entered the world on the game thread"
             );
-            Some(world_vid)
+            Some((world_vid, shown))
         }
         // A refusal means the world already holds this VID, player id, or Name.
         // Continuing would put two clients on one identity, so the descriptor closes:
@@ -4338,13 +4048,16 @@ fn stand_up_npcs(state: &mut GameState, data: &NpcData) -> Result<(), String> {
 }
 
 /// What every connection shares, built once the listeners are bound and the Game data loaded.
+///
+/// `clock` is the process's `get_dword_time()`, which the world reads too, so a handshake time
+/// and a move's start are on one clock.
 fn connection_context(
     config: &ServerConfig,
     state: &Arc<ServerState>,
     store: &Store,
     listeners: &Listeners,
     data: GameData,
-    (clients, positions): (Arc<ChannelClients>, Arc<PositionTable>),
+    (clients, clock): (Arc<ChannelClients>, BootLiveClock),
     game: GameLoopController,
 ) -> ConnectionContext {
     // Every legacy game Core reported its own client port (`mother_port`) to the status list; the
@@ -4355,7 +4068,7 @@ fn connection_context(
         .map(|listener| listener.local_addr().port())
         .collect();
     ConnectionContext {
-        clock: BootLiveClock::new(),
+        clock,
         ping_cycle: Duration::from_secs(u64::from(config.game.ping_event_second_cycle)),
         // `ServerConfig::validate` has already refused a zero cycle, so this cannot be `None`
         // for a process that started; it is `expect`ed rather than defaulted so a caller that
@@ -4382,7 +4095,6 @@ fn connection_context(
         handles: Arc::new(AtomicU32::new(0)),
         names: Arc::new(data.names),
         clients,
-        positions,
         creates: Arc::new(CreateCooldown::default()),
         block_char_creation: config.game.block_char_creation,
         delete_levels: (
@@ -4391,6 +4103,7 @@ fn connection_context(
         ),
         shout_limit_level: config.game.shout_limit_level,
         global_shout: config.game.enable_global_shout,
+        pk_protect_level: config.game.pk_protect_level,
         game,
     }
 }
@@ -4422,6 +4135,53 @@ async fn install_item_ids(
         Ok(()) => Ok(()),
         Err(error) => Err(format!("The world refused the item id range: {error}").into()),
     }
+}
+
+/// The world `serve` moves into the game thread, with its NPCs stood up.
+///
+/// It is built without an item id allocator on purpose: the start id is `MAX(id)` over the
+/// item table, and that table is only readable once the store has migrated, which happens
+/// inside the accept loop. The allocator arrives as a command from there.
+fn build_world(
+    config: &ServerConfig,
+    data: &GameData,
+    quests: Quests,
+    clients: &Arc<ChannelClients>,
+    clock: BootLiveClock,
+) -> Result<GameState, String> {
+    let mut game_state = GameState::new(Arc::clone(&data.protos))
+        .with_item_count_limit(config.game.item_count_limit)
+        .with_npc_shops(Arc::clone(&data.shops))
+        .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
+        .with_drop_lifetime(config.game.item_destroy_time_dropitem)
+        .with_clients(Arc::clone(clients))
+        .with_clock(Box::new(clock))
+        .with_view_range(config.game.view_range)
+        .with_locale_strings(Arc::clone(&data.locale))
+        .with_quests(quests);
+    stand_up_npcs(&mut game_state, &data.npcs)?;
+    Ok(game_state)
+}
+
+/// Stop and join the game thread and close the store after the accept loop failed, so the
+/// error `serve` returns is not raced by a world still running.
+async fn clean_up_after_error(
+    controller: &GameLoopController,
+    game_loop: GameLoopHandle,
+    store: &Store,
+) {
+    if let Err(error) = controller.request_stop().await {
+        warn!(%error, "Game loop stop command was not accepted during error cleanup");
+    }
+    match game_loop.join().await {
+        Ok(terminal) => {
+            info!(?terminal, "Game loop error cleanup acknowledged");
+            info!("Game loop thread joined during error cleanup");
+        }
+        Err(error) => error!(%error, "Game loop error cleanup failed"),
+    }
+    store.close().await;
+    info!("Store closed");
 }
 
 /// `prodomo serve`.
@@ -4464,25 +4224,13 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     // The gate opens in the accept loop once the schema is up to date.
     let ready_gate = ReadyGate::closed();
 
-    // The world is built here and moved into the game thread. It is built without an
-    // item id allocator on purpose: the start id is `MAX(id)` over the item table, and
-    // that table is only readable once the store has migrated, which happens inside
-    // the accept loop below. The allocator arrives as a command from there.
     // One client registry serves the descriptors and the world, which tells a map when an item
     // on its ground is destroyed.
     let clients = Arc::new(ChannelClients::new());
-    // One position table too, which a trade finds and measures the other player in.
-    let positions = Arc::new(PositionTable::new());
-    let mut game_state = GameState::new(Arc::clone(&data.protos))
-        .with_item_count_limit(config.game.item_count_limit)
-        .with_npc_shops(Arc::clone(&data.shops))
-        .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
-        .with_drop_lifetime(config.game.item_destroy_time_dropitem)
-        .with_clients(Arc::clone(&clients))
-        .with_positions(Arc::clone(&positions))
-        .with_locale_strings(Arc::clone(&data.locale))
-        .with_quests(quests);
-    stand_up_npcs(&mut game_state, &data.npcs)?;
+    // One `get_dword_time()` for the process: the descriptors' handshakes and the world's
+    // moves read the same clock.
+    let clock = BootLiveClock::new();
+    let game_state = build_world(&config, &data, quests, &clients, clock)?;
     let mut game_loop = spawn_game_loop(GameLoopConfig::default(), game_state)?;
     let controller = game_loop.controller();
     info!(thread_id = ?game_loop.thread_id(), "Dedicated game loop started");
@@ -4497,7 +4245,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
             &store,
             &listeners,
             data,
-            (clients, positions),
+            (clients, clock),
             controller.clone(),
         ),
     };
@@ -4517,18 +4265,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
     let exit = match exit {
         Ok(exit) => exit,
         Err(run_error) => {
-            if let Err(error) = controller.request_stop().await {
-                warn!(%error, "Game loop stop command was not accepted during error cleanup");
-            }
-            match game_loop.join().await {
-                Ok(terminal) => {
-                    info!(?terminal, "Game loop error cleanup acknowledged");
-                    info!("Game loop thread joined during error cleanup");
-                }
-                Err(error) => error!(%error, "Game loop error cleanup failed"),
-            }
-            store.close().await;
-            info!("Store closed");
+            clean_up_after_error(&controller, game_loop, &store).await;
             return Err(run_error);
         }
     };
@@ -4856,4 +4593,45 @@ where
             send_shop_records(session, addr, &records).await
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prodomo::lifecycle::ClientLifecycle;
+    use tokio::io::AsyncReadExt;
+
+    /// A record the world queued before an order reaches the client before anything following
+    /// the order writes, so a warp's departure never overtakes the records that led to it.
+    #[tokio::test]
+    async fn an_order_follows_the_records_queued_before_it() {
+        let (ours, mut theirs) = tokio::io::duplex(4096);
+        let lifecycle = ClientLifecycle::start(1, HandshakeServerKind::Game, 0).state;
+        let mut session = LiveClientSession::new(ours, lifecycle).expect("a plaintext session");
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 13_000));
+        let (queue, receiver) = mpsc::unbounded_channel();
+        queue.send(vec![0xA1, 0xA2]).expect("the queue is open");
+        let mut outbox = Some(receiver);
+        let mut pending = vec![vec![0xA0]];
+
+        let follow = async |session: &mut LiveClientSession<tokio::io::DuplexStream>| {
+            session.send(&[0xB1]).await.is_ok()
+        };
+        assert!(take_order(&mut session, addr, &mut outbox, &mut pending, follow).await);
+        assert!(pending.is_empty());
+        let refused = async |_: &mut LiveClientSession<tokio::io::DuplexStream>| false;
+        assert!(!take_order(&mut session, addr, &mut outbox, &mut pending, refused).await);
+        drop(session);
+
+        let mut written = Vec::new();
+        theirs
+            .read_to_end(&mut written)
+            .await
+            .expect("the session wrote and closed");
+        assert_eq!(
+            written,
+            [0xA0, 0xA1, 0xA2, 0xB1],
+            "pending, then queued, then the order"
+        );
+    }
 }

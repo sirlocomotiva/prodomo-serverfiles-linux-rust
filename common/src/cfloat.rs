@@ -20,6 +20,16 @@ pub fn i32_to_f32(value: i32) -> f32 {
     f32::from(high) * 65_536.0 + f32::from(low)
 }
 
+/// `(float)value` of a `DWORD`: the nearest `f32` to `value`, ties to even.
+///
+/// The same exact steps as [`i32_to_f32`], with an unsigned high half.
+#[must_use]
+pub fn u32_to_f32(value: u32) -> f32 {
+    let high = u16::try_from(value >> 16).unwrap_or(0);
+    let low = u16::try_from(value & 0xffff).unwrap_or(0);
+    f32::from(high) * 65_536.0 + f32::from(low)
+}
+
 /// `(int)value`: the `f32` with its fraction dropped toward zero.
 ///
 /// C leaves a value outside the `int` range undefined, and SSE2 returns `INT_MIN` for it. No
@@ -159,6 +169,48 @@ mod tests {
         );
         for value in samples() {
             assert_eq!(i32_to_f32(value).to_bits(), witness_f32(value), "{value}");
+        }
+    }
+
+    #[test]
+    fn an_unsigned_count_converts_to_the_nearest_float_ties_to_even() {
+        // 2^24 + 1 rounds down to the even 2^24, 2^24 + 3 up to the even 2^24 + 4, and the
+        // largest DWORD to 2^32, which no i32 path reaches.
+        assert_eq!(u32_to_f32(16_777_217).to_bits(), 16_777_216.0_f32.to_bits());
+        assert_eq!(u32_to_f32(16_777_219).to_bits(), 16_777_220.0_f32.to_bits());
+        assert_eq!(
+            u32_to_f32(u32::MAX).to_bits(),
+            4_294_967_296.0_f32.to_bits()
+        );
+        assert_eq!(
+            u32_to_f32(0x8000_0001).to_bits(),
+            2_147_483_648.0_f32.to_bits()
+        );
+        for value in samples() {
+            let unsigned = u32::from_ne_bytes(value.to_ne_bytes());
+            // The witness rounds the exact value through its two bracketing floats.
+            let exact = f64::from(unsigned);
+            let got = u32_to_f32(unsigned);
+            let gap = (f64::from(got) - exact).abs();
+            for neighbour in [next_up(got), next_down(got)] {
+                let other = (f64::from(neighbour) - exact).abs();
+                assert!(
+                    gap < other || (gap.to_bits() == other.to_bits() && got.to_bits() & 1 == 0),
+                    "{unsigned}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unsigned_count_below_two_to_the_24_converts_exactly() {
+        for value in [
+            0_u32, 1, 2, 999, 65_535, 65_536, 65_537, 5_333, 16_777_215, 16_777_216,
+        ] {
+            assert_eq!(
+                f64::from(u32_to_f32(value)).to_bits(),
+                f64::from(value).to_bits()
+            );
         }
     }
 

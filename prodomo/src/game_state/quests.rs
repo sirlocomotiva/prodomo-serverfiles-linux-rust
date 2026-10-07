@@ -309,6 +309,7 @@ mod test_place {
         recently_fought: false,
         empire: 1,
         language: 0,
+        pk_mode: crate::loading_phase::PK_MODE_PEACE,
     };
 }
 
