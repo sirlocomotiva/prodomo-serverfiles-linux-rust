@@ -9,7 +9,8 @@
 //!
 //! Legacy walks its sectrees and views in an order hashed by pointer. The Rewrite walks the
 //! sectrees around a point in legacy's `Build` order and everything else in [`EntityKey`] order,
-//! every player by VID and then every NPC by VID (the V1 Divergence, docs/STATUS.md).
+//! every player by VID, then every NPC by VID, then every ground item by VID (the V1
+//! Divergence, docs/STATUS.md).
 //!
 //! Everything here runs on the game thread only (ADR-0002).
 
@@ -23,12 +24,15 @@ use crate::sync_position::distance_approx;
 pub(super) const VIEW_BONUS_RANGE: i64 = 500;
 
 /// One entity a sectree holds and a view names. The derived order (every player by VID, then
-/// every NPC by VID) is the fixed order the Rewrite uses where legacy walks a set hashed by
-/// pointer (V1).
+/// every NPC by VID, then every ground item by its ground VID) is the fixed order the Rewrite
+/// uses where legacy walks a set hashed by pointer (V1).
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(super) enum EntityKey {
     Character(u32),
     Npc(u32),
+    /// An item lying on the ground, a `CItem` entity: `AddToGround` lays it (`G/item.cpp:549-584`)
+    /// and `RemoveFromGround` takes it up (`:533-547`).
+    Ground(u32),
 }
 
 /// A sectree, by column and row from its map grid's first (`SectreeGrid::sectree_at`).
@@ -417,8 +421,37 @@ impl MapIndex {
         true
     }
 
-    /// `CEntity::Destroy`'s `ViewCleanup` then `SECTREE::RemoveEntity` (`G/char.cpp:786-789`):
-    /// every entity that sees `me` loses it, and `me` leaves the map.
+    /// `CItem::AddToGround` (`G/item.cpp:549-584`): the item stands at the point, joins its
+    /// sectree and fills its view once, both ways. An item is never sent anything, so it gets no
+    /// insert of its own. Returns false, changing nothing, when no sectree holds the point
+    /// (`:569-574`).
+    pub(super) fn add_to_ground(
+        &mut self,
+        me: EntityKey,
+        (x, y, z): (i32, i32, i32),
+        radius: i64,
+        out: &mut Vec<Effect>,
+    ) -> bool {
+        let Some(tree) = self.tree_at(x, y) else {
+            return false;
+        };
+        self.spots.insert(
+            me,
+            Spot {
+                tree: Some(tree),
+                x,
+                y,
+                z,
+            },
+        );
+        self.index(me, tree);
+        self.update_sectree(me, radius, out);
+        true
+    }
+
+    /// `CEntity::Destroy`'s `ViewCleanup` then `SECTREE::RemoveEntity` (`G/char.cpp:786-789`),
+    /// and `CItem::RemoveFromGround`'s two in the other order (`G/item.cpp:533-547`), which
+    /// sends the same: every entity that sees `me` loses it, and `me` leaves the map.
     pub(super) fn remove(&mut self, me: EntityKey, out: &mut Vec<Effect>) {
         self.view_cleanup(me, out);
         if let Some(tree) = self.spots.get(&me).and_then(|spot| spot.tree) {
@@ -433,7 +466,7 @@ impl MapIndex {
 mod tests {
     use super::*;
 
-    use EntityKey::{Character as Pc, Npc};
+    use EntityKey::{Character as Pc, Ground, Npc};
 
     const RADIUS: i64 = 10_500;
 
@@ -979,5 +1012,113 @@ mod tests {
         out.clear();
         map.update_sectree(Pc(2), RADIUS, &mut out);
         assert!(out.is_empty());
+    }
+
+    /// `AddToGround`'s one `UpdateSectree`: every entity around within the radius sees the item
+    /// and is seen by it, each pair in walk order, and the item is sent nothing of its own.
+    #[test]
+    fn an_item_added_to_the_ground_fills_its_view_both_ways_once() {
+        let mut map = grid();
+        place(&mut map, Pc(2), centre(1, 1));
+        place(&mut map, Npc(3), centre(1, 1));
+        // Two sectrees away: not around.
+        place(&mut map, Pc(9), centre(3, 1));
+        let mut out = Vec::new();
+        let (x, y, _) = centre(1, 1);
+        // In a sectree around, but 7725 along both axes is 10,501 by `DISTANCE_APPROX`.
+        stand(&mut map, Pc(5), (x + 7725, y + 7725));
+        assert!(map.add_to_ground(Ground(1), (x, y, 17), RADIUS, &mut out));
+        assert_eq!(
+            out,
+            vec![
+                ins(Pc(2), Ground(1)),
+                ins(Ground(1), Pc(2)),
+                ins(Npc(3), Ground(1)),
+                ins(Ground(1), Npc(3)),
+            ]
+        );
+        assert_eq!(
+            map.spot(Ground(1)),
+            Some(Spot {
+                tree: map.tree_at(x, y),
+                x,
+                y,
+                z: 17
+            })
+        );
+        assert!(map.sees(Pc(2), Ground(1)) && map.sees(Ground(1), Pc(2)));
+        assert!(!map.sees(Pc(9), Ground(1)) && !map.sees(Pc(5), Ground(1)));
+        // Adding it does not recompute anyone else's view.
+        assert!(!map.sees(Pc(2), Pc(5)));
+    }
+
+    /// `AddToGround` with no sectree at the point fails before it sets anything (`:569-574`).
+    #[test]
+    fn an_item_where_no_sectree_is_is_not_added_and_changes_nothing() {
+        let mut map = grid();
+        place(&mut map, Pc(2), centre(9, 9));
+        let mut out = Vec::new();
+        assert!(!map.add_to_ground(Ground(1), (64_000, 3200, 0), RADIUS, &mut out));
+        assert!(out.is_empty());
+        assert_eq!(map.spot(Ground(1)), None);
+        assert_eq!(map.around_of(Pc(2)), vec![Pc(2)]);
+    }
+
+    /// The walk inside one sectree puts the ground items last, by ground VID (V1).
+    #[test]
+    fn ground_items_are_walked_after_the_npcs_by_ground_vid() {
+        let mut map = grid();
+        let at = (centre(2, 2).0, centre(2, 2).1);
+        for key in [Ground(1), Npc(3), Ground(0), Pc(9), Pc(200)] {
+            stand(&mut map, key, at);
+        }
+        let tree = map.tree_at(at.0, at.1).expect("a sectree");
+        assert_eq!(
+            map.around(tree),
+            vec![Pc(9), Pc(200), Npc(3), Ground(0), Ground(1)]
+        );
+    }
+
+    /// A player shown later finds the item in its recompute, a move out of range prunes it with
+    /// its removal at the next recompute, and the item leaving the ground tells every player
+    /// that still sees it.
+    #[test]
+    fn players_meet_and_lose_a_ground_item_through_the_view() {
+        let mut map = grid();
+        let mut out = Vec::new();
+        let (x, y, _) = centre(4, 4);
+        assert!(map.add_to_ground(Ground(6), (x, y, 0), RADIUS, &mut out));
+        assert!(out.is_empty(), "nobody stands around yet");
+        let shown = place(&mut map, Pc(1), centre(4, 5));
+        assert_eq!(
+            shown,
+            vec![
+                ins(Pc(1), Pc(1)),
+                ins(Ground(6), Pc(1)),
+                ins(Pc(1), Ground(6))
+            ]
+        );
+        place(&mut map, Pc(3), centre(5, 4));
+        assert!(map.sees(Pc(3), Ground(6)));
+        out.clear();
+        assert!(map.move_body(Pc(3), centre(7, 4).0, centre(7, 4).1, RADIUS, &mut out));
+        assert!(out.is_empty(), "a move recomputes nothing");
+        map.update_sectree(Pc(3), RADIUS, &mut out);
+        assert_eq!(
+            out,
+            vec![
+                rem(Pc(1), Pc(3)),
+                rem(Pc(3), Pc(1)),
+                rem(Ground(6), Pc(3)),
+                rem(Pc(3), Ground(6))
+            ],
+            "1 is out of range too, and walked first"
+        );
+        assert!(!map.sees(Ground(6), Pc(3)) && !map.sees(Pc(3), Ground(6)));
+        out.clear();
+        map.remove(Ground(6), &mut out);
+        assert_eq!(out, vec![rem(Ground(6), Pc(1))]);
+        assert!(!map.sees(Pc(1), Ground(6)));
+        assert_eq!(map.spot(Ground(6)), None);
     }
 }

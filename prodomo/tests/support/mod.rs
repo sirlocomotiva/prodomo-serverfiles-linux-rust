@@ -158,6 +158,82 @@ pub fn execute(url: &str, statement: &str) -> Result<(), sqlx::Error> {
         })
 }
 
+/// A transaction that holds the row locks its statement took, on a thread of its own, until it
+/// is released or dropped.
+pub struct HeldLock {
+    /// Dropped to end the transaction.
+    release: Option<tokio::sync::oneshot::Sender<()>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HeldLock {
+    /// Commit the transaction, which frees its locks, and wait until it has.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the transaction could not commit.
+    pub fn release(mut self) {
+        self.release = None;
+        if let Some(worker) = self.worker.take() {
+            assert!(worker.join().is_ok(), "the held transaction should commit");
+        }
+    }
+}
+
+impl Drop for HeldLock {
+    /// End a transaction never released, as on a failed assertion, so that its locks and its
+    /// connection do not outlive the test. A failure here is not reported: the test has already
+    /// failed.
+    fn drop(&mut self) {
+        self.release = None;
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// Begin a transaction on its own connection, run `statement` in it, such as a
+/// `SELECT ... FOR UPDATE`, and hold the locks it took until the answer is released. Also
+/// answers how many rows the statement returned, so a scenario can check that it locked the
+/// row it meant to.
+///
+/// # Panics
+///
+/// Panics when the store cannot be reached or the statement does not run.
+pub fn hold_lock(url: &str, statement: &str) -> (HeldLock, usize) {
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let (count_tx, count_rx) = std::sync::mpsc::channel();
+    let url = url.to_owned();
+    let statement = statement.to_owned();
+    let worker = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime should start")
+            .block_on(async {
+                let mut connection = PgConnection::connect(&url)
+                    .await
+                    .expect("the scenario's store should accept a connection");
+                let mut transaction = connection.begin().await.expect("a transaction begins");
+                let locked = sqlx::query(&statement)
+                    .fetch_all(&mut *transaction)
+                    .await
+                    .expect("the statement should run");
+                let _ = count_tx.send(locked.len());
+                // A release or a drop of the handle ends the wait alike.
+                let _ = released.await;
+                transaction.commit().await.expect("the transaction commits");
+                let _ = connection.close().await;
+            });
+    });
+    let count = count_rx.recv().expect("the statement should have run");
+    let held = HeldLock {
+        release: Some(release),
+        worker: Some(worker),
+    };
+    (held, count)
+}
+
 /// The integer columns of a `SELECT`, `width` per row.
 ///
 /// The scenarios call this to read a fact back out of the store that only the store knows,

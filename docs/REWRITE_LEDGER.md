@@ -26563,3 +26563,287 @@ After the run, no `prodomo_%` database remains and no `*.core` file is outside `
 workspace has 250 Rust files and 186,014 lines, outside `server/` and `.scratch/`. No crate was
 fetched, and `Cargo.lock` is unchanged. `psql` is not installed, so the store was read through
 `podman exec` into the database's container.
+
+## 229c. Ground items in the view: `CItem`'s `AddToGround`, `RemoveFromGround` and `EncodeInsertPacket`
+
+229b put the players and NPCs in the view and left the items on the ground outside it: their add
+and removal reached every client on the map, and an entering client was sent every item lying on
+its map after `GC_PHASE` (the V8 Divergence). 229c puts them in the view, as legacy does.
+
+In legacy an item on the ground is a `CEntity` like a character. `CItem::AddToGround`
+(`G/item.cpp:549-584`) finds the sectree holding the point, returns false when there is none,
+and otherwise sets the item's window to `GROUND` and its point, inserts it into the sectree, and
+runs its `UpdateSectree` once: every entity within range in the sectrees around sees the item and
+is seen by it. `ViewInsert` sends each player in range the item's `EncodeInsertPacket`
+(`:163-202`), a `GC_ITEM_GROUND_ADD` at the item's x, y and z; the item has no descriptor, so the
+players' inserts to it send nothing (`:167-168`). From then on a player's own view finds the item
+as it finds any entity: on its `Show` when it enters, on a goto, and on the sixteenth-Pulse sample
+of its walk. `RemoveFromGround` (`:533-547`) takes the item out of its sectree and runs
+`ViewCleanup`, which sends each player that saw it the item's `EncodeRemovePacket`
+(`:204-218`), a `GC_ITEM_GROUND_DEL`. `DropItem` lays the item at the dropper's `GetXYZ`
+(`G/char_item.cpp:7503-7541`), a whole `PickupItem` and the destroy event take it away.
+
+### 229c.1 What landed
+
+- **The view.** `EntityKey` gains `Ground(vid)`, an item lying on the ground under its ground
+  VID. Within a sectree and a view the walk order is players by VID, then NPCs by VID, then
+  ground items by ground VID (V1). `MapIndex::add_to_ground` is `AddToGround`: with no sectree
+  at the point it returns false and changes nothing; otherwise it stands the item there, indexes
+  it and runs its one `update_sectree`. `RemoveFromGround` is `MapIndex::remove`, the verb
+  `Destroy` already used: legacy's `RemoveFromGround` runs `RemoveEntity` before `ViewCleanup`
+  and `Destroy` the other way round, and both send the same.
+- **The records.** `view_encode::ground_add` writes the `GC_ITEM_GROUND_ADD` at the item's spot
+  in the view, `ground_del` the `GC_ITEM_GROUND_DEL`, and a removal sent to a player is the
+  removal of what it names (`remove_of`). An insert of a ground item reads the item from the
+  world's ground and its spot from its map's view. A ground item, like an NPC, is sent nothing.
+  The `GC_ITEM_OWNERSHIP` legacy sends after the add when the item has an ownership event waits
+  for `sys.item.ownership`.
+- **The drop.** `GameState::drop_item` takes the dropper's point from its body (`GetXYZ`: x, y
+  and z), or from the descriptor's point when it has none, and asks the map whether a sectree
+  holds it (`DropAt::lands`). After the step the item enters the ground and the view at that
+  point: the players in view are sent its add at once, and the dropper's own copy, if it sees
+  the point, takes the place of the ground record among its item records
+  (`MovedItems::ground_at`, `place_ground`), so its order against the cell's record and the
+  notice is legacy's. The z had been 0 since ledger 217.
+- **The pick-up.** A pick-up that takes the whole item runs `RemoveFromGround`: each player that
+  saw it is sent its removal at once, and the picker's own removal takes the ground record's
+  place among its records. A pick-up that leaves part of a stack on the ground changes nothing
+  in the view.
+- **The write fence.** A drop's order (`StoreOrder::laid`) tells the item's watch channel once its
+  rows are stored. A pick-up of that item (`StoreOrder::after`, `game_state.rs:1376`) waits for
+  those rows before it writes its own, so its insert of the same rows never runs ahead of the
+  drop's (an unfenced pick-up hits a duplicate key). A drop never waits. If the drop stores
+  nothing, its order is dropped untold, and the pick-up closes with its step unwritten (V12).
+- **The destroy event.** `destroy_expired` takes each due item out of the view, and only its
+  viewers are sent its removal, in ground-VID order.
+- **Entering.** The entrant's `Show` inserts the items lying in its view with the players and
+  NPCs, inside the records that lead its burst, before `GC_PHASE` (`G/input_login.cpp:590`,
+  `:608`).
+- **A drop where no sectree is.** `world::character::ground::drop_item` refuses it with the new
+  `MoveRefused::NoSectree`, after every check legacy makes, so each line legacy sends first is
+  still sent and the item stays in its cell. Legacy takes the item from its cell first and then
+  loses it when `AddToGround` fails (229c.3).
+- **Deleted.** `GameState::ground_items_on`, `GameCommand::GroundItemsOn`, the descriptor's
+  `show_the_ground`, `ChannelClients::broadcast_on_map`, `RelayScope::MapExceptSelf` and
+  `item_move::ground_record`. A move's ground record no longer becomes a relay: the world sends
+  it through the view.
+- **The sync port.** A `CG_SYNC_POSITION` naming a ground VID finds nothing, as
+  `CHARACTER_MANAGER::Find` finds characters only.
+
+### 229c.2 What the client sees
+
+**A drop.** Each player within `VIEW_RANGE + 500` of the dropper's point, in the sectrees around
+it, is sent the item's `GC_ITEM_GROUND_ADD`, at the dropper's x, y and z; a player farther away,
+anywhere else on the map, is sent nothing. The dropper is sent its own add between the cell's
+record and the notice, as before.
+
+**A pick-up and the destroy event.** Only the players that see the item are sent its
+`GC_ITEM_GROUND_DEL`.
+
+**Entering and walking.** A player entering the game is shown the items lying in its view inside
+its burst, before `GC_PHASE`, after the players and NPCs of each sectree. Until now it was shown
+every item of the map after `GC_PHASE`. A walking player meets an item on the sample that finds
+it in range, and loses it on the sample that finds it out of range.
+
+### 229c.3 Divergences and Defects
+
+- **V8 is retired.** Ground records reach the item's view, as in legacy.
+- **V1** extends to the ground items: a sectree's and a view's entries are walked players by VID,
+  NPCs by VID, then ground items by ground VID, and the items whose destroy event falls on one
+  Pulse go in ground-VID order, before the Pulse's moves. Legacy walks pointer-hashed sets.
+- **V12 (new, provisional, owner question 16).** A drop's ground add and a whole pick-up's
+  removal reach the other players in view as the world runs the step, before the store writes
+  the item rows. A drop never waits, and its own records, its copy of the add included, wait for
+  its write. A pick-up of an item a drop laid waits for the drop's rows before it writes its own,
+  and its records, its copy of the removal included, wait with them. A drop whose write fails
+  closes the dropper, and a pick-up waiting on that drop closes with its step unwritten, the store
+  keeping the item where it was; the others have already seen the item fall, or go, as the world
+  held it. Legacy sends everything at once and saves later. Holding the others' copies until the
+  write would not serve the monster drops, whose records reach the view before the death record.
+- **V13 (recorded).** A ground item's VID comes from a counter of its own that starts at 1
+  (since ledger 217). Legacy's `CreateItem` numbers every item it makes (`++m_dwVIDCount`,
+  `G/item_manager.cpp:264`). A client sees only ground VIDs.
+- **V14 (recorded).** A pick-up finds an item only on the picker's Channel and map (since ledger
+  217). Legacy's `FindByVID` searches every item of the Core and `DistanceValid` compares x and y
+  alone (`G/char_item.cpp:7974-7982`, `G/item.cpp:586-597`), so a picker at the same
+  coordinates on another map of the Core, such as a private copy of the map, picks it up.
+- **A Defect not reproduced (provisional, owner question 17).** Legacy's `DropItem` takes the
+  item, or the dropped part of a stack, from its cell before `AddToGround` fails at a point no
+  sectree holds, and the item is lost with no line (`G/char_item.cpp:7503-7541`,
+  `G/item.cpp:569-574`). The Rewrite refuses the drop after every legacy check, and the item
+  stays. Only a character the V4 Divergence keeps outside every sectree can drop there.
+
+### 229c.4 Not ported yet
+
+- `GC_ITEM_OWNERSHIP` after a ground add, with `sys.item.ownership` and the monster drops.
+- Dropping a worn item (`RemoveFromCharacter`), as before (`Unported::Equipment`).
+- `DropGold`, as before.
+
+### 229c.5 Scenario and Parity inventory
+
+- `a_dropped_stack_lies_on_the_map_until_someone_picks_it_up` now also covers `sys.world.view`.
+  Zulu, entering where the item lies, is shown its add once in its burst, after Alpha, who stands
+  in the item's sectree (V1). A new player, Charlie, stands on the same map 15700 west and 9300
+  north of Alpha, out of view: it enters with no ground add, nobody sees it arrive, and it hears
+  neither the drops nor the pick-ups. The scenario's `ShownRecords` gains `ground_adds` and
+  `insert_at`, and `GC_ITEM_GROUND_ADD` counts among the shown records.
+- `a_dropped_item_nobody_picks_up_is_destroyed_on_time_and_the_map_sees_it_go` is renamed
+  `a_dropped_item_nobody_picks_up_is_destroyed_on_time_and_its_view_sees_it_go`.
+- Rows (notes appended, no status changes): `gc.item_ground_add`, `gc.item_ground_del`,
+  `cg.game.item_drop`, `cg.game.item_drop2`, `cg.game.item_pickup`,
+  `event.item.item_destroy_event` (the scenario's new name), `sys.world.view` (still `partial`
+  until the revive-invisible update and flag, 229d) and `sys.login.enter`.
+- Counts unchanged from the end of 229b, and `par229c.py` changes none: 1645 rows, 120 ported,
+  125 partial, 1338 missing, 6 unused, 56 codec (`.scratch/tmp/tools/parity_counts.py`). The notes
+  change no status.
+
+### 229c.6 Corrections, findings and controls
+
+Corrections to the plan and the earlier record:
+
+- The plan had the pick-up's removal to the other players held by the write fence. It is not:
+  `deliver` sends their copies during the step, and the fence orders only the mover's records.
+  Alpha's late `del` in the fence scenario came from Alpha's own blocked descriptor.
+- The first V12 text had the mover's own records wait for their write and nothing else. The
+  fence now orders a pick-up behind the drop it follows; STATUS (V12), 229c.3 and question 16
+  say so.
+- STATUS's V1 row said the moving players of each Pulse are walked in key order. They are walked
+  by VID (a `BTreeSet`). Fixed.
+- The V8 row is removed from STATUS, since the Divergence no longer exists. Its record stays in
+  the 229b section.
+- The `163-218` citations for the ground encoders were checked against legacy source and are
+  correct; `533-547` and `549-584` are the spans for `RemoveFromGround` and `AddToGround`.
+
+Controls for the negative claims, each run on the final tree (searches over the workspace's
+`*.rs` outside `server/` and `legacy/`, with `git grep`; the positive control is the 229b commit,
+`3da7843f`):
+
+| claim | search | result | positive control | nonsense control |
+|---|---|---|---|---|
+| The six 229b names are gone: `ground_items_on`, `GroundItemsOn`, `show_the_ground`, `broadcast_on_map`, `MapExceptSelf`, `ground_record` | that alternation, in `*.rs` | 0 | 37 lines at 3da7843f | `zzqx_ledger_nonsense_229c1`: 0 |
+| The old scenario name is gone from the code | `the_map_sees_it_go`, in `*.rs` and `*.md` | 0 in `*.rs`; 1 in the append-only 229b section of `docs/REWRITE_LEDGER.md` (line 22012) | 4 lines at 3da7843f | 0 |
+| The new scenario name is in place | `its_view_sees_it_go`, in `*.rs` and `*.md` | 3: the test in `prodomo/tests/parity.rs`, its `timed-events.md` row, and STATUS's step-4 line (line 46) | none needed (a presence check) | 0 |
+| V8 is no longer a live Divergence | `V8` in `docs/STATUS.md` | 0 | 1 line at 3da7843f (the V8 row) | 0 |
+| The only pick-up that waits is `game_state.rs:1376` | `StoreOrder::after(`, outside tests | 1 call (the two others are in tests: `game_state.rs:2931`, `item_move.rs:523-524`) | `pub fn after(` in `item_move.rs`: 1 | 0 |
+
+Controls for the fence (`prodomo/tests/parity.rs`, `a_pick_up_is_stored_only_after_the_drop_it_follows`):
+
+- With the fence as written, the scenario passes on the real code (1 passed).
+- With `turn()` always true, it fails at `parity.rs:1899`, Zulu's `unanswered()`, with "a refused
+  record closed the connection: Closed". The test sees the fence, not an unrelated failure.
+- The three fence mutants are in the sweep (229c.7).
+
+Anchors: every sweep mutant's text occurs exactly once in its file, and the change lands before
+the file's test module (`.scratch/tmp/l229/c229/anchors.py`, run on the sweep copy: 48 of 48).
+
+### 229c.7 Review and mutation sweep
+
+The review's findings were low, and each is fixed here:
+
+- The code comments on `MovedItems::ground_at` (`prodomo/src/item_move.rs:91-92`) and on
+  `EntityKey::Ground` (`prodomo/src/game_state/view.rs:33-34`) cited `G/item.cpp:533-584` for
+  both entities. They now cite `:549-584` for `AddToGround` and `:533-547` for
+  `RemoveFromGround`. The mutants `vw_ground_before_npc` and `vw_ground_first` quote the new text.
+- STATUS's V1 row (line 235): the moving players of each Pulse are walked by VID, not in the key
+  order of the sectree and the view.
+- `par229c.py`, the script that writes the 229c notes into the Parity rows, had a docstring
+  for a run that happened before the port. It now says it runs once, from the repository root,
+  and it refuses a second run, which would append every note again. It has run once.
+
+The mutation sweep runs the 48 mutants of `.scratch/tmp/tools/mutants229c.py` on two tar copies of
+the final tree, `wt2` and `wt3`, 24 each (`SHARD=0/2` and `SHARD=1/2`). Every mutant's text occurs
+once, in executable code, before the test module (`anchors.py`, 48 of 48). After each mutant the
+file was restored by sha256, and `item_move.rs` (`7d6813ce…`), `game_state.rs` (`a7f45415…`),
+`view.rs` (`415dfb22…`) and `main.rs` (`f97da66e…`) match main in both copies. No mutant was a
+compile-kill, and no verdict was flaky.
+
+Result: 47 killed, 1 survived.
+
+- Shard 1 (wt3): 24 of 24 killed.
+- Shard 0 (wt2): 23 of 24 killed. `sy_ground_as_player` survived, and it is an equivalent:
+  `resolve`'s Ground arm is unreachable, since `key_of` names characters and NPCs only. Its
+  defect class, a ground VID resolving as a sync victim, is pinned by
+  `game_state::tests::a_sync_naming_a_ground_vid_finds_nothing`, which syncs ground VID 1 beside
+  a character (processed 1, accepted none, no close, nothing sent, the item unmoved). Checked
+  against the class by making `key_of` find ground items and that arm a Player together: the
+  test fails.
+- `fence_stored_never_tells` is killed by
+  `item_move::tests::store_orders_compare_by_channel_and_an_unordered_step_never_waits`, at
+  `prodomo/src/item_move.rs:528`, where the drop's tell never arrives. Under the same mutant the
+  scenario `game_state::tests::a_pick_up_waits_for_the_store_of_the_drop_that_laid_its_item`
+  never returns. The driver has no timeout, so the first run sat on that scenario until its test
+  binary was stopped by hand; the driver's kill is the assertion, and its `finally` restored the
+  file. A timed check in wt3 (`.scratch/tmp/l229/c229/hang_check.sh`) confirms both: the item_move
+  test fails with exit 101, and the scenario is still running after 300 s (exit 124). The hang
+  is recorded as a kill by timeout, apart from the assertion kills.
+
+The first run, before the review's fixes (`c_full.log`, 45 mutants), had seven survivors:
+`gr_lands_before_equip`, `gs_drop_z_zero`, `gs_drop_ground_z_zero`, `gs_destroy_reverse_order`,
+`enc_ground_add_z_zero` (failed under load and passed alone), `enc_map_key_ground_none` and
+`sy_ground_as_player`. Five were test gaps. Each was closed by a test or an assertion, and the
+mutant applied by hand fails it (`sweep-notes.md`), so the rerun kills them. `enc_map_key_ground_none`
+has no caller today (`packet_around(Ground(..))` is unused until `sys.item.ownership`), so it is
+killed by its defect-class test, `game_state::tests::a_ground_item_sends_around_to_the_players_that_see_it`.
+`sy_ground_as_player` is the one equivalent that survived the rerun.
+
+### 229c.8 Receipt
+
+The count went from 3197 to 3211. 16 tests were added, and the three map-broadcast tests in
+`client_registry.rs` became one, so the net change is 14:
+
+- `prodomo/src/game_state.rs`: 7, for a pick-up that waits for its drop's rows, a drop's view and
+  its dropper's records, an entrant shown the items in its view, a drop where no sectree is, the
+  destroy event's view, a ground item sent around to the players that see it, and a sync naming a
+  ground VID.
+- `prodomo/src/game_state/view.rs`: 4, for `AddToGround`'s insert both ways once, a body where no
+  sectree is, the walk with ground items after the NPCs by ground VID, and players meeting and
+  losing a ground item through the view.
+- `prodomo/src/game_state/view_encode.rs`: 1, for a ground item's add at its spot and its removal
+  by VID.
+- `prodomo/src/item_move.rs`: 2, for `StoreOrder` comparing by Channel with an unordered step
+  never waiting, and a ground record leaving its place for the view with no relay.
+- `world/src/character/ground.rs`: 1, for a drop where no sectree is, which keeps the item.
+- `prodomo/tests/parity.rs`: 1, the fence scenario
+  `a_pick_up_is_stored_only_after_the_drop_it_follows`.
+- `prodomo/src/client_registry.rs`: the map-broadcast tests
+  (`a_map_broadcast_reaches_the_sender_too`, `_skips_every_other_map`,
+  `_skips_every_other_channel`) become one,
+  `a_map_holds_only_its_own_clients_on_its_own_channel`, which keeps `on_map` and `count_on_map`.
+  Net −2.
+
+The tests added after the sweep's first run and after the review are in the count.
+
+The gates ran on the final tree, with `DATABASE_URL` exported as `gates.sh` does
+(`gates229c_final/gates.summary`):
+
+| gate | result |
+|---|---|
+| `cargo fmt --all -- --check` (`/usr/bin/cargo-fmt`) | clean |
+| `cargo build --workspace --locked --offline` | clean, 0 warnings |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | clean |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 3211 passed, 0 failed, 38 suites |
+| the same with `DATABASE_URL` unset | 3211 passed, 0 failed, 38 suites |
+| `cargo test --workspace --doc --locked --offline` | 1 passed, 0 failed, 19 ignored |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` | clean |
+
+The two test counts match because a database test that finds `DATABASE_URL` unset prints a notice
+and passes (`prodomo/tests/support/mod.rs:139-143`). To check that the store is used, the fence
+scenario ran both ways: with the variable set it ran for 8.07 s and printed no notice; without it,
+it printed `skipped: DATABASE_URL is not set` and finished in 0.00 s. Both runs passed.
+
+The first full run (`gates229c/`) failed the rustdoc gate with exit 101: `error: unresolved link to
+StoreOrder` at `prodomo/src/lib.rs:78:1`. The link was in `item_move.rs`'s module doc, which
+rustdoc resolves from the crate root (AGENTS.md). It now reads `crate::item_move::StoreOrder`, and
+the rustdoc gate exits 0 on the final tree. Every other gate in the first run matched the final
+run, so the counts above are the final ones. The first run's rust count also included the
+`.scratch/` copies (570 files), so `gates.sh` now excludes `.scratch/`, as the 229b count did.
+
+After the final run, no `prodomo_%` database remains (`pg_database`), and no `*.core` file is
+outside `target/`. The workspace has 250 Rust files and 186,833 lines outside `server/` and
+`.scratch/` (`git ls-files -co --exclude-standard '*.rs'`); 229b had 250 files and 186,014 lines.
+The toolchain is `clippy 0.1.85` and `rustfmt 1.8.0`, called by their `/usr/bin` paths. No crate
+was fetched, and `Cargo.lock` is unchanged. `psql` is not installed, so the store was read through
+`podman exec`.
+
+The mutation sweep (229c.7) ran 48 mutants: 47 killed, 1 equivalent survived with its defect class
+pinned by a test, and no compile-kills. The parity counts are as in 229c.5.

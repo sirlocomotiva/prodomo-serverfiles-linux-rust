@@ -1153,35 +1153,6 @@ async fn entering_burst(
     ))
 }
 
-/// Send a client that has just entered its map the items lying there.
-///
-/// Legacy shows them as the character's sectree view fills, each as `EncodeInsertPacket`
-/// writes `GC_ITEM_GROUND_ADD` (`G/item.cpp:163`). The Rewrite's scope is the whole map, so the
-/// whole map's items are sent at once.
-async fn show_the_ground<S>(
-    session: &mut LiveClientSession<S>,
-    addr: SocketAddr,
-    context: &ConnectionContext,
-    channel: u8,
-    map: i32,
-) -> bool
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let records = match context.game.ground_items_on(channel, map).await {
-        Ok(records) => records,
-        Err(error) => {
-            warn!(%addr, %error, "The world could not list the ground items; closing");
-            return false;
-        }
-    };
-    if let Err(error) = send_all(session, &records).await {
-        warn!(%addr, %error, "Client session stopped");
-        return false;
-    }
-    true
-}
-
 /// What the descriptor knows of its character that a move or a use reads.
 fn item_actor(held: &Held) -> Mover {
     Mover {
@@ -1208,7 +1179,8 @@ fn descriptor_language(account: Option<&SelectAccount>) -> u8 {
 /// Store, send and broadcast what one item step did, or send the notice for its refusal.
 ///
 /// The rows are written in one transaction before any record is sent, with the change a buy or
-/// a sale made to the gold. The result is whether the descriptor stays open.
+/// a sale made to the gold, and a pick-up's only once the drop that laid the item has stored its
+/// own. The result is whether the descriptor stays open.
 async fn finish_item_step<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -1223,7 +1195,7 @@ async fn finish_item_step<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let moved = match answer {
+    let mut moved = match answer {
         Ok(Ok(moved)) => moved,
         Ok(Err(MoveItemRefused::Refused(reason))) => {
             info!(%addr, %reason, "Item step refused");
@@ -1245,6 +1217,11 @@ where
             return false;
         }
     };
+    // A pick-up's rows wait for the drop's, which another descriptor stores.
+    if !moved.store_order.turn().await {
+        warn!(%addr, kind = ?moved.kind, "The drop this step follows was not stored; closing");
+        return false;
+    }
     let stored = match moved.gold {
         Some(gold) => {
             db::items::apply_transfer(&context.store, moved.owner_id, &moved.changes, gold).await
@@ -1255,6 +1232,7 @@ where
         warn!(%addr, %error, kind = ?moved.kind, "The item step could not be stored; closing");
         return false;
     }
+    moved.store_order.stored();
     if let Some(points) = moved.points {
         hold_points(held, points);
     }
@@ -1267,8 +1245,8 @@ where
     }
     info!(%addr, kind = ?moved.kind, rows = moved.changes.len(), "Item moved");
     // `PacketAround`: the look, the effects and the broadcast points reach the characters that
-    // see this one, and a ground record everyone else on the map (V8). The world sends them,
-    // after the rows are written, so nobody hears of a move the store did not take.
+    // see this one. The world sends them after the rows are written, so nobody hears of a move
+    // the store did not take. A ground item's view has already sent the others theirs.
     if moved.around.is_empty() {
         return true;
     }
@@ -2798,7 +2776,7 @@ where
             queued: false,
         });
     }
-    show_the_ground(session, addr, context, seat.number, map).await
+    true
 }
 
 /// Move the held character to where `CInputLogin::Entergame` shows it: the first movable point

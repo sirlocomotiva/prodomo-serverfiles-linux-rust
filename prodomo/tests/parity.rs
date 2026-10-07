@@ -1634,7 +1634,7 @@ fn enter_game_view(keyed: &mut Keyed) -> Entered {
     entered
 }
 
-/// [`enter_game_burst`] without the final quiet check, for a map whose ground is not empty.
+/// [`enter_game_burst`] without the final quiet check, for a burst that more records follow.
 fn enter_game_records(keyed: &mut Keyed) -> Vec<u8> {
     enter_game_shown(keyed).add
 }
@@ -1680,8 +1680,8 @@ fn enter_game_shown(keyed: &mut Keyed) -> Entered {
 
 /// What `Show` and `SendNPCPosition` send after the own-character pair: every character in view,
 /// each as its `GC_CHARACTER_ADD` and, for a PC or an NPC, its `GC_CHAR_ADDITIONAL_INFO`, a
-/// moving player's `GC_MOVE` and walk mode, the walk mode of a walking entrant, and then the map's
-/// NPC list when the map has one.
+/// moving player's `GC_MOVE` and walk mode, the walk mode of a walking entrant, each item lying
+/// in view as its `GC_ITEM_GROUND_ADD`, and then the map's NPC list when the map has one.
 struct Shown {
     /// The insert and summary records, in the order they arrived.
     records: Vec<Vec<u8>>,
@@ -1699,14 +1699,29 @@ impl Shown {
             .collect()
     }
 
+    /// The `GC_ITEM_GROUND_ADD` records alone, each with its place among the shown.
+    fn ground_adds(&self) -> Vec<(usize, &[u8])> {
+        self.records
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| record[0] == GROUND_ADD)
+            .map(|(at, record)| (at, record.as_slice()))
+            .collect()
+    }
+
+    /// The place among the shown of the insert of the character `vid`.
+    fn insert_at(&self, vid: u32) -> usize {
+        let id = vid.to_le_bytes();
+        self.records
+            .iter()
+            .position(|record| record[0] == GC_CHARACTER_ADD && record[1..5] == id)
+            .unwrap_or_else(|| panic!("{vid} is shown"))
+    }
+
     /// The insert of the character `vid` and the summary right behind it.
     fn pair_of(&self, vid: u32) -> (Vec<u8>, Vec<u8>) {
         let id = vid.to_le_bytes();
-        let at = self
-            .records
-            .iter()
-            .position(|record| record[0] == GC_CHARACTER_ADD && record[1..5] == id)
-            .unwrap_or_else(|| panic!("{vid} is shown"));
+        let at = self.insert_at(vid);
         let info = self.records[at + 1].clone();
         assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO, "{info:02x?}");
         assert_eq!(info[1..5], id, "the summary's vid");
@@ -1786,7 +1801,7 @@ fn read_shown(keyed: &mut Keyed) -> (Shown, Vec<u8>) {
     let mut next = keyed.read_game();
     while matches!(
         next[0],
-        GC_CHARACTER_ADD | GC_CHAR_ADDITIONAL_INFO | GC_MOVE | GC_WALK_MODE
+        GC_CHARACTER_ADD | GC_CHAR_ADDITIONAL_INFO | GC_MOVE | GC_WALK_MODE | GROUND_ADD
     ) {
         records.push(next);
         next = keyed.read_game();
@@ -6562,10 +6577,12 @@ fn client_item_drop(cell: u16, count: Option<u16>) -> Vec<u8> {
     }
 }
 
-/// `cg.game.item_drop`, `cg.game.item_drop2`, `cg.game.item_pickup`: part of a stack is
-/// dropped, a drop inside the second after it is refused, the rest is dropped whole, and each
-/// part is picked up again, one by a character that entered the map after it fell. Every client
-/// on the map sees each item fall and go, out of view too (V8), and the store follows each step.
+/// `cg.game.item_drop`, `cg.game.item_drop2`, `cg.game.item_pickup`, `sys.world.view`: part of
+/// a stack is dropped, a drop inside the second after it is refused, the rest is dropped whole,
+/// and each part is picked up again, one by a character that entered the map after it fell. The
+/// item is an entity of the view (`G/item.cpp:563-597`): every client in view sees each item fall
+/// and go, an entrant is shown what lies in its view, and a character out of view hears none of
+/// it. The store follows each step.
 #[test]
 fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     let Some(database) = ScratchDatabase::create() else {
@@ -6588,7 +6605,7 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     let inventory = common::item_slots::EWindows::Inventory as u8;
 
     // Given: Alpha holds ten of a stackable item at cell 0.
-    let (mut alpha, _character) = enter_world(&server, b"alice", 0);
+    let (mut alpha, alpha_listed) = enter_world(&server, b"alice", 0);
     Server::write_console(&console, &format!("item give Alpha {stackable} 10"));
     server.wait_for("id 100000000; the client has it");
     assert_eq!(
@@ -6616,14 +6633,25 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     let dropped_at = std::time::Instant::now();
 
     // When: Zulu enters the map.
-    let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
-    // Then: the item lying there is shown, and Alpha sees Zulu arrive.
-    assert_eq!(zulu.read_game(), a_ground_add(1, stackable));
+    let (mut zulu, zulu_listed) = {
+        let (mut keyed, character, _items) = load_character(&server, b"bob", 0);
+        let entered = enter_game_view(&mut keyed);
+        // Then: the item lying there is shown once, after Alpha, who stands in its sectree: a
+        // sectree's players come before its ground items (V1).
+        let grounds = entered.shown.ground_adds();
+        assert_eq!(grounds.len(), 1, "{grounds:02x?}");
+        assert_eq!(grounds[0].1, a_ground_add(1, stackable));
+        assert!(entered.shown.insert_at(alpha_listed.id) < grounds[0].0);
+        entered.shown.pair_of(alpha_listed.id);
+        (keyed, character)
+    };
+    // And: Alpha sees Zulu arrive.
     alpha.sees_arrive(zulu_listed.id, true);
-    // When: Charlie enters out of view. Then: every item lying on the map is shown after
-    // `GC_PHASE` (V8), and nobody sees Charlie arrive.
-    let (mut charlie, _character) = enter_game_unread(&server, b"carol");
-    assert_eq!(charlie.read_game(), a_ground_add(1, stackable));
+    // When: Charlie enters out of view. Then: nothing lying there is shown, and nobody sees
+    // Charlie arrive.
+    let (mut charlie, _, charlie_entered) = enter_world_seeing(&server, b"carol", 0);
+    let charlie_grounds = charlie_entered.shown.ground_adds();
+    assert!(charlie_grounds.is_empty(), "{charlie_grounds:02x?}");
     alpha.quiet("Charlie enters out of Alpha's view");
     zulu.quiet("and out of Zulu's");
 
@@ -6633,8 +6661,8 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     both.extend(client_chat(prodomo::chat::CHAT_SHOUT, b"hi"));
     alpha.send_record(&both);
     // Then: the cell is cleared, the six fall under ground VID 2, Zulu sees them fall, and the
-    // row is gone. Legacy writes the fall to the map while it reads the drop, before it reads
-    // the shout, so everyone hears the shout after the fall.
+    // row is gone. Legacy writes the fall to the view while it reads the drop, before it reads
+    // the shout, so the view hears the shout after the fall.
     let shout = chat_packet(prodomo::chat::CHAT_SHOUT, 1, b"|Len|l Alpha : hi");
     assert_eq!(alpha.read_game(), a_clear_record(0));
     assert_eq!(alpha.read_game(), a_ground_add(2, stackable));
@@ -6644,10 +6672,9 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     assert_eq!(zulu.read_game(), shout, "the shout after the fall");
     assert_eq!(
         charlie.read_game(),
-        a_ground_add(2, stackable),
-        "the whole map (V8)"
+        shout,
+        "Charlie is out of the item's view and hears only the shout"
     );
-    assert_eq!(charlie.read_game(), shout);
     check(&database, "NOT EXISTS (SELECT 1 FROM item)");
 
     // When: Zulu picks up the four.
@@ -6660,7 +6687,6 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     assert_eq!(set[26], 1, "the pick-up highlight");
     assert_eq!(zulu.read_game(), an_info_line(&picked_up));
     assert_eq!(alpha.read_game(), a_ground_del(1));
-    assert_eq!(charlie.read_game(), a_ground_del(1), "the whole map (V8)");
     check(
         &database,
         "EXISTS (SELECT 1 FROM item JOIN player ON player.id = item.owner_id WHERE item.id = \
@@ -6676,23 +6702,23 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     assert_eq!(set[26], 0, "Alpha was the last holder");
     assert_eq!(alpha.read_game(), an_info_line(&picked_up));
     assert_eq!(zulu.read_game(), a_ground_del(2));
-    assert_eq!(charlie.read_game(), a_ground_del(2), "the whole map (V8)");
     check(
         &database,
         "EXISTS (SELECT 1 FROM item JOIN player ON player.id = item.owner_id WHERE item.id = \
          100000000 AND name = 'Alpha' AND window_type = 1 AND pos = 0 AND count = 6)",
     );
+    charlie.quiet("Charlie hears neither pick-up");
     // And: an item already picked up is not there to pick up, and nobody is told.
     alpha.unanswered(&protocol::cg_item_pickup::CgItemPickup::new(1).encode());
     assert_eq!(zulu.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
-    charlie.quiet("nothing more reaches Charlie");
 }
 
 /// `event.item.item_destroy_event`: with a two-second lifetime, an item nobody picks up is
-/// destroyed on time and every client on the map sees it go. A `CG_ITEM_DROP2` carrying gold
-/// is ignored before the drop limit, because `DropGold` is not ported.
+/// destroyed on time and every client in its view sees it go (`RemoveFromGround`,
+/// `G/item.cpp:533-547`). A `CG_ITEM_DROP2` carrying gold is ignored before the drop limit,
+/// because `DropGold` is not ported.
 #[test]
-fn a_dropped_item_nobody_picks_up_is_destroyed_on_time_and_the_map_sees_it_go() {
+fn a_dropped_item_nobody_picks_up_is_destroyed_on_time_and_its_view_sees_it_go() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
@@ -6744,6 +6770,75 @@ fn a_dropped_item_nobody_picks_up_is_destroyed_on_time_and_the_map_sees_it_go() 
     // And: the item is gone for good: no row, and nothing to pick up.
     check(&database, "NOT EXISTS (SELECT 1 FROM item)");
     zulu.unanswered(&protocol::cg_item_pickup::CgItemPickup::new(1).encode());
+}
+
+/// `cg.game.item_pickup`, V12: the view hears of a drop before the dropper's store writes it,
+/// and a pick-up of the dropped item stores its rows only after the drop's. A whole stack keeps
+/// its row's id on the ground, so the pick-up inserts the id the drop deletes; stored first, it
+/// would meet the drop's row and be refused. Legacy keeps one item and writes it later
+/// (`G/char_item.cpp:7972`, `G/item_manager.cpp:459-470`).
+#[test]
+fn a_pick_up_is_stored_only_after_the_drop_it_follows() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    seat_alpha_and_zulu(&server, &database, &[]);
+    let protos = owners_protos();
+    let stackable = a_stackable_vnum(&protos);
+    let mut picked_up = b"[LS;444;".to_vec();
+    picked_up.extend_from_slice(&protos.get(stackable).expect("a proto").locale_name);
+    picked_up.push(b']');
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+
+    // Given: Alpha holds three of a stackable item at cell 0, and Zulu stands beside it.
+    let (mut alpha, _character) = enter_world(&server, b"alice", 0);
+    Server::write_console(&console, &format!("item give Alpha {stackable} 3"));
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, stackable, 3));
+    let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
+    alpha.sees_arrive(zulu_listed.id, true);
+    // And: another transaction holds the item's row, so the store cannot delete it yet.
+    let (lock, locked) = support::hold_lock(
+        database.url(),
+        "SELECT id FROM item WHERE id = 100000000 FOR UPDATE",
+    );
+    assert_eq!(locked, 1, "the lock holds the item's row");
+
+    // When: Alpha drops the stack whole. Then: Zulu sees it fall while the store waits, and
+    // Alpha, whose records follow the write, is told nothing yet.
+    alpha.send_record(&client_item_drop(0, None));
+    assert_eq!(zulu.read_game(), a_ground_add(1, stackable));
+    // When: Zulu picks it up. Then: the pick-up waits for the drop's rows, nobody is told, and
+    // the row is still Alpha's.
+    zulu.unanswered(&protocol::cg_item_pickup::CgItemPickup::new(1).encode());
+    alpha.quiet("the drop's records wait for its rows");
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item JOIN player ON player.id = item.owner_id WHERE item.id = \
+         100000000 AND name = 'Alpha' AND count = 3)",
+    );
+
+    // When: the row is freed.
+    lock.release();
+    // Then: the drop is stored and answered, and Alpha then sees the item go.
+    assert_eq!(alpha.read_game(), a_clear_record(0));
+    assert_eq!(alpha.read_game(), a_ground_add(1, stackable));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;443]"));
+    assert_eq!(alpha.read_game(), a_ground_del(1));
+    // And: the pick-up is stored after it and answered, and the row is Zulu's.
+    assert_eq!(zulu.read_game(), a_ground_del(1));
+    let set = zulu.read_game();
+    assert_eq!(set_fields(&set), (inventory, 0, stackable, 3));
+    assert_eq!(set[26], 1, "the pick-up highlight");
+    assert_eq!(zulu.read_game(), an_info_line(&picked_up));
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM item JOIN player ON player.id = item.owner_id WHERE item.id = \
+         100000000 AND name = 'Zulu' AND window_type = 1 AND pos = 0 AND count = 3) AND \
+         (SELECT count(*) FROM item) = 1",
+    );
 }
 
 /// Lower Alpha to level 9 with 1500 hit points and 70000 spell points, and give it five

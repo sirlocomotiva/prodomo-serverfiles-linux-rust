@@ -443,6 +443,9 @@ pub enum MoveRefused {
     /// `PickupItem` (`@fixme150`): a quest item, and a script of the character waits for its
     /// client.
     PickedUpWhileQuesting,
+    /// `DropItem`: no sectree holds the dropper's point, so `AddToGround` would fail
+    /// (`G/item.cpp:569-574`).
+    NoSectree,
 }
 
 impl MoveRefused {
@@ -594,6 +597,7 @@ impl core::fmt::Display for MoveRefused {
             Self::PickedUpWhileQuesting => {
                 f.write_str("a quest item is picked up while a script waits")
             }
+            Self::NoSectree => f.write_str("no sectree holds the drop point"),
         }
     }
 }

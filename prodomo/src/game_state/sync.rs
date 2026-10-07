@@ -68,6 +68,8 @@ impl SyncPositionPorts for WorldSync<'_> {
         let kind = match key {
             EntityKey::Character(_) => SyncPositionVictimKind::Player,
             EntityKey::Npc(raw) => npc_kind(self.world.npc_by_vid(raw)?.char_type),
+            // `CHARACTER_MANAGER::Find` finds characters only; `key_of` names no ground item.
+            EntityKey::Ground(_) => return None,
         };
         Some(SyncPositionVictim {
             vid,

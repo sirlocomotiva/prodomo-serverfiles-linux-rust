@@ -15,6 +15,13 @@
 //! records at once and saves the items later (`CHARACTER::MoveItem`, then `ITEM_MANAGER`'s
 //! delayed save), so the order is the Rewrite's, and a client cannot tell the two apart
 //! because it waits for neither.
+//!
+//! Each descriptor stores its own steps in turn, but a drop and the pick-up of what it laid are
+//! two descriptors' steps on one item. The world hands them out in its order, and the pick-up
+//! waits for the drop's rows before it writes its own
+//! ([`crate::item_move::StoreOrder`]): the item's row leaves the dropper before it reaches the
+//! picker, and a picker whose dropper stored nothing is closed with its step unwritten, the store
+//! keeping the item where it was.
 
 use common::enums::EWearPositions;
 use common::item_slots::{EWindows, INVENTORY_MAX_NUM};
@@ -27,12 +34,12 @@ use gamedata::item_proto_value::type_value;
 use gamedata::locale_string::LocaleStrings;
 use protocol::gc_actors::{GcCharacterGoldChange, GcCharacterUpdate};
 use protocol::gc_chat::CHAT_TYPE_INFO;
-use protocol::gc_item_window::GcItemGroundAdd;
-use protocol::gc_vid::{GcHeaderAndDword, GcSpecialEffect, HEADER_GC_ITEM_GROUND_DEL};
+use protocol::gc_vid::{GcHeaderAndDword, GcSpecialEffect};
 use protocol::item_pos::ItemPos;
+use tokio::sync::watch;
 use world::character::{
-    CharacterItems, CharacterLook, GroundRecord, ItemChange, MoveDone, MoveFacts, MoveKind,
-    MoveRecord, MoveRefused, Points, Quickslots, StoreRecord,
+    CharacterItems, CharacterLook, ItemChange, MoveDone, MoveFacts, MoveKind, MoveRecord,
+    MoveRefused, Points, Quickslots, StoreRecord,
 };
 use world::item::Item;
 
@@ -81,9 +88,13 @@ pub struct MovedItems {
     pub owner_id: u32,
     /// The records the client is sent, each its own frame, in the order legacy sends them.
     pub records: Vec<Vec<u8>>,
+    /// Where in `records` a drop's or a pick-up's ground record stood. The world puts there
+    /// what the item's view sends the mover, which may be nothing (`AddToGround`,
+    /// `G/item.cpp:549-584`; `RemoveFromGround`, `:533-547`), and sends the others theirs itself.
+    pub ground_at: Option<usize>,
     /// The records others are sent too, in order, each with whom it reaches: the look, the
     /// effects and the broadcast points reach the characters that see the mover
-    /// (`PacketAround`), and a ground record everyone else on the map (V8).
+    /// (`PacketAround`).
     pub around: Vec<(RelayScope, Vec<u8>)>,
     /// The row changes, in the order they are applied.
     pub changes: Vec<RowChange>,
@@ -94,7 +105,76 @@ pub struct MovedItems {
     /// How much a step that paid or was paid changed the mover's gold, which the row changes'
     /// transaction adds to the stored gold with them.
     pub gold: Option<i64>,
+    /// Where the step's rows stand among another descriptor's on the same item.
+    pub store_order: StoreOrder,
 }
+
+/// Where a step's store stands among another descriptor's on the same item: a drop tells the
+/// pick-ups of what it laid when its rows are stored, and a pick-up waits for that before it
+/// writes its own. Drops never wait, so no two steps wait on each other.
+#[derive(Debug, Clone, Default)]
+pub struct StoreOrder {
+    /// Told once the step's rows are stored. Dropped untold, it tells the waiters that the
+    /// rows never will be.
+    tell: Option<watch::Sender<bool>>,
+    /// Told once the step this one follows has stored its rows.
+    wait: Option<watch::Receiver<bool>>,
+}
+
+impl StoreOrder {
+    /// A drop's order, and what the item it laid hands each pick-up to wait on.
+    #[must_use]
+    pub fn laid() -> (Self, watch::Receiver<bool>) {
+        let (tell, wait) = watch::channel(false);
+        let order = Self {
+            tell: Some(tell),
+            wait: None,
+        };
+        (order, wait)
+    }
+
+    /// The order of a step that stores after the one `wait` hears from.
+    #[must_use]
+    pub fn after(wait: watch::Receiver<bool>) -> Self {
+        Self {
+            tell: None,
+            wait: Some(wait),
+        }
+    }
+
+    /// Waits for the step's turn to store: true once the step it follows has stored its rows,
+    /// or at once with none to follow; false when that step ended without storing.
+    pub async fn turn(&mut self) -> bool {
+        match self.wait.as_mut() {
+            Some(wait) => wait.wait_for(|stored| *stored).await.is_ok(),
+            None => true,
+        }
+    }
+
+    /// Tells the steps that follow this one that its rows are stored.
+    pub fn stored(&self) {
+        if let Some(tell) = &self.tell {
+            let _was_stored = tell.send_replace(true);
+        }
+    }
+}
+
+/// Two orders are equal when they tell and wait on the same channels.
+impl PartialEq for StoreOrder {
+    fn eq(&self, other: &Self) -> bool {
+        let tells = match (&self.tell, &other.tell) {
+            (Some(one), Some(two)) => one.same_channel(two),
+            (one, two) => one.is_none() && two.is_none(),
+        };
+        let waits = match (&self.wait, &other.wait) {
+            (Some(one), Some(two)) => one.same_channel(two),
+            (one, two) => one.is_none() && two.is_none(),
+        };
+        tells && waits
+    }
+}
+
+impl Eq for StoreOrder {}
 
 /// The change from `before` to `after` that a Transfer adds to the stored gold.
 ///
@@ -121,6 +201,7 @@ impl MovedItems {
     ) -> Self {
         let to = mover.recipient(strings);
         let mut records = Vec::with_capacity(done.records.len());
+        let mut ground_at = None;
         let mut around = Vec::new();
         for record in done.records {
             let mut frame = Vec::new();
@@ -145,9 +226,10 @@ impl MovedItems {
                     frame = notice(text, to);
                     None
                 }
-                MoveRecord::Ground(record) => {
-                    frame = ground_record(record);
-                    Some(RelayScope::MapExceptSelf)
+                // The view sends it (`MovedItems::ground_at`).
+                MoveRecord::Ground(_) => {
+                    ground_at = Some(records.len());
+                    continue;
                 }
                 MoveRecord::PickedUp { vnum } => {
                     frame = picked_up_notice(protos, vnum, to);
@@ -177,11 +259,21 @@ impl MovedItems {
             kind: done.kind,
             owner_id,
             records,
+            ground_at,
             around,
             changes: row_changes(owner_id, &done.changes),
             points: None,
             quickslots: None,
             gold: None,
+            store_order: StoreOrder::default(),
+        }
+    }
+
+    /// Puts `own`, the records a ground item's view sent the mover, where the ground record
+    /// stood, so they keep legacy's order among the item records.
+    pub fn place_ground(&mut self, own: Vec<Vec<u8>>) {
+        if let Some(at) = self.ground_at {
+            self.records.splice(at..at, own);
         }
     }
 }
@@ -386,29 +478,6 @@ pub fn drop_limit_notice(to: Recipient<'_>) -> Vec<u8> {
     notice(DROP_LIMIT_NOTICE, to)
 }
 
-/// `GC_ITEM_GROUND_ADD` or `GC_ITEM_GROUND_DEL`, encoded (`G/item.cpp:163-218`).
-///
-/// The z is 0: the character's `GetXYZ` z, which the Rewrite does not track and legacy's
-/// characters on the ground keep at 0.
-#[must_use]
-pub fn ground_record(record: GroundRecord) -> Vec<u8> {
-    match record {
-        GroundRecord::Add { vid, vnum, x, y } => GcItemGroundAdd {
-            x,
-            y,
-            z: 0,
-            vid,
-            vnum,
-        }
-        .encode(),
-        GroundRecord::Del { vid } => {
-            let mut frame = Vec::new();
-            GcHeaderAndDword::new(HEADER_GC_ITEM_GROUND_DEL, vid).encode_into(&mut frame);
-            frame
-        }
-    }
-}
-
 /// `ChatPacket(CHAT_TYPE_INFO, "[LS;444;%s]", item->GetName())` (`G/char_item.cpp:8048`,
 /// `:8080`).
 ///
@@ -439,6 +508,25 @@ mod tests {
         assert!(!super::drop_allowed(Some(Duration::ZERO)));
         assert!(!super::drop_allowed(Some(Duration::from_millis(999))));
         assert!(super::drop_allowed(Some(Duration::from_millis(1000))));
+    }
+
+    /// Orders are equal when they tell and wait on the same channels; a step with no order
+    /// takes its turn at once.
+    #[tokio::test]
+    async fn store_orders_compare_by_channel_and_an_unordered_step_never_waits() {
+        use super::StoreOrder;
+        let (laid, wait) = StoreOrder::laid();
+        let (other, other_wait) = StoreOrder::laid();
+        assert_eq!(StoreOrder::default(), StoreOrder::default());
+        assert_eq!(laid, laid.clone());
+        assert_ne!(laid, other);
+        assert_ne!(laid, StoreOrder::default());
+        assert_eq!(StoreOrder::after(wait.clone()), StoreOrder::after(wait));
+        assert_ne!(StoreOrder::after(other_wait), StoreOrder::default());
+        assert!(StoreOrder::default().turn().await);
+        assert!(!*other.tell.as_ref().expect("a drop tells").borrow());
+        other.stored();
+        assert!(*other.tell.as_ref().expect("a drop tells").borrow());
     }
 
     use super::*;
@@ -665,6 +753,59 @@ mod tests {
         assert_eq!(
             moved.around,
             vec![(RelayScope::ViewExceptSelf, frame.clone())]
+        );
+    }
+
+    /// A ground record leaves only its place: the world fills it with what the item's view
+    /// sends the mover, and nobody else is sent anything from here.
+    #[test]
+    fn a_ground_record_leaves_its_place_for_the_view_and_no_relay() {
+        let done = MoveDone {
+            kind: MoveKind::Dropped,
+            records: vec![
+                MoveRecord::Notice("first"),
+                MoveRecord::Ground(world::character::GroundRecord::Del { vid: 3 }),
+                MoveRecord::Notice("last"),
+            ],
+            changes: Vec::new(),
+        };
+        let actor = Mover {
+            recently_fought: false,
+            empire: 1,
+            language: 1,
+            pk_mode: crate::loading_phase::PK_MODE_PEACE,
+        };
+        let strings = LocaleStrings::default();
+        let moved = MovedItems::new(7, 7, done, actor, &owners(), &strings);
+        assert_eq!(moved.records.len(), 2);
+        assert!(moved.records[0].ends_with(b"first") && moved.records[1].ends_with(b"last"));
+        assert_eq!(moved.ground_at, Some(1));
+        assert!(moved.around.is_empty());
+        let mut placed = moved.clone();
+        placed.place_ground(vec![b"own".to_vec(), b"two".to_vec()]);
+        let (first, last) = (moved.records[0].clone(), moved.records[1].clone());
+        assert_eq!(
+            placed.records,
+            vec![first, b"own".to_vec(), b"two".to_vec(), last]
+        );
+        let mut none = MovedItems::new(
+            7,
+            7,
+            MoveDone {
+                kind: MoveKind::Moved,
+                records: vec![MoveRecord::Notice("only")],
+                changes: Vec::new(),
+            },
+            actor,
+            &owners(),
+            &strings,
+        );
+        assert_eq!(none.ground_at, None);
+        let only = none.records.clone();
+        none.place_ground(vec![b"own".to_vec()]);
+        assert_eq!(
+            none.records, only,
+            "a step with no ground record places nothing"
         );
     }
 

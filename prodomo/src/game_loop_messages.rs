@@ -388,15 +388,6 @@ pub enum GameCommand {
         /// Where the game thread reports what the pick-up did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
-    /// Lists the `GC_ITEM_GROUND_ADD` records for every item on one map of one Channel.
-    GroundItemsOn {
-        /// The Channel.
-        channel: u8,
-        /// The map index.
-        map: i32,
-        /// Where the game thread sends the records.
-        reply: oneshot::Sender<Vec<Vec<u8>>>,
-    },
     /// Shares the NPCs the regen files stood up on one map of one Channel, with the map's
     /// mini-map list.
     NpcsOn {
@@ -506,8 +497,6 @@ pub enum RelayScope {
     /// Every player standing on the character's map of its Channel, the character included,
     /// as `FEmpireChatPacket` walks the client set by map (`G/input_main.cpp:926-953`).
     Map,
-    /// The same, without the character.
-    MapExceptSelf,
     /// `PacketAround(record)`: the character's view, then the character (`G/entity.cpp:88-105`).
     ViewAndSelf,
     /// `PacketAround(record, this)`: the character's view, without the character.
@@ -1246,28 +1235,6 @@ impl GameLoopController {
             ground,
             place,
             mover,
-            reply,
-        })
-        .await
-        .map_err(|_| MoveItemError::NotSent)?;
-        answer.await.map_err(|_| MoveItemError::NoAnswer)
-    }
-
-    /// Asks the world for the items lying on one map, as the records a client entering it
-    /// is sent.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::move_item`].
-    pub async fn ground_items_on(
-        &self,
-        channel: u8,
-        map: i32,
-    ) -> Result<Vec<Vec<u8>>, MoveItemError> {
-        let (reply, answer) = oneshot::channel();
-        self.send_command(GameCommand::GroundItemsOn {
-            channel,
-            map,
             reply,
         })
         .await

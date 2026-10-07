@@ -80,6 +80,9 @@ pub struct DropAt {
     pub owner_id: u32,
     /// Whether a script of the dropper waits for its client (`quest::PC::IsRunning`).
     pub questing: bool,
+    /// Whether a sectree holds the point, so `AddToGround` can lay the item there
+    /// (`G/item.cpp:569-574`).
+    pub lands: bool,
 }
 
 /// `CHARACTER::DropItem`: the item at `at`, or `count` of its stack, goes to the ground.
@@ -94,9 +97,9 @@ pub struct DropAt {
 ///
 /// [`MoveRefused::InvalidSource`], [`MoveRefused::Empty`], [`MoveRefused::Exchanging`],
 /// [`MoveRefused::DroppedWhileQuesting`], [`MoveRefused::Undroppable`],
-/// [`MoveRefused::NoItemIds`] or [`MoveRefused::IdsExhausted`] for a part-stack, and
-/// [`MoveRefused::NotPorted`] for a window other than the inventory or a worn item. Nothing
-/// changes on any of them.
+/// [`MoveRefused::NoItemIds`] or [`MoveRefused::IdsExhausted`] for a part-stack,
+/// [`MoveRefused::NotPorted`] for a window other than the inventory or a worn item, and
+/// [`MoveRefused::NoSectree`] when the item would not land. Nothing changes on any of them.
 pub fn drop_item(
     items: &mut CharacterItems,
     ids: Option<&mut ItemIds>,
@@ -125,6 +128,12 @@ pub fn drop_item(
     }
     if is_equip_position(at) {
         return Err(MoveRefused::NotPorted(Unported::Equipment));
+    }
+    // Legacy takes the item from its cell before `AddToGround` fails, and the item is lost,
+    // with no line (`G/char_item.cpp:7507-7541`). The Rewrite refuses it after every check
+    // legacy makes, so each line legacy sends is still sent (a Defect not reproduced).
+    if !to.lands {
+        return Err(MoveRefused::NoSectree);
     }
     let whole = count == 0 || count >= item.count;
     let (record, change, dropped, last_owner) = if whole {
@@ -388,6 +397,7 @@ mod tests {
         y: 700,
         owner_id: 42,
         questing: false,
+        lands: true,
     };
 
     fn on_ground(item: Item, last_owner: u32) -> GroundItem {
@@ -516,6 +526,34 @@ mod tests {
         assert_eq!(MoveRefused::Undroppable.notice(), Some("[LS;442]"));
     }
 
+    /// A drop where no sectree is keeps the item and the cell, and keeps the line an undroppable
+    /// item is refused with, since that check comes first in legacy.
+    #[test]
+    fn a_drop_where_no_sectree_is_keeps_the_item() {
+        let mut undroppable = Item::new(8, SWORD);
+        undroppable.anti_flags = ITEM_ANTIFLAG_DROP;
+        let mut items = holding(&[
+            (4, Item::new(7, SWORD)),
+            (5, undroppable),
+            (6, arrows(9, 20)),
+        ]);
+        let before = items.clone();
+        let nowhere = DropAt { lands: false, ..TO };
+        let mut ids = ids();
+        for (at, count, reason) in [
+            (inv(4), 0, MoveRefused::NoSectree),
+            (inv(6), 5, MoveRefused::NoSectree),
+            (inv(5), 0, MoveRefused::Undroppable),
+            (inv(7), 0, MoveRefused::Empty),
+        ] {
+            let dropped = drop_item(&mut items, Some(&mut ids), at, count, nowhere);
+            assert_eq!(dropped, Err(reason), "{at:?}");
+        }
+        assert_eq!(items, before);
+        assert_eq!(MoveRefused::NoSectree.notice(), None);
+        assert!(drop_item(&mut items, Some(&mut ids), inv(6), 5, TO).is_ok());
+    }
+
     #[test]
     fn an_item_offered_in_a_trade_is_not_dropped() {
         let mut items = holding(&[(4, Item::new(8, SWORD)), (6, arrows(9, 20))]);
@@ -586,15 +624,20 @@ mod tests {
         assert_eq!(letter_moved.kind, MoveKind::PickedUp);
     }
 
+    /// A worn item is refused as not ported wherever it would land, so the warning names the
+    /// missing path and not the point.
     #[test]
     fn a_worn_item_is_not_dropped_yet() {
         let worn = ItemPos::new(INV, INVENTORY_MAX_NUM);
         let mut items = CharacterItems::new();
         items.set(worn, &Item::new(7, SWORD)).expect("worn");
-        assert_eq!(
-            drop_item(&mut items, None, worn, 0, TO),
-            Err(MoveRefused::NotPorted(Unported::Equipment))
-        );
+        let nowhere = DropAt { lands: false, ..TO };
+        for to in [TO, nowhere] {
+            assert_eq!(
+                drop_item(&mut items, None, worn, 0, to),
+                Err(MoveRefused::NotPorted(Unported::Equipment))
+            );
+        }
         assert!(items.item_at(worn).is_some());
     }
 

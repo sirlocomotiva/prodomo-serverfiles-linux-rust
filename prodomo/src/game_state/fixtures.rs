@@ -98,11 +98,22 @@ pub(super) fn enter(
 /// As [`enter`], on `place`, a Channel and map the world hosts.
 pub(super) fn enter_on(
     world: &mut GameState,
+    place: (u8, i32),
+    vid: u32,
+    at: (i32, i32),
+    stamina: i32,
+) -> UnboundedReceiver<Vec<u8>> {
+    enter_seeing(world, place, vid, at, stamina).0
+}
+
+/// As [`enter_on`], with the records the entrant's own client was sent as it was shown.
+pub(super) fn enter_seeing(
+    world: &mut GameState,
     (channel, map): (u8, i32),
     vid: u32,
     (x, y): (i32, i32),
     stamina: i32,
-) -> UnboundedReceiver<Vec<u8>> {
+) -> (UnboundedReceiver<Vec<u8>>, Vec<Vec<u8>>) {
     let (tx, inbox) = unbounded_channel();
     let name = format!("P{vid}");
     world
@@ -122,7 +133,7 @@ pub(super) fn enter_on(
         language: 0,
         pk_mode: crate::loading_phase::PK_MODE_PROTECT,
     };
-    let _records = world.place_body(
+    let shown = world.place_body(
         Vid::new(vid),
         EnterPlace {
             channel,
@@ -133,5 +144,5 @@ pub(super) fn enter_on(
         },
         card,
     );
-    inbox
+    (inbox, shown)
 }

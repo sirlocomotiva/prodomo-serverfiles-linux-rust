@@ -1,17 +1,20 @@
 //! The records a view change writes: `EncodeInsertPacket` and `EncodeRemovePacket` of a player
-//! or an NPC, sent to the client of the entity whose view changed (`G/char.cpp:1060-1275`), and
-//! `PacketAround`, which sends one record to an entity's view (`G/entity.cpp:88-105`).
+//! or an NPC (`G/char.cpp:1060-1275`) or of a ground item (`G/item.cpp:163-218`), sent to the
+//! client of the entity whose view changed, and `PacketAround`, which sends one record to an
+//! entity's view (`G/entity.cpp:88-105`).
 //!
 //! Each effect is encoded when it is delivered, so an insert reads the live motion. An entity
-//! with no client, which is every NPC, is sent nothing (`G/char.cpp:1063-1066`).
+//! with no client, which is every NPC and every ground item, is sent nothing
+//! (`G/char.cpp:1063-1066`, `G/item.cpp:167-168`).
 //!
 //! Everything here runs on the game thread only (ADR-0002).
 
 use common::cfloat::f32_to_i32;
 use common::vid::Vid;
 use protocol::gc_actors::GcCharacterMove;
+use protocol::gc_item_window::GcItemGroundAdd;
 use protocol::gc_position::GcWalkMode;
-use protocol::gc_vid::{GcHeaderAndDword, HEADER_GC_CHARACTER_DEL};
+use protocol::gc_vid::{GcHeaderAndDword, HEADER_GC_CHARACTER_DEL, HEADER_GC_ITEM_GROUND_DEL};
 use world::character::{Character, Points};
 
 use super::motion::{is_walking, Body};
@@ -49,18 +52,37 @@ pub(super) fn remove_record(vid: u32) -> Vec<u8> {
     framed(|out| GcHeaderAndDword::new(HEADER_GC_CHARACTER_DEL, vid).encode_into(out))
 }
 
+/// `[1a, x, y, z, vid, vnum]`, a ground item's `EncodeInsertPacket` (`G/item.cpp:163-202`),
+/// at the item's spot. The ownership record after it waits for `sys.item.ownership`.
+pub(super) fn ground_add(vid: u32, vnum: u32, spot: Spot) -> Vec<u8> {
+    GcItemGroundAdd {
+        x: spot.x,
+        y: spot.y,
+        z: spot.z,
+        vid,
+        vnum,
+    }
+    .encode()
+}
+
+/// `[1b, vid]`, a ground item's `EncodeRemovePacket` (`G/item.cpp:204-218`).
+pub(super) fn ground_del(vid: u32) -> Vec<u8> {
+    framed(|out| GcHeaderAndDword::new(HEADER_GC_ITEM_GROUND_DEL, vid).encode_into(out))
+}
+
+/// `of->EncodeRemovePacket(to)` for a receiving player.
+fn remove_of(of: EntityKey) -> Vec<u8> {
+    match of {
+        EntityKey::Character(vid) | EntityKey::Npc(vid) => remove_record(vid),
+        EntityKey::Ground(vid) => ground_del(vid),
+    }
+}
+
 /// The bytes one `encode_into` writes.
 fn framed(encode: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
     let mut record = Vec::new();
     encode(&mut record);
     record
-}
-
-/// The VID an entity key names.
-const fn vid_of(key: EntityKey) -> u32 {
-    match key {
-        EntityKey::Character(vid) | EntityKey::Npc(vid) => vid,
-    }
 }
 
 /// `EncodeInsertPacket` of the player `vid` (`G/char.cpp:1060-1254`). `recipient` is the
@@ -170,14 +192,15 @@ impl GameState {
                 Effect::Remove {
                     of,
                     to: EntityKey::Character(to),
-                } => self.send_to(to, remove_record(vid_of(of)), &mut reply),
-                // An NPC has no desc: `EncodeInsertPacket` and `EncodeRemovePacket` return.
+                } => self.send_to(to, remove_of(of), &mut reply),
+                // An NPC and a ground item have no desc: `EncodeInsertPacket` and
+                // `EncodeRemovePacket` return.
                 Effect::Insert {
-                    to: EntityKey::Npc(_),
+                    to: EntityKey::Npc(_) | EntityKey::Ground(_),
                     ..
                 }
                 | Effect::Remove {
-                    to: EntityKey::Npc(_),
+                    to: EntityKey::Npc(_) | EntityKey::Ground(_),
                     ..
                 } => {}
             }
@@ -220,6 +243,19 @@ impl GameState {
                     self.send_to(to, framed(|out| additional.encode_into(out)), reply);
                 }
             }
+            EntityKey::Ground(vid) => {
+                let Some(lying) = self.ground.get(&vid) else {
+                    return;
+                };
+                let Some(spot) = self
+                    .maps
+                    .get(&(lying.channel, lying.map))
+                    .and_then(|index| index.spot(of))
+                else {
+                    return;
+                };
+                self.send_to(to, ground_add(vid, lying.ground.item.vnum, spot), reply);
+            }
         }
     }
 
@@ -237,6 +273,10 @@ impl GameState {
                 .npc_of
                 .get(&vid)
                 .map(|&(channel, map, _)| (channel, map)),
+            EntityKey::Ground(vid) => self
+                .ground
+                .get(&vid)
+                .map(|lying| (lying.channel, lying.map)),
         }
     }
 
@@ -249,14 +289,13 @@ impl GameState {
         let me = EntityKey::Character(vid.raw());
         for (scope, record) in records {
             match scope {
-                RelayScope::Map | RelayScope::MapExceptSelf => {
+                RelayScope::Map => {
                     // Legacy walks a pointer-ordered set; the Rewrite goes in VID order (V1).
                     let mut on_map: Vec<Vid> = self
                         .bodies
                         .iter()
                         .filter(|(_, body)| (body.channel, body.map) == place)
                         .map(|(&other, _)| other)
-                        .filter(|&other| *scope == RelayScope::Map || other != vid)
                         .collect();
                     on_map.sort_unstable_by_key(|other| other.raw());
                     for other in on_map {
@@ -546,6 +585,29 @@ mod tests {
             None,
         );
         assert_eq!(drained(&mut seven), vec![remove_record(0x8000_0001)]);
+    }
+
+    /// A ground item's add carries its spot's x, y and z, its ground VID and its vnum
+    /// (`EncodeInsertPacket`, `G/item.cpp:163-202`); its removal is `[1b, vid]`.
+    #[test]
+    fn a_ground_item_is_added_at_its_spot_and_removed_by_its_vid() {
+        let spot = Spot {
+            tree: None,
+            x: 3200,
+            y: 3300,
+            z: 55,
+        };
+        let expected = GcItemGroundAdd {
+            x: 3200,
+            y: 3300,
+            z: 55,
+            vid: 4,
+            vnum: 27_001,
+        };
+        assert_eq!(ground_add(4, 27_001, spot), expected.encode());
+        assert_eq!(ground_del(0x0102_0304), vec![0x1b, 4, 3, 2, 1]);
+        assert_eq!(remove_of(EntityKey::Ground(5)), ground_del(5));
+        assert_eq!(remove_of(EntityKey::Npc(5)), remove_record(5));
     }
 
     /// The entrant's own records go to the reply buffer, in effect order, and every other

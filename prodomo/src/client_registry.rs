@@ -14,10 +14,10 @@
 //!
 //! # What reaches a client through here
 //!
-//! The world sends the records about bodies (moves, poses, talking chat, the view) itself,
-//! through each client's [`ClientOutbox`]. What still walks this registry is the ground-item
-//! record a map's clients are sent ([`ChannelClients::broadcast_on_map`], V8), the client a
-//! warp NPC orders ([`ChannelClients::members_on_map`]), and the shout.
+//! The world sends the records about bodies (moves, poses, talking chat, the view) and about
+//! the items on the ground itself, through each client's [`ClientOutbox`].
+//! What still walks this registry is the client a warp NPC orders
+//! ([`ChannelClients::members_on_map`]), the player a trade looks for, and the shout.
 //!
 //! # The shout crosses every Channel
 //!
@@ -232,28 +232,6 @@ impl ChannelClients {
         self.on_map(channel, map).len()
     }
 
-    /// Deliver one record to every client on the map, **including** the sender.
-    ///
-    /// A send to a member whose receiver is gone is skipped rather than failing the
-    /// broadcast. The public API cannot produce that state, because dropping a lease is
-    /// the only way to close its receiver and dropping also deregisters, so the branch
-    /// is defensive rather than covered by a test.
-    pub fn broadcast_on_map(&self, channel: u8, map: i32, record: &[u8]) -> usize {
-        let Ok(channels) = self.inner.lock() else {
-            return 0;
-        };
-        let Some(members) = channels.get(&channel) else {
-            return 0;
-        };
-        let mut sent = 0;
-        for member in members.iter().filter(|member| member.entry.map == map) {
-            if member.outbox.send(record.to_vec()) {
-                sent += 1;
-            }
-        }
-        sent
-    }
-
     /// Deliver a line built for each client to every client on every Channel, and answer how
     /// many were sent one.
     ///
@@ -408,36 +386,20 @@ mod tests {
     }
 
     #[test]
-    fn a_map_broadcast_reaches_the_sender_too() {
+    fn a_map_holds_only_its_own_clients_on_its_own_channel() {
         let registry = Arc::new(ChannelClients::new());
-        let mut ayla = registry.join(entry(1, 100, "Ayla"));
-        let mut brann = registry.join(entry(1, 100, "Brann"));
+        let _here = registry.join(entry(1, 100, "Here"));
+        let _elsewhere = registry.join(entry(1, 101, "Elsewhere"));
+        let _two = registry.join(entry(2, 100, "Two"));
 
-        assert_eq!(registry.broadcast_on_map(1, 100, b"line"), 2);
-        assert_eq!(drained(&mut ayla), vec!["line".to_string()]);
-        assert_eq!(drained(&mut brann), vec!["line".to_string()]);
-    }
-
-    #[test]
-    fn a_map_broadcast_skips_every_other_map() {
-        let registry = Arc::new(ChannelClients::new());
-        let mut here = registry.join(entry(1, 100, "Here"));
-        let mut elsewhere = registry.join(entry(1, 101, "Elsewhere"));
-
-        assert_eq!(registry.broadcast_on_map(1, 100, b"line"), 1);
-        assert_eq!(drained(&mut here), vec!["line".to_string()]);
-        assert!(drained(&mut elsewhere).is_empty());
-    }
-
-    #[test]
-    fn a_map_broadcast_skips_every_other_channel() {
-        let registry = Arc::new(ChannelClients::new());
-        let mut one = registry.join(entry(1, 100, "One"));
-        let mut two = registry.join(entry(2, 100, "Two"));
-
-        assert_eq!(registry.broadcast_on_map(1, 100, b"line"), 1);
-        assert_eq!(drained(&mut one), vec!["line".to_string()]);
-        assert!(drained(&mut two).is_empty());
+        let names: Vec<String> = registry
+            .on_map(1, 100)
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(names, vec!["Here".to_string()]);
+        assert_eq!(registry.count_on_map(1, 101), 1);
+        assert_eq!(registry.count_on_map(2, 100), 1);
     }
 
     #[test]
@@ -555,7 +517,6 @@ mod tests {
             assert_eq!(registry.count_on_map(1, 100), 2);
         }
         assert_eq!(registry.count_on_map(1, 100), 1, "the lease deregistered");
-        assert_eq!(registry.broadcast_on_map(1, 100, b"line"), 1);
         drop(watcher);
         assert_eq!(registry.count_on_map(1, 100), 0);
     }
@@ -564,7 +525,6 @@ mod tests {
     fn the_registry_reports_an_unknown_channel_as_empty() {
         let registry = ChannelClients::new();
         assert_eq!(registry.count_on_map(9, 100), 0);
-        assert_eq!(registry.broadcast_on_map(9, 100, b"line"), 0);
         assert_eq!(registry.deliver_everywhere(|_| Some(b"line".to_vec())), 0);
         assert!(registry.on_map(9, 100).is_empty());
     }
