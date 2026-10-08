@@ -13,8 +13,9 @@
 # Rust/Cargo build output
 /target/
 
-# Local server configuration; it holds the real store password
-/prodomo.toml
+# Local server configuration; it holds the real store password. Not anchored, so a copy under
+# config/ or a scratch tree is ignored too. config/prodomo.toml.example stays tracked.
+prodomo.toml
 
 # OS metadata
 .DS_Store
@@ -93,6 +94,9 @@ ipch/
 # Python artifacts
 __pycache__/
 *.pyc
+
+# Compiled probe binary; chat_enum.cpp beside it rebuilds it
+/.scratch/ledger188/chat_enum
 
 # Bundled third-party headers contain directories named debug/, log/, x86/, win32/ and arm/
 # that the build-output rules above would otherwise hide. Re-include those directories only;
