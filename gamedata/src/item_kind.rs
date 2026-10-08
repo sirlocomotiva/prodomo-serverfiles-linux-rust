@@ -1,9 +1,10 @@
 //! The item type, sub-type and limit numbers the game rules compare an [`ItemProto`] against.
 //!
 //! Each is the value of a legacy enum member in `server/server/common/item_length.h`:
-//! `EItemTypes` (`:68-107`), `EArmorSubTypes` (`:136-148`), `ECostumeSubTypes` (`:150-171`),
-//! `EItemAntiFlag` (`:376-396`), `EItemWearableFlag` (`:398-425`) and `ELimitTypes`
-//! (`:427-451`). The Game data reader turns a name in `item_proto.txt` into its
+//! `EItemTypes` (`:68-107`), `EWeaponSubTypes` (`:124-132`), `EArmorSubTypes` (`:136-148`),
+//! `ECostumeSubTypes` (`:150-171`), `EItemAntiFlag` (`:376-396`), `EItemWearableFlag`
+//! (`:398-425`) and `ELimitTypes` (`:427-451`). The Game data reader turns a name in
+//! `item_proto.txt` into its
 //! **index** in the matching name table of [`item_proto_value`](crate::item_proto_value), and
 //! the rules compare that index against the enum member, so the two numberings must agree. The
 //! tests pin each constant to its name's index, which is the witness that they do.
@@ -69,6 +70,19 @@ pub const ARMOR_NECK: i32 = 5;
 pub const ARMOR_EAR: i32 = 6;
 /// `ARMOR_GLOVE`, behind `ENABLE_GLOVE_SYSTEM`, which `prodomodefines.h` defines.
 pub const ARMOR_GLOVE: i32 = 7;
+
+/// `WEAPON_SWORD`, the one-handed sword: its stance is `MOTION_MODE_ONEHAND_SWORD`.
+pub const WEAPON_SWORD: i32 = 0;
+/// `WEAPON_DAGGER`: its stance is `MOTION_MODE_DUALHAND_SWORD`.
+pub const WEAPON_DAGGER: i32 = 1;
+/// `WEAPON_BOW`: its stance is `MOTION_MODE_BOW`.
+pub const WEAPON_BOW: i32 = 2;
+/// `WEAPON_TWO_HANDED`: its stance is `MOTION_MODE_TWOHAND_SWORD`.
+pub const WEAPON_TWO_HANDED: i32 = 3;
+/// `WEAPON_BELL`: its stance is `MOTION_MODE_BELL`.
+pub const WEAPON_BELL: i32 = 4;
+/// `WEAPON_FAN`: its stance is `MOTION_MODE_FAN`.
+pub const WEAPON_FAN: i32 = 5;
 
 /// `USE_POTION`: a potion whose recovery runs over the following seconds.
 pub const USE_POTION: i32 = 0;
@@ -234,6 +248,17 @@ mod tests {
             (ARMOR_GLOVE, "ARMOR_GLOVE"),
         ] {
             assert_eq!(value, index(armor, name), "{name}");
+        }
+        let weapon = SUB_TYPE[usize::try_from(ITEM_WEAPON).expect("a small index")];
+        for (value, name) in [
+            (WEAPON_SWORD, "WEAPON_SWORD"),
+            (WEAPON_DAGGER, "WEAPON_DAGGER"),
+            (WEAPON_BOW, "WEAPON_BOW"),
+            (WEAPON_TWO_HANDED, "WEAPON_TWO_HANDED"),
+            (WEAPON_BELL, "WEAPON_BELL"),
+            (WEAPON_FAN, "WEAPON_FAN"),
+        ] {
+            assert_eq!(value, index(weapon, name), "{name}");
         }
         let usable = SUB_TYPE[usize::try_from(ITEM_USE).expect("a small index")];
         for (value, name) in [

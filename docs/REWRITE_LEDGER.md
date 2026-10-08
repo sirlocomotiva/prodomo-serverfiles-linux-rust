@@ -27130,3 +27130,238 @@ crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
 Owner questions 18 to 21 are in `.scratch/equip/owner-questions.md`, which the commit leaves out
 under the standing staging rule. Question 18 covers `LoadAffect`, 19 the stamina clock, 20 the
 database write and 21 the alignment.
+
+## 229e. The `.msa` player motions: a player's walk and run speed is its race's clip for its weapon's stance
+
+Legacy's `CHARACTER::Goto` times a walk with `CalculateMoveDuration` (`G/char.cpp:3585-3595`), which
+divides the distance by `GetMoveMotionSpeed()` (`G/char.cpp:3555-3577`). That speed is read from the
+owner's `.msa` clips. `GetMotionMode` (`G/char.cpp:3513-3553`) picks the stance from the sub-type of
+the weapon in the weapon slot, and `GetMoveMotionSpeed` takes the walk clip when the body is walking
+and is a PC, and the run clip otherwise. The speed is `-accY / MotionDuration`. A race with no clip
+for the stance returns 300.0f, with no fall-back to the general clip. `G/` below means
+`server/server/game/`; other legacy paths are written from `server/server/`.
+
+Before 229e the motion speed was that 300 for every player, since no clip was read. Owner question 14
+covers this (`.scratch/equip/owner-questions.md`). The owner's clips give a general run of 450 units a
+second for a shaman with no weapon, so a 1600-unit run takes 3555 ms where the Rewrite took 5333.
+
+### 229e.1 What landed
+
+- **The clip reader.** `gamedata/src/pc_motion.rs` (new) reads one clip with `parse_clip`, which takes
+  the first value of `MotionDuration` (a clip without it does not load, `motion.cpp:534-538`) and the
+  `y` of `Accumulation`, read by `GetTokenPosition` at `motion.cpp:540` when the key has exactly three
+  values (`motion.cpp:401-405` zeroes it otherwise). `PcMotions::load` reads the 128 clips of
+  `CMotionManager::Build` (`motion.cpp:264-357`): races 0 to 3 from `data/pc/<job>` and races 4 to 7
+  from `data/pc2/<job>`, each of the eight modes with `run.msa` and `walk.msa`. A clip that is absent or
+  has no duration goes to `skipped`, and the others still load. A clip that exists but cannot be read,
+  or that the text reader refuses, is an error, so a damaged install stops the server at startup.
+- **The text reader.** `gamedata/src/text_file.rs`: `TextFile` gains `entries`, the keys written
+  outside any group, and `get(key)`. Before 229e the parser dropped them, and the `.msa` keys are root
+  keys. `TextGroup::get` and `TextFile::get` share `value_of`. Keys are lowercased, and the first
+  occurrence wins, as legacy's `LocalTokenVectorMap.insert` does (`text_file_loader.cpp:127`, `:143`).
+- **The stance constants.** `gamedata/src/item_kind.rs`: `WEAPON_SWORD` (0), `WEAPON_DAGGER` (1),
+  `WEAPON_BOW` (2), `WEAPON_TWO_HANDED` (3), `WEAPON_BELL` (4), `WEAPON_FAN` (5), the sub-type
+  indices of the weapon names, checked by the existing `each_sub_type_is_its_name_index_in_its_type_table`.
+- **The data folder.** `common/src/config.rs`: `ServerConfig::data_dir` is `game_data/data`.
+- **The boot.** `prodomo/src/main.rs` `load_pc_motions` reads the clips from `config.data_dir()`,
+  warns once per skipped clip, and infos the loaded and skipped counts. The `Arc<PcMotions>` reaches the
+  game state through the builder's `with_motions`.
+- **The speed.** `prodomo/src/game_state/motion.rs`:
+  - `is_walking` is `points.stamina() <= 0`, the stamina arm of `IsWalking` (`G/char.h:951`). The
+    `m_bNowWalking` arm is not ported (V3).
+  - `motion_mode_of` reads the sub-type of the weapon in slot `EWearPositions::Weapon` (`4`) and maps
+    it to the stance (`GetMotionMode`). Like legacy it reads only the sub-type.
+  - `motion_speed_of` returns `-accY / duration` of the clip for the race, the stance and the walk
+    state, and `MOTION_SPEED_FALLBACK` (300) when there is no character, no points, or no clip loaded
+    for that key.
+  - `goto` passes that speed to `move_duration`, so the walk's duration is the clip's. `run_move`
+    still uses `POINT_MOV_SPEED` for `judge_move`, as before.
+- **The f32 reading.** Legacy reads each number with `atof` as a double and stores it as a float.
+  `atof` here is a decimal-prefix scanner that mirrors `atof`, followed by `str::parse::<f32>()`. The
+  two agree on the 22 distinct player-clip numbers the owner's files hold, checked by an ad hoc
+  comparison outside the repository, not by a repo test (`pc_motion.rs:18-20`).
+- **The fixture.** `prodomo/src/game_state/fixtures.rs`: `enter_seeing_with` takes the items of the
+  entrant, so a scenario can wear a weapon. `enter_seeing` delegates to it.
+
+### 229e.2 What the client sees
+
+The `GC_CHARACTER_MOVE` record (`gc.character_move`, ported) is unchanged in shape. Its duration field
+is the walk's duration, which `move_relay` takes from the `Goto` (`prodomo/src/movement.rs:269-285`;
+legacy `EncodeMovePacket`, `G/char.cpp:1008`). That duration is now the clip's: 3555 ms for the long
+walk where it was 5333 ms at 300 units a second. `CG_MOVE` (`cg.game.move`) and `GC_WALK_MODE`
+(`gc.walk_mode`) are unchanged.
+
+Scenarios, all in `prodomo/tests/parity.rs`, read the clip values from the owner's files:
+
+- the diagonal walk, with no weapon, runs at the general run clip, 450 units a second;
+- `LONG_WALK_MS` (3555 ms, `parity.rs:4775`) is a 1600-unit run at 450 units a second, the general run
+  clip of a shaman with no weapon. It replaces the 5333 ms of the 300 fall-back in five scenarios;
+- the diagonal walk of 141.42 units is 314 ms at 450 units a second (was 471 ms at 300);
+- `a_walking_shaman_moves_at_its_general_walk_clip` (`parity.rs:4841`): a shaman in the walk state
+  takes the general walk clip, 155.74 units a second, so 1600 units take 10273 ms;
+- `a_walking_dagger_wearer_moves_at_its_dualhand_walk_clip` (`parity.rs:4852`): a dagger's stance is
+  DualHandSword, whose walk clip is 221.075 units a second, so 1600 units take 7237 ms.
+
+### 229e.3 Divergences and Defects
+
+- **Divergence: an unreadable clip stops startup.** Legacy inserts a clip only when it loads
+  (`motion.cpp:386-399`), so a clip that exists but cannot be read is missing, with only a log line,
+  and its speed falls back to 300. The Rewrite refuses to start (`PcMotionError`), so a damaged install
+  is seen at once. A clip that is absent, or has no `MotionDuration`, still falls back to 300 as legacy
+  does.
+- **Note: the clips are read once, at boot.** Legacy's `CMotionManager::Build` inserts into
+  `m_map_pkMotionSet` without clearing it first (`motion.cpp:281`, `:336`), so a second call would keep
+  the old sets and leak the new ones. The Rewrite loads once at boot and never reloads.
+- **Open, not ported: `IsWalking` is the stamina arm only (V3).** Legacy's `IsWalking()` is
+  `m_bNowWalking || GetStamina() <= 0` (`G/char.h:951`). The `m_bNowWalking` arm changes through
+  `PointChange`'s stamina arm, which is not ported, so a player walks exactly when its stamina is spent.
+
+### 229e.4 Not ported yet
+
+- **The horse stance.** No mount is ported, so no speed reads the horse clips. `Build` loads them
+  (`motion.cpp:320-323`), and so does `PcMotions::load`. The shaman's horse run clip has
+  `Accumulation 0.00 0.00 0.00` (`legacy/gamedata/data/pc/shaman/horse/run.msa`), so its speed would be
+  0 if it were read (V2).
+- **The polymorph arm of `GetMotionMode`.** No polymorph state exists, so the arm is not ported (V2).
+- **The recomputes of the move duration.** Legacy recomputes a walk's duration when `POINT_MOV_SPEED`
+  changes mid-walk (`G/char.cpp:3812-3814`), after a victim is moved by `Goto` (`G/char_skill.cpp:1827`,
+  `:1945`; `G/char_battle.cpp:3741`), and in a Blue Dragon skill (`G/BlueDragon_Skill.h:327`). The
+  Rewrite keeps the duration its `Goto` set. This is open under V2.
+- **The monster clips and `motlist.txt`.** `data.motion` is `partial`: the 128 player clips are read.
+  Monster clips (`data/monster/<name>/motlist.txt`, `motion.cpp:43`, `:77`) belong to 229f.
+
+### 229e.5 Scenario and parity inventory
+
+- The parity scenarios go from 83 to 85. The two new ones are the walking shaman and the walking dagger
+  wearer above. The diagonal scenario and the five `LONG_WALK_MS` scenarios already existed and changed
+  their expected values, so they are not in the +2.
+- Unit tests: `pc_motion.rs` 16 (new file), `text_file.rs` 3, `game_state/motion.rs` 7, `parity.rs` 2
+  (the two scenarios). The total goes from 3232 to 3260, +28, with no test removed. `item_kind.rs`
+  extends an existing test and adds none.
+- Parity rows: `data.motion` (`gamedata.md:18`) moves from missing to partial, with the note above.
+  `sys.world.move` (`systems.md:31`) stays partial, and its note gains the 229e sentence: the mount
+  arm, the polymorph arm and the two recomputes are not ported (V2). `cg.game.move`
+  (`client-packets.md:50`) and `gc.character_move` (`server-records.md:13`) are already ported and get
+  a 229e note. `gc.walk_mode` (`server-records.md:87`) and `affect_event` (`timed-events.md:43`) need no
+  change.
+- The counts (`python3 .scratch/tmp/tools/parity_counts.py`) are 121 ported, 125 partial, 1337 missing,
+  6 unused and 56 codec, out of 1645 rows. Before 229e they were 121 ported, 124 partial, 1338 missing,
+  6 unused and 56 codec.
+- Owner question 14 is resolved in `.scratch/equip/owner-questions.md`. The other owner questions are
+  unchanged.
+- No ADR changed.
+
+### 229e.6 Corrections, findings and controls
+
+Corrections and findings:
+
+- **The mutation driver never ran the `gamedata` crate's unit tests.** Its suite list had no entry for
+  `gamedata/`, so a mutant there could only be killed by the prodomo or parity suites. A `gamed` suite
+  was added to `mutate_v2.py`, and its baseline runs too. 26 of the 44 mutants are in `gamedata/`.
+- **Owner question 14 said "long-run scenario" without naming one.** It now names the `LONG_WALK_MS`
+  long walk, a run clip at 450 units a second.
+- **The draft's reload note said legacy "leaks the old maps".** `Build` inserts without clearing
+  (`motion.cpp:281`, `:336`), so the new sets are the ones that leak. 229e.3 has the corrected wording.
+- **The draft's test counts were 13, 3, 6 and 24.** The correct counts are 16, 3, 7 and 2 (28 in all,
+  3232 to 3260).
+- **Two fixes came before the final gates.** A rustfmt diff on a zero-token `assert_eq!` was fixed with
+  `/usr/bin/cargo-fmt --all`. Five clippy `float_cmp` errors in the `pc_motion.rs` tests were fixed by
+  comparing `to_bits()`.
+- **The first database gate ran on a tree from before those fixes.** It was stopped and run again on
+  the final tree. The final run is `gates229e4` (229e.8).
+- **A negative-claim search failed under zsh.** An unquoted variable list of paths did not expand, so
+  the search was rerun with literal paths. Only the rerun is cited in the table below.
+- **`mo_no_points_walks` survived as an equivalent mutant.** The `None` arm of `is_walking` cannot be
+  reached from `motion_speed_of`, which returns the fall-back before it asks. The defect that arm would
+  hide is a player with no points being treated as walking, so `a_player_with_no_points_runs` tests
+  `is_walking` directly (229e.7).
+- **`pm_duration_last_value` survived.** The existing duration tests gave each clip one value per key,
+  so `first()` and `last()` agreed. `a_duration_with_two_values_takes_the_first` gives one key two values.
+- **`pm_no_duration_not_skipped` and `pm_text_error_skipped` survived.** No test read the skipped list or
+  a refused text file. Two closers now do (229e.7).
+
+Controls for the negative claims, run on the final tree. The Rust searches cover `prodomo/src`,
+`world/src`, `gamedata/src`, `common/src` and `protocol/src`, or the subset named. The legacy searches
+cover `server/`, read with `grep -a`.
+
+| claim | search | result | positive control | nonsense control |
+|---|---|---|---|---|
+| the `m_bNowWalking` arm is not ported (no field; V3) | `nowwalking\|now_walking`, case-insensitive, in the five Rust trees | 3 lines, all doc comments: `view_encode.rs:29`, `motion.rs:243`, `motion.rs:244`; no field | the same pattern in `server/server/game/`: 35 lines, `IsWalking` at `char.h:951`; and `fn is_walking` in `prodomo/src`: `motion.rs:246`, found | `zzqx_ledger_nonsense_229e` in the five trees: 0 |
+| the mount arm of `GetMoveMotionSpeed` is not ported; no mounted state reaches a speed | `mount_vnum\|mountvnum\|horse_ride\|riding\|mounted`, case-insensitive, in the five Rust trees | 45 lines: wire fields in `protocol/src/gc_actors.rs`, the distance test's `riding` flag in `movement.rs`, the `horse_ride` table entry (`command/table.rs:197`), and comments. The one construction in the motion path sets `riding: false` (`motion.rs:490`) | `GetMountVnum` in `server/server/game/char.cpp`: 12 lines | `zzqx_ledger_nonsense_229e` in the five trees: 0 |
+| the polymorph arm of `GetMotionMode` is not ported; no polymorph state exists | `polymorph`, case-insensitive, in `prodomo/src`: the command-table entries at `command/table.rs:155-156` (mapped to `Command::NotPorted` at `command.rs:124`), comments at `game_state/motion.rs:13, 253-254`, and point and record fields; no polymorph state is written | the entries, comments and fields listed | `IsPolymorphed` or `m_dwPolymorphRace` in `server/server/game/char.cpp`: 13 lines, `:338` and `:957` among them | `zzqx_ledger_nonsense_229e` in `prodomo/src`: 0 |
+| the walk's duration is not recomputed when `POINT_MOV_SPEED` changes mid-walk | `move_duration(` in `prodomo/src` and `world/src`, excluding tests and definitions | 1 call: `game_state/motion.rs:574`, from `goto`; no other caller | `CalculateMoveDuration` in `server/server/game/*.cpp`: 6 lines, the definition at `char.cpp:3585` and the callers at `char.cpp:3491, 3814`, `char_battle.cpp:3741`, `char_skill.cpp:1827, 1945`; `BlueDragon_Skill.h:327` is a header caller, outside the `*.cpp` search | `zzqx_ledger_nonsense_229e` in `prodomo/src` and `world/src`: 0 |
+
+Other controls:
+
+- **The database-off gate skips the store tests and says so.** `an_operator_command_names_the_store_it_cannot_use`
+  with `DATABASE_URL` unset prints `skipped: DATABASE_URL is not set` and passes in 0.00 s. With the
+  variable set it prints no notice and passes in 0.06 s. A skipped test still counts as passed, so the
+  totals match with and without the variable and cannot show a skip. The notice does, and a grep of the
+  gates' output for `skipped` matched only test names, so the notice was checked on this test by hand.
+- **The scratch-database check has a positive control.** On the `prodomo-pg18` container, after the gates,
+  `SELECT datname FROM pg_database WHERE datname LIKE 'prodomo\_%'` returns no row. With
+  `datname = 'prodomo'` in its place it returns `prodomo`, so the server answered both queries.
+
+### 229e.7 Review and mutation sweep
+
+The 44 mutants of `.scratch/tmp/tools/mutants229e.py` ran as two shards of `mutate_v2.py` on a tar copy of
+the final tree (`sweep229e/tree`), one shard at a time: shard 0 of 2 (22 mutants), then shard 1 of 2
+(22 mutants). The 44 are 26 in `gamedata/`, 1 in `common/`, 16 in `prodomo/src/game_state/motion.rs`
+and 1 in `prodomo/src/main.rs`. Shard 0's log opens with `baseline ok`: the world, common, gamed,
+prodomo lib, prodomo bin and parity suites all passed, parity with at least 85 passing. Shard 1's log has
+no baseline line, so it ran with `BASELINE=0` on the same copy. With `CHECK=1` the driver asserts, before
+each run, that a mutant's old text occurs exactly once in its file; all 44 pass.
+
+The first pass killed 40 and let 4 survive. No compile failure and no flaky verdict appears in the logs.
+Two mutants were killed by parity scenarios, `cf_data_dir` and `ma_wiring_empty_clips`, and both kills held
+when the scenarios ran alone, which the driver requires before a parity failure counts. The other 38 were
+killed by unit tests.
+
+Each survivor got a closing unit test, and the rerun (`rerun.log`, baseline first, which passed) killed all
+four:
+
+| survivor | shard | closed by |
+|---|---|---|
+| `pm_duration_last_value` | 0 | `pc_motion::tests::a_duration_with_two_values_takes_the_first` |
+| `mo_no_points_walks` | 0 | `game_state::motion::tests::a_player_with_no_points_runs` |
+| `pm_no_duration_not_skipped` | 1 | `pc_motion::tests::a_clip_with_no_duration_is_skipped_and_the_rest_load` |
+| `pm_text_error_skipped` | 1 | `pc_motion::tests::a_clip_the_text_reader_refuses_stops_the_load` |
+
+So 44 of 44 are killed. The copy matches the final tree for the ten Rust files that changed in 229e (`cmp`
+finds no difference), and no Rust file is newer than the final gates run. The sweep logs are copied to
+`.scratch/tmp/l229e/sweep/`.
+
+### 229e.8 Receipt
+
+The count went from 3232 to 3260, +28, and no test was removed. The 28 are:
+
+- `gamedata/src/pc_motion.rs` (new): 16 unit tests.
+- `gamedata/src/text_file.rs`: 3 unit tests.
+- `prodomo/src/game_state/motion.rs`: 7 unit tests.
+- `prodomo/tests/parity.rs`: 2 scenarios.
+
+The gates ran on the final tree. Their summary is `gates229e4/gates.summary`, copied to
+`.scratch/tmp/l229e/gates/`:
+
+| gate | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| build, workspace | clean, 0 warnings |
+| clippy, workspace, all targets, `-D warnings` | clean |
+| test, workspace, all targets, with `DATABASE_URL` | 3260 passed, 0 failed, 38 suites |
+| test, the same with `DATABASE_URL` unset | 3260 passed, 0 failed, 38 suites |
+| doc tests | 1 passed, 0 failed, 19 ignored |
+| rustdoc, warnings denied | clean |
+| scratch databases left behind | 0 |
+| `*.core` outside `target/` | 0 |
+
+The workspace has 252 Rust files and 189,155 lines outside `server/` and `.scratch/`, as the gates count
+them. The 229d receipt had 251 files and 188,244 lines. The toolchain is Rust 1.85.1, with `clippy 0.1.85`
+and `rustfmt 1.8.0`, called as `/usr/bin/cargo-clippy` and `/usr/bin/cargo-fmt`. No crate was added, and
+`Cargo.toml` and `Cargo.lock` are unchanged.
+
+Parity after 229e: 121 ported, 125 partial, 1337 missing, 6 unused and 56 codec, out of 1645 rows. Before
+229e: 121, 124, 1338, 6 and 56.
+
+No ADR changed. Owner question 14 is resolved. `.scratch/equip/owner-questions.md` is left out of the
+commit under the standing staging rule (ledger 229d).

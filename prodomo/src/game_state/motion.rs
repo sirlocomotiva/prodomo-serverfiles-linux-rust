@@ -7,19 +7,27 @@
 //! function moves the body at once. Moving a body changes its sectree but never its view, as
 //! legacy's `Sync` does (`G/char.cpp:3437-3455`).
 //!
-//! The motion speed is legacy's fall-back of 300 for every body (V2): the `.msa` motions that
-//! give each race and weapon its own are not loaded yet.
+//! A player's motion speed is the speed of its race's `.msa` clip for its weapon's mode, walk or
+//! run (`GetMoveMotionSpeed`, `G/char.cpp:3555-3577`). The clips are loaded at boot and shared
+//! through `with_motions`. A race with no clip for the mode gets legacy's fall-back of 300. No
+//! mount and no polymorph are ported, so neither branch of the legacy function runs (V2).
 //!
 //! Everything here runs on the game thread only (ADR-0002).
 
 use std::cmp::Ordering;
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::cfloat::{f32_to_i32, i32_to_f32, u32_to_f32};
+use common::enums::EWearPositions;
 use common::point_slot::POINT_MOV_SPEED;
 use common::vid::Vid;
-use world::character::{Character, EXCHANGE_MAX_DISTANCE};
+use gamedata::item_kind::{
+    WEAPON_BELL, WEAPON_BOW, WEAPON_DAGGER, WEAPON_FAN, WEAPON_SWORD, WEAPON_TWO_HANDED,
+};
+use gamedata::pc_motion::{MotionClip, MotionMode, PcMotions};
+use world::character::{Character, Equipment, Worn, EXCHANGE_MAX_DISTANCE};
 
 use protocol::cg_move::CgMove;
 
@@ -35,8 +43,8 @@ use crate::movement::{
 use crate::sync_position::distance_approx;
 use tracing::{debug, info, warn};
 
-/// The motion speed `GetMoveMotionSpeed` falls back to when the race has no motion for the
-/// mode (`G/char.cpp:3576`): every body's, until the motions are loaded (V2).
+/// The motion speed `GetMoveMotionSpeed` falls back to when no clip is loaded for the race and
+/// the mode (`G/char.cpp:3576`). Without `with_motions` no clip is loaded, so every body has it.
 pub(super) const MOTION_SPEED_FALLBACK: f32 = 300.0;
 
 /// The mask `StateMove` samples the view and the trade on: `(thecore_pulse() & 15) == 0`
@@ -241,6 +249,21 @@ pub(super) fn is_walking(character: &Character) -> bool {
         .is_some_and(|points| points.stamina() <= 0)
 }
 
+/// `CHARACTER::GetMotionMode` (`G/char.cpp:3513-3553`) for the weapon in the weapon slot, or no
+/// weapon. Like legacy it reads only the sub-type. The polymorph arm is not ported, as there is
+/// no polymorph state (V2).
+pub(super) fn motion_mode_of(weapon: Option<&Worn<'_>>) -> MotionMode {
+    match weapon.map(|worn| worn.proto.sub_type) {
+        Some(WEAPON_SWORD) => MotionMode::OneHandSword,
+        Some(WEAPON_TWO_HANDED) => MotionMode::TwoHandSword,
+        Some(WEAPON_DAGGER) => MotionMode::DualHandSword,
+        Some(WEAPON_BOW) => MotionMode::Bow,
+        Some(WEAPON_BELL) => MotionMode::Bell,
+        Some(WEAPON_FAN) => MotionMode::Fan,
+        _ => MotionMode::General,
+    }
+}
+
 /// Logs what one `CG_MOVE` of the player under `vid` did.
 fn log_move(vid: Vid, outcome: Option<&MoveOutcome>) {
     match outcome {
@@ -292,6 +315,32 @@ impl GameState {
             .ok()
             .and_then(Character::points)
             .map_or(0, |points| points.limit_point(POINT_MOV_SPEED))
+    }
+
+    /// `GetMoveMotionSpeed` (`G/char.cpp:3555-3577`) for the character under `vid`: the speed of
+    /// its race's clip for its weapon's mode, walk or run as it is now. The fall-back when there
+    /// is no character, no points, or no clip for the race and the mode.
+    pub(super) fn motion_speed_of(&self, vid: u32) -> f32 {
+        let Some(character) = self.characters.find_by_vid(Vid::new(vid)).ok() else {
+            return MOTION_SPEED_FALLBACK;
+        };
+        let Some(points) = character.points() else {
+            return MOTION_SPEED_FALLBACK;
+        };
+        let weapon =
+            Equipment::of(character.items(), &self.protos).wear(EWearPositions::Weapon as u16);
+        let mode = motion_mode_of(weapon.as_ref());
+        self.motions
+            .get(points.race(), mode, is_walking(character))
+            .map_or(MOTION_SPEED_FALLBACK, MotionClip::speed)
+    }
+
+    /// Share the player motion clips boot loaded. Without them every player moves at the
+    /// fall-back of 300, which is legacy's answer for a race with no clip.
+    #[must_use]
+    pub fn with_motions(mut self, motions: Arc<PcMotions>) -> Self {
+        self.motions = motions;
+        self
     }
 
     /// `CHARACTER::Show` for a player's body (`G/char.cpp:1847-1917`): the view work, then
@@ -506,6 +555,7 @@ impl GameState {
         };
         let now = self.clock.now();
         let move_speed = self.move_speed_of(vid);
+        let motion_speed = self.motion_speed_of(vid);
         let Some(body) = self.bodies.get_mut(&Vid::new(vid)) else {
             return false;
         };
@@ -521,7 +571,7 @@ impl GameState {
         body.motion.dest = (x, y);
         body.motion.start = (spot.x, spot.y);
         body.motion.duration_ms =
-            move_duration(body.motion.start, (x, y), MOTION_SPEED_FALLBACK, move_speed);
+            move_duration(body.motion.start, (x, y), motion_speed, move_speed);
         body.motion.start_ms = now;
         body.motion.moving = true;
         self.movers.insert(vid);
@@ -665,10 +715,16 @@ impl GameState {
 mod tests {
     use super::*;
 
-    use super::super::fixtures::{a_world, enter, points, TestClock, PLACE};
+    use super::super::fixtures::{a_world, enter, enter_seeing_with, points, TestClock, PLACE};
     use super::super::view_encode::encode_pc_insert;
     use crate::game_loop_messages::{Kept, RelayScope};
     use crate::movement::{FUNC_MAX_NUM, FUNC_MOVE, FUNC_WAIT};
+    use common::item_slots::{EWindows, INVENTORY_MAX_NUM};
+    use gamedata::item_kind::ITEM_WEAPON;
+    use gamedata::item_proto::{ItemProto, ItemProtos};
+    use protocol::item_pos::ItemPos;
+    use tokio::sync::mpsc::UnboundedReceiver;
+    use world::item::Item;
 
     fn drained(inbox: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<Vec<u8>> {
         std::iter::from_fn(|| inbox.try_recv().ok()).collect()
@@ -813,6 +869,138 @@ mod tests {
         assert!(world.goto(7, 3200 + 1600, 3200));
         let body = &world.bodies[&Vid::new(7)];
         assert_eq!(body.motion.duration_ms, 5333);
+    }
+
+    /// A clip that moves a body `speed` units a second, over one second.
+    fn a_clip(speed: f32) -> MotionClip {
+        MotionClip {
+            duration: 1.0,
+            accumulation_y: -speed,
+        }
+    }
+
+    /// The owner's protos, which the world the weapon tests enter into also holds.
+    fn owners() -> ItemProtos {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
+        ItemProtos::load(&dir).expect("the owner's item protos load")
+    }
+
+    /// The vnum of the first weapon in the owner's protos whose sub-type is `sub_type`.
+    fn a_weapon_vnum(sub_type: i32) -> u32 {
+        owners()
+            .rows()
+            .iter()
+            .find(|proto| proto.item_type == ITEM_WEAPON && proto.sub_type == sub_type)
+            .expect("the owner's table has a weapon of that sub-type")
+            .vnum
+    }
+
+    /// A world on `motions` with player 7 entered at (3200, 3200) on [`PLACE`], with `stamina`,
+    /// wearing a weapon of `weapon` (a vnum) in the weapon cell when one is given. The receiver
+    /// is the player's inbox, which must stay alive for the player to be sent to.
+    fn a_player_with_clips(
+        motions: PcMotions,
+        weapon: Option<u32>,
+        stamina: i32,
+    ) -> (GameState, UnboundedReceiver<Vec<u8>>) {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock).with_motions(Arc::new(motions));
+        let mut items = Vec::new();
+        if let Some(vnum) = weapon {
+            let mut item = Item::new(11, vnum);
+            item.set_size(1).expect("a positive footprint");
+            let cell = INVENTORY_MAX_NUM + EWearPositions::Weapon as u16;
+            items.push((ItemPos::new(EWindows::Inventory as u8, cell), item));
+        }
+        let (inbox, _shown) =
+            enter_seeing_with(&mut world, PLACE, 7, (3200, 3200), stamina, &items);
+        (world, inbox)
+    }
+
+    /// The duration of a 1600-unit move, the distance of every test move here.
+    fn a_move_duration(world: &mut GameState) -> u32 {
+        assert!(world.goto(7, 3200 + 1600, 3200));
+        world.bodies[&Vid::new(7)].motion.duration_ms
+    }
+
+    #[test]
+    fn a_walking_player_moves_at_the_walk_clip_of_its_race() {
+        let mut motions = PcMotions::default();
+        motions.insert(0, MotionMode::General, false, a_clip(500.0));
+        motions.insert(0, MotionMode::General, true, a_clip(250.0));
+        let (mut world, _inbox) = a_player_with_clips(motions, None, 0);
+        assert_eq!(a_move_duration(&mut world), 6400);
+    }
+
+    #[test]
+    fn a_running_player_moves_at_the_run_clip_of_its_race() {
+        let mut motions = PcMotions::default();
+        motions.insert(0, MotionMode::General, false, a_clip(500.0));
+        motions.insert(0, MotionMode::General, true, a_clip(250.0));
+        let (mut world, _inbox) = a_player_with_clips(motions, None, 820);
+        assert_eq!(a_move_duration(&mut world), 3200);
+    }
+
+    #[test]
+    fn a_player_moves_at_the_clip_of_its_weapons_stance() {
+        let mut motions = PcMotions::default();
+        motions.insert(0, MotionMode::General, false, a_clip(500.0));
+        motions.insert(0, MotionMode::DualHandSword, false, a_clip(250.0));
+        let dagger = a_weapon_vnum(WEAPON_DAGGER);
+        let (mut world, _inbox) = a_player_with_clips(motions, Some(dagger), 820);
+        assert_eq!(a_move_duration(&mut world), 6400);
+    }
+
+    #[test]
+    fn a_weapon_whose_stance_has_no_clip_falls_back_to_300_not_to_the_general_clip() {
+        let mut motions = PcMotions::default();
+        motions.insert(0, MotionMode::General, false, a_clip(500.0));
+        let bow = a_weapon_vnum(WEAPON_BOW);
+        let (mut world, _inbox) = a_player_with_clips(motions, Some(bow), 820);
+        assert_eq!(a_move_duration(&mut world), 5333);
+    }
+
+    #[test]
+    fn a_clip_of_another_race_is_not_used() {
+        let mut motions = PcMotions::default();
+        motions.insert(3, MotionMode::General, false, a_clip(500.0));
+        let (mut world, _inbox) = a_player_with_clips(motions, None, 820);
+        assert_eq!(a_move_duration(&mut world), 5333);
+    }
+
+    #[test]
+    fn each_weapon_sub_type_has_its_stance_and_the_rest_are_general() {
+        let protos = owners();
+        let template = protos
+            .rows()
+            .iter()
+            .find(|proto| proto.item_type == ITEM_WEAPON)
+            .expect("the owner's table has a weapon")
+            .clone();
+        let item = Item::new(11, template.vnum);
+        let mode_of_sub_type = |sub_type: i32| {
+            let proto = ItemProto {
+                sub_type,
+                ..template.clone()
+            };
+            motion_mode_of(Some(&Worn {
+                item: &item,
+                proto: &proto,
+            }))
+        };
+        for (sub_type, mode) in [
+            (WEAPON_SWORD, MotionMode::OneHandSword),
+            (WEAPON_TWO_HANDED, MotionMode::TwoHandSword),
+            (WEAPON_DAGGER, MotionMode::DualHandSword),
+            (WEAPON_BOW, MotionMode::Bow),
+            (WEAPON_BELL, MotionMode::Bell),
+            (WEAPON_FAN, MotionMode::Fan),
+            // WEAPON_ARROW, which has no stance of its own.
+            (6, MotionMode::General),
+        ] {
+            assert_eq!(mode_of_sub_type(sub_type), mode, "sub-type {sub_type}");
+        }
+        assert_eq!(motion_mode_of(None), MotionMode::General);
     }
 
     #[test]
@@ -1079,6 +1267,22 @@ mod tests {
         assert!(walking(7));
         assert!(!walking(8));
         assert!(walking(9));
+    }
+
+    #[test]
+    fn a_player_with_no_points_runs() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let _inbox = enter(&mut world, 7, (3200, 3200), 0);
+        let walking =
+            |world: &GameState| is_walking(world.characters.find_by_vid(Vid::new(7)).unwrap());
+        assert!(walking(&world));
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(7))
+            .unwrap()
+            .set_points(None);
+        assert!(!walking(&world));
     }
 
     #[test]

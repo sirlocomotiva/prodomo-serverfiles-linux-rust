@@ -4471,10 +4471,11 @@ fn a_move_reaches_the_view_around_the_mover_and_not_a_character_out_of_view() {
     alice.quiet("PacketAround excludes the mover");
 
     // `FUNC_MOVE` is 1 and it is the branch that calls `Goto`, so the record carries the
-    // duration `Goto` computed: the diagonal of (100, 100) at 300 a second is 471 ms.
+    // duration `Goto` computed. Alpha, a shaman with no weapon, runs the general run clip at 450
+    // a second, so the diagonal of (100, 100), 141.42 units, is 314 ms.
     let walk = client_move(1, 0, 0, 470_200, 950_200, 0x5eee);
     alice.send_record(&walk);
-    assert_eq!(yankee.read_game(), relayed_move(&walk, alpha.id, 471));
+    assert_eq!(yankee.read_game(), relayed_move(&walk, alpha.id, 314));
     alice.quiet("the mover is still excluded");
 
     // The distance test compares against 999 units of 100, so 200000 is refused.
@@ -4768,8 +4769,92 @@ const FUNC_MOVE: u8 = 1;
 const FUNC_COMBO: u8 = 3;
 /// `FUNC_ATTACK` (`prodomo/src/movement.rs`): a melee swing while moving. It ends the revive.
 const FUNC_ATTACK: u8 = 2;
-/// A walk of 1600 at the default speed, 300 a second: 5333 ms.
-const LONG_WALK_MS: u32 = 5333;
+/// A walk of 1600 at the general run clip of a shaman or an assassin with no weapon, 450 a second
+/// (`pc/shaman/general/run.msa` and `pc/assassin/general/run.msa`, 300 over 0.666667 s and 270
+/// over 0.6 s): 3555 ms. Yankee, an assassin, and Alpha, a shaman, are the walkers here.
+const LONG_WALK_MS: u32 = 3555;
+
+/// The owner's dagger, `WEAR_WEAPON` `WEAPON_DAGGER`, which a shaman may wear.
+const DAGGER: u32 = 1_000;
+
+/// Give Alpha the dagger in the weapon cell, window 2 at 4 as the worn fan is.
+fn give_alpha_dagger(database: &ScratchDatabase) {
+    let protos = owners_protos();
+    let dagger = protos.get(DAGGER).expect("the owner's data has it");
+    assert_eq!(
+        (dagger.item_type, dagger.sub_type),
+        (
+            gamedata::item_kind::ITEM_WEAPON,
+            gamedata::item_kind::WEAPON_DAGGER
+        ),
+        "a dagger"
+    );
+    sql(
+        database,
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 2, 4, \
+             1, {DAGGER} FROM player WHERE name = 'Alpha'"
+        ),
+    );
+}
+
+/// Alpha, a shaman at stamina 0 so it walks, and Yankee, in view of it, on the diagonal scenario's
+/// map. Alpha steps to (470100, 950100), then walks 1600 south to (470100, 951700); with `dagger`
+/// Alpha wears the dagger. Yankee is relayed the walk with `duration` ms.
+fn alpha_walks_1600_south(database: &ScratchDatabase, dagger: bool, duration: u32) {
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    create_account(&server, "carol");
+    add_characters(database);
+    seat_yankee_and_charlie(database);
+    if dagger {
+        give_alpha_dagger(database);
+    }
+    stamina(database, "Alpha", 0);
+    let (mut alice, alpha, _) = if dagger {
+        enter_equipped_world_with(&server, b"alice", 1)
+    } else {
+        enter_world_seeing(&server, b"alice", 0)
+    };
+    let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    let (_, yankee_info) = alice.sees_arrive(yankee_listed.id, false);
+    assert_eq!(
+        yankee_info, yankee_entered.info,
+        "the summary Yankee got of itself"
+    );
+
+    let step = client_move(FUNC_COMBO, 0, 0, 470_100, 950_100, 0x5eed);
+    alice.send_record(&step);
+    assert_eq!(yankee.read_game(), relayed_move(&step, alpha.id, 0));
+    alice.quiet("PacketAround excludes the mover");
+
+    let walk = client_move(FUNC_MOVE, 0, 0, 470_100, 951_700, 0x5eee);
+    alice.send_record(&walk);
+    assert_eq!(yankee.read_game(), relayed_move(&walk, alpha.id, duration));
+}
+
+/// A walking shaman with no weapon moves at its general walk clip, `pc/shaman/general/walk.msa`:
+/// 1.0 s over 155.74 units, so the 1600-unit walk is 10273 ms (`CalculateMoveDuration`,
+/// `G/char.cpp:3585-3595`).
+#[test]
+fn a_walking_shaman_moves_at_its_general_walk_clip() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    alpha_walks_1600_south(&database, false, 10_273);
+}
+
+/// A walking shaman with a dagger moves at its `dualhand_sword` walk clip,
+/// `pc/shaman/dualhand_sword/walk.msa`: 0.8 s over 176.86 units, 221.075 a second, so the same
+/// walk is 7237 ms, not the general clip's 10273. The dagger's only addon is attack speed.
+#[test]
+fn a_walking_dagger_wearer_moves_at_its_dualhand_walk_clip() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    alpha_walks_1600_south(&database, true, 7_237);
+}
 
 /// A Server whose view range is 10000, so its radius is 10500, with alice's Alpha, bob's Yankee
 /// and carol's Charlie on map 1 at `points`, each stored at `stamina_value`.
@@ -7787,11 +7872,23 @@ fn an_account_keeps_items_in_its_safebox_and_takes_them_from_its_mall() {
     bob.closed_by(&slash(b"/mall_passwor"));
 }
 
-/// [`enter_world_seeing`] for a character that wears equipment at load. The load lowers the
-/// spell points between the set-aside items and the gold (`point_change(.., 7, 0, 600)` in
-/// `a_relogged_character_wears_its_equipment_and_its_points_count_it`), which the shared loader
-/// does not allow for; this reads the load through to its final points record, then enters.
+/// [`enter_equipped_world_with`] for the four items [`give_alpha_equipment`] sets: the stone is
+/// refused and its row kept.
 fn enter_equipped_world(server: &Server, login: &[u8]) -> (Keyed, Listed, Entered) {
+    enter_equipped_world_with(server, login, 4)
+}
+
+/// [`enter_world_seeing`] for a character that wears equipment at load, whose load sets
+/// `item_count` items. The load lowers the spell points between the set-aside items and the gold
+/// (`point_change(.., 7, 0, 600)` in
+/// `a_relogged_character_wears_its_equipment_and_its_points_count_it`), and a worn weapon's attack
+/// speed changes the points after the items, which the shared loader does not allow for; this
+/// reads the load through to its final points record, then enters.
+fn enter_equipped_world_with(
+    server: &Server,
+    login: &[u8],
+    item_count: usize,
+) -> (Keyed, Listed, Entered) {
     let (mut keyed, _empire, list) = select_screen(server, login);
     let character = listed(&list, 0);
     keyed.send_record(&client_select(0));
@@ -7805,12 +7902,12 @@ fn enter_equipped_world(server: &Server, login: &[u8]) -> (Keyed, Listed, Entere
     keyed.loaded(&loaded);
     assert_eq!(keyed.read_game()[0], GC_SKILL_LEVEL_NEW);
     let mut record = keyed.read_game();
-    let mut items = 0;
+    let mut loaded_items = 0;
     while record[0] == ITEM_SET {
-        items += 1;
+        loaded_items += 1;
         record = keyed.read_game();
     }
-    assert_eq!(items, 4, "the stone is refused and its row kept");
+    assert_eq!(loaded_items, item_count, "the items the load sets");
     while record != gold {
         assert_eq!(record[0], GC_POINT_CHANGE, "{record:02x?}");
         record = keyed.read_game();

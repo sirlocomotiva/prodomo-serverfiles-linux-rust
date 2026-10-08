@@ -42,6 +42,7 @@ use gamedata::mob_locale_names::{MobLocaleNames, MobNamesByLanguage};
 use gamedata::mob_names::MobNames;
 use gamedata::mob_proto::MobProtos;
 use gamedata::npc_shop::{shops_from_dump, NpcShops};
+use gamedata::pc_motion::PcMotions;
 use gamedata::regen::{self, RegenEntry};
 use gamedata::server_attr::{self, SectreeGrid};
 use prodomo::auth_login::{
@@ -3742,6 +3743,35 @@ fn load_item_protos(config: &ServerConfig) -> Result<Arc<ItemProtos>, String> {
     Ok(Arc::new(protos))
 }
 
+/// Load the player motion clips under `<game_data>/data` (`CMotionManager::Build`), which give
+/// each race and weapon its walk and run speed.
+///
+/// A clip legacy would not load (absent, or with no `MotionDuration`) is left out and warned
+/// about, and its race and mode fall back to 300 as legacy's do (`G/char.cpp:3576`). A clip that
+/// exists but cannot be read, or is not a legacy text file, stops the server before any port
+/// opens, as the other Game data files do (a Divergence: legacy goes on without it).
+fn load_pc_motions(config: &ServerConfig) -> Result<Arc<PcMotions>, String> {
+    let data_dir = config.data_dir();
+    let motions = PcMotions::load(&data_dir).map_err(|error| {
+        format!(
+            "Motion clips are unusable in {}: {error}",
+            data_dir.display()
+        )
+    })?;
+    for path in &motions.skipped {
+        warn!(
+            clip = %path.display(),
+            "A motion clip is absent or has no MotionDuration; its speed falls back to 300"
+        );
+    }
+    info!(
+        clips = motions.loaded(),
+        skipped = motions.skipped.len(),
+        "Motion clips loaded"
+    );
+    Ok(Arc::new(motions))
+}
+
 /// Load the locale strings of every language: `<country_dir>/<code>/locale_string.txt`.
 ///
 /// Legacy reads them at boot (`G/locale_service.cpp:418-455`) and goes on without a file it
@@ -3834,6 +3864,8 @@ struct GameData {
     npcs: NpcData,
     /// The shops a keeper opens, which the game thread holds.
     shops: Arc<NpcShops>,
+    /// The player motion clips, the same table the game thread holds.
+    motions: Arc<PcMotions>,
 }
 
 /// What boot stands the NPCs up from: the mob prototypes, the names a client is sent, and the
@@ -3856,6 +3888,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let npcs = load_npc_data(config, &atlas)?;
     let cells = load_map_cells(config, &atlas)?;
     let shops = load_npc_shops(config, &protos)?;
+    let motions = load_pc_motions(config)?;
     let quests = load_quests(config, &npcs)?;
     let data = GameData {
         atlas,
@@ -3865,6 +3898,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         locale,
         npcs,
         shops,
+        motions,
     };
     Ok((data, quests))
 }
@@ -4133,6 +4167,7 @@ fn build_world(
     let mut game_state = GameState::new(Arc::clone(&data.protos))
         .with_item_count_limit(config.game.item_count_limit)
         .with_npc_shops(Arc::clone(&data.shops))
+        .with_motions(Arc::clone(&data.motions))
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
         .with_drop_lifetime(config.game.item_destroy_time_dropitem)
         .with_clients(Arc::clone(clients))

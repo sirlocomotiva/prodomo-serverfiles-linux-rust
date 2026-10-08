@@ -7,8 +7,10 @@ use std::sync::Arc;
 use common::vid::Vid;
 use gamedata::item_proto::ItemProtos;
 use gamedata::server_attr::SectreeGrid;
+use protocol::item_pos::ItemPos;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use world::character::{Points, PointsRow};
+use world::item::Item;
 
 use super::GameState;
 use crate::client_live::LiveClock;
@@ -109,15 +111,27 @@ pub(super) fn enter_on(
 /// As [`enter_on`], with the records the entrant's own client was sent as it was shown.
 pub(super) fn enter_seeing(
     world: &mut GameState,
+    place: (u8, i32),
+    vid: u32,
+    at: (i32, i32),
+    stamina: i32,
+) -> (UnboundedReceiver<Vec<u8>>, Vec<Vec<u8>>) {
+    enter_seeing_with(world, place, vid, at, stamina, &[])
+}
+
+/// As [`enter_seeing`], with `items` the entrant holds, its worn items among them.
+pub(super) fn enter_seeing_with(
+    world: &mut GameState,
     (channel, map): (u8, i32),
     vid: u32,
     (x, y): (i32, i32),
     stamina: i32,
+    items: &[(ItemPos, Item)],
 ) -> (UnboundedReceiver<Vec<u8>>, Vec<Vec<u8>>) {
     let (tx, inbox) = unbounded_channel();
     let name = format!("P{vid}");
     world
-        .enter_world_with_items(Vid::new(vid), vid, &name, &[], ClientOutbox::new(tx))
+        .enter_world_with_items(Vid::new(vid), vid, &name, items, ClientOutbox::new(tx))
         .expect("the player enters");
     world
         .characters

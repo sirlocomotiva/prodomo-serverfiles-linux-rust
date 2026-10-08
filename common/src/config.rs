@@ -198,6 +198,13 @@ impl ServerConfig {
     pub fn proto_dir(&self) -> PathBuf {
         self.game_data.join("proto")
     }
+
+    /// The motion data folder: `<game_data>/data`, holding the `pc` and `pc2` motion sets that
+    /// `CMotionManager::Build` loads.
+    #[must_use]
+    pub fn data_dir(&self) -> PathBuf {
+        self.game_data.join("data")
+    }
 }
 
 /// The `[store]` table.

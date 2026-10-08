@@ -26,6 +26,7 @@ pub mod mob_names;
 pub mod mob_proto;
 pub mod npc_shop;
 pub mod object_proto;
+pub mod pc_motion;
 pub mod records;
 pub mod refine;
 pub mod regen;

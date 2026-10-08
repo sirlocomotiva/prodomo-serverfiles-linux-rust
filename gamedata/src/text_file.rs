@@ -77,18 +77,29 @@ pub struct TextGroup {
 impl TextGroup {
     /// The first value of `key`, or `None` when the group has no such key.
     pub fn get(&self, key: &[u8]) -> Option<&[Vec<u8>]> {
-        self.entries
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_slice())
+        value_of(&self.entries, key)
     }
 }
 
-/// Every `group` block in a file, in file order.
+/// The first value of `key` in `entries`, the one `std::map::find` returns.
+fn value_of<'a>(entries: &'a [(Vec<u8>, Vec<Vec<u8>>)], key: &[u8]) -> Option<&'a [Vec<u8>]> {
+    entries
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_slice())
+}
+
+/// Every `group` block in a file, in file order, and the keys written outside any group.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TextFile {
     /// The child groups of the implicit root, in the order they appear.
     pub groups: Vec<TextGroup>,
+    /// The keys written outside every group, which legacy keeps in the root node's token map.
+    ///
+    /// A flat file such as a player's `.msa` motion has nothing else. The rules of
+    /// [`TextGroup::entries`] apply: a key written twice keeps its first value, and the order is
+    /// the map's.
+    pub entries: Vec<(Vec<u8>, Vec<Vec<u8>>)>,
 }
 
 impl TextFile {
@@ -105,6 +116,11 @@ impl TextFile {
     /// The first group named `name`.
     pub fn group(&self, name: &[u8]) -> Option<&TextGroup> {
         self.groups.iter().find(|g| g.name == name)
+    }
+
+    /// The first value of `key` among the keys outside every group, or `None` when there is none.
+    pub fn get(&self, key: &[u8]) -> Option<&[Vec<u8>]> {
+        value_of(&self.entries, key)
     }
 }
 
@@ -197,8 +213,9 @@ fn find_from(hay: &[u8], needle: u8, from: usize) -> Option<usize> {
 ///
 /// The parse is recursive over a cursor shared by every level, which is what `m_dwcurLineIndex` is.
 /// The returned groups are the child groups of the implicit root, in file order, so a file with no
-/// `group` line at all yields none. A `list` block collects every following non-brace line into
-/// one flat token list, and a line holding only `{` is skipped.
+/// `group` line at all yields none. The keys written outside any group are kept in
+/// [`TextFile::entries`]. A `list` block collects every following non-brace line into one flat
+/// token list, and a line holding only `{` is skipped.
 ///
 /// # Errors
 ///
@@ -212,6 +229,7 @@ pub fn parse(data: &[u8]) -> Result<TextFile, TextFileError> {
     let root = load_group(&lines, &mut cursor, 0)?;
     Ok(TextFile {
         groups: root.children,
+        entries: root.entries,
     })
 }
 
@@ -499,6 +517,33 @@ mod tests {
         let g = f.group(b"g").expect("the group is named g");
         assert_eq!(as_str(g.get(b"vnum").unwrap()), ["50011"]);
         assert_eq!(as_str(g.get(b"1").unwrap()), ["71084", "15", "40"]);
+    }
+
+    #[test]
+    fn parse_keeps_the_keys_written_outside_every_group() {
+        // A flat file has no group at all, and its keys are the root's (`:131-142`).
+        let f = parse(b"ScriptType  MotionData\nMotionDuration 0.5\n").unwrap();
+        assert!(f.is_empty());
+        assert_eq!(as_str(f.get(b"scripttype").unwrap()), ["MotionData"]);
+        assert_eq!(as_str(f.get(b"motionduration").unwrap()), ["0.5"]);
+        assert!(
+            f.get(b"MotionDuration").is_none(),
+            "a key is stored lowercased"
+        );
+    }
+
+    #[test]
+    fn parse_keeps_the_first_value_of_a_repeated_root_key() {
+        let f = parse(b"k one\nk two\n").unwrap();
+        assert_eq!(as_str(f.get(b"k").unwrap()), ["one"]);
+    }
+
+    #[test]
+    fn parse_stops_the_root_at_a_key_with_no_value_as_a_group_does() {
+        // The one-token key breaks out of the root loop, so the keys after it are lost.
+        let f = parse(b"a 1\nb\nc 3\n").unwrap();
+        assert_eq!(as_str(f.get(b"a").unwrap()), ["1"]);
+        assert!(f.get(b"c").is_none());
     }
 
     #[test]

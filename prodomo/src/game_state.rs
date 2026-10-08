@@ -389,6 +389,8 @@ pub struct GameState {
     npcs: BTreeMap<(u8, i32), Arc<MapNpcs>>,
     /// The NPC shops, by keeper vnum.
     shops: Arc<gamedata::npc_shop::NpcShops>,
+    /// The player motion clips, which give each race and weapon its walk and run speed.
+    motions: Arc<gamedata::pc_motion::PcMotions>,
     /// `g_bEmpireShopPriceTripleDisable`: a stranger's prices are not tripled.
     shop_price_3x_disabled: bool,
     /// The keeper each character browses, keyed by its VID.
@@ -479,6 +481,7 @@ impl GameState {
             affect_sequence: 0,
             npcs: BTreeMap::new(),
             shops: Arc::default(),
+            motions: Arc::default(),
             shop_price_3x_disabled: false,
             browsing: HashMap::new(),
             trades: BTreeMap::new(),
