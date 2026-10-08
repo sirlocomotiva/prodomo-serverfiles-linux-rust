@@ -3,6 +3,10 @@
 .omo
 .codegraph
 
+# Scratch output and nested experiment clones: local only, never committed.
+# The tracked notes under .scratch/ stay in git.
+/.scratch/tmp/
+
 # Superseded planning state
 /.sisyphus/
 
@@ -15,6 +19,14 @@
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Patch, backup and crash-dump leftovers
+*.orig
+*.rej
+*.bak
+*.swp
+*.core
+core.[0-9]*
 
 # IDE/editor settings
 .vs/
