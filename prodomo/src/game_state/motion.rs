@@ -147,11 +147,20 @@ pub(super) struct Body {
     pub(super) sync_owner: Option<(u32, Duration)>,
     /// What its insert records say that walking does not change.
     pub(super) card: PcCard,
+    /// The Pulse the body last stopped moving on, which the stamina refill counts three seconds
+    /// from (`m_dwStopTime`, in Pulses; see [`crate::game_state::affect`]).
+    pub(super) stop_pulse: u64,
 }
 
 impl Body {
     /// A body that has just entered at `point` on `map` of `channel`, standing.
-    pub(super) const fn new(channel: u8, map: i32, point: (i32, i32), card: PcCard) -> Self {
+    pub(super) const fn new(
+        channel: u8,
+        map: i32,
+        point: (i32, i32),
+        card: PcCard,
+        stop_pulse: u64,
+    ) -> Self {
         Self {
             channel,
             map,
@@ -162,6 +171,7 @@ impl Body {
             last_sync: None,
             sync_owner: None,
             card,
+            stop_pulse,
         }
     }
 }
@@ -322,8 +332,24 @@ impl GameState {
         self.maps.entry(key).or_insert_with(MapIndex::treeless);
         self.bodies.insert(
             vid,
-            Body::new(place.channel, place.map, (place.x, place.y), card),
+            Body::new(
+                place.channel,
+                place.map,
+                (place.x, place.y),
+                card,
+                self.last_pulse,
+            ),
         );
+        // `Show` starts the affect event of a PC below its maximum stamina (`G/char.cpp:1874-1875`).
+        let below_max = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(world::character::Character::points)
+            .is_some_and(|points| points.stamina() < points.max_stamina());
+        if below_max {
+            self.start_affect_event(vid);
+        }
         let at = (place.x, place.y, place.z);
         let mut records = Vec::new();
         if !self.show_body(vid.raw(), at, Some(&mut records)) {
@@ -443,6 +469,13 @@ impl GameState {
                         body.last_attack = Some(now);
                     }
                     body.rotation = accepted.rotation;
+                    // `ResetStopTime()` on every accepted function, which starts the stamina
+                    // refill's wait (`input_main.cpp:1833`, `:1872`). A zero-speed `FUNC_MOVE`
+                    // returns before it and is `Ignore` in `judge_move`, so never gets here.
+                    body.stop_pulse = self.last_pulse;
+                }
+                if matches!(record.function, FUNC_ATTACK | FUNC_COMBO) {
+                    self.remove_revive_invisible(vid);
                 }
                 match accepted.disposition {
                     MoveDisposition::Goto { x, y } => {
@@ -893,8 +926,16 @@ mod tests {
         let insert = |of: u32, to: u32| {
             let body = &world.bodies[&Vid::new(of)];
             let spot = world.spot_of(of).expect("a spot");
-            encode_pc_insert(of, body, spot, &points(820), Some((to, false)), clock.now())
-                .to_records
+            encode_pc_insert(
+                of,
+                body,
+                spot,
+                &points(820),
+                Some((to, false)),
+                clock.now(),
+                [0; 2],
+            )
+            .to_records
         };
         let holds = |records: &[Vec<u8>], run: &[Vec<u8>]| {
             records.windows(run.len()).any(|window| window == run)

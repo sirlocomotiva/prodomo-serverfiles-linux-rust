@@ -66,7 +66,7 @@ use prodomo::command::{
 };
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
 use prodomo::game_loop_messages::{
-    GameLoopController, GameLoopTerminal, GroundPlace, Kept, RelayScope, Settled,
+    GameLoopController, GameLoopTerminal, GroundPlace, Kept, RelayScope, Settled, Shown,
 };
 use prodomo::game_state::{
     world_item_id_range, GameState, ShopAnswer, ShopStep, TradeAnswer, TradeSettled, TradeStep,
@@ -1125,7 +1125,7 @@ fn ground_place(held: &Held) -> Option<GroundPlace> {
 }
 
 /// The enter-game burst for the character `held` has loaded: `shown`, the records the world's
-/// `Show` of it wrote to it, then its map's NPC list for the mini-map.
+/// `Show` of it wrote to it, then its map's NPC list for the mini-map, then its own update.
 ///
 /// `None` when the world did not answer, and the connection closes.
 async fn entering_burst(
@@ -1133,7 +1133,7 @@ async fn entering_burst(
     addr: SocketAddr,
     channel: u8,
     held: &Held,
-    shown: Vec<Vec<u8>>,
+    shown: Shown,
 ) -> Option<EnterGameBurst> {
     let character = held.character.as_ref()?;
     let map = held.map.unwrap_or_default();
@@ -1146,8 +1146,9 @@ async fn entering_burst(
     };
     Some(enter_game_burst(
         character,
-        shown,
+        shown.records,
         &npcs,
+        shown.update,
         channel,
         global_time(),
     ))
@@ -1165,6 +1166,8 @@ fn item_actor(held: &Held) -> Mover {
         language: descriptor_language(held.account.as_ref()),
         // The world sets it from the body's card (`GameState::run_item_step`).
         pk_mode: PK_MODE_PEACE,
+        // The world sets the affect words from the character's affects before a step runs.
+        affect_flags: [0; 2],
     }
 }
 
@@ -2739,7 +2742,7 @@ where
     held.world = Some(world_vid);
     // From here a failed write closes the connection, whose close path takes the character
     // out of the world, so the characters that see it are sent its removal.
-    let Some(burst) = entering_burst(context, addr, seat.number, held, shown.records).await else {
+    let Some(burst) = entering_burst(context, addr, seat.number, held, shown).await else {
         return false;
     };
     info!(

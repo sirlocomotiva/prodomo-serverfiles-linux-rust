@@ -26847,3 +26847,286 @@ was fetched, and `Cargo.lock` is unchanged. `psql` is not installed, so the stor
 
 The mutation sweep (229c.7) ran 48 mutants: 47 killed, 1 equivalent survived with its defect class
 pinned by a test, and no compile-kills. The parity counts are as in 229c.5.
+
+## 229d. The revive-invisible affect and the stamina refill: `sys.world.view` becomes `ported`
+
+Legacy's login ends with `ch->Show(...)` (`G/input_login.cpp:590`), then the NPC list
+(`:592`), then `ch->ReviveInvisible(5)` (`G/input_login.cpp:593`). `G/` below means
+`server/server/game/`; other legacy paths are written from `server/server/`. `ReviveInvisible`
+(`G/char.cpp:7490-7493`) adds the affect `AFFECT_REVIVE_INVISIBLE` (215, `G/affect.h:40`) with the
+flag `AFF_REVIVE_INVISIBLE`, for five seconds. The flag rides in the character's look update
+(`GC_CHARACTER_UPDATE`), and the affect's own record (`GC_AFFECT_ADD`) goes to the entrant. An
+attack takes the affect off: `OnMove(true)` removes it at `G/char.cpp:6156-6157` (`OnMove` starts
+at `:6148`). Legacy's affect event also refills stamina, dividing the time since the stop time by
+3000 ms (`G/char_affect.cpp:219`). The Rewrite waits 75 Pulses instead, three seconds at 25 a
+second (V9, owner question 19).
+
+Before 229d, `sys.world.view` was `partial`. 229d sends the entrant's update and affect in legacy's
+order, and ports the affect event's stamina refill, so the row becomes `ported`.
+
+### 229d.1 What landed
+
+- **The affect event.** `prodomo/src/game_state/affect.rs` (new) holds the affect functions.
+  `start_affect_event` makes an event due 25 Pulses after the last Pulse (`PASSES_PER_SEC`,
+  `prodomo/src/save.rs:20`) and numbers it from `affect_sequence`. `run_affect_events(pulse)` runs
+  the due events in that number order. One run of `run_affect_event` computes the recovery and,
+  when stamina is below its maximum and the body has been idle for `STAMINA_REST_PULSES` (75,
+  `affect.rs:31`), the stamina refill. It counts the affects down, writes the point changes and the
+  expiry removals to the character's own client, and sends the flag update when the flags changed.
+  The event runs again 25 Pulses later while it is recovering, while any affect is left, or while
+  stamina is not full. Otherwise it ends.
+- **The attack.** `remove_revive_invisible` takes the revive affect off the event. When the flags
+  change, it sends the update to the viewers and the character, then sends the removal to the
+  character.
+- **The update.** `update_frame` builds `GC_CHARACTER_UPDATE` from the look
+  (`world::character::look_of`) and the given flags. `send_affect_update` sends it through
+  `packet_around` with no exclusion, so the character gets its own copy as well as its viewers.
+- **The entrant.** `GameState::shown_on_admit` (`prodomo/src/game_state.rs:917`) places the body,
+  then calls `enter_revive_invisible` (`affect.rs`). That adds the affect, sends the update to the
+  viewers with the flags, and returns the update for the entrant's own burst. The entrant is
+  excluded from that `packet_around` send. `place_body` starts the stamina event for a PC below
+  max stamina (`motion.rs:351`, legacy `G/char.cpp:1874-1875`), then encodes the entrant's own
+  insert (`show_body`, `motion.rs:355`). The revive affect is added afterward, in
+  `enter_revive_invisible`, so the insert carries `[0; 2]`. `loading_phase::enter_game_burst`
+  (`prodomo/src/loading_phase.rs:835`) puts the update before the `GC_AFFECT_ADD`.
+- **The insert flags.** `character_add` takes the flags as a parameter (`loading_phase.rs:587`).
+  Viewer inserts use `affect_flags_of` at the time of the insert (`view_encode.rs:230`).
+- **The look.** `world::character::equip::look_of` is `Equipper::look` as a free function over the
+  character's items, points and protos. `Equipper::look` calls it, and `world/src/character/mod.rs`
+  re-exports it.
+- **The absorption rule.** An equipment change's look update carries the actor's current affect
+  flags (`affect_flags_of`), as legacy's `UpdatePacket` copies `m_afAffectFlag`
+  (`G/char.cpp:1311-1312`). Caveat: the flag is inferred from entry and insert history.
+- **The stop time.** `Body::stop_pulse` is set to the last Pulse in `place_body`
+  (`prodomo/src/game_state/motion.rs:335-341`) and on each accepted function in
+  `apply_judged_move` (`motion.rs:475`). A zero-speed `FUNC_MOVE` is
+  `Ignore("no movement speed")` in `judge_move` (`prodomo/src/movement.rs:244`), so it never
+  reaches that set.
+- **The treeless entrant.** `in_sectree` (`view_encode.rs:322`) is the check that
+  `enter_revive_invisible` makes before it returns the entrant's update. `packet_around`
+  (`view_encode.rs:329`) sends nothing for an entity with no sectree, as legacy's `PacketView`
+  returns at `G/entity.cpp:95`. An entrant at a point no sectree holds gets no update in its burst,
+  and its affect still starts (V4).
+- **The alignment.** The additional-information record writes `s_alignment: 0`
+  (`prodomo/src/item_move.rs:298`), not the character's alignment (owner question 21).
+- **The `process_pulse` doc.** The doc at `prodomo/src/game_state.rs:1529-1533` names the affect
+  event in plain code, not as an intra-doc link, so the rustdoc gate passes (229d.6).
+
+### 229d.2 What the client sees
+
+| record | header | bytes | sent to | content |
+|---|---|---|---|---|
+| `GC_CHARACTER_UPDATE` | 19 | 55 (`GC_CHARACTER_UPDATE_WIRE_SIZE`) | the viewers in range; the entrant in its burst and on each flag change | the affect flags at bytes 20 to 27: `[0, 0, 0, 8, 0, 0, 0, 0]` while the revive lasts |
+| `GC_AFFECT_ADD` | 126 | 22 (1 header, then the 21-byte element) | the entrant's own client | type 215, apply 0, value 0, flag 28, duration 5, sp cost 0 |
+| `GC_AFFECT_REMOVE` | 127 | 6 | the entrant's own client | the affect type as a u32 at bytes 1 to 4 (215), then the apply byte at 5 (0) |
+| the stamina point records | | | the entrant's own client | the point changes the refill writes |
+
+The sequences the scenarios pin:
+
+- **Entry.** The entrant's burst carries the view's records and the NPC list, then its update with
+  the flags, then its `GC_AFFECT_ADD`. After the `GC_PHASE` boundary come the time record, the
+  Channel record and the event-letters line
+  (`an_entrant_is_sent_the_revive_update_before_its_affect_add`).
+- **A viewer in range.** The viewer is sent the arrival pair (`sees_arrive`: the insert, then its
+  additional record), then the update (`a_viewer_in_range_gets_the_arrival_pair_then_the_update`).
+- **Expiry.** On the fifth second the entrant is sent `GC_AFFECT_REMOVE`, then its update with no
+  flag (`the_revive_ends_after_five_seconds_with_remove_then_update`). Legacy's expiry sends the
+  remove at `G/char_affect.cpp:317`, then calls `UpdatePacket` at `:331`.
+- **Attack.** An attack sends the entrant its update with no flag, then `GC_AFFECT_REMOVE`
+  (`[127, 215, 0, 0, 0, 0]`). The viewer gets the update with no flag, then the relayed move
+  (`an_attack_step_ends_the_revive_before_the_move_relay`). Legacy's `OnMove(true)` reaches
+  `RemoveAffect(CAffect *)` through `RemoveAffect(DWORD)` (`G/char_affect.cpp:864`, `:879`), which
+  calls `UpdatePacket` at `:846` before `SendAffectRemovePacket` at `:856`. The attack order is the
+  reverse of expiry's, as in legacy.
+- **A look change inside the window** carries the flag
+  (`a_look_change_inside_the_window_carries_the_flag`).
+- **Stamina.** A body that enters below its maximum stamina is refilled about three seconds after
+  it enters (`a_character_below_max_stamina_is_refilled_about_three_seconds_after_entering`). Its
+  stop time starts at the entry Pulse, and a move resets it and delays the refill
+  (`a_move_resets_the_stop_time_and_delays_the_refill`).
+
+### 229d.3 Divergences and Defects
+
+- **V9 in `docs/STATUS.md`, five items, with owner questions 18 to 21.**
+  1. An entrant's HP and SP are not refilled at entry. Legacy's `LoadAffect` refills both to their
+     maximums through `PointChange` (the `@fixme118` block, `G/char_affect.cpp:660-665`), with
+     POINT_CHANGE records, and the port sends none (owner question 18). `LoadAffect` (`:563`) runs
+     from an event that retries every second (`PASSES_PER_SEC(1)`, `:541`) while the phase is
+     handshake, login, select, dead or loading. It ends on close, and calls `LoadAffect` once in
+     the game phase (`:548-551`).
+  2. The stamina wait is counted from the `EnterWorld` Pulse, not from the stop time legacy keeps
+     from the load (owner question 19).
+  3. The wait is 75 Pulses. Legacy divides elapsed milliseconds by 3000
+     (`G/char_affect.cpp:219`; owner question 19).
+  4. `GD_REMOVE_AFFECT` is not sent to the database (owner question 20). Legacy's
+     `SendAffectRemovePacket` (`G/char_affect.cpp:87`) sends it at `:99`.
+  5. The update's alignment is 0, not the character's (owner question 21). Legacy's `UpdatePacket`
+     sends `m_iAlignment / 10` (`G/char.cpp:1314`).
+- **V3 is narrowed, not retired.** The affect event's stamina refill is ported. The walking flags,
+  `PointChange`'s switch, `StateMove`'s restore and consumption, and the two walk commands stay
+  open, as `docs/STATUS.md` records V3.
+- **Other STATUS entries.** V1, V2, V4, V6 and V7 are unchanged in `docs/STATUS.md`. V4 is the
+  treeless entrant (229d.1), and V2, the motions, waits for 229e.
+- **The treeless entrant is unreached on owner data (P7).** Maps 13 (demon dungeon), 12 (moon cave)
+  and 226 (santhia kouzelny dul) have far-edge strips that no sectree covers, so a point there is
+  treeless. A wire-level scenario for it was tried and removed. The unit test
+  `a_treeless_entrant_gets_no_update_in_its_burst_and_its_affect_still_starts` covers the path.
+
+### 229d.4 Not ported yet
+
+- **The restart calls.** Legacy calls `ReviveInvisible(5)` at `G/cmd_general.cpp:513`, inside
+  `do_restart_now` (`:471`), and at `:591`, `:617`, `:653`, `:667` and `:703`, inside `do_restart`
+  (`:526`). The port's command table names `restart_now`, `restart_here` and `restart_town`
+  (`prodomo/src/command/table.rs:50`, `:76`, `:77`), all `POS_DEAD` and `GM_PLAYER`, and none has a
+  handler. `CommandEntry::command` maps them to `Command::NotPorted` (`prodomo/src/command.rs:124`),
+  and `main.rs:4338-4341` logs "Command not ported; ignoring" and sends nothing. The rows
+  `cmd.restart_now`, `cmd.restart_here` and `cmd.restart_town` in `.scratch/parity/commands.md`
+  stay `missing`. They belong to death and restart, 229f.
+- **`ForgetMyAttacker`** (`G/char_battle.cpp:3748`) walks its sectree and then calls
+  `ReviveInvisible(5)` (`:3756`). It is not ported. Its callers are `G/cmd_gm.cpp:3031`,
+  `G/char_item.cpp:3893` and `G/questlua_pc.cpp:1782`. It belongs to 229f, with combat.
+- **The rest of V3.** `StateMove`'s consumption and restore (`G/char_state.cpp:782`, with
+  `SetNowWalking` at `:842` and `:863`); the walking flags and `PointChange`, whose stamina branch
+  calls `SetNowWalking(true)` at `G/char.cpp:4290` (`PointChange` is at `:3872`); `SetNowWalking`
+  (`G/char.cpp:7345`) and its `GC_WALK_MODE` record (`:7364`); and `/set_walk_mode` and
+  `/set_run_mode` (`G/cmd_general.cpp:2016`, `:2022`).
+- **`LoadAffect` on login** (`event.char_affect.load_affect_login_event`, `missing`; owner
+  question 18), and the database write of `GD_REMOVE_AFFECT` (owner question 20).
+- **The motions** (`.msa`) are 229e.
+
+### 229d.5 Scenario and parity inventory
+
+Nine scenarios are new in `prodomo/tests/parity.rs`:
+
+1. `a_look_change_inside_the_window_carries_the_flag`
+2. `a_potion_drunk_inside_the_window_ticks_on_the_entry_phase`
+3. `an_entrant_is_sent_the_revive_update_before_its_affect_add`
+4. `a_viewer_in_range_gets_the_arrival_pair_then_the_update`
+5. `an_entrant_within_five_seconds_sees_the_flag_in_the_add_and_its_expiry_clears_it`
+6. `the_revive_ends_after_five_seconds_with_remove_then_update`
+7. `an_attack_step_ends_the_revive_before_the_move_relay`
+8. `a_character_below_max_stamina_is_refilled_about_three_seconds_after_entering`
+9. `a_move_resets_the_stop_time_and_delays_the_refill`
+
+The rows:
+
+- `.scratch/parity/systems.md` row 30, `sys.world.view`: `ported`, scenario
+  `an_entrant_is_sent_the_revive_update_before_its_affect_add`. Its note cites V1, V4, V6, V7 and
+  V9. It is the only status that changed in the parity tables.
+- `.scratch/parity/timed-events.md`, `event.char_affect.affect_event`: stays `partial`, with a note
+  on the 229d refill.
+- `.scratch/parity/timed-events.md`, `event.char_affect.load_affect_login_event`: stays `missing`,
+  with a note that cites owner question 18.
+
+The counts (`python3 .scratch/tmp/tools/parity_counts.py`) are 121 ported, 124 partial, 1338
+missing, 6 unused and 56 codec, out of 1645 rows. The 229c section (229c.4) had 120 ported and 125 partial.
+
+### 229d.6 Corrections, findings and controls
+
+Corrections and findings:
+
+- The entry's `Show` and `ReviveInvisible(5)` are `G/input_login.cpp:590` and `:593`. An earlier
+  note cited `G/char.cpp:590` and `:593`. The definition, `G/char.cpp:7490`, was right.
+- `PacketAround` is `CEntity::PacketAround` at `server/server/game/entity.cpp:88`. It forwards to
+  `PacketView`, which returns at `:95` when the entity has no sectree. An earlier search of
+  `entity.cpp` for `PacketAround` found nothing, because the legacy sources are ISO-8859 and a plain
+  `grep` skips them without a message. Every legacy search in this section uses `grep -a`.
+- A comment in `motion.rs` said the zero-speed move reaches the stop-time set. It returns before that
+  set, and `judge_move` makes it `Ignore`. The comment is corrected.
+- The plan said 42 mutants. `.scratch/tmp/tools/mutants229d.py` holds 37, and 37 were swept.
+- The first gates run failed rustdoc. The `process_pulse` doc linked the private
+  `Self::run_affect_events`, which `-D rustdoc::private-intra-doc-links` refuses. The doc now names
+  the function in plain code. The rerun on the final tree passed (229d.8).
+- Earlier notes under-counted the legacy callers of `ReviveInvisible`. `grep -a` finds ten lines in
+  `server/`: the declaration, the definition, the ported call at `G/input_login.cpp:593`, and seven
+  unported calls (six in `cmd_general.cpp` and `char_battle.cpp:3756`).
+
+Controls for the negative claims, run on the final tree. The Rust searches cover `prodomo/src`,
+`world/src`, `db/src` and `protocol/src`. The legacy searches cover `server/`.
+
+| claim | search | result | positive control | nonsense control |
+|---|---|---|---|---|
+| `ForgetMyAttacker` is not ported | `forget_my_attacker`, case-insensitive, in the four Rust trees | 0 | `enter_revive_invisible` in `prodomo/src`: 5 | `zzqx_ledger_nonsense_229d` in the four trees and `server/`: 0 |
+| the restart handlers are not ported | `do_restart\|restart_now\|restart_here\|restart_town` in `prodomo/src` | 4: the three table lines (`command/table.rs:50`, `:76`, `:77`) and the doc comment at `game_state/safebox.rs:18`; no handler | `enter_revive_invisible` in `prodomo/src`: 5 | as above |
+| legacy `ReviveInvisible(` | `grep -arn` in `server/` | 10 lines: the declaration (`G/char.h:1353`), the definition (`G/char.cpp:7490`), the ported call (`G/input_login.cpp:593`) and seven unported calls (`G/cmd_general.cpp:513, 591, 617, 653, 667, 703` and `G/char_battle.cpp:3756`) | `G/input_login.cpp:593`, found by the same search | `zzqx_ledger_nonsense_229d` in `server/`: 0 |
+| legacy `ForgetMyAttacker` | `grep -arn` in `server/` | 8 lines: the declaration (`G/char.h:1375`), the functor's struct and constructor (`G/char_battle.cpp:3624`, `:3627`), the definition (`:3748`), the functor's use (`:3753`) and three callers (`G/cmd_gm.cpp:3031`, `G/char_item.cpp:3893`, `G/questlua_pc.cpp:1782`) | the definition at `G/char_battle.cpp:3748`, found by the same search | `zzqx_ledger_nonsense_229d` in `server/`: 0 |
+| `GD_REMOVE_AFFECT` is not written by the port | `GD_REMOVE_AFFECT\|REMOVE_AFFECT_DB` in the four Rust trees | 0 | `GD_REMOVE_AFFECT` in `server/`: 4 lines in 3 files (`server/server/game/char_affect.cpp:99`, `server/server/common/tables.h:53`, `server/server/db/ClientManager.cpp:2499` and `:2500`) | `zzqx_ledger_nonsense_229d` in the four trees: 0 |
+| `db/src` holds no affect write | `affect`, case-insensitive, in `db/src`, minus the `rows_affected` lines | 0 | the same search without the filter: 20 lines, all `rows_affected` | `zzqx_ledger_nonsense_229d` in the four trees: 0 |
+
+### 229d.7 Review and mutation sweep
+
+The 37 mutants of `.scratch/tmp/tools/mutants229d.py` ran as two sequential shards of
+`mutate_v2.py` (`sweep229d.sh`): shard 0 of 2 (19 mutants) on `.scratch/tmp/l229/wt2`, then shard 1
+of 2 (18 mutants) on `.scratch/tmp/l229/wt3`. `mutate_v2.py` restores each file after its mutant
+and checks its sha256. The unmutated baseline passed (`baseline229d.log`): world 377, common 96,
+prodomo lib 697, prodomo bin 1, and parity 83, all passing. Two earlier attempts
+(`sweep229d_wt2.log` and `sweep229d_wt3.log`, both dated 21:49) failed the baseline on chat
+scenarios, including `a_shout_reaches_its_empire_on_every_channel`. Their logs do not record why,
+and they are not counted. The baseline passed at 21:55, and the sweep then ran one shard at a
+time, since two would share the 8 cores.
+
+The first run killed 31 and let 6 survive: 16 killed in shard 0 and 15 in shard 1. None was a
+compile-kill, and no verdict was flaky. A parity scenario counts as a kill only when it fails again
+run alone. Of the 31 kills, 17 were confirmed that way (8 in shard 0, 9 in shard 1); the other 14
+were unit tests.
+
+All six survivors were caught by no scenario in the first run. Each got a named closing unit test in
+`affect.rs`, and the rerun killed all six:
+
+| survivor | shard | closed by |
+|---|---|---|
+| `af_stamina_threshold_strict` | 0 | `the_stamina_refill_comes_on_the_seventy_fifth_idle_pulse_and_not_before` |
+| `af_stamina_rest_74` | 1 | `a_body_stopped_a_pulse_late_is_refilled_on_the_hundredth_pulse_not_the_seventy_fifth` |
+| `af_sort_by_vid` | 0 | `two_revives_that_end_on_one_pulse_send_their_updates_in_the_order_they_started` |
+| `af_sequence_frozen` | 1 | `each_started_event_takes_the_next_sequence_number` and `two_revives_that_end_on_one_pulse_send_their_updates_in_the_order_they_started` |
+| `af_again_no_stamina` | 0 | `a_body_stopped_a_pulse_late_is_refilled_on_the_hundredth_pulse_not_the_seventy_fifth` and `the_stamina_refill_comes_on_the_seventy_fifth_idle_pulse_and_not_before` |
+| `af_expired_reversed` | 1 | `two_affects_that_end_together_leave_in_the_order_they_were_added` |
+
+Five of the ten unit tests in `affect.rs` are these closers. The rerun ran the six on `wt2`, and all
+six were killed, so 37 of 37 are killed.
+
+Two notes on the copies. The first run used the copies as they stood then, before the closers
+existed. `wt2` now holds the final `affect.rs`, which the rerun used. It differs from the final
+tree only in one doc comment in `prodomo/src/game_state.rs` (`:1532-1533`), the intra-doc-link
+wording that the rustdoc gate rejected, and a doc comment cannot change a test verdict. `wt3`, which
+ran shard 1, was not updated. Its `affect.rs` lacks the five closing tests and their helper, and two
+imports they use (`PulseProcessor` and `GameState`). Its `game_state.rs` has the same older doc
+comment. Its production code matches the final tree. `diff -rq` finds no other difference in
+`prodomo/src`, `protocol/src`, `world/src` or `db/src`.
+
+### 229d.8 Receipt
+
+The count went from 3211 to 3232, +21, and no test was removed. The 21 are:
+
+- `prodomo/src/game_state/affect.rs` (new): 10 unit tests.
+- `prodomo/tests/parity.rs`: 9 scenarios.
+- `protocol/src/gc_actors.rs`: 1, `the_update_carries_the_affect_flags_at_bytes_twenty_to_twenty_seven`.
+- `protocol/src/gc_vid.rs`: 1, `the_affect_remove_record_is_the_type_then_the_apply_byte`.
+
+The gates ran on the final tree. Their summary is `gates229d_2/gates.summary`:
+
+| gate | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| build, workspace | clean, 0 warnings |
+| clippy, workspace, all targets, `-D warnings` | clean |
+| test, workspace, all targets, with `DATABASE_URL` | 3232 passed, 0 failed, 38 suites |
+| test, the same with `DATABASE_URL` unset | 3232 passed, 0 failed, 38 suites |
+| doc tests | 1 passed, 0 failed, 19 ignored |
+| rustdoc, warnings denied | clean |
+| scratch databases left behind | 0 |
+| `*.core` outside `target/` | 0 |
+
+The unmutated baseline run of `tests/parity.rs` passed 83 of 83 (`baseline229d.log`), and the gates
+above include the same suite. The first gates run (`gates229d/`) passed every gate except rustdoc,
+which 229d.6 covers.
+
+The workspace has 251 Rust files and 188,244 lines outside `server/` and `.scratch/`. The count is
+`git ls-files -co --exclude-standard '*.rs'` with those two prefixes removed, as `gates.sh` counts
+it. The 229c receipt had 250 files and 186,833 lines. The toolchain is Rust 1.85.1, with
+`clippy 0.1.85` and `rustfmt 1.8.0`, called as `/usr/bin/cargo-clippy` and `/usr/bin/cargo-fmt`. No
+crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Owner questions 18 to 21 are in `.scratch/equip/owner-questions.md`, which the commit leaves out
+under the standing staging rule. Question 18 covers `LoadAffect`, 19 the stamina clock, 20 the
+database write and 21 the alignment.

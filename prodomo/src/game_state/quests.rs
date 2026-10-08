@@ -310,6 +310,7 @@ mod test_place {
         empire: 1,
         language: 0,
         pk_mode: crate::loading_phase::PK_MODE_PEACE,
+        affect_flags: [0; 2],
     };
 }
 

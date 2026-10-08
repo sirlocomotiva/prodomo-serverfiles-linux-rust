@@ -2586,6 +2586,36 @@ mod tests {
         assert_ne!(GcMainCharacter2Empire::header(), GcMainCharacter::header());
     }
 
+    /// `dwAffectFlag` is two little-endian words at bytes 20..28 of the 55-byte UPDATE. Bit 27
+    /// of word 0 is the revive-invisible flag, `0x0800_0000`, so its bytes are `00 00 00 08` and
+    /// the byte at offset 23 is 0x08.
+    #[test]
+    fn the_update_carries_the_affect_flags_at_bytes_twenty_to_twenty_seven() {
+        let record = GcCharacterUpdate {
+            dw_vid: 0x0102_0304,
+            aw_part: [0; EQUIP_PART_NUM],
+            b_moving_speed: 0,
+            b_attack_speed: 0,
+            b_state_flag: 0,
+            dw_affect_flag: [0x0800_0000, 0x0000_0001],
+            dw_guild_id: 0,
+            s_alignment: 0,
+            dw_level: 0,
+            dw_conqueror_level: 0,
+            b_pk_mode: 0,
+            dw_mount_vnum: 0,
+            b_refine_element_type: 0,
+            dw_new_is_guild_name: 0,
+            by_premium: 0,
+            i_premium_time: 0,
+            b_language: 0,
+        };
+        let wire = encode(record, GcCharacterUpdate::encode_into);
+        assert_eq!(wire.len(), GC_CHARACTER_UPDATE_WIRE_SIZE);
+        assert_eq!(wire[20..28], [0, 0, 0, 0x08, 1, 0, 0, 0]);
+        assert_eq!(wire[23], 0x08, "bit 27 of word 0 is the byte at offset 23");
+    }
+
     /// The three distinct name-array lengths must never be unified.
     #[test]
     fn the_three_name_array_lengths_stay_distinct() {

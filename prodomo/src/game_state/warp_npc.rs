@@ -368,6 +368,7 @@ impl GameState {
                         empire: entry.empire,
                         language: entry.language,
                         pk_mode: self.pk_mode_of(raw),
+                        affect_flags: self.affect_flags_of(common::vid::Vid::new(raw)),
                     };
                     if let Some(line) = self.is_hack(vid, mover) {
                         let _sent = self.write_to_client(vid, line);

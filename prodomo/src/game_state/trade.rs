@@ -451,6 +451,7 @@ impl GameState {
                 empire: entry.empire,
                 language: entry.language,
                 pk_mode: self.pk_mode_of(target),
+                affect_flags: self.affect_flags_of(common::vid::Vid::new(target)),
             },
         })
     }
@@ -1037,6 +1038,7 @@ mod tests {
             empire,
             language: 1,
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
+            affect_flags: [0; 2],
         }
     }
 

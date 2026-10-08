@@ -99,6 +99,7 @@ pub(super) fn encode_pc_insert(
     points: &Points,
     recipient: Option<(u32, bool)>,
     now: u32,
+    flags: [u32; 2],
 ) -> Encoded {
     let motion = body.motion;
     let mut at = InsertAt {
@@ -120,7 +121,7 @@ pub(super) fn encode_pc_insert(
         }
     }
     let mut to_records = vec![
-        framed(|out| character_add(&body.card, points, vid, at).encode_into(out)),
+        framed(|out| character_add(&body.card, points, vid, at, flags).encode_into(out)),
         framed(|out| character_additional(&body.card, points, vid).encode_into(out)),
     ];
     if i_dur > 0 {
@@ -226,6 +227,7 @@ impl GameState {
                     points,
                     Some((to, self.walks(to))),
                     self.clock.now(),
+                    self.affect_flags_of(Vid::new(of)),
                 );
                 for record in encoded.to_records {
                     self.send_to(to, record, reply);
@@ -308,15 +310,24 @@ impl GameState {
         }
     }
 
+    /// The viewers of `me` in key order, or `None` when `me` stands in no sectree of its map.
+    fn viewers_of(&self, me: EntityKey) -> Option<Vec<EntityKey>> {
+        self.map_key_of(me)
+            .and_then(|place| self.maps.get(&place))
+            .and_then(|index| index.viewers(me))
+    }
+
+    /// Whether `me` stands in a sectree. An entity in none has no view, so it sends nothing
+    /// through one, not even to itself (`G/entity.cpp:95`).
+    pub(super) fn in_sectree(&self, me: EntityKey) -> bool {
+        self.viewers_of(me).is_some()
+    }
+
     /// `CEntity::PacketAround` (`G/entity.cpp:88-105`): `record` to every player `me` sees, in
     /// key order, then to `me` itself, skipping `except`. An entity in no sectree sends
     /// nothing, not even its own copy (`:95`).
     pub(super) fn packet_around(&self, me: EntityKey, record: &[u8], except: Option<EntityKey>) {
-        let Some(viewers) = self
-            .map_key_of(me)
-            .and_then(|place| self.maps.get(&place))
-            .and_then(|index| index.viewers(me))
-        else {
+        let Some(viewers) = self.viewers_of(me) else {
             return;
         };
         let mut none = None;
@@ -363,7 +374,7 @@ mod tests {
     /// A body on [`PLACE`] standing at (3200, 3200), turned `rotation` degrees.
     fn a_body(rotation: f32) -> Body {
         let (channel, map) = PLACE;
-        let mut body = Body::new(channel, map, (3200, 3200), a_card());
+        let mut body = Body::new(channel, map, (3200, 3200), a_card(), 0);
         body.rotation = rotation;
         body
     }
@@ -383,7 +394,7 @@ mod tests {
         let points = points(stamina);
         let at = InsertAt { angle, x, y, z };
         vec![
-            framed(|out| character_add(&a_card(), &points, vid, at).encode_into(out)),
+            framed(|out| character_add(&a_card(), &points, vid, at, [0; 2]).encode_into(out)),
             framed(|out| character_additional(&a_card(), &points, vid).encode_into(out)),
         ]
     }
@@ -396,7 +407,15 @@ mod tests {
     #[test]
     fn an_idle_pc_insert_is_add_then_info() {
         let body = a_body(45.0);
-        let encoded = encode_pc_insert(7, &body, at(3200, 3200, 17), &points(820), None, 9_000);
+        let encoded = encode_pc_insert(
+            7,
+            &body,
+            at(3200, 3200, 17),
+            &points(820),
+            None,
+            9_000,
+            [0; 2],
+        );
         assert_eq!(
             encoded,
             Encoded {
@@ -419,7 +438,15 @@ mod tests {
             duration_ms: 5_333,
             moving: true,
         };
-        let encoded = encode_pc_insert(7, &body, at(4000, 3200, 0), &points(820), None, 3_000);
+        let encoded = encode_pc_insert(
+            7,
+            &body,
+            at(4000, 3200, 0),
+            &points(820),
+            None,
+            3_000,
+            [0; 2],
+        );
         let mut expected = pair(7, 93.0, (4000, 3200, 0), 820);
         // 93 / 5 is 18.6, truncated to 18; the time left is 1000 + 5333 - 3000.
         expected.push(GcCharacterMove::new(FUNC_MOVE, 0, 18, 7, 4800, 3200, 3_000, 3_333).encode());
@@ -441,7 +468,8 @@ mod tests {
             moving: true,
         };
         for now in [6_333, 6_334, 1_000 + 5_333 + 0x8000_0000] {
-            let encoded = encode_pc_insert(7, &body, at(4000, 3200, 5), &points(820), None, now);
+            let encoded =
+                encode_pc_insert(7, &body, at(4000, 3200, 5), &points(820), None, now, [0; 2]);
             assert_eq!(
                 encoded.to_records,
                 pair(7, 90.0, (4800, 3300, 5), 820),
@@ -456,6 +484,7 @@ mod tests {
             &points(820),
             None,
             1_000 + 5_333 + 0x8000_0001,
+            [0; 2],
         );
         assert_eq!(
             encoded.to_records.len(),
@@ -464,7 +493,7 @@ mod tests {
         );
         // A body at its destination is sent where it stands, whatever the clock says.
         body.motion.dest = (4000, 3200);
-        let encoded = encode_pc_insert(7, &body, at(4000, 3200, 5), &points(820), None, 0);
+        let encoded = encode_pc_insert(7, &body, at(4000, 3200, 5), &points(820), None, 0, [0; 2]);
         assert_eq!(encoded.to_records, pair(7, 90.0, (4000, 3200, 5), 820));
     }
 
@@ -473,9 +502,9 @@ mod tests {
     fn a_walking_recipient_gets_its_own_walk_mode_on_the_other_client() {
         let body = a_body(0.0);
         let spot = at(3200, 3200, 0);
-        let walking = encode_pc_insert(7, &body, spot, &points(820), Some((8, true)), 0);
+        let walking = encode_pc_insert(7, &body, spot, &points(820), Some((8, true)), 0, [0; 2]);
         assert_eq!(walking.reverse, Some(walk_mode(8, WALKMODE_RUN)));
-        let running = encode_pc_insert(7, &body, spot, &points(820), Some((8, false)), 0);
+        let running = encode_pc_insert(7, &body, spot, &points(820), Some((8, false)), 0, [0; 2]);
         assert_eq!(running.reverse, None);
     }
 
@@ -641,7 +670,7 @@ mod tests {
             y: 3200,
             z: 0,
         };
-        character_add(&card(8), &points(0), 8, at_eight).encode_into(&mut shown_eight);
+        character_add(&card(8), &points(0), 8, at_eight, [0; 2]).encode_into(&mut shown_eight);
         assert_eq!(
             reply.len(),
             3,

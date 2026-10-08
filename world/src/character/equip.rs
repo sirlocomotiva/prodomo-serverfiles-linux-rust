@@ -373,6 +373,21 @@ impl Trail {
     }
 }
 
+/// What `UpdatePacket` sends for a character with `items`, `points` and `protos`: its parts,
+/// move and attack speeds, levels, and the refine element of its worn gear. It reads the
+/// character only, so the game state can send it without the steps' gear.
+pub fn look_of(items: &CharacterItems, points: &Points, protos: &ItemProtos) -> CharacterLook {
+    let byte = |kind: usize| u8::try_from(points.limit_point(kind) & 0xff).unwrap_or(0);
+    CharacterLook {
+        parts: points.parts(),
+        moving_speed: byte(point::POINT_MOV_SPEED),
+        attack_speed: byte(point::POINT_ATT_SPEED),
+        level: u32::from(points.level()),
+        conqueror_level: u32::from(points.conqueror_level()),
+        refine_element_type: Equipment::of(items, protos).refine_element_type(),
+    }
+}
+
 /// The character's storage and gear, with the trail each step appends to.
 pub(crate) struct Equipper<'s, 'g> {
     items: &'s mut CharacterItems,
@@ -442,17 +457,8 @@ impl<'s, 'g> Equipper<'s, 'g> {
     }
 
     /// What `UpdatePacket` sends now.
-    fn look(&self) -> CharacterLook {
-        let points = &*self.gear.points;
-        let byte = |kind: usize| u8::try_from(points.limit_point(kind) & 0xff).unwrap_or(0);
-        CharacterLook {
-            parts: points.parts(),
-            moving_speed: byte(point::POINT_MOV_SPEED),
-            attack_speed: byte(point::POINT_ATT_SPEED),
-            level: u32::from(points.level()),
-            conqueror_level: u32::from(points.conqueror_level()),
-            refine_element_type: Equipment::of(self.items, self.gear.protos).refine_element_type(),
-        }
+    pub fn look(&self) -> CharacterLook {
+        look_of(self.items, &*self.gear.points, self.gear.protos)
     }
 
     fn push_points(&mut self, records: Vec<super::points::PointRecord>) {

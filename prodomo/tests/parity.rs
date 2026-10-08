@@ -789,8 +789,12 @@ struct Keyed {
     channel_number: u8,
     /// Whether the character this connection enters walks, its stamina at or below 0: then
     /// its own insert is followed by its walk mode. [`Keyed::loaded`] sets it from the loading
-    /// burst's `POINT_STAMINA`; every fixture row is stored at 0.
+    /// burst's `POINT_STAMINA`; a fixture row is stored at 12,345 ([`add_characters`]) unless
+    /// the scenario stores 0 itself.
     walking: bool,
+    /// The VIDs whose revive-invisible timer this connection has seen the entry of and not yet
+    /// the expiry of. [`Keyed::timer_record`] keeps it.
+    timers: Vec<[u8; 4]>,
 }
 
 impl Keyed {
@@ -805,6 +809,7 @@ impl Keyed {
             language: ENGLISH,
             channel_number: 1,
             walking: true,
+            timers: Vec::new(),
         }
     }
 
@@ -1011,6 +1016,10 @@ fn every_refusal_is_noid(keyed: &mut Keyed, key: u32, bob_key: u32) {
 
 /// Three characters for alice in empire 1: one on a map Channel 1 hosts, one on the Shared
 /// Channel's map, and one on a map no Channel hosts, which moves to the empire 1 start (map 1).
+///
+/// Each is stored with its stamina above every maximum, so the event that refills a spent
+/// stamina does not run and its points record stays out of the quiet windows. A scenario
+/// about walking stores 0 itself.
 fn add_characters(database: &ScratchDatabase) {
     sql(
         database,
@@ -1033,6 +1042,10 @@ fn add_characters(database: &ScratchDatabase) {
         database,
         "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 3, 'Delta', 2, 60000, \
          150000 FROM account WHERE login = 'alice'",
+    );
+    sql(
+        database,
+        "UPDATE player SET stamina = 12345 WHERE name IN ('Alpha', 'Beta', 'Delta')",
     );
 }
 
@@ -1311,6 +1324,12 @@ const GC_NPC_POSITION: u8 = 115;
 /// `TNPCPosition`: `bType`, `name[25]`, `x`, `y`.
 const NPC_POSITION_LEN: usize = 1 + 25 + 4 + 4;
 const GC_AFFECT_ADD: u8 = 126;
+/// `HEADER_GC_AFFECT_REMOVE`: `TPacketGCAffectRemove`, a header, a `DWORD dwType` and a `BYTE
+/// bApplyOn` (`G/packet.h`), six bytes in all.
+const GC_AFFECT_REMOVE: u8 = 127;
+const AFFECT_REMOVE_LEN: usize = 1 + 4 + 1;
+/// `AFFECT_REVIVE_INVISIBLE`: the `AffectType` of the affect the revive timer runs (`G/char.cpp`).
+const AFFECT_REVIVE_INVISIBLE: u32 = 215;
 const GC_TIME: u8 = 106;
 const GC_CHANNEL: u8 = 121;
 const GC_CHAT: u8 = 4;
@@ -1362,6 +1381,8 @@ fn game_len(header: u8) -> usize {
         GC_CHAR_ADDITIONAL_INFO => CHAR_ADDITIONAL_INFO_LEN,
         GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT => dynamic_len(header),
         GC_AFFECT_ADD => AFFECT_ADD_LEN,
+        GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
         GC_TIME => TIME_LEN,
         GC_CHANNEL => CHANNEL_LEN,
         GC_POINT_CHANGE => POINT_CHANGE_LEN,
@@ -1647,6 +1668,8 @@ struct Entered {
     info: Vec<u8>,
     /// Everything in view, after its own pair and walk mode.
     shown: Shown,
+    /// Its `GC_AFFECT_ADD` for the revive-invisible affect, the record after its look update.
+    affect: Vec<u8>,
 }
 
 /// [`enter_game_records`], answering what the burst showed.
@@ -1669,13 +1692,33 @@ fn enter_game_shown(keyed: &mut Keyed) -> Entered {
         !shown.records.contains(&own_walk),
         "its own walk mode once at most"
     );
+    let update = shown
+        .update
+        .as_deref()
+        .expect("the entrant's GC_CHARACTER_UPDATE follows the map's records");
+    assert_eq!(
+        update.len(),
+        CHARACTER_UPDATE_LEN,
+        "no wSize: a fixed record"
+    );
+    assert_eq!(&update[1..5], &add[1..5], "dwVID is the entrant's own");
+    assert_eq!(
+        &update[20..28],
+        &[0, 0, 0, 0x08, 0, 0, 0, 0],
+        "the revive-invisible flag 28 is bit 27 of word 0 (V9)"
+    );
     assert_eq!(affect[0], GC_AFFECT_ADD);
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, keyed.channel_number]);
     let notice = keyed.read_game();
     assert_eq!(notice[0], GC_CHAT);
-    Entered { add, info, shown }
+    Entered {
+        add,
+        info,
+        shown,
+        affect,
+    }
 }
 
 /// What `Show` and `SendNPCPosition` send after the own-character pair: every character in view,
@@ -1687,6 +1730,9 @@ struct Shown {
     records: Vec<Vec<u8>>,
     /// The `GC_NPC_POSITION` record, when the map lists any NPC.
     list: Option<Vec<u8>>,
+    /// The entrant's own `GC_CHARACTER_UPDATE`, which the burst sends after the map's list and
+    /// before its `GC_AFFECT_ADD`.
+    update: Option<Vec<u8>>,
 }
 
 impl Shown {
@@ -1798,13 +1844,15 @@ fn stamina(database: &ScratchDatabase, name: &str, value: i32) {
 /// Read what [`Shown`] describes, answering it with the record that follows it.
 fn read_shown(keyed: &mut Keyed) -> (Shown, Vec<u8>) {
     let mut records = Vec::new();
-    let mut next = keyed.read_game();
+    let mut next = keyed.read_game_raw();
     while matches!(
         next[0],
         GC_CHARACTER_ADD | GC_CHAR_ADDITIONAL_INFO | GC_MOVE | GC_WALK_MODE | GROUND_ADD
     ) {
+        // Noted, so the expiry of an insert that carries the revive flag is recognised.
+        keyed.timer_record(&next);
         records.push(next);
-        next = keyed.read_game();
+        next = keyed.read_game_raw();
     }
     let list = if next[0] == GC_NPC_POSITION {
         assert_eq!(
@@ -1813,12 +1861,29 @@ fn read_shown(keyed: &mut Keyed) -> (Shown, Vec<u8>) {
             "wSize is the whole record"
         );
         let list = next;
-        next = keyed.read_game();
+        next = keyed.read_game_raw();
         Some(list)
     } else {
         None
     };
-    (Shown { records, list }, next)
+    let update = if next[0] == GC_CHARACTER_UPDATE {
+        let update = next;
+        // Read raw, because it is the entry the scenario asserts on. Noting it lets the
+        // expiry that follows be recognised as the timer's.
+        keyed.timer_record(&update);
+        next = keyed.read_game_raw();
+        Some(update)
+    } else {
+        None
+    };
+    (
+        Shown {
+            records,
+            list,
+            update,
+        },
+        next,
+    )
 }
 
 /// A 25-byte Name field holding `name`, NUL-padded.
@@ -1868,36 +1933,112 @@ impl Keyed {
         self.read(select_answer_len)
     }
 
-    /// Assert that nothing but a `GC_PING` cycle arrives.
+    /// Note `record` if it is one of the revive timer's own records, and report whether it is.
+    ///
+    /// The timer reaches a connection that sees the character twice. The first look update
+    /// for a VID with the revive flag (flag 28, bit 27 of word 0) is its entry, and the look
+    /// update with no flags that follows is its expiry. An equipment change made while the
+    /// character is still invisible also carries the flag, but its VID is already entered, so
+    /// it is not the timer's and is not reported. The entrant's own connection also reads the
+    /// affect's `GC_AFFECT_REMOVE` (type 215, apply 0) when it runs out.
+    ///
+    /// A view insert carries the same flag word (`dwAffectFlag`, bytes 27..31), so an insert
+    /// with the flag enters the VID too: a walker that comes into view while its timer runs
+    /// is never sent the look update, but the expiry still reaches the viewer. An insert is
+    /// noted and not reported, and a removal forgets its VID, since the timer is then nobody
+    /// else's to see end.
+    fn timer_record(&mut self, record: &[u8]) -> bool {
+        match record[0] {
+            GC_AFFECT_REMOVE => {
+                record[1..5] == AFFECT_REVIVE_INVISIBLE.to_le_bytes() && record[5] == 0
+            }
+            GC_CHARACTER_UPDATE => {
+                let vid: [u8; 4] = record[1..5].try_into().expect("a VID");
+                let flags = &record[20..28];
+                let entered = self.timers.iter().position(|seen| *seen == vid);
+                match (flags[3] & 0x08 != 0, entered) {
+                    (true, None) => {
+                        self.timers.push(vid);
+                        true
+                    }
+                    (false, Some(at)) if flags.iter().all(|&byte| byte == 0) => {
+                        self.timers.swap_remove(at);
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            GC_CHARACTER_ADD => {
+                let vid: [u8; 4] = record[1..5].try_into().expect("a VID");
+                if record[30] & 0x08 != 0 && !self.timers.contains(&vid) {
+                    self.timers.push(vid);
+                }
+                false
+            }
+            GC_CHARACTER_DEL => {
+                let vid: [u8; 4] = record[1..5].try_into().expect("a VID");
+                self.timers.retain(|seen| *seen != vid);
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Assert that nothing but a `GC_PING` cycle arrives, and absorb the revive timer's own
+    /// records ([`Keyed::timer_record`]).
     ///
     /// A ping is on its own timer and says nothing about the record just sent, so a ping
-    /// inside the window is not an answer. Anything else is.
+    /// inside the window is not an answer. Anything else is. The window's bytes are walked as
+    /// records, each at its own width, because a look update is 55 bytes and not one unit.
     fn quiet(&mut self, note: &str) {
+        self.quiet_for(note, QUIET_WINDOW);
+    }
+
+    /// [`Keyed::quiet`] over a `window` of its own, for a check that must outlast a second.
+    fn quiet_for(&mut self, note: &str, window: Duration) {
         let key = self.output;
-        let deadline = std::time::Instant::now() + QUIET_WINDOW;
+        let deadline = std::time::Instant::now() + window;
+        let mut wire = Vec::new();
         loop {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
-                return;
+                break;
             }
             match self.client.drain(left) {
-                (bytes, Quiet::Open) if bytes.is_empty() => return,
-                (bytes, Quiet::Open) => {
-                    assert_eq!(
-                        bytes.len() % 8,
-                        0,
-                        "the wire carries whole TEA units ({note})"
-                    );
-                    for unit in bytes.chunks(8) {
-                        let plain = decrypt_padded(unit, &key).expect("aligned");
-                        assert_eq!(
-                            plain[0], GC_PING,
-                            "only a ping may arrive while nothing is expected ({note})"
-                        );
-                    }
-                }
+                (bytes, Quiet::Open) if bytes.is_empty() => break,
+                (bytes, Quiet::Open) => wire.extend(bytes),
                 (_, closed) => panic!("{note} closed the connection: {closed:?}"),
             }
+        }
+        assert_eq!(
+            wire.len() % 8,
+            0,
+            "the wire carries whole TEA units ({note})"
+        );
+        let plain: Vec<u8> = wire
+            .chunks(8)
+            .flat_map(|unit| decrypt_padded(unit, &key).expect("aligned"))
+            .collect();
+        let mut at = 0;
+        while let Some(&header) = plain.get(at) {
+            let width = match header {
+                GC_PING => 1,
+                GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
+                GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+                other => panic!(
+                    "only a ping may arrive while nothing is expected ({note}): header {other}"
+                ),
+            };
+            assert!(
+                at + width <= plain.len(),
+                "a record still arriving when the window closed ({note})"
+            );
+            let record = &plain[at..at + width];
+            assert!(
+                header == GC_PING || self.timer_record(record),
+                "only a ping may arrive while nothing is expected ({note}): {record:02x?}"
+            );
+            at += width.div_ceil(8) * 8;
         }
     }
 
@@ -1927,9 +2068,21 @@ impl Keyed {
         record
     }
 
+    /// Read the next loading or enter-game record that is not the revive timer's own: those
+    /// are noted by [`Keyed::timer_record`] and skipped. A scenario that checks the timer reads
+    /// with [`Keyed::read_game_raw`] instead.
+    fn read_game(&mut self) -> Vec<u8> {
+        loop {
+            let record = self.read_game_raw();
+            if !self.timer_record(&record) {
+                return record;
+            }
+        }
+    }
+
     /// Read the next loading or enter-game record, sizing a `WORD wSize` record from the first
     /// TEA unit and a fixed-width one from [`game_len`].
-    fn read_game(&mut self) -> Vec<u8> {
+    fn read_game_raw(&mut self) -> Vec<u8> {
         self.read_sized(|header, first| match game_len(header) {
             usize::MAX => usize::from(first[1]) | (usize::from(first[2]) << 8),
             fixed => fixed,
@@ -1981,6 +2134,10 @@ impl Keyed {
             }
             records.push(plain[at..at + width].to_vec());
             at += padded;
+        }
+        // Noted but not removed: a drain reports every record, the timer's included.
+        for record in &records {
+            self.timer_record(record);
         }
         (records, quiet)
     }
@@ -2785,6 +2942,7 @@ fn entering_a_map_shows_its_npcs_and_a_click_keeps_the_connection() {
     let server = Server::start(binary(), database.url());
     create_account(&server, "alice");
     add_characters(&database);
+    stamina(&database, "Alpha", 0);
     let (mut alice, alpha, _items) = load_character(&server, b"alice", 0);
     alice.send_record(&client_enter_game());
     let own = alice.read_game();
@@ -3188,6 +3346,7 @@ fn a_goto_npc_shows_its_neighbour_at_its_target_on_the_same_map() {
     );
     create_account(&server, "alice");
     add_characters(&database);
+    stamina(&database, "Alpha", 0);
 
     let (mut alice, alpha, _items) = load_character(&server, b"alice", 0);
     let own = enter_game_records(&mut alice);
@@ -4257,6 +4416,7 @@ fn seat_yankee_and_charlie(database: &ScratchDatabase) {
     );
     stamina(database, "Alpha", 12_345);
     stamina(database, "Yankee", 12_345);
+    stamina(database, "Charlie", 12_345);
 }
 
 /// `cg.world.move`: an accepted move reaches the characters in the mover's view and never the
@@ -4504,10 +4664,17 @@ fn a_sync_batch_is_relayed_around_the_claimer_only() {
         "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
          454300, 940700 FROM account WHERE login = 'carol'",
     );
+    // Yankee and Charlie never walk, so they are stored above every stamina maximum.
+    stamina(&database, "Yankee", 12_345);
+    stamina(&database, "Charlie", 12_345);
+
+    // Yankee and Charlie never walk, so they are stored above every stamina maximum.
+    stamina(&database, "Yankee", 12_345);
+    stamina(&database, "Charlie", 12_345);
 
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
     let (mut yankee, yankee_id) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee_id.id, true);
+    alice.sees_arrive(yankee_id.id, false);
     let (mut charlie, _) = enter_world(&server, b"carol", 0);
 
     // A claim on Yankee from a position 10 units away, inside every limit.
@@ -4599,6 +4766,8 @@ const IDX18_VID: u32 = FIRST_NPC_VID + 18;
 /// `FUNC_MOVE` and `FUNC_COMBO`, `TPacketCGMove`'s `bFunc`.
 const FUNC_MOVE: u8 = 1;
 const FUNC_COMBO: u8 = 3;
+/// `FUNC_ATTACK` (`prodomo/src/movement.rs`): a melee swing while moving. It ends the revive.
+const FUNC_ATTACK: u8 = 2;
 /// A walk of 1600 at the default speed, 300 a second: 5333 ms.
 const LONG_WALK_MS: u32 = 5333;
 
@@ -4667,7 +4836,8 @@ fn assert_insert_move(record: &[u8], vid: u32, dest: (i32, i32), walk_ms: u32) {
     );
     let left = u32::from_le_bytes(record[20..24].try_into().expect("four bytes"));
     assert!(
-        (1..walk_ms).contains(&left),
+        // The whole walk, when it is sent in the Pulse the move starts in.
+        (1..=walk_ms).contains(&left),
         "iDur {left} is the walk's remainder"
     );
 }
@@ -5946,8 +6116,13 @@ enum Seen {
 
 /// Every record a move sends within a quiet window, each checked against the mover's VID.
 fn read_a_move(keyed: &mut Keyed, vid: u32) -> Vec<Seen> {
+    read_a_move_within(keyed, vid, Duration::from_millis(700))
+}
+
+/// [`read_a_move`] for a quiet window of `window`, for a move whose next tick comes soon after.
+fn read_a_move_within(keyed: &mut Keyed, vid: u32, window: Duration) -> Vec<Seen> {
     let language = keyed.language;
-    let (records, quiet) = keyed.drain_game(Duration::from_millis(700), |header| match header {
+    let (records, quiet) = keyed.drain_game(window, |header| match header {
         GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
         GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
         other => game_len(other),
@@ -6237,8 +6412,8 @@ fn an_armour_is_used_on_swapped_and_used_off_and_the_store_follows() {
 
 /// `cg.game.item_use` of a `USE_POTION`: each small red potion owes 300 hit points, a second
 /// drunk while the first is owed adds to it, the last of the stack clears its cell, the affect
-/// event pays 7% of the maximum each second from a second after the first, and the logout save
-/// keeps the paid hit points.
+/// event pays 7% of the maximum each second on the schedule the character's entry started, and
+/// the logout save keeps the paid hit points.
 #[test]
 fn a_drunk_potion_pays_its_hit_points_over_the_next_seconds_and_the_save_keeps_them() {
     let Some(database) = ScratchDatabase::create() else {
@@ -6268,8 +6443,22 @@ fn a_drunk_potion_pays_its_hit_points_over_the_next_seconds_and_the_save_keeps_t
     alpha.send_record(&client_item_use(0));
     // Then: 300 hit points are owed for each, the red effect plays twice, the stack goes to
     // one and then its cell is cleared, and the row with it.
+    let mut seen = read_a_move(&mut alpha, vid);
+    // The potion joins the event that Alpha's entry started (`StartAffectEvent` returns when one
+    // runs, `G/char_affect.cpp:238`), so the event's second is the entry's, not the drink's: its
+    // first tick may already be in this window. A tick is the hit points and the owed recovery.
+    let mut paid = 0;
+    if seen.len() > 6 {
+        let tick = seen.split_off(6);
+        assert_eq!(
+            tick,
+            [Seen::Point(hp, 500 + 99), Seen::Point(recovery, 600 - 99)],
+            "the first tick, inside the drink's window"
+        );
+        paid = 99;
+    }
     assert_eq!(
-        read_a_move(&mut alpha, vid),
+        seen,
         [
             Seen::Point(recovery, 300),
             Seen::Effect(1),
@@ -6283,7 +6472,6 @@ fn a_drunk_potion_pays_its_hit_points_over_the_next_seconds_and_the_save_keeps_t
 
     // And: each second the event pays 99, which is 7% of Alpha's maximum, until the 600 are
     // paid.
-    let mut paid = 0;
     while paid < 600 {
         let step = (600 - paid).min(99);
         paid += step;
@@ -6297,9 +6485,9 @@ fn a_drunk_potion_pays_its_hit_points_over_the_next_seconds_and_the_save_keeps_t
         );
     }
     // And: then it stops.
-    assert_eq!(
-        alpha.client.drain(Duration::from_millis(1200)),
-        (Vec::new(), Quiet::Open)
+    alpha.quiet_for(
+        "the event has paid the 600 and ends",
+        Duration::from_millis(1200),
     );
 
     // And: the logout save keeps what the event paid.
@@ -6557,6 +6745,8 @@ fn seat_alpha_and_zulu(server: &Server, database: &ScratchDatabase, others: &[&s
         "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Zulu', 1, 470000, \
          950000 FROM account WHERE login = 'bob'",
     );
+    // Zulu never walks, so it is stored above every stamina maximum like the fixtures.
+    stamina(database, "Zulu", 12_345);
 }
 
 /// Load `login`'s first character and enter the game with [`enter_game_records`].
@@ -6646,7 +6836,7 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
         (keyed, character)
     };
     // And: Alpha sees Zulu arrive.
-    alpha.sees_arrive(zulu_listed.id, true);
+    alpha.sees_arrive(zulu_listed.id, false);
     // When: Charlie enters out of view. Then: nothing lying there is shown, and nobody sees
     // Charlie arrive.
     let (mut charlie, _, charlie_entered) = enter_world_seeing(&server, b"carol", 0);
@@ -6710,7 +6900,7 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
     charlie.quiet("Charlie hears neither pick-up");
     // And: an item already picked up is not there to pick up, and nobody is told.
     alpha.unanswered(&protocol::cg_item_pickup::CgItemPickup::new(1).encode());
-    assert_eq!(zulu.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    zulu.quiet("nobody is told of an item already picked up");
 }
 
 /// `event.item.item_destroy_event`: with a two-second lifetime, an item nobody picks up is
@@ -6738,7 +6928,7 @@ fn a_dropped_item_nobody_picks_up_is_destroyed_on_time_and_its_view_sees_it_go()
     server.wait_for("id 100000000; the client has it");
     assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, stackable, 3));
     let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
-    alpha.sees_arrive(zulu_listed.id, true);
+    alpha.sees_arrive(zulu_listed.id, false);
 
     // When: Alpha drops gold. Then: nothing answers, and the drop limit is not started.
     alpha.unanswered(
@@ -6798,7 +6988,7 @@ fn a_pick_up_is_stored_only_after_the_drop_it_follows() {
     server.wait_for("id 100000000; the client has it");
     assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, stackable, 3));
     let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
-    alpha.sees_arrive(zulu_listed.id, true);
+    alpha.sees_arrive(zulu_listed.id, false);
     // And: another transaction holds the item's row, so the store cannot delete it yet.
     let (lock, locked) = support::hold_lock(
         database.url(),
@@ -7595,4 +7785,592 @@ fn an_account_keeps_items_in_its_safebox_and_takes_them_from_its_mall() {
         assert_eq!(bob.read_game(), whole);
     }
     bob.closed_by(&slash(b"/mall_passwor"));
+}
+
+/// [`enter_world_seeing`] for a character that wears equipment at load. The load lowers the
+/// spell points between the set-aside items and the gold (`point_change(.., 7, 0, 600)` in
+/// `a_relogged_character_wears_its_equipment_and_its_points_count_it`), which the shared loader
+/// does not allow for; this reads the load through to its final points record, then enters.
+fn enter_equipped_world(server: &Server, login: &[u8]) -> (Keyed, Listed, Entered) {
+    let (mut keyed, _empire, list) = select_screen(server, login);
+    let character = listed(&list, 0);
+    keyed.send_record(&client_select(0));
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_LOADING]);
+    assert_eq!(keyed.read_game(), [GC_ENTITY, 3, 0]);
+    assert_eq!(keyed.read_game()[0], GC_MAIN_CHARACTER2_EMPIRE);
+    let gold = keyed.read_game();
+    assert_eq!(gold[0], GC_CHARACTER_GOLD);
+    let loaded = keyed.read_game();
+    assert_eq!(loaded[0], GC_PLAYER_POINTS);
+    keyed.loaded(&loaded);
+    assert_eq!(keyed.read_game()[0], GC_SKILL_LEVEL_NEW);
+    let mut record = keyed.read_game();
+    let mut items = 0;
+    while record[0] == ITEM_SET {
+        items += 1;
+        record = keyed.read_game();
+    }
+    assert_eq!(items, 4, "the stone is refused and its row kept");
+    while record != gold {
+        assert_eq!(record[0], GC_POINT_CHANGE, "{record:02x?}");
+        record = keyed.read_game();
+    }
+    assert_eq!(keyed.read_game()[0], GC_PLAYER_POINTS);
+    let entered = enter_game_view(&mut keyed);
+    (keyed, character, entered)
+}
+
+#[test]
+fn a_look_change_inside_the_window_carries_the_flag() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    seat_yankee_and_charlie(&database);
+    give_alpha_equipment(&database);
+
+    // Given: Alpha entered wearing the armour, and Yankee entered after it, both inside the five
+    // seconds the revive runs from Alpha's entry.
+    let entered_at = std::time::Instant::now();
+    let (mut alpha_keyed, alpha, _alpha_entered) = enter_equipped_world(&server, b"alice");
+    let (mut yankee, yankee_listed, _yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    alpha_keyed.sees_arrive(yankee_listed.id, false);
+    let arrival = alpha_keyed.read_game_raw();
+    assert!(
+        alpha_keyed.timer_record(&arrival),
+        "Yankee's entry is the timer's"
+    );
+
+    // When: the armour is taken off the body cell, inside the window. Then: the look update
+    // Alpha is sent carries flag 28 in word 0, and the body part is bare.
+    assert!(
+        entered_at.elapsed() < Duration::from_millis(4_500),
+        "the take-off is inside the window"
+    );
+    alpha_keyed.send_record(&client_item_move(180, 10, 0));
+    let (records, quiet) = alpha_keyed.drain_game(Duration::from_millis(700), revive_width);
+    assert_eq!(quiet, Quiet::Open);
+    let looks: Vec<&Vec<u8>> = records
+        .iter()
+        .filter(|record| record[0] == GC_CHARACTER_UPDATE)
+        .collect();
+    assert_eq!(looks.len(), 1, "one look for the take-off: {records:02x?}");
+    let own = looks[0];
+    assert_eq!(&own[1..5], &alpha.id.to_le_bytes(), "Alpha's VID");
+    assert_eq!(
+        own[20..28],
+        [0, 0, 0, 0x08, 0, 0, 0, 0],
+        "the flag in its own look"
+    );
+    assert_eq!(own[5..7], [0, 0], "the body part is bare");
+
+    // Then: Yankee, in range, is sent the same look with the flag.
+    let seen = read_past_pings(&mut yankee);
+    assert_eq!(seen[0], GC_CHARACTER_UPDATE, "{seen:02x?}");
+    assert_eq!(&seen[1..5], &alpha.id.to_le_bytes(), "Alpha's VID");
+    assert_eq!(
+        seen[20..28],
+        [0, 0, 0, 0x08, 0, 0, 0, 0],
+        "the flag in the viewer's look"
+    );
+    assert_eq!(seen[5..7], [0, 0], "the body part is bare for the viewer");
+}
+
+#[test]
+fn a_potion_drunk_inside_the_window_ticks_on_the_entry_phase() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE player SET hp = 500 WHERE name = 'Alpha'");
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    let (hp, recovery) = (
+        u8::try_from(common::point_slot::POINT_HP).expect("a point byte"),
+        u8::try_from(common::point_slot::POINT_HP_RECOVERY).expect("a point byte"),
+    );
+
+    // Given: Alpha, at 500 hit points, enters, and the revive's five seconds run from the entry.
+    let entered_at = std::time::Instant::now();
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    let add = enter_game_burst(&mut alpha);
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    Server::write_console(&console, "item give Alpha 27001 2");
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 27_001, 2));
+
+    // When: one potion is drunk 30 pulses (1.2 s) after the entry, inside the window. Then: 300
+    // hit points are owed, the red effect plays and the stack goes to one. The potion joins the
+    // event the entry started, which its due pulse does not move (`StartAffectEvent` returns
+    // when one runs, `G/char_affect.cpp:238`), so the next tick is the one at 50 pulses.
+    std::thread::sleep(Duration::from_millis(1200).saturating_sub(entered_at.elapsed()));
+    assert!(
+        entered_at.elapsed() < Duration::from_millis(4_500),
+        "the drink is inside the window"
+    );
+    alpha.send_record(&client_item_use(0));
+    assert_eq!(
+        read_a_move_within(&mut alpha, vid, Duration::from_millis(300)),
+        [
+            Seen::Point(recovery, 300),
+            Seen::Effect(1),
+            Seen::Count(0, 1),
+        ]
+    );
+
+    // And: the ticks at 50, 75 and 100 pulses pay 99 each, from the owed 300.
+    let mut paid = 0;
+    for _ in 0..3 {
+        paid += 99;
+        assert_eq!(
+            read_a_tick(&mut alpha, vid),
+            [
+                Seen::Point(hp, 500 + paid),
+                Seen::Point(recovery, 300 - paid)
+            ]
+        );
+    }
+
+    // Then: the fifth tick, at 125 pulses, pays the last 3 and the revive ends. The recovery
+    // records come before the removal and the flag update (`G/char_affect.cpp:175-211` before
+    // `:226`): the removal to Alpha, then its look with no flag.
+    assert_eq!(
+        read_a_tick(&mut alpha, vid),
+        [Seen::Point(hp, 800), Seen::Point(recovery, 0)],
+        "the fifth tick pays the last 3"
+    );
+    assert_eq!(
+        read_past_pings(&mut alpha),
+        [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0],
+        "the removal follows the recovery"
+    );
+    let update = read_past_pings(&mut alpha);
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert_eq!(&update[1..5], &vid.to_le_bytes(), "Alpha's VID");
+    assert_eq!(&update[20..28], &[0; 8], "no flag left");
+    alpha.quiet("nothing else follows the revive's end");
+}
+
+/// The width of each game record a wait for the revive or the refill can see, for
+/// [`Keyed::drain_game`]: a look update is 55 bytes, every other record its [`game_len`].
+fn revive_width(header: u8) -> usize {
+    match header {
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        other => game_len(other),
+    }
+}
+
+/// The next record that is not a `GC_PING`, which arrives on its own timer and says nothing
+/// about the wait. The record is read raw: the caller notes it if it is the revive's.
+fn read_past_pings(keyed: &mut Keyed) -> Vec<u8> {
+    loop {
+        let record = keyed.read_game_raw();
+        if record[0] != GC_PING {
+            return record;
+        }
+    }
+}
+
+/// The records of a drain that are not pings.
+fn without_pings(records: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    records
+        .into_iter()
+        .filter(|record| record[0] != GC_PING)
+        .collect()
+}
+
+/// The revive-invisible affect as its entrant sees it (V9, C4 P1): the look update that carries
+/// the flag, then the `GC_AFFECT_ADD` of the affect, and the phase after both. Alpha's own insert
+/// carries no flag, because it is sent before the affect joins the entrant's event.
+#[test]
+fn an_entrant_is_sent_the_revive_update_before_its_affect_add() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+
+    // When: Alpha enters the game. Then: its look update has flag 28 (bit 27 of word 0), and the
+    // affect that follows is type 215 with apply 0, value 0, flag 28 (the number, not the mask),
+    // duration 5 (ticks, so five seconds) and SP cost 0. `read_shown` reads the records in
+    // the order they are asserted: the shown records, the list, the update, the affect.
+    let (_alpha, alpha, entered) = enter_world_seeing(&server, b"alice", 0);
+    let update = entered
+        .shown
+        .update
+        .as_deref()
+        .expect("the entrant's update");
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert_eq!(&update[1..5], &alpha.id.to_le_bytes(), "its own VID");
+    assert_eq!(&update[20..28], &[0, 0, 0, 0x08, 0, 0, 0, 0], "flag 28");
+    assert_eq!(
+        entered.add[27..31],
+        [0, 0, 0, 0],
+        "its own insert is sent before the affect is added"
+    );
+    assert_eq!(
+        entered.affect,
+        [
+            GC_AFFECT_ADD, // header
+            215,
+            0,
+            0,
+            0, // dwType: AFFECT_REVIVE_INVISIBLE
+            0, // bApplyOn: POINT_NONE
+            0,
+            0,
+            0,
+            0, // lApplyValue
+            28,
+            0,
+            0,
+            0, // dwFlag: the number, and not the mask
+            5,
+            0,
+            0,
+            0, // lDuration: five ticks
+            0,
+            0,
+            0,
+            0, // lSPCost
+        ]
+    );
+}
+
+/// A viewer in range is sent the entrant's arrival pair, then its look update with the flag
+/// (V9, C4 P2). The insert is sent before the affect joins the entrant's event, so the update
+/// is what tells the viewer the entrant is invisible.
+#[test]
+fn a_viewer_in_range_gets_the_arrival_pair_then_the_update() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    create_account(&server, "carol");
+    add_characters(&database);
+    seat_yankee_and_charlie(&database);
+
+    // Given: Yankee is in game before Alpha, so Alpha's arrival is the viewer's to see.
+    let (mut yankee, _yankee_listed, _yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+
+    // When: Alpha enters. Then: Yankee gets Alpha's pair, then the update with the flag.
+    let (_alpha, alpha, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+    yankee.sees_arrive(alpha.id, false);
+    let update = yankee.read_game_raw();
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert_eq!(&update[1..5], &alpha.id.to_le_bytes(), "Alpha's VID");
+    assert_eq!(&update[20..28], &[0, 0, 0, 0x08, 0, 0, 0, 0], "flag 28");
+    assert!(yankee.timer_record(&update), "the entry is the timer's");
+    yankee.quiet("nothing else follows the entrant's update");
+}
+
+/// A viewer that enters inside the five seconds sees the flag in the entrant's insert, and the
+/// expiry reaches the viewer as a look update with no flag (V9, C4 P3, P4). The entrant's own
+/// insert carries no flag, which is the order `read_shown` relies on.
+#[test]
+fn an_entrant_within_five_seconds_sees_the_flag_in_the_add_and_its_expiry_clears_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    seat_yankee_and_charlie(&database);
+
+    // Given: Alpha entered, and the affect runs its five seconds from there.
+    let entered_at = std::time::Instant::now();
+    let (mut alpha_keyed, alpha, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+
+    // When: Yankee enters within the five seconds. Then: Alpha's insert carries flag 28 in
+    // word 0, and Yankee's own insert does not.
+    let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    let (alpha_insert, _alpha_info) = yankee_entered.shown.pair_of(alpha.id);
+    assert_eq!(
+        alpha_insert[27..31],
+        [0, 0, 0, 0x08],
+        "within five seconds the insert carries flag 28"
+    );
+    assert_eq!(
+        yankee_entered.add[27..31],
+        [0, 0, 0, 0],
+        "Yankee's own insert"
+    );
+
+    // Alpha is sent Yankee's arrival: the insert, its summary, and Yankee's look update with the
+    // flag, which the timer notes as Yankee's.
+    alpha_keyed.sees_arrive(yankee_listed.id, false);
+    let arrival = alpha_keyed.read_game_raw();
+    assert!(
+        alpha_keyed.timer_record(&arrival),
+        "Yankee's entry is the timer's"
+    );
+
+    // When: the five seconds are up. Then: Yankee gets Alpha's look update with no flag.
+    let expiry = read_past_pings(&mut yankee);
+    assert_eq!(expiry[0], GC_CHARACTER_UPDATE, "{expiry:02x?}");
+    assert_eq!(&expiry[1..5], &alpha.id.to_le_bytes(), "Alpha's VID");
+    assert_eq!(&expiry[20..28], &[0; 8], "no flag left");
+    assert!(
+        entered_at.elapsed() >= Duration::from_millis(4_500),
+        "the flag lasts five seconds"
+    );
+
+    // Then: the entrant's own connection is sent the removal, then its look update with no flag.
+    assert_eq!(
+        read_past_pings(&mut alpha_keyed),
+        [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0],
+        "the entrant's removal"
+    );
+    let own = read_past_pings(&mut alpha_keyed);
+    assert_eq!(own[0], GC_CHARACTER_UPDATE, "{own:02x?}");
+    assert_eq!(&own[1..5], &alpha.id.to_le_bytes(), "Alpha's own VID");
+    assert_eq!(&own[20..28], &[0; 8], "no flag left on its own update");
+    alpha_keyed.quiet("nothing else follows the entrant's expiry");
+
+    // Then: Yankee's own expiry is the same pair on its connection, a little after Alpha's.
+    assert_eq!(
+        read_past_pings(&mut yankee),
+        [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0],
+        "the viewer's own removal"
+    );
+    let yankee_own = read_past_pings(&mut yankee);
+    assert_eq!(yankee_own[0], GC_CHARACTER_UPDATE, "{yankee_own:02x?}");
+    assert_eq!(
+        &yankee_own[1..5],
+        &yankee_listed.id.to_le_bytes(),
+        "Yankee's own VID"
+    );
+    assert_eq!(
+        &yankee_own[20..28],
+        &[0; 8],
+        "no flag left on Yankee's update"
+    );
+}
+
+/// The revive ends five seconds after entering: the entrant gets `GC_AFFECT_REMOVE`, then the
+/// look update with no flag, and the viewer gets the update (V9, C4 P4, item 12). Alpha enters
+/// first, so its five seconds are the ones measured, and Yankee's own expiry follows on Alpha's
+/// connection a moment later. Alpha's stamina is at its maximum, 890 (800 + 5 × 18), so the affect
+/// event has nothing else to run for and ends with it. The legacy `LoadAffect` restores the
+/// affect on a reload (G1), which the Rewrite does not do yet.
+#[test]
+fn the_revive_ends_after_five_seconds_with_remove_then_update() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    seat_yankee_and_charlie(&database);
+    stamina(&database, "Alpha", 890);
+
+    // Given: Alpha enters, and Yankee enters after it and sees Alpha's arrival. The windows are
+    // measured from before Alpha's entry, so they end no later than Alpha's five seconds would.
+    let entered_at = std::time::Instant::now();
+    let (mut alpha_keyed, alpha, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    alpha_keyed.sees_arrive(yankee_listed.id, false);
+    let arrival = alpha_keyed.read_game_raw();
+    assert!(
+        alpha_keyed.timer_record(&arrival),
+        "the entry is the timer's"
+    );
+
+    // Then: nothing ends the revive before five seconds (4.5 s from the entry).
+    let until_early = Duration::from_millis(4_500).saturating_sub(entered_at.elapsed());
+    let (early, quiet) = alpha_keyed.drain_game(until_early, revive_width);
+    assert_eq!(quiet, Quiet::Open);
+    assert_eq!(
+        without_pings(early),
+        Vec::<Vec<u8>>::new(),
+        "nothing before five seconds"
+    );
+
+    // Then: the removal reaches the entrant first, then its look update with no flag. Yankee's
+    // own expiry is sent to Alpha's connection too, a moment later, and is the only other record.
+    let until_ended = Duration::from_millis(7_000).saturating_sub(entered_at.elapsed());
+    let (ended, quiet) = alpha_keyed.drain_game(until_ended, revive_width);
+    assert_eq!(quiet, Quiet::Open);
+    let ended = without_pings(ended);
+    assert!(ended.len() >= 2, "{ended:02x?}");
+    assert_eq!(
+        ended[0],
+        [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0],
+        "the removal of type 215 and apply 0"
+    );
+    assert_eq!(ended[1][0], GC_CHARACTER_UPDATE, "{:02x?}", ended[1]);
+    assert_eq!(&ended[1][1..5], &alpha.id.to_le_bytes(), "Alpha's VID");
+    assert_eq!(&ended[1][20..28], &[0; 8], "the flags are gone");
+    for later in &ended[2..] {
+        assert_eq!(later[0], GC_CHARACTER_UPDATE, "{later:02x?}");
+        assert_eq!(
+            &later[1..5],
+            &yankee_listed.id.to_le_bytes(),
+            "Yankee's own expiry"
+        );
+        assert_eq!(&later[20..28], &[0; 8], "no flag left on Yankee either");
+    }
+    alpha_keyed.quiet("nothing else follows the expiries");
+
+    // Then: the viewer gets Alpha's look update with no flag, as the next record on its
+    // connection after its own entry.
+    let seen = read_past_pings(&mut yankee);
+    assert_eq!(seen[0], GC_CHARACTER_UPDATE, "{seen:02x?}");
+    assert_eq!(&seen[1..5], &alpha.id.to_le_bytes(), "Alpha's VID");
+    assert_eq!(&seen[20..28], &[0; 8], "the viewer sees no flag");
+}
+
+/// An accepted attack ends the revive before its relay: the entrant gets the look update with
+/// no flag, then `GC_AFFECT_REMOVE`, and the viewer gets the update and then the move (V9, C6
+/// item 13, C4 P5). The mover is not relayed its own move.
+#[test]
+fn an_attack_step_ends_the_revive_before_the_move_relay() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    seat_yankee_and_charlie(&database);
+
+    let (mut yankee, _yankee_listed, _yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    let (mut alpha_keyed, alpha, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+    yankee.sees_arrive(alpha.id, false);
+    let entry = yankee.read_game_raw();
+    assert!(yankee.timer_record(&entry), "the entry is the timer's");
+
+    // When: Alpha swings, standing where it is. Then: its own update has no flag, and the
+    // removal follows it.
+    let attack = client_move(FUNC_ATTACK, 7, 40, 470_100, 950_100, 0x5eed);
+    alpha_keyed.send_record(&attack);
+    let update = read_past_pings(&mut alpha_keyed);
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert_eq!(&update[20..28], &[0; 8], "the attack takes the flag off");
+    assert!(
+        alpha_keyed.timer_record(&update),
+        "the flag goes with the update"
+    );
+    assert_eq!(
+        read_past_pings(&mut alpha_keyed),
+        [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0],
+        "the removal follows the update"
+    );
+    alpha_keyed.quiet("the mover is not relayed its own attack");
+
+    // Then: the viewer gets the update, and then the relayed move.
+    let update = yankee.read_game_raw();
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert_eq!(&update[20..28], &[0; 8], "the viewer sees no flag");
+    assert!(yankee.timer_record(&update), "the expiry is the timer's");
+    assert_eq!(
+        yankee.read_game(),
+        relayed_move(&attack, alpha.id, 0),
+        "the attack's relay follows the update"
+    );
+}
+
+/// A walking entrant has its stamina refilled three seconds after it stopped (V3a, C6 item 16):
+/// a `GC_POINT_CHANGE` to slot 9 carrying the maximum, 890 (800 + 5 × 18). A viewer that enters
+/// before the refill sees the entrant walking.
+#[test]
+fn a_character_below_max_stamina_is_refilled_about_three_seconds_after_entering() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    seat_yankee_and_charlie(&database);
+    stamina(&database, "Alpha", 0);
+
+    // Given: Alpha enters with no stamina, so it walks, and Yankee enters at once.
+    let entered_at = std::time::Instant::now();
+    let (mut alpha_keyed, alpha, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (_yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    assert!(
+        yankee_entered
+            .shown
+            .records
+            .contains(&walk_mode_of(&alpha.id.to_le_bytes())),
+        "a newcomer sees a walking entrant walk"
+    );
+
+    // Alpha is sent Yankee's arrival before any refill: the insert, its summary, and Yankee's
+    // look update with the flag. The refill is read past them.
+    alpha_keyed.sees_arrive(yankee_listed.id, false);
+    let arrival = alpha_keyed.read_game_raw();
+    assert_eq!(arrival[0], GC_CHARACTER_UPDATE, "{arrival:02x?}");
+    assert_eq!(
+        &arrival[1..5],
+        &yankee_listed.id.to_le_bytes(),
+        "Yankee's VID"
+    );
+
+    // When: the refill is due. Then: it is a point change to stamina at the maximum, and it
+    // comes about three seconds after the entry, not before.
+    let refill = read_past_pings(&mut alpha_keyed);
+    let waited = entered_at.elapsed();
+    assert_eq!(refill[0], GC_POINT_CHANGE, "{refill:02x?}");
+    assert_eq!(&refill[4..8], &alpha.id.to_le_bytes(), "Alpha's VID");
+    assert_eq!(
+        refill[8],
+        u8::try_from(POINT_STAMINA).expect("a point byte"),
+        "slot 9 is stamina"
+    );
+    assert_eq!(
+        i64::from_le_bytes(refill[17..25].try_into().expect("eight bytes")),
+        890,
+        "refilled to the maximum"
+    );
+    assert!(
+        waited >= Duration::from_millis(2_800),
+        "the refill waits three seconds, not {waited:?}"
+    );
+}
+
+/// A move restarts the three-second wait of a walking entrant, so its refill comes three
+/// seconds after the move (V3a, C6 item 17). Without the move the refill would come at three
+/// seconds after the entry.
+#[test]
+fn a_move_resets_the_stop_time_and_delays_the_refill() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    stamina(&database, "Alpha", 0);
+
+    // Given: Alpha enters with no stamina and walks, and it moves 1.5 s after entering, while
+    // the refill is still waiting.
+    let entered_at = std::time::Instant::now();
+    let (mut alpha_keyed, _alpha, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+    std::thread::sleep(Duration::from_millis(1_500));
+    alpha_keyed.send_record(&client_move(FUNC_MOVE, 0, 0, 470_200, 950_200, 0x5eee));
+
+    // Then: the refill comes three seconds after the move, which is past 4.4 s after the entry.
+    let refill = read_past_pings(&mut alpha_keyed);
+    let waited = entered_at.elapsed();
+    assert_eq!(refill[0], GC_POINT_CHANGE, "{refill:02x?}");
+    assert_eq!(
+        refill[8],
+        u8::try_from(POINT_STAMINA).expect("a point byte"),
+        "slot 9 is stamina"
+    );
+    assert!(
+        waited >= Duration::from_millis(4_400),
+        "the move restarts the wait, so the refill is not at three seconds: {waited:?}"
+    );
 }

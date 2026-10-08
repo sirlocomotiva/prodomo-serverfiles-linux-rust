@@ -533,6 +533,9 @@ pub struct Showing {
 pub struct Shown {
     /// The records, in order.
     pub records: Vec<Vec<u8>>,
+    /// The character's own `GC_CHARACTER_UPDATE`, with the affect flags its revive-invisible
+    /// affect sets. Its enter-game burst carries it; `None` when the character has no place.
+    pub update: Option<Vec<u8>>,
 }
 
 /// Where a character stands, as the descriptor holds it. The world reads the point of a

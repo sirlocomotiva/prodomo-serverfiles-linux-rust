@@ -484,6 +484,7 @@ mod tests {
             empire,
             language: 1,
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
+            affect_flags: [0; 2],
         }
     }
 

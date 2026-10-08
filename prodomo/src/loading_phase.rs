@@ -581,7 +581,16 @@ pub struct InsertAt {
 /// (`G/char.cpp:1089-1091`), which the limit holds to 0..200 and 0..170, so each fits the
 /// record's byte.
 #[must_use]
-pub fn character_add(card: &PcCard, state: &Points, vid: u32, at: InsertAt) -> GcCharacterAdd {
+///
+/// `flags` are the two affect words the character has now (`dwAffectFlag`), which the insert
+/// carries as the view's record of its affects.
+pub fn character_add(
+    card: &PcCard,
+    state: &Points,
+    vid: u32,
+    at: InsertAt,
+    flags: [u32; 2],
+) -> GcCharacterAdd {
     GcCharacterAdd::new(
         vid,
         at.angle,
@@ -593,7 +602,7 @@ pub fn character_add(card: &PcCard, state: &Points, vid: u32, at: InsertAt) -> G
         speed_byte(state.limit_point(point::POINT_MOV_SPEED)),
         speed_byte(state.limit_point(point::POINT_ATT_SPEED)),
         0,
-        [0, 0],
+        flags,
     )
 }
 
@@ -827,6 +836,7 @@ pub fn enter_game_burst(
     character: &Character,
     shown: Vec<Vec<u8>>,
     npcs: &MapNpcs,
+    update: Option<Vec<u8>>,
     channel: u8,
     now: u32,
 ) -> EnterGameBurst {
@@ -836,6 +846,11 @@ pub fn enter_game_burst(
     if !npcs.positions.is_empty() {
         let entries = npcs.positions.iter().map(npc_position).collect();
         before.push(encoded(&mut GcNpcPosition::new(entries), "the NPC list"));
+    }
+    // The character's own update comes first: `ReviveInvisible` changes the affect flags the
+    // update carries, and the update is sent before the affect's own record.
+    if let Some(frame) = update {
+        before.push(frame);
     }
     // `ch->ReviveInvisible(5)` adds an affect, and `AddAffect` sends `GC_AFFECT_ADD` for
     // every affect it takes on a PC (`G/char.cpp:7490-7493`, `G/char_affect.cpp:747-750`).
@@ -1063,7 +1078,7 @@ mod tests {
     fn own_pair(language: u8) -> Vec<Vec<u8>> {
         let card = PcCard::of(&hero(), language, 15);
         let mut add = Vec::new();
-        character_add(&card, &hero_points(), 0x1122_3344, hero_at()).encode_into(&mut add);
+        character_add(&card, &hero_points(), 0x1122_3344, hero_at(), [0; 2]).encode_into(&mut add);
         let mut info = Vec::new();
         character_additional(&card, &hero_points(), 0x1122_3344).encode_into(&mut info);
         vec![add, info]
@@ -1438,7 +1453,8 @@ mod tests {
         assert_eq!(slots[point::POINT_MOV_SPEED], 50);
         assert_eq!(slots[point::POINT_MAX_HP], 585);
         let mut bytes = Vec::new();
-        character_add(&PcCard::of(&hero, 0, 15), &state, 1, hero_at()).encode_into(&mut bytes);
+        character_add(&PcCard::of(&hero, 0, 15), &state, 1, hero_at(), [0; 2])
+            .encode_into(&mut bytes);
         assert_eq!(bytes[24], 50, "bMovingSpeed");
         assert_eq!(bytes[25], 100, "bAttackSpeed");
     }
@@ -1537,6 +1553,7 @@ mod tests {
             &hero_points(),
             0x1122_3344,
             hero_at(),
+            [0; 2],
         )
         .encode_into(&mut bytes);
         assert_eq!(bytes.len(), 35, "1 header byte plus the 34-byte payload");
@@ -1638,7 +1655,8 @@ mod tests {
             z: 0x0a0b,
         };
         let mut bytes = Vec::new();
-        character_add(&PcCard::of(&hero(), 0, 15), &hero_points(), 1, at).encode_into(&mut bytes);
+        character_add(&PcCard::of(&hero(), 0, 15), &hero_points(), 1, at, [0; 2])
+            .encode_into(&mut bytes);
         assert_eq!(&bytes[5..9], &135f32.to_le_bytes(), "angle");
         assert_eq!(&bytes[9..13], &0x0102_0304i32.to_le_bytes(), "x");
         assert_eq!(&bytes[13..17], &(-0x0506_0708i32).to_le_bytes(), "y");
@@ -1650,7 +1668,7 @@ mod tests {
     /// it is six records around the descriptor's own `SetPhase(PHASE_GAME)`.
     #[test]
     fn enter_game_burst_headers_are_in_legacy_order() {
-        let burst = enter_game_burst(&hero(), own_pair(3), &no_npcs(), 1, 1_600_000_000);
+        let burst = enter_game_burst(&hero(), own_pair(3), &no_npcs(), None, 1, 1_600_000_000);
         assert_eq!(
             headers(&burst.before_phase),
             vec![1, 136, 126],
@@ -1667,7 +1685,7 @@ mod tests {
     /// and writing it as content as well would put two on the wire.
     #[test]
     fn no_enter_game_half_carries_a_phase_record() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 1, 0);
         for frame in all(&burst.before_phase, &burst.after_phase) {
             assert_ne!(
                 frame[0], 253,
@@ -1738,7 +1756,7 @@ mod tests {
     /// after the NPC records and before `SetPhase(PHASE_GAME)`.
     #[test]
     fn the_revive_invisible_affect_is_sent_once_with_five_seconds() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 1, 0);
         let affects: Vec<&Vec<u8>> = all(&burst.before_phase, &burst.after_phase)
             .into_iter()
             .filter(|f| f[0] == 126)
@@ -1767,7 +1785,7 @@ mod tests {
     /// after it.
     #[test]
     fn the_affect_is_the_last_record_before_the_phase_change() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 1, 0);
         assert_eq!(
             burst.before_phase.last().map(|f| f[0]),
             Some(126),
@@ -1782,7 +1800,7 @@ mod tests {
 
     #[test]
     fn time_then_channel_carry_their_whole_values() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 4, 1_600_000_000);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 4, 1_600_000_000);
         let frames = all(&burst.before_phase, &burst.after_phase);
         let time_at = frames.iter().position(|f| f[0] == 106).unwrap();
         let channel_at = frames.iter().position(|f| f[0] == 121).unwrap();
@@ -1799,7 +1817,7 @@ mod tests {
     /// command line, and the text is the unterminated tail.
     #[test]
     fn the_letters_event_line_is_the_last_record() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 1, 0);
         let last = burst.after_phase.last().unwrap();
         assert_eq!(last[0], 4, "GC_CHAT is byte 4");
         assert_eq!(
@@ -1825,7 +1843,7 @@ mod tests {
     /// `SEventLetters` writes; the sent bytes must keep the space.
     #[test]
     fn the_letters_event_line_keeps_its_space() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 1, 0);
         let last = burst.after_phase.last().unwrap();
         let text = &last[10..];
         assert_eq!(text, b"letters_event 0");
@@ -1835,7 +1853,7 @@ mod tests {
     /// An empty NPC list sends nothing at all: `SendNPCPosition` returns before it writes.
     #[test]
     fn an_empty_npc_list_sends_no_record() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 1, 0);
         assert!(
             !all(&burst.before_phase, &burst.after_phase)
                 .into_iter()
@@ -1955,11 +1973,11 @@ mod tests {
             z: 0,
         };
         let mut add = Vec::new();
-        character_add(&neighbour, &hero_points(), 0x0a0b_0c0d, at).encode_into(&mut add);
+        character_add(&neighbour, &hero_points(), 0x0a0b_0c0d, at, [0; 2]).encode_into(&mut add);
         let mut info = Vec::new();
         character_additional(&neighbour, &hero_points(), 0x0a0b_0c0d).encode_into(&mut info);
         shown.extend([add, info]);
-        let burst = enter_game_burst(&hero(), shown.clone(), &no_npcs(), 1, 0);
+        let burst = enter_game_burst(&hero(), shown.clone(), &no_npcs(), None, 1, 0);
         assert_eq!(
             headers(&burst.before_phase),
             vec![1, 136, 1, 136, 126],
@@ -1972,7 +1990,7 @@ mod tests {
     /// before the phase change, so the own pair can never reach the client twice.
     #[test]
     fn the_burst_adds_no_insert_of_its_own() {
-        let burst = enter_game_burst(&hero(), Vec::new(), &no_npcs(), 1, 0);
+        let burst = enter_game_burst(&hero(), Vec::new(), &no_npcs(), None, 1, 0);
         assert_eq!(headers(&burst.before_phase), vec![126]);
     }
 
@@ -1981,7 +1999,7 @@ mod tests {
     #[test]
     fn the_mini_map_sits_between_the_shown_records_and_the_affect() {
         let npcs = npcs_listed();
-        let burst = enter_game_burst(&hero(), own_pair(0), &npcs, 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &npcs, None, 1, 0);
         assert_eq!(headers(&burst.before_phase), vec![1, 136, 115, 126]);
         let mut expected = Vec::new();
         GcNpcPosition::new(npcs.positions.iter().map(npc_position).collect())
@@ -2044,7 +2062,7 @@ mod tests {
     #[test]
     fn the_package_sdb_is_absent_from_both_bursts() {
         let loading = loading_burst(&hero(), &hero_points(), 1, &with_neighbour());
-        let entering = enter_game_burst(&hero(), own_pair(0), &npcs_listed(), 1, 0);
+        let entering = enter_game_burst(&hero(), own_pair(0), &npcs_listed(), None, 1, 0);
         assert!(
             !all(&loading.before_map_test, &loading.after_map_test)
                 .into_iter()
@@ -2062,7 +2080,7 @@ mod tests {
     /// A hard-coded welcome would be a Divergence: the snapshot has no `GREET` row.
     #[test]
     fn no_hard_coded_greeting_is_sent() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 1, 0);
         let lines: Vec<&Vec<u8>> = all(&burst.before_phase, &burst.after_phase)
             .into_iter()
             .filter(|f| f[0] == 4)
@@ -2076,7 +2094,7 @@ mod tests {
     #[test]
     fn every_record_is_its_own_frame() {
         let loading = loading_burst(&hero(), &hero_points(), 1, &with_neighbour());
-        let entering = enter_game_burst(&hero(), own_pair(0), &npcs_listed(), 1, 0);
+        let entering = enter_game_burst(&hero(), own_pair(0), &npcs_listed(), None, 1, 0);
         for half in [
             &loading.before_map_test,
             &loading.after_map_test,

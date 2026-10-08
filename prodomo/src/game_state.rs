@@ -38,9 +38,8 @@ use gamedata::map_atlas::MapRegion;
 use gamedata::regen::RegenEntry;
 use gamedata::server_attr::SectreeGrid;
 use world::character::{
-    drop_item, is_recovering, move_item, pickup_item, update_recovery, use_item, CharacterManager,
-    CharacterManagerError, DropAt, Gear, GroundItem, MoveRefused, MoveRequest, MoveRules, Pcg32,
-    Picker, Rejected, Side,
+    drop_item, move_item, pickup_item, use_item, CharacterManager, CharacterManagerError, DropAt,
+    Gear, GroundItem, MoveRefused, MoveRequest, MoveRules, Pcg32, Picker, Rejected, Side,
 };
 use world::item::{ItemIdRange, ItemIds};
 use world::npc::{MapNpcs, NpcSpawner, NpcVidsExhausted};
@@ -51,15 +50,15 @@ use tracing::{debug, warn};
 use crate::client_live::LiveClock;
 use crate::client_registry::{ChannelClients, ClientOutbox};
 use crate::game_loop::PulseProcessor;
-use crate::game_loop_messages::{GameCommand, GroundPlace, Kept, Shown};
+use crate::game_loop_messages::{GameCommand, GroundPlace, Kept, Loaded, Shown};
 use crate::item_grant::{grant_item, GrantOutcome, GrantRefusal, GrantRequest};
 use crate::item_move::{belt_grade, move_facts, MoveItemRefused, MovedItems, Mover, StoreOrder};
-use crate::loading_phase::point_changes;
 use crate::quickslot::{QuickslotAnswer, QuickslotStep};
 use crate::save::PASSES_PER_SEC;
 use crate::sync_position::distance_approx;
 use world::character::{add_from_client, sync_quickslots};
 
+mod affect;
 #[cfg(test)]
 mod fixtures;
 mod motion;
@@ -378,9 +377,11 @@ pub struct GameState {
     drop_lifetime: u64,
     /// The Channel's client registry: who a trade or a warp NPC finds online.
     clients: Option<Arc<ChannelClients>>,
-    /// The characters whose potion recovery runs, with the pulse their event fires on next
-    /// (`m_pkAffectEvent`).
-    recovering: HashMap<common::vid::Vid, u64>,
+    /// The affect event of each character that has one (`m_pkAffectEvent`): the potion
+    /// recovery, the stamina refill and the timed affects. See [`affect`].
+    affect_events: HashMap<common::vid::Vid, affect::AffectEvent>,
+    /// The number of the last affect event started, which orders two events due on one Pulse.
+    affect_sequence: u64,
     /// The NPCs standing on each map of each Channel, keyed by (Channel, map index).
     ///
     /// Shared with the descriptor that shows them, because they never change once boot has
@@ -474,7 +475,8 @@ impl GameState {
             next_ground_vid: 1,
             drop_lifetime: drop_lifetime_pulses(DEFAULT_DROP_LIFETIME_SECS),
             clients: None,
-            recovering: HashMap::new(),
+            affect_events: HashMap::new(),
+            affect_sequence: 0,
             npcs: BTreeMap::new(),
             shops: Arc::default(),
             shop_price_3x_disabled: false,
@@ -738,17 +740,7 @@ impl GameState {
                 reply,
             } => {
                 let answer = self.enter_world_with_items(vid, player_id, &name, &items, outbox);
-                let answer = answer.map(|()| {
-                    if let Some(character) = self.characters.find_player_mut(&name) {
-                        character.set_points(loaded.points);
-                        character.set_quickslots(loaded.quickslots);
-                        character.set_gold(loaded.gold);
-                    }
-                    let records = loaded
-                        .show
-                        .map_or_else(Vec::new, |show| self.place_body(vid, show.place, show.card));
-                    Shown { records }
-                });
+                let answer = answer.map(|()| self.shown_on_admit(vid, &name, loaded));
                 // A dropped admit answer means the descriptor is already closing, and a
                 // character nobody will play is not a state worth warning about: the
                 // close path runs the leave, which finds nobody and says so at debug.
@@ -919,9 +911,33 @@ impl GameState {
     ///
     /// # Errors
     ///
+    /// The answer to an admitted character: its load's points, quickslots and gold are set on it,
+    /// then its body is placed and, when the load showed it, the revive-invisible affect starts.
+    /// The placement's records come first, and the update that starts the affect after them.
+    fn shown_on_admit(&mut self, vid: common::vid::Vid, name: &str, loaded: Box<Loaded>) -> Shown {
+        if let Some(character) = self.characters.find_player_mut(name) {
+            character.set_points(loaded.points);
+            character.set_quickslots(loaded.quickslots);
+            character.set_gold(loaded.gold);
+        }
+        let (records, update) = match loaded.show {
+            Some(show) => {
+                let records = self.place_body(vid, show.place, show.card);
+                (records, self.enter_revive_invisible(vid))
+            }
+            None => (Vec::new(), None),
+        };
+        Shown { records, update }
+    }
+
     /// As [`GameState::enter_world`], and [`EnterWorldRefused::ItemRefused`] when an
     /// item would not go where the load put it. The character is taken back out in that
     /// case, so every refusal still leaves the world unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Every [`EnterWorldRefused`] that the admission can raise: a null VID, a duplicate VID,
+    /// player id or Name, and an item that would not go where the load put it.
     pub fn enter_world_with_items(
         &mut self,
         vid: common::vid::Vid,
@@ -998,7 +1014,7 @@ impl GameState {
     pub fn leave_world(&mut self, vid: common::vid::Vid) -> Option<Kept> {
         self.cancel_trade(vid);
         let _outbox = self.outboxes.remove(&vid);
-        let _event = self.recovering.remove(&vid);
+        let _event = self.affect_events.remove(&vid);
         self.stop_browsing(vid);
         self.close_storage(vid);
         self.end_quests(vid);
@@ -1135,9 +1151,12 @@ impl GameState {
         })?;
         // `StartAffectEvent`: a potion that left recovery starts the event, one second out,
         // unless it already runs.
-        if moved.points.as_ref().is_some_and(is_recovering) {
-            let due = self.last_pulse.saturating_add(u64::from(PASSES_PER_SEC));
-            let _running = self.recovering.entry(vid).or_insert(due);
+        if moved
+            .points
+            .as_ref()
+            .is_some_and(world::character::is_recovering)
+        {
+            self.start_affect_event(vid);
         }
         Ok(moved)
     }
@@ -1428,40 +1447,6 @@ impl GameState {
         }
     }
 
-    /// Fire every recovery event due by `pulse`: one second of `UpdateAffect`'s recovery, whose
-    /// point records go to the character's client alone. The event runs again a second later
-    /// while recovery is left (`affect_event`, `G/char_affect.cpp:143-162`).
-    fn run_recovery(&mut self, pulse: u64) {
-        let due: Vec<common::vid::Vid> = self
-            .recovering
-            .iter()
-            .filter(|(_, due)| **due <= pulse)
-            .map(|(vid, _)| *vid)
-            .collect();
-        for vid in due {
-            let points = self
-                .characters
-                .find_by_vid_mut(vid)
-                .ok()
-                .and_then(|character| character.items_and_points_mut().1);
-            let Some(points) = points else {
-                let _gone = self.recovering.remove(&vid);
-                continue;
-            };
-            let records = update_recovery(points);
-            let again = is_recovering(points);
-            for frame in point_changes(&records, vid.raw()) {
-                let _delivered = self.write_to_client(vid, frame);
-            }
-            if again {
-                let next = pulse.saturating_add(u64::from(PASSES_PER_SEC));
-                let _rescheduled = self.recovering.insert(vid, next);
-            } else {
-                let _ended = self.recovering.remove(&vid);
-            }
-        }
-    }
-
     /// Run one item step against the storage and gear of the character online under `vid`.
     fn run_item_step(
         &mut self,
@@ -1482,6 +1467,7 @@ impl GameState {
         let actor = Mover {
             recently_fought: actor.recently_fought || self.attacked_recently(vid),
             pk_mode: self.pk_mode_of(vid.raw()),
+            affect_flags: self.affect_flags_of(vid),
             ..actor
         };
         let character = self
@@ -1543,7 +1529,8 @@ impl PulseProcessor for GameState {
     /// Step one pulse.
     ///
     /// Counts the Pulse, then runs the events that are due on it: the ground items whose
-    /// lifetime ran out, the recovery of each character and the warp NPCs. Last, as
+    /// lifetime ran out, the affect event of each character (the potion's recovery, the stamina
+    /// refill and the revive timer, `run_affect_events`) and the warp NPCs. Last, as
     /// `CHARACTER_MANAGER::Update` comes after the heartbeat's events (`G/main.cpp:777-782`),
     /// each moving player steps. The count is also the only way a test can tell that the game
     /// thread owns this value.
@@ -1551,7 +1538,7 @@ impl PulseProcessor for GameState {
         self.last_pulse = pulse;
         self.metrics.pulses.store(pulse, Ordering::SeqCst);
         self.destroy_expired(pulse);
-        self.run_recovery(pulse);
+        self.run_affect_events(pulse);
         self.run_warp_npcs(pulse);
         self.step_motion(pulse);
     }
@@ -2425,6 +2412,7 @@ mod tests {
             empire: 1,
             language: 1,
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
+            affect_flags: [0; 2],
         }
     }
 
@@ -3360,7 +3348,10 @@ mod tests {
             .use_item(Vid::new(7), inventory(0), a_mover())
             .expect("the potion is drunk");
         assert_eq!(moved.kind, world::character::MoveKind::Used);
-        assert_eq!(state.recovering.get(&Vid::new(7)), Some(&28));
+        assert_eq!(
+            state.affect_events.get(&Vid::new(7)).map(|event| event.due),
+            Some(28)
+        );
         let owed = points_at_seven(&state).get_point(common::point_slot::POINT_HP_RECOVERY);
         assert_eq!(owed, 300, "the small red potion owes 300 HP");
         assert_eq!(
@@ -3385,7 +3376,10 @@ mod tests {
         );
         let frames: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
         assert!(!frames.is_empty(), "the payment reaches the client");
-        assert_eq!(state.recovering.get(&Vid::new(7)), Some(&53));
+        assert_eq!(
+            state.affect_events.get(&Vid::new(7)).map(|event| event.due),
+            Some(53)
+        );
 
         for pulse in (53..).step_by(25).take(20) {
             state.process_pulse(pulse);
@@ -3394,7 +3388,7 @@ mod tests {
         assert_eq!(done.hp(), before.hp() + 300, "the whole recovery was paid");
         assert_eq!(done.get_point(common::point_slot::POINT_HP_RECOVERY), 0);
         assert!(
-            state.recovering.is_empty(),
+            state.affect_events.is_empty(),
             "the event ended with the recovery"
         );
     }
@@ -3409,7 +3403,10 @@ mod tests {
         let _ = state
             .use_item(Vid::new(7), inventory(0), a_mover())
             .expect("the second potion is drunk");
-        assert_eq!(state.recovering.get(&Vid::new(7)), Some(&25));
+        assert_eq!(
+            state.affect_events.get(&Vid::new(7)).map(|event| event.due),
+            Some(25)
+        );
     }
 
     #[test]
@@ -3435,7 +3432,7 @@ mod tests {
             .expect("the character was online");
         assert_eq!(departed.points, Some(expected));
         assert_eq!(departed.quickslots, kept.quickslots);
-        assert!(state.recovering.is_empty());
+        assert!(state.affect_events.is_empty());
         let (reply, answer) = tokio::sync::oneshot::channel();
         state.apply(GameCommand::KeptOf {
             vid: Vid::new(7),

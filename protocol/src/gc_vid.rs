@@ -957,6 +957,16 @@ mod tests {
         );
     }
 
+    /// `TPacketGCAffectRemove` (`G/packet.h`): the header, the affect type, and `bApplyOn`
+    /// last. The revive-invisible affect is type 215 with apply 0, so it is `7f d7 00 00 00 00`.
+    #[test]
+    fn the_affect_remove_record_is_the_type_then_the_apply_byte() {
+        let record = GcHeaderAndDwordAndByte::new(HEADER_GC_AFFECT_REMOVE, 215, 0);
+        let mut wire = Vec::new();
+        record.encode_into(&mut wire);
+        assert_eq!(wire, [0x7f, 0xd7, 0, 0, 0, 0]);
+    }
+
     #[test]
     fn the_special_effect_record_puts_the_byte_before_the_dword() {
         // { BYTE header; BYTE type; DWORD vid; } -- the opposite order from
