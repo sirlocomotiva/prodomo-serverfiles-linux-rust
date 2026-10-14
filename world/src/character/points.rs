@@ -479,6 +479,9 @@ pub struct Points {
     skill_damage_bonus: BTreeMap<u8, i32>,
     part_base: u8,
     parts: [u16; PARTS],
+    /// The hit points and their maximum each time the `POINT_HP` arm ran, oldest first: what
+    /// `BroadcastTargetPacket` sends the characters targeting this one (`char.cpp:4259`).
+    target_broadcasts: Vec<(i32, i32)>,
 }
 
 impl Points {
@@ -518,6 +521,7 @@ impl Points {
             skill_damage_bonus: BTreeMap::new(),
             part_base: row.part_base,
             parts: [0; PARTS],
+            target_broadcasts: Vec::new(),
         };
         // `SetPlayerProto` sets the base part, the hair and the sash from the row before it
         // computes (`char.cpp:2258-2265`); the computation then puts the base part in the
@@ -621,6 +625,13 @@ impl Points {
     #[must_use]
     pub fn hp(&self) -> i32 {
         self.hp
+    }
+
+    /// Takes the hit points the `POINT_HP` arm left each time it ran since the last take, with
+    /// the maximum at that time, oldest first. Each is one `BroadcastTargetPacket`
+    /// (`char.cpp:4259`), which the world sends the characters targeting this one.
+    pub fn take_target_broadcasts(&mut self) -> Vec<(i32, i32)> {
+        std::mem::take(&mut self.target_broadcasts)
     }
 
     /// The current spell points.
@@ -933,6 +944,8 @@ impl Points {
             point::POINT_HP => {
                 let amount = amount.min(self.max_hp().saturating_sub(self.hp));
                 self.hp = self.hp.saturating_add(amount);
+                // `BroadcastTargetPacket()`, after `SetHP` and whatever the amount was.
+                self.target_broadcasts.push((self.hp, self.max_hp()));
                 (amount, self.hp)
             }
             point::POINT_SP => {
@@ -1506,6 +1519,24 @@ mod tests {
         );
         assert_eq!((points.hp(), points.sp()), (760, 260));
         assert!(points.check_maximum_points().is_empty());
+    }
+
+    #[test]
+    fn each_hit_point_arm_queues_one_target_broadcast_and_a_take_empties_the_queue() {
+        let mut row = fresh(0);
+        row.hp = 100;
+        let mut points = Points::load(&row);
+        let _ = points.take_target_broadcasts();
+        let _ = points.point_change(point::POINT_HP, 0, false, false);
+        let _ = points.point_change(point::POINT_HP, -30, false, false);
+        let _ = points.point_change(point::POINT_HP, 5_000, false, false);
+        let _ = points.point_change(point::POINT_SP, -30, false, false);
+        let _ = points.point_change(point::POINT_STAMINA, -30, false, false);
+        assert_eq!(
+            points.take_target_broadcasts(),
+            [(100, 760), (70, 760), (760, 760)]
+        );
+        assert!(points.take_target_broadcasts().is_empty());
     }
 
     #[test]

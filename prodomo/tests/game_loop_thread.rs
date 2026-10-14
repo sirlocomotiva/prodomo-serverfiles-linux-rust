@@ -243,6 +243,12 @@ async fn a_grant_sent_from_tokio_is_applied_on_the_thread_that_owns_the_world() 
     assert_eq!(outcome.record.cell.cell, 0, "the first free cell");
     assert_eq!(outcome.count, 1);
 
+    // The loop drains a command and then steps the Pulse after it, so the answer can arrive
+    // before that Pulse is counted; wait for it rather than read the counter once.
+    let stepped = std::time::Instant::now() + Duration::from_secs(1);
+    while metrics.pulses() == 0 && std::time::Instant::now() < stepped {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     assert!(
         metrics.pulses() >= 1,
         "the command was drained between pulses, so the thread ran to apply it"

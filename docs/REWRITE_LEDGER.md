@@ -27673,3 +27673,277 @@ Before 229f the counts were 121, 125, 1337, 6 and 56.
 
 No ADR changed. Under the standing staging rule (ledger 229d), `.scratch/equip/owner-questions.md`
 stays out of the commit.
+
+## 229g. The target: a click on a player or a monster shows its hit points, and the targeters follow each change
+
+A client clicking any character sends `CG_TARGET` (0x3d) with its VID. Legacy answers with
+`GC_TARGET` (0x3f), and from then on sends the clicker the target's hit points each time they
+change. Until 229g the Rewrite had no analyzer for `CG_TARGET` in the game phase, so
+`report_step` closed the connection: **a click on any player, NPC or monster disconnected the
+client.** 229g ports `CInputMain::Target`, `CHARACTER::SetTarget`, `ClearTarget` and
+`BroadcastTargetPacket`, and the loading phase's consume of a stray `CG_TARGET` or `CG_ITEM_USE`.
+`G/` below means `server/server/game/` and `C/` means `server/server/common/`.
+
+### 229g.1 What landed
+
+- **The analyzer** (`prodomo/src/main.rs`):
+  - `CG_TARGET` in the game phase goes to `target_step` through `world_step`, which also takes the
+    three motion records. It decodes `CgTarget`, ignores a character outside the world, and hands
+    the VID to the world without waiting (`GameLoopController::target`, `GameCommand::Target`);
+    the descriptor waits for the command to settle before it reads the next frame, as a relay does.
+  - `is_consumed` names the records an analyzer consumes with nothing done: `CG_ITEM_USE` and
+    `CG_TARGET` in the login, select and loading phases (`@fixme120`,
+    `G/input_login.cpp:1254-1257`), and `CG_ENTER_GAME` in the game phase, which had an arm of its
+    own. Folding both into one arm keeps `analyze` under clippy's 100 lines.
+- **The world** (`prodomo/src/game_state/target.rs`, new):
+  - `Targets` keeps `m_pkChrTarget` and `m_set_pkChrTargetedBy` as one relation: each targeter's
+    target, and each target's targeters in VID order.
+  - `GameState::target` is `CInputMain::Target` and `SetTarget` (`G/input_main.cpp:2249-2269`,
+    `G/char.cpp:6458-6598`). No building object has a VID (V6), so it goes straight to `SetTarget`
+    with the character the VID names on the clicker's own Channel and map: a player with a body
+    there or an NPC standing there, and none for anything else (VID 0 included). The same target
+    returns with nothing sent. On a castle map (181 to 183) a character that is not a GM returns,
+    and every character is `GM_PLAYER`. Otherwise the relation is updated and the clicker is sent
+    `GC_TARGET`.
+  - The record: a maximum that is not positive shows 0, 0, 0; a player shows
+    `MINMAX(0, hp * 100 / max, 100)`, its hit points and its maximum; a horse (races 20101 to
+    20109) with no rider, which is every horse, shows 100, 100, 100; any other NPC shows its
+    percentage, hit points and maximum. A monster (`CHAR_TYPE_MONSTER`) whose race flags reach
+    `RACE_FLAG_ATT_ELEC` carries `bElement`: the first of the six element flags its flags lie
+    within 1024 of, 1 for `ATT_ELEC` to 6 for `ATT_DARK`, and 6 when the loop runs out
+    (`G/char.cpp:6575-6592`). The alliance fields are false and 0. No target sends VID 0 and zeros.
+  - `GameState::clear_target` is `ClearTarget` (`G/char.cpp:6419-6456`). `leave_world` calls it
+    right after the trade's cancel, as `Destroy` calls it near its start (`G/char.cpp:654`): the
+    leaver's target forgets it, and each character targeting it loses its target and is sent VID 0,
+    before the view's removal.
+  - `GameState::broadcast_targets` is `BroadcastTargetPacket` (`G/char.cpp:6600-6661`). It runs at
+    the end of every command and every Pulse, and sends each queued hit-point change of each online
+    player to the characters targeting it, oldest first.
+- **The hit points** (`world/src/character/points.rs`): `PointChange`'s `POINT_HP` arm queues the
+  hit points and the maximum after `SetHP`, whatever the amount, as legacy calls
+  `BroadcastTargetPacket` there (`G/char.cpp:4247-4263`). `Points::take_target_broadcasts` hands the
+  queue to the world.
+- **A monster's hit points** (`world/src/npc.rs`): `Npc` gains `hp`, `max_hp` and `race_flag`.
+  `create` sets the maximum to the proto's `dwMaxHP`, as `ComputePoints` does for a non-player
+  (`G/char.cpp:3017`), fills the hit points to it, and keeps the race flags. Nothing lowers the hit
+  points yet.
+- **A doc correction.** `protocol::cg_pick::CgTarget`'s field doc said legacy does nothing when
+  `FindObjectByVID` fails. It calls `SetTarget` with what `CHARACTER_MANAGER::Find` finds, and a VID
+  that names nothing clears the target.
+
+### 229g.2 What the client sees
+
+- A click on a player: `GC_TARGET` with its VID, percentage, hit points and maximum, and element 0.
+  A level 1 assassin stored with 325 hit points shows 50, 325 and 650.
+- A click on a monster: its VID, 100 and its proto's maximum twice, and its element. The stray dog
+  (vnum 101, `MAX_HP` 126, `RACE_FLAG` `ANIMAL`) shows 100, 126, 126 and element 0.
+- The same click again: nothing. A click on nothing, or a VID 0: VID 0 and zeros, if there was a
+  target.
+- Each change of the target's hit points, a potion's tick among them: the new percentage, hit points
+  and maximum.
+- The target leaving the world: VID 0 and zeros, then its removal from the view.
+- A client that clicks or uses an item while it loads keeps its connection.
+
+### 229g.3 Divergences and Defects
+
+- **V15, new** (STATUS): the characters targeting one are walked by VID (V1); `CheckTarget` waits
+  for the player recovery event, so a target is kept at any distance until it leaves the world; a
+  death clears no killer's target, since nothing dies; a horse has no rider and shows 100; and no
+  character is a GM or polymorphed, so nobody targets on a castle map and nobody shows as a horse.
+- **Four Defects not reproduced** (STATUS):
+  - `CHARACTER_MANAGER::Find` finds a VID on any map, so a modified client can target, and follow
+    the hit points of, a character on another map of the Core (`G/input_main.cpp:2268`). The Rewrite
+    finds a target on the clicker's own Channel and map, as its click, shop and trade do.
+  - `ClearTarget` and `BroadcastTargetPacket` never set `bElement`, so the byte is whatever the
+    stack held. The Rewrite sends 0.
+  - `SetTarget` and `BroadcastTargetPacket` multiply the hit points by 100 in an `int`
+    (`G/char.cpp:6493`, `:6555`, `:6624`), which wraps past 21,474,836. The Rewrite multiplies in 64
+    bits; the owner's largest maximum is 12,958,000.
+  - `ComputePoints` reads a monster's `DWORD dwMaxHP` into an `int` (`G/char.cpp:3017`). The
+    Rewrite holds a maximum past `i32::MAX` at `i32::MAX`; none of the owner's is.
+- **No new provisional decision and no new owner question.** The element loop's fall-through
+  value 6 looked like a Quirk for a monster with a flag above `ATT_DARK`. It is also `ATT_DARK`'s own
+  value, and no monster of the owner's carries a flag above it with an element (229g.6), so it
+  changes nothing the owner's players see.
+
+### 229g.4 Not ported yet
+
+- `CheckTarget`, with the rest of the player `recovery_event` (`G/char.cpp:3172-3285`): the 4800
+  drop, `DistributeSP`, `UpdateKillerMode`, the poison check and the hit-point regeneration.
+  `event.char.recovery_event` stays `missing`, with a 229g note.
+- The killer's target clear on a death (`G/char_battle.cpp:1275-1276`): with combat.
+- `G/target.cpp`'s quest target arrows (`event.target.target_event`) and `__SEND_TARGET_INFO__`'s
+  drop list (`CG_TARGET_INFO_LOAD`), so `sys.combat.target` is `partial`.
+- The horse's rider (`GetVictim`, `GetHorseHealth`), the polymorph and the GM levels.
+
+### 229g.5 Correction to 229f.5
+
+229f.5 asked "whether the owner's live server runs the OX, war and siege schedules". There is no live
+server. The owner runs none: there is no `prodomo.toml` beyond the example, the test store is a fresh
+database, and the owner gave only the legacy Game data. The open point is whether the OX event and
+the guild, kingdom and siege wars should run once the server opens. Owner question 27 already says
+so; only the 229f.5 sentence was wrong.
+
+### 229g.6 Scenario and parity inventory
+
+- The parity scenarios go from 86 to 87: `a_click_targets_a_monster_and_a_player_and_a_leave_clears_it`.
+  Alpha's client sends a `CG_ITEM_USE` and a `CG_TARGET` while it loads and keeps its connection;
+  it clicks the stray dog twice and gets one answer, clears the target with VID 0, clicks Yankee and
+  gets 50, 325 and 650 while Yankee hears nothing, and when Yankee leaves it gets VID 0 before
+  Yankee's removal.
+- Unit tests:
+  - `prodomo/src/game_state/target.rs` (new): 14, five on the record arithmetic and the relation,
+    nine on the world (a player and a monster target, a VID naming nothing, another map and another
+    Channel, the castle maps 181 to 183 against 180 and 184, a leaver, the broadcasts of a command
+    and of a Pulse, and the command's settling).
+  - `world/src/character/points.rs`: 1, the queue of the `POINT_HP` arm.
+  - `world/src/npc.rs`: 1, the maximum held at `i32::MAX`; the spawn test's smith now carries a
+    maximum and race flags.
+  - `prodomo/src/game_state.rs`: `leaving_hands_back_the_points_and_ends_the_recovery` takes the
+    queue the command's broadcast drained before it compares the points.
+- Parity rows:
+  - `cg.game.target` (`client-packets.md:82`), `cg.login.target` (`:45`) and `cg.login.item_use`
+    (`:44`) move from missing to `ported` with the scenario.
+  - `gc.target` (`server-records.md:55`) moves from codec to `ported` with the scenario.
+  - `sys.combat.target` (`systems.md:76`) moves from missing to `partial`; its note names the
+    scenario and what is not ported.
+  - `event.char.recovery_event` (`timed-events.md:33`) stays missing and gains a note.
+  - `event.target.target_event` (`timed-events.md:98`) is `G/target.cpp`, another system, and is
+    unchanged.
+- Parity counts (`python3 .scratch/tmp/tools/parity_counts.py`), out of 1645 rows:
+
+  | | ported | partial | missing | unused | codec |
+  |---|---|---|---|---|---|
+  | before 229g | 121 | 126 | 1336 | 6 | 56 |
+  | after 229g | 125 | 127 | 1332 | 6 | 55 |
+
+### 229g.7 Corrections, findings and controls
+
+- **The session's first test runs used rustup's 1.98 `cargo`.** `~/.cargo/bin` comes first on the
+  interactive shell's `PATH`, so `cargo test` built with Rust 1.98.1, which warns about a test in
+  `prodomo/src/account_player.rs` that 1.85.1 does not, and `/usr/bin/cargo-clippy` then refused
+  the 1.98 artifacts with `E0514`. Every later build, test, sweep and gate in 229g ran with
+  `/usr/bin` first on `PATH`, so with cargo and rustc 1.85.1.
+- **The test database container had stopped** (`prodomo-pg18`, exited 0 about 28 minutes before
+  the first database run of the session), so the first full run failed every database test at
+  `CREATE DATABASE`. It was started again with `podman start`; nothing else changed.
+- **A test compared points across a command that now drains the queue.**
+  `leaving_hands_back_the_points_and_ends_the_recovery` held a copy of the points with the potion's
+  queued change, and the `KeptOf` command's broadcast emptied the live queue. The test now takes the
+  copy's queue, and asserts it was not empty, before the comparison.
+- **The first element test assumed `ATT_ELEC | TREE | ANIMAL` shows `ATT_ELEC`.** It shows
+  `ATT_FIRE`: 3073 lies 1025 from 2048 and 1023 from 4096. That is legacy's arithmetic, and the test
+  now pins it.
+- **The analyzer passed clippy's 100-line limit** with two new arms. The consumes became one
+  `is_consumed` arm and `CG_TARGET` joined the motion records under `world_step`.
+- **The first gate run failed one test without the database, an old race.**
+  `a_grant_sent_from_tokio_is_applied_on_the_thread_that_owns_the_world`
+  (`prodomo/tests/game_loop_thread.rs`) read the Pulse counter once, right after the grant's answer.
+  The loop applies a drained command and only then steps the Pulse after it (`game_loop.rs`
+  `LoopRuntime::run`), so the answer can arrive while the counter is still 0. It passed in the
+  database run of the same gates. The test now waits up to a second for the first Pulse before it
+  asserts. Nothing in 229g touches the loop; the failing run is in `.scratch/tmp/l229g/gates-first/`.
+- **The second gate run failed two chat scenarios with the database, an old harness gap.**
+  `a_shout_reaches_its_empire_on_every_channel` and `a_talking_line_reaches_the_map_including_its_sender`
+  each read a `GC_CHARACTER_POINT_CHANGE` of `POINT_STAMINA` to 800 (`bAmount` false, so the amount
+  is 0) where they expected silence or a chat line. Yankee is stored with the column's default
+  stamina of 0, so the refill of ledger 229d (`G/char_affect.cpp:219-221`) comes three seconds after
+  the body stops. A run slowed by the gates' load lets those three seconds pass inside the scenario.
+  These are the scenarios the 229g sweep saw fail under load (229g.8). The record is legacy's, so
+  the harness now skips it: `is_stamina_refill` joins the revive timer and the monster records in
+  `Keyed::read_game` and `Keyed::quiet_for`. The two scenarios about the refill read it raw and
+  still assert it. The failing run is in `.scratch/tmp/l229g/gates-second/`.
+
+Controls for the counts and the negative claims. The Rust searches cover `prodomo/src`,
+`world/src`, `gamedata/src`, `common/src` and `protocol/src`, or the subset named; the legacy
+searches read `server/` with `grep -a`.
+
+| claim | search | result | positive control | nonsense control |
+|---|---|---|---|---|
+| `CheckTarget` is not ported | `CheckTarget\|check_target\|4800` in the five trees | the module doc of `target.rs` (`:44-45`); the other `4800` hits are test coordinates and two unrelated constants | `CheckTarget` in `server/server/game/char.cpp`: 2 lines | `zzqx_ledger_nonsense_229g` in the five trees: 0 |
+| no building object has a VID | `FindObjectByVID\|building::` in the five trees | the boot record readers of `gamedata` (`records.rs`, `land.rs`, `object_proto.rs`) and two doc lines of `cg_pick.rs`; no object instance | `FindObjectByVID` in `server/server/game/input_main.cpp`: 1 line | as above: 0 |
+| no character is polymorphed | `polymorph`, case-insensitive, in `prodomo/src` and `world/src` | the command table's two entries, doc comments, the point slot's name and a combat doc; no state | `IsPolymorphed` in `server/server/game/char.cpp`: 8 lines | as above: 0 |
+| nothing lowers an NPC's hit points | `\.hp\b *[-+]?=[^=]` in `world/src` and `prodomo/src` | only `Points` and stored rows (`points.rs`, `main.rs:789`); `Npc::hp` is set once, in `create` | the search finds `points.rs:946`, the `POINT_HP` arm | as above: 0 |
+| every element-bearing monster of the owner's gets its own element | the element loop over the owner's `mob_proto.txt`, flags split at commas with quotes stripped | elements 1 to 6: 55, 49, 103, 120, 88, 61 | the flag counts: `ATT_ELEC` 55, `ATT_FIRE` 49, `ATT_ICE` 103, `ATT_WIND` 120, `ATT_EARTH` 88, `ATT_DARK` 61 | `ATT_WATER`: 0 |
+| no maximum of the owner's passes `i32::MAX` | `MAX_HP` over the owner's `mob_proto.txt` | largest 12,958,000; none above 2,147,483,647; 7 are 0 | the dog's 126 is read as the scenario asserts | as the result: 0 above |
+
+### 229g.8 Review and mutation sweep
+
+The 42 mutants of `.scratch/tmp/tools/mutants229g.py` ran as two shards of `mutate_v2.py` on a tar copy of
+the final code (`sweep229g/tree0`), one shard at a time: shard 0 of 2 (21 mutants), then shard 1 of 2
+(21 mutants). The 42 are 28 in `prodomo/src/game_state/target.rs`, 4 in `prodomo/src/game_state.rs`, 2 in
+`world/src/character/points.rs`, 4 in `world/src/npc.rs` and 4 in `prodomo/src/main.rs`. Shard 0's log
+opens with `baseline ok`: the world, common, gamed, prodomo lib, prodomo bin and parity suites all
+passed, parity with at least 87 passing (the `PARITY_OK` floor was raised from 86 to 87 for this
+sweep). Shard 1 ran with `BASELINE=0` on the same copy. With `CHECK=1` the driver asserted, before the
+runs, that each mutant's old text occurs exactly once in its file and lands before the file's test
+module; all 42 passed.
+
+The first pass killed 40 and let 2 survive. No mutant failed to compile, so every kill is semantic. Five
+were killed by the parity scenario `a_click_targets_a_monster_and_a_player_and_a_leave_clears_it`, and
+each kill held when the scenario ran alone: `tg_player_hp_for_max`, `ma_login_use_closes`,
+`ma_game_target_unrouted`, `ma_login_target_closes` and `ma_target_as_motion`. The other 35 were killed
+by unit tests.
+
+The two survivors failed only parity scenarios that then passed alone, which the driver reports as
+flaky under load and does not count: `tg_horse_short` (`a_pose_reaches_the_view_including_its_sender`,
+`a_shout_reaches_its_empire_on_every_channel`, `a_talking_line_reaches_the_map_including_its_sender`) and
+`tg_element_above_elec` (`an_armour_is_worn_swapped_and_taken_off_and_the_store_follows`). None of those
+scenarios touches a target. Each survivor got a closing assertion, and the rerun (`rerun.log`,
+`BASELINE=0`, `ONLY=` the two) killed both:
+
+| survivor | shard | what it did | closed by |
+|---|---|---|---|
+| `tg_horse_short` | 1 | race 20109 is not a horse | an added assertion in `game_state::target::tests::an_npc_target_shows_its_hit_points_a_horse_100_and_only_a_monster_an_element` (race 20109 with a positive maximum shows 100) |
+| `tg_element_above_elec` | 1 | a race flag of exactly `RACE_FLAG_ATT_ELEC` carries no element | an added assertion in the same test (`1 << 11` shows element 1) |
+
+Both survived because the test stood on each side of the edges but not on them: race 20109 was tried
+only with a zero maximum, and the race flag only below `RACE_FLAG_ATT_ELEC` and at the ice flag.
+
+So 42 of 42 are killed. After the closing test was copied into it, the copy matches the final tree for
+all eight Rust files that changed in 229g (`cmp` finds no difference). The sweep logs are copied to
+`.scratch/tmp/l229g/sweep/`.
+
+### 229g.9 Receipt
+
+The count went from 3280 to 3297, +17. The 3280 includes the example-config commit after 229f,
+which added `the_examples_channels_that_are_off_turn_on_by_uncommenting`
+(`common/tests/config_test.rs`). The changes by file:
+
+- `prodomo/src/game_state/target.rs` (new): 14 unit tests.
+- `world/src/character/points.rs`: 1 unit test.
+- `world/src/npc.rs`: 1 unit test, so 31 became 32.
+- `prodomo/tests/parity.rs`: 1 scenario, so 86 became 87.
+- `prodomo/tests/game_loop_thread.rs`: no test added; the grant test waits for its first Pulse
+  (229g.7).
+- `prodomo/tests/parity.rs` also gains `is_stamina_refill`, a helper and not a test (229g.7).
+
+The gates ran on the final tree. The first run failed the old loop race of 229g.7 in the run without
+the database, and the second failed the two chat scenarios on the stamina refill in the run with it.
+The third run, after both fixes, passed everything. Its summary is `gates229g3/gates.summary`,
+copied to `.scratch/tmp/l229g/gates/`. The failing runs' summaries and test logs are in
+`.scratch/tmp/l229g/gates-first/` and `.scratch/tmp/l229g/gates-second/`, and the sweep's logs in
+`.scratch/tmp/l229g/sweep/`.
+
+| gate | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| build, workspace | clean, 0 warnings |
+| clippy, workspace, all targets, `-D warnings` | clean |
+| test, workspace, all targets, with `DATABASE_URL` | 3297 passed, 0 failed, 38 suites |
+| test, the same with `DATABASE_URL` unset | 3297 passed, 0 failed, 38 suites |
+| doc tests | 1 passed, 0 failed, 19 ignored |
+| rustdoc, warnings denied | clean |
+| scratch databases left behind | 0 |
+| `*.core` outside `target/` | 0 |
+
+Counted the way the gates count it, the workspace has 254 Rust files and 191,473 lines outside
+`server/` and `.scratch/`. The 229f receipt had 253 files and 190,488 lines. The toolchain is
+Rust 1.85.1 with `clippy 0.1.85` and `rustfmt 1.8.0`, called as `/usr/bin/cargo-clippy` and
+`/usr/bin/cargo-fmt`. No crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Parity after 229g: 125 ported, 127 partial, 1332 missing, 6 unused and 55 codec, out of 1645 rows.
+Before 229g the counts were 121, 126, 1336, 6 and 56.
+
+No ADR changed. Under the standing staging rule (ledger 229d), `.scratch/equip/owner-questions.md`
+stays out of the commit.

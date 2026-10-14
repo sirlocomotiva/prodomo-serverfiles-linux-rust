@@ -151,6 +151,14 @@ pub struct Npc {
     pub regen: Option<usize>,
     /// The seconds before `kill_ore_load_event` destroys it, for an ore vein.
     pub ore_lifetime: Option<u32>,
+    /// `GetHP`: its hit points. `SetProto` fills them to the maximum (`G/char.cpp:2491`), and
+    /// nothing lowers them yet.
+    pub hp: i32,
+    /// `GetMaxHP`: its proto's `dwMaxHP`, which `ComputePoints` makes the maximum of a
+    /// non-player (`G/char.cpp:3017`, `:3051-3056`).
+    pub max_hp: i32,
+    /// Its proto's `RACE_FLAG_*` bits, which a target's element is read from.
+    pub race_flag: u32,
 }
 
 impl Npc {
@@ -713,6 +721,9 @@ impl<'a> NpcSpawner<'a> {
             leader: None,
             regen: None,
             ore_lifetime,
+            hp: max_hp(proto),
+            max_hp: max_hp(proto),
+            race_flag: proto.race_flag,
         });
         self.report.spawned += 1;
         if proto.mob_type == CHAR_TYPE_STONE {
@@ -720,6 +731,14 @@ impl<'a> NpcSpawner<'a> {
         }
         Ok(site.npcs.len() - 1)
     }
+}
+
+/// `iMaxHP = m_pkMobData->m_table.dwMaxHP` (`G/char.cpp:3017`): the `DWORD` read into an `int`.
+///
+/// A maximum past `i32::MAX` is held at `i32::MAX`, where legacy's conversion wraps it negative;
+/// the owner's largest is 12,958,000.
+fn max_hp(proto: &MobTableRecord) -> i32 {
+    i32::try_from(proto.max_hp).unwrap_or(i32::MAX)
 }
 
 /// `InsertNPCPosition`'s entry: the box's centre, less the map's base.
@@ -796,6 +815,8 @@ mod tests {
     fn protos() -> MobProtos {
         let mut smith = proto(20_016, CHAR_TYPE_NPC, 0);
         smith.table.on_click_type = 2;
+        smith.table.max_hp = 1_500;
+        smith.table.race_flag = 1 << 3;
         let mut monster = proto(101, CHAR_TYPE_MONSTER, 0);
         monster.table.ai_flag = MONSTER_AI;
         let mut wolf = proto(102, CHAR_TYPE_MONSTER, 0);
@@ -926,8 +947,22 @@ mod tests {
         }
     }
 
+    /// A maximum past `i32::MAX` is held there; the rest are the proto's.
+    #[test]
+    fn the_maximum_hit_points_are_the_protos_held_at_i32_max() {
+        let mut table = MobTableRecord::default();
+        for (stored, held) in [(0, 0), (12_958_000, 12_958_000), (u32::MAX, i32::MAX)] {
+            table.max_hp = stored;
+            assert_eq!(max_hp(&table), held);
+        }
+        table.max_hp = 1 << 31;
+        assert_eq!(max_hp(&table), i32::MAX);
+        table.max_hp = (1 << 31) - 1;
+        assert_eq!(max_hp(&table), i32::MAX);
+    }
+
     /// An NPC at a point stands there with the entry's z and direction, and the proto's speeds,
-    /// and holds its regen.
+    /// its hit points full, and holds its regen.
     #[test]
     fn an_npc_at_a_point_stands_as_its_entry_says() {
         let mut at = point(20_016, 10_500, 20_700);
@@ -955,6 +990,9 @@ mod tests {
                 leader: None,
                 regen: Some(0),
                 ore_lifetime: None,
+                hp: 1_500,
+                max_hp: 1_500,
+                race_flag: 1 << 3,
             }]
         );
         assert_eq!(report.spawned, 1);

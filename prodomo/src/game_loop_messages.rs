@@ -482,6 +482,16 @@ pub enum GameCommand {
         /// Dropped once the records are sent, see [`Settled`].
         settled: oneshot::Sender<()>,
     },
+    /// `CInputMain::Target`: the character online under `vid` targets the character `target`
+    /// names, or none for VID 0. The world answers it with `GC_TARGET` when the target changes.
+    Target {
+        /// The VID of the targeting character.
+        vid: common::vid::Vid,
+        /// The VID the client sent.
+        target: u32,
+        /// Dropped once the answer is sent, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
     /// Requests terminal loop shutdown.
     Stop,
 }
@@ -1397,6 +1407,28 @@ impl GameLoopController {
         self.send_command(GameCommand::Relay {
             vid,
             records,
+            settled,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Hands the world a `CG_TARGET` from the character online under `vid`, without waiting.
+    /// The [`Settled`] resolves once its answer is sent.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn target(
+        &self,
+        vid: common::vid::Vid,
+        target: u32,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::Target {
+            vid,
+            target,
             settled,
         })
         .await

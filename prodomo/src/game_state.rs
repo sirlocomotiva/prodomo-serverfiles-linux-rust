@@ -67,6 +67,7 @@ mod quests;
 mod safebox;
 mod shop;
 mod sync;
+mod target;
 mod trade;
 mod view;
 mod view_encode;
@@ -420,6 +421,8 @@ pub struct GameState {
     view_radius: i64,
     /// Where each NPC is listed: its map's key and its place in that map's list.
     npc_of: HashMap<u32, (u8, i32, usize)>,
+    /// Who targets whom (`m_pkChrTarget`, `m_set_pkChrTargetedBy`).
+    targets: target::Targets,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -497,6 +500,7 @@ impl GameState {
             clock: motion::WorldClock::default(),
             view_radius: view_radius_of(DEFAULT_VIEW_RANGE),
             npc_of: HashMap::new(),
+            targets: target::Targets::default(),
         }
     }
 
@@ -794,6 +798,14 @@ impl GameState {
             command @ (GameCommand::Move { .. }
             | GameCommand::SyncPosition { .. }
             | GameCommand::Relay { .. }) => self.apply_motion(command),
+            GameCommand::Target {
+                vid,
+                target,
+                settled,
+            } => {
+                self.target(vid, target);
+                drop(settled);
+            }
             GameCommand::Stop => {
                 // The loop handles `Stop` itself, before a command ever reaches a
                 // processor. Reaching here would mean the loop and the state
@@ -802,6 +814,7 @@ impl GameState {
                 debug_assert!(false, "the game loop must handle Stop itself");
             }
         }
+        self.broadcast_targets();
     }
 
     /// Take a granted item back and tell the caller whether it came out.
@@ -1018,6 +1031,7 @@ impl GameState {
     /// already ending.
     pub fn leave_world(&mut self, vid: common::vid::Vid) -> Option<Kept> {
         self.cancel_trade(vid);
+        self.clear_target(vid);
         let _outbox = self.outboxes.remove(&vid);
         let _event = self.affect_events.remove(&vid);
         self.stop_browsing(vid);
@@ -1546,6 +1560,7 @@ impl PulseProcessor for GameState {
         self.run_affect_events(pulse);
         self.run_warp_npcs(pulse);
         self.step_motion(pulse);
+        self.broadcast_targets();
     }
 }
 
@@ -3431,6 +3446,9 @@ mod tests {
             .unwrap()
             .expect("the character is online");
         assert_eq!(kept.points, Some(expected.clone()));
+        // The command ended by taking what the hit-point arm had queued for the targeters.
+        let mut expected = expected;
+        assert!(!expected.take_target_broadcasts().is_empty());
 
         let departed = state
             .leave_world(Vid::new(7))

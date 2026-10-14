@@ -107,7 +107,7 @@ use protocol::cg_inventory::{
     HEADER_CG_LOGIN3, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_QUEST_INPUT_STRING,
     HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP,
     HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYNC_POSITION,
-    HEADER_CG_WARP,
+    HEADER_CG_TARGET, HEADER_CG_WARP,
 };
 use protocol::cg_item_drop::CgItemDrop;
 use protocol::cg_item_drop2::CgItemDrop2;
@@ -119,6 +119,7 @@ use protocol::cg_login3::CgLogin3;
 use protocol::cg_micro::{CgScriptAnswer, CgWarp};
 use protocol::cg_move::CgMove;
 use protocol::cg_name::CgChangeName;
+use protocol::cg_pick::CgTarget;
 use protocol::cg_position::CgCharacterPosition;
 use protocol::cg_quest_text::CgQuestInputString;
 use protocol::cg_quickslot_add::CgQuickslotAdd;
@@ -1624,6 +1625,36 @@ async fn move_character(
 /// The pose record goes to the characters that see this one and then to this character,
 /// because `CHARACTER::Standup` and `CHARACTER::Sitdown` call `PacketAround` with no `except`
 /// (`G/char.cpp:3331`, `:3348`), and `PacketAround` finishes with the self-send.
+/// `CInputMain::Target` (`G/input_main.cpp:2249-2269`): the world sets the character's target to
+/// the one the VID names and answers with `GC_TARGET` when it changed.
+async fn target_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    let record = match CgTarget::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed TARGET; closing");
+            return false;
+        }
+    };
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "TARGET from a character outside the world; ignoring");
+        return true;
+    };
+    match context.game.target(world_vid, record.vid).await {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not take the target; closing");
+            return false;
+        }
+    }
+    debug!(%addr, target = record.vid, "Target handed to the world");
+    true
+}
+
 async fn character_pose(
     addr: SocketAddr,
     context: &ConnectionContext,
@@ -1809,13 +1840,9 @@ where
                 None => report_step(addr, LiveStep::Record { phase, frame }),
             }
         }
-        // `CG_ENTER_GAME` (10) in the game phase: the header is in the main table
-        // (`G/packet_info.cpp:116`), and `CInputMain::Analyze` has no case for it, so its
-        // `default` consumes the record and sends nothing (`G/input_main.cpp:4126-4127`).
-        LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && frame.header == HEADER_CG_ENTERGAME.value() =>
-        {
-            debug!(%addr, "ENTER_GAME in the game phase; consumed");
+        // The records a phase's analyzer consumes with nothing done, see [`is_consumed`].
+        LiveStep::Record { phase, frame } if is_consumed(phase, frame.header) => {
+            debug!(%addr, ?phase, header = frame.header, "consumed with nothing done");
             true
         }
         // `CG_CHAT` (3) in the game phase: `CInputMain::Chat` (`G/input_main.cpp:781`).
@@ -1840,12 +1867,12 @@ where
         {
             belongings_step(session, addr, context, held, &frame).await
         }
-        // `CG_MOVE` (7), `CG_SYNC_POSITION` (8) and `CG_CHARACTER_POSITION` (28) in the game
-        // phase.
+        // `CG_MOVE` (7), `CG_SYNC_POSITION` (8), `CG_CHARACTER_POSITION` (28) and `CG_TARGET`
+        // (61) in the game phase.
         LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && is_motion_step(frame.header) =>
+            if phase == ClientPhase::Game && is_world_step(frame.header) =>
         {
-            motion_step(addr, context, held, &frame).await
+            world_step(addr, context, held, &frame).await
         }
         // `CG_ON_CLICK` (26), `CG_SHOP` (50), `CG_SCRIPT_ANSWER` (29) and
         // `CG_QUEST_INPUT_STRING` (30) in the game phase.
@@ -1868,6 +1895,43 @@ where
             warp_end(addr, &frame)
         }
         step => report_step(addr, step),
+    }
+}
+
+/// Whether `phase`'s analyzer consumes a record of `header` and does nothing with it:
+///
+/// - `CG_ITEM_USE` (11) and `CG_TARGET` (61) in the login, select and loading phases, which a
+///   client still sends for the character it left (`@fixme120`, `G/input_login.cpp:1254-1257`);
+/// - `CG_ENTER_GAME` (10) in the game phase: the header is in the main table
+///   (`G/packet_info.cpp:116`), and `CInputMain::Analyze` has no case for it, so its `default`
+///   consumes the record (`G/input_main.cpp:4126-4127`).
+fn is_consumed(phase: ClientPhase, header: u8) -> bool {
+    match phase {
+        ClientPhase::Login | ClientPhase::Select | ClientPhase::Loading => {
+            header == HEADER_CG_ITEM_USE.value() || header == HEADER_CG_TARGET.value()
+        }
+        ClientPhase::Game => header == HEADER_CG_ENTERGAME.value(),
+        _ => false,
+    }
+}
+
+/// Whether `header` is a record the world answers alone: one that moves a character, or
+/// `CG_TARGET`.
+fn is_world_step(header: u8) -> bool {
+    is_motion_step(header) || header == HEADER_CG_TARGET.value()
+}
+
+/// Run a step [`is_world_step`] accepts.
+async fn world_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    if frame.header == HEADER_CG_TARGET.value() {
+        target_step(addr, context, held, frame).await
+    } else {
+        motion_step(addr, context, held, frame).await
     }
 }
 

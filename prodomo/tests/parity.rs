@@ -1408,6 +1408,7 @@ fn game_len(header: u8) -> usize {
         GC_SAFEBOX_WRONG_PASSWORD => 1,
         GC_WARP => WARP_LEN,
         GC_WALK_MODE => WALK_MODE_LEN,
+        GC_TARGET => TARGET_LEN,
         other => panic!("unexpected loading or enter-game header {other}"),
     }
 }
@@ -2010,8 +2011,9 @@ impl Keyed {
     }
 
     /// Assert that nothing but a `GC_PING` cycle arrives, and absorb the revive timer's own
-    /// records ([`Keyed::timer_record`]) and the view records of the monsters, stones and veins
-    /// a walk's last sample brought in or took out ([`Keyed::monster_record`]).
+    /// records ([`Keyed::timer_record`]), the view records of the monsters, stones and veins
+    /// a walk's last sample brought in or took out ([`Keyed::monster_record`]), and a stamina
+    /// refill ([`is_stamina_refill`]).
     ///
     /// A ping is on its own timer and says nothing about the record just sent, so a ping
     /// inside the window is not an answer. Anything else is. The window's bytes are walked as
@@ -2064,7 +2066,10 @@ impl Keyed {
             );
             let record = &plain[at..at + width];
             assert!(
-                header == GC_PING || self.monster_record(record) || self.timer_record(record),
+                header == GC_PING
+                    || self.monster_record(record)
+                    || self.timer_record(record)
+                    || is_stamina_refill(record),
                 "only a ping may arrive while nothing is expected ({note}): {record:02x?}"
             );
             at += width.div_ceil(8) * 8;
@@ -2097,13 +2102,17 @@ impl Keyed {
         record
     }
 
-    /// Read the next loading or enter-game record that is not the revive timer's own nor a
-    /// monster's: those are noted by [`Keyed::timer_record`] and [`Keyed::monster_record`] and
-    /// skipped. A scenario that checks the timer reads with [`Keyed::read_game_raw`] instead.
+    /// Read the next loading or enter-game record that is not the revive timer's own, a
+    /// monster's nor a stamina refill: the first two are noted by [`Keyed::timer_record`] and
+    /// [`Keyed::monster_record`], and all three are skipped ([`is_stamina_refill`]). A scenario
+    /// that checks the timer or the refill reads with [`Keyed::read_game_raw`] instead.
     fn read_game(&mut self) -> Vec<u8> {
         loop {
             let record = self.read_game_raw();
-            if !self.monster_record(&record) && !self.timer_record(&record) {
+            if !self.monster_record(&record)
+                && !self.timer_record(&record)
+                && !is_stamina_refill(&record)
+            {
                 return record;
             }
         }
@@ -8290,6 +8299,17 @@ fn revive_width(header: u8) -> usize {
     }
 }
 
+/// Whether `record` is a `GC_CHARACTER_POINT_CHANGE` of `POINT_STAMINA`.
+///
+/// A character below its maximum stamina that has stood still for three seconds is sent its
+/// refill (ledger 229d, `G/char_affect.cpp:219-221`). A walk spends stamina, so when a run is
+/// slow the refill can land inside a scenario that is about something else. The scenarios
+/// about the refill read it raw ([`read_past_pings`]).
+fn is_stamina_refill(record: &[u8]) -> bool {
+    record.first() == Some(&GC_POINT_CHANGE)
+        && record.get(8).map(|&kind| usize::from(kind)) == Some(POINT_STAMINA)
+}
+
 /// The next record that is not a `GC_PING`, which arrives on its own timer and says nothing
 /// about the wait. The record is read raw: the caller notes it if it is the revive's.
 fn read_past_pings(keyed: &mut Keyed) -> Vec<u8> {
@@ -8698,4 +8718,100 @@ fn a_move_resets_the_stop_time_and_delays_the_refill() {
         waited >= Duration::from_millis(4_400),
         "the move restarts the wait, so the refill is not at three seconds: {waited:?}"
     );
+}
+
+/// `cg.game.target`, `gc.target`: `HEADER_CG_TARGET` and `HEADER_GC_TARGET`, a header and the
+/// target's VID one way, and `TPacketGCTarget`'s 32 bytes the other.
+const CG_TARGET: u8 = 0x3d;
+const GC_TARGET: u8 = 0x3f;
+const TARGET_LEN: usize = 32;
+
+/// `CG_TARGET` naming `vid`.
+fn client_target(vid: u32) -> Vec<u8> {
+    let mut record = vec![CG_TARGET];
+    record.extend_from_slice(&vid.to_le_bytes());
+    record
+}
+
+/// `GC_TARGET` of `vid`: its percentage, hit points and maximum, the alliance fields false and
+/// 0, and its element.
+fn target_of(vid: u32, percent: u8, hp: i32, max_hp: i32, element: u8) -> Vec<u8> {
+    let mut record = vec![GC_TARGET];
+    record.extend_from_slice(&vid.to_le_bytes());
+    record.push(percent);
+    record.extend_from_slice(&hp.to_le_bytes());
+    record.extend_from_slice(&max_hp.to_le_bytes());
+    record.extend_from_slice(&[0; 17]);
+    record.push(element);
+    record
+}
+
+/// Ledger 229g: `CInputMain::Target` and `CHARACTER::SetTarget` (`G/input_main.cpp:2249-2269`,
+/// `G/char.cpp:6458-6598`), `ClearTarget` (`:654`) and the `@fixme120` consume
+/// (`G/input_login.cpp:1254-1257`).
+///
+/// A `CG_TARGET` or `CG_ITEM_USE` in the loading phase is consumed and the entry goes on. A
+/// click on the stray dog (vnum 101, `MAX_HP` 126, `RACE_FLAG` `ANIMAL`, so no element) is
+/// answered with its VID, 100 and 126 twice; the same click again is answered with nothing,
+/// and VID 0 clears the target with zeros. A click on Yankee, a level 1 assassin stored with 325
+/// of its 650 hit points, is answered with 50, 325 and 650, and Yankee is sent nothing; when Yankee leaves, Alpha is sent VID 0 before the removal.
+#[test]
+fn a_click_targets_a_monster_and_a_player_and_a_leave_clears_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t600\t525\t0\t0\t0\t1\t1s\t100\t1\t101\n",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    seat_yankee_and_charlie(&database);
+    sql(
+        &database,
+        "UPDATE player SET hp = 325 WHERE name = 'Yankee'",
+    );
+
+    // Given: Alpha's client still sends a use and a click in the loading phase.
+    let (mut alpha_keyed, _alpha, _items) = load_character(&server, b"alice", 0);
+    alpha_keyed.send_record(&client_item_use(0));
+    alpha_keyed.send_record(&client_target(1));
+    alpha_keyed.quiet("the loading phase consumes a use and a click");
+    let entered = enter_game_shown(&mut alpha_keyed);
+    let dog = entered
+        .shown
+        .monsters
+        .iter()
+        .find(|insert| inserted_at(insert) == DOG_AT)
+        .expect("the dog is shown");
+    let dog_vid = u32::from_le_bytes(dog[1..5].try_into().expect("a VID"));
+
+    // When: Alpha clicks the dog, twice. Then: one answer, its hit points full.
+    alpha_keyed.send_record(&client_target(dog_vid));
+    assert_eq!(
+        alpha_keyed.read_game(),
+        target_of(dog_vid, 100, 126, 126, 0)
+    );
+    alpha_keyed.send_record(&client_target(dog_vid));
+    alpha_keyed.quiet("the same target again sends nothing");
+    alpha_keyed.send_record(&client_target(0));
+    assert_eq!(alpha_keyed.read_game(), target_of(0, 0, 0, 0, 0));
+
+    // When: Yankee enters and Alpha clicks it. Then: its hit points, and Yankee hears nothing.
+    let (mut yankee, yankee_listed, _yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    alpha_keyed.sees_arrive(yankee_listed.id, false);
+    alpha_keyed.send_record(&client_target(yankee_listed.id));
+    assert_eq!(
+        alpha_keyed.read_game(),
+        target_of(yankee_listed.id, 50, 325, 650, 0)
+    );
+    yankee.quiet("the target is not told it was clicked");
+
+    // When: Yankee leaves. Then: Alpha's target is cleared before the removal.
+    drop(yankee);
+    assert_eq!(alpha_keyed.read_game(), target_of(0, 0, 0, 0, 0));
+    alpha_keyed.sees_leave(yankee_listed.id);
 }

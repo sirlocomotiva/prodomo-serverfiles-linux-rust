@@ -296,8 +296,9 @@ impl CgQuestConfirm {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct CgTarget {
     /// The targeted virtual ID. Opaque: `CInputMain::Target` at
-    /// `input_main.cpp:2249` passes it to `FindObjectByVID` and does nothing at
-    /// all when that fails, so every value is legal and none is a framing error.
+    /// `input_main.cpp:2249` passes it to `FindObjectByVID`, then to
+    /// `CHARACTER_MANAGER::Find`, and a VID neither finds clears the target, so
+    /// every value is legal and none is a framing error.
     pub vid: u32,
 }
 
