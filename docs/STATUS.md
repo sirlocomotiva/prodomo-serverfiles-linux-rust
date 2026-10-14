@@ -144,8 +144,8 @@ reach Shared Channel maps through the OX event and through two kinds of war.
 None of these warps runs in the Rewrite yet, because `pc.warp` is not ported. Today the Shared Channel
 carries only the warp NPC pair between maps 72 and 73, and the login of a character saved on a Shared
 Channel map. The Shared Channel stays on so that these features work when they land (ledger 229f.5).
-`config/prodomo.toml.example` still lists Channels 2-4 with their legacy maps. To leave them off, the
-owner's own config drops their `[[channel]]` tables.
+`config/prodomo.toml.example` runs Channel 1 and the Shared Channel. Channels 2-4 stay in it as
+commented-out tables with their legacy maps, so each can be turned on again by uncommenting its table.
 
 Hosting only these two Channels bounds the one game thread's load (ADR-0002). Measured
 on the release build at ledger 229f, Channel 1's 57 maps stand 57,697 characters in about 0.8 s, the
@@ -154,7 +154,7 @@ monsters). With the Shared Channel's 29 maps too, it holds 65,632 characters and
 world uses no measurable CPU, because no monster acts yet; the cost per Pulse is measured again when
 the monster state machine lands.
 
-`config/prodomo.toml.example` holds this topology with each Channel's legacy map set. The binary
+Each Channel in `config/prodomo.toml.example` keeps its legacy map set. The binary
 refuses a topology it cannot run before binding anything (ledger 178.3). Two legacy settings the
 owner should know about (178.5):
 

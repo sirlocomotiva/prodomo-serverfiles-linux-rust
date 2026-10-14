@@ -26,7 +26,7 @@ The reasons are in [`docs/adr/`](docs/adr/).
 | path | contents |
 |---|---|
 | `protocol/`, `common/`, `net/`, `db/`, `gamedata/`, `world/`, `quest/`, `prodomo/` | The Rust workspace. `prodomo/` is the one server binary; see `AGENTS.md` for what each crate holds. |
-| `config/prodomo.toml.example` | The commented configuration, with the legacy topology and ports. |
+| `config/prodomo.toml.example` | The commented configuration, with the legacy ports. Channel 1 and the Shared Channel run; Channels 2-4 are commented out. |
 | `legacy/` | The owner's legacy Game data (protos, maps, quests, locale strings, drop and shop tables), configuration, and SQL schema and table rows. See [`legacy/README.md`](legacy/README.md). |
 | `server/` | The frozen legacy C++ server source. It is the behavioural reference and is never modified or built. |
 

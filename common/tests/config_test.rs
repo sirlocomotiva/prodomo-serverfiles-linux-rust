@@ -3,6 +3,7 @@
 //! These tests pin the document format and the topology rules. The legacy `CONFIG` and
 //! `conf.txt` files are not read; ledger sections 169 and 178 map their keys to this document.
 
+use std::fs;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
@@ -177,16 +178,37 @@ fn game_defaults_are_the_legacy_compiled_in_values() {
     );
 }
 
+const EXAMPLE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../config/prodomo.toml.example"
+);
+
 #[test]
 fn the_shipped_example_is_a_valid_document() {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../config/prodomo.toml.example"
-    );
-    let config = load_server_config(path).unwrap();
+    // The owner's plan: Channel 1 and the Shared Channel, with Channels 2-4 off.
+    let config = load_server_config(EXAMPLE).unwrap();
+    let numbers: Vec<u8> = config.channels.iter().map(|c| c.number).collect();
+    assert_eq!(numbers, vec![1, SHARED_CHANNEL]);
+    assert_eq!(config.auth.port, 30001);
+    assert_eq!(config.channels[0].maps.len(), 57);
+    assert_eq!(config.channels[1].maps.len(), 29);
+}
+
+#[test]
+fn the_examples_channels_that_are_off_turn_on_by_uncommenting() {
+    // Channels 2-4 stay in the example as commented tables, so the legacy topology is one edit
+    // away; with every line uncommented, it is the five-Channel deployment of legacy/config.
+    let text = fs::read_to_string(EXAMPLE).unwrap();
+    let start = text.find("# [[channel]]\n# number = 2\n").unwrap();
+    let end = text.find("[[channel]]\nnumber = 99\n").unwrap();
+    let block: String = text[start..end]
+        .lines()
+        .map(|line| line.strip_prefix("# ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let config = parse(&format!("{}{block}\n{}", &text[..start], &text[end..])).unwrap();
     let numbers: Vec<u8> = config.channels.iter().map(|c| c.number).collect();
     assert_eq!(numbers, vec![1, 2, 3, 4, SHARED_CHANNEL]);
-    assert_eq!(config.auth.port, 30001);
     assert_eq!(config.channels[0].maps.len(), 57);
     assert!(config.channels[1..4].iter().all(|c| c.maps.len() == 49));
     assert_eq!(config.channels[4].maps.len(), 29);

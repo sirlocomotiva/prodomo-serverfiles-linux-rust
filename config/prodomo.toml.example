@@ -4,7 +4,9 @@
 # file replaces the legacy per-Core `CONFIG` files and the DB server's `conf.txt`; see
 # docs/REWRITE_LEDGER.md sections 169 and 178 for how each legacy key maps here.
 #
-# The topology and values below are the owner's legacy deployment (legacy/config), translated.
+# The values below are the owner's legacy deployment (legacy/config), translated. The topology is
+# the owner's current plan: Channel 1 and the Shared Channel (99) run, and Channels 2-4 are off
+# (docs/STATUS.md, topology).
 # An UNKNOWN key is an error, so a typo fails at startup. Booleans must be real TOML booleans
 # (`true` / `false`), not the legacy `1` / `0`.
 #
@@ -43,6 +45,9 @@ port = 30001
 #
 # Channel 1 hosts eight maps Channels 2-4 do not (56, 209, 358, 359, 373, 374, 376, 377), as the
 # legacy deployment did.
+#
+# The Shared Channel stays on even with one Channel: Channel 1's players reach its maps through the
+# OX event (113), the guild battle and flag wars (110, 111) and the kingdom and siege wars (103).
 
 [[channel]]
 number = 1
@@ -53,32 +58,36 @@ maps = [
     216, 217, 226, 227, 235, 240, 358, 359, 373, 374, 376, 377,
 ]
 
-[[channel]]
-number = 2
-ports = [30007, 30009]
-maps = [
-    1, 3, 4, 5, 12, 13, 21, 23, 24, 25, 27, 34, 41, 43, 44, 45, 61, 62, 63, 64, 65, 66, 67, 68, 69,
-    70, 71, 75, 76, 104, 108, 109, 112, 134, 135, 136, 137, 138, 139, 193, 206, 210, 212, 216, 217,
-    226, 227, 235, 240,
-]
-
-[[channel]]
-number = 3
-ports = [30011, 30013]
-maps = [
-    1, 3, 4, 5, 12, 13, 21, 23, 24, 25, 27, 34, 41, 43, 44, 45, 61, 62, 63, 64, 65, 66, 67, 68, 69,
-    70, 71, 75, 76, 104, 108, 109, 112, 134, 135, 136, 137, 138, 139, 193, 206, 210, 212, 216, 217,
-    226, 227, 235, 240,
-]
-
-[[channel]]
-number = 4
-ports = [30015, 30017]
-maps = [
-    1, 3, 4, 5, 12, 13, 21, 23, 24, 25, 27, 34, 41, 43, 44, 45, 61, 62, 63, 64, 65, 66, 67, 68, 69,
-    70, 71, 75, 76, 104, 108, 109, 112, 134, 135, 136, 137, 138, 139, 193, 206, 210, 212, 216, 217,
-    226, 227, 235, 240,
-]
+# Channels 2-4 are off. Each would host Channel 1's maps without its eight extra ones, 49 maps.
+# With all four on, the one game thread stands about four times the monsters (ledger 229f.5). To
+# turn one on, remove the `# ` in front of each line of its table.
+#
+# [[channel]]
+# number = 2
+# ports = [30007, 30009]
+# maps = [
+#     1, 3, 4, 5, 12, 13, 21, 23, 24, 25, 27, 34, 41, 43, 44, 45, 61, 62, 63, 64, 65, 66, 67, 68, 69,
+#     70, 71, 75, 76, 104, 108, 109, 112, 134, 135, 136, 137, 138, 139, 193, 206, 210, 212, 216, 217,
+#     226, 227, 235, 240,
+# ]
+#
+# [[channel]]
+# number = 3
+# ports = [30011, 30013]
+# maps = [
+#     1, 3, 4, 5, 12, 13, 21, 23, 24, 25, 27, 34, 41, 43, 44, 45, 61, 62, 63, 64, 65, 66, 67, 68, 69,
+#     70, 71, 75, 76, 104, 108, 109, 112, 134, 135, 136, 137, 138, 139, 193, 206, 210, 212, 216, 217,
+#     226, 227, 235, 240,
+# ]
+#
+# [[channel]]
+# number = 4
+# ports = [30015, 30017]
+# maps = [
+#     1, 3, 4, 5, 12, 13, 21, 23, 24, 25, 27, 34, 41, 43, 44, 45, 61, 62, 63, 64, 65, 66, 67, 68, 69,
+#     70, 71, 75, 76, 104, 108, 109, 112, 134, 135, 136, 137, 138, 139, 193, 206, 210, 212, 216, 217,
+#     226, 227, 235, 240,
+# ]
 
 [[channel]]
 number = 99
