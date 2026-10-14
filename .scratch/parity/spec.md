@@ -59,6 +59,12 @@ from the legacy source's field order. A scenario proves the row it is named in; 
 ported when its scenario covers the system's behaviour, not only one of its entry points. The
 scenarios need a store and run only when `DATABASE_URL` is set, like every database test.
 
+Where a binary scenario is impractical, a world or unit test proves a row instead (owner,
+2026-10-14). An ore vein, for one, ends 7 to 15 minutes after it stands, and no config shortens
+that. Its `scenario` cell is `path::name`, the test's file relative to the workspace root and its
+function, and `inventory_rows_keep_the_rules` checks that the file holds `#[test] fn name()`.
+The row's note says why no binary scenario proves it.
+
 ## Findings for the owner
 
 - **The adminpage is unreachable in legacy.** `HEADER_CG_TEXT` (64) is registered

@@ -130,7 +130,7 @@ pub enum NpcOrder {
 /// A warp or goto NPC whose name parsed, and what it does to a player that passes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WarpNpc {
-    /// Its VID, for the log.
+    /// Its VID, for the log and for its `Destroy`.
     vid: u32,
     /// Its x.
     x: i32,
@@ -140,6 +140,13 @@ pub(super) struct WarpNpc {
     empire: u8,
     /// The `WarpSet` or `Show` a player that passes is sent.
     order: NpcOrder,
+}
+
+impl WarpNpc {
+    /// Its VID.
+    pub(super) fn vid(&self) -> u32 {
+        self.vid
+    }
 }
 
 /// The pulses `IsHack` measures the portal limit from, for one character.

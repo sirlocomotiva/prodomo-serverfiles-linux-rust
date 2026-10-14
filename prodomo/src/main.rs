@@ -142,7 +142,7 @@ use tracing::{debug, error, info, warn};
 use world::cells::{HostedCells, MapCells};
 use world::character::MoveRequest;
 use world::item::Item;
-use world::npc::{NpcSpawner, NpcVids};
+use world::npc::{NpcSpawner, NpcVids, Respawner};
 
 /// The command line.
 #[derive(Debug, Parser)]
@@ -3937,8 +3937,8 @@ struct GameData {
 /// a client is sent, and the regen entries of every map each Channel hosts.
 struct NpcData {
     protos: Arc<MobProtos>,
-    groups: MobGroups,
-    names: MobLocaleNames,
+    groups: Arc<MobGroups>,
+    names: Arc<MobLocaleNames>,
     maps: Vec<(u8, MapRegion, Vec<RegenEntry>)>,
 }
 
@@ -4049,8 +4049,8 @@ fn load_npc_data(config: &ServerConfig, atlas: &MapAtlas) -> Result<NpcData, Str
     );
     Ok(NpcData {
         protos: Arc::new(protos),
-        groups,
-        names,
+        groups: Arc::new(groups),
+        names: Arc::new(names),
         maps,
     })
 }
@@ -4144,9 +4144,14 @@ fn load_quests(config: &ServerConfig, npcs: &NpcData) -> Result<Quests, String> 
 }
 
 /// Stand the NPCs, monsters and stones up in the world before the game thread starts, on each
-/// map's cells, drawing from its dice. A hosted map with no cells is one the map index does
-/// not list, which has no regen entries either.
-fn stand_up_npcs(state: &mut GameState, data: &NpcData, cells: &HostedCells) -> Result<(), String> {
+/// map's cells, drawing from its dice, and hand the world what its regens spawn from after. A
+/// hosted map with no cells is one the map index does not list, which has no regen entries
+/// either.
+fn stand_up_npcs(
+    state: &mut GameState,
+    data: &NpcData,
+    cells: &Arc<HostedCells>,
+) -> Result<(), String> {
     let mut spawner = NpcSpawner::new(&data.protos, &data.groups, &data.names, NpcVids::default());
     for (channel, region, entries) in &data.maps {
         let Some(map_cells) = cells.get(region.index) else {
@@ -4167,6 +4172,13 @@ fn stand_up_npcs(state: &mut GameState, data: &NpcData, cells: &HostedCells) -> 
         idle = report.idle,
         "NPCs and monsters stood up"
     );
+    let respawner = Respawner::new(
+        Arc::clone(&data.protos),
+        Arc::clone(&data.groups),
+        Arc::clone(&data.names),
+        spawner.into_vids(),
+    );
+    state.install_respawner(respawner, Arc::clone(cells));
     Ok(())
 }
 
@@ -4757,5 +4769,78 @@ mod tests {
             [0xA0, 0xA1, 0xA2, 0xB1],
             "pending, then queued, then the order"
         );
+    }
+
+    /// Boot hands the world what its regens spawn from: an ore vein boot stood ends within 15
+    /// minutes, and its regen stands another under the first VID boot did not use.
+    #[test]
+    fn boot_hands_the_regens_their_spawner_and_the_vids_it_left() {
+        use gamedata::mob_proto::{MobProto, CHAR_TYPE_NPC};
+        use gamedata::records::MobTableRecord;
+        use gamedata::regen::RegenKind;
+        use gamedata::server_attr::{CellBlock, SectreeGrid, ServerAttr, SECTREE_CELLS};
+        use prodomo::game_loop::PulseProcessor;
+        use world::cells::MapCells;
+        use world::npc::FIRST_NPC_VID;
+
+        let region = MapRegion {
+            index: 41,
+            name: b"vein".to_vec(),
+            sx: 0,
+            sy: 0,
+            ex: 6_400,
+            ey: 6_400,
+            spawn: (0, 0),
+            empire_spawns: None,
+        };
+        let block = CellBlock::from_cells(&vec![0; SECTREE_CELLS * SECTREE_CELLS]);
+        let attr = ServerAttr::from_blocks(1, 1, vec![block]).expect("one open block");
+        let grid = SectreeGrid::of(&region).expect("one sectree");
+        let mut hosted = HostedCells::default();
+        hosted.insert(region.index, MapCells::new(grid, Arc::new(attr)));
+        let vein = RegenEntry {
+            kind: RegenKind::Mob,
+            sx: 500,
+            sy: 500,
+            ex: 500,
+            ey: 500,
+            z_section: 0,
+            direction: 1,
+            time: 1,
+            max_count: 1,
+            vnum: 20_047,
+        };
+        let proto = MobProto {
+            line: 2,
+            table: MobTableRecord {
+                vnum: 20_047,
+                mob_type: CHAR_TYPE_NPC,
+                max_hp: 100,
+                ..MobTableRecord::default()
+            },
+        };
+        let data = NpcData {
+            protos: Arc::new(MobProtos::from_rows(vec![proto])),
+            groups: Arc::new(MobGroups::default()),
+            names: Arc::new(MobLocaleNames::parse(b"VNUM\tNAME\n").expect("a header")),
+            maps: vec![(1, region, vec![vein])],
+        };
+        let mut state = GameState::new(ItemProtos::default());
+        stand_up_npcs(&mut state, &data, &Arc::new(hosted)).expect("boot stands the vein");
+        let vids = |state: &GameState| -> Vec<u32> {
+            state
+                .npcs_on(1, 41)
+                .npcs
+                .iter()
+                .map(|npc| npc.vid)
+                .collect()
+        };
+        assert_eq!(vids(&state), [FIRST_NPC_VID]);
+
+        // A vein lives at most 15 minutes, and its regen runs every second after that.
+        for pulse in 1..=(15 * 60 + 1) * 25 {
+            state.process_pulse(pulse);
+        }
+        assert_eq!(vids(&state), [FIRST_NPC_VID + 1]);
     }
 }

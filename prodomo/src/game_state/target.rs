@@ -183,7 +183,7 @@ fn npc_target(npc: &Npc) -> (HitPoints, u8) {
 }
 
 /// One `GC_TARGET`, with the alliance fields of `__SHIP_DEFENSE__` false and 0.
-fn target_record(vid: u32, (percent, hp, max_hp): HitPoints, element: u8) -> Vec<u8> {
+pub(super) fn target_record(vid: u32, (percent, hp, max_hp): HitPoints, element: u8) -> Vec<u8> {
     let mut record = Vec::new();
     GcTarget::new(vid, percent, hp, max_hp, 0, 0, 0, element).encode_into(&mut record);
     record

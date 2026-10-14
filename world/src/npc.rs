@@ -61,6 +61,7 @@
 use std::error::Error;
 use std::fmt;
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 
 use gamedata::map_atlas::MapRegion;
 use gamedata::mob_group::MobGroups;
@@ -182,15 +183,30 @@ pub struct NpcPosition {
     pub y: i32,
 }
 
-/// One timed regen entry as boot leaves it: legacy `REGEN` with its `count` and its event.
+/// One timed regen entry: legacy `REGEN` with its `count` and its event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Regen {
     /// The entry.
     pub entry: RegenEntry,
     /// `count`: the characters that hold it and stand, each a lone character or a group leader.
+    /// A spawn adds the units that stood, and `Destroy` takes one off (`G/char.cpp:572-583`).
     pub count: u32,
     /// The seconds after boot its `regen_event` first fires: `number(0, 16)` plus its time.
     pub first_fire: u32,
+}
+
+impl Regen {
+    /// `num = max_count - count` (`G/regen.cpp:330`): the units a `regen_spawn` runs.
+    ///
+    /// Legacy subtracts two `int`s into a `DWORD`, so a count past the maximum would wrap to
+    /// some four billion units; nothing raises the count past the maximum, and the Rewrite runs
+    /// none then. A negative maximum runs none, as at boot.
+    #[must_use]
+    pub fn missing(&self) -> u32 {
+        u32::try_from(self.entry.max_count)
+            .unwrap_or(0)
+            .saturating_sub(self.count)
+    }
 }
 
 /// What one map holds: its characters in spawn order, its mini-map list in file order, and its
@@ -406,6 +422,12 @@ impl<'a> NpcSpawner<'a> {
         self.report
     }
 
+    /// The VIDs this spawner has not handed out, which the spawns after boot go on from.
+    #[must_use]
+    pub fn into_vids(self) -> NpcVids {
+        self.vids
+    }
+
     /// `regen_load`'s work for one map: its mini-map list, its first spawn and its regens, entry
     /// by entry, with the map's cells to check each point against.
     ///
@@ -437,7 +459,8 @@ impl<'a> NpcSpawner<'a> {
                 self.report.idle += 1;
                 continue;
             }
-            let count = self.regen_spawn(&mut site, entry, regens.len(), dice)?;
+            let units = entry.max_count.max(0).unsigned_abs();
+            let count = self.regen_spawn(&mut site, entry, regens.len(), units, dice)?;
             let jitter = seconds(number(dice, FIRST_FIRE_JITTER.0, FIRST_FIRE_JITTER.1));
             regens.push(Regen {
                 entry: *entry,
@@ -452,16 +475,16 @@ impl<'a> NpcSpawner<'a> {
         })
     }
 
-    /// `regen_spawn(regen, false)`: `max_count` units, each holding regen `regen`. Answers the
-    /// units that stood, legacy's `count`.
+    /// `regen_spawn(regen, false)`: `units` units, each holding regen `regen`. Answers the
+    /// units that stood, which legacy adds to `count`.
     fn regen_spawn(
         &mut self,
         site: &mut Site<'_>,
         entry: &RegenEntry,
         regen: usize,
+        units: u32,
         dice: &mut dyn Dice,
     ) -> Result<u32, NpcVidsExhausted> {
-        let units = entry.max_count.max(0).unsigned_abs();
         let vnum = vnum_bits(entry.vnum);
         let mut count = 0;
         for _ in 0..units {
@@ -730,6 +753,63 @@ impl<'a> NpcSpawner<'a> {
             self.report.stones += 1;
         }
         Ok(site.npcs.len() - 1)
+    }
+}
+
+/// What a `regen_event` spawns from once boot is over: the spawner's tables, shared, and the
+/// VIDs boot left.
+#[derive(Debug, Clone)]
+pub struct Respawner {
+    protos: Arc<MobProtos>,
+    groups: Arc<MobGroups>,
+    names: Arc<MobLocaleNames>,
+    vids: NpcVids,
+}
+
+impl Respawner {
+    /// A respawner reading these tables and numbering characters from `vids`.
+    #[must_use]
+    pub fn new(
+        protos: Arc<MobProtos>,
+        groups: Arc<MobGroups>,
+        names: Arc<MobLocaleNames>,
+        vids: NpcVids,
+    ) -> Self {
+        Self {
+            protos,
+            groups,
+            names,
+            vids,
+        }
+    }
+
+    /// `regen_spawn(regen, false)` as `regen_event` runs it (`G/regen.cpp:582-599`): the
+    /// [`Regen::missing`] units of the regen at `index` in its map's list, each by the spawner
+    /// its entry names and with the same draws as at boot. Answers the characters it stood up,
+    /// in spawn order, and the units among them that stood, which the caller adds to the
+    /// regen's count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NpcVidsExhausted`] when the characters outnumber the VIDs left; the ones
+    /// numbered before then are lost with the answer.
+    pub fn respawn(
+        &mut self,
+        (region, cells): (&MapRegion, &MapCells),
+        regen: &Regen,
+        index: usize,
+        dice: &mut dyn Dice,
+    ) -> Result<(Vec<Npc>, u32), NpcVidsExhausted> {
+        let mut spawner =
+            NpcSpawner::new(&self.protos, &self.groups, &self.names, self.vids.clone());
+        let mut site = Site {
+            region,
+            cells,
+            npcs: Vec::new(),
+        };
+        let stood = spawner.regen_spawn(&mut site, &regen.entry, index, regen.missing(), dice);
+        self.vids = spawner.into_vids();
+        Ok((site.npcs, stood?))
     }
 }
 
@@ -1582,5 +1662,119 @@ mod tests {
             entries.iter().filter(|e| e.spawns() && e.time != 0).count()
         );
         assert_eq!(map.regens.len(), 1_118);
+    }
+
+    /// `max_count - count`, with a negative maximum and a count past it running none.
+    #[test]
+    fn a_regen_misses_the_units_its_count_lacks() {
+        let mut regen = Regen {
+            entry: point(20_016, 10_500, 20_700),
+            count: 0,
+            first_fire: 0,
+        };
+        for (max_count, count, missing) in [
+            (3, 1, 2),
+            (3, 3, 0),
+            (1, 0, 1),
+            (0, 0, 0),
+            (-1, 0, 0),
+            (2, 5, 0),
+        ] {
+            regen.entry.max_count = max_count;
+            regen.count = count;
+            assert_eq!(regen.missing(), missing, "{max_count} {count}");
+        }
+    }
+
+    fn respawner(vids: NpcVids) -> Respawner {
+        Respawner::new(
+            Arc::new(protos()),
+            Arc::new(groups()),
+            Arc::new(names()),
+            vids,
+        )
+    }
+
+    /// A fire spawns only the units the count lacks, each holding the regen at its index, and
+    /// numbers them on from the VIDs boot left; a full regen spawns none and draws nothing.
+    #[test]
+    fn a_respawn_stands_the_missing_units_on_from_the_vids_boot_left() {
+        let mut entry = point(20_016, 10_500, 20_700);
+        entry.max_count = 3;
+        let mut regen = Regen {
+            entry,
+            count: 1,
+            first_fire: 0,
+        };
+        let cells = cells(&[]);
+        let mut respawner = respawner(NpcVids::starting_at(FIRST_NPC_VID + 7));
+        let mut dice = Script::new(&[]);
+        let (stood, count) = respawner
+            .respawn((&region(1), &cells), &regen, 4, &mut dice)
+            .unwrap();
+        assert_eq!(count, 2);
+        let vids: Vec<u32> = stood.iter().map(|n| n.vid).collect();
+        assert_eq!(vids, [FIRST_NPC_VID + 7, FIRST_NPC_VID + 8]);
+        assert!(stood
+            .iter()
+            .all(|n| n.regen == Some(4) && n.name == b"Smith"));
+        regen.count = 3;
+        let (stood, count) = respawner
+            .respawn((&region(1), &cells), &regen, 4, &mut dice)
+            .unwrap();
+        assert_eq!((stood.len(), count), (0, 0));
+        regen.count = 2;
+        let (stood, _) = respawner
+            .respawn((&region(1), &cells), &regen, 4, &mut dice)
+            .unwrap();
+        assert_eq!(stood[0].vid, FIRST_NPC_VID + 9, "the counter went on");
+    }
+
+    /// A respawn draws as boot does: a box's points and rotation, and an ore vein's lifetime.
+    #[test]
+    fn a_respawned_vein_draws_its_point_rotation_and_lifetime() {
+        let regen = Regen {
+            entry: boxed(RegenKind::Mob, 20_047),
+            count: 0,
+            first_fire: 0,
+        };
+        let cells = cells(&[]);
+        let mut respawner = respawner(NpcVids::default());
+        let mut dice = Script::new(&[0, 200, 90, 100]);
+        let (stood, count) = respawner
+            .respawn((&region(1), &cells), &regen, 0, &mut dice)
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            (stood[0].x, stood[0].y, stood[0].rotation),
+            (10_100, 20_300, 90)
+        );
+        assert_eq!(stood[0].ore_lifetime, Some(520));
+        assert_eq!(dice.left(), 0);
+    }
+
+    /// A respawn that runs out of VIDs answers so, and the counter stays spent.
+    #[test]
+    fn a_respawn_past_the_last_vid_answers_exhausted() {
+        let mut entry = point(20_016, 10_500, 20_700);
+        entry.max_count = 2;
+        let regen = Regen {
+            entry,
+            count: 0,
+            first_fire: 0,
+        };
+        let cells = cells(&[]);
+        let mut respawner = respawner(NpcVids::starting_at(u32::MAX));
+        let mut dice = Script::new(&[]);
+        assert_eq!(
+            respawner.respawn((&region(1), &cells), &regen, 0, &mut dice),
+            Err(NpcVidsExhausted)
+        );
+        let mut one = regen;
+        one.entry.max_count = 1;
+        assert_eq!(
+            respawner.respawn((&region(1), &cells), &one, 0, &mut dice),
+            Err(NpcVidsExhausted)
+        );
     }
 }

@@ -17,14 +17,15 @@
 //!
 //! # What is deliberately absent
 //!
-//! There is no Channel map set. The NPCs the regen files stand up at boot are here, but they
-//! never move or respawn; a click reaches their quests and then a keeper's shop, and a warp NPC
-//! sends the players near it on. This holds the pieces the item path, the shops, the quests, the
-//! warp NPCs and the map view need and nothing more, because each of the rest is a separate unit
-//! with its own decision to record.
+//! There is no Channel map set. The NPCs the regen files stand up at boot are here, and their
+//! regens spawn what is missing, but they never move or fight; an ore vein ends at its time, a
+//! click reaches their quests and then a keeper's shop, and a warp NPC sends the players near it
+//! on. This holds the pieces the item path, the shops, the quests, the warp NPCs, the regens and
+//! the map view need and nothing more, because each of the rest is a separate unit with its own
+//! decision to record.
 //! [`PulseProcessor::process_pulse`](crate::game_loop::PulseProcessor::process_pulse) steps
-//! only the events those pieces have: the ground items, the recovery, the distant trades and the
-//! warp NPCs.
+//! only the events those pieces have: the ground items, the recovery, the distant trades, the
+//! warp NPCs, the regens and the ore veins.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{BuildHasher, RandomState};
@@ -64,6 +65,7 @@ mod affect;
 mod fixtures;
 mod motion;
 mod quests;
+mod regen;
 mod safebox;
 mod shop;
 mod sync;
@@ -386,8 +388,9 @@ pub struct GameState {
     affect_sequence: u64,
     /// The NPCs standing on each map of each Channel, keyed by (Channel, map index).
     ///
-    /// Shared with the descriptor that shows them, because they never change once boot has
-    /// stood them up: nothing moves, respawns or removes an NPC yet.
+    /// Shared with the descriptor that shows them. A regen's spawn and a `Destroy` change a
+    /// map's list in place when nobody else holds it, and a copy of it otherwise, so a
+    /// descriptor keeps the list it was given.
     npcs: BTreeMap<(u8, i32), Arc<MapNpcs>>,
     /// The NPC shops, by keeper vnum.
     shops: Arc<gamedata::npc_shop::NpcShops>,
@@ -423,6 +426,8 @@ pub struct GameState {
     npc_of: HashMap<u32, (u8, i32, usize)>,
     /// Who targets whom (`m_pkChrTarget`, `m_set_pkChrTargetedBy`).
     targets: target::Targets,
+    /// The regen events and the ore veins' ends. See [`regen`].
+    regens: regen::Regens,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -501,6 +506,7 @@ impl GameState {
             view_radius: view_radius_of(DEFAULT_VIEW_RANGE),
             npc_of: HashMap::new(),
             targets: target::Targets::default(),
+            regens: regen::Regens::default(),
         }
     }
 
@@ -610,6 +616,7 @@ impl GameState {
         }
         self.npcs.insert(key, Arc::new(npcs));
         self.warp_npcs.insert(key, warps);
+        self.schedule_map(key, region);
     }
 
     /// The NPCs standing on one map of one Channel, or none for a map boot stood none up on.
@@ -1549,7 +1556,8 @@ impl PulseProcessor for GameState {
     ///
     /// Counts the Pulse, then runs the events that are due on it: the ground items whose
     /// lifetime ran out, the affect event of each character (the potion's recovery, the stamina
-    /// refill and the revive timer, `run_affect_events`) and the warp NPCs. Last, as
+    /// refill and the revive timer, `run_affect_events`), the warp NPCs, and the regen events and
+    /// ore veins' ends (`run_regens`). Last, as
     /// `CHARACTER_MANAGER::Update` comes after the heartbeat's events (`G/main.cpp:777-782`),
     /// each moving player steps. The count is also the only way a test can tell that the game
     /// thread owns this value.
@@ -1559,6 +1567,7 @@ impl PulseProcessor for GameState {
         self.destroy_expired(pulse);
         self.run_affect_events(pulse);
         self.run_warp_npcs(pulse);
+        self.run_regens(pulse);
         self.step_motion(pulse);
         self.broadcast_targets();
     }

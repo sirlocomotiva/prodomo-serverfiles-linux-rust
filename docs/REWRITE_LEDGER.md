@@ -27947,3 +27947,248 @@ Before 229g the counts were 121, 126, 1336, 6 and 56.
 
 No ADR changed. Under the standing staging rule (ledger 229d), `.scratch/equip/owner-questions.md`
 stays out of the commit.
+
+## 229h. The regen event: each regen runs on its timer and stands what it lacks, and an ore vein ends
+
+Legacy gives each timed regen entry a `regen_event` that reruns `regen_spawn(regen, false)` every
+`time` seconds, and gives each ore vein a `kill_ore_load_event` that destroys it 7 to 15 minutes
+after it stands. 229f stood every map's characters up once at boot and kept each regen with its
+count and its first fire's draw, but nothing read them: nothing respawned and an ore vein lived for
+ever. 229h ports `regen_event`, `kill_ore_load_event` and the part of `CHARACTER::Destroy` a
+non-player reaches today. `G/` below means `server/server/game/`.
+
+### 229h.1 What landed
+
+- **The units a regen lacks** (`world/src/npc.rs`): `Regen::missing` is legacy's
+  `max_count - count` (`G/regen.cpp:330`), 0 for a negative or exceeded maximum. Legacy's `num` is
+  a `DWORD`, so a count above the maximum would wrap to some four billion units; the Rewrite's
+  saturates. `regen_spawn` now takes the units to stand, which boot passes as `max_count` and a
+  later run as `missing()`.
+- **`Respawner`** (`world/src/npc.rs`, new): the spawner's tables (`Arc`s of the mob protos, the
+  mob groups and the locale names, which `main.rs`'s `NpcData` now holds) and the VID counter boot
+  left (`NpcSpawner::into_vids`). `respawn` runs `regen_spawn` for a regen's missing units on its
+  map's region and cells, drawing from the world's dice, and answers the characters that stood and
+  their count. VIDs go on from where boot stopped, so none is reused.
+- **The schedule** (`prodomo/src/game_state/regen.rs`, new):
+  - `Regens` keeps the respawner, the hosted cells, each map's region and the due events, a
+    `BTreeSet` of (Pulse, event): `Due::Vein(vid)` or `Due::Regen { channel, map, at }`.
+  - `stand_npcs` ends with `schedule_map`: each regen's first run `first_fire` seconds on (229f
+    drew it as `number(0, 16)` plus its time, `G/regen.cpp:688`) and each ore vein's end at its
+    drawn lifetime (`number(420, 900)` seconds, `G/char.cpp:2569`). A map stood again drops its
+    old runs.
+  - `process_pulse` runs `run_regens` after the warp NPCs: every event due on or before the Pulse,
+    in (Pulse, event) order.
+  - `fire_regen` is `regen_event` (`G/regen.cpp:582-599`): it schedules the next run `time` seconds
+    on, returns when the regen lacks nothing, and otherwise respawns. `stand_more` adds what stood
+    to the map's list (copy on write, `Arc::make_mut`), indexes each VID, shows each in the view,
+    which sends its insert to each player that now sees it, schedules a new vein's end, starts a
+    warp or goto NPC's event, and adds the count.
+  - `install_respawner` hands the world the respawner and the cells; `main.rs`'s `stand_up_npcs`
+    calls it after boot. Until then a run spawns nothing.
+- **`Destroy` of a non-player** (`GameState::destroy_npc`), in legacy's order
+  (`G/char.cpp:572-790`): a VID that names nothing is refused (`G/char_manager.cpp:131-136`); its
+  regen counts one fewer (`:572-583`); each character following it follows no one, as a group
+  master's party is deleted (`:661-676`); `ClearTarget` sends VID 0 to each one targeting it
+  (`:654`); each viewer is sent its removal (`:786-789`); the VID index and the map's list let it
+  go, the last character taking its place; and the warp list drops it. An ore vein's end calls it.
+- `WarpNpc::vid` and `target::target_record` are now visible to the module.
+
+### 229h.2 What the client sees
+
+- Nothing new on a map whose regens are full, which is every regen boot stood completely: each
+  run finds nothing missing. A unit boot could not place (236 on Channel 1, 229f) is tried again
+  on each run, as legacy does, and appears in view when a try succeeds.
+- An ore vein disappears 7 to 15 minutes after it stands: a player that targeted it gets
+  `GC_TARGET` with VID 0, each viewer gets its `GC_CHARACTER_DEL`, and at its regen's next run a
+  new vein stands in the regen's box with a new VID and its own lifetime.
+
+### 229h.3 Divergences and Defects
+
+- **V16 (new).** The events due on one Pulse run by Pulse, an ore vein's end before a regen, then
+  by VID or by map and entry, where legacy runs its event heap's order. A map keeps its
+  non-players in a list, and a destroyed one's place is taken by the last; only the Rewrite's own
+  index sees the list. A run whose VIDs are exhausted logs a warning and stands nothing.
+- **A legacy Defect not reproduced.** `regen_spawn`'s `num` is `DWORD` (`G/regen.cpp:326-330`),
+  so a count above the maximum would make one run spawn about four billion units. Nothing in
+  legacy is known to raise the count past it, but `--m_pkRegen->count` is marked "Is this really
+  safe?" (`G/char.cpp:580`). The Rewrite's `missing()` saturates at 0, under the owner's standing
+  decision to fix legacy bugs directly (2026-10-14).
+
+### 229h.4 Not ported yet
+
+- The dungeon regen (`dungeon_regen_event`, `G/regen.cpp:493`), its `IsValidRegen` check and
+  `DeadCharacter`: there are no dungeons yet.
+- Every other part of `Destroy`: a non-player has no shop, exchange, safebox, horse, pet, affect or
+  skill event yet, and no state machine, stone or victim. A group's party is not kept, only each
+  member's leader.
+- Every other way a non-player ends: nothing dies yet, so only an ore vein's end makes room for a
+  respawn.
+
+### 229h.5 The owner's decision on proofs
+
+The owner decided on 2026-10-14 that an in-memory test is enough to prove a Parity row where a
+binary scenario is impractical, and that bugs and backdoors found in the original are fixed
+directly. An ore vein lives 7 to 15 minutes and no config shortens it. So
+`event.char.kill_ore_load_event` is `ported` on the world test
+`an_ore_vein_ends_at_its_time_and_its_regen_stands_another`. `.scratch/parity/spec.md` now
+allows a `path::name` scenario cell. `inventory_rows_keep_the_rules` checks the file holds
+`#[test] fn name()`, through `scenario_problem` and its own test
+`a_scenario_cell_names_a_scenario_here_or_a_world_test_by_its_path`. The decision is also in
+`.scratch/equip/owner-questions.md` under "Standing decisions".
+
+### 229h.6 Scenario and parity inventory
+
+- The parity scenarios go from 87 to 88: `a_full_regen_stands_nothing_more_each_time_it_runs`.
+  The stray dog (`1s`, one unit) stands at boot; Alpha, by it for 19 seconds, which covers its
+  first run (at most 17 seconds) and at least one more, gets no second insert at its point.
+  `Keyed::inserts_for` reads every insert of a window. It accepts what `quiet_for` accepts, and a
+  stamina refill.
+- The parity suite also gains `a_scenario_cell_names_a_scenario_here_or_a_world_test_by_its_path`,
+  which checks the cell rule against a scenario, a world test, and three nonsense names.
+- Unit tests:
+  - `world/src/npc.rs`: 4, so 32 became 36: the units a regen lacks over six counts, a respawn
+    standing the missing units from the VIDs boot left, a respawned vein's draws (point, rotation
+    and lifetime) and a respawn past the last VID.
+  - `prodomo/src/game_state/regen.rs` (new): 8, covering:
+    - a regen's first run, standing two of three units, each indexed at its own place, and its
+      later runs every `time` seconds, not every `first_fire`;
+    - an ore vein's end and its respawn;
+    - a destroyed character's place and its followers;
+    - a destroyed and a respawned warp NPC;
+    - a world with no respawner;
+    - a replaced map;
+    - the due order.
+  - `prodomo/src/main.rs`: 1, `boot_hands_the_regens_their_spawner_and_the_vids_it_left`: boot
+    stands a vein; after 15 minutes and a second of Pulses, a new vein stands under the next VID.
+- Parity rows:
+  - `event.regen.regen_event` (`timed-events.md:97`) moves from missing to `ported` with the
+    scenario.
+  - `event.char.kill_ore_load_event` (`timed-events.md:32`) moves from missing to `ported` with
+    the world test (229h.5).
+  - `sys.world.regen` (`systems.md:35`) stays `partial`; its note names the two rows and what is
+    left (the dungeon regen, deaths).
+- Parity counts (`python3 .scratch/tmp/tools/parity_counts.py`), out of 1645 rows:
+
+  | | ported | partial | missing | unused | codec |
+  |---|---|---|---|---|---|
+  | before 229h | 125 | 127 | 1332 | 6 | 55 |
+  | after 229h | 127 | 127 | 1330 | 6 | 55 |
+
+### 229h.7 Corrections, findings and controls
+
+- **The draft's vein test read a stamina refill.** The world fixture entered its player at stamina
+  800 against a maximum of 820, so the refill of 229d reached the inbox at Pulse 75, inside the
+  vein's quiet window. The regen tests enter the player above its maximum. This is the same
+  record 229g.7 found in the binary.
+- **A boot-wiring mutant cannot be seen from the binary.** Without a death, a binary scenario sees
+  a respawn only after a vein's 7 to 15 minutes. `boot_hands_the_regens_their_spawner_and_the_vids_it_left`
+  runs `stand_up_npcs` itself and pulses its world past a vein's life.
+- **229g's refill skip had a gap.** `Keyed::quiet_for` sizes each record from its header before it
+  asks whether the record may arrive, and its table had no `GC_CHARACTER_POINT_CHANGE`. So a refill
+  inside a quiet window still panicked with "header 17", before `is_stamina_refill` was asked. The
+  sweep's baseline failed on `a_pose_reaches_the_view_including_its_sender` this way. Three parity
+  suites run at once reproduced it, in that scenario and in `a_shout_reaches_its_empire_on_every_channel`.
+  The table now sizes the record, and only a refill passes. The 229g gates passed because no
+  refill landed in a quiet window that time.
+- **The revive's end inside a move.** Under the same load, `an_armour_is_worn_swapped_and_taken_off_and_the_store_follows`
+  read the revive affect's `GC_AFFECT_REMOVE`, which comes 5 seconds after entry, inside a move's
+  window ("a record nobody accounted for in a move: header 127"). This was the "armour" flake of
+  the 229g sweep. `read_a_move_within` now skips it through `is_revive_end`, which
+  `Keyed::timer_record` also uses. At three suites at once, two other scenarios still fail:
+  - two scenarios about the 5-second window itself (`a_look_change_inside_the_window_carries_the_flag`
+    and `a_walking_dagger_wearer_moves_at_its_dualhand_walk_clip`);
+  - every scenario whose server takes too long to log "Accepting clients".
+
+  Both are overload, not records. The logs are in `.scratch/tmp/l229h/load/`.
+- **The first sweep pass ran on stale test binaries.** The copy's `target/` was moved from the
+  229g sweep's directory. `env!("CARGO_MANIFEST_DIR")` in the gamedata tests still named the old
+  path, so the baseline failed before any mutant ran. `cargo clean` of the nine workspace crates in
+  the copy fixed it. That pass's logs are in `.scratch/tmp/l229h/sweep/first/`.
+
+Controls for the counts and the negative claims. The Rust searches cover `prodomo/src`,
+`world/src`, `gamedata/src`, `common/src` and `protocol/src`; the legacy searches read
+`server/server/game/` with `grep -a`.
+
+| claim | search | result | positive control | nonsense control |
+|---|---|---|---|---|
+| legacy runs two regen events | `event_create(regen_event\|event_create(dungeon_regen_event` | `regen.cpp:688` and `:493` | `event_create(` over `*.cpp`: 129 | `zzqx_ledger_nonsense_229h` in `server/server/game`: 0 |
+| an ore vein's end is created once | `kill_ore_load_event` | its definition at `char.cpp:2447` and its `event_create` at `:2569` | as the result: the two lines | as above: 0 |
+| four places give a character its regen | `SetRegen(` | `char_manager.cpp:567`, `:657`, `regen.cpp:321`, `:381`, and the definition at `char.cpp:6133` | as the result | as above: 0 |
+| only an ore vein's end destroys a non-player | `destroy_npc(` outside tests | `regen.rs:154`, the `Due::Vein` arm | the six test calls `world.destroy_npc` | `zzqx_ledger_nonsense_229h` in the five Rust trees: 0 |
+
+### 229h.8 Review and mutation sweep
+
+The 33 mutants of `.scratch/tmp/tools/mutants229h.py` ran as two shards of `mutate_v2.py` on a tar
+copy of the final code (`sweep229h/tree0`), one shard at a time. The 33 are:
+
+- 22 in `prodomo/src/game_state/regen.rs`;
+- 1 in `prodomo/src/game_state/warp_npc.rs`;
+- 6 in `world/src/npc.rs`;
+- 2 in `prodomo/src/game_state.rs`;
+- 2 in `prodomo/src/main.rs`.
+
+The `PARITY_OK` floor was raised from 87 to 89 passing parity tests: the new scenario and the cell
+rule's test. With `CHECK=1` the driver asserted that each mutant's old text occurs exactly once in
+its file, before the file's test module; all 33 passed.
+
+The sweep took three passes:
+
+1. **The first pass** is in `first/`. Shard 0's baseline failed on stale test binaries (229h.7), so
+   none of its mutants ran. Shard 1, with `BASELINE=0`, ran its 16: 14 killed and 2 survived.
+2. **After the survivors were closed**, shard 1 was rerun and killed all 16. Shard 0's baseline then
+   failed again, on `a_pose_reaches_the_view_including_its_sender` and the refill gap of 229h.7.
+3. **After the harness fixes**, shard 0 ran from a clean baseline (`baseline ok`, parity at least 89)
+   and killed all 17.
+
+Shard 1's final pass ran before those two harness fixes, which touch only `prodomo/tests/parity.rs`.
+Every shard 1 kill came from unit tests, none from parity. The copy was compared file by file with
+main before the last pass.
+
+All 33 are killed: 31 by the unit tests of `regen.rs` and `npc.rs`, and the two `main.rs` mutants by
+`boot_hands_the_regens_their_spawner_and_the_vids_it_left`. No mutant failed to compile, so every
+kill is semantic. No kill came from a parity scenario. `a_full_regen_stands_nothing_more_each_time_it_runs`
+checks the steady state, which the unit tests reach first.
+
+| survivor | shard | what it did | closed by |
+|---|---|---|---|
+| `rg_next_as_first_fire` | 1 | the next run `first_fire` seconds on instead of `time` | `a_regen_first_runs_at_its_draw_and_then_spawns_only_what_it_lacks` now reads the due run at Pulse 130: 175 every 2 seconds, 150 with the mutant. At Pulse 200 both gave 225 (75 + 3 × 50 = 75 + 2 × 75). |
+| `rg_more_index_first` | 1 | every respawned unit indexed at the first new place | the same test now stands two of three units and checks each one's place in `npc_of` |
+
+The rerun log is `shard1.log`; the first pass's logs are `first/shard0.log` and `first/shard1.log`,
+and the pose failure's is `first/shard0-pose.log`.
+
+### 229h.9 Receipt
+
+The count went from 3297 to 3312, +15. The changes by file:
+
+- `world/src/npc.rs`: 4 unit tests, so 32 became 36.
+- `prodomo/src/game_state/regen.rs` (new): 8 unit tests.
+- `prodomo/src/main.rs`: 1 unit test, so 1 became 2.
+- `prodomo/tests/parity.rs`: 1 scenario and the cell rule's test, so the suite runs 89, not 87.
+  `is_revive_end` is a helper, not a test.
+
+The gates ran on the final tree once and passed everything. Their summary is `gates229h/gates.summary`,
+copied to `.scratch/tmp/l229h/gates/`.
+
+| gate | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| build, workspace | clean, 0 warnings |
+| clippy, workspace, all targets, `-D warnings` | clean |
+| test, workspace, all targets, with `DATABASE_URL` | 3312 passed, 0 failed, 38 suites |
+| test, the same with `DATABASE_URL` unset | 3312 passed, 0 failed, 38 suites |
+| doc tests | 1 passed, 0 failed, 19 ignored |
+| rustdoc, warnings denied | clean |
+| scratch databases left behind | 0 |
+| `*.core` outside `target/` | 0 |
+
+Counted the way the gates count it, the workspace has 255 Rust files and 192,596 lines outside
+`server/` and `.scratch/`. The 229g receipt had 254 files and 191,473 lines. The toolchain is
+Rust 1.85.1 with `clippy 0.1.85` and `rustfmt 1.8.0`, called as `/usr/bin/cargo-clippy` and
+`/usr/bin/cargo-fmt`. No crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Parity after 229h: 127 ported, 127 partial, 1330 missing, 6 unused and 55 codec, out of 1645 rows.
+Before 229h the counts were 125, 127, 1332, 6 and 55.
+
+No ADR changed. `.scratch/parity/spec.md` gained the world-test rule of 229h.5. Under the standing
+staging rule (ledger 229d), `.scratch/equip/owner-questions.md` stays out of the commit.

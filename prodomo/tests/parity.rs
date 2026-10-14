@@ -181,6 +181,40 @@ fn unregistered_header() -> u8 {
         .expect("some header byte is unregistered")
 }
 
+/// Why a `ported` row's scenario cell names no test, or `None` when it names one.
+///
+/// A bare name is a scenario in this file. A `path::name` cell names a world test in the file
+/// at `path`, relative to the workspace root: the owner accepts one where a binary scenario is
+/// impractical, such as an ore vein's 7 to 15 minute life (2026-10-14, `.scratch/parity/spec.md`).
+fn scenario_problem(cell: &str) -> Option<String> {
+    let Some((path, name)) = cell.rsplit_once("::") else {
+        let signature = format!("fn {cell}()");
+        return (!SCENARIOS.contains(&signature)).then(|| {
+            format!("names `{cell}`, which is not a scenario in prodomo/tests/parity.rs")
+        });
+    };
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(path);
+    let Ok(text) = std::fs::read_to_string(&source) else {
+        return Some(format!(
+            "names `{path}`, which is not a file of the workspace"
+        ));
+    };
+    let marker = format!("#[test]\n    fn {name}() {{");
+    (!text.contains(&marker)).then(|| format!("names `{name}`, which is not a test in `{path}`"))
+}
+
+#[test]
+fn a_scenario_cell_names_a_scenario_here_or_a_world_test_by_its_path() {
+    assert_eq!(scenario_problem("inventory_rows_keep_the_rules"), None);
+    let world = "prodomo/src/game_state/regen.rs::\
+                 an_ore_vein_ends_at_its_time_and_its_regen_stands_another";
+    assert_eq!(scenario_problem(world), None);
+    // Controls: an unknown name, a helper that is not a test, and a file that does not exist.
+    assert!(scenario_problem("zzqx_no_such_scenario").is_some());
+    assert!(scenario_problem("prodomo/src/game_state/regen.rs::a_map").is_some());
+    assert!(scenario_problem("prodomo/src/zzqx.rs::a_map").is_some());
+}
+
 #[test]
 fn inventory_rows_keep_the_rules() {
     let rows = inventory::load(&inventory_dir()).unwrap_or_else(|problems| {
@@ -198,12 +232,8 @@ fn inventory_rows_keep_the_rules() {
         .map(ToString::to_string)
         .collect();
     for row in rows.iter().filter(|row| row.status == Status::Ported) {
-        let signature = format!("fn {}()", row.scenario);
-        if !SCENARIOS.contains(&signature) {
-            problems.push(format!(
-                "{}: `{}` names `{}`, which is not a scenario in prodomo/tests/parity.rs",
-                row.file, row.id, row.scenario
-            ));
+        if let Some(problem) = scenario_problem(&row.scenario) {
+            problems.push(format!("{}: `{}` {problem}", row.file, row.id));
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
@@ -1975,9 +2005,7 @@ impl Keyed {
     /// else's to see end.
     fn timer_record(&mut self, record: &[u8]) -> bool {
         match record[0] {
-            GC_AFFECT_REMOVE => {
-                record[1..5] == AFFECT_REVIVE_INVISIBLE.to_le_bytes() && record[5] == 0
-            }
+            GC_AFFECT_REMOVE => is_revive_end(record),
             GC_CHARACTER_UPDATE => {
                 let vid: [u8; 4] = record[1..5].try_into().expect("a VID");
                 let flags = &record[20..28];
@@ -2056,6 +2084,9 @@ impl Keyed {
                 GC_CHARACTER_ADD => CHARACTER_ADD_LEN,
                 GC_CHAR_ADDITIONAL_INFO => CHAR_ADDITIONAL_INFO_LEN,
                 GC_CHARACTER_DEL => 1 + 4,
+                // Sized so that `is_stamina_refill` below can judge it; any other point
+                // change fails there.
+                GC_POINT_CHANGE => POINT_CHANGE_LEN,
                 other => panic!(
                     "only a ping may arrive while nothing is expected ({note}): header {other}"
                 ),
@@ -6452,6 +6483,9 @@ fn read_a_move_within(keyed: &mut Keyed, vid: u32, window: Duration) -> Vec<Seen
     assert_eq!(quiet, Quiet::Open);
     records
         .iter()
+        // The revive affect's end reaches the mover five seconds after its entry, wherever a
+        // slow run has got to by then; a scenario about the affect reads it itself.
+        .filter(|record| !is_revive_end(record))
         .map(|record| match record.first().copied().unwrap_or_default() {
             ITEM_SET => {
                 let (window, cell, vnum, _count) = set_fields(record);
@@ -8299,6 +8333,14 @@ fn revive_width(header: u8) -> usize {
     }
 }
 
+/// Whether `record` is the revive-invisible affect's `GC_AFFECT_REMOVE` (type 215, apply 0),
+/// as [`Keyed::timer_record`] reads it.
+fn is_revive_end(record: &[u8]) -> bool {
+    record.first() == Some(&GC_AFFECT_REMOVE)
+        && record.get(1..5) == Some(&AFFECT_REVIVE_INVISIBLE.to_le_bytes()[..])
+        && record.get(5) == Some(&0)
+}
+
 /// Whether `record` is a `GC_CHARACTER_POINT_CHANGE` of `POINT_STAMINA`.
 ///
 /// A character below its maximum stamina that has stood still for three seconds is sent its
@@ -8814,4 +8856,77 @@ fn a_click_targets_a_monster_and_a_player_and_a_leave_clears_it() {
     drop(yankee);
     assert_eq!(alpha_keyed.read_game(), target_of(0, 0, 0, 0, 0));
     alpha_keyed.sees_leave(yankee_listed.id);
+}
+
+impl Keyed {
+    /// The `GC_CHARACTER_ADD` records that arrive within `window`, in order, with every record
+    /// [`Keyed::quiet_for`] accepts noted as it notes them; anything else panics.
+    fn inserts_for(&mut self, note: &str, window: Duration) -> Vec<Vec<u8>> {
+        let deadline = std::time::Instant::now() + window;
+        let mut inserts = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            let (records, quiet) = self.drain_game(left, |header| match header {
+                GC_PING => 1,
+                GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
+                GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+                GC_CHARACTER_ADD => CHARACTER_ADD_LEN,
+                GC_CHAR_ADDITIONAL_INFO => CHAR_ADDITIONAL_INFO_LEN,
+                GC_CHARACTER_DEL => 1 + 4,
+                GC_POINT_CHANGE => POINT_CHANGE_LEN,
+                other => panic!("an unexpected record ({note}): header {other}"),
+            });
+            assert_eq!(quiet, Quiet::Open, "{note} closed the connection");
+            for record in records {
+                let _monster = self.monster_record(&record);
+                assert!(
+                    record[0] != GC_POINT_CHANGE || is_stamina_refill(&record),
+                    "only a stamina refill may change a point ({note}): {record:02x?}"
+                );
+                if record[0] == GC_CHARACTER_ADD {
+                    inserts.push(record);
+                }
+            }
+        }
+        inserts
+    }
+}
+
+/// Ledger 229h: `regen_event` (`G/regen.cpp:582-599`), which runs `regen_spawn(regen, false)`
+/// `number(0, 16)` plus its time seconds after boot and every `time` seconds after.
+///
+/// The stray dog's entry (`1s`, one unit) first runs within 17 seconds of boot and then every
+/// second. Its count is full, so each run spawns `max_count - count`, none: Alpha, standing by
+/// the dog for 19 seconds, is sent no second insert at its point. The respawn after a `Destroy`
+/// is the world test `an_ore_vein_ends_at_its_time_and_its_regen_stands_another`; nothing in the
+/// binary dies yet, and an ore vein ends 7 to 15 minutes after it stands.
+#[test]
+fn a_full_regen_stands_nothing_more_each_time_it_runs() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t600\t525\t0\t0\t0\t1\t1s\t100\t1\t101\n",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alice);
+    let dogs = |inserts: &[Vec<u8>]| {
+        inserts
+            .iter()
+            .filter(|insert| inserted_at(insert) == DOG_AT)
+            .count()
+    };
+    assert_eq!(dogs(&entered.shown.monsters), 1, "boot stood the dog");
+
+    // When: the dog's regen runs, at least twice. Then: no second dog.
+    let inserts = alice.inserts_for("the dog's regen runs", Duration::from_secs(19));
+    assert_eq!(dogs(&inserts), 0, "a full regen stands nothing more");
 }
