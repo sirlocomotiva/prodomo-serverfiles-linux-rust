@@ -457,6 +457,7 @@ mod tests {
             moving_speed: 0,
             attack_speed: 0,
             name: name.to_vec(),
+            ..world::npc::Npc::default()
         }
     }
 

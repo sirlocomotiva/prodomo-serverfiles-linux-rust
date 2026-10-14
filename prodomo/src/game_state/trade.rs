@@ -977,6 +977,7 @@ mod tests {
                 .chain(others.iter().cloned())
                 .collect(),
             positions: Vec::new(),
+            regens: Vec::new(),
         }
     }
 
@@ -1019,6 +1020,7 @@ mod tests {
             moving_speed: 0,
             attack_speed: 0,
             name: Vec::new(),
+            ..world::npc::Npc::default()
         }
     }
 

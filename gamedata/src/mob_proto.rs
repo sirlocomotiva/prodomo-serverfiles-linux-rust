@@ -116,6 +116,10 @@ pub const BATTLE_TYPE: &[&str] = &[
 /// `get_Mob_Size_Value` (`ProtoReader.cpp:656-676`). The value is the index plus one.
 pub const SIZE: &[&str] = &["SMALL", "MEDIUM", "BIG"];
 
+/// `AIFLAG_AGGRESSIVE` (`common/length.h:686-700`): the bit [`AI_FLAG`]'s `AGGR` sets, which
+/// `IsAggressive` reads and `SetAggressive` sets.
+pub const AIFLAG_AGGRESSIVE: u32 = 1;
+
 /// `get_Mob_AIFlag_Value` (`ProtoReader.cpp:678-702`), bit by bit.
 pub const AI_FLAG: &[&str] = &[
     "AGGR",
@@ -576,7 +580,7 @@ pub(crate) fn strtol(field: &[u8]) -> i32 {
 ///
 /// A magnitude past the type is `ULONG_MAX`, and a negative one is negated in the type, so `-1` is
 /// `0xFFFF_FFFF`.
-fn strtoul(field: &[u8]) -> u32 {
+pub(crate) fn strtoul(field: &[u8]) -> u32 {
     let (negative, digits) = sign_and_digits(field);
     match u32::try_from(magnitude(digits)) {
         Ok(value) if negative => value.wrapping_neg(),

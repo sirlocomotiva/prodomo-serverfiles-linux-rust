@@ -37,6 +37,7 @@ use gamedata::locale_string::LocaleStrings;
 use gamedata::map_atlas::MapRegion;
 use gamedata::regen::RegenEntry;
 use gamedata::server_attr::SectreeGrid;
+use world::cells::MapCells;
 use world::character::{
     drop_item, move_item, pickup_item, use_item, CharacterManager, CharacterManagerError, DropAt,
     Gear, GroundItem, MoveRefused, MoveRequest, MoveRules, Pcg32, Picker, Rejected, Side,
@@ -554,11 +555,12 @@ impl GameState {
         self
     }
 
-    /// Stand up the NPCs one map's regen entries name, on one Channel, drawing from this
-    /// state's own dice as legacy's boot draws from `thecore_random`.
+    /// Stand up the characters one map's regen entries name, on one Channel, on the map's
+    /// cells, drawing from this state's own dice as legacy's boot draws from `thecore_random`:
+    /// its NPCs, warps and gotos, its monsters, groups and stones, and its ore veins.
     ///
     /// Called once per map before the thread starts. A second call for the same map replaces
-    /// its NPCs; their VIDs are not reused.
+    /// its characters; their VIDs are not reused.
     ///
     /// # Errors
     ///
@@ -567,10 +569,10 @@ impl GameState {
         &mut self,
         spawner: &mut NpcSpawner<'_>,
         channel: u8,
-        region: &MapRegion,
+        (region, cells): (&MapRegion, &MapCells),
         entries: &[RegenEntry],
     ) -> Result<(), NpcVidsExhausted> {
-        let npcs = spawner.spawn_map(region, entries, &mut self.dice)?;
+        let npcs = spawner.spawn_map(region, cells, entries, &mut self.dice)?;
         self.stand_npcs(channel, region, npcs);
         Ok(())
     }
@@ -3571,6 +3573,15 @@ mod tests {
         }
     }
 
+    /// The cells of [`an_npc_map`]: one open sectree.
+    fn open_cells() -> MapCells {
+        use gamedata::server_attr::{CellBlock, ServerAttr, SECTREE_CELLS};
+        let block = CellBlock::from_cells(&vec![0; SECTREE_CELLS * SECTREE_CELLS]);
+        let attr = ServerAttr::from_blocks(1, 1, vec![block]).expect("one block");
+        let grid = SectreeGrid::of(&an_npc_map(1)).expect("placed");
+        MapCells::new(grid, Arc::new(attr))
+    }
+
     fn a_smith_at(x: i32, y: i32) -> RegenEntry {
         RegenEntry {
             kind: gamedata::regen::RegenKind::Mob,
@@ -3589,6 +3600,7 @@ mod tests {
     /// Boot stands the NPCs up per (Channel, map), and `NpcsOn` shares the same table.
     #[test]
     fn the_npcs_boot_stood_up_are_shared_per_channel_and_map() {
+        use gamedata::mob_group::MobGroups;
         use gamedata::mob_locale_names::MobLocaleNames;
         use gamedata::mob_proto::{MobProto, MobProtos, CHAR_TYPE_NPC};
         use gamedata::records::MobTableRecord;
@@ -3603,14 +3615,16 @@ mod tests {
             },
         }]);
         let names = MobLocaleNames::parse(b"VNUM\tNAME\n20016\tSmith\n").unwrap();
-        let mut spawner = NpcSpawner::new(&protos, &names, NpcVids::default());
+        let groups = MobGroups::default();
+        let mut spawner = NpcSpawner::new(&protos, &groups, &names, NpcVids::default());
         let mut state = a_state();
         let entries = [a_smith_at(10_100, 20_100), a_smith_at(10_200, 20_200)];
+        let cells = open_cells();
         state
-            .spawn_npcs(&mut spawner, 2, &an_npc_map(1), &entries)
+            .spawn_npcs(&mut spawner, 2, (&an_npc_map(1), &cells), &entries)
             .expect("VIDs to spare");
         state
-            .spawn_npcs(&mut spawner, 2, &an_npc_map(41), &entries[..1])
+            .spawn_npcs(&mut spawner, 2, (&an_npc_map(41), &cells), &entries[..1])
             .expect("VIDs to spare");
 
         let first = state.npcs_on(2, 1);
@@ -3710,6 +3724,7 @@ mod tests {
             moving_speed: 0,
             attack_speed: 0,
             name: Vec::new(),
+            ..world::npc::Npc::default()
         }
     }
 
@@ -3717,6 +3732,7 @@ mod tests {
         MapNpcs {
             npcs,
             positions: Vec::new(),
+            regens: Vec::new(),
         }
     }
 

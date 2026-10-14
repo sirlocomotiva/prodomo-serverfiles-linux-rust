@@ -563,6 +563,7 @@ mod tests {
             moving_speed: 0,
             attack_speed: 0,
             name: b"a3 4002 8995".to_vec(),
+            ..world::npc::Npc::default()
         };
         let warp = npc(0x8000_0001, gamedata::mob_proto::CHAR_TYPE_WARP);
         let smith = npc(0x8000_0002, gamedata::mob_proto::CHAR_TYPE_NPC);
@@ -572,6 +573,7 @@ mod tests {
             std::sync::Arc::new(MapNpcs {
                 npcs: vec![warp.clone(), smith.clone()],
                 positions: Vec::new(),
+                regens: Vec::new(),
             }),
         );
         let _ = world.npc_of.insert(warp.vid, (key.0, key.1, 0));

@@ -308,8 +308,10 @@ pub struct Neighbourhood {
 /// (`CHARACTER::EncodeInsertPacket`, `G/char.cpp:1060-1110`).
 ///
 /// The type is the proto's, the angle its rotation, the z its spawn's, and the race the vnum's
-/// low 16 bits. The speeds are its limited points. It has no affect, and no state flag: a regen
-/// NPC spawns without the spawn motion, and `Show` clears that bit once the record is written.
+/// low 16 bits. The speeds are its limited points. The affects are its own: a stone or a
+/// monster shown with the spawn motion keeps `AFF_SPAWN` (`G/char.cpp:1886-1887`), which
+/// nothing resets. It has no state flag: `Show` clears `ADD_CHARACTER_STATE_SPAWN` once the
+/// record is written (`:1913`), before any client can enter its view.
 #[must_use]
 pub fn npc_add(npc: &Npc) -> GcCharacterAdd {
     GcCharacterAdd::new(
@@ -323,7 +325,7 @@ pub fn npc_add(npc: &Npc) -> GcCharacterAdd {
         npc.moving_speed,
         npc.attack_speed,
         0,
-        [0, 0],
+        npc.affect_flags,
     )
 }
 
@@ -1107,6 +1109,7 @@ mod tests {
                     y: 23_456,
                 },
             ],
+            regens: Vec::new(),
         }
     }
 
@@ -1878,6 +1881,7 @@ mod tests {
             moving_speed: 120,
             attack_speed: 90,
             name: b"Fierar".to_vec(),
+            ..world::npc::Npc::default()
         }
     }
 

@@ -13,6 +13,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use gamedata::mob_proto::{CHAR_TYPE_MONSTER, CHAR_TYPE_STONE};
 use parity::client::Quiet;
 use parity::inventory::{self, Status};
 use parity::server::default_channels;
@@ -795,6 +796,9 @@ struct Keyed {
     /// The VIDs whose revive-invisible timer this connection has seen the entry of and not yet
     /// the expiry of. [`Keyed::timer_record`] keeps it.
     timers: Vec<[u8; 4]>,
+    /// The VIDs of the monsters and stones in this connection's view, which
+    /// [`Keyed::monster_record`] keeps.
+    monsters: Vec<[u8; 4]>,
 }
 
 impl Keyed {
@@ -810,6 +814,7 @@ impl Keyed {
             channel_number: 1,
             walking: true,
             timers: Vec::new(),
+            monsters: Vec::new(),
         }
     }
 
@@ -1726,8 +1731,11 @@ fn enter_game_shown(keyed: &mut Keyed) -> Entered {
 /// moving player's `GC_MOVE` and walk mode, the walk mode of a walking entrant, each item lying
 /// in view as its `GC_ITEM_GROUND_ADD`, and then the map's NPC list when the map has one.
 struct Shown {
-    /// The insert and summary records, in the order they arrived.
+    /// The insert and summary records, in the order they arrived, but a monster's or a stone's.
     records: Vec<Vec<u8>>,
+    /// The inserts of the monsters, stones and veins, in the order they arrived
+    /// ([`Keyed::monster_record`]).
+    monsters: Vec<Vec<u8>>,
     /// The `GC_NPC_POSITION` record, when the map lists any NPC.
     list: Option<Vec<u8>>,
     /// The entrant's own `GC_CHARACTER_UPDATE`, which the burst sends after the map's list and
@@ -1773,6 +1781,15 @@ impl Shown {
         assert_eq!(info[1..5], id, "the summary's vid");
         (self.records[at].clone(), info)
     }
+}
+
+/// Whether the `GC_CHARACTER_ADD` `insert` is of a character the boot dice placed: a monster,
+/// a stone, or an ore vein of `world::npc`'s `ORE_VEINS`, races 20047-20059 and 30301-30306.
+fn is_boot_drawn(insert: &[u8]) -> bool {
+    let race = u16::from_le_bytes([insert[22], insert[23]]);
+    matches!(insert[21], CHAR_TYPE_MONSTER | CHAR_TYPE_STONE)
+        || (20_047..=20_059).contains(&race)
+        || (30_301..=30_306).contains(&race)
 }
 
 /// `[6f, vid, 00]`: the run walk mode of the character under the little-endian `vid`, the only
@@ -1844,14 +1861,21 @@ fn stamina(database: &ScratchDatabase, name: &str, value: i32) {
 /// Read what [`Shown`] describes, answering it with the record that follows it.
 fn read_shown(keyed: &mut Keyed) -> (Shown, Vec<u8>) {
     let mut records = Vec::new();
+    let mut monsters = Vec::new();
     let mut next = keyed.read_game_raw();
     while matches!(
         next[0],
         GC_CHARACTER_ADD | GC_CHAR_ADDITIONAL_INFO | GC_MOVE | GC_WALK_MODE | GROUND_ADD
     ) {
-        // Noted, so the expiry of an insert that carries the revive flag is recognised.
-        keyed.timer_record(&next);
-        records.push(next);
+        if keyed.monster_record(&next) {
+            if next[0] == GC_CHARACTER_ADD {
+                monsters.push(next);
+            }
+        } else {
+            // Noted, so the expiry of an insert that carries the revive flag is recognised.
+            keyed.timer_record(&next);
+            records.push(next);
+        }
         next = keyed.read_game_raw();
     }
     let list = if next[0] == GC_NPC_POSITION {
@@ -1879,6 +1903,7 @@ fn read_shown(keyed: &mut Keyed) -> (Shown, Vec<u8>) {
     (
         Shown {
             records,
+            monsters,
             list,
             update,
         },
@@ -1985,7 +2010,8 @@ impl Keyed {
     }
 
     /// Assert that nothing but a `GC_PING` cycle arrives, and absorb the revive timer's own
-    /// records ([`Keyed::timer_record`]).
+    /// records ([`Keyed::timer_record`]) and the view records of the monsters, stones and veins
+    /// a walk's last sample brought in or took out ([`Keyed::monster_record`]).
     ///
     /// A ping is on its own timer and says nothing about the record just sent, so a ping
     /// inside the window is not an answer. Anything else is. The window's bytes are walked as
@@ -2025,6 +2051,9 @@ impl Keyed {
                 GC_PING => 1,
                 GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
                 GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+                GC_CHARACTER_ADD => CHARACTER_ADD_LEN,
+                GC_CHAR_ADDITIONAL_INFO => CHAR_ADDITIONAL_INFO_LEN,
+                GC_CHARACTER_DEL => 1 + 4,
                 other => panic!(
                     "only a ping may arrive while nothing is expected ({note}): header {other}"
                 ),
@@ -2035,7 +2064,7 @@ impl Keyed {
             );
             let record = &plain[at..at + width];
             assert!(
-                header == GC_PING || self.timer_record(record),
+                header == GC_PING || self.monster_record(record) || self.timer_record(record),
                 "only a ping may arrive while nothing is expected ({note}): {record:02x?}"
             );
             at += width.div_ceil(8) * 8;
@@ -2068,15 +2097,43 @@ impl Keyed {
         record
     }
 
-    /// Read the next loading or enter-game record that is not the revive timer's own: those
-    /// are noted by [`Keyed::timer_record`] and skipped. A scenario that checks the timer reads
-    /// with [`Keyed::read_game_raw`] instead.
+    /// Read the next loading or enter-game record that is not the revive timer's own nor a
+    /// monster's: those are noted by [`Keyed::timer_record`] and [`Keyed::monster_record`] and
+    /// skipped. A scenario that checks the timer reads with [`Keyed::read_game_raw`] instead.
     fn read_game(&mut self) -> Vec<u8> {
         loop {
             let record = self.read_game_raw();
-            if !self.timer_record(&record) {
+            if !self.monster_record(&record) && !self.timer_record(&record) {
                 return record;
             }
+        }
+    }
+
+    /// Note `record` if it is a view record of a monster, a stone or an ore vein, and report
+    /// whether it is.
+    ///
+    /// Map 1's regen files stand its monsters, stones and veins up at points the boot dice
+    /// draws, so which of them a walk brings into view differs from run to run, and a scenario
+    /// about players and NPCs reads past them. An insert of `bType` `CHAR_TYPE_MONSTER` or
+    /// `CHAR_TYPE_STONE`, or of a vein's race, enters its VID; a vein is a `CHAR_TYPE_NPC`, so
+    /// its summary follows and is noted too; and the removal of an entered VID forgets it.
+    /// [`a_map_shows_its_monsters_and_stones_in_view`] is the scenario about them.
+    fn monster_record(&mut self, record: &[u8]) -> bool {
+        match record[0] {
+            GC_CHARACTER_ADD if is_boot_drawn(record) => {
+                let vid: [u8; 4] = record[1..5].try_into().expect("a VID");
+                if !self.monsters.contains(&vid) {
+                    self.monsters.push(vid);
+                }
+                true
+            }
+            GC_CHAR_ADDITIONAL_INFO => self.monsters.iter().any(|seen| record[1..5] == *seen),
+            GC_CHARACTER_DEL => {
+                let vid: [u8; 4] = record[1..5].try_into().expect("a VID");
+                let entered = self.monsters.iter().position(|seen| *seen == vid);
+                entered.map(|at| self.monsters.swap_remove(at)).is_some()
+            }
+            _ => false,
         }
     }
 
@@ -2782,8 +2839,10 @@ fn an_entering_character_stands_on_the_first_movable_point_or_at_its_empires_rec
     );
 }
 
-/// The VID the Rewrite gives the first NPC it stands up: `world::npc::FIRST_NPC_VID`. Channel 1
-/// is stood up first, and map 1 is its first map.
+/// The VID the Rewrite gives the first character it stands up: `world::npc::FIRST_NPC_VID`.
+/// Channel 1 is stood up first, map 1 is its first map, and its `regen.txt` its first file, so
+/// its monsters take the first VIDs and `npc.txt`'s characters the ones after them, as many as
+/// the boot dice let stand.
 const FIRST_NPC_VID: u32 = 0x8000_0000;
 
 /// The name `mob_names.txt` in `country/en` gives vnum 20300, the first NPC of map 1's `npc.txt`.
@@ -2838,6 +2897,10 @@ fn client_click(vid: u32) -> Vec<u8> {
 /// `VIEW_RANGE + 500` in the 3x3 sectrees around Alpha, and the warp is not one of them. Each
 /// is shown as an NPC with its summary, at its listed point or, for one with a regen box, within
 /// 100 of it, in `Build` order and then VID order in each sectree.
+///
+/// An insert is matched to its entry by the Name its summary carries and its point, not by its
+/// VID: `npc.txt`'s group 12007 is not listed and stands up as many members as its box's cells
+/// let, so the VIDs after it are not the list's indices plus a fixed base.
 fn assert_alphas_npcs_in_view(shown: &Shown, entries: &[&[u8]], warp: usize) {
     let point_of = |entry: &[u8]| {
         let word = |at: usize| i32::from_le_bytes(entry[at..at + 4].try_into().expect("four"));
@@ -2866,26 +2929,32 @@ fn assert_alphas_npcs_in_view(shown: &Shown, entries: &[&[u8]], warp: usize) {
     assert_eq!(shown.inserts().len(), 15);
     let mut records = shown.records.iter();
     let mut walked = Vec::new();
+    let mut matched = Vec::new();
     for _ in 0..in_view.len() {
         let insert = records.next().expect("an insert");
         assert_eq!(insert[0], GC_CHARACTER_ADD);
         let vid = u32::from_le_bytes(insert[1..5].try_into().expect("four"));
-        let index =
-            usize::try_from(vid.checked_sub(FIRST_NPC_VID).expect("an NPC")).expect("small");
-        assert!(in_view.contains(&index), "insert {index} is in view");
-        let at = inserted_at(insert);
-        let listed = point_of(entries[index]);
-        let slack = if BOXED_NPCS.contains(&index) { 100 } else { 0 };
-        assert!(
-            (at.0 - listed.0).abs() <= slack && (at.1 - listed.1).abs() <= slack,
-            "insert {index} at {at:?}, listed at {listed:?}"
-        );
         assert_eq!(insert[21], 1, "bType CHAR_TYPE_NPC");
         let summary = records.next().expect("a summary");
-        assert_eq!(summary[0], GC_CHAR_ADDITIONAL_INFO, "summary {index}");
-        assert_eq!(&summary[1..5], &vid.to_le_bytes(), "summary {index}");
-        walked.push((walk(at).expect("in the 3x3"), index));
+        assert_eq!(summary[0], GC_CHAR_ADDITIONAL_INFO, "summary {vid:#x}");
+        assert_eq!(&summary[1..5], &vid.to_le_bytes(), "summary {vid:#x}");
+        let at = inserted_at(insert);
+        let index = (0..entries.len())
+            .find(|&index| {
+                let listed = point_of(entries[index]);
+                let slack = if BOXED_NPCS.contains(&index) { 100 } else { 0 };
+                !matched.contains(&index)
+                    && entries[index][1..26] == summary[5..30]
+                    && (at.0 - listed.0).abs() <= slack
+                    && (at.1 - listed.1).abs() <= slack
+            })
+            .unwrap_or_else(|| panic!("insert {vid:#x} at {at:?} is a listed NPC"));
+        assert!(in_view.contains(&index), "insert {index} is in view");
+        matched.push(index);
+        walked.push((walk(at).expect("in the 3x3"), vid));
     }
+    matched.sort_unstable();
+    assert_eq!(matched, in_view, "each in view is shown once");
     assert!(
         walked.windows(2).all(|pair| pair[0] < pair[1]),
         "Build order, then VID order in each sectree: {walked:?}"
@@ -2896,9 +2965,9 @@ fn assert_alphas_npcs_in_view(shown: &Shown, entries: &[&[u8]], warp: usize) {
 /// The `GC_CHARACTER_ADD` and `GC_CHAR_ADDITIONAL_INFO` `npc.txt`'s first NPC is shown with:
 /// at its point, vnum 20300, both speeds 100, no state; then its en name, map 1's empire and
 /// `PK_MODE_FREE`.
-fn first_npcs_records() -> (Vec<u8>, Vec<u8>) {
+fn first_npcs_records(vid: u32) -> (Vec<u8>, Vec<u8>) {
     let mut insert = vec![GC_CHARACTER_ADD];
-    insert.extend_from_slice(&FIRST_NPC_VID.to_le_bytes());
+    insert.extend_from_slice(&vid.to_le_bytes());
     insert.extend_from_slice(&0f32.to_le_bytes());
     insert.extend_from_slice(&471_800i32.to_le_bytes());
     insert.extend_from_slice(&951_600i32.to_le_bytes());
@@ -2909,7 +2978,7 @@ fn first_npcs_records() -> (Vec<u8>, Vec<u8>) {
     insert.extend_from_slice(&[0; 8]);
     let mut summary = vec![0; CHAR_ADDITIONAL_INFO_LEN];
     summary[0] = GC_CHAR_ADDITIONAL_INFO;
-    summary[1..5].copy_from_slice(&FIRST_NPC_VID.to_le_bytes());
+    summary[1..5].copy_from_slice(&vid.to_le_bytes());
     summary[5..30].copy_from_slice(&name_field(FIRST_NPC_NAME));
     summary[42] = 1;
     summary[57] = 2;
@@ -2961,15 +3030,21 @@ fn entering_a_map_shows_its_npcs_and_a_click_keeps_the_connection() {
     let (shown, affect) = read_shown(&mut alice);
     assert_eq!(affect[0], GC_AFFECT_ADD, "the NPCs come before the affect");
 
-    // The list holds `npc.txt`'s 48 characters in the order they were stood up, so entry `i` is
-    // the VID `FIRST_NPC_VID + i`, each at its point less map 1's base.
+    // The list holds `npc.txt`'s 48 listed characters in the order they were stood up, each at
+    // its point less map 1's base. The first is the first shown, and `regen.txt`'s monsters took
+    // the VIDs before it.
     let list = shown.list.as_ref().expect("map 1 lists its NPCs");
     let entries: Vec<&[u8]> = list[5..].chunks(NPC_POSITION_LEN).collect();
     assert_eq!(entries.len(), 48);
     let warp = usize::try_from(WARP_INDEX).expect("small");
     assert_alphas_npcs_in_view(&shown, &entries, warp);
+    let base = u32::from_le_bytes(shown.records[0][1..5].try_into().expect("a VID"));
+    assert!(
+        base > FIRST_NPC_VID,
+        "regen.txt's monsters stood up before npc.txt"
+    );
 
-    let (insert, summary) = first_npcs_records();
+    let (insert, summary) = first_npcs_records(base);
     assert_eq!(shown.records[0], insert, "npc.txt's first NPC");
     assert_eq!(
         shown.records[1], summary,
@@ -3002,7 +3077,7 @@ fn entering_a_map_shows_its_npcs_and_a_click_keeps_the_connection() {
     assert_eq!(alice.read_game()[0], GC_CHAT);
     assert_eq!(alice.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
 
-    alice.send_record(&client_click(FIRST_NPC_VID));
+    alice.send_record(&client_click(base));
     alice.quiet("a click on an NPC");
     alice.send_record(&client_click(FIRST_NPC_VID - 1));
     alice.quiet("a click on a VID nobody holds");
@@ -3016,6 +3091,152 @@ fn entering_a_map_shows_its_npcs_and_a_click_keeps_the_connection() {
     );
 
     map_72_is_shown_on_the_shared_channel(&server, &database);
+}
+
+/// Where the scenario's stray dog stands: an open cell of map 1, 1503 from [`ALPHA_ENTERS_AT`].
+const DOG_AT: (i32, i32) = (469_600, 948_500);
+/// The centre of the scenario's stone's box, half widths 1 and 1: open cells of map 1, about
+/// 2000 from [`ALPHA_ENTERS_AT`].
+const STONE_AT: (i32, i32) = (470_600, 952_000);
+
+/// A `GC_CHARACTER_ADD` of a character with no summary at `at`, z 0 and rotation 0: its
+/// `bType`, race, limited speeds and first affect word, no state flag.
+fn unsummarised_insert(
+    vid: u32,
+    at: (i32, i32),
+    (char_type, race): (u8, u16),
+    speeds: [u8; 2],
+) -> Vec<u8> {
+    let mut insert = vec![GC_CHARACTER_ADD];
+    insert.extend_from_slice(&vid.to_le_bytes());
+    insert.extend_from_slice(&0f32.to_le_bytes());
+    insert.extend_from_slice(&at.0.to_le_bytes());
+    insert.extend_from_slice(&at.1.to_le_bytes());
+    insert.extend_from_slice(&0i32.to_le_bytes());
+    insert.push(char_type);
+    insert.extend_from_slice(&race.to_le_bytes());
+    insert.extend_from_slice(&speeds);
+    insert.push(0);
+    insert
+}
+
+/// `sys.world.regen`, `sys.world.view`, `gc.character_add`: map 1's regen files stand its
+/// monsters and stones up at boot (`regen_spawn`, `G/regen.cpp:186-262`), and entering the map
+/// shows each one in view as `EncodeInsertPacket` writes it (`G/char.cpp:1060-1110`), with no
+/// `GC_CHAR_ADDITIONAL_INFO`, which only a PC or an NPC is sent (`:1110`).
+///
+/// The scenario's `npc.txt` adds a stray dog, vnum 101, at an open point beside Alpha, and a
+/// stone, vnum 8001, in a box of half widths 1 and 1 there, each with direction 1, so rotation
+/// 0 and no rotation draw. The dog is a `CHAR_TYPE_MONSTER` with its proto's speeds, 100 and
+/// 100, and no affect: a point spawns without the spawn motion (`G/regen.cpp:346-353`). The
+/// stone stands within 100 of its box's centre, facing a drawn angle, as a `CHAR_TYPE_STONE` with
+/// its proto's 109 and
+/// 104, and `AFF_SPAWN` (word 0 bit 2) set, because a box's stone always spawns with the motion
+/// (`SpawnMobRange`, `G/char_manager.cpp:480-481`) and nothing resets the flag (D5). Neither is
+/// on the mini-map, which still lists `npc.txt`'s 48. `npc.txt` stands its characters up in
+/// order, so the stone's VID follows the dog's. Every monster and stone in view, the owner's
+/// `regen.txt`'s included, is in `Build` order and then VID order, within `VIEW_RANGE + 500` in
+/// the 3x3 sectrees around Alpha.
+#[test]
+fn a_map_shows_its_monsters_and_stones_in_view() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t600\t525\t0\t0\t0\t1\t1s\t100\t1\t101\nm\t610\t560\t1\t1\t0\t1\t1s\t100\t1\t8001\n",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alice);
+    assert_eq!(inserted_at(&entered.add), ALPHA_ENTERS_AT);
+    let shown = &entered.shown;
+
+    let vid_of = |insert: &[u8]| u32::from_le_bytes(insert[1..5].try_into().expect("a VID"));
+    let standing_at = |at: (i32, i32)| {
+        shown
+            .monsters
+            .iter()
+            .find(|insert| inserted_at(insert) == at)
+            .unwrap_or_else(|| panic!("a monster at {at:?} is shown"))
+    };
+    let dog = standing_at(DOG_AT);
+    let dog_vid = vid_of(dog);
+    let mut expected = unsummarised_insert(dog_vid, DOG_AT, (CHAR_TYPE_MONSTER, 101), [100, 100]);
+    expected.extend_from_slice(&[0; 8]);
+    assert_eq!(dog, &expected, "the dog, with no affect");
+    let stone = shown
+        .monsters
+        .iter()
+        .find(|insert| {
+            let at = inserted_at(insert);
+            insert[22..24] == 8001u16.to_le_bytes()
+                && (at.0 - STONE_AT.0).abs() <= 100
+                && (at.1 - STONE_AT.1).abs() <= 100
+        })
+        .expect("the stone is shown within 100 of its box's centre");
+    assert_eq!(vid_of(stone), dog_vid + 1, "npc.txt's next character");
+    // A box's character is spawned with rotation -1, so `SpawnMob` draws `number(0, 360)`.
+    let angle = f32::from_le_bytes(stone[5..9].try_into().expect("four"));
+    assert!(
+        angle.fract() == 0.0 && (0.0..=360.0).contains(&angle),
+        "a drawn whole angle: {angle}"
+    );
+    let mut expected = unsummarised_insert(
+        dog_vid + 1,
+        inserted_at(stone),
+        (CHAR_TYPE_STONE, 8001),
+        [109, 104],
+    );
+    expected.extend_from_slice(&[4, 0, 0, 0, 0, 0, 0, 0]);
+    expected[5..9].copy_from_slice(&stone[5..9]);
+    assert_eq!(stone, &expected, "the stone, with AFF_SPAWN");
+    assert!(
+        alice.monsters.contains(&dog_vid.to_le_bytes()),
+        "the connection holds the dog in view"
+    );
+
+    for insert in &shown.monsters {
+        let vid = vid_of(insert);
+        assert!(
+            !shown
+                .records
+                .iter()
+                .any(|record| record[0] == GC_CHAR_ADDITIONAL_INFO && vid_of(record) == vid),
+            "no summary for monster {vid:#x}"
+        );
+        assert_eq!(insert[26], 0, "no state flag");
+        assert!(
+            matches!(insert[27..35], [0 | 4, 0, 0, 0, 0, 0, 0, 0]),
+            "AFF_SPAWN at most: {insert:02x?}"
+        );
+    }
+    let tree_of = |(x, y): (i32, i32)| (x / SECTREE_SIZE, y / SECTREE_SIZE);
+    let (column, row) = tree_of(ALPHA_ENTERS_AT);
+    let walked: Vec<(usize, u32)> = shown
+        .monsters
+        .iter()
+        .map(|insert| {
+            let at = inserted_at(insert);
+            let gap = distance_approx(at.0 - ALPHA_ENTERS_AT.0, at.1 - ALPHA_ENTERS_AT.1);
+            assert!(gap <= 5500, "{at:?} is within reach");
+            let step = BUILD_ORDER
+                .iter()
+                .position(|&(dc, dr)| tree_of(at) == (column + dc, row + dr))
+                .expect("in the 3x3");
+            (step, vid_of(insert))
+        })
+        .collect();
+    assert!(
+        walked.windows(2).all(|pair| pair[0] < pair[1]),
+        "Build order, then VID order in each sectree: {walked:?}"
+    );
+    let list = shown.list.as_ref().expect("map 1 lists its NPCs");
+    assert_eq!(&list[3..5], &48u16.to_le_bytes(), "no monster is listed");
+    alice.quiet("the burst is over");
 }
 
 /// Charlie enters map 72 on the Shared Channel beside its warp at (99, 33), which is all that is in
@@ -4762,8 +4983,6 @@ const VIEW_C: (i32, i32) = (454_300, 940_700);
 /// A point in sectree row 147, outside the 3x3 around Alpha's row 145 and 9128 from Alpha, so
 /// within reach but not in a sectree Alpha's view walks.
 const ROW_147: (i32, i32) = (444_100, 941_600);
-/// The VID of idx18, the 9009 at [`IDX18_AT`].
-const IDX18_VID: u32 = FIRST_NPC_VID + 18;
 /// `FUNC_MOVE` and `FUNC_COMBO`, `TPacketCGMove`'s `bFunc`.
 const FUNC_MOVE: u8 = 1;
 const FUNC_COMBO: u8 = 3;
@@ -4898,12 +5117,17 @@ fn insert_body(insert: &[u8]) -> &[u8] {
     &insert[9..27]
 }
 
-/// Assert that `insert` is idx18's `GC_CHARACTER_ADD`: an NPC of race 9009 at [`IDX18_AT`].
-fn assert_idx18(insert: &[u8]) {
-    assert_eq!(&insert[1..5], &IDX18_VID.to_le_bytes(), "idx18's VID");
+/// Assert that `insert` is idx18's `GC_CHARACTER_ADD`: an NPC of race 9009 at [`IDX18_AT`],
+/// whose VID depends on how many monsters stood up before it, and answer its VID.
+fn assert_idx18(insert: &[u8]) -> u32 {
+    assert!(
+        u32::from_le_bytes(insert[1..5].try_into().expect("a VID")) > FIRST_NPC_VID,
+        "idx18's VID"
+    );
     assert_eq!(inserted_at(insert), IDX18_AT, "at its point");
     assert_eq!(insert[21], 1, "CHAR_TYPE_NPC");
     assert_eq!(&insert[22..24], &9009u16.to_le_bytes(), "race 9009");
+    u32::from_le_bytes(insert[1..5].try_into().expect("a VID"))
 }
 
 /// Assert that the `GC_MOVE` an insert carries for `vid` walks to `dest` with some time left
@@ -4962,10 +5186,10 @@ fn players_and_npcs_within_view_range_see_each_other_on_entry() {
     assert_eq!(inserted_at(&yankee_entered.add), VIEW_B);
     let seen = &yankee_entered.shown.records;
     assert_eq!(seen.len(), 4, "idx18's pair and Alpha's");
-    assert_idx18(&seen[0]);
+    let idx18 = assert_idx18(&seen[0]);
     assert_eq!(
         &seen[1][..5],
-        &[&[GC_CHAR_ADDITIONAL_INFO][..], &IDX18_VID.to_le_bytes()].concat()
+        &[&[GC_CHAR_ADDITIONAL_INFO][..], &idx18.to_le_bytes()].concat()
     );
     assert_eq!(
         &seen[2][1..5],
@@ -5111,13 +5335,17 @@ fn an_npc_appears_and_disappears_as_a_player_walks() {
 
     let sent = std::time::Instant::now();
     alice.send_record(&client_move(FUNC_MOVE, 0, 0, 444_100, 928_800, 0x6100));
-    let (add, _) = alice.sees_arrive(IDX18_VID, false);
-    assert_idx18(&add);
+    let add = alice.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD, "{add:02x?}");
+    let idx18 = assert_idx18(&add);
+    let info = alice.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO, "{info:02x?}");
+    assert_eq!(&info[1..5], &idx18.to_le_bytes(), "the summary's vid");
     alice.quiet("idx18 alone");
 
     wait_out_walk(sent, LONG_WALK_MS);
     alice.send_record(&client_move(FUNC_MOVE, 0, 0, row_144.0, row_144.1, 0x6101));
-    alice.sees_leave(IDX18_VID);
+    alice.sees_leave(idx18);
     alice.quiet("one removal");
 }
 

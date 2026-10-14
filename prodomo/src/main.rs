@@ -38,6 +38,7 @@ use gamedata::banword::banwords_from_dump;
 use gamedata::item_proto::ItemProtos;
 use gamedata::locale_string::{Ending, LocaleStrings, LOCALE_COUNT};
 use gamedata::map_atlas::{MapAtlas, MapRegion};
+use gamedata::mob_group::MobGroups;
 use gamedata::mob_locale_names::{MobLocaleNames, MobNamesByLanguage};
 use gamedata::mob_names::MobNames;
 use gamedata::mob_proto::MobProtos;
@@ -3868,10 +3869,11 @@ struct GameData {
     motions: Arc<PcMotions>,
 }
 
-/// What boot stands the NPCs up from: the mob prototypes, the names a client is sent, and the
-/// regen entries of every map each Channel hosts.
+/// What boot stands the NPCs and monsters up from: the mob prototypes, the mob groups, the names
+/// a client is sent, and the regen entries of every map each Channel hosts.
 struct NpcData {
     protos: Arc<MobProtos>,
+    groups: MobGroups,
     names: MobLocaleNames,
     maps: Vec<(u8, MapRegion, Vec<RegenEntry>)>,
 }
@@ -3958,6 +3960,7 @@ fn load_npc_data(config: &ServerConfig, atlas: &MapAtlas) -> Result<NpcData, Str
     }
     let names = MobLocaleNames::load(&config.country_dir())
         .map_err(|error| format!("Mob names are unusable: {error}"))?;
+    let groups = load_mob_groups(config)?;
     let map_dir = config.map_dir();
     let mut maps = Vec::new();
     for channel in &config.channels {
@@ -3982,9 +3985,43 @@ fn load_npc_data(config: &ServerConfig, atlas: &MapAtlas) -> Result<NpcData, Str
     );
     Ok(NpcData {
         protos: Arc::new(protos),
+        groups,
         names,
         maps,
     })
+}
+
+/// Load the Locale's mob groups and group-groups (`CMobManager::LoadGroup` and
+/// `LoadGroupGroup`, `G/mob_manager.cpp:255-409`).
+///
+/// A missing or malformed file stops the server, as legacy's boot exits on either. A group
+/// legacy skips is warned about with legacy's reason, and a vnum listed twice keeps its first
+/// group (legacy's `insert` keeps the first too).
+fn load_mob_groups(config: &ServerConfig) -> Result<MobGroups, String> {
+    let locale_dir = config.locale_dir();
+    let groups = MobGroups::load(&locale_dir).map_err(|error| {
+        format!(
+            "Mob groups are unusable in {}: {error}",
+            locale_dir.display()
+        )
+    })?;
+    for skipped in groups.skipped() {
+        warn!(
+            file = skipped.file,
+            name = %String::from_utf8_lossy(&skipped.name),
+            reason = skipped.reason,
+            "A mob group is skipped"
+        );
+    }
+    for &(file, vnum) in groups.duplicates() {
+        warn!(
+            file,
+            vnum, "A mob group vnum is listed more than once; the first group is used"
+        );
+    }
+    let (count, group_groups) = groups.len();
+    info!(groups = count, group_groups, "Mob groups loaded");
+    Ok(groups)
 }
 
 /// Load the `server_attr` of every map a Channel hosts, once however many Channels host it
@@ -4042,22 +4079,29 @@ fn load_quests(config: &ServerConfig, npcs: &NpcData) -> Result<Quests, String> 
     Ok(Quests::new(manager, Arc::clone(&npcs.protos), names))
 }
 
-/// Stand the NPCs up in the world before the game thread starts, drawing from its dice.
-fn stand_up_npcs(state: &mut GameState, data: &NpcData) -> Result<(), String> {
-    let mut spawner = NpcSpawner::new(&data.protos, &data.names, NpcVids::default());
+/// Stand the NPCs, monsters and stones up in the world before the game thread starts, on each
+/// map's cells, drawing from its dice. A hosted map with no cells is one the map index does
+/// not list, which has no regen entries either.
+fn stand_up_npcs(state: &mut GameState, data: &NpcData, cells: &HostedCells) -> Result<(), String> {
+    let mut spawner = NpcSpawner::new(&data.protos, &data.groups, &data.names, NpcVids::default());
     for (channel, region, entries) in &data.maps {
+        let Some(map_cells) = cells.get(region.index) else {
+            continue;
+        };
         state
-            .spawn_npcs(&mut spawner, *channel, region, entries)
+            .spawn_npcs(&mut spawner, *channel, (region, map_cells), entries)
             .map_err(|error| format!("NPCs could not be stood up: {error}"))?;
     }
     let report = spawner.report();
     info!(
         spawned = report.spawned,
-        unported = report.unported,
+        stones = report.stones,
+        gated = report.gated,
         no_proto = report.no_proto,
+        no_group = report.no_group,
         unplaced = report.unplaced,
         idle = report.idle,
-        "NPCs stood up"
+        "NPCs and monsters stood up"
     );
     Ok(())
 }
@@ -4175,7 +4219,7 @@ fn build_world(
         .with_view_range(config.game.view_range)
         .with_locale_strings(Arc::clone(&data.locale))
         .with_quests(quests);
-    stand_up_npcs(&mut game_state, &data.npcs)?;
+    stand_up_npcs(&mut game_state, &data.npcs, &data.cells)?;
     Ok(game_state)
 }
 

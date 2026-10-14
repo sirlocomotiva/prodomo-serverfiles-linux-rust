@@ -654,21 +654,37 @@ fn run_to_exit(config: Option<&str>) -> (ExitStatus, String) {
         child: Some(spawn_server(&test_root, &config_path, &log_dir)),
         test_root: test_root.clone(),
     };
+    // Both pipes are read while the server runs: a pipe can hold as little as one page (Linux
+    // shrinks new pipes once a user's pipes pass `pipe-user-pages-soft`), and a server whose
+    // console outgrows it blocks on the write and never exits.
+    let child = process.child_mut();
+    let stdout = drain(child.stdout.take().expect("stdout is piped"));
+    let stderr = drain(child.stderr.take().expect("stderr is piped"));
     wait_until_exited(process.child_mut(), "prodomo did not reject the config");
-    let output = process
+    let status = process
         .child
         .take()
         .expect("child process should exist")
-        .wait_with_output()
-        .expect("output should be readable");
+        .wait()
+        .expect("status should be readable");
     let console = format!(
         "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&stdout.join().expect("the stdout reader should finish")),
+        String::from_utf8_lossy(&stderr.join().expect("the stderr reader should finish"))
     );
     drop(process);
     assert!(!test_root.exists(), "temporary artifacts should be removed");
-    (output.status, console)
+    (status, console)
+}
+
+/// Read a pipe to its end on a thread of its own, so the writer never waits on the test.
+fn drain(mut pipe: impl Read + Send + 'static) -> JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes)
+            .expect("the console pipe should be readable");
+        bytes
+    })
 }
 
 #[test]

@@ -27365,3 +27365,311 @@ Parity after 229e: 121 ported, 125 partial, 1337 missing, 6 unused and 56 codec,
 
 No ADR changed. Owner question 14 is resolved. `.scratch/equip/owner-questions.md` is left out of the
 commit under the standing staging rule (ledger 229d).
+
+## 229f. The monsters stand up: every regen entry kind spawns at boot, and the view shows monsters, stones and ore veins
+
+Legacy's `SECTREE_MANAGER::Build` reads each hosted map's regen files through `regen_load`
+(`G/regen.cpp:601-710`). Each entry with a regen time spawns at once through `regen_spawn`
+(`:325-383`), and then draws `number(0, 16)` for its `regen_event`'s first fire (`:679-689`). Before
+229f the Rewrite spawned only the NPC, warp and goto entries (ledger 223). It counted the monsters,
+stones, groups, anywhere entries and ore veins, but did not spawn them, because they need the cell
+attributes (ledger 229a) and the mob groups. 229f spawns them all with legacy's draws in legacy's
+order. A client entering a map is shown the ones in its view. None of them moves, fights, dies or
+respawns yet; that is 229g onwards. `G/` below means `server/server/game/`, `D/` means
+`server/server/db/`, and `C/` means `server/server/common/`.
+
+### 229f.1 What landed
+
+- **The group loader.** `gamedata/src/mob_group.rs` (new) reads `group.txt` and `group_group.txt`
+  from the Locale folder through the `CTextFileLoader` port, as `LoadGroup` and `LoadGroupGroup` do
+  (`G/mob_manager.cpp:255-409`):
+  - A group's members are its leader's second value, then the second value of keys `1` to `255`,
+    up to the first key that is missing.
+  - A group with no vnum, no leader or a one-value leader is skipped, and the reason legacy logs is
+    kept.
+  - A member line with one value refuses the file. Legacy's `at(1)` throws `std::out_of_range` there
+    and ends the process (`:368`).
+  - A group-group keeps each member's first value and drops a member of 0. It drops the probability,
+    as `AddMember` does (D1).
+  - A repeated vnum keeps its first group, as legacy's `insert` does, and is listed in `duplicates`.
+  - The owner's files hold 876 groups, 222 group-groups and 22 repeated vnums.
+- **The spawner.** `world/src/npc.rs` `NpcSpawner::spawn_map` follows `regen_load` entry by entry:
+  - The mini-map list is unchanged.
+  - An entry with time 0 is idle: listed, never spawned.
+  - Otherwise `regen_spawn` runs `max_count` units and the jitter is drawn afterwards. The entry's
+    `Regen` keeps the entry, the count that stood and the first fire.
+  - `regen_spawn` picks the spawner as legacy does:
+    - An anywhere entry goes to `spawn_mob_random_position`: the gated 5001, 5002 and 5004 are refused
+      with no draw, then up to 2000 tries on the map's grid, and the rotation is drawn after `SetProto`.
+    - A box of one point goes to `spawn_mob`, whatever its kind, with the direction's rotation drawn
+      first and no spawn motion (D4 for a group).
+    - A group box goes to `spawn_group`, a group-group box to `spawn_group_group` (one uniform draw,
+      D1), and a mob box to `spawn_mob_range`.
+  - `spawn_mob_range` makes 16 tries of `number(sx, ex)` then `number(sy, ey)`. A stone forces the
+    spawn motion.
+  - `spawn_group` stands the leader in the box, then each member in a box drawn with four
+    `number(300, 500)` around the one before it. The group fails if its leader fails, and skips a
+    later member that fails. The followers carry the leader's VID, and a `ga` entry sets
+    `AIFLAG_AGGRESSIVE` on every member.
+  - `spawn_mob` checks the cell of anything that is not an NPC, warp or goto, and of an ore vein.
+    There must be a sectree. The cell may not be blocked (an ore vein) or blocked or built on
+    (anything else), and it may not be `BANPK`.
+  - `create` takes the next VID and sets the rotation. An ore vein draws its lifetime,
+    `number(420, 900)`. An NPC with no empire takes its map's. The speeds are limited to 0 to 250,
+    and the spawn motion sets `AFF_SPAWN`, bit 2 of affect word 0 (D5).
+  - `SpawnReport` counts what stood and what did not: spawned, stones, gated, no proto, no group,
+    unplaced and idle.
+- **The boot.** `prodomo/src/main.rs` `load_mob_groups` loads the groups. It warns once per skipped
+  group and once per repeated vnum, and logs the counts. `stand_up_npcs` passes each hosted map's
+  cells to the spawner and logs the report. A map with no cells is skipped, as before.
+- **The insert.** `prodomo/src/loading_phase.rs` `npc_add` sends the character's `affect_flags`
+  instead of `[0, 0]` (`G/char.cpp:1886-1887`, `:1913`). Only `CHAR_TYPE_NPC` gets a
+  `GC_CHAR_ADDITIONAL_INFO`, so a monster, a stone or a warp does not; an ore vein, an NPC, does.
+- **The proto constants.** `gamedata/src/mob_proto.rs`: `AIFLAG_AGGRESSIVE` (bit 0), and `strtoul` is
+  `pub(crate)` for the group loader.
+
+### 229f.2 What the client sees
+
+`GC_CHARACTER_ADD` (`gc.character_add`, ported) is unchanged in shape. It is now sent for every
+monster, stone and ore vein in view. A boxed stone's insert carries `AFF_SPAWN` in `dwAffectFlag[0]`
+(0x4), and a monster's or stone's insert is followed by no `GC_CHAR_ADDITIONAL_INFO`.
+
+The new scenario is `a_map_shows_its_monsters_and_stones_in_view` (`prodomo/tests/parity.rs:3141`).
+It adds two lines to the map's regen and asserts:
+
+- the dog at a point: its exact insert bytes, with the direction's rotation and no affect;
+- the stone in a one-cell box: the next VID, a whole-degree angle from 0 to 360, the proto's speeds
+  and `AFF_SPAWN`;
+- across all monsters in view: no summary, state 0, affect 0 or 4, in build order then VID order,
+  each within the view's reach. The mini-map list stays at 48 entries.
+
+The two existing NPC scenarios read the first NPC's VID from the burst instead of a constant. Since
+229f, `regen.txt`'s monsters take the VIDs before `npc.txt`'s.
+
+### 229f.3 Divergences and Defects
+
+New Divergence rows in `docs/STATUS.md`:
+
+- **A group makes no party.** The members stand with the first as their leader, but nobody follows
+  it and no party record is kept. Legacy makes the first member a `CParty` master
+  (`G/char_manager.cpp:638-653`).
+- **An ore vein is never destroyed.** Its lifetime is drawn and kept, but no `kill_ore_load_event`
+  runs (`G/char.cpp:2563-2570`).
+- **An anywhere spawn sends no `test_server` notice** (`G/char_manager.cpp:375-376`). The owner's
+  files have no anywhere entry that is not event-gated.
+
+Three existing rows changed. The VID row: monsters, stones and veins count up from 2^31 too. The
+"spawned once" row: the regen's count and first fire are kept for the event. The "never moves" row:
+monsters do not move either.
+
+Defects reproduced provisionally, with owner questions 22 to 24:
+
+- **D1:** a group-group picks uniformly. `LoadGroupGroup` drops each member's probability
+  (`G/mob_manager.cpp:287-293`).
+- **D4:** a group entry at a point spawns its group vnum as a mob vnum (`G/regen.cpp:346-353`).
+- **D5:** `AFF_SPAWN` is never reset (`G/char.cpp:1886-1887`).
+
+Two more provisional choices:
+
+- **Q25:** one dice stream for the whole process, against one per legacy Core.
+- **Q26:** the `NOATTCHUNJO` and `NOATTJINNO` names are swapped in the proto reader
+  (`D/ProtoReader.cpp:674-698` against `C/length.h:686-700`; X6). 229f reads only bit 0, so the swap
+  does not matter yet.
+
+Kept from earlier: a point outside every sectree spawns nothing, where legacy's 16-bit sectree key can
+wrap. The `npc.rs` module doc says so.
+
+### 229f.4 Not ported yet
+
+- The `regen_event`, so nothing respawns. Each map's `Regen` list is kept for it.
+- `CG_TARGET`, the monster state machine and wandering, melee, death and restart, drops, exp, and
+  the mob's carried items.
+- The group's party and follow, and the ore vein's destruction (229f.3).
+- The event flags that ungate 5001, 5002 and 5004. No GM command sets one yet.
+- The monster `.msa` clips and `motlist.txt` (`data.motion` stays `partial`).
+
+### 229f.5 Topology and load
+
+The owner decided on 2026-10-14 to run Channel 1 alone and keep Channels 2-4 off (`docs/STATUS.md`,
+topology). Asked about the Shared Channel the same day, they answered: "if it's needed, yes, it must
+stay on". A read-only research pass then checked whether Channel 1 players need it. It ran five
+sweeps (the Shared Channel's maps, warp NPCs, quests, the legacy C++ and the Rewrite) and then an
+adversarial check of every route the sweeps claimed. Of the 29 map ids the Shared Channel lists, 10
+have a line in the map index, and the other 19 get no region. Three legacy routes take Channel 1
+players onto Shared Channel maps:
+
+- **The OX event, to map 113.** NPC 20011 stands on maps 1, 21, 41, 112 and 373, and
+  `event/ox_event.quest:28-39` sends a player on while `oxevent_status` is 1.
+- **Guild battle and flag wars, to maps 110 and 111.** The observer NPCs 11001, 11003 and 11005
+  stand on maps 1, 3, 21, 23, 41 and 43, and they send a player on through
+  `pc.warp_to_guild_war_observer_position` (`questlua_pc.cpp:406-441`).
+- **The kingdom and siege war buttons, to map 103.** The button's `pc.warp(0, 25600)` checks no
+  event flag.
+
+Several routes were refuted:
+
+- The Teleport Ring to map 73: item 70058 has no source in the shipped data.
+- A dungeon jump to map 207: creating the instance needs a local sectree.
+- No ordinary route reaches maps 72, 73, 105, 133 or 81. The wedding has its C++ path, but no
+  script starts a marriage.
+
+So the Shared Channel is needed, and it stays on.
+
+None of the three routes runs in the Rewrite yet, because `pc.warp` is not ported. Turning the Shared
+Channel off today would only cost the 72/73 warp NPC pair and the login of a character saved on a
+Shared Channel map. Whether the owner's live server runs the OX, war and siege schedules, and whether
+`event_panel` lets an ordinary player set `oxevent_status`, were not verified. Both are recorded as
+owner question 27.
+
+Measured on the release build with the owner's data:
+
+| hosted | characters | stand-up | accepting clients | resident memory |
+|---|---|---|---|---|
+| Channel 1 (57 maps) | 57,697 | about 0.8 s | 2.1 s after start | 262 MB (131 MB before 229f) |
+| Channel 1 and the Shared Channel | 65,632 | | | 291 MB |
+
+Channel 1's report: `spawned=57697 stones=823 gated=127 no_proto=288 no_group=701 unplaced=236
+idle=0`. An idle world used 0% CPU, since no monster acts. The cost per Pulse is measured again when
+the state machine lands. The timings are from the log's timestamps.
+
+### 229f.6 Scenario and parity inventory
+
+- The parity scenarios go from 85 to 86.
+- Unit tests:
+  - `gamedata/src/mob_group.rs` (new): 7.
+  - `world/src/npc.rs`: 9 added and 1 removed, `what_this_port_does_not_spawn_is_counted`, since
+    nothing is left uncounted for that reason. Three were renamed for what they now check.
+  - `prodomo/tests/parity.rs`: 1 scenario.
+- Parity rows:
+  - `data.mob.group` (`gamedata.md:20`) moves from missing to partial. Its note names the scenario;
+    its scenario cell stays empty, since only a `ported` row may fill it. It is not `ported` because
+    no scenario asserts a group's members, and the party is not ported.
+  - `data.map.regen`, `data.proto.mob`, `sys.world.regen`, `sys.mob.proto` and `gc.character_add`
+    keep their status and gain a 229f note.
+- Parity counts (`python3 .scratch/tmp/tools/parity_counts.py`), out of 1645 rows:
+
+  | | ported | partial | missing | unused | codec |
+  |---|---|---|---|---|---|
+  | before 229f | 121 | 125 | 1337 | 6 | 56 |
+  | after 229f | 121 | 126 | 1336 | 6 | 56 |
+
+- Owner questions 22 to 26 are new.
+- No ADR changed.
+
+### 229f.7 Corrections, findings and controls
+
+Corrections and findings:
+
+- **The first draft of the `data.mob.group` row named its scenario in the scenario cell.** A
+  `partial` row may not, and `inventory_rows_keep_the_rules` refused it in the sweep copy's baseline.
+  The scenario name moved into the note. The 86 scenarios had passed in the main tree before that
+  row edit, so the error was found by the sweep's baseline, not by a run of the final tree.
+- **The first sweep ran its two shards side by side, each in its own copy, against one test
+  database.** Shard 0's baseline then failed five chat and equipment scenarios that 229f does not
+  touch. Run alone, the same copy's parity suite failed only the inventory row above. Both shards
+  were stopped and run again one after the other in one copy, as in 229e. The aborted logs are kept
+  as `shard0.parallel-fail.log` and `shard1.parallel-aborted.log`, and no verdict is taken from them.
+
+Controls for the negative claims, run on the final tree. The Rust searches cover `prodomo/src`,
+`world/src`, `gamedata/src`, `common/src` and `protocol/src`, or the subset named. The legacy searches
+read `server/` with `grep -a`.
+
+| claim | search | result | positive control | nonsense control |
+|---|---|---|---|---|
+| no regen event fires; the kept regens are read by nothing | `regen_event\|fn fire_regen\|respawn`, case-insensitive, in the five trees; `\bregens\b\|first_fire` in `prodomo/src` and `world/src` | one line, the `respawn` GM command's table entry (`command/table.rs:72`); `regens` is only built in `npc.rs` and set empty in five test fixtures, and `first_fire` is only written and asserted | `regen_event` in `server/server/game/regen.cpp`: 10 lines | `zzqx_ledger_nonsense_229f` in the five trees: 0 |
+| nothing destroys an ore vein | `ore_lifetime` in the five trees | the field, its one write in `create`, a fixture's `None` and test assertions; no reader outside tests | `kill_ore_load_event` in `server/server/game/char.cpp`: the event at `:2447` and its creation at `:2569` | as above: 0 |
+| a group makes no party and nobody follows | `CParty\|party_` in `prodomo/src` and `world/src`; `\.leader\b` in the same | no party state: the party chat test, the `party_request` command entries and the party point names; `.leader` is written once (`npc.rs:589`) and read only by tests | `.leader` finds the write, so the search reaches the field | as above: 0 |
+| an anywhere spawn sends no `test_server` notice | `test_server`, case-insensitive, in `prodomo/src` and `world/src` | four doc comments (`loading_phase.rs:163`, `warp_npc.rs:56-57`, `npc.rs:57`); no code | `if (test_server) SendNotice(buf);` at `server/server/game/char_manager.cpp:375-376` | as above: 0 |
+
+- **The first gate run of the final tree failed three process tests.** These were
+  `serve_exits_when_the_store_refuses_it_for_good`,
+  `serve_refuses_to_start_when_the_configured_item_id_span_is_too_narrow` and
+  `serve_refuses_to_start_when_a_hosted_maps_cell_attributes_are_cut_short`. Each one timed out
+  with "prodomo did not reject the config", in both the run with `DATABASE_URL` and the run without
+  it.
+  - **Cause.** `run_to_exit` read the child's stdout and stderr only after the child had exited.
+    On this host a new pipe holds 8 KiB, because Linux shrinks new pipes once a user's pipes pass
+    `pipe-user-pages-soft`. The 229f boot now logs the repeated mob-group vnums, which brings the
+    console to about 11 KiB. The hung child was in `pipe_write`, with 13 of its 22 group warnings
+    written to the log file.
+  - **Fix.** `run_to_exit` now reads both pipes on threads of their own while it waits (`drain` in
+    `prodomo/tests/process.rs`). With that change, the 11 process tests pass with and without
+    `DATABASE_URL`. No server code changed.
+- **Five mutants survived the first pass of the sweep.** Section 229f.8 lists each one and the
+  test that now kills it. Two new tests in `npc.rs` and one in `mob_group.rs` kill four of
+  them, and an assertion added to an existing `npc.rs` test kills the fifth.
+
+### 229f.8 Review and mutation sweep
+
+The 48 mutants of `.scratch/tmp/tools/mutants229f.py` ran as two shards of `mutate_v2.py` on a tar copy of
+the final tree (`sweep229f/tree0`), one shard at a time: shard 0 of 2 (24 mutants), then shard 1 of 2
+(24 mutants). The 48 are 41 in `world/src/npc.rs`, 5 in `gamedata/src/mob_group.rs`, 1 in
+`prodomo/src/main.rs` and 1 in `prodomo/src/loading_phase.rs`. Shard 0's log opens with `baseline ok`:
+the world, common, gamed, prodomo lib, prodomo bin and parity suites all passed, parity with at least 86
+passing. Shard 1's log has no baseline line, so it ran with `BASELINE=0` on the same copy. With `CHECK=1`
+the driver asserts, before each run, that a mutant's old text occurs exactly once in its file and lands
+before the file's test module; all 48 pass, in the main tree and in the copy.
+
+The first pass killed 43 and let 5 survive. No compile failure and no flaky verdict appears in the logs.
+Two mutants were killed by parity scenarios, and both kills held when the scenarios ran alone, which the
+driver requires before a parity failure counts: `ma_no_groups` by
+`entering_a_map_shows_its_npcs_and_a_click_keeps_the_connection`, and `lp_add_no_affects` by
+`a_map_shows_its_monsters_and_stones_in_view`. The other 41 were killed by unit tests.
+
+Each survivor got a closing unit test, and the rerun (`rerun.log`, `BASELINE=0`, `ONLY=` the five) killed
+all five:
+
+| survivor | shard | what it did | closed by |
+|---|---|---|---|
+| `np_anywhere_banpk_ok` | 0 | an anywhere spawn stands on a `BANPK` cell | `npc::tests::an_anywhere_entry_draws_inside_the_maps_edge_and_shuns_banpk` |
+| `np_group_vnum_zero_ok` | 0 | `SpawnGroup` looks group 0 up | `npc::tests::a_group_of_vnum_zero_is_never_looked_up` |
+| `np_anywhere_width_no_minus` | 1 | an anywhere draw reaches the map's last cell | `npc::tests::an_anywhere_entry_draws_inside_the_maps_edge_and_shuns_banpk` |
+| `np_gg_aggressive` | 1 | a group-group spawns aggressive | an added assertion in `npc::tests::a_group_group_picks_one_group_uniformly` |
+| `mg_member_stops_early` | 1 | the loaders stop after member key 2 | `mob_group::tests::the_loaders_read_member_keys_up_to_255` |
+
+The first four survived because no test map had a `BANPK` cell, a group 0, a draw at the map's far edge or
+an aggressive check on a group-group; the fifth because no test group had more than two members. The
+test fixture `groups()` gained a group of vnum 0 for the second.
+
+So 48 of 48 are killed. The copy matches the final tree for the other twelve Rust files that
+changed in 229f (`cmp` finds no difference). The thirteenth changed file, `prodomo/tests/process.rs`, holds
+only the pipe fix of 229f.7, which came after the sweep. No suite the sweep runs builds that file. No Rust
+file is newer than the final gates run. The sweep logs, with the two
+aborted parallel logs of 229f.7, are copied to `.scratch/tmp/l229f/sweep/`.
+
+### 229f.9 Receipt
+
+The count went from 3260 to 3279, +19. The changes by file:
+
+- `world/src/npc.rs`: 11 unit tests added and 1 removed (`what_this_port_does_not_spawn_is_counted`,
+  whose claim no longer holds), and 3 renamed, so 21 became 31.
+- `gamedata/src/mob_group.rs` (new): 8 unit tests.
+- `prodomo/tests/parity.rs`: 1 scenario, so 86 became 87.
+
+The gates ran on the final tree. The first run failed the three process tests of 229f.7. The run
+after the pipe fix passed everything. Its summary is `gates229f2/gates.summary`, copied to
+`.scratch/tmp/l229f/gates/`. The failing run's summary and test logs are in
+`.scratch/tmp/l229f/gates-first/`.
+
+| gate | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| build, workspace | clean, 0 warnings |
+| clippy, workspace, all targets, `-D warnings` | clean |
+| test, workspace, all targets, with `DATABASE_URL` | 3279 passed, 0 failed, 38 suites |
+| test, the same with `DATABASE_URL` unset | 3279 passed, 0 failed, 38 suites |
+| doc tests | 1 passed, 0 failed, 19 ignored |
+| rustdoc, warnings denied | clean |
+| scratch databases left behind | 0 |
+| `*.core` outside `target/` | 0 |
+
+Counted the way the gates count it, the workspace has 253 Rust files and 190,488 lines outside
+`server/` and `.scratch/`. The 229e receipt had 252 files and 189,155 lines. The toolchain is
+Rust 1.85.1 with `clippy 0.1.85` and `rustfmt 1.8.0`, called as `/usr/bin/cargo-clippy` and
+`/usr/bin/cargo-fmt`. No crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Parity after 229f: 121 ported, 126 partial, 1336 missing, 6 unused and 56 codec, out of 1645 rows.
+Before 229f the counts were 121, 125, 1337, 6 and 56.
+
+No ADR changed. Under the standing staging rule (ledger 229d), `.scratch/equip/owner-questions.md`
+stays out of the commit.

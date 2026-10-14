@@ -612,6 +612,7 @@ mod tests {
             moving_speed: 0,
             attack_speed: 0,
             name: Vec::new(),
+            ..world::npc::Npc::default()
         }
     }
 
@@ -619,6 +620,7 @@ mod tests {
         Arc::new(MapNpcs {
             npcs,
             positions: Vec::new(),
+            regens: Vec::new(),
         })
     }
 
