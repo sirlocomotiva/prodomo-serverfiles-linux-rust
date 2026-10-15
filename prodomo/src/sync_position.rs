@@ -47,15 +47,17 @@ pub fn distance_approx(dx: i32, dy: i32) -> i32 {
 
 /// What `CHARACTER::IsSyncOwner` reads off a victim.
 ///
-/// `None` is a character that was never claimed. The source does not store that case: its
-/// constructor seeds `m_fSyncTime` with `get_float_time() - 3`, which is already past the
-/// window, so a fresh victim is always claimable and `None` is the faithful answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A `claimed_at` of `None` is a character that was never claimed. The source does not store
+/// that case: its constructor seeds `m_fSyncTime` with `get_float_time() - 3`, which is already
+/// past the window, so a fresh victim is always claimable and `None` is the faithful answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SyncOwnershipState {
     /// `m_pkChrSyncOwner`, the character currently allowed to move the victim.
     pub owner: Option<Vid>,
-    /// `m_fSyncTime`, refreshed on every accepted claim, in the same units as `now`.
-    pub claimed_at: Duration,
+    /// `m_fSyncTime`, refreshed on every accepted claim, in the same units as `now`. A release
+    /// (`SetSyncOwner(NULL)`) clears the owner and keeps it, so for the rest of the window no
+    /// one but a fresh claim's owner takes the victim.
+    pub claimed_at: Option<Duration>,
 }
 
 /// The result of judging one `SetSyncOwner(actor)` call.
@@ -80,12 +82,13 @@ pub enum SyncOwnershipOutcome {
 
 /// Judge one `CHARACTER::SetSyncOwner(actor)` call against a victim.
 ///
-/// `server/server/game/char.cpp:5469-5551`, in the source's own order. Two arms are not
-/// ported: `AIFLAG_NOMOVE`, which only a monster carries, and `!battle_is_attackable`, which
-/// refuses with a `DAMAGE_BLOCK` record (`:5476-5481`). That one is the PK rule
-/// (`G/battle.cpp:99-151`, `CPVPManager::CanAttack`) and can refuse a pair of player
-/// characters, for one in the protect PK mode or two of one empire in the peace mode; it
-/// waits for the battle rules, and STATUS lists it among the movement gaps.
+/// `server/server/game/char.cpp:5469-5551`, in the source's own order. Two arms come before
+/// it: `AIFLAG_NOMOVE`, which only a monster carries, and `!battle_is_attackable`, which
+/// refuses with a `DAMAGE_BLOCK` record (`:5476-5481`). `game_state::fight` runs both for a
+/// non-player victim. For a player victim the second is the PK rule (`G/battle.cpp:99-151`,
+/// `CPVPManager::CanAttack`) and can refuse a pair of player characters, for one in the
+/// protect PK mode or two of one empire in the peace mode; it waits for the battle rules, and
+/// STATUS lists it among the movement gaps.
 #[must_use]
 pub fn judge_sync_ownership(
     actor: Vid,
@@ -103,7 +106,7 @@ pub fn judge_sync_ownership(
     // `if (!IsSyncOwner(ch)) return false;`. `IsSyncOwner` accepts the current owner, or any
     // character once the claim stamp is at least `SYNC_CLAIM_LIFETIME` old.
     let holds = state.owner == Some(actor);
-    let age = state.owner.and(now.checked_sub(state.claimed_at));
+    let age = state.claimed_at.and_then(|at| now.checked_sub(at));
     let claim_is_fresh = age.is_some_and(|age| age < SYNC_CLAIM_LIFETIME);
     if !holds && claim_is_fresh {
         return SyncOwnershipOutcome::Refused;
@@ -605,7 +608,7 @@ mod tests {
     fn unowned() -> SyncOwnershipState {
         SyncOwnershipState {
             owner: None,
-            claimed_at: Duration::ZERO,
+            claimed_at: None,
         }
     }
 
@@ -658,11 +661,40 @@ mod tests {
         let actor = Vid::new(3);
         let state = SyncOwnershipState {
             owner: Some(Vid::new(1)),
-            claimed_at: Duration::from_millis(20),
+            claimed_at: Some(Duration::from_millis(20)),
         };
         assert_eq!(
             judge_sync_ownership(actor, &at_origin(2), state, 0, 0, Duration::from_millis(50)),
             SyncOwnershipOutcome::Refused
+        );
+    }
+
+    #[test]
+    fn a_released_victim_keeps_its_claim_time() {
+        // `SetSyncOwner(NULL)` clears `m_pkChrSyncOwner` and keeps `m_fSyncTime`, so
+        // `IsSyncOwner` refuses even the last owner until the window passes.
+        let actor = Vid::new(1);
+        let state = SyncOwnershipState {
+            owner: None,
+            claimed_at: Some(Duration::from_millis(20)),
+        };
+        let at = |millis| {
+            judge_sync_ownership(
+                actor,
+                &at_origin(2),
+                state,
+                0,
+                0,
+                Duration::from_millis(millis),
+            )
+        };
+        assert_eq!(at(119), SyncOwnershipOutcome::Refused);
+        assert_eq!(
+            at(120),
+            SyncOwnershipOutcome::Accepted {
+                owner_changed: true,
+                record: ownership_record(actor, Vid::new(2)),
+            }
         );
     }
 
@@ -672,7 +704,7 @@ mod tests {
         let actor = Vid::new(3);
         let state = SyncOwnershipState {
             owner: Some(Vid::new(1)),
-            claimed_at: Duration::from_millis(20),
+            claimed_at: Some(Duration::from_millis(20)),
         };
         assert_eq!(
             judge_sync_ownership(
@@ -695,7 +727,7 @@ mod tests {
         let actor = Vid::new(1);
         let state = SyncOwnershipState {
             owner: Some(actor),
-            claimed_at: Duration::ZERO,
+            claimed_at: Some(Duration::ZERO),
         };
         assert_eq!(
             judge_sync_ownership(actor, &at_origin(2), state, 0, 0, Duration::from_millis(1)),
@@ -737,7 +769,7 @@ mod tests {
         far.x = 4000;
         let state = SyncOwnershipState {
             owner: Some(actor),
-            claimed_at: Duration::ZERO,
+            claimed_at: Some(Duration::ZERO),
         };
         assert_eq!(
             judge_sync_ownership(actor, &far, state, 0, 0, Duration::from_millis(1)),
@@ -764,7 +796,7 @@ mod tests {
         far.y = 1000;
         let state = SyncOwnershipState {
             owner: Some(Vid::new(9)),
-            claimed_at: Duration::ZERO,
+            claimed_at: Some(Duration::ZERO),
         };
         assert_eq!(
             judge_sync_ownership(actor, &far, state, 0, 0, Duration::from_secs(60)),

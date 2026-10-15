@@ -30,9 +30,10 @@ pub use apply::{
     APPLY_MAX_SP_PCT, APPLY_NONE, APPLY_SKILL, MAX_APPLY_NUM,
 };
 pub use combat::{
-    attack_rating, melee_damage, normal_hit, pk_eligibility, AttackRatingInput, Damage,
-    DamageOutcome, HitOutcome, MeleeDamageInput, NormalHitInput, PkActor, PkDenial, PkEligibility,
-    PkMode, Vitality,
+    attack_rating, calc_melee_damage, melee_reach, mob_attack_range, pk_eligibility, strike_npc,
+    AttackRatingInput, Damage, DamageOutcome, HitEvent, PkActor, PkDenial, PkEligibility, PkMode,
+    Strike, Striker, Struck, Vitality, DAMAGE_CRITICAL, DAMAGE_NORMAL, DAMAGE_PENETRATE,
+    FLY_HP_SMALL, FLY_SP_SMALL, SE_CRITICAL, SE_PENETRATE,
 };
 pub use dice::{number, Dice, Pcg32};
 pub use equip::{

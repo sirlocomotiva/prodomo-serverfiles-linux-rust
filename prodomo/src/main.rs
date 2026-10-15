@@ -97,17 +97,19 @@ use prodomo::ServerState;
 use protocol::cg_account::{
     CgEnterGame, CgLoginByKey, CgPlayerCreate, CgPlayerDelete, CgPlayerSelect,
 };
+use protocol::cg_attack::CgAttack;
 use protocol::cg_chat::CgChat;
 use protocol::cg_exchange::CgExchange;
 use protocol::cg_inventory::{
-    HEADER_CG_CHANGE_NAME, HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE,
-    HEADER_CG_CHARACTER_POSITION, HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_EMPIRE,
-    HEADER_CG_ENTERGAME, HEADER_CG_EXCHANGE, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2,
+    HEADER_CG_ADD_FLY_TARGETING, HEADER_CG_ATTACK, HEADER_CG_CHANGE_NAME,
+    HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE, HEADER_CG_CHARACTER_POSITION,
+    HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_EMPIRE, HEADER_CG_ENTERGAME,
+    HEADER_CG_EXCHANGE, HEADER_CG_FLY_TARGETING, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2,
     HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_LOGIN2,
     HEADER_CG_LOGIN3, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_QUEST_INPUT_STRING,
     HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP,
-    HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYNC_POSITION,
-    HEADER_CG_TARGET, HEADER_CG_WARP,
+    HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER,
+    HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_USE_SKILL, HEADER_CG_WARP,
 };
 use protocol::cg_item_drop::CgItemDrop;
 use protocol::cg_item_drop2::CgItemDrop2;
@@ -1619,12 +1621,6 @@ async fn move_character(
     true
 }
 
-/// `CG_CHARACTER_POSITION` (28) in the game phase: `CInputMain::Position`
-/// (`input_main.cpp:1530-1548`).
-///
-/// The pose record goes to the characters that see this one and then to this character,
-/// because `CHARACTER::Standup` and `CHARACTER::Sitdown` call `PacketAround` with no `except`
-/// (`G/char.cpp:3331`, `:3348`), and `PacketAround` finishes with the self-send.
 /// `CInputMain::Target` (`G/input_main.cpp:2249-2269`): the world sets the character's target to
 /// the one the VID names and answers with `GC_TARGET` when it changed.
 async fn target_step(
@@ -1655,6 +1651,42 @@ async fn target_step(
     true
 }
 
+/// `CInputMain::Attack` (`G/input_main.cpp:1918-2008`): the world runs the character's hit on
+/// the VID the record names and sends what it shows (see `game_state::fight`).
+async fn attack_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    let record = match CgAttack::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed ATTACK; closing");
+            return false;
+        }
+    };
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "ATTACK from a character outside the world; ignoring");
+        return true;
+    };
+    match context.game.attack(world_vid, record).await {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not take the attack; closing");
+            return false;
+        }
+    }
+    debug!(%addr, target = record.target_vid, "Attack handed to the world");
+    true
+}
+
+/// `CG_CHARACTER_POSITION` (28) in the game phase: `CInputMain::Position`
+/// (`input_main.cpp:1530-1548`).
+///
+/// The pose record goes to the characters that see this one and then to this character,
+/// because `CHARACTER::Standup` and `CHARACTER::Sitdown` call `PacketAround` with no `except`
+/// (`G/char.cpp:3331`, `:3348`), and `PacketAround` finishes with the self-send.
 async fn character_pose(
     addr: SocketAddr,
     context: &ConnectionContext,
@@ -1867,8 +1899,8 @@ where
         {
             belongings_step(session, addr, context, held, &frame).await
         }
-        // `CG_MOVE` (7), `CG_SYNC_POSITION` (8), `CG_CHARACTER_POSITION` (28) and `CG_TARGET`
-        // (61) in the game phase.
+        // `CG_ATTACK` (2), `CG_MOVE` (7), `CG_SYNC_POSITION` (8), `CG_CHARACTER_POSITION` (28)
+        // and `CG_TARGET` (61) in the game phase.
         LiveStep::Record { phase, frame }
             if phase == ClientPhase::Game && is_world_step(frame.header) =>
         {
@@ -1904,21 +1936,34 @@ where
 ///   client still sends for the character it left (`@fixme120`, `G/input_login.cpp:1254-1257`);
 /// - `CG_ENTER_GAME` (10) in the game phase: the header is in the main table
 ///   (`G/packet_info.cpp:116`), and `CInputMain::Analyze` has no case for it, so its `default`
-///   consumes the record (`G/input_main.cpp:4126-4127`).
+///   consumes the record (`G/input_main.cpp:4126-4127`);
+/// - `CG_FLY_TARGETING` (51), `CG_USE_SKILL` (52), `CG_ADD_FLY_TARGETING` (53) and `CG_SHOOT`
+///   (54) in the game phase, which wait for the skills (V17f): legacy's analyzer runs them, and
+///   the Rewrite keeps the connection and does nothing.
 fn is_consumed(phase: ClientPhase, header: u8) -> bool {
     match phase {
         ClientPhase::Login | ClientPhase::Select | ClientPhase::Loading => {
             header == HEADER_CG_ITEM_USE.value() || header == HEADER_CG_TARGET.value()
         }
-        ClientPhase::Game => header == HEADER_CG_ENTERGAME.value(),
+        ClientPhase::Game => [
+            HEADER_CG_ENTERGAME,
+            HEADER_CG_FLY_TARGETING,
+            HEADER_CG_USE_SKILL,
+            HEADER_CG_ADD_FLY_TARGETING,
+            HEADER_CG_SHOOT,
+        ]
+        .iter()
+        .any(|consumed| consumed.value() == header),
         _ => false,
     }
 }
 
-/// Whether `header` is a record the world answers alone: one that moves a character, or
-/// `CG_TARGET`.
+/// Whether `header` is a record the world answers alone: one that moves a character,
+/// `CG_TARGET` or `CG_ATTACK`.
 fn is_world_step(header: u8) -> bool {
-    is_motion_step(header) || header == HEADER_CG_TARGET.value()
+    is_motion_step(header)
+        || header == HEADER_CG_TARGET.value()
+        || header == HEADER_CG_ATTACK.value()
 }
 
 /// Run a step [`is_world_step`] accepts.
@@ -1930,6 +1975,8 @@ async fn world_step(
 ) -> bool {
     if frame.header == HEADER_CG_TARGET.value() {
         target_step(addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_ATTACK.value() {
+        attack_step(addr, context, held, frame).await
     } else {
         motion_step(addr, context, held, frame).await
     }

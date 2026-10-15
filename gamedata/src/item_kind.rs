@@ -83,6 +83,8 @@ pub const WEAPON_TWO_HANDED: i32 = 3;
 pub const WEAPON_BELL: i32 = 4;
 /// `WEAPON_FAN`: its stance is `MOTION_MODE_FAN`.
 pub const WEAPON_FAN: i32 = 5;
+/// `WEAPON_MOUNT_SPEAR`, the mounted spear: `CalcMeleeDamage` swings it as a melee weapon.
+pub const WEAPON_MOUNT_SPEAR: i32 = 7;
 
 /// `USE_POTION`: a potion whose recovery runs over the following seconds.
 pub const USE_POTION: i32 = 0;
@@ -257,6 +259,7 @@ mod tests {
             (WEAPON_TWO_HANDED, "WEAPON_TWO_HANDED"),
             (WEAPON_BELL, "WEAPON_BELL"),
             (WEAPON_FAN, "WEAPON_FAN"),
+            (WEAPON_MOUNT_SPEAR, "WEAPON_MOUNT_SPEAR"),
         ] {
             assert_eq!(value, index(weapon, name), "{name}");
         }

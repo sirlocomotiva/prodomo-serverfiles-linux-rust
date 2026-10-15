@@ -44,7 +44,7 @@
 //! - **The partner of every step.** `CInputMain::Exchange` looks up `arg1` for every subheader,
 //!   although only `START` names a character (a Defect): the step is ignored when that
 //!   character waits after a safebox load, which tells it the wait line, or is dead. The
-//!   Rewrite checks the wait of the player a `START` asks alone. Nobody dies yet, so no step is
+//!   Rewrite checks the wait of the player a `START` asks alone. No player dies yet, so no step is
 //!   ignored for a dead character.
 //! - **A safebox never loaded.** Legacy's load time starts at 0 (`G/char.cpp:278`), so every
 //!   trade step waits for the first 10 seconds after the process starts. A character whose

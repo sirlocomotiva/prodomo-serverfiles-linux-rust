@@ -804,6 +804,13 @@ impl Points {
         records
     }
 
+    /// `SetPoint`: put `value` in an instant slot, for a test that needs a point no ported apply
+    /// reaches.
+    #[cfg(test)]
+    pub(crate) fn set_point(&mut self, kind: usize, value: i32) {
+        self.instant[kind] = value;
+    }
+
     /// `CheckMaximumPoints`: lower the hit and spell points to their maxima.
     pub fn check_maximum_points(&mut self) -> Vec<PointRecord> {
         let mut records = Vec::new();

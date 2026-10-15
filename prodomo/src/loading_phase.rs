@@ -338,7 +338,8 @@ pub fn npc_add_at(npc: &Npc, at: InsertAt) -> GcCharacterAdd {
         npc.race,
         npc.moving_speed,
         npc.attack_speed,
-        0,
+        // `ADD_CHARACTER_STATE_DEAD` once it has died (`G/char.cpp:1446-1447`), until it goes.
+        u8::from(npc.dead),
         npc.affect_flags,
     )
 }

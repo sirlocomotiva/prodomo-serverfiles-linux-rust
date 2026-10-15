@@ -22,10 +22,11 @@
 //! character asks for Idle and waits 1 Pulse (`CHARACTER::Initialize`, `G/char.cpp:263-264`).
 //!
 //! - **Idle** (`StateIdle`, `G/char_state.cpp:362-387`). A stone waits 1 second. A monster runs
-//!   `__StateIdle_Monster` (`:626-736`): a coward runs away (`CowardEscape`, `:282-321`); otherwise it waits 1 to 3 seconds when aggressive and 3 to 5
-//!   when not, and one time in 7 turns to a random heading and walks 300 to 700 units, when
-//!   neither `no_wander` nor `AIFLAG_NOMOVE` holds it and both the point and the half-way point
-//!   are movable; a monster that does not walk may speak (`MonsterChat(MONSTER_CHAT_WAIT)`).
+//!   `__StateIdle_Monster` (`:626-736`): a coward runs away (`CowardEscape`, `:282-321`);
+//!   otherwise it waits 1 to 3 seconds when aggressive and 3 to 5 when not, and one time in 7
+//!   turns to a random heading and walks 300 to 700 units, when neither `no_wander` nor
+//!   `AIFLAG_NOMOVE` holds it and both the point and the half-way point are movable; a monster
+//!   that does not walk may speak (`MonsterChat(MONSTER_CHAT_WAIT)`).
 //!   Any other non-player runs `__StateIdle_NPC` (`:507-624`): it may speak, waits 5 seconds,
 //!   and, unless it is a guard or `AIFLAG_NOMOVE` holds it, one time in 7 walks 200 to 400 units
 //!   at a walk, which tells its view the first time.
@@ -40,15 +41,21 @@
 //! quests has none. The line is a `GC_CHAT` the speaker says to its view, with its VID, as a
 //! player's talk is, and not a server line.
 //!
+//! A player's hit can stun a monster and kill it (see [`super::fight`]). A dead NPC's update
+//! does nothing, and neither does a stunned monster's Idle (`G/char_state.cpp:628-629`), while
+//! its Move goes on, as `StateMove` has no such guard. The line a hit monster speaks
+//! (`MonsterChat(MONSTER_CHAT_ATTACKED)`) is drawn with the hit.
+//!
 //! # What is not here yet
 //!
-//! - **The fight.** No NPC has a victim yet: `FindVictim` and `BeginFight` of an aggressive
-//!   monster, the Battle state, the guard's victim search and the aggro of a chasing monster wait
-//!   for `sys.combat.core`. An aggressive monster near a player therefore wanders as a peaceful
-//!   one does, with its own shorter wait.
+//! - **The monster's side of the fight.** No NPC has a victim yet: `FindVictim` and
+//!   `BeginFight` of an aggressive or hit monster, the Battle state, the guard's victim search
+//!   and the aggro of a chasing monster wait for 229l. An aggressive monster near a player
+//!   therefore wanders as a peaceful one does, with its own shorter wait.
 //! - **The protector.** `GetProtege` (a group's leader, a stone's spawn) and `Follow` wait for the
 //!   group's party and follow.
-//! - **A stone's spawns** at each tenth of its hit points wait for damage, which nothing deals.
+//! - **A stone's spawns** at each tenth of its hit points wait for a hit on a stone, which is
+//!   refused until they are ported.
 //! - **Santa, the war flags and the horses** (`StateHorse`) wait for their systems; no spawn file
 //!   stands a horse race.
 //! - **The monster clips.** Every NPC moves at the fall-back motion speed of 300 (V2), as no
@@ -56,8 +63,10 @@
 //!
 //! The berserk and god-speed resets wait for the fight too: 148 mob protos carry `BERSERK` and 46
 //! `GODSPEED`, but only Battle turns either on (`G/char_state.cpp:1125-1133`), so Idle finds
-//! nothing to reset (`:643-649`). No affect stuns an NPC and none keeps a shop, so `CanMove` always holds. The `test_server` walk
-//! toggle is not ported, as production never runs it.
+//! nothing to reset (`:643-649`). No affect stuns an NPC and none keeps a shop, so `CanMove`
+//! always holds. The `test_server` walk toggle (`:740-746`), which sets a wandering monster
+//! running 60 times in 101, waits for the `test_server` audit (owner question 5): legacy's
+//! `test_server` defaults to 1 (`G/config.cpp:72`).
 //!
 //! # Divergences
 //!
@@ -198,6 +207,8 @@ struct Who {
     ai_flags: u32,
     map: i32,
     aggressive: bool,
+    /// `IsStun()`: a player's hit left it no hit points (see [`super::fight`]).
+    stunned: bool,
 }
 
 /// `GetDeltaByDegree` (`G/vector.cpp:54-60`): the step of `distance` toward `degree`, clockwise
@@ -262,17 +273,20 @@ impl GameState {
         }
     }
 
-    /// `UpdateStateMachine` (`G/char.cpp:5338-5348`). Nothing dies yet, so `IsDead` is never
-    /// true.
+    /// `UpdateStateMachine` (`G/char.cpp:5338-5348`).
     fn update_state_machine(&mut self, vid: u32, pulse: u64) {
-        if self.npc_by_vid(vid).is_none() {
+        let Some(dead) = self.npc_by_vid(vid).map(|npc| npc.dead) else {
             self.minds.forget(vid);
             return;
-        }
+        };
         let Some(mind) = self.minds.machines.get_mut(&vid) else {
             return;
         };
         if pulse < mind.next_pulse {
+            return;
+        }
+        // `if (IsDead()) return;`: the next update stays where it was.
+        if dead {
             return;
         }
         // `CFSM::Update` (`G/FSM.cpp:22-38`); every Begin and End is empty.
@@ -299,6 +313,7 @@ impl GameState {
             ai_flags: npc.ai_flags,
             map,
             aggressive: npc.is_aggressive(),
+            stunned: npc.stunned,
         })
     }
 
@@ -351,6 +366,10 @@ impl GameState {
 
     /// `__StateIdle_Monster` (`G/char_state.cpp:626-736`), without a victim.
     fn idle_monster(&mut self, vid: u32, who: Who) {
+        // `if (IsStun()) return;` (`:628-629`): the wait stays as it was.
+        if who.stunned {
+            return;
+        }
         if who.ai_flags & AIFLAG_COWARD != 0 {
             self.coward_escape(vid, who.map);
             return;
@@ -537,7 +556,7 @@ impl GameState {
     /// `CHARACTER::Move` and `Sync` (`G/char.cpp:3384-3458`, `:3610-3622`) for an NPC: the same
     /// point changes nothing; any other turns it toward the point and stands it there with z 0,
     /// changing its sectree but not its view. A point no sectree holds leaves it where it was.
-    fn npc_move(&mut self, vid: u32, x: i32, y: i32) {
+    pub(super) fn npc_move(&mut self, vid: u32, x: i32, y: i32) {
         let Some(&(channel, map, at)) = self.npc_of.get(&vid) else {
             return;
         };
@@ -571,16 +590,11 @@ impl GameState {
 
     /// `MonsterChat(MONSTER_CHAT_WAIT)` (`G/char.cpp:7555-7600`).
     fn monster_chat_wait(&mut self, vid: u32, who: Who) {
-        let race = u32::from(who.race);
-        let line = if who.char_type == CHAR_TYPE_MONSTER {
+        let index = if who.char_type == CHAR_TYPE_MONSTER {
             if number(&mut self.dice, 0, 60) != 0 {
                 return;
             }
-            let index = MONSTER_CHAT_WAIT * 3 + number(&mut self.dice, 1, 3);
-            let Some(quests) = &self.quests else {
-                return;
-            };
-            quests.manager().host().monster_chat_line(race, index)
+            MONSTER_CHAT_WAIT * 3 + number(&mut self.dice, 1, 3)
         } else {
             let odds = if GUARD_RACES.contains(&who.race) {
                 6
@@ -590,6 +604,7 @@ impl GameState {
             if number(&mut self.dice, 0, odds) != 0 {
                 return;
             }
+            let race = u32::from(who.race);
             let Some(count) = self
                 .quests
                 .as_ref()
@@ -597,12 +612,22 @@ impl GameState {
             else {
                 return;
             };
-            let index = number(&mut self.dice, 1, count);
-            let Some(quests) = &self.quests else {
-                return;
-            };
-            quests.manager().host().monster_chat_line(race, index)
+            number(&mut self.dice, 1, count)
         };
+        self.monster_say(vid, index);
+    }
+
+    /// The non-player under `vid` says line `index` of its race's `locale.monster_chat`
+    /// (`G/char.cpp:7568-7600`): a talking `GC_CHAT` with its VID, to its view. A world with no
+    /// quests, and a line that is missing or empty, say nothing.
+    pub(super) fn monster_say(&self, vid: u32, index: i32) {
+        let (Some(npc), Some(quests)) = (self.npc_by_vid(vid), &self.quests) else {
+            return;
+        };
+        let line = quests
+            .manager()
+            .host()
+            .monster_chat_line(u32::from(npc.race), index);
         if line.is_empty() {
             return;
         }
@@ -1104,6 +1129,67 @@ mod tests {
             next.motion.duration_ms,
             move_duration(target, back, MOTION_SPEED_FALLBACK, 100)
         );
+    }
+
+    /// A stunned monster's Idle returns before any draw and keeps the wait it had
+    /// (`G/char_state.cpp:628-629`); the same monster unstunned draws its wait.
+    #[test]
+    fn a_stunned_monster_idles_with_no_draw() {
+        let mut stunned = an_npc(ME, CHAR_TYPE_MONSTER, 101, 0);
+        stunned.stunned = true;
+        let (world, mut inbox, dice) = first_idle(stunned, 1);
+        assert_eq!(world.dice, dice);
+        assert_eq!(mind(&world).next_pulse, 2, "the first duration stays");
+        assert_eq!(drained(&mut inbox), Vec::<Vec<u8>>::new());
+        let (world, _, mut dice) = first_idle(an_npc(ME, CHAR_TYPE_MONSTER, 101, 0), 1);
+        let wait = number(&mut dice, 3, 5);
+        assert_eq!(mind(&world).next_pulse, 1 + pulses(wait));
+        assert_ne!(world.dice, Pcg32::new(1, 0));
+    }
+
+    /// A dead NPC's `UpdateStateMachine` returns before the state runs, and its next update
+    /// stays on the Pulse it was (`G/char.cpp:5343-5344`).
+    #[test]
+    fn a_dead_npc_runs_no_state() {
+        let mut dead = an_npc(ME, CHAR_TYPE_MONSTER, 101, 0);
+        dead.dead = true;
+        let (mut world, mut inbox, dice) = first_idle(dead, 1);
+        for pulse in 2..=30 {
+            world.process_pulse(pulse);
+        }
+        assert_eq!(world.dice, dice);
+        let mind = mind(&world);
+        assert_eq!((mind.next_pulse, mind.state), (1, Fsm::Initial));
+        assert_eq!(drained(&mut inbox), Vec::<Vec<u8>>::new());
+    }
+
+    /// `StateMove` has no stun guard: a monster stunned mid-walk still reaches its point, and
+    /// then idles with no draw.
+    #[test]
+    fn a_monster_stunned_mid_walk_still_arrives() {
+        let seed = a_seed(|dice| {
+            let _wait = number(dice, 3, 5);
+            number(dice, 0, 6) == 0
+        });
+        let monster = an_npc(ME, CHAR_TYPE_MONSTER, 101, 0);
+        let (mut world, _, _) = first_idle(monster, seed);
+        let walk = mind(&world);
+        assert_eq!(walk.asked, Some(Fsm::Move));
+        world.npc_mut(ME).unwrap().stunned = true;
+        let clock = TestClock::default();
+        world.clock = super::super::motion::WorldClock::new(Box::new(clock.clone()));
+        clock.set(T0 + walk.motion.duration_ms);
+        for pulse in 2..=5 {
+            world.process_pulse(pulse);
+        }
+        let npc = world.npc_by_vid(ME).unwrap();
+        assert_eq!((npc.x, npc.y), walk.motion.dest);
+        let rest = mind(&world);
+        assert_eq!((rest.state, rest.asked), (Fsm::Move, Some(Fsm::Idle)));
+        let dice = world.dice.clone();
+        world.process_pulse(rest.next_pulse);
+        assert_eq!(world.dice, dice, "the stunned Idle draws nothing");
+        assert_eq!(mind(&world).state, Fsm::Idle);
     }
 
     /// A player shown an NPC mid-walk is sent it where it stands, with its move and its walk

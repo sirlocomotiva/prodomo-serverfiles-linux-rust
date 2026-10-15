@@ -1446,11 +1446,12 @@ fn game_len(header: u8) -> usize {
         GC_QUICKSLOT_DEL | GC_SAFEBOX_SIZE | GC_MALL_OPEN => 1 + 1,
         GC_QUICKSLOT_SWAP => 1 + 2,
         GC_EXCHANGE => EXCHANGE_LEN,
-        GC_SAFEBOX_DEL | GC_MALL_DEL | GC_CHARACTER_DEL => 1 + 4,
+        GC_SAFEBOX_DEL | GC_MALL_DEL | GC_CHARACTER_DEL | GC_STUN | GC_DEAD => 1 + 4,
         GC_SAFEBOX_WRONG_PASSWORD => 1,
         GC_WARP => WARP_LEN,
         GC_WALK_MODE => WALK_MODE_LEN,
         GC_TARGET => TARGET_LEN,
+        GC_DAMAGE_INFO => DAMAGE_INFO_LEN,
         other => panic!("unexpected loading or enter-game header {other}"),
     }
 }
@@ -9205,4 +9206,339 @@ impl Keyed {
         }
         wire
     }
+}
+
+/// `cg.game.attack`: `HEADER_CG_ATTACK`, `TPacketCGAttack`'s header, `bType`, `dwVID` and the
+/// two magic-cube pieces (`G/packet.h:531-538`).
+const CG_ATTACK: u8 = 0x02;
+/// `HEADER_CG_FLY_TARGETING`, `HEADER_CG_USE_SKILL`, `HEADER_CG_ADD_FLY_TARGETING` and
+/// `HEADER_CG_SHOOT` (`G/packet.h:56-59`).
+const CG_FLY_TARGETING: u8 = 0x33;
+const CG_USE_SKILL: u8 = 0x34;
+const CG_ADD_FLY_TARGETING: u8 = 0x35;
+const CG_SHOOT: u8 = 0x36;
+/// `gc.damage_info`: `HEADER_GC_DAMAGE_INFO`, `TPacketGCDamageInfo`'s header, `dwVID`, `flag`
+/// and `damage` (`G/packet.h:2048-2054`).
+const GC_DAMAGE_INFO: u8 = 0x87;
+const DAMAGE_INFO_LEN: usize = 1 + 4 + 1 + 4;
+/// `gc.stun` and `gc.dead`: `HEADER_GC_STUN` and `HEADER_GC_DEAD`, each a header and a VID.
+const GC_STUN: u8 = 0x0d;
+const GC_DEAD: u8 = 0x0e;
+/// `DAMAGE_NORMAL`, the flag of a plain melee hit (`G/char_battle.cpp:1984`).
+const DAMAGE_NORMAL: u8 = 1;
+/// The stray dog's `MAX_HP` (vnum 101).
+const DOG_HP: i32 = 126;
+/// The damage Alpha's bare fist deals the stray dog. `CalcMeleeDamage`'s only draw is the
+/// unarmed `number(0, 0)`, so the hit is exact: Alpha's attack grade is 344 and the dog's
+/// defence grade 10 (`G/char.cpp:2716-2767`, `:2850-2858`); the hit rating, 274/300 less the
+/// evasion's 0.23 (`G/battle.cpp:271-297`, with the attacker's level, owner question 28), is
+/// 0.6833, which turns the 36 above twice Alpha's level into 24, so the attack is 332, and the
+/// defence leaves 322.
+const PUNCH_ON_THE_DOG: i32 = 322;
+/// A stray dog (vnum 101) at regen point (605, 540), where Alpha enters, which stands once and
+/// would stand again only after 1000 seconds.
+const DOG_AT_ALPHA: &str = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t101\n";
+
+/// `CG_ATTACK` of type 0 on `vid`, the magic-cube pieces 0.
+fn client_attack(vid: u32) -> Vec<u8> {
+    client_attack_typed(0, vid)
+}
+
+/// `CG_ATTACK` of `attack_type` on `vid`.
+fn client_attack_typed(attack_type: u8, vid: u32) -> Vec<u8> {
+    let mut record = vec![CG_ATTACK, attack_type];
+    record.extend_from_slice(&vid.to_le_bytes());
+    record.extend_from_slice(&[0, 0]);
+    record
+}
+
+/// `CG_FLY_TARGETING` or `CG_ADD_FLY_TARGETING` under `header`, on `vid` at `(x, y)`.
+fn client_fly(header: u8, vid: u32, (x, y): (i32, i32)) -> Vec<u8> {
+    let mut record = vec![header];
+    record.extend_from_slice(&vid.to_le_bytes());
+    record.extend_from_slice(&x.to_le_bytes());
+    record.extend_from_slice(&y.to_le_bytes());
+    record
+}
+
+/// `GC_DAMAGE_INFO` of `damage` with `flag` on `vid`.
+fn damage_info(vid: u32, flag: u8, damage: i32) -> Vec<u8> {
+    let mut record = vec![GC_DAMAGE_INFO];
+    record.extend_from_slice(&vid.to_le_bytes());
+    record.push(flag);
+    record.extend_from_slice(&damage.to_le_bytes());
+    record
+}
+
+/// `GC_STUN` of `vid`.
+fn stun_of(vid: u32) -> Vec<u8> {
+    let mut record = vec![GC_STUN];
+    record.extend_from_slice(&vid.to_le_bytes());
+    record
+}
+
+/// `GC_DEAD` of `vid`.
+fn dead_of(vid: u32) -> Vec<u8> {
+    let mut record = vec![GC_DEAD];
+    record.extend_from_slice(&vid.to_le_bytes());
+    record
+}
+
+/// `GC_OWNERSHIP` of `victim` to `owner`, 0 for none.
+fn ownership_of(owner: u32, victim: u32) -> Vec<u8> {
+    let mut record = vec![GC_OWNERSHIP];
+    record.extend_from_slice(&owner.to_le_bytes());
+    record.extend_from_slice(&victim.to_le_bytes());
+    record
+}
+
+/// `GC_CHARACTER_DEL` of `vid`.
+fn removal_of(vid: u32) -> Vec<u8> {
+    let mut record = vec![GC_CHARACTER_DEL];
+    record.extend_from_slice(&vid.to_le_bytes());
+    record
+}
+
+impl Keyed {
+    /// The next record past a ping, the revive timer's own and a stamina refill, with what an
+    /// NPC does on its own skipped as [`Keyed::read_game_raw`] skips it.
+    ///
+    /// [`Keyed::read_game`] takes a noted monster's `GC_CHARACTER_DEL` for a walk's noise
+    /// ([`Keyed::monster_record`]), and here the monster's removal is the answer.
+    fn read_fight(&mut self) -> Vec<u8> {
+        loop {
+            let record = self.read_game_raw();
+            if record[0] != GC_PING && !self.timer_record(&record) && !is_stamina_refill(&record) {
+                return record;
+            }
+        }
+    }
+}
+
+/// The VID of the `GC_CHARACTER_ADD` among `inserts` shown at `at`.
+fn vid_shown_at<'a>(inserts: impl IntoIterator<Item = &'a [u8]>, at: (i32, i32)) -> u32 {
+    let insert = inserts
+        .into_iter()
+        .find(|insert| inserted_at(insert) == at)
+        .unwrap_or_else(|| panic!("a character is shown at {at:?}"));
+    u32::from_le_bytes(insert[1..5].try_into().expect("a VID"))
+}
+
+/// A server whose map 1 has the `npc.txt` `lines` and no monster wanders, Alpha entered, its
+/// VID, what the burst showed it, and its revive ended by a swing where it stands, the client's
+/// `FUNC_ATTACK` move before its `CG_ATTACK`.
+fn alpha_swinging_by(database: &ScratchDatabase, lines: &str) -> (Server, Keyed, u32, Entered) {
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        lines,
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(database);
+    let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    let swing = client_move(
+        FUNC_ATTACK,
+        7,
+        40,
+        ALPHA_ENTERS_AT.0,
+        ALPHA_ENTERS_AT.1,
+        0x5eed,
+    );
+    alpha.send_record(&swing);
+    let update = read_past_pings(&mut alpha);
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert!(alpha.timer_record(&update), "the swing ends the revive");
+    assert_eq!(
+        read_past_pings(&mut alpha),
+        [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0]
+    );
+    alpha.quiet("the swing is not relayed to the swinger");
+    (server, alpha, listed.id, entered)
+}
+
+/// Ledger 229j: `CInputMain::Attack` and `battle_melee_attack` (`G/input_main.cpp:1966-2009`,
+/// `G/battle.cpp:172-210`), `CHARACTER::Damage` and its `Stun`, `StunEvent`, `Dead` and
+/// `dead_event` (`G/char_battle.cpp:402-548`, `:1238-1696`, `:2179-2433`), `SetSyncOwner`
+/// (`G/char.cpp:5469-5555`).
+///
+/// Alpha punches the stray dog it targets, standing on it. Its one hit of 322 takes all 126 of
+/// the dog's hit points: Alpha is shown the damage, the dog's hit points, the stun and its claim
+/// on the dog, in that order. Three seconds later the stun ends in death: Alpha's target is
+/// cleared, the dog has no owner and is dead. A second later the dog goes: no owner, then its
+/// removal; and its regen waits 1000 seconds.
+#[test]
+fn a_punch_on_a_targeted_dog_stuns_it_and_it_dies_three_seconds_later_and_leaves() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (_server, mut alpha, alpha_vid, entered) = alpha_swinging_by(&database, DOG_AT_ALPHA);
+    let dog = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    alpha.send_record(&client_target(dog));
+    assert_eq!(alpha.read_game(), target_of(dog, 100, DOG_HP, DOG_HP, 0));
+
+    // When: Alpha punches the dog. Then: the damage before the clamp, the hit points, the
+    // stun and the claim.
+    alpha.send_record(&client_attack(dog));
+    assert_eq!(
+        alpha.read_fight(),
+        damage_info(dog, DAMAGE_NORMAL, PUNCH_ON_THE_DOG)
+    );
+    assert_eq!(alpha.read_fight(), target_of(dog, 0, 0, DOG_HP, 0));
+    assert_eq!(alpha.read_fight(), stun_of(dog));
+    assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, dog));
+    let hit = std::time::Instant::now();
+    alpha.quiet("the hit sends nothing more");
+
+    // Then: three seconds on, the stun ends in death.
+    assert_eq!(alpha.read_fight(), target_of(0, 0, 0, 0, 0));
+    assert!(
+        hit.elapsed() >= Duration::from_millis(2_500),
+        "the stun lasts 75 Pulses: {:?}",
+        hit.elapsed()
+    );
+    assert_eq!(alpha.read_fight(), ownership_of(0, dog));
+    assert_eq!(alpha.read_fight(), dead_of(dog));
+    let died = std::time::Instant::now();
+
+    // Then: a second on, the dog goes.
+    assert_eq!(alpha.read_fight(), ownership_of(0, dog));
+    assert!(
+        died.elapsed() >= Duration::from_millis(750),
+        "the dead dog lies 25 Pulses: {:?}",
+        died.elapsed()
+    );
+    assert_eq!(alpha.read_fight(), removal_of(dog));
+    alpha.quiet_for(
+        "the regen of 1000 seconds stands nothing",
+        Duration::from_secs(2),
+    );
+}
+
+/// Ledger 229j: a hit on a stunned victim runs `Dead` at once and deals nothing
+/// (`G/char_battle.cpp:2248-2252`): no damage is shown, the dog dies and goes a second later,
+/// and the stun's own death never comes (`:1464`).
+#[test]
+fn a_second_punch_on_a_stunned_dog_kills_it_at_once_with_no_number() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (_server, mut alpha, alpha_vid, entered) = alpha_swinging_by(&database, DOG_AT_ALPHA);
+    let dog = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    alpha.send_record(&client_target(dog));
+    assert_eq!(alpha.read_game(), target_of(dog, 100, DOG_HP, DOG_HP, 0));
+    alpha.send_record(&client_attack(dog));
+    assert_eq!(
+        alpha.read_fight(),
+        damage_info(dog, DAMAGE_NORMAL, PUNCH_ON_THE_DOG)
+    );
+    assert_eq!(alpha.read_fight(), target_of(dog, 0, 0, DOG_HP, 0));
+    assert_eq!(alpha.read_fight(), stun_of(dog));
+    assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, dog));
+
+    // When: Alpha punches the stunned dog. Then: it dies at once, with no damage shown.
+    alpha.send_record(&client_attack(dog));
+    let hit = std::time::Instant::now();
+    assert_eq!(alpha.read_fight(), target_of(0, 0, 0, 0, 0));
+    assert_eq!(alpha.read_fight(), ownership_of(0, dog));
+    assert_eq!(alpha.read_fight(), dead_of(dog));
+    assert!(
+        hit.elapsed() < Duration::from_millis(1_500),
+        "no stun to wait out: {:?}",
+        hit.elapsed()
+    );
+    assert_eq!(alpha.read_fight(), ownership_of(0, dog));
+    assert_eq!(alpha.read_fight(), removal_of(dog));
+    assert!(
+        hit.elapsed() < Duration::from_millis(2_500),
+        "the dog goes a second after its death: {:?}",
+        hit.elapsed()
+    );
+    alpha.quiet_for(
+        "no second death when the stun would have ended",
+        Duration::from_secs(3),
+    );
+}
+
+/// Ledger 229j: the reach and the receivers. A dog 300 east is 288 away by `DISTANCE_APPROX`,
+/// within the 350 a bare fist reaches and beyond the 250 of a claim
+/// (`G/battle.cpp:172-210`, `G/char.cpp:5508-5519`); one 500 east, 480 away, is out of reach.
+///
+/// A punch on the far dog does nothing. A punch on the near dog, which Alpha never targeted,
+/// shows Alpha neither the damage (`G/char_battle.cpp:1720-1742`) nor its hit points nor a
+/// claim; only the stun, then the release and the death, then the release and the removal.
+/// The far dog is untouched.
+#[test]
+fn an_untargeted_punch_shows_no_number_and_one_beyond_reach_does_nothing() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let lines = "m\t608\t540\t0\t0\t0\t1\t1000s\t100\t1\t101\n\
+                 m\t610\t540\t0\t0\t0\t1\t1000s\t100\t1\t101\n";
+    let (_server, mut alpha, _alpha_vid, entered) = alpha_swinging_by(&database, lines);
+    let monsters = || entered.shown.monsters.iter().map(Vec::as_slice);
+    let near = vid_shown_at(monsters(), (470_400, 950_000));
+    let far = vid_shown_at(monsters(), (470_600, 950_000));
+
+    alpha.send_record(&client_attack(far));
+    alpha.quiet("a dog beyond the reach is not hit");
+
+    alpha.send_record(&client_attack(near));
+    assert_eq!(alpha.read_fight(), stun_of(near));
+    let hit = std::time::Instant::now();
+    alpha.quiet("no damage, no hit points and no claim for an untargeted dog 288 away");
+    assert_eq!(alpha.read_fight(), ownership_of(0, near));
+    assert!(hit.elapsed() >= Duration::from_millis(2_500));
+    assert_eq!(alpha.read_fight(), dead_of(near));
+    assert_eq!(alpha.read_fight(), ownership_of(0, near));
+    assert_eq!(alpha.read_fight(), removal_of(near));
+
+    alpha.send_record(&client_target(far));
+    assert_eq!(alpha.read_game(), target_of(far, 100, DOG_HP, DOG_HP, 0));
+}
+
+/// Ledger 229j: what waits for the skills is consumed, and an attack on what is no monster is
+/// refused, each keeping the connection. `CG_SHOOT`, `CG_FLY_TARGETING`,
+/// `CG_ADD_FLY_TARGETING` and `CG_USE_SKILL` do nothing (V17f; legacy's relay of a fly target
+/// skips its sender, `G/char_battle.cpp:3342-3371`); a `CG_ATTACK` of a skill's type, on the
+/// shopkeeper 100 east, on Alpha itself and on a VID that names nothing does nothing
+/// (`G/input_main.cpp:1966-2009`, `G/battle.cpp:99-152`). The dog is still whole after.
+#[test]
+fn skill_shoot_and_fly_frames_and_refused_victims_keep_the_connection() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let lines = format!("{DOG_AT_ALPHA}m\t606\t540\t0\t0\t0\t1\t1000s\t100\t1\t9001\n");
+    let (_server, mut alpha, alpha_vid, entered) = alpha_swinging_by(&database, &lines);
+    let dog = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    let shopkeeper = vid_shown_at(entered.shown.inserts(), (470_200, 950_000));
+    let mut use_skill = vec![CG_USE_SKILL];
+    use_skill.extend_from_slice(&1_u32.to_le_bytes());
+    use_skill.extend_from_slice(&dog.to_le_bytes());
+    for record in [
+        vec![CG_SHOOT, 0],
+        client_fly(CG_FLY_TARGETING, dog, ALPHA_ENTERS_AT),
+        client_fly(CG_ADD_FLY_TARGETING, dog, ALPHA_ENTERS_AT),
+        use_skill,
+        client_attack_typed(1, dog),
+        client_attack(shopkeeper),
+        client_attack(alpha_vid),
+        client_attack(0x7fff_fff0),
+    ] {
+        alpha.send_record(&record);
+    }
+    alpha.quiet("the skills' frames and the refused attacks send nothing");
+    alpha.send_record(&client_target(dog));
+    assert_eq!(alpha.read_game(), target_of(dog, 100, DOG_HP, DOG_HP, 0));
 }

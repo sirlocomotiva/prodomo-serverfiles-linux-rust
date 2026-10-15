@@ -61,6 +61,7 @@ use crate::sync_position::distance_approx;
 use world::character::{add_from_client, sync_quickslots};
 
 mod affect;
+mod fight;
 #[cfg(test)]
 mod fixtures;
 mod mob_ai;
@@ -431,6 +432,9 @@ pub struct GameState {
     regens: regen::Regens,
     /// The NPCs' state machines and the state set. See [`mob_ai`].
     minds: mob_ai::Minds,
+    /// What each non-player keeps of its fight: its killer, its owner and its events. See
+    /// [`fight`].
+    npc_combat: HashMap<u32, fight::NpcCombat>,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -511,6 +515,7 @@ impl GameState {
             targets: target::Targets::default(),
             regens: regen::Regens::default(),
             minds: mob_ai::Minds::default(),
+            npc_combat: HashMap::new(),
         }
     }
 
@@ -810,13 +815,8 @@ impl GameState {
             command @ (GameCommand::Move { .. }
             | GameCommand::SyncPosition { .. }
             | GameCommand::Relay { .. }) => self.apply_motion(command),
-            GameCommand::Target {
-                vid,
-                target,
-                settled,
-            } => {
-                self.target(vid, target);
-                drop(settled);
+            command @ (GameCommand::Target { .. } | GameCommand::Attack { .. }) => {
+                self.apply_pick(command);
             }
             GameCommand::Stop => {
                 // The loop handles `Stop` itself, before a command ever reaches a
@@ -1043,6 +1043,7 @@ impl GameState {
     /// already ending.
     pub fn leave_world(&mut self, vid: common::vid::Vid) -> Option<Kept> {
         self.cancel_trade(vid);
+        self.release_owned(vid);
         self.clear_target(vid);
         let _outbox = self.outboxes.remove(&vid);
         let _event = self.affect_events.remove(&vid);
@@ -1561,8 +1562,8 @@ impl PulseProcessor for GameState {
     ///
     /// Counts the Pulse, then runs the events that are due on it: the ground items whose
     /// lifetime ran out, the affect event of each character (the potion's recovery, the stamina
-    /// refill and the revive timer, `run_affect_events`), the warp NPCs, and the regen events and
-    /// ore veins' ends (`run_regens`). Last, as
+    /// refill and the revive timer, `run_affect_events`), the warp NPCs, and the regen events, the
+    /// ore veins' ends and the fight's stun, death and recovery events (`run_regens`). Last, as
     /// `CHARACTER_MANAGER::Update` comes after the heartbeat's events (`G/main.cpp:777-782`),
     /// each moving player steps. The count is also the only way a test can tell that the game
     /// thread owns this value.

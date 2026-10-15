@@ -76,6 +76,10 @@ use gamedata::server_attr::{ATTR_BANPK, ATTR_BLOCK, ATTR_OBJECT};
 use crate::cells::MapCells;
 use crate::character::{number, Dice};
 
+mod fight;
+
+pub use fight::MobFight;
+
 /// The first VID a non-player takes: above every player id, which is a positive `int`.
 pub const FIRST_NPC_VID: u32 = 0x8000_0000;
 
@@ -152,14 +156,22 @@ pub struct Npc {
     pub regen: Option<usize>,
     /// The seconds before `kill_ore_load_event` destroys it, for an ore vein.
     pub ore_lifetime: Option<u32>,
-    /// `GetHP`: its hit points. `SetProto` fills them to the maximum (`G/char.cpp:2491`), and
-    /// nothing lowers them yet.
+    /// `GetHP`: its hit points. `SetProto` fills them to the maximum (`G/char.cpp:2491`); a
+    /// player's hit lowers them and the recovery event raises them again.
     pub hp: i32,
     /// `GetMaxHP`: its proto's `dwMaxHP`, which `ComputePoints` makes the maximum of a
     /// non-player (`G/char.cpp:3017`, `:3051-3056`).
     pub max_hp: i32,
     /// Its proto's `RACE_FLAG_*` bits, which a target's element is read from.
     pub race_flag: u32,
+    /// What it fights with: the points `SetProto` gives it.
+    pub fight: MobFight,
+    /// `IsStun`: `INSTANT_FLAG_STUN`, which `Stun` sets when its hit points reach 0 and `Dead`
+    /// clears (`G/char_battle.cpp:422-459`, `:1558`).
+    pub stunned: bool,
+    /// `IsDead`: `POS_DEAD`, which `Dead` sets (`G/char_battle.cpp:1369`). Its insert then carries
+    /// `ADD_CHARACTER_STATE_DEAD` until it is destroyed.
+    pub dead: bool,
 }
 
 impl Npc {
@@ -747,6 +759,9 @@ impl<'a> NpcSpawner<'a> {
             hp: max_hp(proto),
             max_hp: max_hp(proto),
             race_flag: proto.race_flag,
+            fight: MobFight::of(proto),
+            stunned: false,
+            dead: false,
         });
         self.report.spawned += 1;
         if proto.mob_type == CHAR_TYPE_STONE {
@@ -1073,6 +1088,9 @@ mod tests {
                 hp: 1_500,
                 max_hp: 1_500,
                 race_flag: 1 << 3,
+                fight: MobFight::of(protos().get(20_016).expect("the smith")),
+                stunned: false,
+                dead: false,
             }]
         );
         assert_eq!(report.spawned, 1);

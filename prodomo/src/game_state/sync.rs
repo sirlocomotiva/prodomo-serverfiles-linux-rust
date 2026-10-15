@@ -2,7 +2,9 @@
 //! whose policy is [`crate::sync_position::process`], run against the world's bodies.
 //!
 //! A victim is any entity on the claimer's own Channel and map: a player, whose body moves, or
-//! an NPC, whose kind the policy skips. Each accepted claim's `TPacketGCOwnership` goes to the
+//! a non-player. The policy skips an NPC, a warp and a goto; any other non-player's claim is
+//! judged by [`GameState::set_npc_sync_owner`], its stamp is kept, and the synced point moves it
+//! as its own step does (`npc_move`). Each accepted claim's `TPacketGCOwnership` goes to the
 //! victim's view and the victim (`SetSyncOwner`'s `PacketAround`, `G/char.cpp:5555`) as it is
 //! judged, and the accepted positions go to the claimer's view without the claimer
 //! (`G/input_main.cpp:2161`) after every element is judged.
@@ -80,22 +82,19 @@ impl SyncPositionPorts for WorldSync<'_> {
     }
 
     fn set_sync_owner(&mut self, actor: Vid, victim: &SyncPositionVictim) -> bool {
-        // An NPC has no body to own; every kind that stands today is skipped before this.
+        // A non-player's claim is `GameState::set_npc_sync_owner`, with its `AIFLAG_NOMOVE` and
+        // `battle_is_attackable` arms.
+        if matches!(self.key_of(victim.vid), Some(EntityKey::Npc(_))) {
+            return self
+                .world
+                .set_npc_sync_owner(actor, self.actor, victim, self.now);
+        }
         let state = self
             .world
             .bodies
             .get(&victim.vid)
-            .and_then(|body| body.sync_owner)
-            .map_or(
-                SyncOwnershipState {
-                    owner: None,
-                    claimed_at: Duration::ZERO,
-                },
-                |(owner, claimed_at)| SyncOwnershipState {
-                    owner: Some(Vid::new(owner)),
-                    claimed_at,
-                },
-            );
+            .map(|body| body.sync)
+            .unwrap_or_default();
         let (x, y) = self.actor;
         match judge_sync_ownership(actor, victim, state, x, y, self.now) {
             SyncOwnershipOutcome::Refused => false,
@@ -111,7 +110,10 @@ impl SyncPositionPorts for WorldSync<'_> {
                     if owner_changed {
                         body.last_sync = None;
                     }
-                    body.sync_owner = Some((actor.raw(), self.now));
+                    body.sync = SyncOwnershipState {
+                        owner: Some(actor),
+                        claimed_at: Some(self.now),
+                    };
                 }
                 self.broadcast_around_victim(victim.vid, &record);
                 true
@@ -120,16 +122,27 @@ impl SyncPositionPorts for WorldSync<'_> {
     }
 
     fn last_sync_time(&mut self, victim: Vid) -> Option<Duration> {
-        self.world.bodies.get(&victim)?.last_sync
+        if let Some(body) = self.world.bodies.get(&victim) {
+            return body.last_sync;
+        }
+        self.world.npc_combat.get(&victim.raw())?.last_sync
     }
 
     fn set_last_sync_time(&mut self, victim: Vid, now: Duration) {
         if let Some(body) = self.world.bodies.get_mut(&victim) {
             body.last_sync = Some(now);
+        } else if self.world.npc_of.contains_key(&victim.raw()) {
+            let combat = self.world.npc_combat.entry(victim.raw()).or_default();
+            combat.last_sync = Some(now);
         }
     }
 
     fn sync(&mut self, victim: Vid, x: i32, y: i32) {
+        // `CHARACTER::Sync` of a non-player is the one its step runs.
+        if matches!(self.key_of(victim), Some(EntityKey::Npc(_))) {
+            self.world.npc_move(victim.raw(), x, y);
+            return;
+        }
         let _moved = self.world.sync_body(victim.raw(), x, y);
     }
 
@@ -192,8 +205,8 @@ mod tests {
 
     use super::super::fixtures::{a_world, enter, TestClock};
     use crate::sync_position::{
-        SyncPositionCloseReason, HEADER_GC_SYNC_POSITION, SYNC_HACK_LIMIT_COUNT,
-        SYNC_POSITION_PREFIX_SIZE,
+        SyncOwnershipState, SyncPositionCloseReason, HEADER_GC_SYNC_POSITION,
+        SYNC_HACK_LIMIT_COUNT, SYNC_POSITION_PREFIX_SIZE,
     };
 
     const HEADER_GC_OWNERSHIP: u8 = 0x3e;
@@ -202,6 +215,14 @@ mod tests {
         std::iter::from_fn(|| inbox.try_recv().ok())
             .map(|record| record[0])
             .collect()
+    }
+
+    /// The claim of the player under `owner`, made at `at`.
+    fn owned_by(owner: u32, at: Duration) -> SyncOwnershipState {
+        SyncOwnershipState {
+            owner: Some(Vid::new(owner)),
+            claimed_at: Some(at),
+        }
     }
 
     fn one_element(vid: u32, x: i32, y: i32) -> SyncPositionPacket {
@@ -221,7 +242,7 @@ mod tests {
         let mut claimer = enter(&mut world, 7, (3200, 3200), 820);
         let mut victim = enter(&mut world, 8, (3500, 3200), 820);
         let claimed_at = Duration::from_millis(500);
-        world.bodies.get_mut(&Vid::new(8)).unwrap().sync_owner = Some((7, claimed_at));
+        world.bodies.get_mut(&Vid::new(8)).unwrap().sync = owned_by(7, claimed_at);
         let _ = (headers(&mut claimer), headers(&mut victim));
         clock.set(1000);
 
@@ -229,7 +250,7 @@ mod tests {
         assert_eq!(result.map(|result| result.accepted_elements.len()), Some(1));
         let spot = world.spot_of(8).unwrap();
         assert_eq!((spot.x, spot.y), (3600, 3200));
-        assert_eq!(world.bodies[&Vid::new(8)].sync_owner, Some((7, claimed_at)));
+        assert_eq!(world.bodies[&Vid::new(8)].sync, owned_by(7, claimed_at));
         assert_eq!(
             world.bodies[&Vid::new(8)].last_sync,
             Some(Duration::from_millis(1000))
@@ -244,8 +265,8 @@ mod tests {
         let result = world.sync_positions(Vid::new(7), &one_element(8, 3450, 3200));
         assert_eq!(result.map(|result| result.accepted_elements.len()), Some(1));
         assert_eq!(
-            world.bodies[&Vid::new(8)].sync_owner,
-            Some((7, Duration::from_millis(2000)))
+            world.bodies[&Vid::new(8)].sync,
+            owned_by(7, Duration::from_millis(2000))
         );
         assert_eq!(
             headers(&mut victim),
@@ -292,8 +313,7 @@ mod tests {
         let _old = enter(&mut world, 7, (3200, 3200), 820);
         let _victim = enter(&mut world, 8, (3500, 3200), 820);
         let _new = enter(&mut world, 9, (3550, 3200), 820);
-        world.bodies.get_mut(&Vid::new(8)).unwrap().sync_owner =
-            Some((7, Duration::from_millis(1000)));
+        world.bodies.get_mut(&Vid::new(8)).unwrap().sync = owned_by(7, Duration::from_millis(1000));
         // The old owner, past 250, keeps the claim and stamps the sync at 1050.
         clock.set(1050);
         let result = world.sync_positions(Vid::new(7), &one_element(8, 3510, 3200));
@@ -307,7 +327,7 @@ mod tests {
         let result = world.sync_positions(Vid::new(9), &one_element(8, 3520, 3200));
         assert_eq!(result.map(|result| result.accepted_elements.len()), Some(1));
         let victim = &world.bodies[&Vid::new(8)];
-        assert_eq!(victim.sync_owner, Some((9, Duration::from_millis(1100))));
+        assert_eq!(victim.sync, owned_by(9, Duration::from_millis(1100)));
         assert_eq!(victim.last_sync, Some(Duration::from_millis(1100)));
         assert_eq!(world.bodies[&Vid::new(9)].sync_hack_count, 0);
         // Control: the same owner 50 ms on is too soon, and the refusal is counted.

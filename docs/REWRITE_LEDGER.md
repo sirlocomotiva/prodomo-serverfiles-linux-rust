@@ -28582,3 +28582,480 @@ rows. Before 229i the counts were 127, 127, 1330, 6 and 55.
 
 No ADR changed. Under the standing staging rule (ledger 229d), `.scratch/equip/owner-questions.md`
 stays out of the commit.
+
+## 229j. The player hits a monster: a punch or a weapon lands with legacy's damage, a lethal one stuns, and the monster dies and goes
+
+A client hitting a character sends `CG_ATTACK`, which names the victim by VID. `CInputMain::Attack`
+finds it, and `CHARACTER::Attack` goes on only while `battle_is_attackable` holds. Then:
+- `battle_melee_attack` measures the reach;
+- `battle_hit` computes the damage (`CalcMeleeDamage`, `CalcAttBonus`);
+- `CHARACTER::Damage` draws its chances, takes the hit points and shows the hit.
+
+A monster left with no hit points is stunned, and dies 3 seconds later (`StunEvent`, `Dead`). A
+second later `dead_event` destroys it. A hit monster that lives gives its hit points back
+(`recovery_event`). The attacker claims the monster (`SetSyncOwner`), and death releases the claim
+(`ClearSync`).
+
+Until 229j no NPC could be hit, and a `CG_ATTACK` closed the connection as a record no analyzer
+reads. 229j ports a player's melee hit on a monster from the record to the monster's removal. `G/`
+below means `server/server/game/`.
+
+### 229j.1 What landed
+
+- **The hit** (`world/src/character/combat/melee.rs`, new). The world crate's placeholder
+  `melee_damage` and `normal_hit` are replaced by legacy's code, with every draw taken from the
+  `Dice` in legacy's order:
+  - **`melee_reach`** (`G/battle.cpp:172-201`). The reach is 300. For a `MELEE` monster it is the
+    attack range plus 15 %, at least 350; `GetMobAttackRange` adds 300 for a ship-defence minion
+    (`G/char.cpp:2656-2676`, vnums 3401 to 3605 and 3950 to 3959). A hydra is reached from 600
+    further. The distance is `DISTANCE_APPROX`, and a victim exactly at the reach is hit.
+  - **`calc_melee_damage`** (`CalcMeleeDamage`, `G/battle.cpp:489-666`):
+    - the weapon's early returns: a worn item that is no weapon, a bow, or a sub-type the melee
+      does not swing deals 0 with no draw;
+    - the weapon's roll, or the bare fist's `number(0, 0)`;
+    - the low roll, `number(1, 5)` below 3;
+    - the hit rating (`CalcAttackRating`, `:271-297`), with the attacker's level in the evasion
+      (owner question 28);
+    - `CalcAttBonus`'s arms for a player on a non-player (`:299-415`) before the defence:
+      the race bonuses, the monster, Metin and boss bonuses and the job resists.
+  - **`strike_npc`** (`battle_hit`, `:760-817`, and the `DAMAGE_TYPE_NORMAL` branch of
+    `CHARACTER::Damage`, `G/char_battle.cpp:1744-2436`):
+    - the weapon resist of the victim;
+    - the critical and penetrating chances, each drawn only when its point is above 0;
+    - the steals of hit and spell points, the hit recovery and the mana burn;
+    - the bonuses and defences, a stoneskin monster's half below its `bStoneSkinPoint`, and the
+      spell points a draining monster takes;
+    - `NormalAttackAffect`'s draws;
+    - `MonsterChat(MONSTER_CHAT_ATTACKED)`, one time in 61.
+
+    It returns what the hit shows as `HitEvent`s, in the order legacy sends them, and how it ended
+    (`Struck`): no damage, refused on a `BANPK` cell, a stunned victim killed, an already dead one,
+    or the hit points taken.
+- **The monster's battle points** (`world/src/npc/fight.rs`, new). `MobFight::of` holds what
+  `SetProto` and `ComputeBattlePoints` give a non-player from its proto (`G/char.cpp:2466-2500`,
+  `:2849-2859`):
+  - the attack grade, twice the level plus twice the strength;
+  - the defence grade, the level plus the vitality plus the proto's defence;
+  - the enchants and resists through `ApplyMobAttribute` (`G/char_resist.cpp:235-248`).
+
+  `Npc` gains `fight`, `stunned` (`IsStun`) and `dead` (`IsDead`).
+- **The fight in the world** (`prodomo/src/game_state/fight.rs`, new):
+  - **`CInputMain::Attack`** (`G/input_main.cpp:1918-2008`) and **`CHARACTER::Attack`**
+    (`G/char_battle.cpp:220-328`):
+    - the victim is looked for on the attacker's own Channel and map;
+    - a type other than 0 (a skill) is consumed;
+    - `battle_is_attackable` (`G/battle.cpp:99-152`) refuses a dead victim, a `BANPK` cell under
+      either, a fake hydra, and every kind but a monster;
+    - out of reach, nothing is sent;
+    - within it the attacker turns to the victim and strikes.
+  - **What the hit shows**, each record to its own receivers:
+    - `GC_DAMAGE_INFO` only to an attacker that targets the victim (`G/char_battle.cpp:1720-1742`),
+      with the damage before it is held to the hit points;
+    - the victim's hit points (`GC_TARGET`) to each character that targets it, as the hit lands;
+    - `GC_SPECIAL_EFFECT` of a critical or penetrating hit to the victim's view;
+    - `GC_CREATE_FLY` of a steal to the victim's view;
+    - the attacker's own point records to itself;
+    - the monster's chat line to its view.
+  - **After the hit:**
+    - a hit that took hit points starts the recovery;
+    - a hit that leaves none stuns the monster: the recovery ends, `GC_STUN` goes to its view, the
+      killer's PID is kept, and `StunEvent` is due 75 Pulses later;
+    - a hit on a stunned monster runs `Dead` at once, with no damage shown.
+  - **The claim** (`SetSyncOwner`, `G/char.cpp:5469-5555`). The attacker claims the monster:
+    - only within 250 by `DISTANCE_APPROX`;
+    - never for a monster `AIFLAG_NOMOVE` holds;
+    - not while another attacker's claim is younger than 100 ms.
+
+    An accepted claim sends `GC_OWNERSHIP` around every time, even for the same owner, as legacy
+    does. Then `OnMove(true)` stamps the attack and ends the attacker's revive-invisible affect,
+    after the claim.
+  - **`Dead`** (`G/char_battle.cpp:1238-1696`):
+    1. the killer is the hitter, or the player whose PID the stun kept, and the PID goes back to 0;
+    2. the killer's target is cleared when it is this monster;
+    3. `ClearSync` sends `GC_OWNERSHIP` with no owner;
+    4. `GC_DEAD` goes to the view;
+    5. `dead_event` is due 25 Pulses later.
+
+    Then `dead_event` destroys the monster (`destroy_npc`): `ClearSync` again, the targeters'
+    target cleared, its removal, and its regen's count lowered so the regen can stand another.
+  - **The recovery** (`G/char.cpp:3172-3314`). Every `bRegenCycle` seconds the monster gets back
+    `bRegenPercent` of its maximum, at least 1, until it is full. Each step shows its targeters
+    its hit points. A stun cancels it.
+  - **A leaving player** releases each monster it owns, and each one's view is told
+    (`ClearSync`'s `FuncClearSync`).
+  - **The events** ride the regen schedule (`Due::Stun`, `Due::Dead`, `Due::Recovery`). A
+    destroyed monster cancels its own.
+- **The state machine** (`mob_ai.rs`):
+  - a stunned monster's Idle does nothing and draws nothing (`G/char_state.cpp:362-387`);
+  - a dead monster's machine does not run (`UpdateStateMachine`, `G/char.cpp:5338-5348`);
+  - a monster stunned mid-walk still arrives, since `StateMove` has no stun guard.
+- **The sync** (`sync.rs`, `sync_position.rs`):
+  - `CG_SYNC_POSITION` reads the same claim as the hit;
+  - the owner's sync moves a monster as its own step does (`npc_move`), as legacy's `Sync` does
+    (`G/input_main.cpp:2149-2152`).
+- **An entrant** in the dead monster's last second is shown it with `ADD_CHARACTER_STATE_DEAD`
+  (`G/char.cpp:1446-1447`).
+- **The wiring:**
+  - `CG_ATTACK` (2) is a world step (`attack_step`, `GameCommand::Attack`).
+  - `CG_SHOOT`, `CG_FLY_TARGETING`, `CG_ADD_FLY_TARGETING` and `CG_USE_SKILL` are consumed in
+    the game phase.
+  - `common::cfloat` gains `f64_to_i32`, which `CalcAttBonus`'s `double` needs.
+  - `gamedata::item_kind` gains `WEAPON_MOUNT_SPEAR`.
+
+### 229j.2 What the client sees
+
+- **A hit.** A punch or a weapon swing on a monster within reach takes legacy's damage. If the
+  player targets the monster, it is shown the number, then the monster's hit points. The
+  attacker's claim (`GC_OWNERSHIP`) follows.
+- **Other hits:**
+  - a critical or penetrating hit shows its effect;
+  - a monster now and then says its "attacked" line;
+  - a steal shows its orb.
+- **A lethal hit.** The monster falls stunned. Three seconds later it dies: the killer's target
+  clears, the monster is released and shown dead. A second later it goes, and its regen can stand
+  it again on its next run.
+- **A second hit on a stunned monster** kills it at once, with no number.
+- **A monster that lives** gets its hit points back every few seconds until it is full.
+- **Refused hits.** A hit on a player, an NPC, a stone, out of reach, or on a `BANPK` cell does
+  nothing.
+- **Skills.** Skills, arrows and their targets do nothing yet, and the connection stays open.
+
+### 229j.3 Divergences and Defects
+
+**V17, new.** A player's first fight differs from legacy in eleven ways, (a) to (k). STATUS lists
+them all. The main ones:
+- only a monster is hit;
+- it does not fight back (229l);
+- `Dead` pays no reward;
+- `NormalAttackAffect` and a gold steal draw but change nothing;
+- skills and the shoot and fly frames are consumed;
+- the attacker's `POS_FIGHTING` is not held;
+- no party revives or is told;
+- a leaving player does not yet release its own ownership (229k).
+
+**V15 and V16, reworded:**
+- V15: a monster's death now clears its killer's target; a player's death waits for 229k.
+- V16: the fight's three events run by due Pulse after the ore-vein ends and the regens, in the
+  order stun, death, recovery.
+
+**Defects not reproduced**, under the owner's standing decision of 2026-10-14, in STATUS's list:
+- **A cross-map victim** (`G/input_main.cpp:1975`, `G/battle.cpp:172-210`).
+  - **Legacy.** `CHARACTER_MANAGER::Find` searches every map, and the reach is measured by x and y
+    alone. So a modified client can hit a monster at the same coordinates on another map of the
+    Core.
+  - **The Rewrite.** It finds the victim on the attacker's Channel and map.
+- **The world boss's damage map** (`SetAccumulateDamageByVID`, `G/char_battle.cpp:2398-2405`).
+  - **Legacy.** It grows for every victim a player hits, until the player leaves.
+  - **The Rewrite.** It keeps no such map.
+- **The recovery's `int` product** (`G/char.cpp:3191-3240`).
+  - **Legacy.** The maximum times the percentage wraps past `INT_MAX`.
+  - **The Rewrite.** It multiplies in 64 bits.
+
+**Legacy kept, recorded:**
+- the damage shown before it is held to the hit points (overkill is shown);
+- a lethal hit only stuns;
+- the penetrate draw that a later branch wastes;
+- the `BLOCK` re-check on a claim (provisional; it shows only once a monster fights back);
+- the attacker's level in the evasion (B5, provisional, owner question 28).
+
+**Unreachable in 229j, noted for later:**
+- `GetMaxHP() >= 0` before a division (`G/char_battle.cpp:1781`, `:2342`). The seven protos with
+  `MAX_HP` 0 (9331 to 9337) are all NPCs, which are refused.
+- The side effects before the `BANPK` check: `battle_is_attackable` refuses a `BANPK` cell first on
+  the melee path.
+- The `test_server` debug chats of `Damage` (`:1920-1921`, `:1946-1947`, `:1960-1961`,
+  `:2031-2032`, `:2348`, `:2358`) are left to the `test_server` audit (owner question 5).
+  `/cannot_dead` waits for the GM commands.
+
+### 229j.4 Not ported yet
+
+- **The player's death and restart** (229k):
+  - a player victim's `Stun`, `Dead`, `dead_event` and `PHASE_DEAD`;
+  - `restart_now`, `restart_here` and `restart_town`;
+  - `ForgetMyAttacker` and its `ReviveInvisible(5)`;
+  - the player's `recovery_event` and `CheckTarget`;
+  - the leaving player's own release (V17k).
+- **The monster fighting back** (229l):
+  - `BeginFight`, Battle, `FindVictim` and the chase;
+  - the aggro, the damage map and `SetLastAttacked`;
+  - the monster's melee.
+- **Drops and exp:**
+  - `Reward`, `DistributeExp`, exp and gold;
+  - the 6 quest `kill` triggers in 5 files;
+  - the gold steal and race 5001;
+  - the one proto with a resurrection (8479).
+- **The group:**
+  - the party revivers (135 protos carry `REVIVE`);
+  - `PM_ATTACKED_BY`.
+- **The skills:**
+  - `CG_SHOOT`, the fly frames and `CG_USE_SKILL`;
+  - a skill-typed `CG_ATTACK`;
+  - `NormalAttackAffect`'s poison, stun and slow.
+- **PvP:** a player victim, `sys.char.pk`, and the 350 PvP reach.
+- **The stones, doors and buildings.**
+- **The `__DUNGEON_INFO__` best hit** of the six dungeon bosses (`G/char_battle.cpp:2322-2336`) waits
+  for the dungeons. No regen line spawns them.
+
+### 229j.5 Scenario and parity inventory
+
+- **The parity scenarios go from 91 to 95.** Each enters Alpha with `no_wander` and ends its
+  revive with a `FUNC_ATTACK` move first:
+  - **`a_punch_on_a_targeted_dog_stuns_it_and_it_dies_three_seconds_later_and_leaves`.** A stray
+    dog (vnum 101, 126 hit points) stands where Alpha enters. Alpha targets it and punches. Alpha
+    reads, in order:
+    1. `GC_DAMAGE_INFO` of 322 with `DAMAGE_NORMAL`;
+    2. `GC_TARGET` at 0 %;
+    3. `GC_STUN`;
+    4. `GC_OWNERSHIP` of the dog to Alpha.
+
+    At least 2 seconds later: `GC_TARGET` with no VID, `GC_OWNERSHIP` with no owner, `GC_DEAD`.
+    At least half a second after that: `GC_OWNERSHIP` with no owner, then the dog's removal. The
+    322 is exact (`PUNCH_ON_THE_DOG`): the bare fist's only draw is `number(0, 0)`.
+  - **`a_second_punch_on_a_stunned_dog_kills_it_at_once_with_no_number`.** A second punch inside
+    the stun runs `Dead` at once with no `GC_DAMAGE_INFO`. Then the dog goes a second later, and
+    the stun's own death never comes.
+  - **`an_untargeted_punch_shows_no_number_and_one_beyond_reach_does_nothing`.** A dog 300 east
+    is 288 away: within the fist's 350, beyond the claim's 250. One 500 east is 480 away.
+    - A punch on the far dog does nothing.
+    - A punch on the near dog, which Alpha never targeted, shows neither the damage, nor its hit
+      points, nor a claim. Alpha reads only the stun, then the release and the death, then the
+      release and the removal.
+  - **`skill_shoot_and_fly_frames_and_refused_victims_keep_the_connection`.** These do nothing and
+    keep the connection open:
+    - `CG_SHOOT`, `CG_FLY_TARGETING`, `CG_ADD_FLY_TARGETING` and `CG_USE_SKILL`;
+    - a `CG_ATTACK` of a skill's type;
+    - a `CG_ATTACK` on a shopkeeper, on Alpha itself, and on a VID that names nothing.
+
+    The dog is still whole after.
+- **The harness** (`prodomo/tests/parity.rs`):
+  - `game_len` sizes `GC_DAMAGE_INFO`, `GC_STUN` and `GC_DEAD`;
+  - `Keyed::read_fight` reads past pings, the revive timer's records and stamina refills, and
+    does not take a noted monster's removal for a walk's noise as `read_game` does;
+  - `alpha_swinging_by` starts the server with `npc.txt` lines and enters Alpha.
+- **Unit tests:**
+  - `prodomo/src/game_state/fight.rs` (new): 24 tests, two of them added by the sweep (229j.7).
+    They cover:
+    - the records of a lethal hit and their receivers;
+    - the stun's 75 Pulses and the death's 25;
+    - a hit on a stunned monster, and the hitter as its killer;
+    - a killer that left;
+    - the recovery, its floor of one, a hit of one point starting it, and its end at a stun;
+    - a critical hit and a drain;
+    - each victim kind refused;
+    - the reach and the claim's range as approximate distances;
+    - a `NOMOVE` monster, one claim for the attack and the sync, the owner's sync moving the
+      monster, and a claim on a dead monster;
+    - a `BANPK` cell under either;
+    - a destroyed monster with no event left;
+    - the revive's end after the claim;
+    - a bow that strikes nothing but claims;
+    - an entrant shown the dead monster;
+    - a leaving owner's release.
+  - `world/src/character/combat/melee.rs` (new): 28 tests, one of them added by the sweep
+    (229j.7), among them:
+    - the test dog against the owner's vnum 101, with its attack grade 8 and defence grade 10;
+    - Alpha's 322 with its one draw;
+    - the low roll;
+    - the weapon early returns;
+    - `CalcAttBonus` before the defence;
+    - the three fixtures of the replaced `melee_damage`;
+    - the reach of each battle type, of the minions and of the hydras;
+    - the draw order with every chance set.
+  - `world/src/npc/fight.rs` (new): 4 tests. They cover the stats and grades a proto gives, the
+    enchants and resists as points, the apply tables, and a resist that cancels a point.
+  - `prodomo/src/game_state/mob_ai.rs`: 3 tests, so 14 became 17. They cover a stunned monster's
+    Idle, a dead NPC's machine, and a monster stunned mid-walk.
+  - `prodomo/src/game_state/regen.rs`: 1 test, so 8 became 9:
+    `a_killed_monster_gives_its_regen_room_for_another`.
+  - `prodomo/src/sync_position.rs`: 1 test, so 20 became 21:
+    `a_released_victim_keeps_its_claim_time`.
+  - `common/src/cfloat.rs`: 1 test, so 7 became 8: `a_double_truncates_toward_zero_and_saturates`.
+  - `world/tests/combat.rs`: 1 test fewer, so 5 became 4.
+    `combat_melee_damage_preserves_cpp_order_and_clamps` went with the placeholder `melee_damage`,
+    and its three fixtures are now in `melee.rs`. The `normal_hit` asserts of two other tests went
+    with `normal_hit`.
+- **Parity rows:**
+  - **Now `ported`:**
+    - `cg.game.attack`, `gc.damage_info`, `gc.stun`, `gc.dead` and `event.char_battle.StunEvent`,
+      under the first scenario;
+    - `gc.create_fly`, under `prodomo/src/game_state/fight.rs::what_a_hit_shows_goes_where_legacy_sends_it`.
+  - **Now `partial`, with notes naming their tests:**
+    - `cg.game.shoot`, `use_skill`, `add_fly_targeting` and `fly_targeting`;
+    - `event.char_battle.dead_event` and `event.char.recovery_event`;
+    - `sys.combat.core` and `sys.combat.resist`.
+  - **Notes added**, state kept: `gc.ownership`, `gc.target`, `gc.character_del`,
+    `gc.sepcial_effect`, `gc.chat`, `sys.combat.target`, `sys.mob.ai`, `sys.char.pk` and
+    `sys.world.regen`.
+- **Parity counts** (`python3 .scratch/tmp/tools/parity_counts.py`), out of 1645 rows:
+
+  | | ported | partial | missing | unused | codec |
+  |---|---|---|---|---|---|
+  | before 229j | 127 | 128 | 1329 | 6 | 55 |
+  | after 229j | 133 | 136 | 1319 | 6 | 51 |
+
+### 229j.6 Corrections, findings and controls
+
+- **The plan left out the release on every death.**
+  - **The source.** `ClearSync` calls `SetSyncOwner(NULL)`, which sends `GC_OWNERSHIP` with no
+    owner around even when no owner was set (`G/char.cpp:5491-5503`, `:5549-5555`, `:5568-5575`).
+    Only a `NOMOVE` character skips it (`:5472`). `Dead` runs it before `GC_DEAD`
+    (`G/char_battle.cpp:1461`), and `Destroy` before `ClearTarget` and the removal
+    (`G/char.cpp:653-654`).
+  - **The fix.** The scenarios and the port expect the release before `GC_DEAD` and again before
+    the removal, also for a dog that never had an owner. The ore veins (20047 to 20059, all
+    `NOMOVE`) keep their bytes.
+- **`SetSyncOwner` resends a claim.** A draft test expected nothing for the owner's own sync.
+  Legacy sends `GC_OWNERSHIP` around on every accepted claim, even for the same owner
+  (`G/char.cpp:5546-5555`), and the test now expects it.
+- **The owner's sync did not move the monster.** Legacy's `SyncPosition` calls `victim->Sync(x, y)`
+  (`G/input_main.cpp:2149-2152`). The draft stored a non-player's synced point only as a body's.
+  `sync` now moves an NPC as its own step does (`npc_move`), and
+  `the_owners_sync_moves_the_monster` pins it.
+- **The 229i `test_server` walk toggle.**
+  - **The claim.** 229i.4 said the toggle (`G/char_state.cpp:740-746`) is not ported because
+    production never runs it.
+  - **The facts.** Legacy's `test_server` defaults to 1 (`G/config.cpp:72`), and none of the
+    owner's `CONFIG` files turns it off (STATUS, 178.5).
+  - **The correction.** The `mob_ai.rs` module doc now says the toggle waits for the
+    `test_server` audit (owner question 5).
+- **Four research errors:**
+  - **`ENABLE_EFFECT_PENETRATE`.** The damage notes said it is not defined. It is defined
+    (`G/char_battle.cpp:69`) and used at `:1929` and `:2034`, so a penetrating hit sends
+    `SE_PENETRATE`.
+  - **A missing draw.** The AI notes' draw list (§1.13) left out `MonsterChat(ATTACKED)`
+    (`G/char_battle.cpp:2245`).
+  - **Alpha's point.** The restart notes (Q8) put Alpha at (607, 540). Alpha enters at (605, 540).
+  - **The commands above `POS_FIGHTING`.** The research said none. There is one, `mount`, which
+    legacy refuses silently in its default arm (`G/cmd.cpp:661-684`) and the Rewrite reports as
+    `NotPorted`. Nothing changes until the position is held (V17g).
+- **A wrong citation in a draft.** A draft of the V17 row cited `G/input_main.cpp:2949-3009` for
+  `SyncPosition`. The handler is at `:2010-2160`.
+- **The first gate run used the wrong cargo.**
+  - **What happened.** It was started from a shell whose PATH put rustup's `~/.cargo/bin` ahead
+    of `/usr/bin`. That rustup install dates from 2026-09-30, and the rewrite did not make it. So
+    `cargo build` and `cargo test` ran 1.98.1. The pinned `cargo-clippy` 0.1.85 then failed with
+    E0514, "found crate `tracing` compiled by an incompatible version of rustc".
+  - **What counts.** That run's 3397 passes don't count. Its logs are in
+    `.scratch/tmp/l229j/gates-wrong-cargo/`.
+  - **The fix.** `gates.sh` now exports `PATH=/usr/bin:$PATH` itself and writes the three
+    versions to `toolchain.txt`. The second run built, linted and tested with cargo 1.85.1.
+  - **Earlier runs.** 229i's clippy run was clean. Since a 1.98.1 cargo under the pinned clippy
+    fails the same way, its gates most likely ran with `/usr/bin` first.
+
+Controls for the counts and the negative claims. Each search uses `grep -a` or `awk`:
+- **Legacy code:** `server/server/game/`.
+- **Legacy data:**
+  - `legacy/gamedata/proto/mob_proto.txt`, one line per proto;
+  - the 186 spawn files (`regen.txt`, `npc.txt`, `boss.txt` and `stone.txt`) under
+    `legacy/gamedata/`, race or group in column 11;
+  - the quests under `legacy/gamedata/locale/europe/quest/`.
+
+| claim | search | result | positive control | nonsense control |
+|---|---|---|---|---|
+| 27 `MELEE` minions reach 460, not 350 | `BATTLE_TYPE` `MELEE` and vnum 3401 to 3605 or 3950 to 3959 | 27 (45 of any battle type) | the dog 101: `MELEE`, range 175, so 350 | vnums 99990 to 99999: 0 |
+| the protos with no hit points are NPCs | `MAX_HP` 0 | 7, vnums 9331 to 9337, all `NPC` | `MAX_HP` 1: 119 | as the claim: no `MONSTER` among them |
+| the party revivers wait for the group | `REVIVE` in `AI_FLAG` | 135 | `NOMOVE`: 713 | the nonsense word `zzqx_ledger_nonsense_229j`: 0 |
+| one proto resurrects | `RESURRECTION_VNUM` above 0 | 1: 8479, into 4305 | as the claim | as the claim: no second |
+| the dog is no `NOMOVE` monster; the ore veins are | `AI_FLAG` of 101; of 20047 to 20059 | empty; `NOMOVE` for all 13 | `NOMOVE`: 713 | as above: 0 |
+| the quest `kill` triggers wait for `Reward` | `(when\|or) [n.]kill` in `*.lua` | 6 lines in 5 files | `yohara_system.lua:67` (`when 3965.kill`) | `zzqxkill`: 0 |
+| no regen line spawns a dungeon-info boss | races 1092, 1093, 2598, 6418, 6001 and 2692 in column 11 of `m` and `s` lines; their groups 1026, 1031, 2530, 6001, 6002 and 33360 to 33362 in `g` and `r` lines | 0 for each | guard 11000: 1 `m` line; group-group 101: 142 `r` lines | race 99999123: 0 |
+| no proto gives a non-player block or reflect | `BLOCK`, `REFLECT` among the mob_proto columns | 0 | `RESIST`: 11 columns | as the claim: 0 |
+
+### 229j.7 Review and mutation sweep
+
+The sweep ran five mutant files of `.scratch/tmp/tools/` through `mutate_v2.py`, in a tar copy of
+the code (`sweep229j/tree0`), one file at a time. A workflow of three agents wrote the first three
+files, one per area, and each file passed the driver's `CHECK=1`:
+
+- **`mutants229j_a.py`, 55 mutants**, all in `prodomo/src/game_state/fight.rs`.
+- **`mutants229j_b.py`, 50 mutants:**
+  - 38 in `world/src/character/combat/melee.rs`;
+  - 6 in `world/src/npc/fight.rs` and 2 in `world/src/npc.rs`;
+  - 3 in `common/src/cfloat.rs` (`f64_to_i32`) and 1 in `gamedata/src/item_kind.rs`.
+- **`mutants229j_c.py`, 35 mutants:**
+  - 9 in `regen.rs`, 8 in `prodomo/src/main.rs`, 6 in `mob_ai.rs` and 4 in `sync.rs`;
+  - 2 each in `game_loop_messages.rs`, `game_state.rs` and `target.rs`;
+  - 1 each in `sync_position.rs` and `loading_phase.rs`.
+- **`mutants229j_d.py`, 2 mutants:** the two the plan names that the area files left out, the
+  claim's `> 250` (`sync_position.rs`) and the ATTACKED chat draw (`melee.rs`).
+- **`mutants229j_e.py`, 6 mutants:** the closing pass, every survivor rerun after it was closed.
+
+The driver's `PARITY_OK` floor went from 91 to 95 passing parity tests: the four new scenarios.
+
+The passes:
+
+1. **The first pass,** 142 mutants. The baseline passed, and 136 were killed, none by a compile
+   error, so every kill is semantic. 11 kills came from parity scenarios, each confirmed alone:
+   - the four skill and fly mutants of `main.rs` and the skill-typed attack, by
+     `skill_shoot_and_fly_frames_and_refused_victims_keep_the_connection`;
+   - the six that drop or misroute `CG_ATTACK` in `main.rs`, `game_loop_messages.rs` and
+     `game_state.rs`, by the three punch scenarios.
+
+   The plan's ten named mutants were all killed:
+   - 75 to 74 and 25 to 24;
+   - removing `killer_pid = 0`;
+   - swapping `GC_TARGET` and `GC_STUN`;
+   - dropping the receiver rule;
+   - the 350 floor to 300;
+   - `> 250` to `>= 250`;
+   - removing the `IsStun` guard in Idle;
+   - drawing a critical hit at 0 %;
+   - removing the ATTACKED chat draw.
+2. **The closing pass,** `mutants229j_e.py`, run in the copy after a fresh tar and the clean of
+   229i.6: the baseline passed, and all 6 were killed, each by the named unit test of the table
+   below.
+
+The survivors and what closed them:
+
+| survivor | file | what it did | closed by |
+|---|---|---|---|
+| `fi_attack_other_map_hit` | a | the victim is looked for on the attacker's Channel only, so a monster on another map of it is hit | `only_a_monster_is_hit` now stands a monster at the same point on the Channel's next map and attacks it: nothing is sent, nothing is drawn, and it keeps its hit point |
+| `fi_recovery_needs_two` | a | a hit of 1 does not start the recovery | `a_hit_of_one_point_starts_the_recovery` (new): a monster whose defence outweighs the punch takes the low roll, on a seed where it comes to 1, and its recovery is due |
+| `fi_killer_pid_first` | a | `Dead` takes the player whose PID the stun kept before the hitter | `the_hitter_of_a_stunned_monster_is_its_killer` (new): beta's hit on the monster alpha stunned clears beta's target, and alpha keeps its own |
+| `me_spear_not_swung` | b | `MELEE_WEAPONS` lists the fan twice and no mounted spear | `a_weapon_rolls_its_values_and_adds_its_refine_twice` now names the six sub-types itself instead of reading the constant it tests |
+| `me_att_bonus_after_defence` | b | `CalcAttBonus` runs on what the defence leaves | `the_attack_bonus_comes_before_the_defence` (new): 10 % against a monster makes Alpha's punch on the dog 355, not 354 |
+| `rg_cancel_noop` | c | `event_cancel` forgets the slot but leaves the event on the schedule | `a_stun_ends_the_recovery` and `a_destroyed_monster_has_no_event_left` now check the schedule holds no event of the monster (`Regens::holds`, a test-only reader). The stale events changed nothing a client sees, since each finds the monster stunned, dead or gone, but they stayed on the schedule |
+
+The logs are `shard_a.log`, `shard_b.log`, `shard_c.log`, `shard_d.log` and `closing.log`.
+
+### 229j.8 Receipt
+
+The count went from 3332 to 3397, +65. 229j.5 lists the changes by file:
+- the new files add 56: `fight.rs` 24, `melee.rs` 28 and `npc/fight.rs` 4;
+- `mob_ai.rs` adds 3, and `regen.rs`, `sync_position.rs` and `cfloat.rs` 1 each;
+- the parity suite adds 4;
+- `world/tests/combat.rs` loses 1.
+
+The first gate run on the final tree, `gates229j_wrongcargo`, built and tested with rustup's cargo
+1.98.1, and its clippy failed (229j.6). The second run, `gates229j2`, used cargo 1.85.1 and passed
+everything. Its summary and `toolchain.txt` are copied to `.scratch/tmp/l229j/gates/`, and the
+first run to `.scratch/tmp/l229j/gates-wrong-cargo/`.
+
+| gate | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| build, workspace | clean, 0 warnings |
+| clippy, workspace, all targets, `-D warnings` | clean |
+| test, workspace, all targets, with `DATABASE_URL` | 3397 passed, 0 failed, 38 suites |
+| test, the same with `DATABASE_URL` unset | 3397 passed, 0 failed, 38 suites |
+| doc tests | 1 passed, 0 failed, 19 ignored |
+| rustdoc, warnings denied | clean |
+| scratch databases left behind | 0 |
+| `*.core` outside `target/` | 0 |
+
+Counted the way the gates count it, the workspace has 259 files and 198,673 lines outside
+`server/` and `.scratch/`. The 229i receipt had 256 files and 194,744 lines.
+
+The toolchain, from `toolchain.txt`:
+- cargo 1.85.1, called with `/usr/bin` first on PATH;
+- `clippy 0.1.85` and `rustfmt 1.8.0`, called as `/usr/bin/cargo-clippy` and
+  `/usr/bin/cargo-fmt`.
+
+No crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Parity after 229j: 133 ported, 136 partial, 1319 missing, 6 unused and 51 codec, out of 1645
+rows. Before 229j the counts were 127, 128, 1329, 6 and 55.
+
+No ADR changed. Under the standing staging rule (ledger 229d), `.scratch/equip/owner-questions.md`
+stays out of the commit. Owner question 28 (evasion reads the attacker's level) was added to it
+in this section.

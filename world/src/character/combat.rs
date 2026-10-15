@@ -1,5 +1,11 @@
+mod melee;
 mod pk;
 
+pub use melee::{
+    calc_melee_damage, melee_reach, mob_attack_range, strike_npc, HitEvent, Strike, Striker,
+    Struck, DAMAGE_CRITICAL, DAMAGE_NORMAL, DAMAGE_PENETRATE, FLY_HP_SMALL, FLY_SP_SMALL,
+    SE_CRITICAL, SE_PENETRATE,
+};
 pub use pk::{pk_eligibility, PkActor, PkDenial, PkEligibility, PkMode};
 
 /// Inputs used by the legacy `CalcAttackRating` formula.
@@ -32,68 +38,6 @@ pub fn attack_rating(input: AttackRatingInput) -> f32 {
         * 3.0_f32
         / 10.0_f32;
     attack - evasion
-}
-
-/// Inputs for the bounded deterministic branch of `CalcMeleeDamage`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MeleeDamageInput {
-    /// Attacker level.
-    pub attacker_level: i32,
-    /// Current attack grade.
-    pub attack_grade: i32,
-    /// Injected inclusive weapon or natural-damage roll before legacy doubling.
-    pub weapon_damage_roll: i32,
-    /// Rating returned by [`attack_rating`].
-    pub attack_rating: f32,
-    /// Weapon refine value before legacy doubling.
-    pub refine_bonus: i32,
-    /// Party attacker role bonus.
-    pub party_attack_bonus: i32,
-    /// Sum of attack-grade percentage bonuses.
-    pub attack_bonus_percent: i32,
-    /// Victim defense grade.
-    pub defense_grade: i32,
-    /// Victim defense percentage bonus.
-    pub defense_bonus_percent: i32,
-    /// Whether victim defense is ignored.
-    pub ignore_defense: bool,
-    /// Injected `CalcBattleDamage` roll used when computed damage is below three.
-    pub low_damage_roll: i32,
-}
-
-/// Computes deterministic melee damage using the C++ integer/float operation order.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-#[must_use]
-pub fn melee_damage(input: MeleeDamageInput) -> i32 {
-    let level_twice = input.attacker_level.wrapping_mul(2);
-    let rolled_damage = input.weapon_damage_roll.wrapping_mul(2);
-    let mut attack = input
-        .attack_grade
-        .wrapping_add(rolled_damage)
-        .wrapping_sub(level_twice);
-    attack = (attack as f32 * input.attack_rating) as i32;
-    attack = attack
-        .wrapping_add(level_twice)
-        .wrapping_add(input.refine_bonus.wrapping_mul(2))
-        .wrapping_add(input.party_attack_bonus);
-    attack = attack
-        .wrapping_mul(100_i32.wrapping_add(input.attack_bonus_percent))
-        .wrapping_div(100);
-
-    let defense = if input.ignore_defense {
-        0
-    } else {
-        input
-            .defense_grade
-            .wrapping_mul(100_i32.wrapping_add(input.defense_bonus_percent))
-            .wrapping_div(100)
-    };
-    let damage = attack.wrapping_sub(defense).max(0);
-    if damage < 3 {
-        input.low_damage_roll
-    } else {
-        damage
-    }
 }
 
 /// Current and maximum hit points owned by a Character.
@@ -178,34 +122,6 @@ pub enum DamageOutcome {
     },
     /// The target was already in dead posture.
     AlreadyDead,
-}
-
-/// Deterministic result of the normal-hit block check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HitOutcome {
-    /// The inclusive block roll succeeded.
-    Blocked,
-    /// The attack proceeds to damage application.
-    Landed,
-}
-
-/// Inputs for the inclusive normal-hit block roll.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NormalHitInput {
-    /// Victim block chance as stored by `POINT_BLOCK`.
-    pub block_chance: i32,
-    /// Injected inclusive roll in the legacy one-through-one-hundred range.
-    pub roll: u8,
-}
-
-/// Resolves the C++ `number(1, 100) <= POINT_BLOCK` comparison.
-#[must_use]
-pub const fn normal_hit(input: NormalHitInput) -> HitOutcome {
-    if input.block_chance != 0 && (input.roll as i32) <= input.block_chance {
-        HitOutcome::Blocked
-    } else {
-        HitOutcome::Landed
-    }
 }
 
 fn source_rating(dexterity: i32, level: i32) -> i32 {

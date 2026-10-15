@@ -2,9 +2,8 @@
 
 use common::vid::Vid;
 use world::character::{
-    attack_rating, melee_damage, normal_hit, pk_eligibility, Activity, AttackRatingInput,
-    Character, CharacterKind, CoreState, Damage, DamageOutcome, HitOutcome, MeleeDamageInput,
-    NormalHitInput, PkActor, PkDenial, PkEligibility, PkMode, Posture, Vitality,
+    attack_rating, pk_eligibility, Activity, AttackRatingInput, Character, CharacterKind,
+    CoreState, Damage, DamageOutcome, PkActor, PkDenial, PkEligibility, PkMode, Posture, Vitality,
 };
 
 #[test]
@@ -88,28 +87,6 @@ fn combat_manual_parity_scenario_hit_nonlethal_lethal_and_pk() {
         ignore_target_rating: false,
     });
     assert_eq!(rating.to_bits(), 0x3f29_7297);
-    assert_eq!(
-        normal_hit(NormalHitInput {
-            block_chance: 10,
-            roll: 11,
-        }),
-        HitOutcome::Landed
-    );
-
-    let damage = melee_damage(MeleeDamageInput {
-        attacker_level: 10,
-        attack_grade: 40,
-        weapon_damage_roll: 10,
-        attack_rating: 1.0,
-        refine_bonus: 0,
-        party_attack_bonus: 0,
-        attack_bonus_percent: 0,
-        defense_grade: 0,
-        defense_bonus_percent: 0,
-        ignore_defense: false,
-        low_damage_roll: 1,
-    });
-    assert_eq!(damage, 60);
 
     let mut victim = Character::new(Vid::new(30));
     victim.set_activity(Activity::Fishing);
@@ -120,9 +97,7 @@ fn combat_manual_parity_scenario_hit_nonlethal_lethal_and_pk() {
         DamageOutcome::Damaged { remaining: 60 }
     );
     assert_eq!(
-        victim.apply_damage(Damage::new(
-            u32::try_from(damage).expect("damage must be nonnegative")
-        )),
+        victim.apply_damage(Damage::new(60)),
         DamageOutcome::Killed { overkill: 0 }
     );
     assert!(!victim.update(0));
@@ -161,21 +136,6 @@ fn pk_actor(id: u32, mode: PkMode) -> PkActor {
 
 #[test]
 fn combat_damage_transitions_cover_hit_and_lethal_boundaries() {
-    assert_eq!(
-        normal_hit(NormalHitInput {
-            block_chance: 25,
-            roll: 25,
-        }),
-        HitOutcome::Blocked
-    );
-    assert_eq!(
-        normal_hit(NormalHitInput {
-            block_chance: 25,
-            roll: 26,
-        }),
-        HitOutcome::Landed
-    );
-
     let mut victim = Character::new(Vid::new(20));
     victim.set_vitality(Vitality::new(100, 100));
     assert_eq!(
@@ -201,30 +161,4 @@ fn combat_damage_transitions_cover_hit_and_lethal_boundaries() {
         zero.apply_damage(Damage::new(0)),
         DamageOutcome::Killed { overkill: 0 }
     );
-}
-
-#[test]
-fn combat_melee_damage_preserves_cpp_order_and_clamps() {
-    let fixtures = [
-        (40, 0, 0, 60),
-        (40, 200, 0, 1),
-        (30_000_000, 0, 100, 17_050_367),
-    ];
-
-    for (attack_grade, defense_grade, attack_bonus_percent, expected) in fixtures {
-        let damage = melee_damage(MeleeDamageInput {
-            attacker_level: 10,
-            attack_grade,
-            weapon_damage_roll: 10,
-            attack_rating: 1.0,
-            refine_bonus: 0,
-            party_attack_bonus: 0,
-            attack_bonus_percent,
-            defense_grade,
-            defense_bonus_percent: 0,
-            ignore_defense: false,
-            low_damage_roll: 1,
-        });
-        assert_eq!(damage, expected);
-    }
 }

@@ -492,6 +492,16 @@ pub enum GameCommand {
         /// Dropped once the answer is sent, see [`Settled`].
         settled: oneshot::Sender<()>,
     },
+    /// `CInputMain::Attack`: the character online under `vid` attacks the VID `record` names.
+    /// The world sends what the hit shows; see `game_state::fight`.
+    Attack {
+        /// The VID of the attacking character.
+        vid: common::vid::Vid,
+        /// The `CG_ATTACK` the client sent.
+        record: protocol::cg_attack::CgAttack,
+        /// Dropped once what the hit shows is sent, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
     /// Requests terminal loop shutdown.
     Stop,
 }
@@ -1429,6 +1439,28 @@ impl GameLoopController {
         self.send_command(GameCommand::Target {
             vid,
             target,
+            settled,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Hands the world a `CG_ATTACK` from the character online under `vid`, without waiting.
+    /// The [`Settled`] resolves once what the hit shows is sent.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn attack(
+        &self,
+        vid: common::vid::Vid,
+        record: protocol::cg_attack::CgAttack,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::Attack {
+            vid,
+            record,
             settled,
         })
         .await

@@ -18,18 +18,25 @@
 //! `M2_DESTROY_CHARACTER` of a non-player runs `CHARACTER::Destroy`:
 //!
 //! 1. the regen it holds counts one fewer (`:572-583`);
-//! 2. `ClearTarget` sends each character targeting it VID 0 (`:654`);
-//! 3. its party: a group's master deletes the party, so its members follow no one; a member
+//! 2. `ClearSync` tells every player that sees it that it has no owner, a `GC_OWNERSHIP` with
+//!    owner 0, unless `AIFLAG_NOMOVE` holds it, as it holds an ore vein (`:653`,
+//!    `G/char.cpp:5469-5575`);
+//! 3. `ClearTarget` sends each character targeting it VID 0 (`:654`);
+//! 4. its party: a group's master deletes the party, so its members follow no one; a member
 //!    quits it (`:661-676`);
-//! 4. its events end, the ore vein's among them (`:741`);
-//! 5. `CEntity::Destroy` sends every player that sees it its removal, and the sectree lets it
+//! 5. its events end: the ore vein's, and the stun, dead and recovery events of a fight
+//!    (`:713-741`);
+//! 6. `CEntity::Destroy` sends every player that sees it its removal, and the sectree lets it
 //!    go (`:786-789`).
+//!
+//! The fight's events ride the same schedule (see [`super::fight`]).
 //!
 //! # Divergences
 //!
 //! - **The order of one Pulse's events.** Legacy runs the events due on one Pulse in its event
-//!   heap's order. The Rewrite runs them by due Pulse, an ore vein's end before a regen, then
-//!   by VID or by map and entry (V16, after V1).
+//!   heap's order. The Rewrite runs them by due Pulse, then an ore vein's end before a regen
+//!   before a stun before a death before a recovery, then by VID or by map and entry (V16,
+//!   after V1).
 //! - **The list a map keeps.** Legacy keeps its characters by VID in `m_map_pkChrByVID`; the
 //!   Rewrite keeps each map's in a list, and a destroyed character's place is taken by the last
 //!   one, which only the Rewrite's own index sees (V16).
@@ -39,8 +46,9 @@
 //! - The dungeon's regen (`dungeon_regen_event`), its `IsValidRegen` check and `DeadCharacter`:
 //!   there are no dungeons yet.
 //! - Every other part of `Destroy`: a non-player has no shop, exchange, safebox, horse, pet,
-//!   affect or skill event yet, and no state machine, stone or victim.
-//! - Every other way a non-player ends: nothing dies yet.
+//!   affect or skill event yet, and no stone or victim.
+//! - Every other way a non-player ends but its ore vein's end and a monster's death: the
+//!   quests', the dungeons' and the events' purges wait for their systems.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -48,6 +56,7 @@ use std::sync::Arc;
 
 use common::vid::Vid;
 use gamedata::map_atlas::MapRegion;
+use gamedata::server_attr::ATTR_BANPK;
 use world::cells::HostedCells;
 use world::npc::{Npc, Respawner};
 
@@ -71,6 +80,12 @@ pub(super) enum Due {
         /// Its place in the map's [`world::npc::MapNpcs::regens`].
         at: usize,
     },
+    /// `StunEvent` of the non-player under this VID. See [`super::fight`].
+    Stun(u32),
+    /// `dead_event` of the non-player under this VID.
+    Dead(u32),
+    /// `recovery_event` of the non-player under this VID.
+    Recovery(u32),
 }
 
 /// The regen events and the ore veins' ends, with what a regen spawns from.
@@ -97,10 +112,29 @@ impl Regens {
         }
         due
     }
+
+    /// `event_create`: `what` is due on `when`, which `slot` keeps for its cancel.
+    pub(super) fn schedule(&mut self, slot: &mut Option<u64>, when: u64, what: Due) {
+        *slot = Some(when);
+        self.due.insert((when, what));
+    }
+
+    /// `event_cancel`: the event whose due Pulse `slot` keeps is taken off the schedule.
+    pub(super) fn cancel(&mut self, slot: &mut Option<u64>, what: Due) {
+        if let Some(when) = slot.take() {
+            self.due.remove(&(when, what));
+        }
+    }
+
+    /// Whether `what` is on the schedule, due on any Pulse.
+    #[cfg(test)]
+    pub(super) fn holds(&self, what: Due) -> bool {
+        self.due.iter().any(|&(_, due)| due == what)
+    }
 }
 
 /// `PASSES_PER_SEC(seconds)`.
-fn pulses(seconds: u32) -> u64 {
+pub(super) fn pulses(seconds: u32) -> u64 {
     u64::from(seconds).saturating_mul(u64::from(PASSES_PER_SEC))
 }
 
@@ -120,6 +154,15 @@ impl GameState {
             .cells
             .get(map)
             .is_some_and(|cells| cells.is_movable(x, y))
+    }
+
+    /// `SECTREE::IsAttr(x, y, ATTR_BANPK)` on the cells boot handed over: false on a map it
+    /// handed none of.
+    pub(super) fn is_banpk(&self, map: i32, x: i32, y: i32) -> bool {
+        self.regens
+            .cells
+            .get(map)
+            .is_some_and(|cells| cells.is_attr(x, y, ATTR_BANPK))
     }
 
     /// Schedules the events of a map boot stood up on `pulse`: each regen's first run and each
@@ -155,13 +198,17 @@ impl GameState {
         self.regens.due.insert((when, Due::Vein(vid)));
     }
 
-    /// Runs every regen event and ore vein end due on or before `pulse`.
+    /// Runs every event due on or before `pulse`: the regens, the ore veins' ends and the
+    /// non-players' stun, dead and recovery events.
     pub(super) fn run_regens(&mut self, pulse: u64) {
         for what in self.regens.take_due(pulse) {
             match what {
                 // The VID of a character already destroyed names nothing, as no VID is reused.
                 Due::Vein(vid) => self.destroy_npc(vid),
                 Due::Regen { channel, map, at } => self.fire_regen((channel, map), at, pulse),
+                Due::Stun(vid) => self.stun_event(vid),
+                Due::Dead(vid) => self.dead_event(vid),
+                Due::Recovery(vid) => self.recovery_event(vid),
             }
         }
     }
@@ -268,6 +315,8 @@ impl GameState {
                 npc.leader = None;
             }
         }
+        // `ClearSync` (`:653`) tells the view it has no owner, then `ClearTarget` (`:654`).
+        self.release_npc_sync(vid);
         self.clear_target(Vid::new(vid));
         let mut effects = Vec::new();
         if let Some(index) = self.maps.get_mut(&key) {
@@ -276,6 +325,8 @@ impl GameState {
         self.deliver(&effects, None);
         self.npc_of.remove(&vid);
         self.minds.forget(vid);
+        // Its stun, dead and recovery events end with it (`:713-718`).
+        self.forget_npc_fight(vid);
         if let Some(list) = self.npcs.get_mut(&key) {
             let list = Arc::make_mut(list);
             if at < list.npcs.len() {
@@ -300,6 +351,7 @@ mod tests {
     use gamedata::mob_proto::{MobProto, MobProtos, CHAR_TYPE_MONSTER, CHAR_TYPE_NPC};
     use gamedata::records::MobTableRecord;
     use gamedata::regen::{RegenEntry, RegenKind};
+    use protocol::cg_attack::CgAttack;
     use tokio::sync::mpsc::UnboundedReceiver;
     use world::npc::{MapNpcs, Npc, NpcVids, Regen, Respawner, FIRST_NPC_VID};
 
@@ -516,6 +568,38 @@ mod tests {
             100 + u64::from(lifetime) * 25,
             Due::Vein(FIRST_NPC_VID + 100)
         )));
+    }
+
+    /// A monster a player kills goes as an ore vein goes: a second after its death its regen
+    /// counts one fewer, and the regen's next run stands another (`G/char_battle.cpp:473-548`,
+    /// `G/char.cpp:653-789`).
+    #[test]
+    fn a_killed_monster_gives_its_regen_room_for_another() {
+        let mut monster = a_character(FIRST_NPC_VID, 101, Some(0));
+        monster.hp = 1;
+        let regen = Regen {
+            entry: at_a_point(101, 1, 3),
+            count: 1,
+            first_fire: 5,
+        };
+        let (mut world, mut inbox) = a_map(vec![monster], vec![regen]);
+        world.attack(Vid::new(1), CgAttack::new(0, FIRST_NPC_VID, 0, 0));
+        assert!(world.npc_by_vid(FIRST_NPC_VID).unwrap().stunned);
+        pulses_to(&mut world, 1, 99);
+        assert_eq!(list(&world).regens[0].count, 1);
+        assert!(world.npc_by_vid(FIRST_NPC_VID).unwrap().dead);
+        world.process_pulse(100);
+        assert_eq!(list(&world).regens[0].count, 0);
+        assert!(list(&world).npcs.is_empty());
+        assert_eq!(
+            drained(&mut inbox).last(),
+            Some(&remove_record(FIRST_NPC_VID))
+        );
+        pulses_to(&mut world, 101, 124);
+        assert_eq!(drained(&mut inbox), Vec::<Vec<u8>>::new());
+        world.process_pulse(125);
+        assert_eq!(added(&drained(&mut inbox)), [FIRST_NPC_VID + 100]);
+        assert_eq!(list(&world).regens[0].count, 1);
     }
 
     /// Destroying a character moves the last one into its place, which the VID index follows,

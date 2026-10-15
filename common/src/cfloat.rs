@@ -69,6 +69,41 @@ pub fn f32_to_i32(value: f32) -> i32 {
     i32::try_from(signed).unwrap_or(if signed < 0 { i32::MIN } else { i32::MAX })
 }
 
+/// `(int)value` of a `double`: the `f64` with its fraction dropped toward zero.
+///
+/// The same rules as [`f32_to_i32`]: a value at or above 2^31 is `i32::MAX`, one at or below
+/// -2^31 is `i32::MIN`, and a NaN is 0. `CalcAttBonus` reaches it, where `/ 100.0` turns the
+/// monster bonus into a `double` before it is added back to the `int` attack.
+#[must_use]
+pub fn f64_to_i32(value: f64) -> i32 {
+    const TWO_POW_31: f64 = 2_147_483_648.0;
+    if value.is_nan() {
+        return 0;
+    }
+    if value >= TWO_POW_31 {
+        return i32::MAX;
+    }
+    if value <= -TWO_POW_31 {
+        return i32::MIN;
+    }
+    let bits = value.to_bits();
+    let exponent = (bits >> 52) & 0x7ff;
+    if exponent < 1023 {
+        // The magnitude is below 1, so the fraction is all there is.
+        return 0;
+    }
+    // The range test above keeps the magnitude below 2^31, so the shift is at most 30.
+    let shift = exponent - 1023;
+    let mantissa = (bits & 0x000f_ffff_ffff_ffff) | 0x0010_0000_0000_0000;
+    let magnitude = i64::try_from(mantissa >> (52 - shift)).unwrap_or(i64::MAX);
+    let signed = if bits >> 63 == 0 {
+        magnitude
+    } else {
+        -magnitude
+    };
+    i32::try_from(signed).unwrap_or(if signed < 0 { i32::MIN } else { i32::MAX })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +314,37 @@ mod tests {
         assert_eq!(f32_to_i32(-1.0e20), i32::MIN);
         assert_eq!(f32_to_i32(f32::NEG_INFINITY), i32::MIN);
         assert_eq!(f32_to_i32(f32::NAN), 0);
+    }
+
+    #[test]
+    fn a_double_truncates_toward_zero_and_saturates() {
+        for (value, expected) in [
+            (0.0_f64, 0),
+            (-0.0, 0),
+            (0.999_999_999, 0),
+            (-0.999_999_999, 0),
+            (1.0, 1),
+            (1.5, 1),
+            (-1.5, -1),
+            (61.999_999_999, 61),
+            (-61.999_999_999, -61),
+            (2_147_483_647.9, i32::MAX),
+            (-2_147_483_647.9, -2_147_483_647),
+            (f64::MIN_POSITIVE, 0),
+        ] {
+            assert_eq!(f64_to_i32(value), expected, "{value}");
+        }
+        assert_eq!(f64_to_i32(2_147_483_648.0), i32::MAX);
+        assert_eq!(f64_to_i32(f64::INFINITY), i32::MAX);
+        assert_eq!(f64_to_i32(-2_147_483_648.0), i32::MIN);
+        assert_eq!(f64_to_i32(f64::NEG_INFINITY), i32::MIN);
+        assert_eq!(f64_to_i32(f64::NAN), 0);
+        for value in samples() {
+            assert_eq!(f64_to_i32(f64::from(value)), value, "{value}");
+            let fraction = f64::from(value) + if value < 0 { -0.75 } else { 0.75 };
+            if fraction.abs() < 2_147_483_648.0 {
+                assert_eq!(f64_to_i32(fraction), value, "{fraction}");
+            }
+        }
     }
 }

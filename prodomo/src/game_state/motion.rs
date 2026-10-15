@@ -40,7 +40,7 @@ use crate::movement::{
     judge_move, move_relay, MoveContext, MoveDisposition, MoveOutcome, MoveRefusal, FUNC_ATTACK,
     FUNC_COMBO,
 };
-use crate::sync_position::distance_approx;
+use crate::sync_position::{distance_approx, SyncOwnershipState};
 use tracing::{debug, info, warn};
 
 /// The motion speed `GetMoveMotionSpeed` falls back to when no clip is loaded for the race and
@@ -151,8 +151,8 @@ pub(super) struct Body {
     pub(super) sync_hack_count: u32,
     /// `m_dwLastSyncTime`, on the world clock's unwrapped span.
     pub(super) last_sync: Option<Duration>,
-    /// `m_pkSyncOwner` by VID, and when it claimed this body.
-    pub(super) sync_owner: Option<(u32, Duration)>,
+    /// `m_pkChrSyncOwner` and `m_fSyncTime`: who owns this body, and when it claimed it.
+    pub(super) sync: SyncOwnershipState,
     /// What its insert records say that walking does not change.
     pub(super) card: PcCard,
     /// The Pulse the body last stopped moving on, which the stamina refill counts three seconds
@@ -177,7 +177,10 @@ impl Body {
             last_attack: None,
             sync_hack_count: 0,
             last_sync: None,
-            sync_owner: None,
+            sync: SyncOwnershipState {
+                owner: None,
+                claimed_at: None,
+            },
             card,
             stop_pulse,
         }

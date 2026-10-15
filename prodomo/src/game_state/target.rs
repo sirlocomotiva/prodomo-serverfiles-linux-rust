@@ -44,7 +44,8 @@
 //! - `CheckTarget`, which the player recovery event runs every three seconds and which drops a
 //!   target 4800 or more away (`G/char.cpp:3250`, `:6663-6669`): that event is not ported, so a
 //!   target is kept at any distance until it leaves the world.
-//! - The killer's target, which a death clears (`G/char_battle.cpp:1275-1276`): nothing dies yet.
+//! - The killer's target, which a death clears (`G/char_battle.cpp:1275-1276`), for a player's
+//!   death: no player dies yet. A monster's death clears it (see [`super::fight`]).
 //! - The horse's rider (`GetVictim`): no horse has one, so a horse shows 100.
 //! - The polymorph: no character is polymorphed, so none shows as the horse it was polymorphed into.
 //! - The GM levels: every character is `GM_PLAYER`, so none targets anything on a castle map.
@@ -279,6 +280,18 @@ impl GameState {
                     let _sent = self.write_to_client(Vid::new(other), record.clone());
                 }
             }
+        }
+    }
+
+    /// `BroadcastTargetPacket` of the non-player under `vid`, whose hit points have just changed:
+    /// each character targeting it is sent its hit points, with no element.
+    pub(super) fn broadcast_npc_target(&self, vid: u32) {
+        let Some(npc) = self.npc_by_vid(vid) else {
+            return;
+        };
+        let record = target_record(vid, shown_hit_points(npc.hp, npc.max_hp), 0);
+        for other in self.targets.targeting(vid) {
+            let _sent = self.write_to_client(Vid::new(other), record.clone());
         }
     }
 }
