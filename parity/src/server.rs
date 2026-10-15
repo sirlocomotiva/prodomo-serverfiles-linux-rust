@@ -111,6 +111,23 @@ impl Server {
     /// [`Server::start`].
     #[must_use]
     pub fn start_with_npcs(binary: &Path, store_url: &str, map: &str, lines: &str) -> Self {
+        Self::start_with_npcs_configured(binary, store_url, map, lines, "")
+    }
+
+    /// [`Server::start_with_npcs`] plus the lines of a `[game]` table, as
+    /// [`Server::start_configured`] takes them; empty for none.
+    ///
+    /// # Panics
+    ///
+    /// As [`Server::start_with_npcs`].
+    #[must_use]
+    pub fn start_with_npcs_configured(
+        binary: &Path,
+        store_url: &str,
+        map: &str,
+        lines: &str,
+        game: &str,
+    ) -> Self {
         let root = unique_root();
         let owner = legacy_dir().join("gamedata");
         let data = root.join("gamedata");
@@ -119,7 +136,7 @@ impl Server {
         let mut text = fs::read(owner.join(&npc)).expect("the map folder should have an npc.txt");
         text.extend_from_slice(lines.as_bytes());
         fs::write(data.join(&npc), text).expect("the extended npc.txt should be writable");
-        let config = config_text_on(&data, store_url, &default_channels(), "");
+        let config = config_text_on(&data, store_url, &default_channels(), game);
         Self::start_in(root, binary, &config)
     }
 

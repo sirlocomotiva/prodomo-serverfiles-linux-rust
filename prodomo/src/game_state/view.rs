@@ -81,6 +81,16 @@ const BUILD_ORDER: [(i32, i32); 9] = [
     (1, 1),
 ];
 
+/// A change to the state set (`m_set_pkChrState`) that the sectrees asked for, which the world
+/// applies before the next state-machine update (see [`super::mob_ai`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Wake {
+    /// `StartStateMachine` of the NPC under this VID.
+    Start(u32),
+    /// `StopStateMachine` of the NPC under this VID.
+    Stop(u32),
+}
+
 /// One map of one Channel: its sectrees, and every entity's spot and view.
 #[derive(Debug)]
 pub(super) struct MapIndex {
@@ -92,6 +102,12 @@ pub(super) struct MapIndex {
     spots: HashMap<EntityKey, Spot>,
     /// Looked up by key, never iterated.
     views: HashMap<EntityKey, View>,
+    /// `m_iPCCount`: the players standing in each sectree's nine. A sectree no player stands
+    /// near has no entry. Looked up by key, never iterated.
+    pc_counts: HashMap<Tree, u32>,
+    /// The starts and stops of the state set the sectrees asked for, in order, until the world
+    /// takes them.
+    wakes: Vec<Wake>,
 }
 
 impl MapIndex {
@@ -102,6 +118,8 @@ impl MapIndex {
             trees: HashMap::new(),
             spots: HashMap::new(),
             views: HashMap::new(),
+            pc_counts: HashMap::new(),
+            wakes: Vec::new(),
         }
     }
 
@@ -148,19 +166,123 @@ impl MapIndex {
             .is_some_and(|view| view.seen.contains_key(&ent))
     }
 
-    /// `SECTREE::InsertEntity` without its commented-out `UpdateSectree` (`G/sectree.cpp:137`).
-    fn index(&mut self, me: EntityKey, tree: Tree) {
+    /// The starts and stops asked for since the last take, in order.
+    pub(super) fn take_wakes(&mut self) -> Vec<Wake> {
+        std::mem::take(&mut self.wakes)
+    }
+
+    /// `m_iPCCount` of the sectree holding a point: the players standing in its nine.
+    #[cfg(test)]
+    pub(super) fn pc_count_at(&self, x: i32, y: i32) -> u32 {
+        self.tree_at(x, y)
+            .and_then(|tree| self.pc_counts.get(&tree).copied())
+            .unwrap_or(0)
+    }
+
+    /// The membership half of `SECTREE::InsertEntity` (`G/sectree.cpp:120-137`).
+    fn join(&mut self, me: EntityKey, tree: Tree) {
         self.trees.entry(tree).or_default().insert(me);
     }
 
-    /// `SECTREE::RemoveEntity`.
-    fn unindex(&mut self, me: EntityKey, tree: Tree) {
+    /// The membership half of `SECTREE::RemoveEntity` (`G/sectree.cpp:160-169`).
+    fn leave(&mut self, me: EntityKey, tree: Tree) {
         if let Some(keys) = self.trees.get_mut(&tree) {
             keys.remove(&me);
             if keys.is_empty() {
                 self.trees.remove(&tree);
             }
         }
+    }
+
+    /// `SECTREE::InsertEntity` without its commented-out `UpdateSectree` (`G/sectree.cpp:137`),
+    /// for an entity that stood in no sectree: a player raises the count of the nine around it,
+    /// and an NPC entering a sectree a player stands near starts its state machine
+    /// (`:141-155`). The warp and goto exception is the world's, which knows the NPC's type.
+    fn index(&mut self, me: EntityKey, tree: Tree) {
+        self.join(me, tree);
+        self.entered(me, tree);
+    }
+
+    /// `SECTREE::RemoveEntity` (`G/sectree.cpp:160-175`): a leaving player lowers the count.
+    fn unindex(&mut self, me: EntityKey, tree: Tree) {
+        self.leave(me, tree);
+        if matches!(me, EntityKey::Character(_)) {
+            self.decrease_pc(tree);
+        }
+    }
+
+    /// `SECTREE::InsertEntity` for an entity that stood in `old`: the membership moves, then a
+    /// player raises the new nine before it lowers the old (`G/sectree.cpp:128-149`), so a
+    /// sectree in both never reaches 0.
+    fn reindex(&mut self, me: EntityKey, old: Tree, tree: Tree) {
+        self.leave(me, old);
+        self.join(me, tree);
+        self.entered(me, tree);
+        if matches!(me, EntityKey::Character(_)) {
+            self.decrease_pc(old);
+        }
+    }
+
+    /// What `InsertEntity` does after the membership for an entity entering `tree`.
+    fn entered(&mut self, me: EntityKey, tree: Tree) {
+        match me {
+            EntityKey::Character(_) => {
+                // `SECTREE::IncreasePC` (`G/sectree.cpp:78-86`).
+                for near in self.neighbours(tree) {
+                    *self.pc_counts.entry(near).or_default() += 1;
+                }
+            }
+            EntityKey::Npc(vid) => {
+                // A sectree no player stands near has no count at all.
+                if self.pc_counts.contains_key(&tree) {
+                    self.wakes.push(Wake::Start(vid));
+                }
+            }
+            EntityKey::Ground(_) => {}
+        }
+    }
+
+    /// `SECTREE::DecreasePC` (`G/sectree.cpp:88-117`): each sectree of the nine around `tree`
+    /// counts one player fewer, and each one left with none stops every character in it. Only an
+    /// NPC is ever in the state set, so only an NPC's stop is asked for.
+    fn decrease_pc(&mut self, tree: Tree) {
+        for near in self.neighbours(tree) {
+            let left = self
+                .pc_counts
+                .get(&near)
+                .map_or(0, |count| count.saturating_sub(1));
+            if left > 0 {
+                self.pc_counts.insert(near, left);
+                continue;
+            }
+            // A count below 0 is logged and set to 0 (`:98-102`); an absent entry is 0.
+            self.pc_counts.remove(&near);
+            if let Some(entities) = self.trees.get(&near) {
+                for ent in entities {
+                    if let EntityKey::Npc(vid) = ent {
+                        self.wakes.push(Wake::Stop(*vid));
+                    }
+                }
+            }
+        }
+    }
+
+    /// `m_neighbor_list`: the sectree itself, then each `neighbor_coord` step the map holds,
+    /// in `Build` order (`G/sectree_manager.cpp:79-120`).
+    fn neighbours(&self, tree: Tree) -> Vec<Tree> {
+        let mut near = Vec::with_capacity(BUILD_ORDER.len());
+        for (dc, dr) in BUILD_ORDER {
+            let (Some(column), Some(row)) = (
+                tree.column.checked_add_signed(dc),
+                tree.row.checked_add_signed(dr),
+            ) else {
+                continue;
+            };
+            if column < self.grid.columns && row < self.grid.rows {
+                near.push(Tree { column, row });
+            }
+        }
+        near
     }
 
     /// `CEntity::ViewInsert` (`G/entity_view.cpp:47-67`). Observers are dormant.
@@ -244,17 +366,8 @@ impl MapIndex {
     /// sectree. Legacy collects them before calling anything (`G/sectree.h:79-90`).
     fn around(&self, tree: Tree) -> Vec<EntityKey> {
         let mut keys = Vec::new();
-        for (dc, dr) in BUILD_ORDER {
-            let (Some(column), Some(row)) = (
-                tree.column.checked_add_signed(dc),
-                tree.row.checked_add_signed(dr),
-            ) else {
-                continue;
-            };
-            if column >= self.grid.columns || row >= self.grid.rows {
-                continue;
-            }
-            if let Some(entities) = self.trees.get(&Tree { column, row }) {
+        for near in self.neighbours(tree) {
+            if let Some(entities) = self.trees.get(&near) {
                 keys.extend(entities.iter().copied());
             }
         }
@@ -297,8 +410,11 @@ impl MapIndex {
                 continue;
             }
             self.view_insert(me, ent, true, out);
-            // :110-117 starts an NPC's state machine here for a player `me`; `sys.mob.ai`
-            // fills the hook (docs/STATUS.md).
+            // :110-117: a player's view starts the state machine of each NPC it takes in, seen
+            // before or not. The warp and goto exception is the world's.
+            if let (EntityKey::Character(_), EntityKey::Npc(vid)) = (me, ent) {
+                self.wakes.push(Wake::Start(vid));
+            }
         }
         let stale: Vec<EntityKey> = self
             .views
@@ -409,10 +525,7 @@ impl MapIndex {
         );
         match spot.tree {
             Some(old) if old == tree => {}
-            Some(old) => {
-                self.unindex(me, old);
-                self.index(me, tree);
-            }
+            Some(old) => self.reindex(me, old, tree),
             None => {
                 self.index(me, tree);
                 self.update_sectree(me, radius, out);
@@ -1120,5 +1233,88 @@ mod tests {
         assert_eq!(out, vec![rem(Ground(6), Pc(1))]);
         assert!(!map.sees(Pc(1), Ground(6)));
         assert_eq!(map.spot(Ground(6)), None);
+    }
+
+    /// The counts of sectrees (c, r) for each `(c, r)`.
+    fn counts(map: &MapIndex, trees: &[(i32, i32)]) -> Vec<u32> {
+        trees
+            .iter()
+            .map(|&(column, row)| {
+                let (x, y, _) = centre(column, row);
+                map.pc_count_at(x, y)
+            })
+            .collect()
+    }
+
+    /// `IncreasePC` and `DecreasePC`: a player counts in each of its nine sectrees and nowhere
+    /// else; two players count twice; a move counts the new nine before it uncounts the old, so a
+    /// sectree in both asks for no stop, and a sectree left with no player stops each NPC in it.
+    #[test]
+    fn a_player_counts_in_its_nine_and_a_sectree_left_with_none_stops_its_npcs() {
+        let mut map = grid();
+        stand(&mut map, Npc(7), (centre(4, 4).0, centre(4, 4).1));
+        stand(&mut map, Npc(8), (centre(5, 5).0, centre(5, 5).1));
+        stand(&mut map, Npc(9), (centre(8, 8).0, centre(8, 8).1));
+        assert_eq!(map.take_wakes(), [], "no player near: no start");
+        place(&mut map, Pc(1), centre(5, 5));
+        let nine = [
+            (5, 5),
+            (4, 5),
+            (6, 5),
+            (5, 4),
+            (5, 6),
+            (4, 6),
+            (6, 4),
+            (4, 4),
+            (6, 6),
+        ];
+        assert_eq!(counts(&map, &nine), [1; 9]);
+        assert_eq!(counts(&map, &[(7, 5), (3, 3), (8, 8)]), [0; 3]);
+        // The view takes in the NPCs in range, each a start.
+        assert_eq!(map.take_wakes(), [Wake::Start(8), Wake::Start(7)]);
+        place(&mut map, Pc(2), centre(5, 5));
+        assert_eq!(counts(&map, &[(5, 5), (4, 4)]), [2, 2]);
+        map.take_wakes();
+        let mut out = Vec::new();
+        map.remove(Pc(2), &mut out);
+        assert_eq!(counts(&map, &[(5, 5), (4, 4)]), [1, 1]);
+        assert_eq!(map.take_wakes(), [], "one player still near");
+        let (x, y, _) = centre(6, 5);
+        assert!(map.move_body(Pc(1), x, y, RADIUS, &mut out));
+        assert_eq!(
+            counts(&map, &[(7, 5), (6, 5), (5, 5), (4, 5), (4, 4)]),
+            [1, 1, 1, 0, 0]
+        );
+        assert_eq!(map.take_wakes(), [Wake::Stop(7)], "(5, 5) is in both nines");
+        map.remove(Pc(1), &mut out);
+        assert_eq!(counts(&map, &[(7, 5), (6, 5), (5, 5)]), [0; 3]);
+        assert_eq!(map.take_wakes(), [Wake::Stop(8)]);
+        assert!(map.pc_counts.is_empty(), "a count of 0 keeps no entry");
+    }
+
+    /// `InsertEntity` of an NPC starts it only in a sectree a player counts in, and a player's
+    /// view starts each NPC it takes in again, seen before or not; a ground item asks for
+    /// nothing.
+    #[test]
+    fn an_npc_starts_entering_a_counted_sectree_and_on_each_view_recompute() {
+        let mut map = grid();
+        place(&mut map, Pc(1), centre(5, 5));
+        stand(&mut map, Npc(7), (centre(6, 6).0, centre(6, 6).1));
+        stand(&mut map, Npc(9), (centre(8, 8).0, centre(8, 8).1));
+        assert_eq!(map.take_wakes(), [Wake::Start(7)]);
+        let mut out = Vec::new();
+        assert!(map.add_to_ground(Ground(3), centre(5, 5), RADIUS, &mut out));
+        assert_eq!(map.take_wakes(), []);
+        map.update_sectree(Pc(1), RADIUS, &mut out);
+        assert_eq!(map.take_wakes(), [Wake::Start(7)]);
+        // An NPC's own recompute or move asks for nothing.
+        map.update_sectree(Npc(7), RADIUS, &mut out);
+        let (x, y, _) = centre(4, 4);
+        assert!(map.move_body(Npc(7), x, y, RADIUS, &mut out));
+        assert_eq!(map.take_wakes(), [Wake::Start(7)], "into a counted sectree");
+        let (x, y, _) = centre(8, 7);
+        assert!(map.move_body(Npc(7), x, y, RADIUS, &mut out));
+        assert_eq!(map.take_wakes(), []);
+        assert_eq!(map.take_wakes(), [], "a take empties the list");
     }
 }

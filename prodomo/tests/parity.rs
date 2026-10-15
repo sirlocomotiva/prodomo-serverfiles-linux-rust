@@ -9,10 +9,12 @@
 
 mod support;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use common::cfloat::{f32_to_i32, i32_to_f32};
 use gamedata::mob_proto::{CHAR_TYPE_MONSTER, CHAR_TYPE_STONE};
 use parity::client::Quiet;
 use parity::inventory::{self, Status};
@@ -20,6 +22,7 @@ use parity::server::default_channels;
 use parity::{Client, Server};
 use prodomo::descriptor_crypto::derive_legacy_descriptor_keys;
 use protocol::cg_inventory::{resolve_cg_base_size, CG_KEEP_ALIVE, HEADER_CG_PONG};
+use protocol::gc_chat::CHAT_TYPE_TALKING;
 use protocol::tea::{decrypt_padded, encrypt_padded, TeaKey};
 use support::{execute, ScratchDatabase};
 
@@ -986,11 +989,20 @@ fn login_key(server: &Server, login: &[u8]) -> (Client, u32) {
     login_key_in(server, login, ENGLISH)
 }
 
-/// [`login_key`] in `language`.
+/// [`login_key`] in `language`. The login is retried while it answers `ALREADY`: a connection
+/// the scenario saw close may not have released the login yet, as
+/// [`login_by_key_when_free`] waits for on the Channel.
 fn login_key_in(server: &Server, login: &[u8], language: u8) -> (Client, u32) {
     let mut auth = auth_client(server);
-    let key = log_in(&mut auth, login, ACCOUNT_PASSWORD, language.into())
-        .expect("the auth login succeeds");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let key = loop {
+        match log_in(&mut auth, login, ACCOUNT_PASSWORD, language.into()) {
+            Err(status) if status == "ALREADY" && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            answer => break answer.expect("the auth login succeeds"),
+        }
+    };
     (auth, key)
 }
 
@@ -1162,7 +1174,7 @@ fn the_channel_login_lists_the_characters_or_names_the_first_failed_check() {
         Err("ALREADY".into())
     );
     assert_eq!(first.client.expect_closed(), Vec::<u8>::new());
-    assert_eq!(second.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    second.still("nothing follows");
 
     add_characters(&database);
     let (empire, list) =
@@ -1249,7 +1261,7 @@ fn a_closing_server_refuses_login2_on_the_setup_key() {
         });
         assert_eq!(failure_status(&answer), "SHUTDOWN");
     }
-    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    keyed.still("nothing follows");
 }
 
 /// `cg.login.login2`: only the login, select, and loading phases read `LOGIN2`. In the auth
@@ -1687,7 +1699,7 @@ fn enter_game_burst(keyed: &mut Keyed) -> Vec<u8> {
 /// [`enter_game_burst`], answering what the burst showed.
 fn enter_game_view(keyed: &mut Keyed) -> Entered {
     let entered = enter_game_shown(keyed);
-    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    keyed.still("nothing follows");
     entered
 }
 
@@ -2078,6 +2090,9 @@ impl Keyed {
         let mut at = 0;
         while let Some(&header) = plain.get(at) {
             let width = match header {
+                GC_MOVE | GC_WALK_MODE | GC_CHAT => {
+                    chatter_width(&plain[at..]).unwrap_or(plain.len() - at)
+                }
                 GC_PING => 1,
                 GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
                 GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
@@ -2100,7 +2115,8 @@ impl Keyed {
                 header == GC_PING
                     || self.monster_record(record)
                     || self.timer_record(record)
-                    || is_stamina_refill(record),
+                    || is_stamina_refill(record)
+                    || is_npc_chatter(record),
                 "only a ping may arrive while nothing is expected ({note}): {record:02x?}"
             );
             at += width.div_ceil(8) * 8;
@@ -2117,7 +2133,34 @@ impl Keyed {
     /// Send one select-screen record that closes the connection without an answer.
     fn closed_by(&mut self, record: &[u8]) {
         self.send_record(record);
-        assert_eq!(self.client.expect_closed(), Vec::<u8>::new());
+        self.closes("a record that closes the connection");
+    }
+
+    /// Assert that the descriptor closes the connection having sent nothing but what an NPC
+    /// does on its own ([`is_npc_chatter`]): a nearby NPC may walk or speak before the close
+    /// lands.
+    fn closes(&mut self, note: &str) {
+        let bytes = self.client.expect_closed();
+        assert_eq!(
+            bytes.len() % 8,
+            0,
+            "whole TEA units before the close ({note})"
+        );
+        let key = self.output;
+        let plain: Vec<u8> = bytes
+            .chunks(8)
+            .flat_map(|unit| decrypt_padded(unit, &key).expect("aligned"))
+            .collect();
+        let mut at = 0;
+        while at < plain.len() {
+            let rest = &plain[at..];
+            let width = chatter_width(rest)
+                .filter(|&width| width <= rest.len() && is_npc_chatter(&rest[..width]));
+            let Some(width) = width else {
+                panic!("{note}: a record before the close: {rest:02x?}");
+            };
+            at += width.div_ceil(8) * 8;
+        }
     }
     /// Read one record whose length the first TEA unit already carries, which is how every
     /// `WORD wSize` record sizes itself on the wire.
@@ -2177,9 +2220,20 @@ impl Keyed {
         }
     }
 
-    /// Read the next loading or enter-game record, sizing a `WORD wSize` record from the first
-    /// TEA unit and a fixed-width one from [`game_len`].
+    /// Read the next loading or enter-game record that is not an NPC's own doing
+    /// ([`is_npc_chatter`]), sizing a `WORD wSize` record from the first TEA unit and a
+    /// fixed-width one from [`game_len`].
     fn read_game_raw(&mut self) -> Vec<u8> {
+        loop {
+            let record = self.read_wire();
+            if !is_npc_chatter(&record) {
+                return record;
+            }
+        }
+    }
+
+    /// Read the next record as it comes, an NPC's own included.
+    fn read_wire(&mut self) -> Vec<u8> {
         self.read_sized(|header, first| match game_len(header) {
             usize::MAX => usize::from(first[1]) | (usize::from(first[2]) << 8),
             fixed => fixed,
@@ -2211,6 +2265,45 @@ impl Keyed {
         window: Duration,
         width_of: impl Fn(u8) -> usize,
     ) -> (Vec<Vec<u8>>, Quiet) {
+        let (records, quiet) = self.drain_wire(window, width_of);
+        // An NPC's own doing is not part of any scenario's answer.
+        let records: Vec<Vec<u8>> = records
+            .into_iter()
+            .filter(|record| !is_npc_chatter(record))
+            .collect();
+        // Noted but not removed: a drain reports every record, the timer's included.
+        for record in &records {
+            self.timer_record(record);
+        }
+        (records, quiet)
+    }
+
+    /// Assert that nothing arrives within [`QUIET_WINDOW`] but what an NPC does on its own
+    /// ([`is_npc_chatter`]), and that the connection stays open.
+    fn still(&mut self, note: &str) {
+        self.still_for(note, QUIET_WINDOW);
+    }
+
+    /// [`Keyed::still`] over a `window` of its own.
+    fn still_for(&mut self, note: &str, window: Duration) {
+        let (records, quiet) = self.drain_wire(window, |header| {
+            panic!("a record nobody accounted for ({note}): header {header}")
+        });
+        assert_eq!(quiet, Quiet::Open, "the client is still connected ({note})");
+        let others: Vec<&Vec<u8>> = records
+            .iter()
+            .filter(|record| !is_npc_chatter(record))
+            .collect();
+        assert!(others.is_empty(), "{note}: {others:02x?}");
+    }
+
+    /// [`Keyed::drain_game`] with every record as it came, an NPC's own included, and none
+    /// noted.
+    fn drain_wire(
+        &mut self,
+        window: Duration,
+        width_of: impl Fn(u8) -> usize,
+    ) -> (Vec<Vec<u8>>, Quiet) {
         let (bytes, quiet) = self.client.drain(window);
         let key = self.output;
         let plain: Vec<u8> = bytes
@@ -2223,7 +2316,7 @@ impl Keyed {
         let mut at = 0;
         while at < plain.len() {
             let header = plain[at];
-            let width = width_of(header);
+            let width = chatter_width(&plain[at..]).unwrap_or_else(|| width_of(header));
             let padded = width.div_ceil(8) * 8;
             if at + width > plain.len() {
                 // In flight, or the last unit of a record whose padding has not landed.
@@ -2231,10 +2324,6 @@ impl Keyed {
             }
             records.push(plain[at..at + width].to_vec());
             at += padded;
-        }
-        // Noted but not removed: a drain reports every record, the timer's included.
-        for record in &records {
-            self.timer_record(record);
         }
         (records, quiet)
     }
@@ -2731,7 +2820,7 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
     // ends with `PointsPacket` (`G/input_db.cpp:1564`): the same gold and points records again.
     assert_eq!(keyed.read_game(), gold, "the item load's gold record");
     assert_eq!(keyed.read_game(), points, "the item load's points record");
-    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    keyed.still("nothing follows");
 
     // `CG_ENTER_GAME`. `Entergame` writes the own pair, `Show` and `SendNPCPosition` the NPCs,
     // the revive-invisible affect, `SetPhase(PHASE_GAME)`, and the time, Channel and events.
@@ -2791,7 +2880,7 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
     assert_eq!(chat[8], 1, "bEmpire");
     assert_eq!(chat[9], 1, "bCanFormat");
     assert_eq!(&chat[10..], b"letters_event 0");
-    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    keyed.still("nothing follows");
 }
 
 /// Log `login` in, enter the game as slot 0 and answer the connection, the position the loading
@@ -3115,7 +3204,7 @@ fn entering_a_map_shows_its_npcs_and_a_click_keeps_the_connection() {
     assert_eq!(alice.read_game()[0], GC_TIME);
     assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(alice.read_game()[0], GC_CHAT);
-    assert_eq!(alice.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    alice.still("nothing follows");
 
     alice.send_record(&client_click(base));
     alice.quiet("a click on an NPC");
@@ -3557,11 +3646,7 @@ fn a_warp_whose_save_fails_closes_without_sending_the_client_away() {
         (450_100, 903_400),
         "Alpha enters beside the warp"
     );
-    assert_eq!(
-        alice.client.expect_closed(),
-        Vec::<u8>::new(),
-        "no GC_CHARACTER_DEL and no GC_WARP"
-    );
+    alice.closes("no GC_CHARACTER_DEL and no GC_WARP");
     server.wait_for("The warp could not save the character; closing without GC_WARP");
     server.wait_for("Character disconnected; wrote the row");
     assert!(
@@ -4127,7 +4212,7 @@ fn the_points_are_computed_at_load_and_the_item_load_clamps_the_pools() {
         clamped,
         "the item load's points record differs only in the two clamped pools"
     );
-    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    keyed.still("nothing follows");
 
     enter_game_burst(&mut keyed);
     drop(keyed);
@@ -4197,7 +4282,7 @@ fn a_conqueror_below_the_map_will_is_sent_half_its_speed_and_hit_points() {
     assert_eq!(keyed.read_game(), point_change(gamma.id, 5, 0, 380));
     assert_eq!(keyed.read_game(), gold, "the item load's gold record");
     assert_eq!(keyed.read_game(), with_point_slot(&loaded, 5, 380));
-    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    keyed.still("nothing follows");
 
     // `EncodeInsertPacket` writes `GetLimitPoint` of both speeds (`G/char.cpp:1089-1091`).
     let add = enter_game_burst(&mut keyed);
@@ -4616,16 +4701,22 @@ fn the_chat_counter_is_reset_every_five_seconds_of_pulses() {
     let answer = chat_packet(prodomo::chat::CHAT_INFO, 1, b"[LS;655]");
     let heard = |alice: &mut Keyed| {
         alice.send_record(&party);
-        let (records, quiet) = alice.drain_game(QUIET_WINDOW, |header| match header {
+        // The revive affect ends five seconds after the entry, which a slow run reaches here:
+        // its removal and look update are the timer's ([`Keyed::timer_record`]), not answers.
+        let (records, quiet) = alice.drain_wire(QUIET_WINDOW, |header| match header {
             GC_CHAT => answer.len(),
             GC_PING => 1,
+            GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
+            GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
             other => panic!("unexpected record {other}"),
         });
         assert_eq!(quiet, Quiet::Open, "a dropped line never closes before ten");
-        let lines: Vec<Vec<u8>> = records
-            .into_iter()
-            .filter(|record| record[0] != GC_PING)
-            .collect();
+        let mut lines = Vec::new();
+        for record in records {
+            if record[0] != GC_PING && !is_npc_chatter(&record) && !alice.timer_record(&record) {
+                lines.push(record);
+            }
+        }
         assert!(
             lines.is_empty() || lines == [answer.clone()],
             "{lines:02x?}"
@@ -5023,6 +5114,8 @@ const VIEW_C: (i32, i32) = (454_300, 940_700);
 /// A point in sectree row 147, outside the 3x3 around Alpha's row 145 and 9128 from Alpha, so
 /// within reach but not in a sectree Alpha's view walks.
 const ROW_147: (i32, i32) = (444_100, 941_600);
+/// `FUNC_WAIT` (`G/packet.h:542`): a non-player's walk as Goto tells it.
+const FUNC_WAIT: u8 = 0;
 /// `FUNC_MOVE` and `FUNC_COMBO`, `TPacketCGMove`'s `bFunc`.
 const FUNC_MOVE: u8 = 1;
 const FUNC_COMBO: u8 = 3;
@@ -5640,13 +5733,7 @@ fn the_save_cycle_writes_the_row_while_the_character_is_still_connected() {
         "(SELECT x FROM player WHERE name = 'Alpha') = 470100",
     );
     // The descriptor is still open: the write came from the event, not from a disconnect.
-    let (bytes, state) = alice.client.drain(std::time::Duration::from_millis(200));
-    assert!(bytes.is_empty(), "a save sends no record: {bytes:02x?}");
-    assert_eq!(
-        state,
-        parity::client::Quiet::Open,
-        "the client is still connected"
-    );
+    alice.still_for("a save sends no record", Duration::from_millis(200));
     drop(alice);
 }
 
@@ -6402,7 +6489,7 @@ fn a_relogged_character_wears_its_equipment_and_its_points_count_it() {
          defence grades with the armour, both speeds with the prototypes, and the stored \
          hit points kept"
     );
-    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    keyed.still("nothing follows");
 
     // And: the set-aside rows were rewritten at their new cells, and the worn rows and the
     // refused stone's row are as they were.
@@ -6893,9 +6980,7 @@ fn a_recovering_character_is_saved_with_what_the_event_paid_while_it_is_still_co
         &database,
         "(SELECT hp = 800 FROM player WHERE name = 'Alpha')",
     );
-    let (bytes, quiet) = alpha.client.drain(Duration::from_millis(200));
-    assert!(bytes.is_empty(), "a save sends no record: {bytes:02x?}");
-    assert_eq!(quiet, Quiet::Open, "the client is still connected");
+    alpha.still_for("a save sends no record", Duration::from_millis(200));
 }
 
 /// A `CG_QUICKSLOT_ADD` of `kind` and `pos` into `slot`.
@@ -7466,7 +7551,7 @@ fn enter_game_with_parts(keyed: &mut Keyed) -> (Vec<u8>, [u16; 6]) {
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(keyed.read_game()[0], GC_CHAT);
-    assert_eq!(keyed.client.drain(QUIET_WINDOW), (Vec::new(), Quiet::Open));
+    keyed.still("nothing follows");
     (add, parts)
 }
 
@@ -8341,6 +8426,39 @@ fn is_revive_end(record: &[u8]) -> bool {
         && record.get(5) == Some(&0)
 }
 
+/// The width of a record an NPC may send on its own, read from its first bytes: a `GC_MOVE`, a
+/// `GC_WALK_MODE`, or a `GC_CHAT` by its `WORD` size. `None` for any other header, or a chat
+/// whose size has not arrived.
+fn chatter_width(record: &[u8]) -> Option<usize> {
+    match *record.first()? {
+        GC_MOVE => Some(GC_MOVE_LEN),
+        GC_WALK_MODE => Some(WALK_MODE_LEN),
+        GC_CHAT => word_sized(record.get(..3)?),
+        _ => None,
+    }
+}
+
+/// Whether `record` is something an NPC did on its own (ledger 229i, `sys.mob.ai`): its walk's
+/// `GC_MOVE`, its `GC_WALK_MODE`, or its talk, each carrying a VID from `FIRST_NPC_VID` up.
+///
+/// The NPCs a player stands near run their state machines: each waits, wanders one time in
+/// seven and speaks now and then, all on the world's dice, so a scenario about something else
+/// reads past them. [`an_npc_near_a_player_wanders_and_tells_its_view`] is the scenario about
+/// them, and it reads with [`Keyed::read_wire`].
+fn is_npc_chatter(record: &[u8]) -> bool {
+    let vid_at = |from: usize| {
+        record
+            .get(from..from + 4)
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four bytes")))
+    };
+    let vid = match record.first() {
+        Some(&(GC_MOVE | GC_CHAT)) => vid_at(4),
+        Some(&GC_WALK_MODE) => vid_at(1),
+        _ => None,
+    };
+    vid.is_some_and(|vid| vid >= FIRST_NPC_VID)
+}
+
 /// Whether `record` is a `GC_CHARACTER_POINT_CHANGE` of `POINT_STAMINA`.
 ///
 /// A character below its maximum stamina that has stood still for three seconds is sent its
@@ -8929,4 +9047,162 @@ fn a_full_regen_stands_nothing_more_each_time_it_runs() {
     // When: the dog's regen runs, at least twice. Then: no second dog.
     let inserts = alice.inserts_for("the dog's regen runs", Duration::from_secs(19));
     assert_eq!(dogs(&inserts), 0, "a full regen stands nothing more");
+}
+
+/// Ledger 229i: the state machine of the NPCs a player stands near (`sys.mob.ai`), started when
+/// the player's view takes them in (`G/entity_view.cpp:110-118`).
+///
+/// Thirty stray dogs stand by Alpha. A dog is no aggressive monster, so each waits 3 to 5
+/// seconds in Idle and one time in seven turns to a random heading and runs 300 to 700 units
+/// (`__StateIdle_Monster`, `G/char_state.cpp:626-736`), which Goto tells the view as a
+/// `GC_MOVE` `FUNC_WAIT`: the destination, the heading over 5, and the duration of the way at
+/// the fall-back motion speed of 300 (V2) and the dog's moving speed of 100
+/// (`SendMovePacket`, `G/char.cpp:3624-3636`). A dog runs, so no walk mode is sent; a dog that
+/// speaks says a talk with its own VID. Over 20 seconds the dogs wait about 150 times, so the
+/// chance that none walks is below one in a billion.
+#[test]
+fn an_npc_near_a_player_wanders_and_tells_its_view() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (_server, mut alice, dogs) = thirty_dogs_by_alpha(&database, "");
+
+    // When: Alpha stands by the dogs for 20 seconds. Then: the dogs walk, and say it.
+    let mut walks: HashMap<u32, Vec<u8>> = HashMap::new();
+    for record in alice.wire_for(Duration::from_secs(20)) {
+        let vid = record_vid(&record);
+        match record.first() {
+            Some(&GC_MOVE) if dogs.contains_key(&vid) => {
+                walks.entry(vid).or_insert(record);
+            }
+            Some(&GC_WALK_MODE) => {
+                let walker = u32::from_le_bytes(record[1..5].try_into().expect("a VID"));
+                assert!(!dogs.contains_key(&walker), "a dog runs: {record:02x?}");
+            }
+            Some(&GC_CHAT) if dogs.contains_key(&vid) => {
+                assert_eq!(record[3], CHAT_TYPE_TALKING, "a dog talks");
+            }
+            _ => {}
+        }
+    }
+    assert!(!walks.is_empty(), "a dog walks in 20 seconds");
+    for (vid, walk) in &walks {
+        let from = dogs[vid];
+        let word = |at: usize| u32::from_le_bytes(walk[at..at + 4].try_into().expect("a word"));
+        let to = (
+            i32::from_le_bytes(walk[8..12].try_into().expect("x")),
+            i32::from_le_bytes(walk[12..16].try_into().expect("y")),
+        );
+        assert_eq!(walk.len(), GC_MOVE_LEN);
+        assert_eq!((walk[1], walk[2]), (FUNC_WAIT, 0), "{walk:02x?}");
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let distance = (f64::from(dx)).hypot(f64::from(dy));
+        assert!(
+            (299.0..=701.0).contains(&distance),
+            "an idle walk runs 300 to 700: {distance}"
+        );
+        // The heading over 5: clockwise from north, as `GetDeltaByDegree` steps.
+        let bearing = f64::from(dx)
+            .atan2(f64::from(dy))
+            .to_degrees()
+            .rem_euclid(360.0);
+        let heading = f64::from(walk[3]) * 5.0;
+        // The way's ends are truncated to whole units, which turns it by less than a degree.
+        assert!(
+            (bearing - heading + 1.0).rem_euclid(360.0) < 6.0,
+            "the heading {heading} is the bearing {bearing} truncated to 5"
+        );
+        // `(distance / 300) * 1000` in `float`, at a moving speed of 100 (100%).
+        let (fx, fy) = (i32_to_f32(dx), i32_to_f32(dy));
+        let millis = f32_to_i32((fx * fx + fy * fy).sqrt() / 300.0 * 1000.0);
+        assert_eq!(i32::try_from(word(20)), Ok(millis), "the way's duration");
+    }
+}
+
+/// The `DWORD` at byte 4 of a record, where a `GC_MOVE` and a `GC_CHAT` carry their VID; 0 for
+/// a record shorter than that.
+fn record_vid(record: &[u8]) -> u32 {
+    record.get(4..8).map_or(0, |bytes| {
+        u32::from_le_bytes(bytes.try_into().expect("four bytes"))
+    })
+}
+
+/// A server with thirty stray dogs standing within 300 of [`DOG_AT`], by Alpha, under the
+/// `[game]` lines `game`; Alpha entered, and each dog's VID with the point it was shown at.
+fn thirty_dogs_by_alpha(
+    database: &ScratchDatabase,
+    game: &str,
+) -> (Server, Keyed, HashMap<u32, (i32, i32)>) {
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t600\t525\t3\t3\t0\t0\t1000s\t100\t30\t101\n",
+        game,
+    );
+    create_account(&server, "alice");
+    add_characters(database);
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alice);
+    let dogs: HashMap<u32, (i32, i32)> = entered
+        .shown
+        .monsters
+        .iter()
+        .filter(|insert| {
+            let (x, y) = inserted_at(insert);
+            (x - DOG_AT.0).abs() <= 300 && (y - DOG_AT.1).abs() <= 300
+        })
+        .map(|insert| {
+            let vid = u32::from_le_bytes(insert[1..5].try_into().expect("a VID"));
+            (vid, inserted_at(insert))
+        })
+        .collect();
+    assert!(dogs.len() >= 30, "the dogs stand by Alpha: {}", dogs.len());
+    (server, alice, dogs)
+}
+
+/// Ledger 229i, the control of [`an_npc_near_a_player_wanders_and_tells_its_view`]: under
+/// `no_wander` (`G/config.cpp:1281-1283`) no monster walks, so the thirty dogs by Alpha stay
+/// where they stand for 15 seconds, about 110 waits, where without it some dog walks but for a
+/// chance below one in ten million.
+#[test]
+fn no_wander_keeps_the_monsters_near_a_player_still() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (_server, mut alice, dogs) = thirty_dogs_by_alpha(&database, "no_wander = true");
+    let walks: Vec<Vec<u8>> = alice
+        .wire_for(Duration::from_secs(15))
+        .into_iter()
+        .filter(|record| record.first() == Some(&GC_MOVE) && dogs.contains_key(&record_vid(record)))
+        .collect();
+    assert_eq!(walks, Vec::<Vec<u8>>::new(), "no dog walks");
+}
+
+impl Keyed {
+    /// Every record that arrives within `window`, an NPC's own included, as
+    /// [`Keyed::inserts_for`] accepts them; anything else panics.
+    fn wire_for(&mut self, window: Duration) -> Vec<Vec<u8>> {
+        let deadline = std::time::Instant::now() + window;
+        let mut wire = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            let (records, quiet) = self.drain_wire(left, |header| match header {
+                GC_PING => 1,
+                GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
+                GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+                GC_CHARACTER_ADD => CHARACTER_ADD_LEN,
+                GC_CHAR_ADDITIONAL_INFO => CHAR_ADDITIONAL_INFO_LEN,
+                GC_CHARACTER_DEL => 1 + 4,
+                GC_POINT_CHANGE => POINT_CHANGE_LEN,
+                other => panic!("an unexpected record: header {other}"),
+            });
+            assert_eq!(quiet, Quiet::Open, "the connection stays open");
+            wire.extend(records);
+        }
+        wire
+    }
 }

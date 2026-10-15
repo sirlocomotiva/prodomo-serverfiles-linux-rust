@@ -28192,3 +28192,393 @@ Before 229h the counts were 125, 127, 1332, 6 and 55.
 
 No ADR changed. `.scratch/parity/spec.md` gained the world-test rule of 229h.5. Under the standing
 staging rule (ledger 229d), `.scratch/equip/owner-questions.md` stays out of the commit.
+
+## 229i. The monster state machine: the NPCs a player stands near wait, wander, speak and run away
+
+Legacy runs a state machine (`CFSM`) for every character in `m_set_pkChrState`. The sectrees put a
+non-player in that set while a player stands near it and take it out when none does. Each Pulse,
+`CHARACTER_MANAGER::Update` runs the due ones. A non-player with no victim is in Idle or Move:
+- it waits;
+- one time in seven it walks or runs to a random point;
+- a coward runs away;
+- a waiting one may say a line of `locale.monster_chat`.
+
+Until 229i every NPC 229f stood stayed at its spawn point and never spoke. 229i ports the state set,
+`CFSM`, `StateIdle`, `StateMove`, `Goto` and its `FUNC_WAIT`, `CowardEscape` and
+`MonsterChat(MONSTER_CHAT_WAIT)` for a character with no victim. It also ports the sectrees' player
+count, which starts and stops the machines. `G/` below means `server/server/game/`.
+
+### 229i.1 What landed
+
+- **The sectrees' player count** (`prodomo/src/game_state/view.rs`). `MapIndex` keeps
+  `m_iPCCount` for each sectree: the players standing in its nine. The sectrees ask for each start
+  and stop of the state set as a `Wake`:
+  - **Arrival.** A player entering a sectree raises the count of the nine around it
+    (`IncreasePC`, `G/sectree.cpp:78-86`).
+  - **A move.** A player moving raises the new nine before it lowers the old (`:128-149`), so a
+    sectree in both never reaches 0.
+  - **Leaving.** A leaving player lowers the count (`:160-175`).
+  - **A count reaching 0.** A sectree left with no player stops every NPC in it (`DecreasePC`,
+    `:88-117`).
+  - **An NPC entering.** An NPC entering a sectree whose count is above 0 starts (`:150-155`).
+  - **A player's view.** A player's view taking an NPC in starts it, whether or not the NPC was
+    seen before (`G/entity_view.cpp:110-118`).
+  - **Warp and goto NPCs.** The world never starts one.
+- **The state set and `CFSM`** (`prodomo/src/game_state/mob_ai.rs`, new):
+  - `Minds` keeps each NPC's `Mind`, the running set and `no_wander`. A `Mind` holds:
+    - the current state and the asked one (`m_pNewState`);
+    - the next update's Pulse and the state's duration;
+    - the rotation, the walk mode and the move (start, destination, start time and duration).
+  - A new character asks for Idle and waits 1 Pulse (`G/char.cpp:263-264`). A start puts the NPC
+    in the set with its next update one Pulse after the Pulse it was asked on, and an NPC already in
+    the set keeps its next update (`StartStateMachine`, `:5322-5331`).
+  - `process_pulse` applies the wakes first, so a wake asked between two Pulses counts from the
+    earlier one, as legacy's heart pulse does. `run_minds` runs after the player moves: it applies
+    the wakes again, then updates every NPC of the set whose next Pulse is due, in VID order (V1).
+  - The update is `CFSM::Update` (`G/FSM.cpp`, `UpdateStateMachine`, `G/char.cpp:5338-5348`): an
+    asked state becomes the state, the state runs, and the next update is its duration later.
+- **Idle** (`StateIdle`, `G/char_state.cpp:362-387`):
+  - **Horses.** A horse (type 8, or races 20101 to 20109) does nothing.
+  - **Stones.** A stone waits 1 second.
+  - **Monsters** (`__StateIdle_Monster`, `:626-736`):
+    - a coward runs `CowardEscape`;
+    - otherwise it waits `number(1, 3)` seconds when aggressive and `number(3, 5)` when not;
+    - unless `no_wander` or `AIFLAG_NOMOVE` holds it, one time in seven (`number(0, 6) == 0`) it
+      turns to a random heading and runs 300 to 700 units;
+    - one that does not walk calls `MonsterChat(MONSTER_CHAT_WAIT)`.
+  - **Any other non-player** (`__StateIdle_NPC`, `:507-624`):
+    - it calls `MonsterChat` and waits 5 seconds;
+    - unless it is a guard (11000, 11002, 11004) or `AIFLAG_NOMOVE` holds it, one time in seven it
+      walks 200 to 400 units at a walk;
+    - the first walk tells its view `GC_WALK_MODE` (`SetNowWalking`).
+  - **The walk's point.** A walk needs both its point and its half-way point movable. The offset is
+    `GetDeltaByDegree` in `f32` (`delta_by_degree`, clockwise from north).
+- **`CowardEscape`** (`G/char_state.cpp:282-321`). The coward tries the reaches 3000 to 5000, then
+  1000 to 3000, then 500 to 1000, with eight tries each. Each try turns to a random heading and
+  draws a distance. It takes the first point whose every hundredth of the way is movable. A coward
+  with no such way stays.
+- **`Goto` and `SendMovePacket`** (`G/char.cpp:3471-3508`, `:3624-3636`):
+  - A `Goto` to the NPC's own point or its current destination sets no new way (`:3473-3487`).
+  - Otherwise it sets the way and its duration at the fall-back motion speed (V2), with the NPC's
+    moving speed. The state duration becomes 4 Pulses, and the state becomes Move.
+  - The view is told `GC_MOVE` with `FUNC_WAIT`, the heading as `rotation / 5`, the destination
+    and the duration.
+- **Move** (`StateMove`, `G/char_state.cpp:782-928`). Every 4 Pulses the NPC moves to the point the
+  elapsed share of the duration reaches, turning toward it with z 0, through the view's
+  `move_body`; a step off every sectree is not taken (229i.3). At the end it asks for Idle with a
+  wait of `number(1, 3)` seconds. Legacy runs `UpdateSectree` in `StateMove` only for a player, so
+  a non-player's view is not sampled while it walks.
+- **`MonsterChat`** (`G/char.cpp:7555-7600`):
+  - **Monsters.** A monster speaks one time in 61 (`number(0, 60) == 0`), the line
+    `MONSTER_CHAT_WAIT * 3 + number(1, 3)` of its race.
+  - **Other non-players.** A guard speaks one time in 7 and any other non-player one time in 31, a
+    line `number(1, table.getn(...))`.
+  - **How the line is sent.** The line is a `GC_CHAT` `CHAT_TYPE_TALKING` the speaker says to its
+    view, with its VID, empire 0 and the text with its zero byte. It is a talk, not a server line,
+    so it does not go through `chat_line`.
+  - **Where the line comes from.** `quest::host::Host` gains `monster_chat_count` and
+    `monster_chat_line`. They read `locale.monster_chat[race]` of the loaded libraries as
+    `ScriptToString` returns the expression (`questlua.cpp:33`). A world with no quests says
+    nothing.
+- **An insert of an NPC mid-walk** (`view_encode.rs`, `loading_phase::npc_add_at`). The insert
+  carries the Mind's rotation and the point the walk has reached, then the walk's `FUNC_MOVE` with
+  the duration left and the NPC's walk mode, as `EncodeInsertPacket` does for a moving character.
+- **The wiring.** `[game] no_wander` reaches the world (`with_no_wander`). A replaced map's NPCs and
+  a destroyed NPC forget their Mind. `gamedata::mob_proto` gains `CHAR_TYPE_HORSE`,
+  `AIFLAG_NOMOVE` and `AIFLAG_COWARD`.
+
+### 229i.2 What the client sees
+
+- **Monsters.** Each monster within a sectree of a player waits 1 to 5 seconds. One time in seven
+  it runs 300 to 700 units. The client gets `GC_MOVE` (`FUNC_WAIT`, argument 0) with its heading,
+  destination and duration, and draws the run.
+- **Other non-players.** A non-player NPC other than a guard walks 200 to 400 units one time in
+  seven. Its first walk is preceded by `GC_WALK_MODE` `WALKMODE_WALK`.
+- **Chat.** Now and then a waiting NPC says a line of its race over its head.
+- **Joining late.** A player entering the view of an NPC mid-walk sees it where the walk has
+  reached, still walking.
+- **No player near.** An NPC whose sectree no player stands near any more stops on the next Pulse
+  and keeps the point it reached.
+- **With `no_wander = true`.** No monster walks.
+
+### 229i.3 Divergences and Defects
+
+- **V1 (extended).** The NPCs of the state set update in VID order, after the Pulse's player moves.
+  Legacy walks `m_set_pkChrState`, a set ordered by pointer.
+- **V2 (extended).** No monster `.msa` clip is loaded, so every non-player moves at the fall-back
+  300 units a second. Legacy reads the race's run or walk clip.
+- **A legacy Defect not reproduced.**
+  - **Legacy.** `Sync` kills a non-player whose step lands where no sectree stands (`Dead()`,
+    `G/char.cpp:3403-3407`).
+  - **The Rewrite.** It leaves the NPC where it stood and does not take the step.
+  - **Reach.** An idle walk cannot reach this: its point and its half-way point are movable, and
+    the sectrees form one rectangle.
+  - It is in STATUS's Defect list, under the owner's standing decision to fix legacy bugs directly
+    (2026-10-14).
+
+### 229i.4 Not ported yet
+
+- **The fight.** No NPC has a victim yet. `sys.combat.core` will bring:
+  - `FindVictim`, `BeginFight` and the Battle state;
+  - an aggressive monster's search;
+  - the guard's search;
+  - the return home.
+
+  An aggressive monster near a player therefore wanders as a peaceful one does, with its own
+  shorter wait. The berserk and god-speed resets of `__StateIdle_Monster` (`:643-649`) also wait
+  for it: 148 protos carry `BERSERK` and 46 `GODSPEED`, but only Battle turns either on
+  (`:1125-1133`).
+- **The protector.** `GetProtege` and `Follow` wait for the group's party and follow.
+- **The other states.** These wait for their systems:
+  - a stone's spawns at each tenth of its hit points;
+  - Santa;
+  - the war flags;
+  - `StateHorse`.
+- **The monster clips and the walk-duration recomputes** (V2).
+- **The `test_server` walk toggle.** Not ported: production never runs it.
+
+### 229i.5 Scenario and parity inventory
+
+- **The parity scenarios go from 89 to 91:**
+  - **`an_npc_near_a_player_wanders_and_tells_its_view`.** It stands a regen of 30 dogs (race 101)
+    within 300 of Alpha on `metin2_map_a1` and reads Alpha's wire for 20 seconds.
+    - **No dog sends a walk mode**, since a monster runs.
+    - **Every dog `GC_CHAT` is a talk.**
+    - **At least one dog runs.** For each dog's first `GC_MOVE`, these must hold:
+      - the record is 24 bytes;
+      - the function is `FUNC_WAIT` with argument 0;
+      - the distance is 299 to 701 from the dog's spawn point;
+      - the heading is within 6 degrees of the bearing to the destination;
+      - the duration is the distance at 300 units a second, in `f32` as legacy computes it.
+  - **`no_wander_keeps_the_monsters_near_a_player_still`.** This is the same stand with
+    `no_wander = true`. In 15 seconds no dog sends a `GC_MOVE`.
+- **The harness** (`prodomo/tests/parity.rs`, `parity/src/server.rs`):
+  - **Wandering NPCs are chatter.** Once NPCs wander, their records can reach any scenario at any
+    time. So `drain_game`, `quiet_for`, `read_game_raw` and the new `Keyed::still` skip NPC chatter:
+    a `GC_MOVE`, `GC_WALK_MODE` or `GC_CHAT` from a VID of `FIRST_NPC_VID` or above.
+  - **`drain_wire` and `wire_for` keep it**, for the scenarios about NPCs.
+  - **Strict empty drains.** `Keyed::still` and `still_for` replace the ten strict empty drains and
+    the two "a save sends no record" drains. They check that only chatter came and the connection
+    is open.
+  - **The config hook.** `Server::start_with_npcs_configured` passes a `[game]` fragment.
+- **Unit tests:**
+  - `prodomo/src/game_state/mob_ai.rs` (new): 14 tests. They cover:
+    - the start, the stop and the rotation;
+    - a wake asked inside a Pulse;
+    - a `Goto` to its own point;
+    - the due Pulse;
+    - each kind's idle wait, by the dice it consumes;
+    - a monster's wander and its steps;
+    - the `FUNC_MOVE` an entering player is sent;
+    - the walk mode told once;
+    - `no_wander` and a blocked point;
+    - the coward on two cell sets against a model of its dice;
+    - the walk's half-way point;
+    - a race's chat line;
+    - a destroyed NPC and a step off the sectrees;
+    - `delta_by_degree`.
+
+    Each dice test asserts the exact dice state after the update, so a draw too many or too few
+    fails.
+  - `prodomo/src/game_state/view.rs`: 2 tests, so 27 became 29. They cover a player's count in its
+    nine with the stops when it leaves, and an NPC starting on entering a counted sectree and on
+    each view recompute.
+  - `quest/tests/host.rs`: 1 test, so 8 became 9:
+    `a_monster_chat_line_is_its_locale_entry_and_nothing_past_it`.
+  - `gamedata/src/mob_proto.rs`: 1 test, so 19 became 20:
+    `the_named_types_and_ai_flags_are_the_readers`, added by the sweep (229i.7).
+- **Parity rows:**
+  - `sys.mob.ai` (`systems.md:73`) stays `partial`. Its note names the scenario, the world tests and
+    what is left.
+  - `gc.character_move`, `gc.walk_mode` and `gc.chat` (`server-records.md`) keep their state, with
+    229i notes: the NPC's `FUNC_WAIT`, its walk mode and its talk.
+  - `gc.walk_mode` was `partial` and stays so (V3).
+- **Parity counts** (`python3 .scratch/tmp/tools/parity_counts.py`), out of 1645 rows:
+
+  | | ported | partial | missing | unused | codec |
+  |---|---|---|---|---|---|
+  | before 229i | 127 | 127 | 1330 | 6 | 55 |
+  | after 229i | 127 | 128 | 1329 | 6 | 55 |
+
+### 229i.6 Corrections, findings and controls
+
+- **Every scenario met wandering NPCs.**
+  - **The failure.** The first full parity run after the port failed 24 scenarios at
+    `parity.rs:1690`. A dog's `GC_MOVE` came after the enter-game burst, where a strict empty drain
+    expected nothing.
+  - **The fix.** The harness now treats NPC chatter as the client would (229i.5). The scenarios
+    about the records the Rewrite sends still read every record that is not chatter.
+- **The unit tests' NPCs could wander.**
+  - **The regen tests.** Their stood character now carries `AIFLAG_NOMOVE`. The draft missed
+    the three protos the tests' respawner stands, so a respawned monster 101 could still walk.
+  - **Why it showed only some of the time.** The world's dice are seeded per run (`RandomState`).
+    So `a_regen_first_runs_at_its_draw_and_then_spawns_only_what_it_lacks` passed the development
+    runs and failed the sweep's baseline with a `GC_MOVE` of the respawned dog.
+  - **The fix.** The respawner's protos carry `AIFLAG_NOMOVE` too. The trade tests' keeper carries
+    it as mob_proto gives race 9007, though no cells stand under that test map.
+  - **The check.** Ten runs of the prodomo lib and bin suites passed, the regen tests
+    passed 300 runs alone, and the trade tests passed 40.
+- **A sweep copy kept a mutant's build.**
+  - **The failure.** The closing pass's baseline failed in the copy on
+    `a_monster_chat_line_is_its_locale_entry_and_nothing_past_it`, which reads an empty line for
+    race 301. The test passed in main, and the copy's sources and `legacy/` were byte-identical.
+  - **The cause.** The last `quest/` mutant of shard 1, `qh_line_none`, empties that line. The
+    driver restored `host.rs`, but no later mutant rebuilt `quest`. Then the closing pass's tar
+    gave `host.rs` main's older mtime, earlier than the mutant's build, so cargo took that build as
+    fresh.
+  - **The fix.** `run2.sh` now runs `cargo clean -p` on the nine workspace crates after the tar.
+    The copy then passed the test, and the closing pass's baseline ran clean.
+- **Three scenarios failed under the gates' load.** The first gate run on the final tree
+  (`gates229i`) failed 2 of 91 parity scenarios with `DATABASE_URL` set, and the second
+  (`gates229i2`) failed a third. Each passed alone.
+  - **`a_warp_whose_save_fails_closes_without_sending_the_client_away`** read 24 bytes before the
+    close where it asserted none. The bytes are still sealed in the log, so the record is not
+    proven. But 24 bytes is three TEA units, the width of one `GC_MOVE` (`GC_MOVE_LEN`), and Alpha
+    stands among NPCs that 229i now lets walk.
+    The 229i harness skips an NPC's own records in its reads, drains and `still`, but this
+    scenario and `Keyed::closed_by` took the raw `Client::expect_closed`. Both now call
+    `Keyed::closes`, which decrypts what came before the close and accepts only NPC chatter
+    (`is_npc_chatter`). Any other record still fails.
+  - **`the_chat_counter_is_reset_every_five_seconds_of_pulses`** read header 127,
+    `GC_AFFECT_REMOVE`: the revive affect's end, five seconds after the entry, which a slow run
+    reaches inside the scenario. The fault predates 229i. The scenario's reads now size the
+    removal and the look update, and skip the timer's own records (`Keyed::timer_record`) and
+    NPC chatter. Any other header still panics.
+  - **`an_empty_slot_closes_and_an_index_past_the_last_is_ignored`** had its second auth login
+    refused with `ALREADY`: the Channel connection it had just seen close had not released the
+    login yet. This fault also predates 229i. The Channel's `LOGIN2` already retried
+    `ALREADY` until the login was free (`login_by_key_when_free`), and the auth login in
+    `login_key_in` now does the same. The scenarios that assert `ALREADY` call `log_in` itself,
+    so they are unchanged.
+  - Three runs of the parity suite with `DATABASE_URL` set, one after another, then the gate run
+    of 229i.8 followed the fixes. The three passed all 91, in 132, 123 and 130 seconds
+    (`.scratch/tmp/l229i/parity-runs/`).
+- **A wrong claim in the draft.**
+  - **The claim.** The draft's module doc said no mob proto carries `BERSERK` or `GODSPEED`, which
+    would make the two resets `unused`.
+  - **The data.** 148 protos carry `BERSERK` and 46 `GODSPEED` (the table below).
+  - **The correction.** The resets wait for the fight, since only Battle sets either flag.
+- **`locale.monster_chat` lists races 601 and 636 twice.** Lua keeps the second table for each, as
+  the Rewrite's host does; the first lines of 601 and 636 are never said. This is the owner's data,
+  not code, so it stays as legacy reads it.
+- **Two simplifications.** Code that could not change behaviour was taken out before the sweep, so
+  that no mutant of it would survive:
+  - **A warp's 60-second idle** (`G/char_state.cpp:369-374`): no warp or goto is ever started.
+  - **`CowardEscape`'s own wait** (`:309`): the `Goto`'s 4 Pulses replace it at once.
+
+Controls for the counts and the negative claims. Each search uses `grep -a`:
+- **Legacy code:** `server/server/game/`.
+- **Legacy data:**
+  - `legacy/gamedata/proto/mob_proto.txt`, one line per proto;
+  - the 186 spawn files (`regen.txt`, `npc.txt`, `boss.txt` and `stone.txt`) under
+    `legacy/gamedata/`, race in column 11;
+  - `legacy/gamedata/locale/europe/quest/locale.lua`.
+
+| claim | search | result | positive control | nonsense control |
+|---|---|---|---|---|
+| the berserk and god-speed resets need Battle | `SetBerserk(true)\|SetGodSpeed(true)` | only `char_state.cpp:1128` and `:1133`, in `StateBattle` | `IsBerserker()`: the definition at `:257` and the calls at `:643` and `:1125` | `zzqx_ledger_nonsense_229i`: 0 |
+| protos carry the flags anyway | `BERSERK`, `GODSPEED` in the `AI_FLAG` column | 148 and 46 | `NOMOVE`: 713; `AGGR`: 530 | the nonsense word: 0 |
+| two cowards, both stood | `COWARD` in `AI_FLAG`, then their races in the spawn files | 5001 and 5004, on 2 and 14 spawn lines | race 101: 142 spawn lines | race 99999123: 0 |
+| no horse stands | type `HORSE` in mob_proto, races 20101 to 20109 in the spawn files | 0 and 0 | type `MONSTER`: 889; the guards 11000, 11002 and 11004: 1 line each | as above: 0 |
+| `monster_chat` covers 107 races | `[n] =` entries of the `locale.monster_chat` table | 109 entries, 107 races, 703 lines | race 20016, a wandering NPC with lines: listed | race 1: no table (`a_monster_chat_line_is_its_locale_entry_and_nothing_past_it`) |
+| a non-player's view is never sampled while it walks | `UpdateSectree` in `StateMove` | `char_state.cpp`, only under `IsPC()` | the player's sample at the same place | as above: 0 |
+
+### 229i.7 Review and mutation sweep
+
+The sweep ran three mutant files of `.scratch/tmp/tools/` through `mutate_v2.py`, in a tar copy
+of the code (`sweep229i/tree0`), one shard at a time:
+
+- **`mutants229i.py`, 90 mutants:**
+  - 68 in `prodomo/src/game_state/mob_ai.rs`;
+  - 10 in `view.rs` and 4 in `view_encode.rs`;
+  - 3 in `quest/src/host.rs` and 3 in `prodomo/src/game_state.rs`;
+  - 1 in `regen.rs` and 1 in `prodomo/src/main.rs`.
+- **`mutants229i_b.py`, 5 mutants:** 3 in `gamedata/src/mob_proto.rs` (the named type and AI flag
+  constants the state machine reads) and 2 in `prodomo/src/loading_phase.rs` (`npc_add_at`).
+- **`mutants229i_c.py`, 13 mutants:** the closing pass, every survivor of the first two files
+  rerun after it was closed.
+
+The driver gained the `quest` suite for mutants under `quest/`, and it is in the baseline too. The
+`PARITY_OK` floor went from 89 to 91 passing parity tests: the two new scenarios. With `CHECK=1`
+the driver asserted that each mutant's old text occurs exactly once in its file, before the file's
+test module. All 108 passed.
+
+The passes:
+
+1. **The first pass** is in `first/`. Shard 0's baseline failed on the regen test of 229i.6, which
+   a respawned monster could walk out of. Shard 1, with `BASELINE=0`, killed its first 4 and was
+   stopped for the fix.
+2. **`mutants229i.py`, two shards,** after the regen fix: shard 0 killed 41 of 45 and shard 1
+   killed 42 of 45. No mutant failed to compile, so every kill is semantic. One kill came from a
+   parity scenario: `ma_no_wander_off`, by `no_wander_keeps_the_monsters_near_a_player_still`,
+   confirmed alone.
+3. **`mutants229i_b.py`:** all 5 survived. `mp_nomove_bit` also failed a parity scenario under
+   load, which passed when the driver reran it alone, so it counts as a survivor.
+4. **The closing pass,** `mutants229i_c.py`, run in the copy after the clean of 229i.6: the
+   baseline passed, and all 13 were killed, each by a named unit test. The 11 closable survivors
+   were killed by the tests in the table below. The equivalent `vw_npc_start_anywhere` was
+   replaced by two mutants of the new `contains_key` check: `vw_npc_start_always` (every NPC
+   starts on entry) was killed by
+   `a_seen_npc_starts_on_the_next_pulse_and_stops_when_no_player_is_near` and two `view` tests,
+   and `vw_npc_start_never` (no NPC starts on entry) by
+   `an_npc_starts_entering_a_counted_sectree_and_on_each_view_recompute`.
+
+The survivors and what closed them:
+
+| survivor | shard | what it did | closed by |
+|---|---|---|---|
+| `ai_goto_start_kept` | 0 | a `Goto` keeps the last way's start | `a_monster_wanders_one_time_in_seven_and_steps_to_its_point` now sends the arrived monster on a second way and checks it starts at the first way's end, with that way's duration |
+| `ai_chat_guard_odds` | 0 | a guard speaks one time in 31, not 7 | `an_idle_npc_says_a_line_of_its_race` now stands guard 11000 on a draw where `number(0, 6)` is 0 and `number(0, 30)` is not, and reads its line |
+| `ve_angle_spawn` | 0 | an insert carries the spawn's rotation, not the walk's heading | `a_player_shown_a_walking_npc_is_sent_its_move` now decodes the insert's add and checks its angle is the walk's heading, which is not the spawn's 90 |
+| `ve_npc_walk_as_run` | 0 | an insert tells a running NPC's mode as a walk | the same test now checks the insert's third record is `GC_WALK_MODE` with `WALKMODE_RUN` (0) |
+| `ai_chat_said_empty` | 1 | an empty line is said as a lone zero byte | `an_idle_npc_says_a_line_of_its_race` now stands monster 101, which has no table, on the speaking draw, and checks nothing is sent though the index is drawn |
+| `vw_npc_start_anywhere` | 1 | an NPC entering a sectree starts at a count of 0 too | equivalent: a sectree's count is removed at 0, so every entry is above 0. The check is now `contains_key`, which says so, and the mutant has nothing left to change |
+| `gs_stand_keeps_minds` | 1 | a map stood again keeps the state machines of the characters it replaced | `a_destroyed_npc_is_forgotten_and_a_step_off_the_sectrees_is_not_taken` now stands the map again over a running monster and checks its Mind and its place in the set are gone |
+| `mp_horse_seven` | b | `CHAR_TYPE_HORSE` is 7, not 8 | `each_kind_of_npc_waits_its_own_idle_time` now stands a type-8 character of race 101, which keeps its first duration and draws nothing |
+| `mp_nomove_bit` | b | `AIFLAG_NOMOVE` is bit 3, not bit 1; a parity scenario failed under load and passed alone | `gamedata::mob_proto::tests::the_named_types_and_ai_flags_are_the_readers` (new) checks each named type and AI flag against the reader's `TYPE` and `AI_FLAG` tables, and reads the owner's coward 5001 |
+| `mp_coward_bit` | b | `AIFLAG_COWARD` is bit 3, not bit 2 | the same new test |
+| `lp_add_at_angle` | b | `npc_add_at` sends the spawn rotation | the insert-angle check that closes `ve_angle_spawn` |
+| `lp_add_at_point` | b | `npc_add_at` sends the list's point, not the insert's | `a_player_shown_a_walking_npc_is_sent_its_move` now decodes the late insert's add: an NPC whose walk has ended but whose last step is still to come is shown at its destination |
+
+The logs are `shard0.log`, `shard1.log`, `shard_b.log` and `closing.log`; the first pass's are under
+`first/`.
+
+### 229i.8 Receipt
+
+The count went from 3312 to 3332, +20. The changes by file:
+
+- `prodomo/src/game_state/mob_ai.rs` (new): 14 unit tests.
+- `prodomo/src/game_state/view.rs`: 2 unit tests, so 27 became 29.
+- `gamedata/src/mob_proto.rs`: 1 unit test, so 19 became 20.
+- `quest/tests/host.rs`: 1 test, so 8 became 9.
+- `prodomo/tests/parity.rs`: 2 scenarios, so the suite runs 91, not 89.
+  `is_npc_chatter`, `chatter_width`, `Keyed::still`, `Keyed::closes` and `Keyed::read_wire` are
+  helpers, not tests.
+
+The first two gate runs on the final tree, `gates229i` and `gates229i2`, failed 2 and 1 parity
+scenarios with `DATABASE_URL` set (229i.6). After the harness fixes, the third run passed
+everything. Its summary is `gates229i3/gates.summary`, copied to `.scratch/tmp/l229i/gates/`, with
+the first two in `.scratch/tmp/l229i/gates-first/` and `gates-second/`.
+
+| gate | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| build, workspace | clean, 0 warnings |
+| clippy, workspace, all targets, `-D warnings` | clean |
+| test, workspace, all targets, with `DATABASE_URL` | 3332 passed, 0 failed, 38 suites |
+| test, the same with `DATABASE_URL` unset | 3332 passed, 0 failed, 38 suites |
+| doc tests | 1 passed, 0 failed, 19 ignored |
+| rustdoc, warnings denied | clean |
+| scratch databases left behind | 0 |
+| `*.core` outside `target/` | 0 |
+
+Counted the way the gates count it, the workspace has 256 files and 194,744 lines outside `server/` and
+`.scratch/`. The 229h receipt had 255 files and 192,596 lines. The toolchain is Rust 1.85.1 with
+`clippy 0.1.85` and `rustfmt 1.8.0`, called as `/usr/bin/cargo-clippy` and `/usr/bin/cargo-fmt`.
+No crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Parity after 229i: 127 ported, 128 partial, 1329 missing, 6 unused and 55 codec, out of 1645
+rows. Before 229i the counts were 127, 127, 1330, 6 and 55.
+
+No ADR changed. Under the standing staging rule (ledger 229d), `.scratch/equip/owner-questions.md`
+stays out of the commit.

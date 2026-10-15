@@ -113,6 +113,15 @@ impl GameState {
         self.regens.cells = cells;
     }
 
+    /// `SECTREE_MANAGER::IsMovablePosition` (`G/sectree_manager.cpp:779-787`) on the cells boot
+    /// handed over: false on a map it handed none of.
+    pub(super) fn is_movable(&self, map: i32, x: i32, y: i32) -> bool {
+        self.regens
+            .cells
+            .get(map)
+            .is_some_and(|cells| cells.is_movable(x, y))
+    }
+
     /// Schedules the events of a map boot stood up on `pulse`: each regen's first run and each
     /// ore vein's end. The events of the characters it replaced are dropped.
     pub(super) fn schedule_map(&mut self, (channel, map): (u8, i32), region: &MapRegion) {
@@ -266,6 +275,7 @@ impl GameState {
         }
         self.deliver(&effects, None);
         self.npc_of.remove(&vid);
+        self.minds.forget(vid);
         if let Some(list) = self.npcs.get_mut(&key) {
             let list = Arc::make_mut(list);
             if at < list.npcs.len() {
@@ -290,12 +300,10 @@ mod tests {
     use gamedata::mob_proto::{MobProto, MobProtos, CHAR_TYPE_MONSTER, CHAR_TYPE_NPC};
     use gamedata::records::MobTableRecord;
     use gamedata::regen::{RegenEntry, RegenKind};
-    use gamedata::server_attr::{CellBlock, SectreeGrid, ServerAttr, SECTREE_CELLS};
     use tokio::sync::mpsc::UnboundedReceiver;
-    use world::cells::{HostedCells, MapCells};
     use world::npc::{MapNpcs, Npc, NpcVids, Regen, Respawner, FIRST_NPC_VID};
 
-    use super::super::fixtures::{a_world, enter, TestClock, PLACE};
+    use super::super::fixtures::{a_world, enter, open_cells, region, TestClock, PLACE};
     use super::super::view_encode::remove_record;
     use super::*;
     use crate::game_loop::PulseProcessor;
@@ -316,37 +324,15 @@ mod tests {
             .collect()
     }
 
-    /// [`PLACE`]'s region: one sectree from the origin.
-    fn region() -> MapRegion {
-        MapRegion {
-            index: PLACE.1,
-            name: b"test".to_vec(),
-            sx: 0,
-            sy: 0,
-            ex: 6_400,
-            ey: 6_400,
-            spawn: (0, 0),
-            empire_spawns: None,
-        }
-    }
-
-    /// [`PLACE`]'s cells, all open.
-    fn open_cells() -> Arc<HostedCells> {
-        let block = CellBlock::from_cells(&vec![0; SECTREE_CELLS * SECTREE_CELLS]);
-        let attr = ServerAttr::from_blocks(1, 1, vec![block]).unwrap();
-        let grid = SectreeGrid::of(&region()).unwrap();
-        let mut hosted = HostedCells::default();
-        hosted.insert(PLACE.1, MapCells::new(grid, Arc::new(attr)));
-        Arc::new(hosted)
-    }
-
-    /// Monster 101, ore vein 20047, and warp 20018 to (10000, 20000).
+    /// Monster 101, ore vein 20047, and warp 20018 to (10000, 20000), which `AIFLAG_NOMOVE`
+    /// keeps from walking into an inbox once they respawn.
     fn respawner(first: u32) -> Respawner {
         let row = |vnum, mob_type| MobProto {
             line: 2,
             table: MobTableRecord {
                 vnum,
                 mob_type,
+                ai_flag: gamedata::mob_proto::AIFLAG_NOMOVE,
                 max_hp: 100,
                 ..MobTableRecord::default()
             },
@@ -381,6 +367,7 @@ mod tests {
         }
     }
 
+    /// A monster at (500, 500), which `AIFLAG_NOMOVE` keeps from walking into the inbox.
     fn a_character(vid: u32, vnum: u32, regen: Option<usize>) -> Npc {
         Npc {
             vid,
@@ -392,6 +379,7 @@ mod tests {
             hp: 100,
             max_hp: 100,
             regen,
+            ai_flags: gamedata::mob_proto::AIFLAG_NOMOVE,
             ..Npc::default()
         }
     }

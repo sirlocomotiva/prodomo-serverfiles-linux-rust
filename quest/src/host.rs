@@ -487,6 +487,43 @@ impl Host {
             .map(|settings| settings.clone())
             .unwrap_or_default()
     }
+
+    /// `table.getn(locale.monster_chat[race])`, which `CHARACTER::MonsterChat` draws a line of a
+    /// non-monster from (`G/char.cpp:7582`). `None` when `locale.monster_chat[race]` is not a
+    /// table, where the expression gives `''` or fails, and `ScriptToString` returns nothing.
+    pub fn monster_chat_count(&self, race: u32) -> Option<i32> {
+        let lines = self.monster_chat_lines(race).ok().flatten()?;
+        getn(&self.lua, &lines).ok()
+    }
+
+    /// `(locale.monster_chat[race] and locale.monster_chat[race][index] or '')` as
+    /// `ScriptToString` returns it (`G/char.cpp:7568-7586`, `questlua.cpp:33`): the line as text
+    /// up to its first zero byte, and nothing where the race has no table, the line is `nil` or
+    /// `false`, or the line is neither text nor a number.
+    pub fn monster_chat_line(&self, race: u32, index: i32) -> Vec<u8> {
+        let Some(lines) = self.monster_chat_lines(race).ok().flatten() else {
+            return Vec::new();
+        };
+        lines
+            .get::<Value>(index)
+            .ok()
+            .and_then(|line| c_string(&self.lua, line).ok().flatten())
+            .unwrap_or_default()
+    }
+
+    /// `locale.monster_chat[race]` when it is a table.
+    fn monster_chat_lines(&self, race: u32) -> mlua::Result<Option<Table>> {
+        let Value::Table(locale) = self.lua.globals().get::<Value>("locale")? else {
+            return Ok(None);
+        };
+        let Value::Table(chats) = locale.get::<Value>("monster_chat")? else {
+            return Ok(None);
+        };
+        match chats.get::<Value>(race)? {
+            Value::Table(lines) => Ok(Some(lines)),
+            _ => Ok(None),
+        }
+    }
 }
 
 /// The source of the chunk an `object/` file runs as, or `None` for the state tables (run at

@@ -100,7 +100,7 @@ pub(super) struct Motion {
 
 impl Motion {
     /// A body standing at `point`, as `Show` leaves it.
-    const fn standing(point: (i32, i32)) -> Self {
+    pub(super) const fn standing(point: (i32, i32)) -> Self {
         Self {
             start: point,
             dest: point,

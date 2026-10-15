@@ -81,6 +81,8 @@ pub const CHAR_TYPE_STONE: u8 = 2;
 pub const CHAR_TYPE_WARP: u8 = 3;
 /// `CHAR_TYPE_PC`, the type a player's character carries.
 pub const CHAR_TYPE_PC: u8 = 6;
+/// `CHAR_TYPE_HORSE`.
+pub const CHAR_TYPE_HORSE: u8 = 8;
 /// `CHAR_TYPE_GOTO`.
 pub const CHAR_TYPE_GOTO: u8 = 9;
 
@@ -119,6 +121,13 @@ pub const SIZE: &[&str] = &["SMALL", "MEDIUM", "BIG"];
 /// `AIFLAG_AGGRESSIVE` (`common/length.h:686-700`): the bit [`AI_FLAG`]'s `AGGR` sets, which
 /// `IsAggressive` reads and `SetAggressive` sets.
 pub const AIFLAG_AGGRESSIVE: u32 = 1;
+
+/// `AIFLAG_NOMOVE` (`common/length.h:689`): the bit `NOMOVE` sets, which keeps a character from
+/// wandering.
+pub const AIFLAG_NOMOVE: u32 = 1 << 1;
+
+/// `AIFLAG_COWARD` (`common/length.h:690`): the bit `COWARD` sets, which `IsCoward` reads.
+pub const AIFLAG_COWARD: u32 = 1 << 2;
 
 /// `get_Mob_AIFlag_Value` (`ProtoReader.cpp:678-702`), bit by bit.
 pub const AI_FLAG: &[&str] = &[
@@ -734,6 +743,33 @@ mod tests {
         assert_eq!([npc.exp, u32::from(npc.def)], [10, 4]);
         assert_eq!([npc.attack_speed, npc.moving_speed], [100, 100]);
         assert_eq!([npc.aggressive_sight, npc.attack_range], [2_000, 175]);
+    }
+
+    /// Each named constant is the index, or the bit, the reader gives its name; and the owner's
+    /// coward 5001 reads with the coward's bit.
+    #[test]
+    fn the_named_types_and_ai_flags_are_the_readers() {
+        let index = |table: &[&str], name| table.iter().position(|entry| *entry == name).unwrap();
+        for (constant, name) in [
+            (CHAR_TYPE_MONSTER, "MONSTER"),
+            (CHAR_TYPE_NPC, "NPC"),
+            (CHAR_TYPE_STONE, "STONE"),
+            (CHAR_TYPE_WARP, "WARP"),
+            (CHAR_TYPE_PC, "PC"),
+            (CHAR_TYPE_HORSE, "HORSE"),
+            (CHAR_TYPE_GOTO, "GOTO"),
+        ] {
+            assert_eq!(usize::from(constant), index(TYPE, name), "{name}");
+        }
+        for (bit, name) in [
+            (AIFLAG_AGGRESSIVE, "AGGR"),
+            (AIFLAG_NOMOVE, "NOMOVE"),
+            (AIFLAG_COWARD, "COWARD"),
+        ] {
+            assert_eq!(bit, 1 << index(AI_FLAG, name), "{name}");
+        }
+        let coward = owners().get(5_001).expect("5001 is in the file").ai_flag;
+        assert_eq!(coward & (AIFLAG_COWARD | AIFLAG_NOMOVE), AIFLAG_COWARD);
     }
 
     /// The twelve `PET` rows are type 255, as `-1` in a `BYTE`, and still load.

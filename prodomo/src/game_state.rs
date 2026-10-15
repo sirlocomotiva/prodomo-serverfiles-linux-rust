@@ -63,6 +63,7 @@ use world::character::{add_from_client, sync_quickslots};
 mod affect;
 #[cfg(test)]
 mod fixtures;
+mod mob_ai;
 mod motion;
 mod quests;
 mod regen;
@@ -428,6 +429,8 @@ pub struct GameState {
     targets: target::Targets,
     /// The regen events and the ore veins' ends. See [`regen`].
     regens: regen::Regens,
+    /// The NPCs' state machines and the state set. See [`mob_ai`].
+    minds: mob_ai::Minds,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -507,6 +510,7 @@ impl GameState {
             npc_of: HashMap::new(),
             targets: target::Targets::default(),
             regens: regen::Regens::default(),
+            minds: mob_ai::Minds::default(),
         }
     }
 
@@ -602,6 +606,7 @@ impl GameState {
             for npc in &replaced.npcs {
                 index.remove(view::EntityKey::Npc(npc.vid), &mut effects);
                 self.npc_of.remove(&npc.vid);
+                self.minds.forget(npc.vid);
             }
         }
         for (at, npc) in npcs.npcs.iter().enumerate() {
@@ -1562,6 +1567,8 @@ impl PulseProcessor for GameState {
     /// each moving player steps. The count is also the only way a test can tell that the game
     /// thread owns this value.
     fn process_pulse(&mut self, pulse: u64) {
+        // The wakes asked for since the last Pulse count from it.
+        self.wake_minds();
         self.last_pulse = pulse;
         self.metrics.pulses.store(pulse, Ordering::SeqCst);
         self.destroy_expired(pulse);
@@ -1569,6 +1576,7 @@ impl PulseProcessor for GameState {
         self.run_warp_npcs(pulse);
         self.run_regens(pulse);
         self.step_motion(pulse);
+        self.run_minds(pulse);
         self.broadcast_targets();
     }
 }

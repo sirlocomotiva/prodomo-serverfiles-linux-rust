@@ -314,12 +314,26 @@ pub struct Neighbourhood {
 /// record is written (`:1913`), before any client can enter its view.
 #[must_use]
 pub fn npc_add(npc: &Npc) -> GcCharacterAdd {
+    npc_add_at(
+        npc,
+        InsertAt {
+            angle: f32::from(npc.rotation),
+            x: npc.x,
+            y: npc.y,
+            z: npc.z,
+        },
+    )
+}
+
+/// [`npc_add`] with the angle and the point the view reads from the NPC's state machine.
+#[must_use]
+pub fn npc_add_at(npc: &Npc, at: InsertAt) -> GcCharacterAdd {
     GcCharacterAdd::new(
         npc.vid,
-        f32::from(npc.rotation),
-        npc.x,
-        npc.y,
-        npc.z,
+        at.angle,
+        at.x,
+        at.y,
+        at.z,
         npc.char_type,
         npc.race,
         npc.moving_speed,

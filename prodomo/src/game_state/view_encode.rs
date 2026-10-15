@@ -17,17 +17,18 @@ use protocol::gc_position::GcWalkMode;
 use protocol::gc_vid::{GcHeaderAndDword, HEADER_GC_CHARACTER_DEL, HEADER_GC_ITEM_GROUND_DEL};
 use world::character::{Character, Points};
 
-use super::motion::{is_walking, Body};
+use super::mob_ai::{Mind, WALKMODE_WALK};
+use super::motion::{is_walking, Body, Motion};
 use super::view::{Effect, EntityKey, Spot};
 use super::GameState;
 use crate::game_loop_messages::RelayScope;
 use crate::loading_phase::{
-    character_add, character_additional, npc_add, npc_additional, InsertAt,
+    character_add, character_additional, npc_add_at, npc_additional, InsertAt,
 };
 use crate::movement::FUNC_MOVE;
 
-/// `WALKMODE_RUN` (`G/packet.h:2377-2381`). `m_bNowWalking` is never set (V3), so every walk-mode
-/// record the view sends says run.
+/// `WALKMODE_RUN` (`G/packet.h:2377-2381`). A player's `m_bNowWalking` is never set (V3), so
+/// every walk-mode record of a player says run.
 pub(super) const WALKMODE_RUN: u8 = 0;
 
 /// The records `to` receives for the reply buffer `reply`, which holds the records of the one
@@ -101,15 +102,39 @@ pub(super) fn encode_pc_insert(
     now: u32,
     flags: [u32; 2],
 ) -> Encoded {
-    let motion = body.motion;
-    let mut at = InsertAt {
+    let at = InsertAt {
         angle: body.rotation,
         x: spot.x,
         y: spot.y,
         z: spot.z,
     };
+    let (at, i_dur) = mid_move(at, body.motion, now);
+    let mut to_records = vec![
+        framed(|out| character_add(&body.card, points, vid, at, flags).encode_into(out)),
+        framed(|out| character_additional(&body.card, points, vid).encode_into(out)),
+    ];
+    to_records.extend(move_records(
+        vid,
+        body.rotation,
+        body.motion,
+        (i_dur, now),
+        WALKMODE_RUN,
+    ));
+    let reverse = recipient
+        .filter(|&(_, walking)| walking)
+        .map(|(other, _)| walk_mode(other, WALKMODE_RUN));
+    Encoded {
+        to_records,
+        reverse,
+    }
+}
+
+/// `EncodeInsertPacket`'s move test (`G/char.cpp:1097-1107`): the time left of a move whose
+/// destination is not the point, as `iDur`, and the destination in place of the point once it is
+/// not above 0.
+fn mid_move(mut at: InsertAt, motion: Motion, now: u32) -> (InsertAt, i32) {
     let mut i_dur = 0_i32;
-    if motion.dest != (spot.x, spot.y) {
+    if motion.dest != (at.x, at.y) {
         let left = motion
             .start_ms
             .wrapping_add(motion.duration_ms)
@@ -120,36 +145,75 @@ pub(super) fn encode_pc_insert(
             at.y = motion.dest.1;
         }
     }
-    let mut to_records = vec![
-        framed(|out| character_add(&body.card, points, vid, at, flags).encode_into(out)),
-        framed(|out| character_additional(&body.card, points, vid).encode_into(out)),
-    ];
-    if i_dur > 0 {
-        // `(BYTE) (GetRotation() / 5)`: the float truncated to an int, then its low byte.
-        let rotation = f32_to_i32(body.rotation / 5.0).to_le_bytes()[0];
-        let duration = u32::try_from(i_dur).unwrap_or(0);
-        to_records.push(
-            GcCharacterMove::new(
-                FUNC_MOVE,
-                0,
-                rotation,
-                vid,
-                motion.dest.0,
-                motion.dest.1,
-                now,
-                duration,
-            )
-            .encode(),
-        );
-        to_records.push(walk_mode(vid, WALKMODE_RUN));
+    (at, i_dur)
+}
+
+/// The move and walk-mode records an insert sends after the add while `i_dur` is above 0
+/// (`G/char.cpp:1210-1222`).
+fn move_records(
+    vid: u32,
+    rotation: f32,
+    motion: Motion,
+    (i_dur, now): (i32, u32),
+    mode: u8,
+) -> Vec<Vec<u8>> {
+    if i_dur <= 0 {
+        return Vec::new();
     }
-    let reverse = recipient
-        .filter(|&(_, walking)| walking)
-        .map(|(other, _)| walk_mode(other, WALKMODE_RUN));
-    Encoded {
-        to_records,
-        reverse,
+    // `(BYTE) (GetRotation() / 5)`: the float truncated to an int, then its low byte.
+    let rotation = f32_to_i32(rotation / 5.0).to_le_bytes()[0];
+    let duration = u32::try_from(i_dur).unwrap_or(0);
+    vec![
+        GcCharacterMove::new(
+            FUNC_MOVE,
+            0,
+            rotation,
+            vid,
+            motion.dest.0,
+            motion.dest.1,
+            now,
+            duration,
+        )
+        .encode(),
+        walk_mode(vid, mode),
+    ]
+}
+
+/// `EncodeInsertPacket` of an NPC (`G/char.cpp:1060-1254`): the add at the point and heading
+/// its state machine has, its additional record when it is a `CHAR_TYPE_NPC`, and its move and
+/// walk mode while it is mid-move (D2 as for a player). An NPC that was never started stands as
+/// it spawned.
+pub(super) fn encode_npc_insert(
+    npc: &world::npc::Npc,
+    mind: Option<&Mind>,
+    now: u32,
+) -> Vec<Vec<u8>> {
+    let at = InsertAt {
+        angle: mind.map_or(f32::from(npc.rotation), |mind| mind.rotation),
+        x: npc.x,
+        y: npc.y,
+        z: npc.z,
+    };
+    let (at, i_dur) = mind.map_or((at, 0), |mind| mid_move(at, mind.motion, now));
+    let mut records = vec![framed(|out| npc_add_at(npc, at).encode_into(out))];
+    if let Some(additional) = npc_additional(npc) {
+        records.push(framed(|out| additional.encode_into(out)));
     }
+    if let Some(mind) = mind {
+        let mode = if mind.walking {
+            WALKMODE_WALK
+        } else {
+            WALKMODE_RUN
+        };
+        records.extend(move_records(
+            npc.vid,
+            mind.rotation,
+            mind.motion,
+            (i_dur, now),
+            mode,
+        ));
+    }
+    records
 }
 
 impl GameState {
@@ -240,9 +304,9 @@ impl GameState {
                 let Some(npc) = self.npc_by_vid(npc) else {
                     return;
                 };
-                self.send_to(to, framed(|out| npc_add(npc).encode_into(out)), reply);
-                if let Some(additional) = npc_additional(npc) {
-                    self.send_to(to, framed(|out| additional.encode_into(out)), reply);
+                let mind = self.minds.get(npc.vid);
+                for record in encode_npc_insert(npc, mind, self.clock.now()) {
+                    self.send_to(to, record, reply);
                 }
             }
             EntityKey::Ground(vid) => {
@@ -356,7 +420,7 @@ mod tests {
     use super::super::fixtures::{a_world, enter, enter_on, points, TestClock, PLACE};
     use super::super::motion::Motion;
     use super::*;
-    use crate::loading_phase::PcCard;
+    use crate::loading_phase::{npc_add, PcCard};
 
     /// The card every body here shows.
     fn a_card() -> PcCard {

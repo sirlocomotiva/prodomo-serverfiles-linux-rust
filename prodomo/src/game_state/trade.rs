@@ -1012,6 +1012,8 @@ mod tests {
             race: 9007,
             char_type: 1,
             on_click: 1,
+            // As mob_proto gives 9007, so the keeper never walks away from its shop.
+            ai_flags: gamedata::mob_proto::AIFLAG_NOMOVE,
             x: SPOT,
             y: SPOT,
             z: 0,

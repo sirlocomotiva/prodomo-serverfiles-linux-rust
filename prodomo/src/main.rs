@@ -4293,6 +4293,7 @@ fn build_world(
         .with_clients(Arc::clone(clients))
         .with_clock(Box::new(clock))
         .with_view_range(config.game.view_range)
+        .with_no_wander(config.game.no_wander)
         .with_locale_strings(Arc::clone(&data.locale))
         .with_quests(quests);
     stand_up_npcs(&mut game_state, &data.npcs, &data.cells)?;

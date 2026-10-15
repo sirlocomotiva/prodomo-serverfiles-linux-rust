@@ -6,9 +6,11 @@ use std::sync::Arc;
 
 use common::vid::Vid;
 use gamedata::item_proto::ItemProtos;
-use gamedata::server_attr::SectreeGrid;
+use gamedata::map_atlas::MapRegion;
+use gamedata::server_attr::{CellBlock, SectreeGrid, ServerAttr, SECTREE_CELLS};
 use protocol::item_pos::ItemPos;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use world::cells::{HostedCells, MapCells};
 use world::character::{Points, PointsRow};
 use world::item::Item;
 
@@ -60,6 +62,30 @@ pub(super) fn a_world(clock: &TestClock) -> GameState {
         },
     );
     world
+}
+
+/// [`PLACE`]'s region: one sectree from the origin.
+pub(super) fn region() -> MapRegion {
+    MapRegion {
+        index: PLACE.1,
+        name: b"test".to_vec(),
+        sx: 0,
+        sy: 0,
+        ex: 6_400,
+        ey: 6_400,
+        spawn: (0, 0),
+        empire_spawns: None,
+    }
+}
+
+/// [`PLACE`]'s cells, all open.
+pub(super) fn open_cells() -> Arc<HostedCells> {
+    let block = CellBlock::from_cells(&vec![0; SECTREE_CELLS * SECTREE_CELLS]);
+    let attr = ServerAttr::from_blocks(1, 1, vec![block]).unwrap();
+    let grid = SectreeGrid::of(&region()).unwrap();
+    let mut hosted = HostedCells::default();
+    hosted.insert(PLACE.1, MapCells::new(grid, Arc::new(attr)));
+    Arc::new(hosted)
 }
 
 /// A level 10 warrior's computed points on [`PLACE`], with `stamina`.

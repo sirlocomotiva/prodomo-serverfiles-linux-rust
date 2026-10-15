@@ -290,3 +290,28 @@ fn loadstring_reads_the_dialect() {
     assert_eq!(function, Value::Nil);
     assert!(message.contains("chunk"), "{message}");
 }
+
+#[test]
+fn a_monster_chat_line_is_its_locale_entry_and_nothing_past_it() {
+    let host = load();
+    // `[301]` lists five lines and `[20018]` five; race 1 has no table (the nonsense control).
+    assert_eq!(host.monster_chat_count(301), Some(5));
+    assert_eq!(host.monster_chat_count(20018), Some(5));
+    assert_eq!(host.monster_chat_count(1), None);
+    assert_eq!(
+        host.monster_chat_line(301, 1),
+        b"Aceste vremuri tensionate ma fac sa-mi pierd rabdarea."
+    );
+    assert_eq!(
+        host.monster_chat_line(20018, 1),
+        b"Sunt asa de ocupat!".to_vec()
+    );
+    assert!(host.monster_chat_line(301, 6).is_empty(), "past the table");
+    assert!(host.monster_chat_line(301, 0).is_empty(), "before it");
+    assert!(host.monster_chat_line(1, 1).is_empty(), "no table");
+    let both: mlua::Result<String> = eval(
+        &host,
+        "return (locale.monster_chat[301] and locale.monster_chat[301][2] or '')",
+    );
+    assert_eq!(host.monster_chat_line(301, 2), both.unwrap().into_bytes());
+}
