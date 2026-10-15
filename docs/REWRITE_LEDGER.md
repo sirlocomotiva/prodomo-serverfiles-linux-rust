@@ -29059,3 +29059,629 @@ rows. Before 229j the counts were 127, 128, 1329, 6 and 55.
 No ADR changed. Under the standing staging rule (ledger 229d), `.scratch/equip/owner-questions.md`
 stays out of the commit. Owner question 28 (evasion reads the attacker's level) was added to it
 in this section.
+
+
+## 229k. The player dies and comes back: a lethal hit stuns, `Dead` three seconds later, and the three restarts or the automatic one
+
+A player left with no hit points is stunned, and `StunEvent` runs `Dead` three seconds later, as
+a second hit on the stunned player does at once (`G/char_battle.cpp:402-459`, `:1238-1696`).
+`Dead` puts the session in `PHASE_DEAD` and shows the client its restart window. The player then
+comes back by a command (`do_restart_now` and `do_restart`, `G/cmd_general.cpp:471-706`) or,
+three minutes after the death, by `dead_event`, which sends it to its empire's town (`:473-525`).
+`DeathPenalty` takes exp from a player a monster killed (`:330-392`).
+
+Until 229k nothing could kill a player, `/restart_here`, `/restart_town` and `/restart_now`
+answered nothing, and the session had no Dead phase. 229k ports the player's side of the death,
+from the lethal hit to the restart, and the player's recovery event with `CheckTarget`. No binary
+path hits a player before 229l, when the monsters fight back, so world tests prove the dead arms
+(owner, 2026-10-14) and a parity scenario the living one. `G/` below means
+`server/server/game/`.
+
+### 229k.1 What landed
+
+- **The death in the world** (`prodomo/src/game_state/death.rs`, new). `PcCombat` holds what
+  legacy's `CHARACTER` keeps of a player's fight beyond its points: the stun, the death, the
+  killer's PID, the death penalty flag and the three events' due Pulses.
+  - **`damage_pc`** (the victim side of `CHARACTER::Damage`, `G/char_battle.cpp:2248-2255`,
+    `:2376-2386`, `:2425-2433`):
+    - a stunned victim dies at once, and a dead one takes nothing;
+    - the damage is held to the hit points, `POINT_HP` changes, and the targeters are shown the
+      hit points;
+    - a hit that leaves none stuns the player and keeps a player attacker's PID.
+
+    It has no live caller until 229l's monster melee, so it and `stun_pc` are `#[cfg(test)]`, the
+    repo's pattern for a test-only helper (no `allow(dead_code)` exists in the code).
+  - **`stun_pc`** (`Stun`, `:422-459`): the hit point and spell point recovery pools go to 0,
+    each with its own record, which ends a drinking potion; the recovery event is cancelled;
+    `GC_STUN` goes to the view, self included; the points lock (below); `StunEvent` is due 75
+    Pulses later.
+  - **`pc_stun_event`** (`StunEvent`, `:402-420`) runs `dead_pc` with no killer.
+  - **`dead_pc`** (the player arms of `Dead`):
+    1. the killer is the hitter or the player whose PID the stun kept, and the PID goes back to
+       0; a player killer that targets the dead player drops its target;
+    2. the position is dead; the penalty flag is set for a non-player killer and cleared
+       otherwise (D5: always assigned);
+    3. `ClearSync`: `GC_OWNERSHIP{0, vid}` to the view, self included, the dead player's own claim
+       cleared, then each NPC it owns released;
+    4. the stun event is cancelled;
+    5. `GC_PHASE{6}` to self, `GC_DEAD` to the view, self included, then `GC_AFFECT_ADD` to self
+       for each running affect with its remaining duration;
+    6. `dead_event` is due 4500 Pulses later;
+    7. the trade ends for both sides (`GC_EXCHANGE END`), the shop browsing ends
+       (`GC_SHOP END`), and an open safebox closes (the `CloseSafebox` command line); the mall
+       stays open, as legacy closes only the safebox.
+  - **`pc_dead_event`** (`dead_event`'s player branch, `:500-525`): `GC_PHASE{5}`, the player
+    stands, its hit points become half its maximum (shown as an amount), the town penalty, the
+    recovery starts, `CloseRestartWindow`, then the Warp to the empire's recall point.
+  - **`restart`** (`do_restart_now` and `do_restart`):
+    - **a living player**, stunned included, is sent `CloseRestartWindow` and its recovery
+      starts, whatever the kind (`:473-477`, `:528-533`);
+    - **a player with no dead event** is sent nothing (`:486-487`, `:535-536`);
+    - **now** (`:478-524`): below 300000 gold the price line; `IsHack`'s line alone (B1, B20);
+      else the revive where it lies at full hit points with the here penalty and the revive
+      invisibility, then `GC_CHARACTER_GOLD_CHANGE{vid, 0, gold - 300000}`, and the answer
+      carries the gold delta for the store;
+    - **here** (`:540-558`, `:695-704`): `IsHack`'s line alone (B24); `[LS;516;n]` while more
+      than 170 seconds of the dead event are left (allowed from 226 Pulses, 9.04 seconds); else
+      the revive where it lies with 50 hit points, the here penalty and the revive invisibility;
+    - **town** (`:560-577`, `:683-693`): the same refusals with 173 (allowed from 151 Pulses,
+      6.04 seconds); else 50 hit points, the town penalty, and the Warp to the recall point.
+    - Every accepted restart first sends `CloseRestartWindow` and `GC_PHASE{5}`, stands the
+      player and starts its recovery (`:579-582`, `:506-509`).
+  - **`stand`** (`SetPosition(POS_STANDING)`, `G/char.cpp:1436-1470`): the stun and dead events
+    are cancelled, the points unlock, and the killer's PID is cleared (D6).
+  - **`recall_destination`**: `GetRecallPositionByEmpire`, else the empire start
+    (`G/char_battle.cpp:508-516`, `G/cmd_general.cpp:687-690`), kept only when the atlas names
+    its map and the player's Channel or the Shared Channel serves it, as `WarpSet` requires.
+    Otherwise the player restarts in place with the revive invisibility (B12, B13).
+    `GameState::with_recall` gives the world the atlas and the Channel maps.
+  - **`death_penalty`** (`DeathPenalty`, with the fixes): the arena maps 190 to 192 take nothing;
+    the flag is read and cleared first (D2, owner question 32); a town restart stops there (B11);
+    below level 10, or one time in three on `number(0, 2)`, the player hears `[LS;901]`;
+    otherwise the loss is the level's share of the next level's exp, at most 800000, halved by a
+    worn Teardrop of Goddess (70012).
+  - **`revive_invisible`** (`AddAffect(215, …, true)`, `G/char_affect.cpp:668-760`): a running
+    215 is ended with `GC_AFFECT_REMOVE` and reset in place, else a new one is pushed; then
+    `GC_CHARACTER_UPDATE` around, self included, the affect event, and `GC_AFFECT_ADD` to self.
+  - **The player's recovery** (`StartRecoveryEvent`, `recovery_event`, `G/char.cpp:3245-3314`):
+    due 75 Pulses after the entry, each restart, `dead_event` and the living arm, never while
+    down; each run calls `check_target` and re-arms. `check_target` (`CheckTarget`, `:6663-6670`)
+    drops a target, player or NPC, 4800 or more away by `DISTANCE_APPROX`. The hit point heal and
+    `DistributeSP` wait (V18b).
+  - **`clear_sync` and the leave** (V17k closed): a disconnecting player's view reads its own
+    release first, `GC_OWNERSHIP{0, leaver}`, then each owned NPC's, then its removal
+    (`G/char.cpp:653`, `:5549-5575`). A Warp departure sends no own release, because legacy
+    removes the entity first (`:6751-6752`).
+  - **A disconnect while down** (B5): the leave pays the here penalty, stands the player and
+    stores 50 hit points, so the relog equals `/restart_here`. Then the three events are
+    cancelled, since a player's VID is reused.
+  - **`block_pc_claim`**: a sync claim on a dead player, or by a stunned or dead claimer, is
+    refused with `GC_DAMAGE_INFO{victim, DAMAGE_BLOCK, 0}` to both (`SetSyncOwner`'s
+    `battle_is_attackable`, `G/char.cpp:5476-5483`; `G/battle.cpp:102-123`).
+- **The points** (`world/src/character/points.rs`):
+  - `Points` and `PointsRow` hold `exp`, which the load fills and the save already wrote;
+  - `set_down` locks `POINT_HP`, `POINT_SP` and `POINT_STAMINA` while the player is down
+    (`G/char.cpp:4250`, `:4268`, `:4279`), so neither a stamina refill nor anything else changes
+    them; the recovery pools still change;
+  - `lose_exp` is `POINT_EXP`'s negative arm (`:4078-4191`): a loss larger than the exp stops at
+    0; at or above `max_level` with a quarter of the next level's exp, nothing (B18, kept);
+    the level never steps down. A positive exp change is still not ported.
+- **The loss table** (`world/src/character/death_penalty.rs`, new): `exp_loss_percent`
+  (`aiExpLossPercents`, `G/constants.cpp:885-899`, with `__GetExpLossPerc`'s level 0 and
+  above-120 arms) and `death_penalty_loss`.
+- **The guards** (legacy's dead guards and the Defects):
+  - a stunned or dead attacker hits nothing (`battle_is_attackable`, `G/battle.cpp:122`);
+  - a stunned player's move is refused silently, as `CanMove` refuses it (D9); a dead player's
+    is shown back where it lies (the ghost arm, `G/input_main.cpp:1804-1812`);
+  - a stunned or dead player uses no item (D7); a dead one drops none (`G/char_item.cpp:7467`)
+    and picks up none (D10);
+  - a dead player starts no trade and is offered none (`G/input_main.cpp:1385`, D10), and clicks
+    no NPC (D10);
+  - a dead player's pose record is refused (B25, below).
+- **The descriptor** (`prodomo/src/main.rs`):
+  - `write_pending` turns the world's `GC_PHASE{6}` and `GC_PHASE{5}` records
+    (`phase_of_record`) into `session.set_phase` at their place in the stream; every other record
+    is sent as before;
+  - `main_record` names the analyzer a main-input record goes to (`MainRecord`): B25's refusal
+    first (`is_dead_refused` drops `CG_CHARACTER_POSITION` while the session is Dead), then the
+    records the Game and Dead phases read alike (`in_main_input`), as `PHASE_DEAD` installs
+    `m_inputMain` (`G/desc.cpp:526-531`); `CInputDead` is never installed;
+  - `flush_turn` and `take_order` run `stand_on_phase_change`, which clears the descriptor's
+    sitting pose, when a record they wrote or the order they followed changed the phase;
+  - `caller_position` gives a command line `POS_DEAD` while the session is Dead, so every command
+    above `POS_DEAD` answers `[LS;918]`;
+  - `hold_points` keeps the exp the world left in the held row, which the save writes;
+  - `restart` runs `/restart_here`, `/restart_town` and `/restart_now` in the world, and stores a
+    gold answer with `db::items::apply_transfer`.
+- **The command table** (`prodomo/src/command.rs`): `restart_now` matches its whole name only
+  (B8); `do_restart` is `Command::Restart(RestartKind::Town)` for `restart_town` and
+  `RestartKind::Here` otherwise, and `do_restart_now` is `Command::Restart(RestartKind::Now)`.
+  The kind is decided once, in the table, and the descriptor passes it on.
+- **The wiring:**
+  - `GameCommand::Restart` and `RestartAnswer`; `GameCommand::LeaveWorld` carries a `Departure`
+    (`Disconnect` or `Warp`);
+  - `Due::PcStun`, `Due::PcDead` and `Due::PcRecovery` follow the NPCs' three events on the
+    schedule;
+  - a player inserted while dead carries `ADD_CHARACTER_STATE_DEAD` (`G/char.cpp:1095`,
+    `:1446-1447`), and `GC_CHARACTER_UPDATE`'s state flag carries the dead bit
+    (`G/char.cpp:1310`);
+  - `affect_add_frame` moved from `loading_phase.rs` to `affect.rs`, which both use;
+  - `GameState::with_max_level` reads `[game] max_level`.
+- **Removed:** the world crate's placeholder `Vitality`, `DamageOutcome` and `apply_damage`, which
+  nothing but their own test called.
+- **The parity harness:**
+  - `parity/src/server.rs`: a new server's gate gets `START_TIMEOUT`, 120 seconds, and every
+    other log line keeps `PROCESS_TIMEOUT`'s 20. See 229k.7 for why.
+  - `Keyed::still` and `still_for` (`prodomo/tests/parity.rs`) absorb the end of a revive timer
+    the client saw start (`Keyed::timer_end`), as `quiet` already did. On the CPU-throttled host
+    a neighbour's five seconds ended inside the check that follows a later login, and the talking
+    line scenario failed even when run alone (229k.8). Any other record still fails the check.
+
+### 229k.2 What the client sees
+
+- **A living player** that types `/restart_here`, `/restart_town`, `/restart_now` or `/restart`
+  gets `CloseRestartWindow` and nothing else; `/restart_n` is no command.
+- **A disconnect** shows each viewer the leaver's release before its removal.
+- **A target** 4800 or more away is dropped at the next recovery run, within three seconds.
+- **From 229l, when a monster kills a player** (proved by world tests now):
+  - the player falls stunned, its recovery pools empty, and three seconds later it is shown dead
+    and released, with the restart window; a newcomer sees it lying dead;
+  - it cannot move, hit, use, drop or pick up items, trade, click an NPC or sit up;
+  - `/restart_here` after 9 seconds stands it where it lies with 50 hit points, `/restart_town`
+    after 6 seconds sends it to its town with 50, and `/restart_now` stands it at once at full
+    hit points for 300000 gold; before the wait it hears how many seconds are left;
+  - three minutes later it is sent to its town with half its hit points;
+  - a monster's kill costs a player of level 10 or more a share of its exp two times in three,
+    and it hears `[LS;901]` otherwise.
+
+### 229k.3 Divergences and Defects
+
+**V18, new.** A player's death and restart differ from legacy in eleven ways, (a) to (k). STATUS
+lists them all. The main ones:
+- the town restart and the automatic restart write their records before the Warp's (a);
+- the recovery event runs `CheckTarget` only (b);
+- no pet, mount, war, dungeon, duel, arena or siege branch, and no affect 511 (c to e);
+- no `ItemDropPenalty` and no quest `die` (f);
+- the production arms of the restart waits and `IsHack` run (i, owner question 5);
+- the automatic restart takes the town penalty (j, owner question 29);
+- the penalty reads its flag before it rolls or speaks (k, owner question 32).
+
+**Reworded:**
+- V9: with no refill, a town restart's 50 hit points stay 50 after the Warp (owner question 18).
+- V15: five ways became three. `CheckTarget` runs on the player recovery event every 75 Pulses.
+- V16: the player's stun, death and recovery follow the NPCs' three events.
+- V17: eleven ways became ten; (k), the leaving player's own release, is closed.
+
+**Defects fixed**, under the owner's standing decision of 2026-10-14, in STATUS's list:
+- **B5, a backdoor.** A disconnect while dead saved hit points of 0 or below, and the relog's
+  refill stood the player up where it died at full hit points, with no penalty and no wait
+  (`G/char.cpp:1779-1783`, `:4250`; `G/char_affect.cpp:660-665`). The Rewrite pays the here
+  penalty, stands it and stores 50.
+- **B25, a backdoor (found by the plan's critic).** `Position` has no dead guard, so a dead
+  player that sits leaves `POS_DEAD` and stands up revived (`G/input_main.cpp:1530-1548`;
+  `G/char.cpp:3335-3349`, `:1438-1444`; `G/char_battle.cpp:550-556`). The Rewrite refuses the
+  pose while dead.
+- **B8.** The prefix walk gave `restart_now` every word from `/rest` to `/restart_n`, so a typo
+  paid 300000 gold (`G/cmd.cpp:298`, `:656`).
+- **B1, B3, B20, B24.** `restart_now`'s refusal said "You paid" and charged nothing; it tested the
+  gold before the dead event; it tested an always-true condition; and `do_restart`'s `IsHack`
+  refusal was followed by an unrelated wait line.
+- **B11 and D2** (provisional, owner question 32). The roll and `[LS;901]` came before the flag,
+  a lucky roll kept the debt, and a town restart rolled and sent a zero exp record.
+- **B12 and B13.** A failed recall Warp left the player standing where it died, unseen and with
+  no revive.
+- **B15 and D3** (provisional, owner question 29). The automatic restart took the here penalty.
+- **D5, D6, D7, D9, D10.** A forked kill left the flag alone; standing kept the killer's PID; a
+  dead player's potion was wasted; a stunned player walked for three seconds; a dead player
+  picked up, traded and clicked NPCs.
+
+**Legacy kept, recorded:**
+- B9: a restart shows each viewer the player again, and the player the viewer with no removal
+  first;
+- B10: one record for each point change;
+- B16: a recall on map 235 goes to a point of map 62, as data;
+- B18: no exp loss at the top level with a quarter of the next level's exp (owner question 30);
+- the level never steps down on a loss (`G/char.cpp:4155-4180`);
+- D1/DE4: a death by the stun timer has no killer.
+
+**Not reachable, noted:** the war map (B2); poison (B17); the quest `die` and sungma (D12, D13);
+`pc.set_flag_kill` and `set_flag_dead`, which stay unbacked (DE1, a backdoor); the PK roll (DE7);
+`CanSummon` (DE8); `/reset` under `test_server` (B23).
+
+### 229k.4 Not ported yet
+
+- **The monster fighting back** (229l): the monster's melee into `damage_pc`, its claim, aggro
+  and damage map, `ForgetMyAttacker` and its `ReviveInvisible(5)`, and the first binary
+  scenario that kills a player and reads the real `GC_PHASE{6}`.
+- **The player's heal:** the recovery event's hit point heal, `DistributeSP` and `last_move`
+  (owner question 18, 229l).
+- **Drops and exp:** `ItemDropPenalty` and the positive exp change.
+- **PvP:** the alignment, the empire points, `[LS;910]` and the killer's PK roll.
+- **The group:** `dead_event`'s party reviver arm.
+- **The affects:** affect 511 and the `ClearAffect` table.
+- **GM commands:** `/kill`, `/stun`, `/forgetme`, `/cannot_dead`, `/can_dead`.
+- **The arena revive** on the Shared Channel.
+
+### 229k.5 Scenario and parity inventory
+
+- **The parity scenarios go from 95 to 97:**
+  - **`a_living_player_restarting_is_told_to_close_the_restart_window`.** Alpha enters with
+    400000 gold. `/restart_here`, `/restart_town`, `/restart_now` and `/restart` each answer
+    exactly `CloseRestartWindow`, and `/restart_n` answers that no such command exists. Nothing
+    else is sent, and after the disconnect the store still holds 400000 gold.
+  - **`a_target_4800_away_is_dropped_by_the_next_recovery_run`.** Yankee is stored 6000 east of
+    Alpha (5765 by `DISTANCE_APPROX`), Charlie 4000 east and 600 south (4082). Alpha targets
+    Yankee and reads `GC_TARGET{0}` within three seconds. Alpha then targets Charlie, which is
+    kept for four seconds, and a second click on Charlie answers nothing.
+- **Changed scenarios:**
+  - `a_talking_line_reaches_the_map_including_its_sender`: its `/restart_here` line now answers
+    `CloseRestartWindow`, and the listener hears nothing.
+  - `a_leaving_player_is_removed_from_its_viewers_only` and the target scenario's disconnect read
+    the leaver's release before its removal (`Keyed::sees_disconnect`).
+  - `a_warp_npc_sends_its_neighbour_away_and_the_client_comes_back_at_the_target` gains a
+    watcher: Yankee, on Bob's account, stands 800 north of the warp NPC. After Alpha's warp,
+    Yankee reads Alpha's arrival, then its removal with no release before it, and nothing else
+    (`G/char.cpp:6749-6755`). It closes `dm_warp_as_disconnect` (229k.7).
+- **Unit and world tests:**
+  - `prodomo/src/game_state/death.rs` (new): 45 tests. They cover:
+    - the lethal hit's records, the stun's 75 Pulses, the second hit and the player killer;
+    - the death's record order and the affect's remaining duration, its closes, and a newcomer;
+    - the guards: move, hit, use, drop, pick up, trade;
+    - the automatic restart at 4500, and each restart at its edge Pulse (225/226, 150/151);
+    - the revive override, a restart refused by a recent trade, the gold below and at 300000;
+    - the living and stunned arms;
+    - the penalty: a flagless death, a roll of 0 (1320 at level 10), a roll above 0, below level
+      10, the arena maps;
+    - the disconnects while dead and while stunned, the own release before the owned ones;
+    - `CheckTarget` at 4800 and 4799 for a player and a monster;
+    - the stun ending the recovery, and the two recall fallbacks;
+    - from the sweep (229k.7): the damage clamp, the hitter over the stunner, the leave's events,
+      the recovery's due and slot, `CheckTarget`'s two axes, a newcomer to a stunned player, the
+      Shared Channel recall, the empire start, the max level, the teardrop, the safebox's
+      250 Pulses, a dead sword wielder's state, and the gold answer; and the stun-to-death test
+      reads the phase record's byte as 6, legacy's `PHASE_DEAD`.
+  - `world/src/character/death_penalty.rs` (new): 4 tests: the table at each band edge, every
+    level from 0 to 255 against the legacy bands, the cap and the teardrop, and the teardrop
+    halving the capped loss.
+  - `world/src/character/points.rs`: 5 tests, so 53 became 58: the floor, B18 and its edge, the
+    lock, and the exp in the row.
+  - `prodomo/src/command.rs`: 2 tests, so 12 became 14: B8's walk and the three restart kinds.
+  - `prodomo/src/main.rs`: 9 tests, so 2 became 11: the phase record, the Dead input, the
+    standing pose after a phase change, a dead player's chat and refused pose, a world's phase
+    record, a death by flush and by order, a dead caller's position, and the held exp.
+  - `prodomo/src/game_state/fight.rs`: 2 tests, so 24 became 26:
+    `a_dead_or_stunned_player_cannot_hit_a_monster` and
+    `a_dead_or_stunned_players_sync_claims_no_monster`. Two tests read the own release first.
+  - `prodomo/src/game_state/shop.rs`: 2 tests, so 24 became 26:
+    `a_death_ends_the_browsing_and_a_dead_player_clicks_no_shop` and
+    `a_stunned_player_still_opens_a_shop`.
+  - `prodomo/src/game_state/sync.rs`: 1 test, so 3 became 4:
+    `a_corpse_cannot_be_synced_and_a_down_claimer_claims_nothing`.
+  - `prodomo/src/game_state.rs`: 1 test, so 67 became 68:
+    `a_leave_command_releases_the_leavers_own_claim_at_a_disconnect_only`.
+  - `prodomo/src/game_state/regen.rs`: 1 test, so 9 became 10:
+    `a_players_stun_dead_and_recovery_events_are_taken_in_that_order`.
+  - `prodomo/src/loading_phase.rs`: 2 tests, so 63 became 65: the state flag of the dead and the
+    living, and the stored exp in the loaded points.
+  - `world/tests/combat.rs`: 1 test fewer, so 4 became 3.
+    `combat_damage_transitions_cover_hit_and_lethal_boundaries` went with `apply_damage`.
+  - In all, 75 tests more.
+- **Parity rows:**
+  - **Now `ported`:** `cmd.restart_here`, `cmd.restart_town` and `cmd.restart_now`, under their
+    world tests in `death.rs`, each noting the living arm's scenario; `gc.affect_remove`, under
+    `the_revive_ends_after_five_seconds_with_remove_then_update`.
+  - **Now `unused`:** `cg.dead.pong`, `time_sync`, `chat`, `whisper` and `hack`. `CInputDead` is
+    declared but never installed (`G/desc.h:197`, one line), and `PHASE_DEAD` reads the main input
+    (`G/desc.cpp:526-531`). Owner question 31 asks to drop them.
+  - **Notes added**, state kept: `cg.game.chat`, `move`, `attack`, `target`, `sync_position` and
+    `character_position`; `gc.character_add`, `character_del`, `char_additional_info`, `chat`,
+    `stun`, `dead`, `player_point_change`, `character_update`, `ownership`, `target`, `warp`,
+    `affect_add`, `character_gold_change` and `phase`; the events `recovery_event`, `StunEvent`,
+    `dead_event`, `affect_event` and `load_affect_login_event`; `sys.combat.core`,
+    `combat.target`, `char.pk`, `char.points`, `char.save`, `char.logout`, `world.view`,
+    `world.move`, `world.warp` and `skill.affect`.
+- **Parity counts** (`python3 .scratch/tmp/tools/parity_counts.py`), out of 1645 rows:
+
+  | | ported | partial | missing | unused | codec |
+  |---|---|---|---|---|---|
+  | before 229k | 133 | 136 | 1319 | 6 | 51 |
+  | after 229k | 137 | 136 | 1311 | 11 | 50 |
+
+### 229k.6 Corrections, findings and controls
+
+- **The critic's fourteen findings**, all taken before the port:
+  1. `Attacker::Npc` would never be built outside the tests, which clippy refuses; `Attacker` is a
+     struct with a `pc` flag.
+  2. Sitting while dead is a revive backdoor in legacy (B25); the pose is refused while dead.
+  3. A sync claim on a dead player, or by a down claimer, is refused with `DAMAGE_BLOCK`, as
+     `SetSyncOwner`'s `battle_is_attackable` refuses it.
+  4. The dead player's own claim is cleared with its release; otherwise its old owner released
+     it again later.
+  5. The recall fallback tests whether a Channel serves the point, not only whether the atlas
+     names it, since the descriptor's `WarpSet` refuses an unserved map silently.
+  6. A town restart that falls back to the spot takes the town penalty, not the here one.
+  7. A stunned player's move is refused silently; showing it back would redraw it standing for
+     its whole view.
+  8. The descriptor's sitting pose is cleared on each phase record.
+  9. The planned test did not reach the lock, since nothing heals a stunned player yet; the
+     lethal-hit test now heals the stunned player directly and reads no change and no record.
+  10. Dead's aura, premium shop and battle pass hooks were added to V18(d) and (e).
+  11. The wait is stated one way (9.04 and 6.04 seconds); `CheckTarget` covers an NPC target.
+  12. The tests assert no draw below level 10, hard-code the 1320 loss, test the living arm below
+      300000 gold, read the revive's remaining duration, and check one 215 entry after the
+      override.
+  13. `clear_sync` replaces the leave's `release_owned` call, so the own release comes first.
+  14. B16 is reachable through the recall and is recorded.
+- **The restart's gold record leaves before the store's write.** Unlike an item step, whose
+  descriptor stores the rows before it sends the records, `/restart_now`'s
+  `GC_CHARACTER_GOLD_CHANGE` is written by the world behind the revive's records, and the
+  descriptor stores the gold after. A store that refuses it closes the session the record went to,
+  and the store keeps the gold, so the revive is free in that one case. The order keeps the
+  record after the revive's, as legacy sends it. The doc of `restart` in `main.rs` says so.
+- **A scenario point was not movable.** S2's first draft stored Charlie 4000 due east of Alpha.
+  That cell is not movable, so the entry moved Charlie to the nearest movable one and the
+  scenario's point check failed. Charlie is stored 4000 east and 600 south (4082 away), a
+  movable cell.
+- **Research corrections:**
+  - the research said `input_main.cpp`'s 21 `IsDead()` lines are handler guards; 16 are, and
+    `:1571` is `CheckComboHack`;
+  - one research note proposed saving the town recall position at a dead disconnect and an
+    admit clamp; the port keeps the position (the relog equals `/restart_here`) and adds no clamp,
+    which would change every parity burst;
+  - one proposed `recovery_event` as `ported`; it stays `partial`, since the heal is deferred;
+  - two proposed a new outbox item or client order for the phase and the recall; the world
+    writes the real `GC_PHASE` bytes, which the descriptor recognises, and resolves the recall
+    itself, so it can fall back in place.
+
+Controls for the counts and the negative claims. Each search uses `grep -a`, under
+`server/server/game/` unless named:
+
+| claim | search | result | positive control | nonsense control |
+|---|---|---|---|---|
+| `CInputDead` is never installed | `m_inputDead` in `*.cpp` and `*.h` | 1, the declaration `desc.h:197` | `m_inputMain`: 2 | `m_inputDeadQQ`: 0 |
+| one site enters the Dead phase | `SetPhase(PHASE_DEAD)` | 1, `char_battle.cpp:1470` | `SetPhase(PHASE_GAME)`: 6 | `SetPhase(PHASE_DEADQQ)`: 0 |
+| one wait of 180 seconds | `PASSES_PER_SEC(180)` | 1, `char_battle.cpp:1594` | `PASSES_PER_SEC(3)` in `char_battle.cpp`: 2 | `PASSES_PER_SEC(181)`: 0 |
+| `DeathPenalty` has five callers | `DeathPenalty(` in `*.cpp` | 6, the definition and 5 calls | `RestartAtSamePos()`: 5 | `DeathPenaltyQQ(`: 0 |
+| five legacy lines close the restart window | `CloseRestartWindow` in `*.cpp` | 5 | `ACMD(do_restart_now)`: 1 | `CloseRestartWindowQQ`: 0 |
+| no owner quest has a `die` trigger | `when die` under `legacy/gamedata` | 0 | `when login`: 27 | `when dieZZQ`: 0 |
+| the arena maps | `nBATTLE_ARENA_MAP[] = { 0, 190, 191, 192 }` in `BattleArena.h` | 1 | the line itself | `193 }`: 0 |
+| the Teardrop is 70012 | `UNIQUE_ITEM_TEARDROP_OF_GODNESS` in `unique_item.h` | `= 70012`, line 18 | the line | `…GODNESSQQ`: 0 |
+| no `allow(dead_code)` in the code | `expect(dead_code` or `allow(dead_code` in `prodomo/src`, `world/src` | 0 | 22 `#[cfg(test)]` lines in `game_state/*.rs` | `expect(dead_codeQQ`: 0 |
+| the walk gave `restart_now` `rest` to `restart_n` | the legacy table walked by a script (`cmdwalk.py`) | `rest` … `restart_n` → `restart_now` | `restart_h` → `restart_here`, `restart_t` → `restart_town` | `zzqx` → none |
+| the waits allow 226 and 151 Pulses | `(4500 - e) / 25 > 170`, `> 173` | holds to e = 225 and 150 | e = 4500 → 0 | n/a |
+| `DISTANCE_APPROX` drops at 4996 | a Python port of `sync_position.rs:36-46` | 4995 → 4799, 4996 → 4800 | 6000 → 5765, 4000 → 3843 | the first dx at 4800 is 4996 |
+
+### 229k.7 Review and mutation sweep, cut short
+
+**The owner stopped the sweep on 2026-10-15.** The owner said: "move forward with the
+implementations, and resume testing when we'll be on a more powerful machine; let's maximize
+implementation as much as possible". The sweep stopped at 17:30, after four of its five mutant
+files and the first mutant of the fifth. Until a stronger machine is ready, each section runs only
+cheap checks (229k.8). What is still owed is listed at the end of this section, with the commands
+that run it.
+
+The sweep runs mutant files from `.scratch/tmp/tools/` through `mutate_v2.py`. It works in a tar
+copy of the code: `sweep229j/tree0`, which is 229j's copy, refreshed by tar and with its nine crates
+cleaned. Each file passed the driver's `CHECK=1`:
+
+- **`mutants229k_a.py`, 61 mutants**, all in `prodomo/src/game_state/death.rs`: the lethal hit,
+  the stun, `Dead` and the leave.
+- **`mutants229k_b.py`, 77 mutants**, all in `death.rs`: the restarts, the recall, the penalty
+  draw and the guards.
+- **`mutants229k_c.py`, 46 mutants:**
+  - 14 in `death.rs`: the recovery event and `CheckTarget`;
+  - 15 in `world/src/character/death_penalty.rs`;
+  - 17 in `world/src/character/points.rs`.
+- **`mutants229k_d.py`, 40 mutants:**
+  - 26 in `prodomo/src/main.rs`, and 5 each in `command.rs` and `loading_phase.rs`;
+  - 2 in `game_state/view_encode.rs`;
+  - 1 each in `game_loop_messages.rs` and `item_move.rs`.
+- **`mutants229k_e.py`, 46 mutants**, in the rest of `game_state`:
+  - 17 in `game_state.rs` and 7 in `sync.rs`;
+  - 4 each in `regen.rs` and `motion.rs`;
+  - 3 each in `fight.rs`, `shop.rs`, `trade.rs` and `safebox.rs`;
+  - 2 in `affect.rs`.
+
+The driver's `PARITY_OK` floor went from 95 to 97 passing parity tests, for the two new scenarios.
+
+**What ran: 225 mutants.** That is files a to d whole, and e's first mutant. The baseline passed.
+189 mutants were killed, none by a compile error, so every kill is semantic. 36 survived.
+
+7 kills came from parity scenarios, each confirmed alone:
+- `dm_restart_now_unrun`, `dm_restart_unrun`, `dm_restart_gold_always_stored` and
+  `dg_restart_not_run`, by `a_living_player_restarting_is_told_to_close_the_restart_window`;
+- `dm_disconnect_as_warp` and `dm_leave_message_always_warp`, by
+  `a_leaving_player_is_removed_from_its_viewers_only` and the target scenario's leave;
+- `dm_dead_bit_two`, by `a_look_change_inside_the_window_carries_the_flag`.
+
+| file | run | killed | survived |
+|---|---|---|---|
+| a | 61 | 56 | 5 |
+| b | 77 | 67 | 10 |
+| c | 46 | 40 | 6 |
+| d | 40 | 25 | 15 |
+| e | 1 of 46 | 1 | 0 |
+
+**Why the sweep was slow, and why whole parity runs failed.** Part d was the first file whose
+mutants reach the parity suite. From its third mutant on, the parallel parity runs failed in bulk:
+one run failed 29 of 97 scenarios. Each failing scenario passed when run alone, so the driver's
+rerun (229c) counted none of them as a kill. The mutants were not the cause:
+- **The host ran out of CPU credits.** It is a `t2.2xlarge` with standard credits. The balance
+  reached 0 at about 11:36 and stayed there. From then on CloudWatch shows `CPUCreditBalance` 0
+  and `CPUUtilization` about 21 %, so the host ran at its baseline, about a fifth of its speed.
+- **Server start-up slowed past the harness's wait.** A debug server takes 4.4 seconds to open its
+  gate when it starts alone. Of that, 2.5 seconds decode the hosted maps' `server_attr` (the
+  gamedata LZO reader), and about 1 second stands the monsters. With eight servers starting at
+  once on the throttled host, each took 19 to 25 seconds.
+- **The failures cascaded.** The harness waited 20 seconds for the gate (`PROCESS_TIMEOUT`). A
+  start that missed it failed its scenario. The next scenarios then started their servers
+  together, so they missed it too, to the end of the run.
+
+The fixes:
+- **`parity/src/server.rs`:** the gate wait is now its own `START_TIMEOUT`, 120 seconds. Every
+  other wait keeps 20 seconds. The repro (`diag229k/repro.py`) ran the same mutant on eight
+  threads. Before the change it failed 29 of 97 scenarios in 200 seconds; after it, 6 of 97 in 482
+  seconds.
+- **`mutate_v2.py`:** `PARITY_THREADS` caps the parity suite's threads, and the resumed sweep ran
+  on 4. `FLAKY_DIR` keeps each failed parallel run's output.
+- **The copy only:** for part e, the copy's manifest built `gamedata` at `opt-level = 3`
+  (`sweep229k/profile.toml`). That cuts the 2.5-second decode from each server's start. Overflow
+  checks and debug assertions stay on.
+
+The sweep was first stopped at 15:19, after 32 of part d's 40 mutants. The mutant then running had
+changed `loading_phase.rs`; reversing its tuple restored the file, and every file's `CHECK` passed
+again. The sweep resumed with the harness change in the copy (`run1b.sh`): the other 8 mutants of
+part d (`rest_d.txt`, `shard_d2.log`), then part e.
+
+Even on four threads, a throttled parallel run still failed 2 to 6 timing-bound scenarios, each of
+which passed alone:
+- the stamina refill;
+- the look change's window and the armour swap;
+- the revive's five seconds and the move's stop time;
+- the walking shaman's and the dagger wearer's paces;
+- the walk mode at zero stamina.
+
+These read "flaky under load, passed alone" in the logs.
+
+**All but one survivor was predicted from the code.** The exception is `dm_phase_dead_seven`, which
+sends `PHASE_DEAD` as 7. No test read the phase record's byte, since each compared it with the
+same constant. The stun-to-death test now reads the byte as 6.
+
+**Two survivors are equivalent:**
+- **`dd_leave_keeps_dead_event`** drops `leave_fight`'s cancel of the `Dead` event. A player that
+  leaves while down is stood up first, and `stand` cancels the event itself; a standing player
+  has none. The class of defect it hides is a stale event that acts after a relog.
+  `a_disconnect_while_dead_saves_50_hp_and_pays_the_here_penalty` tests that class: after the
+  leave the schedule holds none of the player's events, and after the relog the first death's 4500
+  Pulses pass in silence.
+- **`dr_stand_keeps_killer_pid`** drops `stand`'s reset of the kept killer PID. Every lethal hit
+  sets the PID and every death takes it (`dead_pc`'s `mem::take`), so a stand never finds one. The
+  class it hides is a stale PID blamed at a later death.
+  `a_player_killed_by_a_player_carries_no_penalty_and_its_killer_drops_its_target` tests it: it
+  reads the PID reset at the death.
+
+**Two survivors are carried to 229l.** No world test reaches them, and no scenario can die yet:
+- **`dm_restart_gold_unstored`** stores a change of 0 gold for `/restart_now`, so the store never
+  loses the 300000 the revive took.
+- **`dm_boot_recall_unwired`** boots the world without `with_recall`, so every town restart and
+  automatic restart falls back in place (B12).
+
+229l's scenario of a player killed by a monster must kill both.
+
+**The other 32 are answered by tests in the tree.** With the mutant applied, 30 were run one at a
+time against the named test (`verify229k/verify.sh` and `closing229k/d/verify_d.sh`), and each test
+failed. The two `command.rs` mutants were re-expressed on the refactored routing and were not run
+one at a time; the closing pass will run them.
+
+| survivor | file | closed by | verified alone |
+|---|---|---|---|
+| `dd_damage_unclamped` | a | `a_hit_larger_than_a_players_hit_points_leaves_it_with_zero` | yes |
+| `dd_stun_pools_not_emptied` | a | `a_lethal_hit_on_a_player_stuns_it_and_zeroes_its_recovery_pools` | yes |
+| `dd_hitter_after_kept_pid` | a | `the_hitter_of_a_stunned_player_is_its_killer_over_the_player_that_stunned_it` | yes |
+| `dd_leave_keeps_recovery` | a | `a_living_player_that_leaves_leaves_no_recovery_event_behind` | yes |
+| `dr_serves_shared_ignored` | b | `a_town_restart_warps_to_a_town_only_the_shared_channel_serves` | yes |
+| `dr_here_is_hack_skipped`, `dr_town_wait_before_is_hack`, `dr_now_is_hack_skipped` | b | `a_restart_refused_by_a_recent_trade_hears_only_that_refusal` | yes |
+| `dr_now_no_penalty` | b | `a_flagged_death_restarted_now_rolling_zero_takes_the_level_share_of_the_exp` | yes |
+| `dr_recall_no_empire_start` | b | `a_town_restart_on_a_map_the_atlas_does_not_name_warps_to_the_empire_start` | yes |
+| `dr_penalty_level_before_flag` | b | `a_flagless_death_draws_nothing_and_takes_nothing`, `a_player_below_level_10_hears_901_and_keeps_its_exp` | yes |
+| `dr_penalty_max_level_ignored` | b | `a_player_at_the_configured_max_level_holding_a_quarter_of_its_next_level_loses_nothing` | yes |
+| `dr_teardrop_vnum` | b | `a_player_wearing_the_teardrop_of_godness_loses_half_the_level_share` | yes |
+| `dp_recovery_restarted_while_running` | c | `a_living_players_restart_keeps_its_running_recovery_due_where_it_was` | yes |
+| `dp_recovery_runs_with_no_slot` | c | `a_recovery_event_with_no_slot_checks_no_target_and_is_not_due_again` | yes |
+| `dp_target_ignores_y` | c | `a_target_4000_off_on_both_axes_is_dropped_and_one_4000_off_on_one_axis_is_kept` | yes |
+| `dp_loss_level15_three` | c | `every_level_from_0_to_255_loses_the_percent_of_its_legacy_band` | yes |
+| `dp_teardrop_before_cap` | c | `the_teardrop_halves_the_capped_loss_not_the_full_share` | yes |
+| `dp_floor_inclusive` | c | `a_max_level_character_holding_exactly_the_loss_keeps_it` | yes |
+| `dm_dead_chat_unread`, `dm_b25_refusal_dropped` | d | `a_dead_player_chats_as_a_living_one_but_its_pose_is_refused` (`main.rs`) | yes |
+| `dm_phase_record_sent_not_installed` | d | `a_phase_record_the_world_wrote_installs_its_phase` and the two stand tests | yes |
+| `dm_stand_unchecked_after_flush` | d | `a_flushed_death_stands_the_player_up` | yes |
+| `dm_stand_unchecked_after_order` | d | `an_order_turn_that_changes_the_phase_stands_the_player_up` | yes |
+| `dm_save_keeps_loaded_exp` | d | `the_held_character_takes_the_experience_the_world_left` | yes |
+| `dm_dead_caller_standing` | d | `a_dead_caller_runs_its_lines_from_the_dead_position` | yes |
+| `dm_restart_here_town_swapped`, `dm_restart_now_as_here` | d | `restart_here_and_town_share_a_handler_but_not_a_command`, `only_restart_now_needs_its_whole_name` (`command.rs`) | no |
+| `dm_warp_as_disconnect` | d | the warp scenario's watcher (229k.5) | yes |
+| `dm_phase_dead_seven` | d | `a_player_stunned_by_a_monster_dies_75_pulses_later_with_no_killer` | yes |
+| `dm_view_insert_stunned_dead` | d | `a_newcomer_sees_a_stunned_player_standing` | yes |
+| `dm_login_exp_zero` | d | `the_loaded_points_hold_the_stored_exp` (`loading_phase.rs`) | yes |
+
+Three more re-expressed `main.rs` and `command.rs` mutants wait for the closing pass:
+`dm_restart_now_unrun`, `dm_restart_unrun` and `dm_town_flag_inverted`. So do
+`dm_restart_now_as_command_here` and `dm_restart_not_ported` (`closing229k/d/updated_d.py`).
+
+**Owed to a stronger machine:**
+1. Part e's other 45 mutants. `rest_e` is every name in `mutants229k_e.py` but
+   `dg_restart_not_run`. Run them with
+   `ROOT=<copy> BASELINE=0 ONLY=<rest_e> MUTANTS=mutants229k_e.py mutate_v2.py`.
+2. The closing pass, `sweep229k/run2.sh`. It writes `mutants229k_f.py` with `make_f.py` from every
+   survivor (part e's included), less the two equivalents and the two carried. Every mutant in it
+   must be killed.
+3. The full gates (`gates.sh`), with and without `DATABASE_URL`.
+
+The logs are `shard_a.log` to `shard_e.log` and `shard_d2.log`; `flaky1/` holds each failed
+parallel parity run. The lib tests leave about 508 `/tmp/prodomo-console-*` directories per run.
+They are harmless, and are left for a later hygiene pass.
+
+### 229k.8 Receipt
+
+The full gates did not run (229k.7: the owner deferred them to a stronger machine). The cheap
+checks below ran on the final tree, one at a time, with `/usr/bin` first on `PATH` and
+`DATABASE_URL` set. Their logs and `summary` are copied to `.scratch/tmp/l229k/checks/`.
+
+| check | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| clippy, workspace, all targets, `-D warnings` | clean |
+| `world` lib tests | 434 passed, 0 failed |
+| `world` `tests/combat.rs` | 3 passed, 0 failed |
+| `prodomo` lib tests | 832 passed, 0 failed |
+| `prodomo` binary tests (`main.rs`) | 11 passed, 0 failed |
+| `prodomo` `tests/game_loop_thread.rs` | 13 passed, 0 failed |
+| parity: the 2 new scenarios and the 3 changed ones, 1 thread | 5 passed, 0 failed |
+| clippy `-p prodomo`, all targets, after the harness fix | clean |
+
+The first parity run used 2 threads, and it failed
+`a_talking_line_reaches_the_map_including_its_sender`:
+- in the parallel run, a read timed out;
+- run alone, an unexpected `GC_CHARACTER_UPDATE` (header 19) arrived in `enter_game_view`'s
+  "nothing follows" check.
+
+On the throttled host, logging in a second client takes more than five seconds, so the first
+client's revive ended inside that check. The scenario passed in the whole run at 10:32, and
+since then only `death.rs`'s test module has changed (its phase-byte assertion). With the
+harness fix (229k.1), all 5 scenarios passed on one thread in 308 seconds (`parity_new2.log`).
+
+The tests grew by 75, as 229k.5 lists them by file. The full suite should therefore count 3472, from
+229j's 3397, but no full gate run has counted it.
+
+The last whole `prodomo` run was unmutated, at 10:32, before the closing tests:
+- the lib had 832 tests and the binary 11;
+- all 97 parity scenarios passed in 183 seconds (`closing229k/d/prodomo_tests.log`).
+
+The parity suite has not run whole on the final tree.
+
+Counted the way the gates count it, the workspace has 261 files and 202,621 lines outside
+`server/` and `.scratch/`. The 229j receipt had 259 files and 198,673 lines.
+
+The toolchain:
+- cargo 1.85.1;
+- `clippy 0.1.85`, called as `/usr/bin/cargo-clippy`;
+- `rustfmt 1.8.0`, called as `/usr/bin/cargo-fmt`.
+
+No crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+| | ported | partial | missing | unused | codec |
+|---|---|---|---|---|---|
+| parity before 229k | 133 | 136 | 1319 | 6 | 51 |
+| parity after 229k | 137 | 136 | 1311 | 11 | 50 |
+
+All counts are out of 1645 rows.
+
+No ADR changed. Under the standing staging rule (ledger 229d), `.scratch/equip/owner-questions.md`
+stays out of the commit. 229k added four owner questions to it:
+- 29, the automatic restart's penalty;
+- 30, no exp loss at the top;
+- 31, dropping the five `cg.dead.*` rows;
+- 32, when `[LS;901]` is said.
+
+It also added addenda to questions 5 (the restart toggles under `test_server`) and 18 (the town
+restart's 50 hit points).

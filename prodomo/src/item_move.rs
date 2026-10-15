@@ -68,6 +68,10 @@ pub struct Mover {
     /// The two affect flag words `UpdatePacket` sends (`dwAffectFlag`). The descriptor does not
     /// hold them: the world sets them from the character's affects before an item step runs.
     pub affect_flags: [u32; 2],
+    /// Whether the character is dead, which `UpdatePacket` sends in `bStateFlag`
+    /// (`G/char.cpp:1310`): legacy's `CanHandleItem` lets a dead player move items. The world
+    /// sets it before an item step runs.
+    pub dead: bool,
 }
 
 impl Mover {
@@ -284,15 +288,15 @@ impl MovedItems {
 /// `CHARACTER::UpdatePacket` (`G/char.cpp:1277-1340`) for the look a move left, with the
 /// mover's PK mode (`:1315`) and the descriptor's language (`:1321`).
 ///
-/// The state flags, the guild, the alignment, the mount and the premium come from systems this
-/// build does not have, and are 0. The affect words come from the mover.
+/// The guild, the alignment, the mount and the premium come from systems this build does not
+/// have, and are 0. The affect words and the dead bit of the state flags come from the mover.
 pub(crate) fn character_update(vid: u32, look: &CharacterLook, mover: Mover) -> GcCharacterUpdate {
     GcCharacterUpdate {
         dw_vid: vid,
         aw_part: look.parts,
         b_moving_speed: look.moving_speed,
         b_attack_speed: look.attack_speed,
-        b_state_flag: 0,
+        b_state_flag: crate::loading_phase::state_flag(mover.dead),
         dw_affect_flag: mover.affect_flags,
         dw_guild_id: 0,
         s_alignment: 0,
@@ -697,6 +701,7 @@ mod tests {
             language: 1,
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             affect_flags: [0; 2],
+            dead: false,
         };
         let strings = LocaleStrings::default();
         let moved = MovedItems::new(7, 7, done.clone(), actor, &owners(), &strings);
@@ -746,6 +751,7 @@ mod tests {
             language: 4,
             pk_mode: crate::loading_phase::PK_MODE_PROTECT,
             affect_flags: [0; 2],
+            dead: false,
         };
         let strings = LocaleStrings::default();
         let moved = MovedItems::new(7, 0x0102_0304, done, actor, &owners(), &strings);
@@ -780,6 +786,7 @@ mod tests {
             language: 1,
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             affect_flags: [0; 2],
+            dead: false,
         };
         let strings = LocaleStrings::default();
         let moved = MovedItems::new(7, 7, done, actor, &owners(), &strings);

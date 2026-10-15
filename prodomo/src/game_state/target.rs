@@ -22,7 +22,10 @@
 //! amount, so each character targeting one whose hit points change is sent its new percentage
 //! (`G/char.cpp:4259`). `CHARACTER::Destroy` calls `ClearTarget` (`G/char.cpp:654`): the
 //! character's own target forgets it, and each character targeting it is sent VID 0 and loses
-//! its target.
+//! its target. A player's recovery event runs `CheckTarget` every three seconds, which drops a
+//! target 4800 or more away (`G/char.cpp:3250`, `:6663-6669`), and a death drops the killer's
+//! target when it is the one that died (`G/char_battle.cpp:1275-1276`); see [`super::death`] and
+//! [`super::fight`].
 //!
 //! # Divergences
 //!
@@ -41,11 +44,6 @@
 //! # Not ported
 //!
 //! - The building objects: the Rewrite has none (V6), so no VID names one.
-//! - `CheckTarget`, which the player recovery event runs every three seconds and which drops a
-//!   target 4800 or more away (`G/char.cpp:3250`, `:6663-6669`): that event is not ported, so a
-//!   target is kept at any distance until it leaves the world.
-//! - The killer's target, which a death clears (`G/char_battle.cpp:1275-1276`), for a player's
-//!   death: no player dies yet. A monster's death clears it (see [`super::fight`]).
 //! - The horse's rider (`GetVictim`): no horse has one, so a horse shows 100.
 //! - The polymorph: no character is polymorphed, so none shows as the horse it was polymorphed into.
 //! - The GM levels: every character is `GM_PLAYER`, so none targets anything on a castle map.

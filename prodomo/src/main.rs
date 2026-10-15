@@ -64,11 +64,12 @@ use prodomo::client_registry::{ChannelClients, ClientEntry, ClientOrder, Lease};
 use prodomo::client_session::ClientPhase;
 use prodomo::command::{
     interpret, one_argument, Caller, Command as LineCommand, CommandFlood, Interpreted, GM_PLAYER,
-    POS_SITTING, POS_STANDING, TYPE_IN_FULL,
+    POS_DEAD, POS_SITTING, POS_STANDING, TYPE_IN_FULL,
 };
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
 use prodomo::game_loop_messages::{
-    GameLoopController, GameLoopTerminal, GroundPlace, Kept, RelayScope, Settled, Shown,
+    Departure, GameLoopController, GameLoopTerminal, GroundPlace, Kept, RelayScope, RestartKind,
+    Settled, Shown,
 };
 use prodomo::game_state::{
     world_item_id_range, GameState, ShopAnswer, ShopStep, TradeAnswer, TradeSettled, TradeStep,
@@ -82,7 +83,7 @@ use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::loading_phase::{
     enter_game_burst, entering_position, item_load_points, judge_enter_game, judge_select,
     load_points, loading_burst, map_is_allowed, public_map_index, EnterGameBurst, EnterGameVerdict,
-    EnteringPosition, Neighbourhood, PcCard, SelectVerdict, PK_MODE_PEACE,
+    EnteringPosition, Neighbourhood, PcCard, SelectVerdict, PHASE_DEAD, PHASE_GAME, PK_MODE_PEACE,
 };
 use prodomo::movement::{judge_pose, PoseOutcome};
 use prodomo::operator::{prepare, read_new_password, AccountCommand, GmCommand, OperatorCommand};
@@ -134,7 +135,7 @@ use protocol::cg_vid::CgOnClick;
 use protocol::cg_wire::ClientFrame;
 use protocol::gc::{GcAuthSuccess, GcLoginFailure};
 use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO};
-use protocol::gc_inventory::HEADER_GC_EMPIRE;
+use protocol::gc_inventory::{HEADER_GC_EMPIRE, HEADER_GC_PHASE};
 use protocol::gc_small::GcHeaderAndByte;
 use protocol::item_pos::ItemPos;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -485,7 +486,7 @@ async fn handle_connection(
     // items hold, so a save that ran first would name a cell another character can
     // already have been given, and a grant that arrived between the two would be
     // placed into an inventory the world is about to release.
-    leave_the_world(&context, addr, &mut held).await;
+    leave_the_world(&context, addr, &mut held, Departure::Disconnect).await;
     // `CHARACTER::Disconnect` flushes the queued save and, if the character was not queued,
     // calls `SaveReal` itself (`G/char.cpp:1786-1789`), then sets `m_bSkipSave` so nothing
     // writes after (`G/char.cpp:1800`). Both arms write the row, so the branch is the log line
@@ -515,11 +516,16 @@ async fn handle_connection(
 /// A disconnect reaches here (`DESC::SetPlayer(NULL)`), and so does a `WarpSet`, whose
 /// `RemoveEntity` takes the character out of its sectree before `GC_WARP` is sent
 /// (`G/char.cpp:6749-6755`).
-async fn leave_the_world(context: &ConnectionContext, addr: SocketAddr, held: &mut Held) {
+async fn leave_the_world(
+    context: &ConnectionContext,
+    addr: SocketAddr,
+    held: &mut Held,
+    departure: Departure,
+) {
     let Some(world_vid) = held.world.take() else {
         return;
     };
-    match context.game.leave_world(world_vid).await {
+    match context.game.leave_world(world_vid, departure).await {
         // The world's points and quickslots are the ones the save writes: the potion
         // recovery changes the points on the world's pulse, after the last step this
         // descriptor held, and a trade the partner closed the quickslots.
@@ -594,7 +600,7 @@ async fn pump_descriptor<S>(
         // queue is written, with whatever other characters caused meanwhile, before the next
         // frame is analyzed: a record never sits behind an answer to a frame sent after it.
         settle(held).await;
-        if !flush_outbox(session, addr, &mut outbox, &mut pending).await {
+        if !flush_turn(session, addr, &mut outbox, &mut pending, held).await {
             break;
         }
         match session.next_buffered(clock.now()).await {
@@ -643,18 +649,7 @@ async fn pump_descriptor<S>(
                     break;
                 }
             }
-            // `CHARACTER::save_event` (`G/char.cpp:5070-5082`): the character is queued, and
-            // the row is written on the next drain. There is no game loop to drain here, so
-            // this arm writes the row the drain would have written.
-            () = save_tick(held.save.as_mut()) => {
-                if let Some(event) = held.save.as_mut() {
-                    event.queued = true;
-                }
-                hold_world_points(context, addr, held).await;
-                if save_held(context, &*held, std::time::Instant::now()).await {
-                    info!(%addr, "Save event wrote the character row");
-                }
-            }
+            () = save_tick(held.save.as_mut()) => save_on_tick(context, addr, held).await,
             _ = shutdown_rx.recv() => {
                 info!(%addr, "Client session stopping for shutdown");
                 break;
@@ -667,10 +662,10 @@ async fn pump_descriptor<S>(
             // An order from the game thread: a warp or goto NPC this character stands by.
             order = next_order(&mut orders) => {
                 if let Some(order) = order {
-                    let follow = async |session: &mut LiveClientSession<S>| {
+                    let follow = async |session: &mut LiveClientSession<S>, held: &mut Held| {
                         follow_order(session, addr, context, locations, held, order).await
                     };
-                    if !take_order(session, addr, &mut outbox, &mut pending, follow).await {
+                    if !take_order(session, addr, &mut outbox, &mut pending, held, follow).await {
                         break;
                     }
                 } else {
@@ -694,6 +689,19 @@ async fn pump_descriptor<S>(
                 }
             }
         }
+    }
+}
+
+/// `CHARACTER::save_event` (`G/char.cpp:5070-5082`): the character is queued, and the row is
+/// written on the next drain. There is no game loop to drain here, so this writes the row the
+/// drain would have written.
+async fn save_on_tick(context: &ConnectionContext, addr: SocketAddr, held: &mut Held) {
+    if let Some(event) = held.save.as_mut() {
+        event.queued = true;
+    }
+    hold_world_points(context, addr, held).await;
+    if save_held(context, &*held, std::time::Instant::now()).await {
+        info!(%addr, "Save event wrote the character row");
     }
 }
 
@@ -748,8 +756,28 @@ where
     write_pending(session, addr, pending).await
 }
 
-/// Write what the world queued before an order, then follow it; `false` when the session
-/// stopped or the connection must close.
+/// [`flush_outbox`], then stand the player up when a record it wrote changed the phase (a
+/// death or a restart, see [`stand_on_phase_change`]); `false` when the session stopped.
+async fn flush_turn<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    outbox: &mut Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    pending: &mut Vec<Vec<u8>>,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let before = session.phase();
+    let written = flush_outbox(session, addr, outbox, pending).await;
+    if written {
+        stand_on_phase_change(held, before, session.phase());
+    }
+    written
+}
+
+/// Write what the world queued before an order, then follow it, and stand the player up when
+/// either changed the phase; `false` when the session stopped or the connection must close.
 ///
 /// The world queued those records before it ordered (a goto NPC's show earlier in the same
 /// turn, say), so they go out before what following the order writes, as legacy writes them
@@ -759,15 +787,25 @@ async fn take_order<S>(
     addr: SocketAddr,
     outbox: &mut Option<mpsc::UnboundedReceiver<Vec<u8>>>,
     pending: &mut Vec<Vec<u8>>,
-    follow: impl AsyncFnOnce(&mut LiveClientSession<S>) -> bool,
+    held: &mut Held,
+    follow: impl AsyncFnOnce(&mut LiveClientSession<S>, &mut Held) -> bool,
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    flush_outbox(session, addr, outbox, pending).await && follow(session).await
+    let before = session.phase();
+    if !flush_outbox(session, addr, outbox, pending).await || !follow(session, held).await {
+        return false;
+    }
+    stand_on_phase_change(held, before, session.phase());
+    true
 }
 
 /// Write the broadcast records queued during the last turn; `false` when the session stopped.
+///
+/// A `GC_PHASE` record the world wrote, at a player's death or restart, is `DESC::SetPhase`:
+/// the session writes the same record through the boundary it had and installs the phase, so
+/// the records after it are read under the new phase in the order the world wrote them.
 async fn write_pending<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -777,7 +815,11 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     for record in pending.drain(..) {
-        if let Err(error) = session.send(&record).await {
+        let written = match phase_of_record(&record) {
+            Some(phase) => session.set_phase(phase).await.map(drop),
+            None => session.send(&record).await.map(drop),
+        };
+        if let Err(error) = written {
             warn!(%addr, %error, "Client session stopped while writing a broadcast");
             return false;
         }
@@ -785,9 +827,38 @@ where
     true
 }
 
-/// Hold a character's points, and the pools and parts the save writes from the held row.
+/// The phase a `GC_PHASE` record of the world switches the descriptor to: `PHASE_DEAD` at a
+/// death and `PHASE_GAME` at a restart. Any other record is `None`.
+fn phase_of_record(record: &[u8]) -> Option<PostHandshakePhase> {
+    let &[header, phase] = record else {
+        return None;
+    };
+    if header != HEADER_GC_PHASE.value() {
+        return None;
+    }
+    match phase {
+        PHASE_DEAD => Some(PostHandshakePhase::Dead),
+        PHASE_GAME => Some(PostHandshakePhase::Game),
+        _ => None,
+    }
+}
+
+/// `SetPosition(POS_DEAD)` at a death and `SetPosition(POS_STANDING)` at a restart, which come
+/// with the phase the world switched the descriptor to: either leaves the player not sitting.
+fn stand_on_phase_change(held: &mut Held, before: ClientPhase, after: ClientPhase) {
+    if before == after {
+        return;
+    }
+    if let Some(avatar) = held.avatar.as_mut() {
+        avatar.sitting = false;
+    }
+}
+
+/// Hold a character's points, and the experience, pools and parts the save writes from the held
+/// row.
 fn hold_points(held: &mut Held, points: world::character::Points) {
     if let Some(held_character) = held.character.as_mut() {
+        held_character.exp = points.exp();
         held_character.hp = points.hp();
         held_character.sp = points.sp();
         held_character.stamina = points.stamina();
@@ -1171,8 +1242,10 @@ fn item_actor(held: &Held) -> Mover {
         language: descriptor_language(held.account.as_ref()),
         // The world sets it from the body's card (`GameState::run_item_step`).
         pk_mode: PK_MODE_PEACE,
-        // The world sets the affect words from the character's affects before a step runs.
+        // The world sets the affect words from the character's affects, and the dead bit from
+        // its fight, before a step runs.
         affect_flags: [0; 2],
+        dead: false,
     }
 }
 
@@ -1386,7 +1459,7 @@ where
     let Some((address, port)) = locations.get(resolved_map_index) else {
         return true;
     };
-    leave_the_world(context, addr, held).await;
+    leave_the_world(context, addr, held, Departure::Warp).await;
     let target = prodomo::warp::WarpTarget {
         map_index: stored_map_index,
         x,
@@ -1877,75 +1950,105 @@ where
             debug!(%addr, ?phase, header = frame.header, "consumed with nothing done");
             true
         }
-        // `CG_CHAT` (3) in the game phase: `CInputMain::Chat` (`G/input_main.cpp:781`).
-        // `CInputDead::Analyze` maps the same header, but a dead character cannot be
-        // reached yet because the Rewrite has no death state.
-        LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && frame.header == HEADER_CG_CHAT.value() =>
-        {
-            chat_line(session, addr, context, held, &frame).await
-        }
-        // `CG_ITEM_MOVE` (13) in the game phase: `CInputMain::ItemMove`
-        // (`G/input_main.cpp:1060-1066`), reached when the character is not an observer
-        // (`:3707-3710`). The Rewrite has no observer mode, so every character is reached.
-        LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && frame.header == HEADER_CG_ITEM_MOVE.value() =>
-        {
-            move_an_item(session, addr, context, held, &frame).await
-        }
-        // `CG_ITEM_USE` (11), the ground steps and the quickslot requests in the game phase.
-        LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && is_belongings_step(frame.header) =>
-        {
-            belongings_step(session, addr, context, held, &frame).await
-        }
-        // `CG_ATTACK` (2), `CG_MOVE` (7), `CG_SYNC_POSITION` (8), `CG_CHARACTER_POSITION` (28)
-        // and `CG_TARGET` (61) in the game phase.
-        LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && is_world_step(frame.header) =>
-        {
-            world_step(addr, context, held, &frame).await
-        }
-        // `CG_ON_CLICK` (26), `CG_SHOP` (50), `CG_SCRIPT_ANSWER` (29) and
-        // `CG_QUEST_INPUT_STRING` (30) in the game phase.
-        LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && is_npc_step(frame.header) =>
-        {
-            npc_step(session, addr, context, held, &frame).await
-        }
-        // `CG_EXCHANGE` (27) in the game phase.
-        LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && is_transaction_record(frame.header) =>
-        {
-            transaction_record(session, addr, context, held, &frame).await
-        }
-        // `CG_WARP` (65) in the game phase: `CInputMain::Warp` (`G/input_main.cpp:2271-2274`),
-        // which `CInputMain::Analyze` calls (`:3801-3802`).
-        LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Game && frame.header == HEADER_CG_WARP.value() =>
-        {
-            warp_end(addr, &frame)
-        }
+        // The main input and the dead phase's refusal, see [`main_record`].
+        LiveStep::Record { phase, frame } => match main_record(phase, frame.header) {
+            Some(MainRecord::Refused) => {
+                debug!(%addr, header = frame.header, "a dead player's pose is refused");
+                true
+            }
+            Some(MainRecord::Chat) => chat_line(session, addr, context, held, &frame).await,
+            Some(MainRecord::ItemMove) => move_an_item(session, addr, context, held, &frame).await,
+            Some(MainRecord::Belongings) => {
+                belongings_step(session, addr, context, held, &frame).await
+            }
+            Some(MainRecord::World) => world_step(addr, context, held, &frame).await,
+            Some(MainRecord::Npc) => npc_step(session, addr, context, held, &frame).await,
+            Some(MainRecord::Transaction) => {
+                transaction_record(session, addr, context, held, &frame).await
+            }
+            Some(MainRecord::Warp) => warp_end(addr, &frame),
+            None => report_step(addr, LiveStep::Record { phase, frame }),
+        },
         step => report_step(addr, step),
     }
+}
+
+/// The analyzer of the main input a record goes to, see [`main_record`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MainRecord {
+    /// B25: a dead player that sits leaves `POS_DEAD`, and its stand revives it with no penalty
+    /// and no wait (`G/input_main.cpp:1530-1548`, `G/char.cpp:3335-3349`). Its
+    /// `CG_CHARACTER_POSITION` is refused while dead.
+    Refused,
+    /// `CG_CHAT` (3) in the game and dead phases: `CInputMain::Chat` (`G/input_main.cpp:781`).
+    /// `PHASE_DEAD` installs the main input as `PHASE_GAME` does (`G/desc.cpp:526-531`);
+    /// `CInputDead` is never installed (B14).
+    Chat,
+    /// `CG_ITEM_MOVE` (13): `CInputMain::ItemMove` (`G/input_main.cpp:1060-1066`), reached when
+    /// the character is not an observer (`:3707-3710`). The Rewrite has no observer mode, so
+    /// every character is reached.
+    ItemMove,
+    /// `CG_ITEM_USE` (11), the ground steps and the quickslot requests.
+    Belongings,
+    /// `CG_ATTACK` (2), `CG_MOVE` (7), `CG_SYNC_POSITION` (8), `CG_CHARACTER_POSITION` (28) and
+    /// `CG_TARGET` (61).
+    World,
+    /// `CG_ON_CLICK` (26), `CG_SHOP` (50), `CG_SCRIPT_ANSWER` (29) and `CG_QUEST_INPUT_STRING`
+    /// (30).
+    Npc,
+    /// `CG_EXCHANGE` (27).
+    Transaction,
+    /// `CG_WARP` (65): `CInputMain::Warp` (`G/input_main.cpp:2271-2274`), which
+    /// `CInputMain::Analyze` calls (`:3801-3802`).
+    Warp,
+}
+
+/// Which analyzer of the main input takes a record of `header` in `phase`: the dead phase's
+/// refusal first, then the main input's records, which the game and the dead phases read alike.
+/// `None` for a record neither handles, and for every record of another phase.
+fn main_record(phase: ClientPhase, header: u8) -> Option<MainRecord> {
+    if is_dead_refused(phase, header) {
+        return Some(MainRecord::Refused);
+    }
+    if !in_main_input(phase) {
+        return None;
+    }
+    let record = if header == HEADER_CG_CHAT.value() {
+        MainRecord::Chat
+    } else if header == HEADER_CG_ITEM_MOVE.value() {
+        MainRecord::ItemMove
+    } else if is_belongings_step(header) {
+        MainRecord::Belongings
+    } else if is_world_step(header) {
+        MainRecord::World
+    } else if is_npc_step(header) {
+        MainRecord::Npc
+    } else if is_transaction_record(header) {
+        MainRecord::Transaction
+    } else if header == HEADER_CG_WARP.value() {
+        MainRecord::Warp
+    } else {
+        return None;
+    };
+    Some(record)
 }
 
 /// Whether `phase`'s analyzer consumes a record of `header` and does nothing with it:
 ///
 /// - `CG_ITEM_USE` (11) and `CG_TARGET` (61) in the login, select and loading phases, which a
 ///   client still sends for the character it left (`@fixme120`, `G/input_login.cpp:1254-1257`);
-/// - `CG_ENTER_GAME` (10) in the game phase: the header is in the main table
+/// - `CG_ENTER_GAME` (10) in the game and dead phases: the header is in the main table
 ///   (`G/packet_info.cpp:116`), and `CInputMain::Analyze` has no case for it, so its `default`
 ///   consumes the record (`G/input_main.cpp:4126-4127`);
 /// - `CG_FLY_TARGETING` (51), `CG_USE_SKILL` (52), `CG_ADD_FLY_TARGETING` (53) and `CG_SHOOT`
-///   (54) in the game phase, which wait for the skills (V17f): legacy's analyzer runs them, and
-///   the Rewrite keeps the connection and does nothing.
+///   (54) in the game and dead phases, which wait for the skills (V17f): legacy's analyzer runs
+///   them, and the Rewrite keeps the connection and does nothing.
 fn is_consumed(phase: ClientPhase, header: u8) -> bool {
     match phase {
         ClientPhase::Login | ClientPhase::Select | ClientPhase::Loading => {
             header == HEADER_CG_ITEM_USE.value() || header == HEADER_CG_TARGET.value()
         }
-        ClientPhase::Game => [
+        ClientPhase::Game | ClientPhase::Dead => [
             HEADER_CG_ENTERGAME,
             HEADER_CG_FLY_TARGETING,
             HEADER_CG_USE_SKILL,
@@ -1956,6 +2059,17 @@ fn is_consumed(phase: ClientPhase, header: u8) -> bool {
         .any(|consumed| consumed.value() == header),
         _ => false,
     }
+}
+
+/// Whether `phase` reads the main input: the game phase, and the dead phase, which legacy gives
+/// the same input processor (`G/desc.cpp:526-531`).
+const fn in_main_input(phase: ClientPhase) -> bool {
+    matches!(phase, ClientPhase::Game | ClientPhase::Dead)
+}
+
+/// Whether the dead phase refuses a record of `header`: `CG_CHARACTER_POSITION` (B25).
+fn is_dead_refused(phase: ClientPhase, header: u8) -> bool {
+    phase == ClientPhase::Dead && header == HEADER_CG_CHARACTER_POSITION.value()
 }
 
 /// Whether `header` is a record the world answers alone: one that moves a character,
@@ -3962,8 +4076,8 @@ fn map_routes(config: &ServerConfig, listeners: &Listeners) -> MapRoutes {
 
 /// The Game data a connection reads, loaded before any port opens.
 struct GameData {
-    /// The map regions.
-    atlas: MapAtlas,
+    /// The map regions, which the descriptors and the world's town recall share.
+    atlas: Arc<MapAtlas>,
     /// The cell attributes of every hosted map.
     cells: Arc<HostedCells>,
     /// The Names a character may not take.
@@ -4004,7 +4118,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let motions = load_pc_motions(config)?;
     let quests = load_quests(config, &npcs)?;
     let data = GameData {
-        atlas,
+        atlas: Arc::new(atlas),
         cells,
         names,
         protos,
@@ -4268,7 +4382,7 @@ fn connection_context(
         block_login: Arc::from(config.game.block_login.as_str()),
         user_limit: config.game.user_limit,
         logons: LogonRegistry::new(),
-        atlas: Arc::new(data.atlas),
+        atlas: data.atlas,
         cells: data.cells,
         protos: data.protos,
         locale: data.locale,
@@ -4331,6 +4445,19 @@ fn build_world(
     clients: &Arc<ChannelClients>,
     clock: BootLiveClock,
 ) -> Result<GameState, String> {
+    // The maps each Channel serves, and the Shared Channel's, which a town restart's recall
+    // point must be on (`CMapLocation::Get`), as `map_routes` reads them.
+    let channel_maps: HashMap<u8, Vec<u32>> = config
+        .channels
+        .iter()
+        .map(|channel| (channel.number, channel.maps.clone()))
+        .collect();
+    let shared: Vec<u32> = config
+        .channels
+        .iter()
+        .find(|channel| channel.is_shared())
+        .map(|channel| channel.maps.clone())
+        .unwrap_or_default();
     let mut game_state = GameState::new(Arc::clone(&data.protos))
         .with_item_count_limit(config.game.item_count_limit)
         .with_npc_shops(Arc::clone(&data.shops))
@@ -4342,7 +4469,9 @@ fn build_world(
         .with_view_range(config.game.view_range)
         .with_no_wander(config.game.no_wander)
         .with_locale_strings(Arc::clone(&data.locale))
-        .with_quests(quests);
+        .with_quests(quests)
+        .with_max_level(config.game.max_level)
+        .with_recall(Arc::clone(&data.atlas), &channel_maps, &shared);
     stand_up_npcs(&mut game_state, &data.npcs, &data.cells)?;
     Ok(game_state)
 }
@@ -4488,13 +4617,11 @@ async fn run_command<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    // GM levels are not wired yet, so every caller is `GM_PLAYER`. Sitting is the one position
-    // besides standing this build tracks.
-    let sitting = held.avatar.as_ref().is_some_and(|avatar| avatar.sitting);
+    // GM levels are not wired yet, so every caller is `GM_PLAYER`.
     let caller = Caller {
         pulse: context.game.pulse(),
         gm_level: GM_PLAYER,
-        position: if sitting { POS_SITTING } else { POS_STANDING },
+        position: caller_position(session.phase(), held),
     };
     let (entry, rest) = match interpret(line, &mut held.command_flood, caller) {
         Interpreted::Nothing => return true,
@@ -4538,11 +4665,60 @@ where
         LineCommand::SafeboxChangePassword => {
             change_store_password(session, addr, context, held, &rest).await
         }
+        LineCommand::Restart(kind) => restart(addr, context, held, kind).await,
         LineCommand::NotPorted(handler) => {
             info!(%addr, handler, "Command not ported; ignoring");
             true
         }
     }
+}
+
+/// The position a command line's caller runs it from. A dead player's session is in the dead
+/// phase, which `POS_DEAD` goes with; sitting is the one other position besides standing this
+/// build tracks.
+fn caller_position(phase: ClientPhase, held: &Held) -> u8 {
+    let sitting = held.avatar.as_ref().is_some_and(|avatar| avatar.sitting);
+    if phase == ClientPhase::Dead {
+        POS_DEAD
+    } else if sitting {
+        POS_SITTING
+    } else {
+        POS_STANDING
+    }
+}
+
+/// `do_restart` and `do_restart_now` (`G/cmd_general.cpp:471-706`): the world runs the restart
+/// and writes what it shows to this client's queue, and the gold `/restart_now` took is stored
+/// as a transfer, the one way gold changes in the store (ledger 225). A world that cannot be
+/// asked, or a store that refuses the gold, closes the connection as an item step does. Unlike
+/// an item step, the gold record has already left, behind the revive's records in the world's
+/// queue; a refused store closes the session it went to, and the store keeps the gold.
+async fn restart(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    kind: RestartKind,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, ?kind, "Restart without a character in the world; ignoring");
+        return true;
+    };
+    let answer = match context.game.restart(vid, kind, item_actor(held)).await {
+        Ok(answer) => answer,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a restart; closing");
+            return false;
+        }
+    };
+    let Some(gold) = answer.gold else {
+        return true;
+    };
+    if let Err(error) = db::items::apply_transfer(&context.store, vid.raw(), &[], gold).await {
+        warn!(%addr, %error, gold, "The restart's gold could not be stored; closing");
+        return false;
+    }
+    info!(%addr, gold, "Restarted for gold");
+    true
 }
 
 /// One server line to this descriptor, in its language.
@@ -4782,8 +4958,48 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prodomo::descriptor_crypto::DescriptorCrypto;
     use prodomo::lifecycle::ClientLifecycle;
-    use tokio::io::AsyncReadExt;
+    use protocol::cg_handshake::{CgHandshakeHeader, CgInboundHandshake};
+    use tokio::io::{AsyncReadExt, DuplexStream};
+
+    /// A session in the game phase, behind the TEA boundary a login installs, and the client's
+    /// end of its socket.
+    fn game_session() -> (LiveClientSession<DuplexStream>, DuplexStream) {
+        let (ours, theirs) = tokio::io::duplex(4096);
+        let token = 0x0102_0304;
+        let handshake = CgInboundHandshake::new(CgHandshakeHeader::Handshake, token, 0, 0);
+        let lifecycle = ClientLifecycle::start(token, HandshakeServerKind::Game, 0)
+            .state
+            .on_handshake(handshake, 0)
+            .expect("the handshake logs in")
+            .state
+            .transition_to(PostHandshakePhase::Game)
+            .expect("a login enters the game")
+            .state;
+        let mut crypto = DescriptorCrypto::with_default_limit().expect("a cipher");
+        crypto
+            .enable_default_legacy_tea()
+            .expect("the default pair");
+        let session =
+            LiveClientSession::with_cipher(ours, lifecycle, crypto).expect("a game session");
+        (session, theirs)
+    }
+
+    /// A player sitting on map 41.
+    fn sitting() -> Avatar {
+        Avatar {
+            map: 41,
+            x: 1,
+            y: 2,
+            sitting: true,
+        }
+    }
+
+    /// The peer address the descriptor's log lines carry.
+    fn addr() -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 13_000))
+    }
 
     /// A record the world queued before an order reaches the client before anything following
     /// the order writes, so a warp's departure never overtakes the records that led to it.
@@ -4792,19 +5008,35 @@ mod tests {
         let (ours, mut theirs) = tokio::io::duplex(4096);
         let lifecycle = ClientLifecycle::start(1, HandshakeServerKind::Game, 0).state;
         let mut session = LiveClientSession::new(ours, lifecycle).expect("a plaintext session");
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 13_000));
         let (queue, receiver) = mpsc::unbounded_channel();
         queue.send(vec![0xA1, 0xA2]).expect("the queue is open");
         let mut outbox = Some(receiver);
         let mut pending = vec![vec![0xA0]];
+        let mut held = Held::default();
 
-        let follow = async |session: &mut LiveClientSession<tokio::io::DuplexStream>| {
+        let follow = async |session: &mut LiveClientSession<DuplexStream>, _: &mut Held| {
             session.send(&[0xB1]).await.is_ok()
         };
-        assert!(take_order(&mut session, addr, &mut outbox, &mut pending, follow).await);
+        let taken = take_order(
+            &mut session,
+            addr(),
+            &mut outbox,
+            &mut pending,
+            &mut held,
+            follow,
+        );
+        assert!(taken.await);
         assert!(pending.is_empty());
-        let refused = async |_: &mut LiveClientSession<tokio::io::DuplexStream>| false;
-        assert!(!take_order(&mut session, addr, &mut outbox, &mut pending, refused).await);
+        let refused = async |_: &mut LiveClientSession<DuplexStream>, _: &mut Held| false;
+        let taken = take_order(
+            &mut session,
+            addr(),
+            &mut outbox,
+            &mut pending,
+            &mut held,
+            refused,
+        );
+        assert!(!taken.await);
         drop(session);
 
         let mut written = Vec::new();
@@ -4817,6 +5049,256 @@ mod tests {
             [0xA0, 0xA1, 0xA2, 0xB1],
             "pending, then queued, then the order"
         );
+    }
+
+    /// A world's `GC_PHASE` record of the dead or the game phase switches the descriptor's
+    /// phase; a record of another length, header or phase is written as it is.
+    #[test]
+    fn a_phase_record_switches_the_phase_and_nothing_else_does() {
+        let header = HEADER_GC_PHASE.value();
+        assert_eq!(
+            phase_of_record(&[header, PHASE_DEAD]),
+            Some(PostHandshakePhase::Dead)
+        );
+        assert_eq!(
+            phase_of_record(&[header, PHASE_GAME]),
+            Some(PostHandshakePhase::Game)
+        );
+        for record in [
+            vec![],
+            vec![header],
+            vec![header, PHASE_DEAD, 0],
+            vec![header, PHASE_DEAD - 2],
+            vec![header, PHASE_DEAD + 1],
+            vec![HEADER_GC_EMPIRE.value(), PHASE_DEAD],
+        ] {
+            assert_eq!(phase_of_record(&record), None, "{record:?}");
+        }
+    }
+
+    /// The dead phase reads the main input as the game phase does (`G/desc.cpp:526-531`), and
+    /// consumes the same records; it alone refuses `CG_CHARACTER_POSITION` (B25).
+    #[test]
+    fn a_dead_session_reads_the_main_input() {
+        assert!(in_main_input(ClientPhase::Game));
+        assert!(in_main_input(ClientPhase::Dead));
+        for phase in [
+            ClientPhase::Close,
+            ClientPhase::Handshake,
+            ClientPhase::Login,
+            ClientPhase::Select,
+            ClientPhase::Loading,
+        ] {
+            assert!(!in_main_input(phase), "{phase:?}");
+        }
+        for header in [HEADER_CG_ENTERGAME, HEADER_CG_USE_SKILL, HEADER_CG_SHOOT] {
+            assert!(is_consumed(ClientPhase::Dead, header.value()));
+        }
+        assert!(!is_consumed(ClientPhase::Dead, HEADER_CG_ITEM_USE.value()));
+
+        let position = HEADER_CG_CHARACTER_POSITION.value();
+        assert!(is_dead_refused(ClientPhase::Dead, position));
+        assert!(!is_dead_refused(ClientPhase::Game, position));
+        for header in [HEADER_CG_MOVE, HEADER_CG_CHAT, HEADER_CG_ITEM_USE] {
+            assert!(!is_dead_refused(ClientPhase::Dead, header.value()));
+        }
+    }
+
+    /// A death or a restart stands a sitting player up; a turn that leaves the phase as it was
+    /// leaves the pose.
+    #[test]
+    fn a_phase_change_stands_the_player_up() {
+        let mut held = Held {
+            avatar: Some(sitting()),
+            ..Held::default()
+        };
+        stand_on_phase_change(&mut held, ClientPhase::Game, ClientPhase::Game);
+        assert_eq!(held.avatar, Some(sitting()));
+        stand_on_phase_change(&mut held, ClientPhase::Game, ClientPhase::Dead);
+        assert_eq!(
+            held.avatar.as_ref().map(|avatar| avatar.sitting),
+            Some(false)
+        );
+
+        held.avatar = Some(sitting());
+        stand_on_phase_change(&mut held, ClientPhase::Dead, ClientPhase::Game);
+        assert_eq!(
+            held.avatar.as_ref().map(|avatar| avatar.sitting),
+            Some(false)
+        );
+        let mut away = Held::default();
+        stand_on_phase_change(&mut away, ClientPhase::Game, ClientPhase::Dead);
+        assert!(away.avatar.is_none());
+    }
+
+    /// The main input reads a dead player's chat, which carries its restart lines, as it reads a
+    /// living one's, and routes every other record alike in both phases, except the pose: a dead
+    /// player's is refused (B25), a living one's goes to the world.
+    #[test]
+    fn a_dead_player_chats_as_a_living_one_but_its_pose_is_refused() {
+        let routes = [
+            (HEADER_CG_CHAT, MainRecord::Chat),
+            (HEADER_CG_ITEM_MOVE, MainRecord::ItemMove),
+            (HEADER_CG_ITEM_USE, MainRecord::Belongings),
+            (HEADER_CG_MOVE, MainRecord::World),
+            (HEADER_CG_ON_CLICK, MainRecord::Npc),
+            (HEADER_CG_EXCHANGE, MainRecord::Transaction),
+            (HEADER_CG_WARP, MainRecord::Warp),
+        ];
+        let position = HEADER_CG_CHARACTER_POSITION.value();
+        let unrouted = HEADER_CG_LOGIN2.value();
+        for phase in [ClientPhase::Game, ClientPhase::Dead] {
+            for (header, route) in routes {
+                assert_eq!(main_record(phase, header.value()), Some(route), "{phase:?}");
+            }
+            assert_eq!(main_record(phase, unrouted), None, "{phase:?}");
+        }
+        let (dead, living) = (ClientPhase::Dead, ClientPhase::Game);
+        assert_eq!(main_record(dead, position), Some(MainRecord::Refused));
+        assert_eq!(main_record(living, position), Some(MainRecord::World));
+        for phase in [ClientPhase::Loading, ClientPhase::Close] {
+            for header in [HEADER_CG_CHAT.value(), position] {
+                assert_eq!(main_record(phase, header), None, "{phase:?}");
+            }
+        }
+    }
+
+    /// A world's `GC_PHASE` record is `DESC::SetPhase`: writing it installs the phase it names,
+    /// the dead phase at a death and the game phase at a restart. Another record keeps the phase.
+    #[tokio::test]
+    async fn a_phase_record_the_world_wrote_installs_its_phase() {
+        let (mut session, _client) = game_session();
+        let header = HEADER_GC_PHASE.value();
+        let mut pending = vec![vec![HEADER_GC_EMPIRE.value(), 1]];
+        assert!(write_pending(&mut session, addr(), &mut pending).await);
+        assert_eq!(session.phase(), ClientPhase::Game);
+
+        let mut pending = vec![vec![header, PHASE_DEAD]];
+        assert!(write_pending(&mut session, addr(), &mut pending).await);
+        assert_eq!(session.phase(), ClientPhase::Dead);
+        let mut pending = vec![vec![header, PHASE_GAME], vec![HEADER_GC_EMPIRE.value(), 1]];
+        assert!(write_pending(&mut session, addr(), &mut pending).await);
+        assert_eq!(session.phase(), ClientPhase::Game);
+        assert!(pending.is_empty());
+    }
+
+    /// The read loop's flush of the world's queue stands a sitting player up when it writes a
+    /// death (critic 8); a flush that keeps the phase keeps the pose.
+    #[tokio::test]
+    async fn a_flushed_death_stands_the_player_up() {
+        let (mut session, _client) = game_session();
+        let (queue, receiver) = mpsc::unbounded_channel();
+        let mut outbox = Some(receiver);
+        let mut pending = Vec::new();
+        let mut held = Held {
+            avatar: Some(sitting()),
+            ..Held::default()
+        };
+        queue
+            .send(vec![HEADER_GC_EMPIRE.value(), 1])
+            .expect("the queue is open");
+        assert!(flush_turn(&mut session, addr(), &mut outbox, &mut pending, &mut held).await);
+        assert_eq!(held.avatar, Some(sitting()));
+
+        queue
+            .send(vec![HEADER_GC_PHASE.value(), PHASE_DEAD])
+            .expect("the queue is open");
+        assert!(flush_turn(&mut session, addr(), &mut outbox, &mut pending, &mut held).await);
+        assert_eq!(session.phase(), ClientPhase::Dead);
+        assert_eq!(
+            held.avatar.as_ref().map(|avatar| avatar.sitting),
+            Some(false)
+        );
+    }
+
+    /// An order's turn stands a sitting player up when the records it writes change the phase,
+    /// as a death the world queued before the order does (critic 8).
+    #[tokio::test]
+    async fn an_order_turn_that_changes_the_phase_stands_the_player_up() {
+        let (mut session, _client) = game_session();
+        let mut outbox = None;
+        let mut held = Held {
+            avatar: Some(sitting()),
+            ..Held::default()
+        };
+        let follow = async |_: &mut LiveClientSession<DuplexStream>, _: &mut Held| true;
+        let mut pending = vec![vec![HEADER_GC_PHASE.value(), PHASE_DEAD]];
+        let taken = take_order(
+            &mut session,
+            addr(),
+            &mut outbox,
+            &mut pending,
+            &mut held,
+            follow,
+        );
+        assert!(taken.await);
+        assert_eq!(session.phase(), ClientPhase::Dead);
+        assert_eq!(
+            held.avatar.as_ref().map(|avatar| avatar.sitting),
+            Some(false)
+        );
+    }
+
+    /// A dead caller runs its lines from `POS_DEAD`, which the restart lines need, sitting or
+    /// not; a living one runs them from its pose.
+    #[test]
+    fn a_dead_caller_runs_its_lines_from_the_dead_position() {
+        let mut held = Held {
+            avatar: Some(sitting()),
+            ..Held::default()
+        };
+        assert_eq!(caller_position(ClientPhase::Dead, &held), POS_DEAD);
+        assert_eq!(caller_position(ClientPhase::Game, &held), POS_SITTING);
+        held.avatar = None;
+        assert_eq!(caller_position(ClientPhase::Dead, &held), POS_DEAD);
+        assert_eq!(caller_position(ClientPhase::Game, &held), POS_STANDING);
+    }
+
+    /// The save writes the experience the world holds, so the death penalty's loss is kept
+    /// rather than the experience the character was loaded with.
+    #[test]
+    fn the_held_character_takes_the_experience_the_world_left() {
+        let character = db::players::Character {
+            id: 1,
+            slot: 0,
+            name: "Alice".to_owned(),
+            empire: 1,
+            job: 0,
+            level: 10,
+            exp: 1_000,
+            conqueror_level: 0,
+            st: 6,
+            ht: 4,
+            dx: 3,
+            iq: 3,
+            hp: 500,
+            sp: 100,
+            stamina: 800,
+            gold: 0,
+            conqueror_exp: 0,
+            sungma_str: 0,
+            sungma_hp: 0,
+            sungma_move: 0,
+            sungma_immune: 0,
+            voice: 0,
+            part_base: 0,
+            main_part: 0,
+            hair_part: 0,
+            sash_part: 0,
+            x: 1,
+            y: 2,
+            skill_group: 0,
+            playtime_minutes: 0,
+            change_name: false,
+        };
+        let mut points = load_points(&character, 41);
+        assert!(points.lose_exp(100, 120).is_some(), "the death penalty");
+        let mut held = Held {
+            character: Some(character),
+            ..Held::default()
+        };
+        hold_points(&mut held, points);
+        assert_eq!(held.character.as_ref().map(|held| held.exp), Some(900));
     }
 
     /// Boot hands the world what its regens spawn from: an ore vein boot stood ends within 15

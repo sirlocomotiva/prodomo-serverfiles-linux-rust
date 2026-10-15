@@ -89,6 +89,12 @@ impl SyncPositionPorts for WorldSync<'_> {
                 .world
                 .set_npc_sync_owner(actor, self.actor, victim, self.now);
         }
+        // `battle_is_attackable` (`G/battle.cpp:99-152`): a dead victim (`:102`), then a stunned
+        // or dead claimer (`:122`), is refused with a `DAMAGE_BLOCK` to both.
+        if self.world.is_dead(victim.vid.raw()) || self.world.is_down(actor.raw()) {
+            self.world.block_pc_claim(victim.vid, actor);
+            return false;
+        }
         let state = self
             .world
             .bodies
@@ -201,6 +207,7 @@ mod tests {
 
     use common::vid::Vid;
     use protocol::cg_variable::{SyncPositionElement, SyncPositionPacket};
+    use protocol::gc_nested::GcDamageInfo;
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::super::fixtures::{a_world, enter, TestClock};
@@ -210,6 +217,10 @@ mod tests {
     };
 
     const HEADER_GC_OWNERSHIP: u8 = 0x3e;
+
+    fn drained(inbox: &mut UnboundedReceiver<Vec<u8>>) -> Vec<Vec<u8>> {
+        std::iter::from_fn(|| inbox.try_recv().ok()).collect()
+    }
 
     fn headers(inbox: &mut UnboundedReceiver<Vec<u8>>) -> Vec<u8> {
         std::iter::from_fn(|| inbox.try_recv().ok())
@@ -229,6 +240,60 @@ mod tests {
         SyncPositionPacket {
             declared_size: SYNC_POSITION_PREFIX_SIZE + 12,
             elements: vec![SyncPositionElement { vid, x, y }],
+        }
+    }
+
+    /// `battle_is_attackable` for a player victim (`G/battle.cpp:99-152`): a dead victim, or a
+    /// stunned or dead claimer, is refused with a `DAMAGE_BLOCK` to both and accepts nothing;
+    /// a stunned victim is claimed.
+    #[test]
+    fn a_corpse_cannot_be_synced_and_a_down_claimer_claims_nothing() {
+        let block = |victim: u32| {
+            let mut record = Vec::new();
+            GcDamageInfo {
+                header: GcDamageInfo::header(),
+                vid: victim,
+                flag: super::super::fight::DAMAGE_BLOCK,
+                damage: 0,
+            }
+            .encode_into(&mut record);
+            record
+        };
+        // (who is struck down, how many lethal hits, whether the claim stands)
+        for (down, hits, accepted) in [(8, 1, true), (8, 2, false), (7, 1, false), (7, 2, false)] {
+            let clock = TestClock::default();
+            let mut world = a_world(&clock);
+            let mut claimer = enter(&mut world, 7, (3200, 3200), 820);
+            let mut victim = enter(&mut world, 8, (3300, 3200), 820);
+            let struck = Vid::new(down);
+            world.start_pc_recovery(struck);
+            for _ in 0..hits {
+                let _died = world.damage_pc(None, struck, i32::MAX);
+            }
+            let (_, _) = (drained(&mut claimer), drained(&mut victim));
+            clock.set(1000);
+
+            let result = world.sync_positions(Vid::new(7), &one_element(8, 3310, 3200));
+            let taken = usize::from(accepted);
+            let case = format!("{down} down by {hits}");
+            assert_eq!(
+                result.map(|r| r.accepted_elements.len()),
+                Some(taken),
+                "{case}"
+            );
+            if accepted {
+                assert_eq!(
+                    world.bodies[&Vid::new(8)].sync.owner,
+                    Some(Vid::new(7)),
+                    "{case}"
+                );
+            } else {
+                assert_eq!(drained(&mut victim), vec![block(8)], "{case}");
+                assert_eq!(drained(&mut claimer), vec![block(8)], "{case}");
+                assert_eq!(world.bodies[&Vid::new(8)].sync.owner, None, "{case}");
+                let spot = world.spot_of(8).unwrap();
+                assert_eq!((spot.x, spot.y), (3300, 3200), "{case}");
+            }
         }
     }
 

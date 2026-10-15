@@ -52,7 +52,7 @@ use tracing::{debug, warn};
 use crate::client_live::LiveClock;
 use crate::client_registry::{ChannelClients, ClientOutbox};
 use crate::game_loop::PulseProcessor;
-use crate::game_loop_messages::{GameCommand, GroundPlace, Kept, Loaded, Shown};
+use crate::game_loop_messages::{Departure, GameCommand, GroundPlace, Kept, Loaded, Shown};
 use crate::item_grant::{grant_item, GrantOutcome, GrantRefusal, GrantRequest};
 use crate::item_move::{belt_grade, move_facts, MoveItemRefused, MovedItems, Mover, StoreOrder};
 use crate::quickslot::{QuickslotAnswer, QuickslotStep};
@@ -61,6 +61,7 @@ use crate::sync_position::distance_approx;
 use world::character::{add_from_client, sync_quickslots};
 
 mod affect;
+mod death;
 mod fight;
 #[cfg(test)]
 mod fixtures;
@@ -435,6 +436,13 @@ pub struct GameState {
     /// What each non-player keeps of its fight: its killer, its owner and its events. See
     /// [`fight`].
     npc_combat: HashMap<u32, fight::NpcCombat>,
+    /// What each player keeps of its fight: its stun, its death, its killer and its events. See
+    /// [`death`].
+    pc_combat: HashMap<u32, death::PcCombat>,
+    /// `gPlayerMaxLevel`, which the death penalty's experience loss reads.
+    max_level: i32,
+    /// Where a town restart sends a player. See [`death`].
+    recall: death::Recall,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -516,6 +524,9 @@ impl GameState {
             regens: regen::Regens::default(),
             minds: mob_ai::Minds::default(),
             npc_combat: HashMap::new(),
+            pc_combat: HashMap::new(),
+            max_level: DEFAULT_MAX_LEVEL,
+            recall: death::Recall::default(),
         }
     }
 
@@ -786,23 +797,17 @@ impl GameState {
                     );
                 }
             }
-            GameCommand::LeaveWorld { vid, reply } => self.answer_leave(vid, reply),
+            GameCommand::LeaveWorld {
+                vid,
+                departure,
+                reply,
+            } => self.answer_leave(vid, departure, reply),
             GameCommand::Quickslot { vid, step, reply } => {
                 if reply.send(self.quickslot(vid, step)).is_err() {
                     debug!(?vid, "nobody was left to hear a quickslot answer");
                 }
             }
-            GameCommand::KeptOf { vid, reply } => {
-                let place = self.kept_place(vid);
-                let kept = self.characters.find_by_vid(vid).ok().map(|character| Kept {
-                    points: character.points().cloned(),
-                    quickslots: character.quickslots().clone(),
-                    place,
-                });
-                if reply.send(kept).is_err() {
-                    debug!(?vid, "nobody was left to hear a character's points");
-                }
-            }
+            GameCommand::KeptOf { vid, reply } => self.answer_kept(vid, reply),
             command @ (GameCommand::MoveItem { .. }
             | GameCommand::UseItem { .. }
             | GameCommand::Shop { .. }
@@ -818,6 +823,17 @@ impl GameState {
             command @ (GameCommand::Target { .. } | GameCommand::Attack { .. }) => {
                 self.apply_pick(command);
             }
+            GameCommand::Restart {
+                vid,
+                kind,
+                mover,
+                reply,
+            } => {
+                let answer = self.restart(vid, kind, mover);
+                if reply.send(answer).is_err() {
+                    debug!(?vid, "nobody was left to hear a restart's answer");
+                }
+            }
             GameCommand::Stop => {
                 // The loop handles `Stop` itself, before a command ever reaches a
                 // processor. Reaching here would mean the loop and the state
@@ -827,6 +843,20 @@ impl GameState {
             }
         }
         self.broadcast_targets();
+    }
+
+    /// Tell the caller what a save of the character under `vid` writes: its points, its
+    /// quickslots and where its body stands, or `None` when it is not online.
+    fn answer_kept(&self, vid: common::vid::Vid, reply: oneshot::Sender<Option<Kept>>) {
+        let place = self.kept_place(vid);
+        let kept = self.characters.find_by_vid(vid).ok().map(|character| Kept {
+            points: character.points().cloned(),
+            quickslots: character.quickslots().clone(),
+            place,
+        });
+        if reply.send(kept).is_err() {
+            debug!(?vid, "nobody was left to hear a character's points");
+        }
     }
 
     /// Take a granted item back and tell the caller whether it came out.
@@ -953,6 +983,7 @@ impl GameState {
         let (records, update) = match loaded.show {
             Some(show) => {
                 let records = self.place_body(vid, show.place, show.card);
+                self.start_pc_recovery(vid);
                 (records, self.enter_revive_invisible(vid))
             }
             None => (Vec::new(), None),
@@ -1042,8 +1073,15 @@ impl GameState {
     /// rather than treated as fatal because a disconnect that finds nobody is
     /// already ending.
     pub fn leave_world(&mut self, vid: common::vid::Vid) -> Option<Kept> {
+        self.leave_world_by(vid, Departure::Disconnect)
+    }
+
+    /// As [`GameState::leave_world`], for a character that leaves by `departure`. A player
+    /// stunned or dead stands first with 50 hit points (B5), and its fight's events end; a
+    /// disconnect also tells its view it has no owner, which a warp leaves to the map it left.
+    pub fn leave_world_by(&mut self, vid: common::vid::Vid, departure: Departure) -> Option<Kept> {
         self.cancel_trade(vid);
-        self.release_owned(vid);
+        self.leave_fight(vid, departure);
         self.clear_target(vid);
         let _outbox = self.outboxes.remove(&vid);
         let _event = self.affect_events.remove(&vid);
@@ -1147,8 +1185,13 @@ impl GameState {
     }
 
     /// Answer a `LeaveWorld`: the character leaves, and the descriptor is handed its points.
-    fn answer_leave(&mut self, vid: common::vid::Vid, reply: oneshot::Sender<Option<Kept>>) {
-        let removed = self.leave_world(vid);
+    fn answer_leave(
+        &mut self,
+        vid: common::vid::Vid,
+        departure: Departure,
+        reply: oneshot::Sender<Option<Kept>>,
+    ) {
+        let removed = self.leave_world_by(vid, departure);
         // A leave that finds nobody is a double leave, not a failure: the
         // descriptor is ending and the world already agrees the character is
         // gone. Logging it at warn would make an ordinary reconnect noisy.
@@ -1178,6 +1221,9 @@ impl GameState {
         at: protocol::item_pos::ItemPos,
         actor: Mover,
     ) -> Result<MovedItems, MoveItemRefused> {
+        if self.is_down(vid.raw()) {
+            return Err(MoveItemRefused::Refused(MoveRefused::UsedWhileDown));
+        }
         let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
             use_item(items, at, rules, gear)
         })?;
@@ -1327,6 +1373,9 @@ impl GameState {
         place: GroundPlace,
         actor: Mover,
     ) -> Result<MovedItems, MoveItemRefused> {
+        if self.is_dead(vid.raw()) {
+            return Err(MoveItemRefused::Refused(MoveRefused::DroppedWhileDead));
+        }
         let owner_id = self
             .characters
             .find_by_vid(vid)
@@ -1403,6 +1452,9 @@ impl GameState {
         place: GroundPlace,
         actor: Mover,
     ) -> Result<MovedItems, MoveItemRefused> {
+        if self.is_dead(vid.raw()) {
+            return Err(MoveItemRefused::Refused(MoveRefused::PickedUpWhileDead));
+        }
         let lying = self
             .ground
             .get(&ground)
@@ -1500,6 +1552,7 @@ impl GameState {
             recently_fought: actor.recently_fought || self.attacked_recently(vid),
             pk_mode: self.pk_mode_of(vid.raw()),
             affect_flags: self.affect_flags_of(vid),
+            dead: self.is_dead(vid.raw()),
             ..actor
         };
         let character = self
@@ -1587,6 +1640,9 @@ const DEFAULT_DROP_LIFETIME_SECS: i32 = 300;
 
 /// `VIEW_RANGE`'s default (`G/config.cpp:123`), which the configured `game.view_range` replaces.
 const DEFAULT_VIEW_RANGE: i32 = 5000;
+
+/// `gPlayerMaxLevel`'s default (`G/config.cpp:143`), the configured `game.max_level`'s too.
+const DEFAULT_MAX_LEVEL: i32 = 99;
 
 /// The view's radius for `view_range`: `VIEW_RANGE + VIEW_BONUS_RANGE` (`G/entity_view.cpp:94`).
 fn view_radius_of(view_range: i32) -> i64 {
@@ -1883,6 +1939,32 @@ mod tests {
         // A descriptor that never entered the game still runs the close path, so a
         // double leave is reachable and must not be a panic.
         assert!(state.leave_world(Vid::new(999)).is_none());
+    }
+
+    /// The `LeaveWorld` command leaves by the descriptor's departure: a disconnect tells the
+    /// view the leaver has no owner (`ClearSync`, `G/char.cpp:5568-5575`), and a warp, which
+    /// takes the body out of its sectree first (`:6751-6752`), tells it nothing of that.
+    #[test]
+    fn a_leave_command_releases_the_leavers_own_claim_at_a_disconnect_only() {
+        for (departure, released) in [(Departure::Warp, false), (Departure::Disconnect, true)] {
+            let clock = fixtures::TestClock::default();
+            let mut world = fixtures::a_world(&clock);
+            let _leaver = fixtures::enter(&mut world, 7, (3200, 3200), 820);
+            let mut viewer = fixtures::enter(&mut world, 8, (3300, 3200), 820);
+            let _seen = drained(&mut viewer);
+
+            let (reply, answer) = oneshot::channel();
+            world.apply(GameCommand::LeaveWorld {
+                vid: Vid::new(7),
+                departure,
+                reply,
+            });
+            assert!(answer.blocking_recv().unwrap().is_some(), "{departure:?}");
+            let release = crate::sync_position::ownership_record(Vid::new(0), Vid::new(7));
+            let heard = drained(&mut viewer);
+            assert_eq!(heard.contains(&release), released, "{departure:?}");
+            assert!(!heard.is_empty(), "the body's removal is seen");
+        }
     }
 
     #[test]
@@ -2451,6 +2533,7 @@ mod tests {
             language: 1,
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             affect_flags: [0; 2],
+            dead: false,
         }
     }
 
@@ -3338,6 +3421,7 @@ mod tests {
         let mut points = Points::load(&world::character::PointsRow {
             race: 0,
             level: 10,
+            exp: 0,
             conqueror_level: 0,
             st: 6,
             ht: 4,

@@ -2,6 +2,7 @@
 
 mod apply;
 mod combat;
+mod death_penalty;
 mod dice;
 mod equip;
 mod equipment;
@@ -31,10 +32,11 @@ pub use apply::{
 };
 pub use combat::{
     attack_rating, calc_melee_damage, melee_reach, mob_attack_range, pk_eligibility, strike_npc,
-    AttackRatingInput, Damage, DamageOutcome, HitEvent, PkActor, PkDenial, PkEligibility, PkMode,
-    Strike, Striker, Struck, Vitality, DAMAGE_CRITICAL, DAMAGE_NORMAL, DAMAGE_PENETRATE,
-    FLY_HP_SMALL, FLY_SP_SMALL, SE_CRITICAL, SE_PENETRATE,
+    AttackRatingInput, HitEvent, PkActor, PkDenial, PkEligibility, PkMode, Strike, Striker, Struck,
+    DAMAGE_CRITICAL, DAMAGE_NORMAL, DAMAGE_PENETRATE, FLY_HP_SMALL, FLY_SP_SMALL, SE_CRITICAL,
+    SE_PENETRATE,
 };
+pub use death_penalty::{death_penalty_loss, exp_loss_percent};
 pub use dice::{number, Dice, Pcg32};
 pub use equip::{
     find_equip_cell, is_equipable, is_female, look_of, use_item, wear_pos, worn_system_not_ported,

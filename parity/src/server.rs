@@ -14,6 +14,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How long a scenario waits for the server to log a line.
 pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a scenario waits for a new server to open its gate. A debug build decodes the
+/// hosted maps' `server_attr` and stands every monster before it accepts clients, which took
+/// 19 to 25 seconds with eight servers starting at once (ledger 229k). A start that missed
+/// [`PROCESS_TIMEOUT`] failed its scenario, and the scenarios of the next round then started
+/// their servers together and missed it too, to the end of the run.
+pub const START_TIMEOUT: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 const LISTENING: &str = "Listening for ";
@@ -65,7 +71,7 @@ impl Server {
     /// # Panics
     ///
     /// Panics when the process cannot start, exits early, or does not open its gate within
-    /// [`PROCESS_TIMEOUT`]; a scenario cannot continue without a server.
+    /// [`START_TIMEOUT`]; a scenario cannot continue without a server.
     #[must_use]
     pub fn start(binary: &Path, store_url: &str) -> Self {
         Self::start_with(binary, store_url, &default_channels())
@@ -208,7 +214,7 @@ impl Server {
             lines: forward_lines(stdout),
             console: Vec::new(),
         };
-        server.wait_for(ACCEPTING);
+        server.wait_within(ACCEPTING, START_TIMEOUT);
         server
     }
 
@@ -264,10 +270,15 @@ impl Server {
     ///
     /// Panics when the process exits first or [`PROCESS_TIMEOUT`] passes.
     pub fn wait_for(&mut self, needle: &str) {
+        self.wait_within(needle, PROCESS_TIMEOUT);
+    }
+
+    /// [`Self::wait_for`] with `timeout` in place of [`PROCESS_TIMEOUT`].
+    fn wait_within(&mut self, needle: &str, timeout: Duration) {
         if self.logged(needle) {
             return;
         }
-        let deadline = Instant::now() + PROCESS_TIMEOUT;
+        let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = self.child.try_wait().expect("status should be readable") {
                 self.console.extend(self.lines.try_iter());

@@ -1,7 +1,6 @@
 use common::item_slots::INVENTORY_MAX_EXTENDED;
 use common::{vid::Vid, CharacterId};
 
-use super::combat::{Damage, DamageOutcome, Vitality};
 use super::items::CharacterItems;
 use super::points::Points;
 use super::quickslot::Quickslots;
@@ -26,7 +25,6 @@ pub struct Character {
     state: CharacterState,
     posture: Posture,
     activity: Activity,
-    vitality: Vitality,
     next_state_pulse: u64,
     destruction_requested: bool,
     items: CharacterItems,
@@ -47,7 +45,6 @@ impl Character {
             state: CharacterState::new(),
             posture: Posture::Standing,
             activity: Activity::None,
-            vitality: Vitality::new(0, 0),
             next_state_pulse: 0,
             destruction_requested: false,
             items: CharacterItems::new(),
@@ -67,7 +64,6 @@ impl Character {
             state: CharacterState::new(),
             posture: Posture::Standing,
             activity: Activity::None,
-            vitality: Vitality::new(0, 0),
             next_state_pulse: 0,
             destruction_requested: false,
             items: CharacterItems::new(),
@@ -121,29 +117,6 @@ impl Character {
     /// Changes the independent runtime activity.
     pub const fn set_activity(&mut self, activity: Activity) {
         self.activity = activity;
-    }
-
-    /// Returns current and maximum hit points.
-    pub const fn vitality(&self) -> Vitality {
-        self.vitality
-    }
-
-    /// Replaces current and maximum hit points without changing other Character state.
-    pub const fn set_vitality(&mut self, vitality: Vitality) {
-        self.vitality = vitality;
-    }
-
-    /// Applies damage and enters dead posture at the zero-hit-point boundary.
-    pub const fn apply_damage(&mut self, damage: Damage) -> DamageOutcome {
-        if matches!(self.posture, Posture::Dead) {
-            return DamageOutcome::AlreadyDead;
-        }
-        let (vitality, outcome) = self.vitality.take(damage);
-        self.vitality = vitality;
-        if matches!(outcome, DamageOutcome::Killed { .. }) {
-            self.posture = Posture::Dead;
-        }
-        outcome
     }
 
     /// Changes the liveness posture independently from the core FSM.

@@ -15,6 +15,7 @@
 
 use common::point_slot as point;
 use common::vid::Vid;
+use protocol::gc_nested::{GcAffectAdd, GcAffectElement};
 use protocol::gc_vid::{GcHeaderAndDwordAndByte, HEADER_GC_AFFECT_REMOVE};
 use world::character::{is_recovering, update_recovery};
 
@@ -114,10 +115,29 @@ fn take_affects_of_kind(affects: &mut Vec<Affect>, kind: u32) -> Vec<Affect> {
 }
 
 /// The `GC_AFFECT_REMOVE` of one affect: its type, then `bApplyOn` (`G/packet.h`).
-fn affect_remove_frame(affect: &Affect) -> Vec<u8> {
+pub(super) fn affect_remove_frame(affect: &Affect) -> Vec<u8> {
     let mut frame = Vec::new();
     GcHeaderAndDwordAndByte::new(HEADER_GC_AFFECT_REMOVE, affect.kind, affect.apply_on)
         .encode_into(&mut frame);
+    frame
+}
+
+/// The `GC_AFFECT_ADD` of one affect (`SendAffectAddPacket`, `G/char_affect.cpp:15-34`): the
+/// duration is the ticks it has left, and no affect here has a value or a spell-point cost.
+pub(super) fn affect_add_frame(affect: &Affect) -> Vec<u8> {
+    let mut frame = Vec::new();
+    GcAffectAdd {
+        header: GcAffectAdd::header(),
+        element: GcAffectElement {
+            affect_type: affect.kind,
+            apply_on: affect.apply_on,
+            apply_value: 0,
+            flag: affect.flag,
+            duration: affect.remaining,
+            sp_cost: 0,
+        },
+    }
+    .encode_into(&mut frame);
     frame
 }
 
@@ -165,6 +185,7 @@ impl GameState {
             language: body.card.language,
             pk_mode: body.card.pk_mode,
             affect_flags: flags,
+            dead: self.is_dead(vid.raw()),
         };
         let mut frame = Vec::new();
         crate::item_move::character_update(vid.raw(), &look, mover).encode_into(&mut frame);

@@ -253,6 +253,20 @@ impl GameState {
         let _storage = self.storages.remove(&vid);
     }
 
+    /// `CloseSafebox` at a death (`G/char_battle.cpp:1648`): the safebox closes as the client's
+    /// own close does, with its `CloseSafebox` command. The mall stays open.
+    pub(super) fn close_safebox_on_death(&mut self, vid: Vid, mover: Mover) {
+        let pulse = self.last_pulse;
+        let Some(storage) = self.storages.get_mut(&vid) else {
+            return;
+        };
+        if let SafeboxAnswer::Sent(records) = close(storage, pulse, false, mover, &self.locale) {
+            for record in records {
+                let _sent = self.write_to_client(vid, record);
+            }
+        }
+    }
+
     /// A checkin (`mall` is `None`) or a checkout between `cell` and `safe_pos`.
     fn carry(
         &mut self,
@@ -485,6 +499,7 @@ mod tests {
             language: 1,
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             affect_flags: [0; 2],
+            dead: false,
         }
     }
 

@@ -90,9 +90,15 @@ pub(super) fn open_cells() -> Arc<HostedCells> {
 
 /// A level 10 warrior's computed points on [`PLACE`], with `stamina`.
 pub(super) fn points(stamina: i32) -> Points {
+    points_at(10, stamina, 0)
+}
+
+/// A warrior's computed points on [`PLACE`] at `level`, with `stamina` and `exp`.
+pub(super) fn points_at(level: u8, stamina: i32, exp: i64) -> Points {
     let mut points = Points::load(&PointsRow {
         race: 0,
-        level: 10,
+        level,
+        exp,
         conqueror_level: 0,
         st: 6,
         ht: 4,

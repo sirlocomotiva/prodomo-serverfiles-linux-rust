@@ -118,6 +118,9 @@ pub const PHASE_LOADING: u8 = 4;
 /// The legacy `PHASE_GAME` byte (`EPhase`, `G/packet.h:797`).
 pub const PHASE_GAME: u8 = 5;
 
+/// The legacy `PHASE_DEAD` byte (`EPhase`, `G/packet.h:798`), which `Dead` sends a player.
+pub const PHASE_DEAD: u8 = 6;
+
 /// `AffectType` 215 (`G/affect.h:40`), the affect `ReviveInvisible` adds.
 pub const AFFECT_REVIVE_INVISIBLE: u32 = 215;
 
@@ -395,6 +398,7 @@ pub fn load_points(character: &Character, map_index: i32) -> Points {
     Points::load(&PointsRow {
         race: character.job,
         level: character.level,
+        exp: character.exp,
         conqueror_level: character.conqueror_level,
         st: character.st,
         ht: character.ht,
@@ -597,17 +601,18 @@ pub struct InsertAt {
 /// The two speeds are `GetLimitPoint(POINT_MOV_SPEED)` and `GetLimitPoint(POINT_ATT_SPEED)`
 /// (`G/char.cpp:1089-1091`), which the limit holds to 0..200 and 0..170, so each fits the
 /// record's byte.
-#[must_use]
 ///
-/// `flags` are the two affect words the character has now (`dwAffectFlag`), which the insert
-/// carries as the view's record of its affects.
+/// `insert` holds the two affect words the character has now (`dwAffectFlag`), which the
+/// insert carries as the view's record of its affects, and whether it is dead.
+#[must_use]
 pub fn character_add(
     card: &PcCard,
     state: &Points,
     vid: u32,
     at: InsertAt,
-    flags: [u32; 2],
+    insert: impl Into<InsertState>,
 ) -> GcCharacterAdd {
+    let insert = insert.into();
     GcCharacterAdd::new(
         vid,
         at.angle,
@@ -618,9 +623,40 @@ pub fn character_add(
         u16::from(card.job),
         speed_byte(state.limit_point(point::POINT_MOV_SPEED)),
         speed_byte(state.limit_point(point::POINT_ATT_SPEED)),
-        0,
-        flags,
+        state_flag(insert.dead),
+        insert.flags,
     )
+}
+
+/// `ADD_CHARACTER_STATE_DEAD` (`G/packet.h:862`): the bit of `m_bAddChrState` a death sets and a
+/// restart clears (`G/char.cpp:1440-1447`).
+pub const ADD_CHARACTER_STATE_DEAD: u8 = 1;
+
+/// `m_bAddChrState`, which an insert (`G/char.cpp:1095`) and an update (`:1310`) carry as
+/// `bStateFlag`. The dead bit is the one this build has; the spawn, killer and party bits come
+/// with the systems that set them.
+#[must_use]
+pub const fn state_flag(dead: bool) -> u8 {
+    if dead {
+        ADD_CHARACTER_STATE_DEAD
+    } else {
+        0
+    }
+}
+
+/// What a player's insert carries of its state besides the body and the points.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InsertState {
+    /// The two affect words (`dwAffectFlag`).
+    pub flags: [u32; 2],
+    /// Whether the character is dead, which sets [`ADD_CHARACTER_STATE_DEAD`].
+    pub dead: bool,
+}
+
+impl From<[u32; 2]> for InsertState {
+    fn from(flags: [u32; 2]) -> Self {
+        Self { flags, dead: false }
+    }
 }
 
 /// A limited speed as the record's byte. [`Points::limit_point`] holds both speeds inside a
@@ -1368,6 +1404,13 @@ mod tests {
         assert_eq!(slots[point::POINT_SUNGMA_IMMUNE], 24);
     }
 
+    /// The engine a login loads holds the stored experience, which a death penalty takes from
+    /// and the save writes back.
+    #[test]
+    fn the_loaded_points_hold_the_stored_exp() {
+        assert_eq!(hero_points().exp(), hero().exp);
+    }
+
     /// The three base speeds are 100, which is `SetPoint` in `CHARACTER::Init` plus the haste
     /// bonus that is 0 with no party.
     #[test]
@@ -1595,6 +1638,14 @@ mod tests {
         assert_eq!(bytes[25], BASE_SPEED, "bAttackSpeed");
         assert_eq!(bytes[26], 0, "bStateFlag");
         assert_eq!(&bytes[27..35], &[0u8; 8], "the two affect-flag words");
+    }
+
+    /// `ADD_CHARACTER_STATE_DEAD` is `1 << 0` (`G/packet.h:862`): the state flag of a dead
+    /// character is 1, and of a living one 0.
+    #[test]
+    fn the_state_flag_is_1_for_the_dead_and_0_for_the_living() {
+        assert_eq!(state_flag(true), 1);
+        assert_eq!(state_flag(false), 0);
     }
 
     /// The summary record is 70 packed bytes: 1 header, 4 vid, 25 name, 12 parts, then the

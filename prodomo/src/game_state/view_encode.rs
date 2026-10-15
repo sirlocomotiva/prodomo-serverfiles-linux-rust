@@ -23,7 +23,7 @@ use super::view::{Effect, EntityKey, Spot};
 use super::GameState;
 use crate::game_loop_messages::RelayScope;
 use crate::loading_phase::{
-    character_add, character_additional, npc_add_at, npc_additional, InsertAt,
+    character_add, character_additional, npc_add_at, npc_additional, InsertAt, InsertState,
 };
 use crate::movement::FUNC_MOVE;
 
@@ -100,8 +100,9 @@ pub(super) fn encode_pc_insert(
     points: &Points,
     recipient: Option<(u32, bool)>,
     now: u32,
-    flags: [u32; 2],
+    insert: impl Into<InsertState>,
 ) -> Encoded {
+    let insert = insert.into();
     let at = InsertAt {
         angle: body.rotation,
         x: spot.x,
@@ -110,7 +111,7 @@ pub(super) fn encode_pc_insert(
     };
     let (at, i_dur) = mid_move(at, body.motion, now);
     let mut to_records = vec![
-        framed(|out| character_add(&body.card, points, vid, at, flags).encode_into(out)),
+        framed(|out| character_add(&body.card, points, vid, at, insert).encode_into(out)),
         framed(|out| character_additional(&body.card, points, vid).encode_into(out)),
     ];
     to_records.extend(move_records(
@@ -291,7 +292,10 @@ impl GameState {
                     points,
                     Some((to, self.walks(to))),
                     self.clock.now(),
-                    self.affect_flags_of(Vid::new(of)),
+                    InsertState {
+                        flags: self.affect_flags_of(Vid::new(of)),
+                        dead: self.is_dead(of),
+                    },
                 );
                 for record in encoded.to_records {
                     self.send_to(to, record, reply);

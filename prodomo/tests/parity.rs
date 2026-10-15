@@ -1876,6 +1876,17 @@ impl Keyed {
         assert_eq!(self.read_game(), removal, "the removal of {vid}");
     }
 
+    /// Read what a viewer is sent when the player `leaver` disconnects: its own release,
+    /// `GC_OWNERSHIP{0, leaver}` (`ClearSync`, `G/char.cpp:5568-5575`), then its removal.
+    fn sees_disconnect(&mut self, leaver: u32) {
+        assert_eq!(
+            self.read_game(),
+            ownership_of(0, leaver),
+            "the release of {leaver}"
+        );
+        self.sees_leave(leaver);
+    }
+
     /// Read a refused move's re-encode up to the chat line it is answered with: the VIDs of
     /// its inserts, then the line. Any other record first fails.
     fn reencode_then_line(&mut self) -> (Vec<u32>, Vec<u8>) {
@@ -2280,22 +2291,37 @@ impl Keyed {
     }
 
     /// Assert that nothing arrives within [`QUIET_WINDOW`] but what an NPC does on its own
-    /// ([`is_npc_chatter`]), and that the connection stays open.
+    /// ([`is_npc_chatter`]) and the end of a revive timer this client saw start
+    /// ([`Keyed::timer_end`]), and that the connection stays open.
+    ///
+    /// The timer runs on the clock, not on the scenario, so on a slow host a neighbour's five
+    /// seconds can end inside the window: a CPU-throttled run saw it end in the check after a
+    /// later login (ledger 229k).
     fn still(&mut self, note: &str) {
         self.still_for(note, QUIET_WINDOW);
     }
 
     /// [`Keyed::still`] over a `window` of its own.
     fn still_for(&mut self, note: &str, window: Duration) {
-        let (records, quiet) = self.drain_wire(window, |header| {
-            panic!("a record nobody accounted for ({note}): header {header}")
+        let (records, quiet) = self.drain_wire(window, |header| match header {
+            GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+            GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
+            _ => panic!("a record nobody accounted for ({note}): header {header}"),
         });
         assert_eq!(quiet, Quiet::Open, "the client is still connected ({note})");
-        let others: Vec<&Vec<u8>> = records
-            .iter()
-            .filter(|record| !is_npc_chatter(record))
+        let others: Vec<Vec<u8>> = records
+            .into_iter()
+            .filter(|record| !is_npc_chatter(record) && !self.timer_end(record))
             .collect();
         assert!(others.is_empty(), "{note}: {others:02x?}");
+    }
+
+    /// [`Keyed::timer_record`] for a timer's end only: the revive's `GC_AFFECT_REMOVE`, or the
+    /// look update that clears the flags of a VID whose timer this client saw start. A look
+    /// update that starts a timer is not an end.
+    fn timer_end(&mut self, record: &[u8]) -> bool {
+        let starts = record[0] == GC_CHARACTER_UPDATE && record[23] & 0x08 != 0;
+        !starts && self.timer_record(record)
     }
 
     /// [`Keyed::drain_game`] with every record as it came, an NPC's own included, and none
@@ -3463,6 +3489,11 @@ fn a_warp_record((x, y): (i32, i32), port: u16) -> Vec<u8> {
 /// map 3 there. A `CG_WARP` then finds no warp
 /// pending and is consumed (`WarpEnd`, `:6800-6801`).
 ///
+/// Yankee watches from out of the warp's reach and is sent Alpha's removal alone: `WarpSet`
+/// takes Alpha out of its sectree first (`:6749-6755`), so the release of Alpha's claim that
+/// its later `Disconnect` sends (`ClearSync`) reaches nobody, while a disconnect in view sends
+/// it to every viewer ([`Keyed::sees_disconnect`]).
+///
 /// The old descriptor acts no more: a shout it is sent reaches nobody, and its close writes
 /// nothing, so the position the new descriptor saves is the one the row keeps.
 ///
@@ -3475,12 +3506,20 @@ fn a_warp_npc_sends_its_neighbour_away_and_the_client_comes_back_at_the_target()
     };
     let mut server = Server::start(binary(), database.url());
     create_account(&server, "alice");
+    create_account(&server, "bob");
     add_characters(&database);
-    // 100 north of the warp: `DISTANCE_APPROX(0, 100)` is 96, within 300.
+    // 100 north of the warp: `DISTANCE_APPROX(0, 100)` is 96, within 300. Yankee is 800 north,
+    // where it gives 768.
     sql(
         &database,
         "UPDATE player SET x = 450100, y = 903400 WHERE name = 'Alpha'",
     );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         450100, 904100 FROM account WHERE login = 'bob'",
+    );
+    let (mut bob, _yankee) = enter_world(&server, b"bob", 0);
 
     let (_auth, key) = login_key(&server, b"alice");
     let mut alice = Keyed::channel(server.channel(1));
@@ -3492,6 +3531,7 @@ fn a_warp_npc_sends_its_neighbour_away_and_the_client_comes_back_at_the_target()
         (450_100, 903_400),
         "Alpha enters beside the warp"
     );
+    bob.sees_arrive(alpha.id, false);
 
     // Within one fire, the own character's removal and then the warp. The row was written first.
     let mut removed = vec![GC_CHARACTER_DEL];
@@ -3499,6 +3539,8 @@ fn a_warp_npc_sends_its_neighbour_away_and_the_client_comes_back_at_the_target()
     assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
     let port = server.channel(1).port();
     assert_eq!(alice.read_game(), a_warp_record(A1_WARP_TARGET, port));
+    bob.sees_leave(alpha.id);
+    bob.quiet("no release of Alpha's claim");
     check(
         &database,
         "(SELECT x FROM player WHERE name = 'Alpha') = 400200 AND (SELECT y FROM player WHERE \
@@ -4453,9 +4495,11 @@ fn a_talking_line_reaches_the_map_including_its_sender() {
     yankee.quiet("exactly two more records");
 
     // `if (buflen > 1 && *buf == '/')` is checked before the counter, so a slash line costs
-    // nothing and goes to the interpreter instead. `do_restart` is not ported, so it answers
-    // nothing.
-    alice.unanswered(&client_chat(CHAT_TALKING, b"/restart_here"));
+    // nothing and goes to the interpreter instead. `do_restart` tells a living player only to
+    // close the restart window, and the line is not relayed (`G/cmd_general.cpp:528-533`).
+    alice.send_record(&client_chat(CHAT_TALKING, b"/restart_here"));
+    assert_eq!(alice.read_game(), close_restart_window());
+    yankee.quiet("a command line is not relayed");
 
     // One write holding a talking line and then a party line with no party: legacy writes the
     // talking line to the map while it reads it, before it reads the party line, so the sender
@@ -5561,7 +5605,7 @@ fn a_leaving_player_is_removed_from_its_viewers_only() {
 
     drop(alice);
     server.wait_for("Character left the world");
-    yankee.sees_leave(alpha.id);
+    yankee.sees_disconnect(alpha.id);
     yankee.quiet("one removal");
     charlie.quiet("Charlie never saw Alpha");
 }
@@ -8032,6 +8076,11 @@ fn info_to_alpha(text: &[u8]) -> Vec<u8> {
     chat_packet(prodomo::chat::CHAT_INFO, 1, text)
 }
 
+/// The `CloseRestartWindow` command line to a character of empire 1.
+fn close_restart_window() -> Vec<u8> {
+    chat_packet(prodomo::chat::CHAT_COMMAND, 1, b"CloseRestartWindow")
+}
+
 /// Alpha checks the item at cell 5 in at safebox cell 6, then moves it to cell 11. The
 /// inventory cell is cleared before its slot is deleted (`G/input_main.cpp:2357-2360`), the
 /// safebox shows the item, and the row is the account's.
@@ -8971,10 +9020,130 @@ fn a_click_targets_a_monster_and_a_player_and_a_leave_clears_it() {
     );
     yankee.quiet("the target is not told it was clicked");
 
-    // When: Yankee leaves. Then: Alpha's target is cleared before the removal.
+    // When: Yankee leaves. Then: its own release, then Alpha's target is cleared, then the
+    // removal (`ClearSync` before `ClearTarget`, `G/char.cpp:653-654`).
     drop(yankee);
+    assert_eq!(alpha_keyed.read_game(), ownership_of(0, yankee_listed.id));
     assert_eq!(alpha_keyed.read_game(), target_of(0, 0, 0, 0, 0));
     alpha_keyed.sees_leave(yankee_listed.id);
+}
+
+/// Ledger 229k: `do_restart`'s living arm (`G/cmd_general.cpp:526-533`). A living player that
+/// sends `/restart_here`, `/restart_town`, `/restart_now` or `/restart` is told only to close the
+/// restart window: no phase, no warp, no hit points and no gold. `/restart` is `restart_here`'s
+/// prefix, and `/restart_n` matches no command.
+#[test]
+fn a_living_player_restarting_is_told_to_close_the_restart_window() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET gold = 400000 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha) = enter_world(&server, b"alice", 0);
+
+    // When: each restart line, back to back (5 lines, under the flood limit of 10 a second).
+    for line in [
+        &b"/restart_here"[..],
+        b"/restart_town",
+        b"/restart_now",
+        b"/restart",
+    ] {
+        alice.send_record(&slash(line));
+        // Then: only the close, even for `/restart_now` with 400000 gold.
+        assert_eq!(
+            alice.read_game(),
+            close_restart_window(),
+            "{}",
+            String::from_utf8_lossy(line)
+        );
+    }
+    alice.send_record(&slash(b"/restart_n"));
+    assert_eq!(
+        alice.read_game(),
+        info_to_alpha(prodomo::command::NO_SUCH_COMMAND.as_bytes())
+    );
+    alice.quiet("no gold change, no phase");
+
+    drop(alice);
+    server.wait_for("Character left the world");
+    wait_for(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Alpha') = 400000",
+    );
+}
+
+/// Ledger 229k: `CheckTarget` in the player's recovery event (`G/char.cpp:3172-3283`,
+/// `:6663`). Every 75 Pulses a player's target 4800 units or more away is dropped with a
+/// `GC_TARGET` of VID 0. Yankee stands 6000 east of Alpha (5765 by `DISTANCE_APPROX`, out of
+/// view) and is dropped within one run; Charlie stands 4000 east and 600 south (4082), the
+/// movable cell nearest 4000 east, and is kept.
+#[test]
+fn a_target_4800_away_is_dropped_by_the_next_recovery_run() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    create_account(&server, "carol");
+    add_characters(&database);
+    seat_yankee_and_charlie(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 476000, y = 950000, hp = 325 WHERE name = 'Yankee'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET x = 474000, y = 950600 WHERE name = 'Charlie'",
+    );
+
+    let (mut alice, _alpha, _) = enter_world_seeing(&server, b"alice", 0);
+    let (_yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    assert_eq!(
+        inserted_at(&yankee_entered.add),
+        (476_000, 950_000),
+        "Yankee stands where it was stored"
+    );
+    let (_charlie, charlie_listed, charlie_entered) = enter_world_seeing(&server, b"carol", 0);
+    assert_eq!(
+        inserted_at(&charlie_entered.add),
+        (474_000, 950_600),
+        "Charlie stands where it was stored"
+    );
+    alice.sees_arrive(charlie_listed.id, false);
+    alice.quiet("Yankee is out of view");
+
+    // When: Alpha clicks Yankee. Then: the target, and VID 0 at the next recovery run.
+    alice.send_record(&client_target(yankee_listed.id));
+    let clicked = std::time::Instant::now();
+    assert_eq!(
+        alice.read_game(),
+        target_of(yankee_listed.id, 50, 325, 650, 0)
+    );
+    assert_eq!(alice.read_game(), target_of(0, 0, 0, 0, 0));
+    assert!(
+        clicked.elapsed() < Duration::from_secs(3) + QUIET_WINDOW,
+        "one run, 75 Pulses: {:?}",
+        clicked.elapsed()
+    );
+
+    // When: Alpha clicks Charlie. Then: still held after more than one run, so the same click
+    // again is answered with nothing.
+    alice.send_record(&client_target(charlie_listed.id));
+    let held = alice.read_game();
+    assert_eq!(held[0], GC_TARGET, "{held:02x?}");
+    assert_eq!(
+        &held[1..5],
+        &charlie_listed.id.to_le_bytes(),
+        "Charlie's VID"
+    );
+    alice.quiet_for("a target 4082 away is kept", Duration::from_secs(4));
+    alice.unanswered(&client_target(charlie_listed.id));
 }
 
 impl Keyed {

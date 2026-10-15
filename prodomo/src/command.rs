@@ -19,6 +19,8 @@
 //!
 //! - **A command this build does not port answers nothing.** Legacy runs its handler.
 
+use crate::game_loop_messages::RestartKind;
+
 mod table;
 
 /// `POS_DEAD` (`G/char.h:360`).
@@ -104,9 +106,11 @@ const fn entry(
 }
 
 impl CommandEntry {
-    /// Whether the walk takes only the whole name (`do_cmd`).
+    /// Whether the walk takes only the whole name: `do_cmd`'s entries, and `restart_now`,
+    /// which legacy's prefix walk gives every word from `rest` to `restart_n`, as it stands
+    /// before `restart_here` (B8). A typo would otherwise pay 300 000 gold.
     fn exact(&self) -> bool {
-        self.handler == "do_cmd"
+        matches!(self.handler, "do_cmd" | "do_restart_now")
     }
 
     /// What this build runs for the entry.
@@ -121,6 +125,9 @@ impl CommandEntry {
             "do_safebox_change_password" => Command::SafeboxChangePassword,
             "do_mall_password" => Command::MallPassword,
             "do_mall_close" => Command::MallClose,
+            "do_restart" if self.name == "restart_town" => Command::Restart(RestartKind::Town),
+            "do_restart" => Command::Restart(RestartKind::Here),
+            "do_restart_now" => Command::Restart(RestartKind::Now),
             _ => Command::NotPorted(self.name),
         }
     }
@@ -145,6 +152,9 @@ pub enum Command {
     MallPassword,
     /// `do_mall_close`.
     MallClose,
+    /// `do_restart` (`restart_here` and `restart_town`) and `do_restart_now`: the restart of the
+    /// entry's kind.
+    Restart(RestartKind),
     /// An entry this build does not port, by name.
     NotPorted(&'static str),
 }
@@ -396,6 +406,59 @@ mod tests {
         // `qui` is the type-it-in-full entry before `quit`; `quitt` names nothing.
         assert_eq!(ran(b"qui").0, "qui");
         assert_eq!(run(b"quitt", PLAYER), Interpreted::Notice(NO_SUCH_COMMAND));
+    }
+
+    #[test]
+    fn only_restart_now_needs_its_whole_name() {
+        let index = |name: &str| {
+            table::COMMANDS
+                .iter()
+                .position(|entry| entry.name == name)
+                .expect("an entry")
+        };
+        // Legacy's walk meets `restart_now` first, so each of these paid for a revive (B8).
+        assert!(index("restart_now") < index("restart_here"));
+        assert!(index("restart_here") < index("restart_town"));
+        let dead = Caller {
+            position: POS_DEAD,
+            ..PLAYER
+        };
+        let ran_dead = |line: &[u8]| match run(line, dead) {
+            Interpreted::Run { entry, .. } => entry.name,
+            other => panic!("{line:?} ran nothing: {other:?}"),
+        };
+        for line in [&b"rest"[..], b"restart", b"restart_"] {
+            assert_eq!(ran_dead(line), "restart_here", "{line:?}");
+        }
+        assert_eq!(
+            run(b"restart_n", dead),
+            Interpreted::Notice(NO_SUCH_COMMAND)
+        );
+        assert_eq!(ran_dead(b"restart_now"), "restart_now");
+        assert_eq!(ran_dead(b"restart_t"), "restart_town");
+        assert_eq!(ran_dead(b"RESTART_NOW"), "restart_now");
+    }
+
+    #[test]
+    fn restart_here_and_town_share_a_handler_but_not_a_command() {
+        let command = |name: &str| {
+            table::COMMANDS
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(CommandEntry::command)
+        };
+        assert_eq!(
+            command("restart_here"),
+            Some(Command::Restart(RestartKind::Here))
+        );
+        assert_eq!(
+            command("restart_town"),
+            Some(Command::Restart(RestartKind::Town))
+        );
+        assert_eq!(
+            command("restart_now"),
+            Some(Command::Restart(RestartKind::Now))
+        );
     }
 
     #[test]

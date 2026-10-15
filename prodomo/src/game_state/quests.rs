@@ -311,6 +311,7 @@ mod test_place {
         language: 0,
         pk_mode: crate::loading_phase::PK_MODE_PEACE,
         affect_flags: [0; 2],
+        dead: false,
     };
 }
 

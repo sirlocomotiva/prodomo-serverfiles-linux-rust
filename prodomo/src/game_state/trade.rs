@@ -191,6 +191,10 @@ pub enum TradeDeclined {
     /// [`LOAD_WAIT_PULSES`](crate::game_state::LOAD_WAIT_PULSES); that player is told why, and
     /// the sender nothing.
     PartnerSafeboxWait,
+    /// A `START` from a dead character (D10).
+    Dead,
+    /// The player a `START` asks is dead (`G/input_main.cpp:1385-1388`).
+    PartnerDead,
     /// The character trades already.
     Trading,
     /// No character on the character's map has the VID asked.
@@ -291,6 +295,9 @@ impl GameState {
         if self.characters.find_by_vid(vid).is_err() {
             return Err(MoveItemRefused::NoSuchCharacter { vid });
         }
+        if matches!(step, TradeStep::Start { .. }) && self.is_dead(vid.raw()) {
+            return Ok(TradeAnswer::silent(TradeDeclined::Dead));
+        }
         if let Some(waits) = self.safebox_wait(vid, step, place, mover) {
             return Ok(waits);
         }
@@ -329,7 +336,7 @@ impl GameState {
     }
 
     /// The safebox wait of `CInputMain::Exchange` (`G/input_main.cpp:1377-1397`): the other
-    /// player a `START` asks, then the sender.
+    /// player a `START` asks, which is also refused when dead, then the sender.
     fn safebox_wait(
         &self,
         vid: Vid,
@@ -346,6 +353,9 @@ impl GameState {
             if let Some(asked) = asked.filter(|_| self.safebox_loaded_recently(partner)) {
                 let _sent = self.write_to_client(partner, self.trade_wait_line(asked));
                 return Some(TradeAnswer::silent(TradeDeclined::PartnerSafeboxWait));
+            }
+            if asked.is_some() && self.is_dead(target) {
+                return Some(TradeAnswer::silent(TradeDeclined::PartnerDead));
             }
         }
         self.safebox_loaded_recently(vid)
@@ -452,6 +462,7 @@ impl GameState {
                 language: entry.language,
                 pk_mode: self.pk_mode_of(target),
                 affect_flags: self.affect_flags_of(common::vid::Vid::new(target)),
+                dead: self.is_dead(target),
             },
         })
     }
@@ -1043,6 +1054,7 @@ mod tests {
             language: 1,
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             affect_flags: [0; 2],
+            dead: false,
         }
     }
 
@@ -1733,10 +1745,12 @@ mod tests {
         let _told = square.heard(A);
         let _kept = square.state.leave_world(ALPHA);
         let removed = super::super::view_encode::remove_record(ALPHA.raw());
+        let unowned = crate::sync_position::ownership_record(Vid::new(0), ALPHA);
         assert_eq!(
             square.heard(Y),
-            vec![end(), removed],
-            "the trade ends before the viewers hear the removal"
+            vec![end(), unowned, removed],
+            "the trade ends before the viewers hear the release and the removal \
+             (`G/char.cpp:641-655`)"
         );
         assert!(square.is_idle());
         assert!(!square.is_offered(Y, YANKEES));

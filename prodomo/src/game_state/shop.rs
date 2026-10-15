@@ -149,6 +149,8 @@ impl ShopStep {
 /// Why a shop step changed nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShopDeclined {
+    /// A click from a dead character (D10).
+    Dead,
     /// No NPC on the character's map has the clicked VID.
     NoSuchNpc {
         /// The VID the client clicked.
@@ -267,8 +269,21 @@ impl GameState {
         let _browsing = self.browsing.remove(&vid);
     }
 
+    /// `StopShopping` at a death (`G/char_battle.cpp:1646`): the window closes as an `END`
+    /// closes it, and its `GC_SHOP END` goes to the client.
+    pub(super) fn end_browsing(&mut self, vid: Vid) {
+        if let ShopAnswer::Sent(records) = self.close_shop(vid) {
+            for record in records {
+                let _sent = self.write_to_client(vid, record);
+            }
+        }
+    }
+
     /// `CHARACTER::OnClick` on an NPC: the quests first, then its click trigger.
     fn open_shop(&mut self, vid: Vid, target: u32, place: GroundPlace, mover: Mover) -> ShopAnswer {
+        if self.is_dead(vid.raw()) {
+            return ShopAnswer::silent(ShopDeclined::Dead);
+        }
         let Some(race) = self.npc_at(place, target).map(|npc| npc.race) else {
             return ShopAnswer::silent(ShopDeclined::NoSuchNpc { target });
         };
@@ -692,6 +707,7 @@ mod tests {
             language: 1,
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             affect_flags: [0; 2],
+            dead: false,
         }
     }
 
@@ -1268,6 +1284,54 @@ mod tests {
             window(click(&mut state, SCRIPTED, at(0))).owner_vid,
             SCRIPTED
         );
+        assert!(state.browsing.contains_key(&SHOPPER));
+    }
+
+    /// Table B row 8: a death ends the browsing with the shop's `END` after the phase, and a
+    /// dead player's click opens nothing (`G/char_battle.cpp:1614-1648`).
+    #[test]
+    fn a_death_ends_the_browsing_and_a_dead_player_clicks_no_shop() {
+        let mut state = a_market(10_000, &[], true);
+        shopper(&mut state).set_points(Some(super::super::fixtures::points(12_345)));
+        state.start_pc_recovery(SHOPPER);
+        let _window = open(&mut state, WEAPONS);
+        let (tx, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+        let _old = state.outboxes.insert(SHOPPER, ClientOutbox::new(tx));
+        let hp = shopper(&mut state).points().unwrap().hp();
+        assert!(!state.damage_pc(None, SHOPPER, hp));
+        assert!(state.damage_pc(None, SHOPPER, 1));
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        let mut phase = Vec::new();
+        protocol::gc_small::GcHeaderAndByte::new(
+            protocol::gc_inventory::HEADER_GC_PHASE.value(),
+            crate::loading_phase::PHASE_DEAD,
+        )
+        .encode_into(&mut phase);
+        let end = GcShop::new(SHOP_SUBHEADER_GC_END).encode();
+        assert_eq!(heard.last(), Some(&end), "{heard:?}");
+        let at_phase = heard.iter().position(|record| *record == phase);
+        assert_eq!(
+            at_phase.map(|at| at + 1),
+            heard.iter().position(|r| *r == end)
+        );
+        assert!(state.browsing.is_empty());
+        assert_eq!(
+            click(&mut state, WEAPONS, at(0)),
+            ShopAnswer::silent(ShopDeclined::Dead)
+        );
+        assert!(state.browsing.is_empty());
+    }
+
+    /// D10 refuses the dead clicker only: a stunned player's click opens the shop.
+    #[test]
+    fn a_stunned_player_still_opens_a_shop() {
+        let mut state = a_market(10_000, &[], true);
+        shopper(&mut state).set_points(Some(super::super::fixtures::points(12_345)));
+        state.start_pc_recovery(SHOPPER);
+        let hp = shopper(&mut state).points().unwrap().hp();
+        assert!(!state.damage_pc(None, SHOPPER, hp));
+        assert!(state.is_stunned(SHOPPER.raw()));
+        assert_eq!(open(&mut state, WEAPONS).owner_vid, WEAPONS);
         assert!(state.browsing.contains_key(&SHOPPER));
     }
 

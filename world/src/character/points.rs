@@ -66,8 +66,12 @@
 //! The random hit and spell points a level-up adds (`iRandomHP` and `iRandomSP`) are 0: they
 //! grow only at a level-up, and the store gains their columns when the level-up is ported.
 //!
-//! Also not ported: the `IsDead() || IsStun()` guard on the three pools (the Rewrite has no
-//! death yet), the target and party broadcasts after a hit-point change, the walking switch
+//! The three pools refuse every change while the character is stunned or dead, as legacy's
+//! `IsDead() || IsStun()` guard does before the target broadcast (`char.cpp:4250`, `:4268`,
+//! `:4279`); the world sets the lock with [`Points::set_down`]. Experience is stored, but only
+//! the death penalty's loss changes it ([`Points::lose_exp`]): a gain is the level-up chain.
+//!
+//! Also not ported: the party broadcast after a hit-point change, the walking switch
 //! after a stamina change, the polymorph and mount branches of the battle points, and the
 //! parts of `ComputePoints` that read affects, skills, the horse, the dragon-soul deck and the
 //! attribute buffs (`BuffOnAttr`). The passive-skill bonuses are an input
@@ -216,6 +220,8 @@ pub struct PointsRow {
     pub race: u8,
     /// The level.
     pub level: u8,
+    /// The experience held toward the next level.
+    pub exp: i64,
     /// The conqueror level; 0 turns every sungma will off.
     pub conqueror_level: u8,
     /// Strength.
@@ -460,12 +466,15 @@ enum Applied {
 pub struct Points {
     race: u8,
     level: u8,
+    exp: i64,
     conqueror_level: u8,
     real: [i32; SLOTS],
     instant: [i32; SLOTS],
     hp: i32,
     sp: i32,
     stamina: i32,
+    /// Whether the character is stunned or dead, which locks the three pools.
+    down: bool,
     max_hp: i32,
     max_sp: i32,
     max_stamina: i32,
@@ -502,12 +511,14 @@ impl Points {
         let mut points = Self {
             race: row.race,
             level: row.level,
+            exp: row.exp,
             conqueror_level: row.conqueror_level,
             real: [0; SLOTS],
             instant: [0; SLOTS],
             hp: 0,
             sp: 0,
             stamina: 0,
+            down: false,
             max_hp: 0,
             max_sp: 0,
             max_stamina: 0,
@@ -625,6 +636,49 @@ impl Points {
     #[must_use]
     pub fn hp(&self) -> i32 {
         self.hp
+    }
+
+    /// The experience held toward the next level.
+    #[must_use]
+    pub fn exp(&self) -> i64 {
+        self.exp
+    }
+
+    /// Locks the three pools while the character is stunned or dead, and unlocks them when it
+    /// stands again: legacy's `IsDead() || IsStun()` reads the position each time.
+    pub fn set_down(&mut self, down: bool) {
+        self.down = down;
+    }
+
+    /// `PointChange(POINT_EXP, -loss, true)`, the death penalty's loss (`char.cpp:4078-4191`).
+    ///
+    /// A loss larger than the experience takes all of it, and the record shows what was taken.
+    /// Otherwise a character at the server's highest level holding a quarter of its next
+    /// level's cost loses nothing and gets no record, as the conqueror build's early return
+    /// does (`:4113-4116`). The level step never lowers, so a loss leaves it alone. The
+    /// test-server chat line (`:4122-4123`) is not sent.
+    pub fn lose_exp(&mut self, loss: i64, max_level: i32) -> Option<PointRecord> {
+        let kind = u8::try_from(point::POINT_EXP).ok()?;
+        if self.exp < loss {
+            let amount = -self.exp;
+            self.exp = 0;
+            return Some(PointRecord {
+                kind,
+                amount,
+                value: 0,
+                broadcast: false,
+            });
+        }
+        if i32::from(self.level) >= max_level && self.exp >= levels::next_exp(self.level) / 4 {
+            return None;
+        }
+        self.exp -= loss;
+        Some(PointRecord {
+            kind,
+            amount: -loss,
+            value: self.exp,
+            broadcast: false,
+        })
     }
 
     /// Takes the hit points the `POINT_HP` arm left each time it ran since the last take, with
@@ -948,6 +1002,9 @@ impl Points {
     fn apply_pool(&mut self, kind: usize, amount: i32, records: &mut Vec<PointRecord>) -> Applied {
         let (amount, value) = match kind {
             point::POINT_NONE => return Applied::Silent,
+            point::POINT_HP | point::POINT_SP | point::POINT_STAMINA if self.down => {
+                return Applied::Silent;
+            }
             point::POINT_HP => {
                 let amount = amount.min(self.max_hp().saturating_sub(self.hp));
                 self.hp = self.hp.saturating_add(amount);
@@ -1362,6 +1419,7 @@ mod tests {
         PointsRow {
             race,
             level: 1,
+            exp: 0,
             conqueror_level: 0,
             st: job.st,
             ht: job.ht,
@@ -2477,5 +2535,104 @@ mod tests {
         assert_eq!(points.inven_point(), 3);
         assert_eq!(points.level(), 1);
         assert_eq!(points.real_point(point::POINT_ST), 6);
+    }
+
+    fn holding(level: u8, exp: i64) -> Points {
+        let mut row = fresh(0);
+        row.level = level;
+        row.exp = exp;
+        Points::load(&row)
+    }
+
+    #[test]
+    fn a_loss_larger_than_the_exp_stops_at_zero_and_reports_what_was_taken() {
+        let mut points = holding(20, 700);
+        assert_eq!(
+            points.lose_exp(701, 99),
+            Some(record(point::POINT_EXP, -700, 0))
+        );
+        assert_eq!(points.exp(), 0);
+        let mut exact = holding(20, 700);
+        assert_eq!(
+            exact.lose_exp(700, 99),
+            Some(record(point::POINT_EXP, -700, 0))
+        );
+        let mut nothing = holding(20, 0);
+        assert_eq!(
+            nothing.lose_exp(5, 99),
+            Some(record(point::POINT_EXP, 0, 0))
+        );
+    }
+
+    #[test]
+    fn a_max_level_character_holding_a_quarter_of_its_next_exp_loses_nothing() {
+        let quarter = levels::next_exp(99) / 4;
+        let mut capped = holding(99, quarter);
+        assert_eq!(capped.lose_exp(1_000, 99), None);
+        assert_eq!(capped.exp(), quarter);
+        let mut below = holding(99, quarter - 1);
+        assert_eq!(
+            below.lose_exp(1_000, 99),
+            Some(record(point::POINT_EXP, -1_000, quarter - 1_001))
+        );
+        let mut lower = holding(98, levels::next_exp(98) / 4);
+        assert_eq!(
+            lower.lose_exp(1_000, 99),
+            Some(record(
+                point::POINT_EXP,
+                -1_000,
+                levels::next_exp(98) / 4 - 1_000
+            ))
+        );
+        // The floor arm comes first: a capped character with less than the loss still loses.
+        let mut poor = holding(99, quarter);
+        assert_eq!(
+            poor.lose_exp(quarter + 1, 99),
+            Some(record(point::POINT_EXP, -quarter, 0))
+        );
+    }
+
+    #[test]
+    fn a_max_level_character_holding_exactly_the_loss_keeps_it() {
+        // The floor arm needs less experience than the loss (`char.cpp:4103`), so an equal
+        // loss reaches the early return (`:4114-4116`).
+        let held = levels::next_exp(99) / 4 + 1;
+        let mut points = holding(99, held);
+        assert_eq!(points.lose_exp(held, 99), None);
+        assert_eq!(points.exp(), held);
+    }
+
+    #[test]
+    fn a_down_character_gains_no_hit_points_spell_points_or_stamina() {
+        let mut points = warrior();
+        points.hp = 100;
+        points.sp = 100;
+        points.stamina = 100;
+        points.set_down(true);
+        for kind in [point::POINT_HP, point::POINT_SP, point::POINT_STAMINA] {
+            assert_eq!(points.point_change(kind, 50, true, false), Ok(vec![]));
+            assert_eq!(points.point_change(kind, -50, true, false), Ok(vec![]));
+        }
+        assert_eq!(
+            (points.hp(), points.sp(), points.stamina()),
+            (100, 100, 100)
+        );
+        assert!(points.take_target_broadcasts().is_empty());
+        assert_eq!(
+            points.point_change(point::POINT_HP_RECOVERY, 7, true, false),
+            Ok(vec![record(point::POINT_HP_RECOVERY, 7, 7)])
+        );
+        points.set_down(false);
+        assert_eq!(
+            points.point_change(point::POINT_HP, 50, true, false),
+            Ok(vec![record(point::POINT_HP, 50, 150)])
+        );
+        assert_eq!(points.take_target_broadcasts(), vec![(150, 760)]);
+    }
+
+    #[test]
+    fn the_exp_survives_the_points_row() {
+        assert_eq!(holding(12, 4_321).exp(), 4_321);
+        assert_eq!(warrior().exp(), 0);
     }
 }

@@ -86,6 +86,12 @@ pub(super) enum Due {
     Dead(u32),
     /// `recovery_event` of the non-player under this VID.
     Recovery(u32),
+    /// `StunEvent` of the player under this VID. See [`super::death`].
+    PcStun(u32),
+    /// `dead_event` of the player under this VID.
+    PcDead(u32),
+    /// `recovery_event` of the player under this VID.
+    PcRecovery(u32),
 }
 
 /// The regen events and the ore veins' ends, with what a regen spawns from.
@@ -198,17 +204,22 @@ impl GameState {
         self.regens.due.insert((when, Due::Vein(vid)));
     }
 
-    /// Runs every event due on or before `pulse`: the regens, the ore veins' ends and the
-    /// non-players' stun, dead and recovery events.
+    /// Runs every event due on or before `pulse`: the regens, the ore veins' ends and the stun,
+    /// dead and recovery events of the non-players and the players.
     pub(super) fn run_regens(&mut self, pulse: u64) {
         for what in self.regens.take_due(pulse) {
             match what {
-                // The VID of a character already destroyed names nothing, as no VID is reused.
+                // The VID of a non-player already destroyed names nothing, as no such VID is
+                // reused. A player's VID is its PID, which comes back at its next login, so a
+                // player's event runs only while its own slot still holds it.
                 Due::Vein(vid) => self.destroy_npc(vid),
                 Due::Regen { channel, map, at } => self.fire_regen((channel, map), at, pulse),
                 Due::Stun(vid) => self.stun_event(vid),
                 Due::Dead(vid) => self.dead_event(vid),
                 Due::Recovery(vid) => self.recovery_event(vid),
+                Due::PcStun(vid) => self.pc_stun_event(vid),
+                Due::PcDead(vid) => self.pc_dead_event(vid),
+                Due::PcRecovery(vid) => self.pc_recovery_event(vid),
             }
         }
     }
@@ -781,5 +792,30 @@ mod tests {
         assert!(regens.due.is_empty());
         assert_eq!(pulses(3), 75);
         assert_eq!(pulses(u32::MAX), u64::from(u32::MAX) * 25);
+    }
+
+    /// A player's events due on one Pulse are taken after the non-players', its stun before its
+    /// death before its recovery, whatever their VIDs.
+    #[test]
+    fn a_players_stun_dead_and_recovery_events_are_taken_in_that_order() {
+        let mut regens = Regens::default();
+        let due = [
+            Due::PcRecovery(1),
+            Due::PcDead(2),
+            Due::PcStun(3),
+            Due::Recovery(4),
+        ];
+        for what in due {
+            regens.due.insert((5, what));
+        }
+        assert_eq!(
+            regens.take_due(5),
+            [
+                Due::Recovery(4),
+                Due::PcStun(3),
+                Due::PcDead(2),
+                Due::PcRecovery(1)
+            ]
+        );
     }
 }

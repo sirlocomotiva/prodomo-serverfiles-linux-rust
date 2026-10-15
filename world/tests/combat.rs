@@ -3,7 +3,7 @@
 use common::vid::Vid;
 use world::character::{
     attack_rating, pk_eligibility, Activity, AttackRatingInput, Character, CharacterKind,
-    CoreState, Damage, DamageOutcome, PkActor, PkDenial, PkEligibility, PkMode, Posture, Vitality,
+    CoreState, PkActor, PkDenial, PkEligibility, PkMode, Posture,
 };
 
 #[test]
@@ -79,7 +79,7 @@ fn combat_pk_policy_is_explicit_for_invalid_self_and_mode_outcomes() {
 }
 
 #[test]
-fn combat_manual_parity_scenario_hit_nonlethal_lethal_and_pk() {
+fn combat_manual_parity_scenario_rating_state_and_pk() {
     let rating = attack_rating(AttackRatingInput {
         attacker_dexterity: 10,
         attacker_level: 10,
@@ -91,15 +91,7 @@ fn combat_manual_parity_scenario_hit_nonlethal_lethal_and_pk() {
     let mut victim = Character::new(Vid::new(30));
     victim.set_activity(Activity::Fishing);
     victim.request_state(CoreState::Battle);
-    victim.set_vitality(Vitality::new(100, 100));
-    assert_eq!(
-        victim.apply_damage(Damage::new(40)),
-        DamageOutcome::Damaged { remaining: 60 }
-    );
-    assert_eq!(
-        victim.apply_damage(Damage::new(60)),
-        DamageOutcome::Killed { overkill: 0 }
-    );
+    victim.set_posture(Posture::Dead);
     assert!(!victim.update(0));
     assert_eq!(victim.pending_state(), Some(CoreState::Battle));
     assert_eq!(victim.activity(), Activity::Fishing);
@@ -132,33 +124,4 @@ fn pk_actor(id: u32, mode: PkMode) -> PkActor {
         guild_id: None,
         consensual_fight: false,
     }
-}
-
-#[test]
-fn combat_damage_transitions_cover_hit_and_lethal_boundaries() {
-    let mut victim = Character::new(Vid::new(20));
-    victim.set_vitality(Vitality::new(100, 100));
-    assert_eq!(
-        victim.apply_damage(Damage::new(40)),
-        DamageOutcome::Damaged { remaining: 60 }
-    );
-    assert_eq!(
-        victim.apply_damage(Damage::new(60)),
-        DamageOutcome::Killed { overkill: 0 }
-    );
-    assert_eq!(victim.posture(), Posture::Dead);
-
-    let mut overkill = Character::new(Vid::new(21));
-    overkill.set_vitality(Vitality::new(10, 100));
-    assert_eq!(
-        overkill.apply_damage(Damage::new(25)),
-        DamageOutcome::Killed { overkill: 15 }
-    );
-
-    let mut zero = Character::new(Vid::new(22));
-    zero.set_vitality(Vitality::new(0, 100));
-    assert_eq!(
-        zero.apply_damage(Damage::new(0)),
-        DamageOutcome::Killed { overkill: 0 }
-    );
 }

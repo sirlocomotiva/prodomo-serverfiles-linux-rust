@@ -288,6 +288,8 @@ pub enum GameCommand {
     LeaveWorld {
         /// The VID the character entered the world under.
         vid: common::vid::Vid,
+        /// Whether the character disconnects or warps.
+        departure: Departure,
         /// Where the game thread reports what the removed character left behind, or
         /// `None` when it did not hold the character.
         ///
@@ -502,8 +504,48 @@ pub enum GameCommand {
         /// Dropped once what the hit shows is sent, see [`Settled`].
         settled: oneshot::Sender<()>,
     },
+    /// `do_restart` or `do_restart_now` of the player online under `vid`
+    /// (`G/cmd_general.cpp:471-706`); see `game_state::death`.
+    Restart {
+        /// The VID of the restarting player.
+        vid: common::vid::Vid,
+        /// Which restart the command asks for.
+        kind: RestartKind,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports the gold the restart took.
+        reply: oneshot::Sender<RestartAnswer>,
+    },
     /// Requests terminal loop shutdown.
     Stop,
+}
+
+/// How a character leaves the world.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Departure {
+    /// Its client disconnects.
+    Disconnect,
+    /// Its client warps, which takes the body out of its sectree first (`G/char.cpp:6751-6752`).
+    Warp,
+}
+
+/// Which restart a dead player asks for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RestartKind {
+    /// `/restart_here`: where it lies, with 50 hit points.
+    Here,
+    /// `/restart_town`: in its map's town, with 50 hit points.
+    Town,
+    /// `/restart_now`: where it lies, at full hit points, for 300 000 gold.
+    Now,
+}
+
+/// What a restart changed that the descriptor keeps.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RestartAnswer {
+    /// The gold `/restart_now` took, as the signed change the store applies, or `None` when it
+    /// took none.
+    pub gold: Option<i64>,
 }
 
 /// Resolves, its sender dropped, once the world has run a command that answers nothing: every
@@ -1097,11 +1139,16 @@ impl GameLoopController {
     pub async fn leave_world(
         &self,
         vid: common::vid::Vid,
+        departure: Departure,
     ) -> Result<Option<Kept>, LeaveWorldError> {
         let (reply, answer) = oneshot::channel();
-        self.send_command(GameCommand::LeaveWorld { vid, reply })
-            .await
-            .map_err(|_| LeaveWorldError::NotSent)?;
+        self.send_command(GameCommand::LeaveWorld {
+            vid,
+            departure,
+            reply,
+        })
+        .await
+        .map_err(|_| LeaveWorldError::NotSent)?;
         answer.await.map_err(|_| LeaveWorldError::NoAnswer)
     }
 
@@ -1466,6 +1513,30 @@ impl GameLoopController {
         .await
         .map_err(|_| MoveItemError::NotSent)?;
         Ok(settling)
+    }
+
+    /// Asks the world to run one restart command of a player, and waits for the gold it took.
+    /// What it shows is written to the player's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn restart(
+        &self,
+        vid: common::vid::Vid,
+        kind: RestartKind,
+        mover: Mover,
+    ) -> Result<RestartAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Restart {
+            vid,
+            kind,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 
     /// Asks the world for the NPCs standing on one map, which a client entering it is shown.

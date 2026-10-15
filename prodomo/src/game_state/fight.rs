@@ -43,7 +43,7 @@
 //! - **The order of one Pulse's events (V16).** The stun, dead and recovery events ride the
 //!   regen schedule ([`super::regen`]).
 //! - **The owners a leaving player releases** go in VID order (V1); legacy walks its list in the
-//!   order it took them. The leaving player's own release waits for 229k (V17k).
+//!   order it took them, after the leaving player's own release ([`super::death`]).
 //! - **The recovery's share** is computed in 64 bits; legacy's `int` product of the maximum and
 //!   the percentage wraps past `INT_MAX` (a Defect not reproduced).
 //! - **The world boss's damage map** (`SetAccumulateDamageByVID`), which legacy grows for every
@@ -77,10 +77,10 @@ use crate::sync_position::{
 };
 
 /// `DAMAGE_BLOCK` (`G/char.h:134`): the flag `SetSyncOwner` shows an owner it refuses.
-const DAMAGE_BLOCK: u8 = 1 << 3;
+pub(super) const DAMAGE_BLOCK: u8 = 1 << 3;
 
-/// `PASSES_PER_SEC(3)`: the stun before `Dead` (`G/char_battle.cpp:458`).
-const STUN_SECONDS: u32 = 3;
+/// `PASSES_PER_SEC(3)`: the stun before `Dead` (`G/char_battle.cpp:458`), a player's too.
+pub(super) const STUN_SECONDS: u32 = 3;
 
 /// `PASSES_PER_SEC(1)`: a dead monster no party revives waits this long to go (`:1607`).
 const DEAD_SECONDS: u32 = 1;
@@ -115,7 +115,7 @@ fn is_struck(npc: &Npc) -> bool {
 }
 
 /// A record of a header and a VID, as `GC_STUN` and `GC_DEAD` are.
-fn header_and_vid(header: u8, vid: u32) -> Vec<u8> {
+pub(super) fn header_and_vid(header: u8, vid: u32) -> Vec<u8> {
     let mut record = Vec::with_capacity(GcHeaderAndDword::WIRE_SIZE);
     GcHeaderAndDword::new(header, vid).encode_into(&mut record);
     record
@@ -172,7 +172,7 @@ impl GameState {
         // `battle_is_attackable` (`G/battle.cpp:165`), then `battle_melee_attack`'s reach
         // (`:172-210`): beyond it the attack is `BATTLE_NONE` and sends nothing.
         let distance = distance_approx(spot.x.saturating_sub(npc.x), spot.y.saturating_sub(npc.y));
-        if !self.is_attackable((place.1, spot.x, spot.y), npc) || distance > melee_reach(npc) {
+        if !self.is_attackable(vid, (place.1, spot.x, spot.y), npc) || distance > melee_reach(npc) {
             return;
         }
         let victim = SyncPositionVictim {
@@ -226,15 +226,16 @@ impl GameState {
             .get_mut(at)
     }
 
-    /// `battle_is_attackable` of a player standing at `(map, x, y)` on `npc`
-    /// (`G/battle.cpp:99-152`): the victim is alive, neither cell is `ATTR_BANPK`, and the
-    /// victim is no fake hydra. No player is stunned or dead yet, no castle, arena or
-    /// ship-defence map is hosted, and `CPVPManager::CanAttack` lets a player hit every
+    /// `battle_is_attackable` of the player `attacker` standing at `(map, x, y)` on `npc`
+    /// (`G/battle.cpp:99-152`): the victim is alive, neither cell is `ATTR_BANPK`, the attacker
+    /// is neither stunned nor dead (`:122`), and the victim is no fake hydra. No castle, arena
+    /// or ship-defence map is hosted, and `CPVPManager::CanAttack` lets a player hit every
     /// non-player that reaches here.
-    fn is_attackable(&self, (map, x, y): (i32, i32, i32), npc: &Npc) -> bool {
+    fn is_attackable(&self, attacker: Vid, (map, x, y): (i32, i32, i32), npc: &Npc) -> bool {
         !npc.dead
             && !self.is_banpk(map, x, y)
             && !self.is_banpk(map, npc.x, npc.y)
+            && !self.is_down(attacker.raw())
             && !FAKE_HYDRAS.contains(&npc.vnum)
     }
 
@@ -488,7 +489,7 @@ impl GameState {
         if npc.ai_flags & AIFLAG_NOMOVE != 0 {
             return false;
         }
-        if !self.is_attackable((map, owner_at.0, owner_at.1), npc) {
+        if !self.is_attackable(owner, (map, owner_at.0, owner_at.1), npc) {
             self.send_damage_packet(raw, owner, 0, DAMAGE_BLOCK);
             return false;
         }
@@ -534,9 +535,9 @@ impl GameState {
         self.packet_around(EntityKey::Npc(vid), &record, None);
     }
 
-    /// `ClearSync`'s `FuncClearSync` for the player under `vid`, which leaves
-    /// (`G/char.cpp:5559-5575`): each character it owns has no owner, which that one's view is
-    /// told, in VID order (V1). The leaving player's own release waits for 229k.
+    /// `ClearSync`'s `FuncClearSync` for the player under `vid` (`G/char.cpp:5559-5575`): each
+    /// character it owns has no owner, which that one's view is told, in VID order (V1). The
+    /// player's own release is [`GameState::clear_sync`]'s.
     pub(super) fn release_owned(&mut self, vid: Vid) {
         let mut owned: Vec<EntityKey> = self
             .bodies
@@ -945,7 +946,13 @@ mod tests {
         let _kept = world.leave_world(Vid::new(1));
         assert_eq!(
             drained(&mut beta),
-            [stun_record(), owner(1), owner(0), remove_record(1)]
+            [
+                stun_record(),
+                owner(1),
+                ownership_record(Vid::new(0), Vid::new(1)),
+                owner(0),
+                remove_record(1)
+            ]
         );
         world.process_pulse(P0 + 75);
         assert_eq!(drained(&mut beta), [owner(0), dead_record()]);
@@ -1449,6 +1456,80 @@ mod tests {
         }
     }
 
+    /// `battle_is_attackable`'s attacker arm (`G/battle.cpp:122`): a stunned or a dead player
+    /// hits nothing, before any draw, and claims nothing; a standing one hits.
+    #[test]
+    fn a_dead_or_stunned_player_cannot_hit_a_monster() {
+        for lethal_hits in [0, 1, 2] {
+            let (_clock, mut world, mut alpha) = a_fight(a_monster(MAX_HP), NEAR);
+            world.start_pc_recovery(Vid::new(1));
+            let hp = points_of(&mut world, 1).hp();
+            for _ in 0..lethal_hits {
+                let _died = world.damage_pc(None, Vid::new(1), hp);
+            }
+            let refused = lethal_hits > 0;
+            assert_eq!(world.is_down(1), refused);
+            assert_eq!(world.is_dead(1), lethal_hits == 2);
+            drained(&mut alpha);
+            let dice = world.dice.clone();
+            hit(&mut world, 1, ME);
+            assert_eq!(world.dice == dice, refused, "{lethal_hits} hits");
+            assert_eq!(
+                drained(&mut alpha).is_empty(),
+                refused,
+                "{lethal_hits} hits"
+            );
+            assert_eq!(world.npc_by_vid(ME).unwrap().hp == MAX_HP, refused);
+            let claimed = world
+                .npc_combat
+                .get(&ME)
+                .is_some_and(|combat| combat.sync.owner.is_some());
+            assert_eq!(claimed, !refused, "{lethal_hits} hits");
+        }
+    }
+
+    /// `SetSyncOwner` asks `battle_is_attackable` of the claimer (`G/char.cpp:5474-5481`): a
+    /// stunned or a dead player's sync of a monster claims nothing, and its targeting claimer
+    /// is shown a `DAMAGE_BLOCK` of 0; a standing one's claims it.
+    #[test]
+    fn a_dead_or_stunned_players_sync_claims_no_monster() {
+        for lethal_hits in [0, 1, 2] {
+            let (_clock, mut world, mut alpha) = a_fight(a_monster(MAX_HP), NEAR);
+            world.start_pc_recovery(Vid::new(1));
+            let hp = points_of(&mut world, 1).hp();
+            for _ in 0..lethal_hits {
+                let _died = world.damage_pc(None, Vid::new(1), hp);
+            }
+            let refused = lethal_hits > 0;
+            assert_eq!(world.is_down(1), refused);
+            world.target(Vid::new(1), ME);
+            drained(&mut alpha);
+            let result = world
+                .sync_positions(Vid::new(1), &sync_of(ME, SPOT))
+                .unwrap();
+            assert_eq!(
+                result.accepted_elements.is_empty(),
+                refused,
+                "{lethal_hits} hits"
+            );
+            let held = world
+                .npc_combat
+                .get(&ME)
+                .and_then(|combat| combat.sync.owner);
+            assert_eq!(
+                held,
+                (!refused).then_some(Vid::new(1)),
+                "{lethal_hits} hits"
+            );
+            let shown = if refused {
+                vec![damage_info(0, DAMAGE_BLOCK)]
+            } else {
+                vec![owner(1)]
+            };
+            assert_eq!(drained(&mut alpha), shown, "{lethal_hits} hits");
+        }
+    }
+
     /// `Destroy` ends the stun, dead and recovery events (`G/char.cpp:713-718`): a monster gone
     /// while stunned never dies again.
     #[test]
@@ -1548,9 +1629,9 @@ mod tests {
         assert_eq!(state_of(&shown), 1, "dead");
     }
 
-    /// A player that leaves releases what it owns, each victim's view told it has no owner,
-    /// players before non-players and each by VID (`G/char.cpp:653`, `:5559-5575`; V1). The
-    /// claim's time stays.
+    /// A player that leaves has no owner, which its view is told first, and releases what it
+    /// owns, each victim's view told it has no owner, players before non-players and each by VID
+    /// (`G/char.cpp:653`, `:5559-5575`; V1). The claim's time stays.
     #[test]
     fn a_leaving_owner_releases_what_it_owns() {
         let (_clock, mut world, _alpha) = a_fight(a_monster(MAX_HP), NEAR);
@@ -1568,6 +1649,7 @@ mod tests {
         assert_eq!(
             drained(&mut beta),
             [
+                ownership_record(Vid::new(0), Vid::new(1)),
                 ownership_record(Vid::new(0), Vid::new(3)),
                 owner(0),
                 remove_record(1)

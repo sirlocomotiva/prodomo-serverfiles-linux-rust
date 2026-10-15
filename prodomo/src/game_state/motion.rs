@@ -479,8 +479,8 @@ impl GameState {
     /// when it has no body; the outcome is the caller's to log.
     ///
     /// A move refused for its distance (or a dead mover) shows the body where it stands and
-    /// stops it, which re-sends its view (`:1786-1811`); the other refusals and an ignored
-    /// move change nothing and send nothing.
+    /// stops it, which re-sends its view (`:1786-1811`); the other refusals, a stunned mover's
+    /// among them, and an ignored move change nothing and send nothing.
     pub(super) fn run_move(&mut self, vid: Vid, record: &CgMove) -> Option<MoveOutcome> {
         let raw = vid.raw();
         let (_, map) = self.place_of(raw)?;
@@ -491,10 +491,11 @@ impl GameState {
             y: spot.y,
             // The Rewrite has no mount yet, so nothing is riding.
             riding: false,
-            // The Rewrite has no death state yet.
-            dead: false,
-            // The Rewrite has no stun affect and no private shop, so `CanMove` always holds.
-            can_move: true,
+            // `IsDead()`: legacy shows a dead mover back where it lies (`:1786-1811`).
+            dead: self.is_dead(raw),
+            // `CanMove` holds unless stunned (D9: legacy tests `AFF_STUN`, which `Stun` never
+            // sets, so a stunned player walks). The Rewrite has no private shop.
+            can_move: !self.is_stunned(raw),
             move_speed: self.move_speed_of(raw),
         };
         let outcome = judge_move(record, &context);

@@ -641,6 +641,7 @@ mod tests {
         Points::load(&PointsRow {
             race: 3,
             level: 154,
+            exp: 0,
             conqueror_level: 0,
             st: 17,
             ht: 18,
@@ -967,6 +968,7 @@ mod tests {
                 let points = Points::load(&PointsRow {
                     race,
                     level: 154,
+                    exp: 0,
                     conqueror_level: 0,
                     st: 17,
                     ht: 18,
@@ -998,6 +1000,7 @@ mod tests {
         let mut points = Points::load(&PointsRow {
             race: 3,
             level: 154,
+            exp: 0,
             conqueror_level: 1,
             st: 17,
             ht: 18,

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, PULSE_PERIOD};
 use prodomo::game_loop_messages::{
-    AsyncCompletionStatus, CompletionId, GameCommand, GameLoopFailure, GameLoopTerminal,
+    AsyncCompletionStatus, CompletionId, Departure, GameCommand, GameLoopFailure, GameLoopTerminal,
 };
 use prodomo::game_state::GameState;
 
@@ -734,7 +734,7 @@ async fn a_client_that_leaves_the_world_frees_its_name_for_a_later_login() {
     // When: the descriptor disconnects and leaves the world.
     let left = tokio::time::timeout(
         Duration::from_secs(5),
-        controller.leave_world(common::vid::Vid::new(77)),
+        controller.leave_world(common::vid::Vid::new(77), Departure::Disconnect),
     )
     .await
     .expect("the game thread answered within five seconds")
@@ -788,7 +788,7 @@ async fn leaving_a_character_the_thread_never_admitted_is_reported_rather_than_p
 
     let left = tokio::time::timeout(
         Duration::from_secs(5),
-        controller.leave_world(common::vid::Vid::new(4_242)),
+        controller.leave_world(common::vid::Vid::new(4_242), Departure::Disconnect),
     )
     .await
     .expect("the game thread answered within five seconds")

@@ -446,6 +446,12 @@ pub enum MoveRefused {
     /// `DropItem`: no sectree holds the dropper's point, so `AddToGround` would fail
     /// (`G/item.cpp:569-574`).
     NoSectree,
+    /// `UseItem`: the character is stunned (`G/char_item.cpp:7227`) or dead (D7).
+    UsedWhileDown,
+    /// `DropItem`: the character is dead (`G/char_item.cpp:7467`).
+    DroppedWhileDead,
+    /// `PickupItem`: the character is dead (D10).
+    PickedUpWhileDead,
 }
 
 impl MoveRefused {
@@ -598,6 +604,9 @@ impl core::fmt::Display for MoveRefused {
                 f.write_str("a quest item is picked up while a script waits")
             }
             Self::NoSectree => f.write_str("no sectree holds the drop point"),
+            Self::UsedWhileDown => f.write_str("an item is used while stunned or dead"),
+            Self::DroppedWhileDead => f.write_str("an item is dropped while dead"),
+            Self::PickedUpWhileDead => f.write_str("an item is picked up while dead"),
         }
     }
 }
