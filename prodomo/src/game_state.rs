@@ -66,7 +66,10 @@ mod fight;
 #[cfg(test)]
 mod fixtures;
 mod mob_ai;
+mod mob_battle;
+mod mob_strike;
 mod motion;
+mod pc_heal;
 mod quests;
 mod regen;
 mod safebox;
@@ -623,8 +626,10 @@ impl GameState {
                 index.remove(view::EntityKey::Npc(npc.vid), &mut effects);
                 self.npc_of.remove(&npc.vid);
                 self.minds.forget(npc.vid);
+                self.npc_combat.remove(&npc.vid);
             }
         }
+        let now = self.clock.now();
         for (at, npc) in npcs.npcs.iter().enumerate() {
             // `SpawnMob` places an NPC only where a sectree stands (`world/src/npc.rs:367`).
             let _shown = index.show(
@@ -634,6 +639,9 @@ impl GameState {
                 &mut effects,
             );
             self.npc_of.insert(npc.vid, (channel, region.index, at));
+            // `Show` seeds the fight before any `or_default()` can run.
+            self.npc_combat
+                .insert(npc.vid, fight::NpcCombat::created(now, (npc.x, npc.y)));
         }
         self.npcs.insert(key, Arc::new(npcs));
         self.warp_npcs.insert(key, warps);
@@ -3780,6 +3788,7 @@ mod tests {
             conqueror_level: 0,
             language: 1,
             pk_mode: crate::loading_phase::PK_MODE_PROTECT,
+            skill_group: 0,
         };
         let place = crate::game_loop_messages::EnterPlace {
             channel: 1,

@@ -560,6 +560,8 @@ pub struct PcCard {
     pub language: u8,
     /// `m_bPKMode`, from [`pk_mode`].
     pub pk_mode: u8,
+    /// `GetSkillGroup()`: the heal and the shaman shares read it in the world.
+    pub skill_group: u8,
 }
 
 impl PcCard {
@@ -575,6 +577,7 @@ impl PcCard {
             conqueror_level: character.conqueror_level,
             language,
             pk_mode: pk_mode(character.level, pk_protect_level),
+            skill_group: character.skill_group,
         }
     }
 }
@@ -2035,6 +2038,7 @@ mod tests {
             conqueror_level: 1,
             language: 5,
             pk_mode: PK_MODE_PEACE,
+            skill_group: 0,
         };
         let at = InsertAt {
             angle: 90.0,

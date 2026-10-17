@@ -55,6 +55,14 @@ pub struct MobFight {
     pub battle_type: u8,
     /// `GetMobAttackRange`: the proto's `wAttackRange`.
     pub attack_range: u16,
+    /// `wAggressiveSight`: the proto's aggressive sight range.
+    pub aggressive_sight: u16,
+    /// `fDamMultiply` as its IEEE-754 bits, because an `f32` would break `Eq`.
+    pub dam_multiply_bits: u32,
+    /// `bBerserkPoint`: below this share of its hit points a berserker turns berserk.
+    pub berserk_point: u8,
+    /// `bDeathBlowPoint`: the death-blow chance.
+    pub death_blow_point: u8,
     /// `GetMobDamageMin` and `GetMobDamageMax`: the proto's `dwDamageRange`.
     pub damage_range: [u32; 2],
     /// The proto's `bRegenCycle`: the seconds between two recoveries.
@@ -84,6 +92,10 @@ impl MobFight {
             rank: proto.rank,
             battle_type: proto.battle_type,
             attack_range: proto.attack_range,
+            aggressive_sight: proto.aggressive_sight,
+            dam_multiply_bits: proto.dam_multiply.to_bits(),
+            berserk_point: proto.berserk_point,
+            death_blow_point: proto.death_blow_point,
             damage_range: proto.damage_range,
             regen_cycle: proto.regen_cycle,
             regen_percent: proto.regen_percent,
@@ -124,7 +136,14 @@ impl MobFight {
         self.points.get(&slot).copied().unwrap_or(0)
     }
 
-    pub(crate) fn add(&mut self, slot: usize, value: i32) {
+    /// `GetMobDamageMultiply`: the proto's `fDamMultiply`.
+    #[must_use]
+    pub fn dam_multiply(&self) -> f32 {
+        f32::from_bits(self.dam_multiply_bits)
+    }
+
+    /// Adds `value` to the slot, removing it at 0 (`SetProto`'s accumulation).
+    pub fn add(&mut self, slot: usize, value: i32) {
         let sum = self.point(slot).saturating_add(value);
         if sum == 0 {
             self.points.remove(&slot);
@@ -153,6 +172,10 @@ mod tests {
             regen_percent: 3,
             drain_sp: 9,
             stone_skin_point: 40,
+            aggressive_sight: 2000,
+            dam_multiply: 3.0,
+            berserk_point: 20,
+            death_blow_point: 30,
             str: 11,
             dex: 13,
             con: 17,
@@ -163,6 +186,25 @@ mod tests {
             enchants: [1, 2, 3, 4, 5, 6],
             resists: [-7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 0],
             ..MobTableRecord::default()
+        }
+    }
+
+    /// `MobFight` keeps the sight, multiplier, berserk and death-blow points (U17).
+    #[test]
+    fn mob_fight_keeps_the_sight_multiplier_berserk_and_death_blow_points() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
+        let protos = gamedata::mob_proto::MobProtos::load(&root).expect("the owner's protos");
+        for (vnum, sight, multiply, berserk, death_blow) in [
+            (115_u32, 2000_u16, 1.0_f32, 0_u8, 0_u8),
+            (406_u32, 2000_u16, 1.0_f32, 0_u8, 0_u8),
+            (6311_u32, 2000_u16, 3.0_f32, 20_u8, 30_u8),
+        ] {
+            let fight = MobFight::of(protos.get(vnum).expect("the row is in the file"));
+            assert_eq!(fight.aggressive_sight, sight, "{vnum}");
+            assert_eq!(fight.dam_multiply().to_bits(), multiply.to_bits(), "{vnum}");
+            assert_eq!(fight.berserk_point, berserk, "{vnum}");
+            assert_eq!(fight.death_blow_point, death_blow, "{vnum}");
         }
     }
 
@@ -193,6 +235,9 @@ mod tests {
         assert_eq!(fight.damage_range, [20, 24]);
         assert_eq!((fight.regen_cycle, fight.regen_percent), (5, 3));
         assert_eq!((fight.drain_sp, fight.stone_skin_point), (9, 40));
+        assert_eq!(fight.aggressive_sight, 2000);
+        assert_eq!(fight.dam_multiply().to_bits(), 3.0_f32.to_bits());
+        assert_eq!((fight.berserk_point, fight.death_blow_point), (20, 30));
     }
 
     #[test]

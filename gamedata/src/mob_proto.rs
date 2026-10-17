@@ -115,6 +115,17 @@ pub const BATTLE_TYPE: &[&str] = &[
     "SUPER_TANKER",
 ];
 
+/// `BATTLE_TYPE_MELEE` (`common/length.h:484-493`): the melee family is 0, 3..=7; RANGE (1)
+/// and MAGIC (2) stay passive (V19a).
+pub const BATTLE_TYPE_MELEE: u8 = 0;
+/// `BATTLE_TYPE_RANGE`.
+pub const BATTLE_TYPE_RANGE: u8 = 1;
+/// `BATTLE_TYPE_MAGIC`.
+pub const BATTLE_TYPE_MAGIC: u8 = 2;
+
+/// `MOB_RANK_BOSS` (`common/length.h:455-463`): a chasing boss refollows one time in four.
+pub const MOB_RANK_BOSS: u8 = 4;
+
 /// `get_Mob_Size_Value` (`ProtoReader.cpp:656-676`). The value is the index plus one.
 pub const SIZE: &[&str] = &["SMALL", "MEDIUM", "BIG"];
 
@@ -128,6 +139,39 @@ pub const AIFLAG_NOMOVE: u32 = 1 << 1;
 
 /// `AIFLAG_COWARD` (`common/length.h:690`): the bit `COWARD` sets, which `IsCoward` reads.
 pub const AIFLAG_COWARD: u32 = 1 << 2;
+
+/// `AIFLAG_NOATTSHINSU` (`common/length.h:691`, `G/char_state.cpp:331-333`,
+/// `G/trigger.cpp:114-116`): the bit `NOATTSHINSU` sets, which spares empire 1 (Shinsu)
+/// from the monster's victim search.
+pub const AIFLAG_NOATTSHINSU: u32 = 1 << 3;
+
+/// `AIFLAG_NOATTCHUNJO` (`common/length.h:692`, `ProtoReader.cpp:676`,
+/// `G/char_state.cpp:337-339`, `G/trigger.cpp:122-124`): the bit the proto text's
+/// `NOATTCHUNJO` sets. The proto text puts it at bit 4, and it spares empire 2 (Chunjo).
+/// Legacy's enum reads bit 4 as Jinno (B30); the Rewrite reads the proto text's meaning.
+pub const AIFLAG_NOATTCHUNJO: u32 = 1 << 4;
+
+/// `AIFLAG_NOATTJINNO` (`common/length.h:693`, `ProtoReader.cpp:676`,
+/// `G/char_state.cpp:343-345`, `G/trigger.cpp:128-130`): the bit the proto text's
+/// `NOATTJINNO` sets. The proto text puts it at bit 5, and it spares empire 3 (Jinno).
+/// Legacy's enum reads bit 5 as Chunjo (B30); the Rewrite reads the proto text's meaning.
+pub const AIFLAG_NOATTJINNO: u32 = 1 << 5;
+
+/// `AIFLAG_ATTMOB` (`common/length.h:694`, `G/trigger.cpp:85-89`): the bit `ATTMOB` sets,
+/// which lets a monster attack another monster in `FindVictim`. No proto has it.
+pub const AIFLAG_ATTMOB: u32 = 1 << 6;
+
+/// `AIFLAG_BERSERK` (`common/length.h:695`, `G/char_state.cpp:1125-1129`): the bit `BERSERK`
+/// sets, which Battle turns on when the monster's hit points fall below `bBerserkPoint`.
+pub const AIFLAG_BERSERK: u32 = 1 << 7;
+
+/// `AIFLAG_STONESKIN` (`common/length.h:696`): the bit `STONESKIN` sets.
+pub const AIFLAG_STONESKIN: u32 = 1 << 8;
+
+/// `AIFLAG_DEATHBLOW` (`common/length.h:698`, `G/char_battle.cpp:2286-2296`): the bit
+/// `DEATHBLOW` sets, which Battle draws when the monster has a death-blow point, rolling
+/// `number(1, 100) <= bDeathBlowPoint` and, on success, multiplying the damage by 4.
+pub const AIFLAG_DEATHBLOW: u32 = 1 << 10;
 
 /// `get_Mob_AIFlag_Value` (`ProtoReader.cpp:678-702`), bit by bit.
 pub const AI_FLAG: &[&str] = &[

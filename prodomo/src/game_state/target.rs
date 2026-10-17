@@ -259,24 +259,35 @@ impl GameState {
     pub(super) fn broadcast_targets(&mut self) {
         let online: Vec<Vid> = self.outboxes.keys().copied().collect();
         for vid in online {
-            let Some(points) = self
-                .characters
-                .find_by_vid_mut(vid)
-                .ok()
-                .and_then(|character| character.items_and_points_mut().1)
-            else {
-                continue;
-            };
-            let changes = points.take_target_broadcasts();
-            if changes.is_empty() {
-                continue;
-            }
-            let targeting = self.targets.targeting(vid.raw());
-            for (hp, max_hp) in changes {
-                let record = target_record(vid.raw(), shown_hit_points(hp, max_hp), 0);
-                for &other in &targeting {
-                    let _sent = self.write_to_client(Vid::new(other), record.clone());
-                }
+            self.flush_pc_target(vid);
+        }
+    }
+
+    /// `BroadcastTargetPacket` of the player under `vid`: its pending changes go to every
+    /// character targeting it, oldest first. A monster's hit calls it before `GC_STUN` (V17i).
+    pub(super) fn broadcast_pc_target(&mut self, vid: Vid) {
+        self.flush_pc_target(vid);
+    }
+
+    /// One player's pending hit-point changes, to its targeters.
+    fn flush_pc_target(&mut self, vid: Vid) {
+        let Some(points) = self
+            .characters
+            .find_by_vid_mut(vid)
+            .ok()
+            .and_then(|character| character.items_and_points_mut().1)
+        else {
+            return;
+        };
+        let changes = points.take_target_broadcasts();
+        if changes.is_empty() {
+            return;
+        }
+        let targeting = self.targets.targeting(vid.raw());
+        for (hp, max_hp) in changes {
+            let record = target_record(vid.raw(), shown_hit_points(hp, max_hp), 0);
+            for &other in &targeting {
+                let _sent = self.write_to_client(Vid::new(other), record.clone());
             }
         }
     }

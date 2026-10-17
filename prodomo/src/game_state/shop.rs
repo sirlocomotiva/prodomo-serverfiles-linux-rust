@@ -1298,8 +1298,8 @@ mod tests {
         let (tx, mut inbox) = tokio::sync::mpsc::unbounded_channel();
         let _old = state.outboxes.insert(SHOPPER, ClientOutbox::new(tx));
         let hp = shopper(&mut state).points().unwrap().hp();
-        assert!(!state.damage_pc(None, SHOPPER, hp));
-        assert!(state.damage_pc(None, SHOPPER, 1));
+        assert!(!state.damage_pc(None, SHOPPER, hp, None));
+        assert!(state.damage_pc(None, SHOPPER, 1, None));
         let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
         let mut phase = Vec::new();
         protocol::gc_small::GcHeaderAndByte::new(
@@ -1329,7 +1329,7 @@ mod tests {
         shopper(&mut state).set_points(Some(super::super::fixtures::points(12_345)));
         state.start_pc_recovery(SHOPPER);
         let hp = shopper(&mut state).points().unwrap().hp();
-        assert!(!state.damage_pc(None, SHOPPER, hp));
+        assert!(!state.damage_pc(None, SHOPPER, hp, None));
         assert!(state.is_stunned(SHOPPER.raw()));
         assert_eq!(open(&mut state, WEAPONS).owner_vid, WEAPONS);
         assert!(state.browsing.contains_key(&SHOPPER));

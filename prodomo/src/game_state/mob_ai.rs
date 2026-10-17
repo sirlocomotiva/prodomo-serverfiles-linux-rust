@@ -48,10 +48,11 @@
 //!
 //! # What is not here yet
 //!
-//! - **The monster's side of the fight.** No NPC has a victim yet: `FindVictim` and
-//!   `BeginFight` of an aggressive or hit monster, the Battle state, the guard's victim search
-//!   and the aggro of a chasing monster wait for 229l. An aggressive monster near a player
-//!   therefore wanders as a peaceful one does, with its own shorter wait.
+//! - **The fight's missing arms (V19).** The guard's victim search, the aggro of a
+//!   chasing monster, the mob skills, the summoners and god speed, and a RANGE or MAGIC
+//!   monster's fight wait for 229m. A ranging or magic monster near a player therefore
+//!   wanders as a peaceful one does, and the melee family fights ([`super::mob_battle`],
+//!   [`super::mob_strike`]).
 //! - **The protector.** `GetProtege` (a group's leader, a stone's spawn) and `Follow` wait for the
 //!   group's party and follow.
 //! - **A stone's spawns** at each tenth of its hit points wait for a hit on a stone, which is
@@ -80,9 +81,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use common::cfloat::{f32_to_i32, i32_to_f32};
+use common::vid::Vid;
 use gamedata::mob_proto::{
     AIFLAG_COWARD, AIFLAG_NOMOVE, CHAR_TYPE_GOTO, CHAR_TYPE_HORSE, CHAR_TYPE_MONSTER,
-    CHAR_TYPE_STONE, CHAR_TYPE_WARP,
+    CHAR_TYPE_STONE, CHAR_TYPE_WARP, MOB_RANK_BOSS,
 };
 use protocol::gc_actors::GcCharacterMove;
 use protocol::gc_chat::{GcChat, CHAT_TYPE_TALKING};
@@ -100,10 +102,13 @@ use crate::save::PASSES_PER_SEC;
 pub(super) const WALKMODE_WALK: u8 = 1;
 
 /// `m_dwStateDuration` after a `Goto` (`G/char.cpp:3482`, `:3493`), in Pulses.
-const MOVE_STEP_PULSES: u64 = 4;
+pub(super) const MOVE_STEP_PULSES: u64 = 4;
 
 /// `MONSTER_CHAT_WAIT` (`G/constants.h:8`): the chat a waiting character says.
 const MONSTER_CHAT_WAIT: i32 = 0;
+
+/// `MONSTER_CHAT_ATTACK` (`G/constants.h:9`): the chat an attacking monster says.
+const MONSTER_CHAT_ATTACK: i32 = 1;
 
 /// The guards' races (`IsGuardNPC`, `G/char.cpp:7664-7667`).
 const GUARD_RACES: [u16; 3] = [11000, 11002, 11004];
@@ -116,13 +121,13 @@ const HORSE_RACES: std::ops::RangeInclusive<u16> = 20101..=20109;
 const COWARD_DISTANCES: [i32; 4] = [500, 1000, 3000, 5000];
 
 /// `PASSES_PER_SEC(seconds)`.
-fn pulses(seconds: i32) -> u64 {
+pub(super) fn pulses(seconds: i32) -> u64 {
     u64::try_from(seconds)
         .unwrap_or(0)
         .saturating_mul(u64::from(PASSES_PER_SEC))
 }
 
-/// A state of `CFSM`. Battle waits for the fight.
+/// A state of `CFSM`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Fsm {
     /// `m_stateInitial`, which does nothing.
@@ -131,6 +136,19 @@ pub(super) enum Fsm {
     Idle,
     /// `m_stateMove`.
     Move,
+    /// `m_stateBattle` (see [`super::mob_battle`]).
+    Battle,
+}
+
+/// `m_kVIDVictim`. A player's VID comes back at its next login, so a victim that leaves is
+/// `Gone`: legacy's handle that no longer finds its character, which every reader takes as
+/// `!victim` without the stand that `SetVictim(NULL)` makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Victim {
+    /// The victim is online under this VID.
+    Here(Vid),
+    /// The victim left; its VID must not be attacked if it comes back.
+    Gone,
 }
 
 /// What legacy's `CHARACTER` keeps for an NPC's state machine and its walk.
@@ -151,12 +169,18 @@ pub(super) struct Mind {
     pub(super) motion: Motion,
     /// `m_bNowWalking`.
     pub(super) walking: bool,
+    /// `m_kVIDVictim`.
+    pub(super) victim: Option<Victim>,
+    /// `POS_FIGHTING`.
+    pub(super) fighting: bool,
+    /// `m_isBerserk`.
+    pub(super) berserk: bool,
 }
 
 impl Mind {
     /// An NPC as `Initialize` and `Show` leave it: Idle asked for, a duration of 1, standing at
     /// its point with its spawn's heading.
-    fn new(npc: &Npc) -> Self {
+    pub(super) fn new(npc: &Npc) -> Self {
         Self {
             state: Fsm::Initial,
             asked: Some(Fsm::Idle),
@@ -165,6 +189,9 @@ impl Mind {
             rotation: f32::from(npc.rotation),
             motion: Motion::standing((npc.x, npc.y)),
             walking: false,
+            victim: None,
+            fighting: false,
+            berserk: false,
         }
     }
 }
@@ -197,24 +224,46 @@ impl Minds {
         self.machines.remove(&vid);
         self.running.remove(&vid);
     }
+
+    /// The state machine of the NPC under `vid`, to change.
+    pub(super) fn get_mut(&mut self, vid: u32) -> Option<&mut Mind> {
+        self.machines.get_mut(&vid)
+    }
+
+    /// `AddToStateList` plus the Mind: the monster runs, and its machine is `fresh` unless it
+    /// has one.
+    pub(super) fn ensure(&mut self, vid: u32, fresh: Mind) -> &mut Mind {
+        self.running.insert(vid);
+        self.machines.entry(vid).or_insert(fresh)
+    }
+
+    /// Every state machine, to change.
+    pub(super) fn minds_mut(&mut self) -> impl Iterator<Item = (u32, &mut Mind)> {
+        self.machines.iter_mut().map(|(vid, mind)| (*vid, mind))
+    }
+
+    /// Whether `no_wander` holds: no monster wanders or looks for a victim.
+    pub(super) const fn wanders_off(&self) -> bool {
+        self.no_wander
+    }
 }
 
 /// What the idle states read of an NPC.
 #[derive(Clone, Copy, Debug)]
-struct Who {
-    char_type: u8,
-    race: u16,
-    ai_flags: u32,
-    map: i32,
-    aggressive: bool,
+pub(super) struct Who {
+    pub(super) char_type: u8,
+    pub(super) race: u16,
+    pub(super) ai_flags: u32,
+    pub(super) map: i32,
+    pub(super) aggressive: bool,
     /// `IsStun()`: a player's hit left it no hit points (see [`super::fight`]).
-    stunned: bool,
+    pub(super) stunned: bool,
 }
 
 /// `GetDeltaByDegree` (`G/vector.cpp:54-60`): the step of `distance` toward `degree`, clockwise
 /// from north, in `float`. `sin` and `cos` of a `float` are the `float` overloads, as `<cmath>`
 /// resolves them.
-fn delta_by_degree(degree: f32, distance: f32) -> (f32, f32) {
+pub(super) fn delta_by_degree(degree: f32, distance: f32) -> (f32, f32) {
     // `DegreeToRadian`: `degree * (_PI / 180.0f)`, with `_PI` the `float` of pi.
     let radian = degree * (std::f32::consts::PI / 180.0);
     (distance * radian.sin(), distance * radian.cos())
@@ -297,6 +346,7 @@ impl GameState {
             Fsm::Initial => {}
             Fsm::Idle => self.state_idle(vid),
             Fsm::Move => self.state_move(vid),
+            Fsm::Battle => self.state_battle(vid),
         }
         if let Some(mind) = self.minds.machines.get_mut(&vid) {
             mind.next_pulse = pulse.saturating_add(mind.duration);
@@ -304,7 +354,7 @@ impl GameState {
     }
 
     /// What the idle states read of the NPC under `vid`.
-    fn who(&self, vid: u32) -> Option<Who> {
+    pub(super) fn who(&self, vid: u32) -> Option<Who> {
         let &(_, map, _) = self.npc_of.get(&vid)?;
         let npc = self.npc_by_vid(vid)?;
         Some(Who {
@@ -317,7 +367,7 @@ impl GameState {
         })
     }
 
-    fn set_duration(&mut self, vid: u32, duration: u64) {
+    pub(super) fn set_duration(&mut self, vid: u32, duration: u64) {
         if let Some(mind) = self.minds.machines.get_mut(&vid) {
             mind.duration = duration;
         }
@@ -364,7 +414,7 @@ impl GameState {
         }
     }
 
-    /// `__StateIdle_Monster` (`G/char_state.cpp:626-736`), without a victim.
+    /// `__StateIdle_Monster` (`G/char_state.cpp:626-757`).
     fn idle_monster(&mut self, vid: u32, who: Who) {
         // `if (IsStun()) return;` (`:628-629`): the wait stays as it was.
         if who.stunned {
@@ -374,8 +424,22 @@ impl GameState {
             self.coward_escape(vid, who.map);
             return;
         }
-        // `!victim` sets a second (`:654-659`), which only a fight would keep; with no victim
-        // the wait below replaces it at once.
+        // Berserk off (`:643-644`); god speed is dormant (no `POINT_GODSPEED`).
+        if let Some(mind) = self.minds.get_mut(vid) {
+            mind.berserk = false;
+        }
+        // Steps 4-6: the held victim is dropped when it is gone, dead or on BANPK, and an
+        // aggressive wanderer looks for one.
+        let victim = self.idle_victim(vid, who);
+        // Step 7: a live victim starts the fight at once; `BeginFight`'s next Pulse is
+        // overwritten by the post-Execute line, so Battle starts 25 Pulses later (2.2).
+        if let Some(found) = victim {
+            if !self.is_dead(found.raw()) && self.can_begin_fight(vid) {
+                self.begin_fight(vid, found);
+            }
+            return;
+        }
+        // The wait: aggressive and victimless below, `IsAggressive() && !victim` always holds.
         let wait = if who.aggressive {
             number(&mut self.dice, 1, 3)
         } else {
@@ -399,6 +463,47 @@ impl GameState {
         self.monster_chat_wait(vid, who);
     }
 
+    /// Idle steps 4-6 (`G/char_state.cpp:653-686`): the victim held, or found for an
+    /// aggressive wanderer. The `!victim` arm's second is set by the caller asking for nothing.
+    fn idle_victim(&mut self, vid: u32, who: Who) -> Option<Vid> {
+        let held = self.victim_of(vid);
+        let lost = match held {
+            None => true,
+            Some(found) => {
+                self.is_dead(found.raw())
+                    || self
+                        .place_of(found.raw())
+                        .and_then(|(_, map)| self.spot_of(found.raw()).map(|spot| (map, spot)))
+                        .is_some_and(|(map, spot)| self.is_banpk(map, spot.x, spot.y))
+            }
+        };
+        if lost {
+            self.set_victim(vid, None);
+            self.set_duration(vid, pulses(1));
+        } else if held.is_some() {
+            return held;
+        }
+        // The Meley 40000 retry applies to a map that is not hosted; map 61's `xmas_tree`
+        // flag reads 0 here. RANGE and MAGIC never search (V19a).
+        if !self.minds.no_wander
+            && who.aggressive
+            && self
+                .npc_by_vid(vid)
+                .is_some_and(super::mob_battle::fights_back)
+        {
+            let sight = self
+                .npc_by_vid(vid)
+                .map_or(0, |npc| npc.fight.aggressive_sight);
+            if let Some(found) = self.find_victim(vid, sight) {
+                return Some(found);
+            }
+        }
+        if lost {
+            return None;
+        }
+        held
+    }
+
     /// The idle walk's point `distance` ahead of the NPC's heading, when both it and the
     /// half-way point are movable (`G/char_state.cpp:592-598`, `:730-735`).
     fn wander_target(&self, vid: u32, map: i32, distance: f32) -> Option<(i32, i32)> {
@@ -414,7 +519,7 @@ impl GameState {
 
     /// `CowardEscape` (`G/char_state.cpp:282-321`): up to eight headings at each of three
     /// distances, farthest first, the first whose every hundredth of the way is movable.
-    fn coward_escape(&mut self, vid: u32, map: i32) {
+    pub(super) fn coward_escape(&mut self, vid: u32, map: i32) {
         for index in (0..3).rev() {
             for _ in 0..8 {
                 self.turn_at_random(vid);
@@ -459,7 +564,7 @@ impl GameState {
     }
 
     /// Where the NPC under `vid` stands.
-    fn npc_spot(&self, vid: u32) -> Option<(i32, i32)> {
+    pub(super) fn npc_spot(&self, vid: u32) -> Option<(i32, i32)> {
         let npc = self.npc_by_vid(vid)?;
         Some((npc.x, npc.y))
     }
@@ -479,8 +584,9 @@ impl GameState {
     }
 
     /// `CHARACTER::Goto` (`G/char.cpp:3471-3508`) for an NPC. Returns true when a new
-    /// destination was set. With no victim, `MonsterChat(MONSTER_CHAT_ATTACK)` is never said.
-    fn npc_goto(&mut self, vid: u32, x: i32, y: i32) -> bool {
+    /// destination was set. Entering Move with a live victim says
+    /// `MonsterChat(MONSTER_CHAT_ATTACK)` first.
+    pub(super) fn npc_goto(&mut self, vid: u32, x: i32, y: i32) -> bool {
         let Some(spot) = self.npc_spot(vid) else {
             return false;
         };
@@ -508,13 +614,19 @@ impl GameState {
         mind.motion.duration_ms = move_duration(spot, (x, y), MOTION_SPEED_FALLBACK, move_speed);
         mind.motion.start_ms = now;
         mind.duration = MOVE_STEP_PULSES;
+        let chats = mind.state != Fsm::Move;
         mind.asked = Some(Fsm::Move);
+        // Entering Move with a held victim that is still online chats first (`:3500-3503`).
+        // `Gone` gives `NULL`, so there is no chat.
+        if chats && self.victim_of(vid).is_some() {
+            self.monster_chat_attack(vid);
+        }
         true
     }
 
     /// `SendMovePacket(FUNC_WAIT, 0, 0, 0, 0)` (`G/char.cpp:3624-3636`): the destination and the
     /// move's duration, the heading as `(int) GetRotation() / 5`, to the view.
-    fn send_move_wait(&mut self, vid: u32) {
+    pub(super) fn send_move_wait(&mut self, vid: u32) {
         let Some(mind) = self.minds.get(vid) else {
             return;
         };
@@ -534,7 +646,7 @@ impl GameState {
         self.packet_around(me, &record, Some(me));
     }
 
-    /// `StateMove` (`G/char_state.cpp:782-928`) for an NPC with no victim.
+    /// `StateMove` (`G/char_state.cpp:782-928`) for an NPC.
     fn state_move(&mut self, vid: u32) {
         let Some(mind) = self.minds.get(vid) else {
             return;
@@ -544,11 +656,33 @@ impl GameState {
             // `Move(x, y)` (`:793`); a not-a-number rate skips only this (D1).
             self.npc_move(vid, point.0, point.1);
         }
+        // A chasing boss refollows one time in four (`:880-885`); race 2191 is not spawned.
+        if let Some(victim) = self.victim_of(vid) {
+            let boss = self
+                .npc_by_vid(vid)
+                .is_some_and(|npc| npc.fight.rank >= MOB_RANK_BOSS);
+            if boss && number(&mut self.dice, 0, 3) == 0 && self.goto_near_target(vid, victim) {
+                return;
+            }
+        }
         if let Some((_, true)) = step {
-            let wait = number(&mut self.dice, 1, 3);
-            if let Some(mind) = self.minds.machines.get_mut(&vid) {
-                mind.asked = Some(Fsm::Idle);
-                mind.duration = pulses(wait);
+            // With a victim that is not a coward's, Battle after one Pulse; only the
+            // `MonsterLog` sits under legacy's `if (!IsState(m_stateBattle))` (`:907-918`).
+            let to_battle = self.victim_of(vid).is_some()
+                && self
+                    .npc_by_vid(vid)
+                    .is_none_or(|npc| npc.ai_flags & AIFLAG_COWARD == 0);
+            if to_battle {
+                if let Some(mind) = self.minds.machines.get_mut(&vid) {
+                    mind.asked = Some(Fsm::Battle);
+                    mind.duration = 1;
+                }
+            } else {
+                let wait = number(&mut self.dice, 1, 3);
+                if let Some(mind) = self.minds.machines.get_mut(&vid) {
+                    mind.asked = Some(Fsm::Idle);
+                    mind.duration = pulses(wait);
+                }
             }
         }
     }
@@ -589,6 +723,17 @@ impl GameState {
     }
 
     /// `MonsterChat(MONSTER_CHAT_WAIT)` (`G/char.cpp:7555-7600`).
+    /// `MonsterChat(MONSTER_CHAT_ATTACK)` (`G/char_battle.cpp:310-316`): one time in 61 the
+    /// monster says one of its race's three attack lines, drawn as `MONSTER_CHAT_ATTACK * 3 +
+    /// number(1, 3)`.
+    pub(super) fn monster_chat_attack(&mut self, vid: u32) {
+        if number(&mut self.dice, 0, 60) != 0 {
+            return;
+        }
+        let line = number(&mut self.dice, 1, 3);
+        self.monster_say(vid, MONSTER_CHAT_ATTACK * 3 + line);
+    }
+
     fn monster_chat_wait(&mut self, vid: u32, who: Who) {
         let index = if who.char_type == CHAR_TYPE_MONSTER {
             if number(&mut self.dice, 0, 60) != 0 {

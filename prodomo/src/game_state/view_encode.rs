@@ -436,13 +436,14 @@ mod tests {
             conqueror_level: 0,
             language: 0,
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
+            skill_group: 0,
         }
     }
 
     /// A body on [`PLACE`] standing at (3200, 3200), turned `rotation` degrees.
     fn a_body(rotation: f32) -> Body {
         let (channel, map) = PLACE;
-        let mut body = Body::new(channel, map, (3200, 3200), a_card(), 0);
+        let mut body = Body::new(channel, map, (3200, 3200), a_card(), 0, 0);
         body.rotation = rotation;
         body
     }

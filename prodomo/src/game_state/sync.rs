@@ -20,9 +20,8 @@ use protocol::cg_variable::SyncPositionPacket;
 use super::view::EntityKey;
 use super::GameState;
 use crate::sync_position::{
-    judge_sync_ownership, process, SyncOwnershipOutcome, SyncOwnershipState, SyncPositionActor,
-    SyncPositionCloseReason, SyncPositionPorts, SyncPositionResult, SyncPositionVictim,
-    SyncPositionVictimKind,
+    process, SyncPositionActor, SyncPositionCloseReason, SyncPositionPorts, SyncPositionResult,
+    SyncPositionVictim, SyncPositionVictimKind,
 };
 
 /// The ports of one `CG_SYNC_POSITION`, over the world.
@@ -90,41 +89,11 @@ impl SyncPositionPorts for WorldSync<'_> {
                 .set_npc_sync_owner(actor, self.actor, victim, self.now);
         }
         // `battle_is_attackable` (`G/battle.cpp:99-152`): a dead victim (`:102`), then a stunned
-        // or dead claimer (`:122`), is refused with a `DAMAGE_BLOCK` to both.
-        if self.world.is_dead(victim.vid.raw()) || self.world.is_down(actor.raw()) {
-            self.world.block_pc_claim(victim.vid, actor);
-            return false;
-        }
-        let state = self
-            .world
-            .bodies
-            .get(&victim.vid)
-            .map(|body| body.sync)
-            .unwrap_or_default();
-        let (x, y) = self.actor;
-        match judge_sync_ownership(actor, victim, state, x, y, self.now) {
-            SyncOwnershipOutcome::Refused => false,
-            // The owner past the limit keeps the claim as it was and sends nothing.
-            SyncOwnershipOutcome::Kept => true,
-            SyncOwnershipOutcome::Accepted {
-                owner_changed,
-                record,
-            } => {
-                // A new owner resets the last-sync stamp, which lets its first sync pass the
-                // 100 ms test; every accepted claim refreshes the claim's time.
-                if let Some(body) = self.world.bodies.get_mut(&victim.vid) {
-                    if owner_changed {
-                        body.last_sync = None;
-                    }
-                    body.sync = SyncOwnershipState {
-                        owner: Some(actor),
-                        claimed_at: Some(self.now),
-                    };
-                }
-                self.broadcast_around_victim(victim.vid, &record);
-                true
-            }
-        }
+        // or dead claimer (`:122`), is refused with a `DAMAGE_BLOCK` to both. One gate with the
+        // monster's claim.
+        let attackable = !(self.world.is_dead(victim.vid.raw()) || self.world.is_down(actor.raw()));
+        self.world
+            .claim_pc(actor, victim, self.actor, attackable, self.now)
     }
 
     fn last_sync_time(&mut self, victim: Vid) -> Option<Duration> {
@@ -268,7 +237,7 @@ mod tests {
             let struck = Vid::new(down);
             world.start_pc_recovery(struck);
             for _ in 0..hits {
-                let _died = world.damage_pc(None, struck, i32::MAX);
+                let _died = world.damage_pc(None, struck, i32::MAX, None);
             }
             let (_, _) = (drained(&mut claimer), drained(&mut victim));
             clock.set(1000);

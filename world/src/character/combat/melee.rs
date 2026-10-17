@@ -32,7 +32,7 @@ use gamedata::item_kind::{
     WEAPON_SWORD, WEAPON_TWO_HANDED,
 };
 use gamedata::item_proto::ItemProto;
-use gamedata::mob_proto::{CHAR_TYPE_MONSTER, CHAR_TYPE_STONE};
+use gamedata::mob_proto::{AIFLAG_STONESKIN, CHAR_TYPE_MONSTER, CHAR_TYPE_STONE};
 
 use super::{attack_rating, AttackRatingInput};
 use crate::character::{number, race_to_job, Dice, PointRecord, Points};
@@ -56,8 +56,6 @@ pub const DAMAGE_CRITICAL: u8 = 1 << 5;
 
 /// `MONSTER_CHAT_ATTACKED` (`G/constants.h:11`): the chat a monster may say when it is hit.
 const MONSTER_CHAT_ATTACKED: i32 = 3;
-/// `AIFLAG_STONESKIN` (`C/length.h:696`): below `bStoneSkinPoint` the monster takes half.
-const AIFLAG_STONESKIN: u32 = 1 << 8;
 /// `MOB_RANK_BOSS`: from this rank up `POINT_ATTBONUS_BOSS` applies.
 const MOB_RANK_BOSS: u8 = 4;
 /// `BATTLE_TYPE_MELEE`: the battle type whose reach follows its attack range.
@@ -273,11 +271,17 @@ pub fn calc_melee_damage(
     {
         damage /= 2;
     }
-    // `CalcBattleDamage`.
+    battle_damage_floor(dice, damage)
+}
+
+/// `CalcBattleDamage` without the level delta (`G/battle.cpp:244-251`): below 3, `number(1, 5)`.
+/// A monster victim's level delta never applies here: the player attacker is never polymorphed.
+pub(crate) fn battle_damage_floor(dice: &mut dyn Dice, damage: i32) -> i32 {
     if damage < 3 {
-        damage = number(dice, 1, 5);
+        number(dice, 1, 5)
+    } else {
+        damage
     }
-    damage
 }
 
 /// The attack `CalcMeleeDamage` builds before `CalcAttBonus`.
@@ -342,7 +346,7 @@ fn att_bonus_on_npc(attack: i32, attacker: &Points, victim: &Npc) -> i32 {
 /// Dividing in `float` gives the same `float`: the sum is exact in both while it stays below
 /// 2^24, and a quotient rounded to `double` and then to `float` is the quotient rounded to
 /// `float` once, because 53 bits are at least twice 24 plus 2 (Figueroa, 1995).
-fn point_pct(value: i32) -> f32 {
+pub(crate) fn point_pct(value: i32) -> f32 {
     i32_to_f32(value.wrapping_add(100)) / 100.0
 }
 
@@ -387,7 +391,7 @@ fn weapon_resist(damage: i32, weapon: Option<&ItemProto>, victim: &MobFight) -> 
 }
 
 /// `GetHPPct`: the share of the maximum left, 0 when there is no maximum.
-fn hp_pct(victim: &Npc) -> i32 {
+pub(crate) fn hp_pct(victim: &Npc) -> i32 {
     if victim.max_hp <= 0 {
         0
     } else {

@@ -104,6 +104,95 @@ pub fn f64_to_i32(value: f64) -> i32 {
     i32::try_from(signed).unwrap_or(if signed < 0 { i32::MIN } else { i32::MAX })
 }
 
+/// `(float)value` of a `double`: the nearest `f32` to `value`, ties to even.
+///
+/// C casts a `double` to a `float` by rounding to the nearest `f32`, ties to even. The
+/// conversion is performed from the exact bits, with no `as` cast, so the pedantic
+/// `cast_precision_loss` lint stays quiet. Used by the lead's `fFollowSpeed`
+/// (`G/char.cpp:6949`), which mixes `double` and `float` arithmetic.
+/// # Panics
+///
+/// Panics only if an internal bit-width conversion fails, which cannot happen for valid
+/// inputs.
+#[must_use]
+pub fn f64_to_f32(value: f64) -> f32 {
+    let bits = value.to_bits();
+    let sign_bit = bits & (1u64 << 63);
+    let exp64 = (bits >> 52) & 0x7ff;
+    let frac64 = bits & 0x000f_ffff_ffff_ffff;
+
+    // NaN.
+    if exp64 == 0x7ff && frac64 != 0 {
+        let nan32: u64 = (sign_bit >> 32) | 0x7fc0_0000;
+        return f32::from_bits(u32::try_from(nan32).unwrap());
+    }
+    // Infinity.
+    if exp64 == 0x7ff {
+        let inf32: u64 = (sign_bit >> 32) | 0x7f80_0000;
+        return f32::from_bits(u32::try_from(inf32).unwrap());
+    }
+    // Zero or subnormal f64: all below the f32 range.
+    if exp64 == 0 {
+        let zero32: u64 = sign_bit >> 32;
+        return f32::from_bits(u32::try_from(zero32).unwrap());
+    }
+
+    let exp = i64::try_from(exp64).unwrap() - 1023;
+    let mant = frac64 | (1u64 << 52);
+    let e32 = exp + 127;
+
+    if e32 >= 255 {
+        let inf32: u64 = (sign_bit >> 32) | 0x7f80_0000;
+        return f32::from_bits(u32::try_from(inf32).unwrap());
+    }
+
+    if e32 <= 0 {
+        let shift = (1 - e32) + 29;
+        if shift >= 63 {
+            let zero32: u64 = sign_bit >> 32;
+            return f32::from_bits(u32::try_from(zero32).unwrap());
+        }
+        let rshift = u32::try_from(shift).unwrap();
+        let mant_shifted = mant >> rshift;
+        let remainder = mant & ((1u64 << rshift) - 1);
+        let half = 1u64 << (rshift - 1);
+        let rounded = if remainder > half || (remainder == half && (mant_shifted & 1) == 1) {
+            mant_shifted + 1
+        } else {
+            mant_shifted
+        };
+        if rounded >= (1u64 << 24) {
+            let normal_bits: u64 = (sign_bit >> 32) | (1u64 << 23);
+            return f32::from_bits(u32::try_from(normal_bits).unwrap());
+        }
+        let subnormal_bits: u64 = (sign_bit >> 32) | rounded;
+        return f32::from_bits(u32::try_from(subnormal_bits).unwrap());
+    }
+
+    let rshift: u32 = 29;
+    let mant_shifted = mant >> rshift;
+    let remainder = mant & ((1u64 << rshift) - 1);
+    let half = 1u64 << (rshift - 1);
+    let mut rounded = if remainder > half || (remainder == half && (mant_shifted & 1) == 1) {
+        mant_shifted + 1
+    } else {
+        mant_shifted
+    };
+    let mut e32_final = e32;
+    if rounded >= (1u64 << 24) {
+        rounded >>= 1;
+        e32_final += 1;
+        if e32_final >= 255 {
+            let inf32: u64 = (sign_bit >> 32) | 0x7f80_0000;
+            return f32::from_bits(u32::try_from(inf32).unwrap());
+        }
+    }
+    let mant32 = rounded & 0x007f_ffff;
+    let e32u = u64::try_from(e32_final).unwrap();
+    let result_bits: u64 = (sign_bit >> 32) | (e32u << 23) | mant32;
+    f32::from_bits(u32::try_from(result_bits).unwrap())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +435,60 @@ mod tests {
                 assert_eq!(f64_to_i32(fraction), value, "{fraction}");
             }
         }
+    }
+
+    /// `f64_to_f32` rounds to nearest, ties to even, over the speeds and distances (U18).
+    #[test]
+    fn f64_to_f32_rounds_to_nearest_even() {
+        // Exact ties: the midpoint between two adjacent floats rounds to the even one.
+        for low in [1.0_f32, 2.0_f32, 100.0_f32, 300.0_f32, 10_000.0_f32] {
+            for bits in [low.to_bits(), low.to_bits() | 1] {
+                let even = f32::from_bits(bits & !1);
+                let odd = f32::from_bits(bits | 1);
+                let (below, above) = if even < odd { (even, odd) } else { (odd, even) };
+                if above <= below {
+                    continue;
+                }
+                let mid = (f64::from(below) + f64::from(above)) / 2.0;
+                let want = if below.to_bits() & 1 == 0 {
+                    below
+                } else {
+                    above
+                };
+                assert_eq!(f64_to_f32(mid).to_bits(), want.to_bits(), "{mid}");
+            }
+        }
+        // The speeds and distances range: the nearest float, ties to even, witnessed
+        // through the two bracketing floats, as the unsigned tests do.
+        let mut values = vec![300.0, 394.7368, 0.1, 157.5, 201.25, 4800.0, 100_000.0];
+        values.extend((0..20_000).map(|n| f64::from(n) / 2.0));
+        values.extend((-5000..5000).map(|n| f64::from(n) * 1.5));
+        for value in values {
+            let got = f64_to_f32(value);
+            let gap = (f64::from(got) - value).abs();
+            for neighbour in [next_up(got), next_down(got)] {
+                let other = (f64::from(neighbour) - value).abs();
+                assert!(
+                    gap < other || (gap.to_bits() == other.to_bits() && got.to_bits() & 1 == 0),
+                    "{value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn f64_to_f32_known_values() {
+        assert_eq!(f64_to_f32(0.0).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(f64_to_f32(-0.0).to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(f64_to_f32(1.5).to_bits(), 1.5_f32.to_bits());
+        assert_eq!(f64_to_f32(1.0).to_bits(), 1.0_f32.to_bits());
+        assert_eq!(f64_to_f32(f64::INFINITY).to_bits(), f32::INFINITY.to_bits());
+        assert_eq!(
+            f64_to_f32(f64::NEG_INFINITY).to_bits(),
+            f32::NEG_INFINITY.to_bits()
+        );
+        assert!(f64_to_f32(f64::NAN).is_nan());
+        assert_eq!(f64_to_f32(1.0e300).to_bits(), f32::INFINITY.to_bits());
+        assert_eq!(f64_to_f32(-1.0e300).to_bits(), f32::NEG_INFINITY.to_bits());
     }
 }

@@ -274,11 +274,16 @@ impl GameState {
         }
         let first = list.npcs.len();
         list.npcs.extend(stood);
+        let now = self.clock.now();
         let mut effects = Vec::new();
         let mut veins = Vec::new();
         for (offset, npc) in list.npcs[first..].iter().enumerate() {
             self.npc_of
                 .insert(npc.vid, (key.0, key.1, first.saturating_add(offset)));
+            self.npc_combat.insert(
+                npc.vid,
+                super::fight::NpcCombat::created(now, (npc.x, npc.y)),
+            );
             if let Some(index) = self.maps.get_mut(&key) {
                 // `SpawnMob` places a character only where a sectree stands.
                 let _shown = index.show(
@@ -326,8 +331,10 @@ impl GameState {
                 npc.leader = None;
             }
         }
-        // `ClearSync` (`:653`) tells the view it has no owner, then `ClearTarget` (`:654`).
+        // `ClearSync` (`:653`) tells the view it has no owner and releases what it owns, then
+        // `ClearTarget` (`:654`).
         self.release_npc_sync(vid);
+        self.release_owned(Vid::new(vid));
         self.clear_target(Vid::new(vid));
         let mut effects = Vec::new();
         if let Some(index) = self.maps.get_mut(&key) {

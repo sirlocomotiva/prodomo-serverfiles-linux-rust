@@ -7,12 +7,21 @@ use std::sync::Arc;
 use common::vid::Vid;
 use gamedata::item_proto::ItemProtos;
 use gamedata::map_atlas::MapRegion;
+#[cfg(test)]
+use gamedata::mob_group::MobGroups;
+#[cfg(test)]
+use gamedata::mob_locale_names::MobLocaleNames;
+#[cfg(test)]
+use gamedata::mob_proto::MobProtos;
+
 use gamedata::server_attr::{CellBlock, SectreeGrid, ServerAttr, SECTREE_CELLS};
 use protocol::item_pos::ItemPos;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use world::cells::{HostedCells, MapCells};
 use world::character::{Points, PointsRow};
 use world::item::Item;
+#[cfg(test)]
+use world::npc::{MapNpcs, NpcVids, Respawner, FIRST_NPC_VID};
 
 use super::GameState;
 use crate::client_live::LiveClock;
@@ -178,6 +187,7 @@ pub(super) fn enter_seeing_with(
         conqueror_level: 0,
         language: 0,
         pk_mode: crate::loading_phase::PK_MODE_PROTECT,
+        skill_group: 0,
     };
     let shown = world.place_body(
         Vid::new(vid),
@@ -191,4 +201,73 @@ pub(super) fn enter_seeing_with(
         card,
     );
     (inbox, shown)
+}
+
+/// A monster with a real reach for the fight tests: race and battle type of `vnum`, stood at
+/// `at` with `hp`, the given attack range, aggressive sight and AI flags.
+#[cfg(test)]
+pub(super) fn a_fighter(
+    vid: u32,
+    vnum: u32,
+    battle_type: u8,
+    reach: (u16, u16),
+    ai_flags: u32,
+    at: (i32, i32),
+    hp: i32,
+) -> world::npc::Npc {
+    let mut fight = world::npc::MobFight::default();
+    fight.battle_type = battle_type;
+    fight.attack_range = reach.0;
+    fight.aggressive_sight = reach.1;
+    world::npc::Npc {
+        vid,
+        vnum,
+        race: u16::try_from(vnum).unwrap_or(u16::MAX),
+        char_type: gamedata::mob_proto::CHAR_TYPE_MONSTER,
+        x: at.0,
+        y: at.1,
+        ai_flags,
+        hp,
+        max_hp: hp.max(1),
+        fight,
+        ..world::npc::Npc::default()
+    }
+}
+
+/// The player's punch at `target`, as `fight`'s tests make it.
+#[cfg(test)]
+pub(super) fn hit(world: &mut GameState, vid: u32, target: u32) {
+    world.attack(
+        Vid::new(vid),
+        protocol::cg_attack::CgAttack::new(0, target, 0, 0),
+    );
+}
+
+/// A world on `clock` with `npcs` stood on [`PLACE`] over `cells`, where monsters wander
+/// unless `no_wander` holds.
+#[cfg(test)]
+pub(super) fn stand_field(
+    clock: &TestClock,
+    npcs: Vec<world::npc::Npc>,
+    cells: Arc<HostedCells>,
+    no_wander: bool,
+) -> GameState {
+    let mut world = a_world(clock).with_no_wander(no_wander);
+    let respawner = Respawner::new(
+        Arc::new(MobProtos::from_rows(Vec::new())),
+        Arc::new(MobGroups::default()),
+        Arc::new(MobLocaleNames::parse(b"VNUM\tNAME\n").unwrap()),
+        NpcVids::starting_at(FIRST_NPC_VID + 100),
+    );
+    world.install_respawner(respawner, cells);
+    world.stand_npcs(
+        PLACE.0,
+        &region(),
+        MapNpcs {
+            npcs,
+            positions: Vec::new(),
+            regens: Vec::new(),
+        },
+    );
+    world
 }

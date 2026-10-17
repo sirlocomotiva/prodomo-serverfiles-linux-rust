@@ -46,8 +46,6 @@
 //!
 //! # Not yet
 //!
-//! - The monster's hit on a player (229l): [`GameState::damage_pc`] has no live caller yet.
-//! - The player's hit-point heal and `DistributeSP` in the recovery event (OQ18, 229l).
 //! - The quest `die` trigger, `ItemDropPenalty`, the player-against-player, guild war, duel, arena
 //!   and siege hooks, the party, the horse and the mount.
 //!
@@ -71,6 +69,7 @@ use world::character::{death_penalty_loss, number, Equipment, PointRecord, Point
 
 use super::affect::{affect_add_frame, affect_remove_frame, Affect};
 use super::fight::{header_and_vid, DAMAGE_BLOCK};
+use super::pc_heal::pc_heal;
 use super::regen::{pulses, Due};
 use super::view::EntityKey;
 use super::GameState;
@@ -134,11 +133,11 @@ pub(super) struct PcCombat {
     /// `INSTANT_FLAG_STUN`: stunned, waiting for `Dead`.
     stunned: bool,
     /// `POS_DEAD` and `ADD_CHARACTER_STATE_DEAD`.
-    dead: bool,
+    pub(super) dead: bool,
     /// `m_dwKillerPID`: the player whose hit stunned it, which `Dead` reads and resets.
     killer_pid: u32,
     /// `INSTANT_FLAG_DEATH_PENALTY`: the next `DeathPenalty` may take experience.
-    death_penalty: bool,
+    pub(super) death_penalty: bool,
     /// The Pulse `m_pkStunEvent` is due on.
     stun_due: Option<u64>,
     /// The Pulse `m_pkDeadEvent` is due on.
@@ -311,13 +310,14 @@ impl GameState {
     /// hit that leaves no hit points stuns it, with the attacker's PID as its killer when the
     /// attacker is a player. Returns whether the player died, as legacy's `Damage` does.
     ///
-    /// The attacker's side (the damage packet, the damage map, the aggro) is the 229l caller's.
-    #[cfg(test)]
+    /// `shown` is the strike's flag: `SendDamagePacket` goes to the player first, then the hit
+    /// points change, then the targeters see them before `GC_STUN` (V17i).
     pub(super) fn damage_pc(
         &mut self,
         attacker: Option<Attacker>,
         victim: Vid,
         damage: i32,
+        shown: Option<u8>,
     ) -> bool {
         let raw = victim.raw();
         let Some(combat) = self.pc_combat.get(&raw).copied() else {
@@ -333,6 +333,9 @@ impl GameState {
         let Some(hp) = self.pc_points_mut(raw).map(|points| points.hp()) else {
             return false;
         };
+        if let Some(flag) = shown {
+            self.send_pc_damage_info(victim, flag, damage);
+        }
         // `cannot_dead` is a GM's flag, which no player has.
         let damage = if hp.saturating_sub(damage) <= 0 {
             hp
@@ -340,6 +343,7 @@ impl GameState {
             damage
         };
         self.change_pc_point(victim, point::POINT_HP, -damage, false);
+        self.broadcast_pc_target(victim);
         if self
             .pc_points_mut(raw)
             .is_some_and(|points| points.hp() <= 0)
@@ -355,8 +359,7 @@ impl GameState {
     /// `Stun` of the player under `vid` (`G/char_battle.cpp:422-459`): its potion pools empty,
     /// its recovery ends, `GC_STUN` goes to its view, its pools lock, and `StunEvent` is due 3
     /// seconds later. It has no private shop to close.
-    #[cfg(test)]
-    fn stun_pc(&mut self, vid: Vid) {
+    pub(super) fn stun_pc(&mut self, vid: Vid) {
         let raw = vid.raw();
         if self.is_down(raw) {
             return;
@@ -432,6 +435,10 @@ impl GameState {
         // only one a player has (`G/char_affect.cpp:259-265`, `:43-55`).
         let combat = self.pc_combat.entry(raw).or_default();
         combat.dead = true;
+        // `POS_DEAD` is not `POS_FIGHTING`.
+        if let Some(body) = self.bodies.get_mut(&vid) {
+            body.fighting = false;
+        }
         // `INSTANT_FLAG_DEATH_PENALTY`: set for a non-player killer, as no map is forked; cleared
         // for a player killer and for no killer (`:1372-1387`).
         combat.death_penalty = killer.is_some_and(|killer| !killer.pc);
@@ -633,6 +640,10 @@ impl GameState {
         combat.stunned = false;
         combat.dead = false;
         combat.killer_pid = 0;
+        // `POS_STANDING`.
+        if let Some(body) = self.bodies.get_mut(&vid) {
+            body.fighting = false;
+        }
         self.regens.cancel(&mut combat.dead_due, Due::PcDead(raw));
         self.regens.cancel(&mut combat.stun_due, Due::PcStun(raw));
         if let Some(points) = self.pc_points_mut(raw) {
@@ -776,8 +787,8 @@ impl GameState {
             .schedule(&mut combat.recovery_due, when, Due::PcRecovery(raw));
     }
 
-    /// A player's `recovery_event` (`G/char.cpp:3245-3284`): `CheckTarget`, then again 3 seconds
-    /// on. No poison is ported, and the hit-point heal and `DistributeSP` wait for 229l.
+    /// A player's `recovery_event` (`G/char.cpp:3245-3284`): `CheckTarget`, then the heal,
+    /// then again 3 seconds on. `UpdateKillerMode` is not ported (no PK decay).
     pub(super) fn pc_recovery_event(&mut self, vid: u32) {
         let Some(combat) = self.pc_combat.get_mut(&vid) else {
             return;
@@ -787,6 +798,32 @@ impl GameState {
         }
         let player = Vid::new(vid);
         self.check_target(player);
+        let now = self.clock.now();
+        let Some(body) = self.bodies.get(&player) else {
+            let when = self.last_pulse.saturating_add(pulses(RECOVERY_SECONDS));
+            let combat = self.pc_combat.entry(vid).or_default();
+            self.regens
+                .schedule(&mut combat.recovery_due, when, Due::PcRecovery(vid));
+            return;
+        };
+        // `char_battle.cpp:146-147`: within 3 seconds of the attack or the move.
+        let attacking = body
+            .last_attack
+            .is_some_and(|at| now.wrapping_sub(at) < 3000);
+        let moving = now.wrapping_sub(body.last_move) < 3000;
+        let idle_ms = now.wrapping_sub(body.last_move);
+        let skill_group = body.card.skill_group;
+        // No poison is ported, so no `IsAffectFlag(AFF_POISON)` ever holds: always false.
+        let poisoned = false;
+        let Some(points) = self.pc_points_mut(vid) else {
+            let when = self.last_pulse.saturating_add(pulses(RECOVERY_SECONDS));
+            let combat = self.pc_combat.entry(vid).or_default();
+            self.regens
+                .schedule(&mut combat.recovery_due, when, Due::PcRecovery(vid));
+            return;
+        };
+        let records = pc_heal(points, skill_group, attacking, moving, idle_ms, poisoned);
+        self.send_point_records(player, &records);
         let when = self.last_pulse.saturating_add(pulses(RECOVERY_SECONDS));
         let combat = self.pc_combat.entry(vid).or_default();
         self.regens
@@ -849,6 +886,7 @@ impl GameState {
     /// claim is released when it disconnects (a warp leaves its sectree first, so its own release
     /// reaches nobody), what it owns is released, and its events end.
     pub(super) fn leave_fight(&mut self, vid: Vid, departure: Departure) {
+        self.lose_pc_victim(vid);
         let raw = vid.raw();
         if self.is_down(raw) {
             if let Some(mover) = self.own_mover(vid) {
@@ -939,6 +977,7 @@ mod tests {
         world: GameState,
         clients: Arc<ChannelClients>,
         players: BTreeMap<u32, (Lease, UnboundedReceiver<Vec<u8>>)>,
+        clock: TestClock,
     }
 
     /// A world hosting [`PLACE`] whose town is [`TOWN`], served by Channel 1 when `served`,
@@ -978,6 +1017,7 @@ mod tests {
             world,
             clients,
             players: BTreeMap::new(),
+            clock: clock.clone(),
         }
     }
 
@@ -1021,6 +1061,7 @@ mod tests {
                 conqueror_level: 0,
                 language: 0,
                 pk_mode: PK_MODE_PROTECT,
+                skill_group: 0,
             };
             let place = EnterPlace {
                 channel: PLACE.0,
@@ -1094,6 +1135,23 @@ mod tests {
                 .unwrap_or_default()
         }
 
+        /// Sets `vid`'s pools, forgetting the computation's records.
+        fn set_hp_sp(&mut self, vid: Vid, hp: i32, sp: i32) {
+            let points = self
+                .world
+                .characters
+                .find_by_vid_mut(vid)
+                .expect("the player is online")
+                .items_and_points_mut()
+                .1
+                .expect("the player has points");
+            let hp_delta = hp - points.hp();
+            let _hp = points.point_change(point::POINT_HP, hp_delta, false, false);
+            let sp_delta = sp - points.sp();
+            let _sp = points.point_change(point::POINT_SP, sp_delta, false, false);
+            let _own = points.take_target_broadcasts();
+        }
+
         fn set_gold(&mut self, vid: Vid, gold: u64) {
             self.world
                 .characters
@@ -1117,7 +1175,7 @@ mod tests {
         fn struck_down(&mut self, vid: Vid) {
             let hp = self.points(vid).hp();
             assert!(
-                !self.world.damage_pc(Some(MONSTER), vid, hp),
+                !self.world.damage_pc(Some(MONSTER), vid, hp, None),
                 "a stun is no death"
             );
             assert!(self.world.is_stunned(vid.raw()));
@@ -1128,7 +1186,7 @@ mod tests {
         fn killed(&mut self, vid: Vid) {
             self.struck_down(vid);
             self.quiet();
-            assert!(self.world.damage_pc(Some(MONSTER), vid, 1));
+            assert!(self.world.damage_pc(Some(MONSTER), vid, 1, None));
             assert!(self.world.is_dead(vid.raw()));
         }
 
@@ -1220,6 +1278,19 @@ mod tests {
 
     fn hp(value: i32) -> Vec<u8> {
         change(point::POINT_HP, 0, i64::from(value))
+    }
+
+    /// A `PointChange(kind, amount, false)` record: the heal hides the amount (`:3270`,`:3282`).
+    fn healed(kind: usize, after: i32) -> Vec<u8> {
+        change(kind, 0, i64::from(after))
+    }
+
+    fn hp_change(after: i32) -> Vec<u8> {
+        healed(point::POINT_HP, after)
+    }
+
+    fn sp_change(after: i32) -> Vec<u8> {
+        healed(point::POINT_SP, after)
     }
 
     fn stun(vid: Vid) -> Vec<u8> {
@@ -1319,12 +1390,12 @@ mod tests {
             pools.map(|kind| field.points(ALPHA).get_point(kind)),
             [0, 0]
         );
-        assert_eq!(field.heard(BRAVO), vec![stun(ALPHA)]);
-        field.world.broadcast_targets();
         assert_eq!(
             field.heard(BRAVO),
-            vec![target_record(ALPHA.raw(), (0, 0, max), 0)]
+            vec![target_record(ALPHA.raw(), (0, 0, max), 0), stun(ALPHA)]
         );
+        field.world.broadcast_targets();
+        assert_eq!(field.heard(BRAVO), Vec::<Vec<u8>>::new());
         let combat = field.combat(ALPHA);
         assert!(combat.stunned && !combat.dead);
         assert_eq!(
@@ -1354,7 +1425,9 @@ mod tests {
         field.quiet();
         let full = field.points(ALPHA).hp();
 
-        assert!(!field.world.damage_pc(Some(MONSTER), ALPHA, full + 1_000));
+        assert!(!field
+            .world
+            .damage_pc(Some(MONSTER), ALPHA, full + 1_000, None));
         assert_eq!(field.points(ALPHA).hp(), 0);
         assert_eq!(field.heard(ALPHA).first(), Some(&hp(0)));
         assert!(field.world.is_stunned(ALPHA.raw()));
@@ -1399,7 +1472,7 @@ mod tests {
         field.pulse(10);
         field.quiet();
 
-        assert!(field.world.damage_pc(Some(MONSTER), ALPHA, 1));
+        assert!(field.world.damage_pc(Some(MONSTER), ALPHA, 1, None));
         assert_eq!(
             field.heard(ALPHA),
             vec![unowned(ALPHA), phase(PHASE_DEAD), dead(ALPHA)]
@@ -1413,7 +1486,7 @@ mod tests {
             field.heard(ALPHA).is_empty(),
             "the stun event was cancelled"
         );
-        assert!(field.world.damage_pc(Some(MONSTER), ALPHA, 1));
+        assert!(field.world.damage_pc(Some(MONSTER), ALPHA, 1, None));
         assert!(field.heard(ALPHA).is_empty());
         assert!(field.heard(BRAVO).is_empty());
         assert_eq!(field.combat(ALPHA).dead_due, Some(10 + 4_500));
@@ -1435,7 +1508,7 @@ mod tests {
                 vid: BRAVO,
                 pc: true,
             };
-            assert!(!field.world.damage_pc(Some(bravo), ALPHA, hp));
+            assert!(!field.world.damage_pc(Some(bravo), ALPHA, hp, None));
             assert_eq!(field.combat(ALPHA).killer_pid, BRAVO.raw());
             field.pulse(P0 + 74);
             field.quiet();
@@ -1467,11 +1540,11 @@ mod tests {
             vid: BRAVO,
             pc: true,
         };
-        assert!(!field.world.damage_pc(Some(bravo), ALPHA, full));
+        assert!(!field.world.damage_pc(Some(bravo), ALPHA, full, None));
         assert_eq!(field.combat(ALPHA).killer_pid, BRAVO.raw());
         field.quiet();
 
-        assert!(field.world.damage_pc(Some(MONSTER), ALPHA, 1));
+        assert!(field.world.damage_pc(Some(MONSTER), ALPHA, 1, None));
         assert_eq!(field.heard(BRAVO), vec![unowned(ALPHA), dead(ALPHA)]);
         assert_eq!(field.world.targets.of(BRAVO.raw()), Some(ALPHA.raw()));
         let combat = field.combat(ALPHA);
@@ -1672,7 +1745,7 @@ mod tests {
         );
         assert!(field.heard(ALPHA).is_empty());
         assert!(field.heard(BRAVO).is_empty());
-        assert!(field.world.damage_pc(Some(MONSTER), ALPHA, 1));
+        assert!(field.world.damage_pc(Some(MONSTER), ALPHA, 1, None));
         field.quiet();
         let refused = field.world.run_move(ALPHA, &step);
         assert!(
@@ -1722,7 +1795,7 @@ mod tests {
         };
         let started = field.world.trade(ALPHA, asked, here(), mover());
         assert!(matches!(started, Ok(TradeAnswer::Sent(_))), "{started:?}");
-        assert!(field.world.damage_pc(Some(MONSTER), ALPHA, 1));
+        assert!(field.world.damage_pc(Some(MONSTER), ALPHA, 1, None));
         assert!(field.world.trading.is_empty(), "the death ends the trade");
         assert_eq!(
             field.world.use_item(ALPHA, cell, mover()),
@@ -1807,6 +1880,84 @@ mod tests {
         assert!(field.world.regens.holds(Due::PcRecovery(ALPHA.raw())));
     }
 
+    /// G30: the first recovery heals the spirit then the hit points (`G/char.cpp:3261-3283`).
+    /// Idled under 3 seconds, a level 10 warrior at 300/760 HP and 100/260 SP gains 4 SP
+    /// (2 + max/100, idle with HP below max) then 22 HP (15 + max * 1 %).
+    #[test]
+    fn the_first_recovery_heals_sp_then_hp() {
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        field.set_hp_sp(ALPHA, 300, 100);
+        field.quiet();
+        field.pulse(P0 + 75);
+        assert_eq!(field.heard(ALPHA), vec![sp_change(104), hp_change(322)]);
+        assert_eq!(
+            (field.points(ALPHA).hp(), field.points(ALPHA).sp()),
+            (322, 104)
+        );
+    }
+
+    /// G31: an attack within 3 seconds narrows the spirit gain to 3 (2 + max/200), while a
+    /// full-HP idle player gains 11 (9 + max/100): the three `DistributeSP` arms.
+    #[test]
+    fn a_recent_attack_narrows_the_spirit_gain() {
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        field.set_hp_sp(ALPHA, 300, 100);
+        let now = field.world.clock.now();
+        field
+            .world
+            .bodies
+            .get_mut(&ALPHA)
+            .expect("Alpha stands")
+            .last_attack = Some(now);
+        field.quiet();
+        field.pulse(P0 + 75);
+        assert_eq!(field.points(ALPHA).sp(), 103);
+        assert_eq!(field.heard(ALPHA), vec![sp_change(103), hp_change(322)]);
+    }
+
+    /// G31b: an idle player at full hit points gains 11 spirit (9 + max/100) and sends no
+    /// HP record. The joins tick the clock, so the body is re-idled 10 seconds before pulsing.
+    #[test]
+    fn full_hp_widens_the_spirit_gain_and_sends_no_hp() {
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        field.set_hp_sp(ALPHA, 760, 100);
+        field.clock.set(10_000);
+        field
+            .world
+            .bodies
+            .get_mut(&ALPHA)
+            .expect("Alpha stands")
+            .last_move = 0;
+        field.quiet();
+        field.pulse(P0 + 75);
+        assert_eq!(field.heard(ALPHA), vec![sp_change(111)]);
+        assert_eq!(
+            (field.points(ALPHA).hp(), field.points(ALPHA).sp()),
+            (760, 111)
+        );
+    }
+
+    /// G32: both pools clamp at their maxima, and a full player hears nothing.
+    #[test]
+    fn the_heal_clamps_at_both_maxima() {
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        field.set_hp_sp(ALPHA, 755, 259);
+        field.quiet();
+        field.pulse(P0 + 75);
+        assert_eq!(field.heard(ALPHA), vec![sp_change(260), hp_change(760)]);
+        assert_eq!(
+            (field.points(ALPHA).hp(), field.points(ALPHA).sp()),
+            (760, 260)
+        );
+        field.quiet();
+        field.pulse(P0 + 150);
+        assert!(field.heard(ALPHA).is_empty());
+    }
+
     /// Table C at 226 Pulses, refused at 225 with one second left; after it, the dead event's
     /// Pulse brings no second restart.
     #[test]
@@ -1837,6 +1988,7 @@ mod tests {
         assert_eq!(field.points(ALPHA).hp(), 50);
         assert!(field.world.regens.holds(Due::PcRecovery(ALPHA.raw())));
 
+        // The heal is real now: one recovery runs in the wait, idled under 3 seconds.
         field.pulse(died + 4_500);
         let later = field.heard(ALPHA);
         assert!(
@@ -1846,7 +1998,9 @@ mod tests {
             "{later:?}"
         );
         assert!(field.ordered(ALPHA).is_empty());
-        assert_eq!(field.points(ALPHA).hp(), 50);
+        // The wait healed 15 + max * 1 % once.
+        let max = field.points(ALPHA).max_hp();
+        assert_eq!(field.points(ALPHA).hp(), 50 + 15 + max / 100);
     }
 
     /// `ReviveInvisible` over a running revive resets it in place and sends its removal before
@@ -2013,6 +2167,28 @@ mod tests {
         assert_eq!(field.points(ALPHA).hp(), full);
         assert!(!field.world.is_down(ALPHA.raw()));
         assert!(field.ordered(ALPHA).is_empty());
+    }
+
+    /// A player a monster killed is sent its revive update on `/restart_now`: every earlier
+    /// restart test died by the stun event, with no killer.
+    #[test]
+    fn a_player_killed_by_a_monster_is_sent_its_revive_update_on_restart_now() {
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        field.set_gold(ALPHA, 300_000);
+        field.killed(ALPHA);
+        field.quiet();
+
+        field.pulse(field.world.last_pulse + 1);
+        let answer = field.restart(RestartKind::Now);
+        assert_eq!(answer.gold, Some(-300_000));
+        let heard = field.heard(ALPHA);
+        let update = update(&field.world);
+        assert!(
+            heard.contains(&update),
+            "the revive update is sent: {:?}",
+            heard.iter().map(|r| (r[0], r.len())).collect::<Vec<_>>()
+        );
     }
 
     /// The world's `Restart` arm answers its reply with what the restart took: the descriptor

@@ -1013,6 +1013,7 @@ mod tests {
             conqueror_level: 0,
             language: 1,
             pk_mode: crate::loading_phase::PK_MODE_PROTECT,
+            skill_group: 0,
         }
     }
 

@@ -18,6 +18,7 @@ mod model;
 mod points;
 mod potion;
 mod quickslot;
+mod recovery;
 mod safebox;
 mod shop;
 mod state;
@@ -31,8 +32,9 @@ pub use apply::{
     APPLY_MAX_SP_PCT, APPLY_NONE, APPLY_SKILL, MAX_APPLY_NUM,
 };
 pub use combat::{
-    attack_rating, calc_melee_damage, melee_reach, mob_attack_range, pk_eligibility, strike_npc,
-    AttackRatingInput, HitEvent, PkActor, PkDenial, PkEligibility, PkMode, Strike, Striker, Struck,
+    attack_rating, calc_melee_damage, melee_reach, mob_attack_range, mob_reach, pc_hp_pct,
+    pk_eligibility, strike_npc, strike_pc, AttackRatingInput, HitEvent, MobStriker, PcHitEnd,
+    PcStrike, PcVictim, PkActor, PkDenial, PkEligibility, PkMode, Strike, Striker, Struck,
     DAMAGE_CRITICAL, DAMAGE_NORMAL, DAMAGE_PENETRATE, FLY_HP_SMALL, FLY_SP_SMALL, SE_CRITICAL,
     SE_PENETRATE,
 };
@@ -74,6 +76,7 @@ pub use quickslot::{
     add_from_client, chains_when_used_up, find_specify_item, sync_quickslots, Quickslot,
     QuickslotRecord, QuickslotSync, Quickslots, SyncTo, QUICKSLOT_MAX_NUM,
 };
+pub use recovery::{distribute_sp, hp_recovery, RECOVERY_PERCENTS};
 pub use safebox::{
     checkin, checkout, move_stored, Safebox, SafeboxRefused, StoreChange, StoreMove, StoreRecord,
     IRREMOVABLE_NOTICE, MALL_ROWS, SAFEBOX_PAGE_SIZE, SAFEBOX_ROWS, SAFEBOX_WIDTH,

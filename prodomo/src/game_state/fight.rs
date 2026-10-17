@@ -36,10 +36,12 @@
 //! - **The victims (V17a).** Only a monster on the attacker's own Channel and map is hit.
 //!   Legacy finds the VID on any map (a Defect, fixed). A player, stone, door, building or horse
 //!   and race 5001 are refused with nothing sent until their systems are ported.
-//! - **The fight's other halves (V17b-h).** The hit monster does not fight back (`BeginFight`,
-//!   aggro, the damage map); `Dead` pays no reward; `NormalAttackAffect` and the gold steal draw
-//!   but change nothing; skills and the shoot and fly frames are consumed; the attacker's
-//!   `POS_FIGHTING` and victim are not kept; no party revives the monster or is told of it.
+//! - **The fight's other halves (V17b-h, V19).** A hit melee monster runs `BeginFight`
+//!   after the claim ([`super::mob_battle`]); the aggro and the damage map, and a RANGE or
+//!   MAGIC monster's fight, wait for 229m. `Dead` pays no reward; `NormalAttackAffect` and
+//!   the gold steal draw but change nothing; skills and the shoot and fly frames are
+//!   consumed; the attacker's victim is not kept; no party revives the monster or is told
+//!   of it.
 //! - **The order of one Pulse's events (V16).** The stun, dead and recovery events ride the
 //!   regen schedule ([`super::regen`]).
 //! - **The owners a leaving player releases** go in VID order (V1); legacy walks its list in the
@@ -92,11 +94,28 @@ const GOLD_RACE: u32 = 5001;
 /// `battle_is_attackable` refuses to every player.
 const FAKE_HYDRAS: [u32; 2] = [3963, 3964];
 
+/// `m_posLastAttacked` and `m_dwLastAttackedTime`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct LastAttacked {
+    /// `m_dwLastAttackedTime`.
+    pub(super) ms: u32,
+    /// `m_posLastAttacked`.
+    pub(super) at: (i32, i32),
+}
+
 /// What legacy's `CHARACTER` keeps of a non-player's fight beyond its [`Npc`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct NpcCombat {
     /// `m_dwKillerPID`: the player whose hit stunned it, which `Dead` reads and resets.
     killer_pid: u32,
+    /// `m_posLastAttacked` and `m_dwLastAttackedTime`.
+    pub(super) last_attacked: LastAttacked,
+    /// `m_dwLastAttackTime`; `None` is legacy's creation - 20000, which always passes the
+    /// first test (`CalculateDuration(.., 2000)` is at most 4000).
+    pub(super) last_attack_ms: Option<u32>,
+    /// `m_dwLastChangeAttackPositionTime`; `None` is creation - 10000, which always passes
+    /// (the wait is at most 10000).
+    pub(super) last_change_position_ms: Option<u32>,
     /// `m_pkChrSyncOwner` and `m_fSyncTime`.
     pub(super) sync: SyncOwnershipState,
     /// `m_dwLastSyncTime`, which a new owner resets.
@@ -107,6 +126,27 @@ pub(super) struct NpcCombat {
     dead_due: Option<u64>,
     /// The Pulse `m_pkRecoveryEvent` is due on.
     recovery_due: Option<u64>,
+}
+
+impl NpcCombat {
+    /// A fight as `Show` leaves it: the last-attacked point is the standing point, its time
+    /// is now, and both timers are long ago (`G/mob_manager.cpp:39-46`, `G/char.cpp:1877-1882`).
+    pub(super) const fn created(now: u32, at: (i32, i32)) -> Self {
+        Self {
+            killer_pid: 0,
+            last_attacked: LastAttacked { ms: now, at },
+            last_attack_ms: None,
+            last_change_position_ms: None,
+            sync: SyncOwnershipState {
+                owner: None,
+                claimed_at: None,
+            },
+            last_sync: None,
+            stun_due: None,
+            dead_due: None,
+            recovery_due: None,
+        }
+    }
 }
 
 /// Whether a player's hit reaches `npc`: a monster but race 5001 (V17a).
@@ -181,8 +221,9 @@ impl GameState {
             x: npc.x,
             y: npc.y,
         };
-        // `SetRotationToXY` (`:219-223`); `POS_FIGHTING` and the victim are not kept (V17g).
+        // `SetPosition(POS_FIGHTING)` and `SetRotationToXY` (`:219-223`).
         if let Some(body) = self.bodies.get_mut(&vid) {
+            body.fighting = true;
             body.rotation = rotation_to_xy(
                 victim.x.saturating_sub(spot.x),
                 victim.y.saturating_sub(spot.y),
@@ -192,18 +233,36 @@ impl GameState {
         if let Some(strike) = self.strike(vid, target) {
             self.show_strike(vid, target, strike.events);
             match strike.struck {
-                Struck::Landed { damage } => self.after_damage(vid, target, damage),
-                Struck::Finished => self.dead_npc(target, Some(vid)),
+                Struck::Landed { damage } => {
+                    self.set_last_attacked(target);
+                    self.after_damage(vid, target, damage);
+                }
+                Struck::Finished => {
+                    self.set_last_attacked(target);
+                    // `BATTLE_DEAD && IsPC()` stands the hitter down (`battle_end`).
+                    if let Some(body) = self.bodies.get_mut(&vid) {
+                        body.fighting = false;
+                    }
+                    self.dead_npc(target, Some(vid));
+                }
                 Struck::Whiffed | Struck::Refused | Struck::AlreadyDead => {}
             }
         }
-        // `iRet != BATTLE_NONE`: `SetSyncOwner(this)`; `BeginFight` waits for 229l (V17b).
+        // `iRet != BATTLE_NONE`: `SetSyncOwner(this)`, then the victim's `BeginFight`.
         let now = self.clock.elapsed();
         let _owner = self.set_npc_sync_owner(vid, (spot.x, spot.y), &victim, now);
+        if self
+            .npc_by_vid(target)
+            .is_some_and(super::mob_battle::fights_back)
+            && self.can_begin_fight(target)
+        {
+            self.begin_fight(target, vid);
+        }
         // `BATTLE_DAMAGE` or `BATTLE_DEAD`: `OnMove(true)` (`G/char.cpp:6148-6179`). The victim's
         // `OnMove` holds nothing for a non-player, and no Eunhyung or mining is ported.
         let now = self.clock.now();
         if let Some(body) = self.bodies.get_mut(&vid) {
+            body.last_move = now;
             body.last_attack = Some(now);
         }
         self.remove_revive_invisible(vid);
@@ -316,7 +375,7 @@ impl GameState {
     /// The end of `Damage` once the hit points are taken (`G/char_battle.cpp:2407-2433`): a hit
     /// that took any starts the recovery, and one that left none stuns the non-player with the
     /// attacker's PID, which is a player's VID, as its killer. The damage map and the aggro wait
-    /// for 229l.
+    /// for 229m (V19b).
     fn after_damage(&mut self, attacker: Vid, victim: u32, damage: i32) {
         if damage > 0 {
             self.start_recovery(victim);
@@ -388,8 +447,10 @@ impl GameState {
         if let Some(npc) = self.npc_mut(vid) {
             npc.dead = true;
         }
-        // `ClearSync` (`:1461`), then the stun event ends (`:1464`).
+        // `ClearSync` (`:1461`): its own release, then what it owns, then the stun event
+        // ends (`:1464`).
         self.release_npc_sync(vid);
+        self.release_owned(Vid::new(vid));
         let combat = self.npc_combat.entry(vid).or_default();
         self.regens.cancel(&mut combat.stun_due, Due::Stun(vid));
         self.packet_around(
@@ -520,7 +581,7 @@ impl GameState {
 
     /// `ClearSync` of the non-player under `vid` (`G/char.cpp:5568-5575`): `SetSyncOwner(NULL)`
     /// tells its view it has no owner, unless `AIFLAG_NOMOVE` holds it; the claim's time stays.
-    /// A non-player owns no one.
+    /// What it owns is released by the caller ([`GameState::release_owned`]).
     pub(super) fn release_npc_sync(&mut self, vid: u32) {
         if self
             .npc_by_vid(vid)
@@ -961,7 +1022,7 @@ mod tests {
 
     /// A hit that takes hit points starts the recovery: 1 % of the maximum every 6 seconds,
     /// shown to the targeters, until the hit points are full (`G/char.cpp:3191-3240`,
-    /// `:3287-3314`).
+    /// `:3287-3314`). The hitter steps out of the 4000 drop so the chase sends nothing (G33).
     #[test]
     fn a_hit_monster_recovers_until_it_is_full() {
         let (_clock, mut world, mut alpha) = a_fight(a_monster(MAX_HP), NEAR);
@@ -969,6 +1030,10 @@ mod tests {
         drained(&mut alpha);
         let damage = expected_damage(&mut world, 1);
         hit(&mut world, 1, ME);
+        // The hit starts a fight; the hitter steps out of the 4000 drop, so the chase sends
+        // nothing and the recovery assertions stay as they are.
+        let spot = world.spot_of(1).unwrap();
+        assert!(world.move_to(1, spot.x + 4400, spot.y));
         assert_eq!(
             drained(&mut alpha),
             [
@@ -1465,7 +1530,7 @@ mod tests {
             world.start_pc_recovery(Vid::new(1));
             let hp = points_of(&mut world, 1).hp();
             for _ in 0..lethal_hits {
-                let _died = world.damage_pc(None, Vid::new(1), hp);
+                let _died = world.damage_pc(None, Vid::new(1), hp, None);
             }
             let refused = lethal_hits > 0;
             assert_eq!(world.is_down(1), refused);
@@ -1498,7 +1563,7 @@ mod tests {
             world.start_pc_recovery(Vid::new(1));
             let hp = points_of(&mut world, 1).hp();
             for _ in 0..lethal_hits {
-                let _died = world.damage_pc(None, Vid::new(1), hp);
+                let _died = world.damage_pc(None, Vid::new(1), hp, None);
             }
             let refused = lethal_hits > 0;
             assert_eq!(world.is_down(1), refused);

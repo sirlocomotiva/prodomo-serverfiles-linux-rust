@@ -1,4 +1,5 @@
 mod melee;
+mod mob_melee;
 mod pk;
 
 pub use melee::{
@@ -6,6 +7,7 @@ pub use melee::{
     Struck, DAMAGE_CRITICAL, DAMAGE_NORMAL, DAMAGE_PENETRATE, FLY_HP_SMALL, FLY_SP_SMALL,
     SE_CRITICAL, SE_PENETRATE,
 };
+pub use mob_melee::{mob_reach, pc_hp_pct, strike_pc, MobStriker, PcHitEnd, PcStrike, PcVictim};
 pub use pk::{pk_eligibility, PkActor, PkDenial, PkEligibility, PkMode};
 
 /// Inputs used by the legacy `CalcAttackRating` formula.

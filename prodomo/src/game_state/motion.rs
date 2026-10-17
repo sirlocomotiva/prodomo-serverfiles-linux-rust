@@ -147,6 +147,11 @@ pub(super) struct Body {
     pub(super) motion: Motion,
     /// `m_dwLastAttackTime`, stamped by an accepted ATTACK or COMBO (`G/char.cpp:6148-6179`).
     pub(super) last_attack: Option<u32>,
+    /// `m_dwLastMoveTime` (`G/char.cpp:6150`): every accepted move stamps it, `Show` seeds it.
+    pub(super) last_move: u32,
+    /// `POSITION_FIGHTING` (`G/char.cpp:6885-6892`): set by its own hit inside its range and
+    /// by a monster's first hit; a kill or its own death clears it.
+    pub(super) fighting: bool,
     /// The `SyncPosition` hack count (`m_iSyncHackCount`).
     pub(super) sync_hack_count: u32,
     /// `m_dwLastSyncTime`, on the world clock's unwrapped span.
@@ -168,6 +173,7 @@ impl Body {
         point: (i32, i32),
         card: PcCard,
         stop_pulse: u64,
+        now_ms: u32,
     ) -> Self {
         Self {
             channel,
@@ -175,6 +181,8 @@ impl Body {
             rotation: 0.0,
             motion: Motion::standing(point),
             last_attack: None,
+            last_move: now_ms,
+            fighting: false,
             sync_hack_count: 0,
             last_sync: None,
             sync: SyncOwnershipState {
@@ -198,6 +206,13 @@ pub(super) fn calculate_duration(speed: i32, duration: i32) -> i32 {
     };
     // The limit holds the speed to 0..200, so the product fits and the fall-back is never taken.
     i32::try_from(i64::from(duration) * factor / 100).unwrap_or(i32::MAX)
+}
+
+/// `GetMoveSpeed()` (`G/char.cpp:3580-3583`): the clip speed times 10000 over the scaled
+/// duration, in `f32` as C does it (a float times an int, divided by an int).
+#[must_use]
+pub(super) fn get_move_speed(motion_speed: f32, limit_mov_speed: i32) -> f32 {
+    motion_speed * i32_to_f32(10_000) / i32_to_f32(calculate_duration(limit_mov_speed, 10_000))
 }
 
 /// `DISTANCE_SQRT(dx, dy)` (`G/utils.h:12-15`): the squares and the root in `float`.
@@ -382,6 +397,8 @@ impl GameState {
     pub(super) fn place_body(&mut self, vid: Vid, place: EnterPlace, card: PcCard) -> Vec<Vec<u8>> {
         let key = (place.channel, place.map);
         self.maps.entry(key).or_insert_with(MapIndex::treeless);
+        // `Show`: the move time starts at the entering clock (`G/char.cpp:261`).
+        let now = self.clock.now();
         self.bodies.insert(
             vid,
             Body::new(
@@ -390,6 +407,7 @@ impl GameState {
                 (place.x, place.y),
                 card,
                 self.last_pulse,
+                now,
             ),
         );
         // `Show` starts the affect event of a PC below its maximum stamina (`G/char.cpp:1874-1875`).
@@ -517,7 +535,9 @@ impl GameState {
             MoveOutcome::Accept(accepted) => {
                 let now = self.clock.now();
                 if let Some(body) = self.bodies.get_mut(&vid) {
-                    // `OnMove(true)` stamps the attack time (`:1839-1840`).
+                    // `OnMove` (`input_main.cpp:1838-1869`): every accepted move stamps the
+                    // move time; the attack functions stamp the attack time too.
+                    body.last_move = now;
                     if matches!(record.function, FUNC_ATTACK | FUNC_COMBO) {
                         body.last_attack = Some(now);
                     }
@@ -642,6 +662,11 @@ impl GameState {
     /// `StateMove`'s arrival (`G/char_state.cpp:897-904`): Idle, with nothing else changed.
     /// `StopStaminaConsume` is not ported (V3).
     fn arrive(&mut self, vid: u32) {
+        self.leave_move(vid);
+    }
+
+    /// Leaves `m_stateMove`: not moving, out of `movers`, start, destination and duration kept.
+    pub(super) fn leave_move(&mut self, vid: u32) {
         if let Some(body) = self.bodies.get_mut(&Vid::new(vid)) {
             body.motion.moving = false;
         }
@@ -749,6 +774,50 @@ mod tests {
         assert_eq!(calculate_duration(99, 1000), 1010);
         assert_eq!(calculate_duration(101, 999), 989);
         assert_eq!(calculate_duration(100, -7), -7);
+    }
+
+    /// `get_move_speed` is the clip speed over the scaled duration (U19).
+    #[test]
+    fn get_move_speed_is_the_clip_speed_over_the_scaled_duration() {
+        // MOV 100 scales 10000 to itself: the fall-back stays 300.0.
+        assert_eq!(calculate_duration(100, 10_000), 10_000);
+        assert_eq!(get_move_speed(300.0, 100).to_bits(), 300.0_f32.to_bits());
+        // MOV 130 scales 10000 to 7600: `300 * 10000 / 7600` in `f32` is 394.73685.
+        assert_eq!(calculate_duration(130, 10_000), 7600);
+        assert_eq!(get_move_speed(300.0, 130).to_bits(), 0x43C5_5E51);
+        assert_eq!(
+            get_move_speed(300.0, 130).to_bits(),
+            (300.0_f32 * 10_000.0 / 7600.0).to_bits()
+        );
+        // The walk and run clips give their own speeds; with no clip the fall-back holds.
+        for (stamina, walk, want) in [(820, false, 250.0_f32), (0, true, 100.0_f32)] {
+            let mut motions = gamedata::pc_motion::PcMotions::default();
+            motions.insert(
+                0,
+                gamedata::pc_motion::MotionMode::General,
+                false,
+                a_clip(250.0),
+            );
+            motions.insert(
+                0,
+                gamedata::pc_motion::MotionMode::General,
+                true,
+                a_clip(100.0),
+            );
+            let (world, _inbox) = a_player_with_clips(motions, None, stamina);
+            assert_eq!(
+                world.motion_speed_of(7).to_bits(),
+                want.to_bits(),
+                "walk = {walk}"
+            );
+        }
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let _inbox = enter(&mut world, 7, (3200, 3200), 820);
+        assert_eq!(
+            world.motion_speed_of(7).to_bits(),
+            MOTION_SPEED_FALLBACK.to_bits()
+        );
     }
 
     #[test]

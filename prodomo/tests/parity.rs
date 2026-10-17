@@ -562,8 +562,20 @@ fn the_channel_status_list_is_served_in_the_handshake_phase() {
 }
 
 /// Run one statement in the scenario's database.
+///
+/// After any `INSERT INTO player`, the pools are filled to the item-less maxima
+/// (`JOB_INITIAL_POINTS[job % 4]` with `hp_per_ht` 40, `sp_per_iq` 20 and a stored `random_hp`
+/// of 0), so the live heal stays silent and the quiet reads hold. An explicit pool (Gamma, a
+/// created character, a pool a scenario sets later) is untouched (ledger 229l).
 fn sql(database: &ScratchDatabase, statement: &str) {
     execute(database.url(), statement).expect("the statement should succeed");
+    if statement.trim_start().starts_with("INSERT INTO player") {
+        execute(
+            database.url(),
+            "UPDATE player SET hp = (ARRAY[600,650,650,700])[job % 4 + 1] + ht * 40, sp = 200              + iq * 20 WHERE hp = 0 AND sp = 0",
+        )
+        .expect("the fill should succeed");
+    }
 }
 
 /// The password every auth scenario account has: the full 16 bytes legacy keeps.
@@ -2938,7 +2950,7 @@ fn an_entering_character_stands_on_the_first_movable_point_or_at_its_empires_rec
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let mut server = Server::start(binary(), database.url());
+    let mut server = server_without_wander(binary(), database.url());
     for login in ["alice", "bob", "carol", "dave"] {
         create_account(&server, login);
     }
@@ -3504,7 +3516,7 @@ fn a_warp_npc_sends_its_neighbour_away_and_the_client_comes_back_at_the_target()
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let mut server = Server::start(binary(), database.url());
+    let mut server = server_without_wander(binary(), database.url());
     create_account(&server, "alice");
     create_account(&server, "bob");
     add_characters(&database);
@@ -3615,7 +3627,12 @@ fn a_warp_to_no_map_sends_nothing_and_the_character_stays() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let server = Server::start(binary(), database.url());
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "no_wander = true",
+    );
     create_account(&server, "alice");
     add_characters(&database);
     sql(
@@ -3664,7 +3681,7 @@ fn a_warp_whose_save_fails_closes_without_sending_the_client_away() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let mut server = Server::start(binary(), database.url());
+    let mut server = server_without_wander(binary(), database.url());
     create_account(&server, "alice");
     add_characters(&database);
     sql(
@@ -3727,11 +3744,12 @@ fn a_goto_npc_shows_its_neighbour_at_its_target_on_the_same_map() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let server = Server::start_with_npcs(
+    let server = Server::start_with_npcs_configured(
         binary(),
         database.url(),
         "metin2_map_a1",
         "m\t604\t541\t0\t0\t0\t1\t1s\t100\t1\t10601\n",
+        "no_wander = true",
     );
     create_account(&server, "alice");
     add_characters(&database);
@@ -4024,7 +4042,7 @@ fn a_keeper_opens_its_shop_and_a_buy_and_a_sale_are_stored() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let mut server = Server::start(binary(), database.url());
+    let mut server = server_without_wander(binary(), database.url());
     create_account(&server, "alice");
     add_characters(&database);
     // Given: Alpha on map 3, its own empire's, a few steps from the keeper at (325200, 879200),
@@ -4292,7 +4310,7 @@ fn a_conqueror_below_the_map_will_is_sent_half_its_speed_and_hit_points() {
         &database,
         "INSERT INTO player (account_id, slot, name, job, level, st, ht, dx, iq, \
          conqueror_level, sungma_hp, sungma_move, hp, sp, stamina, x, y) SELECT id, 0, 'Gamma', \
-         0, 90, 6, 4, 3, 3, 1, 9, 14, 700, 100, 820, 1100000, 500000 FROM account \
+         0, 90, 6, 4, 3, 3, 1, 9, 14, 700, 260, 820, 1100000, 500000 FROM account \
          WHERE login = 'bob'",
     );
 
@@ -4336,7 +4354,7 @@ fn a_conqueror_below_the_map_will_is_sent_half_its_speed_and_hit_points() {
     drop(keyed);
     wait_for(
         &database,
-        "(SELECT (hp, sp, stamina) = (380, 100, 820) FROM player WHERE name = 'Gamma')",
+        "(SELECT (hp, sp, stamina) = (380, 260, 820) FROM player WHERE name = 'Gamma')",
     );
 }
 
@@ -5256,11 +5274,13 @@ fn a_walking_dagger_wearer_moves_at_its_dualhand_walk_clip() {
 /// A Server whose view range is 10000, so its radius is 10500, with alice's Alpha, bob's Yankee
 /// and carol's Charlie on map 1 at `points`, each stored at `stamina_value`.
 fn view_cast(database: &ScratchDatabase, points: [(i32, i32); 3], stamina_value: i32) -> Server {
+    // `no_wander`: the boot-drawn monsters stay where the scenarios put the players
+    // (ledger 229l).
     let server = Server::start_configured(
         binary(),
         database.url(),
         &default_channels(),
-        "view_range = 10000",
+        "view_range = 10000\nno_wander = true",
     );
     for login in ["alice", "bob", "carol"] {
         create_account(&server, login);
@@ -6459,8 +6479,8 @@ const STONE: u32 = 110_000;
 /// defence grade is 9 + 18 x 4 / 5 + 21, the shown grade 9 + 18 + 21, the magic defence
 /// 9 + (3 x 20 + 18) / 3 + 21 / 2. The armour's attribute adds 500 to the maximum hit points and
 /// its prototype takes 2 from the movement speed; the fan's prototype adds 26 to the attack
-/// speed. The stored 1500 hit points are above the item-less maximum but not the worn one, so
-/// they are kept: the relog heal legacy's `ApplyPoint` would give is a Defect. The body armour
+/// speed. The stored 1920 hit points are the worn maximum, so they are kept and no heal
+/// follows (the relog heal legacy's `ApplyPoint` would give is a Defect). The body armour
 /// becomes the main part, which the logout save stores and the next list shows.
 #[test]
 fn a_relogged_character_wears_its_equipment_and_its_points_count_it() {
@@ -6485,7 +6505,7 @@ fn a_relogged_character_wears_its_equipment_and_its_points_count_it() {
     assert_eq!(loaded[0], GC_PLAYER_POINTS);
     keyed.loaded(&loaded);
     for (slot, value, what) in [
-        (5, 1500, "POINT_HP, as stored"),
+        (5, 1920, "POINT_HP, as stored"),
         (6, 1420, "POINT_MAX_HP, before the items: 700 + 18 x 40"),
         (16, 23, "POINT_DEF_GRADE, before the items: 9 + 14"),
         (17, 100, "POINT_ATT_SPEED, before the items"),
@@ -6566,7 +6586,7 @@ fn a_relogged_character_wears_its_equipment_and_its_points_count_it() {
     drop(keyed);
     wait_for(
         &database,
-        "(SELECT (part_main, hp, sp) = (11810, 1500, 600) FROM player WHERE name = 'Alpha')",
+        "(SELECT (part_main, hp, sp) = (11810, 1920, 600) FROM player WHERE name = 'Alpha')",
     );
     let (_keyed, _empire, list) = select_screen(&server, b"alice");
     assert_eq!(listed(&list, 0).main_part, part(WORN_ARMOUR));
@@ -6931,16 +6951,27 @@ fn a_drunk_potion_pays_its_hit_points_over_the_next_seconds_and_the_save_keeps_t
     alpha.send_record(&client_item_use(0));
     // Then: 300 hit points are owed for each, the red effect plays twice, the stack goes to
     // one and then its cell is cleared, and the row with it.
-    let mut seen = read_a_move(&mut alpha, vid);
+    // The heal ticks land in these windows too (ledger 229l): Alpha is below its maximum
+    // 1420, so every 75 Pulses add 29 (idle under 3 s) or 86. They fold into `hp_now`.
+    let mut hp_now = 500;
+    let (mut seen, pair_base) = without_heal_ticks(
+        &read_a_move(&mut alpha, vid),
+        hp,
+        recovery,
+        &mut hp_now,
+        1420,
+    );
     // The potion joins the event that Alpha's entry started (`StartAffectEvent` returns when one
     // runs, `G/char_affect.cpp:238`), so the event's second is the entry's, not the drink's: its
-    // first tick may already be in this window. A tick is the hit points and the owed recovery.
+    // first tick may already be in this window. A tick is the hit points and the owed recovery;
+    // the helper returns the pool before it, and `paid` threads through the steps below.
     let mut paid = 0;
-    if seen.len() > 6 {
+    if let Some(base) = pair_base {
+        assert_eq!(seen.len(), 8, "the pair follows the drinks");
         let tick = seen.split_off(6);
         assert_eq!(
             tick,
-            [Seen::Point(hp, 500 + 99), Seen::Point(recovery, 600 - 99)],
+            [Seen::Point(hp, base + 99), Seen::Point(recovery, 600 - 99)],
             "the first tick, inside the drink's window"
         );
         paid = 99;
@@ -6959,30 +6990,39 @@ fn a_drunk_potion_pays_its_hit_points_over_the_next_seconds_and_the_save_keeps_t
     check(&database, "NOT EXISTS (SELECT 1 FROM item)");
 
     // And: each second the event pays 99, which is 7% of Alpha's maximum, until the 600 are
-    // paid.
+    // paid. The heal ticks between the steps fold into `hp_now`.
     while paid < 600 {
         let step = (600 - paid).min(99);
         paid += step;
-        let tick = read_a_tick(&mut alpha, vid);
+        let (step_base, potion_hp, owed) =
+            read_tick_events(&mut alpha, vid, hp, recovery, &mut hp_now, 1420);
         assert_eq!(
-            tick,
-            [
-                Seen::Point(hp, 500 + paid),
-                Seen::Point(recovery, 600 - paid)
-            ]
+            (potion_hp, owed),
+            (step_base + step, 600 - paid),
+            "the step on top of the heals"
         );
     }
-    // And: then it stops.
-    alpha.quiet_for(
+    // And: then it stops. The heal ticks do not.
+    quiet_past_heals(
+        &mut alpha,
         "the event has paid the 600 and ends",
         Duration::from_millis(1200),
+        vid,
+        &mut hp_now,
+        1420,
     );
 
-    // And: the logout save keeps what the event paid.
+    // And: the logout save keeps what the event paid plus the heals, with at most the ticks
+    // between the last read and the save on top.
     drop(alpha);
     wait_for(
         &database,
-        "(SELECT hp = 1100 FROM player WHERE name = 'Alpha')",
+        &format!("(SELECT hp >= {hp_now} FROM player WHERE name = 'Alpha')"),
+    );
+    let stored = query_hp(&database, "Alpha");
+    assert!(
+        is_tick_sum(stored - hp_now, 1420),
+        "the save on top of the last read: {stored} from {hp_now}"
     );
 }
 
@@ -7003,7 +7043,10 @@ fn a_recovering_character_is_saved_with_what_the_event_paid_while_it_is_still_co
     create_account(&server, "alice");
     add_characters(&database);
     sql(&database, "UPDATE player SET hp = 500 WHERE name = 'Alpha'");
-    let hp = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
+    let (hp, recovery) = (
+        u8::try_from(common::point_slot::POINT_HP).expect("a point byte"),
+        u8::try_from(common::point_slot::POINT_HP_RECOVERY).expect("a point byte"),
+    );
 
     // Given: Alpha, at 500 hit points, drinks a small red potion.
     let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
@@ -7013,17 +7056,62 @@ fn a_recovering_character_is_saved_with_what_the_event_paid_while_it_is_still_co
     server.wait_for("id 100000000; the client has it");
     let _set = alpha.read_game();
     alpha.send_record(&client_item_use(0));
-    let _used = read_a_move(&mut alpha, vid);
-
-    // When: the event has paid all 300.
-    let mut last = Seen::Point(hp, 500);
-    while last != Seen::Point(hp, 800) {
-        last = read_a_tick(&mut alpha, vid)[0].clone();
+    // The drink's window holds the owed 300, the red effect and the cleared cell, with the
+    // heal ticks folded into `hp_now` — and the first step already inside it if the drink
+    // joined before the tick at 25 pulses, which `paid` threads through (ledger 229l).
+    let mut hp_now = 500;
+    let (kept, pair_base) = without_heal_ticks(
+        &read_a_move(&mut alpha, vid),
+        hp,
+        recovery,
+        &mut hp_now,
+        1420,
+    );
+    let mut paid = 0;
+    if let Some(base) = pair_base {
+        assert_eq!(
+            kept,
+            [
+                Seen::Point(recovery, 300),
+                Seen::Effect(1),
+                Seen::Set(0, 0),
+                Seen::Point(hp, base + 99),
+                Seen::Point(recovery, 201),
+            ],
+            "the drink and the first step, already in the window"
+        );
+        paid = 99;
+    } else {
+        assert_eq!(
+            kept,
+            [Seen::Point(recovery, 300), Seen::Effect(1), Seen::Set(0, 0),],
+            "the drink, before the first step"
+        );
     }
-    // Then: a save while the client is still connected stores 800.
+
+    // When: the event has paid all 300, in three steps of 99 and a last 3. The heal ticks
+    // between the steps fold into `hp_now`; the owed recovery is exact (ledger 229l).
+    while paid < 300 {
+        let step = (300 - paid).min(99);
+        paid += step;
+        let (step_base, potion_hp, owed) =
+            read_tick_events(&mut alpha, vid, hp, recovery, &mut hp_now, 1420);
+        assert_eq!(
+            (potion_hp, owed),
+            (step_base + step, 300 - paid),
+            "the step on top of the heals"
+        );
+    }
+    // Then: a save while the client is still connected stores the event's 800 plus the heals
+    // so far, with later ticks on top.
     wait_for(
         &database,
-        "(SELECT hp = 800 FROM player WHERE name = 'Alpha')",
+        &format!("(SELECT hp >= {hp_now} FROM player WHERE name = 'Alpha')"),
+    );
+    let stored = query_hp(&database, "Alpha");
+    assert!(
+        is_tick_sum(hp_now - 800, 1420) && is_tick_sum(stored - hp_now, 1420),
+        "the save on top of the event's 800: {stored} from {hp_now}"
     );
     alpha.still_for("a save sends no record", Duration::from_millis(200));
 }
@@ -7179,15 +7267,197 @@ fn a_quickslot_follows_its_potion_chains_when_it_is_used_up_and_a_drop_deletes_i
     );
 }
 
-/// One second of the recovery event: the pool's `GC_CHARACTER_POINT_CHANGE`, then the
-/// recovery's, both for `vid`.
-fn read_a_tick(keyed: &mut Keyed, vid: u32) -> [Seen; 2] {
-    [keyed.read_game(), keyed.read_game()].map(|record| {
-        assert_eq!(record[0], GC_POINT_CHANGE);
+/// Whether an HP move from `before` to `after` is a heal tick: `15 + MaxHP . {1|5}/100`
+/// (`hp_recovery`), capped at the maximum (ledger 229l).
+fn is_heal_step(before: i64, after: i64, max_hp: i64) -> bool {
+    [1, 5].iter().any(|percent| {
+        after == (before + 15 + max_hp * percent / 100).min(max_hp) && after > before
+    })
+}
+
+/// Whether `diff` is a sum of heal ticks: the one- and five-percent shares of `max_hp`.
+fn is_tick_sum(mut diff: i64, max_hp: i64) -> bool {
+    if diff < 0 {
+        return false;
+    }
+    let shares = [15 + max_hp / 100, 15 + max_hp * 5 / 100];
+    while diff > 0 {
+        if diff >= shares[1] && is_tick_sum(diff - shares[1], max_hp) {
+            return true;
+        }
+        if diff < shares[0] {
+            return false;
+        }
+        diff -= shares[0];
+    }
+    true
+}
+
+/// One potion step past the heal ticks: reads until the step's HP half and recovery half both
+/// arrive, folding every heal tick's HP record into `hp_now` (ledger 229l). Returns the pool
+/// before the step and the step's two values. The server sends in order, so every heal the
+/// step's value builds on is read first.
+fn read_tick_events(
+    keyed: &mut Keyed,
+    vid: u32,
+    hp: u8,
+    recovery: u8,
+    hp_now: &mut i64,
+    max_hp: i64,
+) -> (i64, i64, i64) {
+    let point_of = |record: &Vec<u8>| {
+        assert_eq!(record[0], GC_POINT_CHANGE, "{record:02x?}");
         assert_eq!(&record[4..8], &vid.to_le_bytes(), "the drinker's VID");
         let value = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
-        Seen::Point(record[8], value)
-    })
+        (record[8], value)
+    };
+    let (step_base, potion_hp) = loop {
+        let (kind, value) = point_of(&keyed.read_game());
+        if kind == hp {
+            if is_heal_step(*hp_now, value, max_hp) {
+                *hp_now = value;
+                continue;
+            }
+            let step_base = *hp_now;
+            *hp_now = value;
+            break (step_base, value);
+        }
+        panic!("a recovery half with no HP half: {kind} {value}");
+    };
+    loop {
+        let (kind, value) = point_of(&keyed.read_game());
+        if kind == recovery {
+            return (step_base, potion_hp, value);
+        }
+        if kind == hp && is_heal_step(*hp_now, value, max_hp) {
+            *hp_now = value;
+            continue;
+        }
+        panic!("past a potion step, a record nobody accounted for: {kind} {value}");
+    }
+}
+
+/// Drop the heal ticks from a drained window: a lone `Point(hp, _)` is a tick and folds
+/// into `hp_now`; an HP point the recovery point follows is a potion pair and is kept, with a
+/// heal tick between the halves folded too (ledger 229l). A 700 ms window holds at most one
+/// pair (ticks are a second apart), and it is returned with the pool before it, so the caller
+/// can tell the pair's step from the heals it builds on.
+fn without_heal_ticks(
+    seen: &[Seen],
+    hp: u8,
+    recovery: u8,
+    hp_now: &mut i64,
+    max_hp: i64,
+) -> (Vec<Seen>, Option<i64>) {
+    let mut kept = Vec::with_capacity(seen.len());
+    let mut pair_base = None;
+    let mut at = 0;
+    let point = |index: usize| match seen.get(index) {
+        Some(Seen::Point(kind, value)) => Some((*kind, *value)),
+        _ => None,
+    };
+    while at < seen.len() {
+        match (point(at), point(at + 1), point(at + 2)) {
+            // A heal tick between the potion's halves: fold it, keep the pair.
+            (Some((kind, hp_value)), Some((hp2, heal)), Some((rec, _)))
+                if kind == hp && hp2 == hp && rec == recovery =>
+            {
+                assert!(pair_base.replace(*hp_now).is_none(), "one pair per window");
+                *hp_now = hp_value;
+                assert!(
+                    is_heal_step(*hp_now, heal, max_hp),
+                    "a heal tick between the halves: {heal} from {hp_now}"
+                );
+                *hp_now = heal;
+                kept.push(seen[at].clone());
+                kept.push(seen[at + 2].clone());
+                at += 3;
+            }
+            // The potion's pair: keep both.
+            (Some((kind, hp_value)), Some((rec, _)), _) if kind == hp && rec == recovery => {
+                assert!(pair_base.replace(*hp_now).is_none(), "one pair per window");
+                *hp_now = hp_value;
+                kept.push(seen[at].clone());
+                kept.push(seen[at + 1].clone());
+                at += 2;
+            }
+            // A lone HP point: a heal tick.
+            (Some((kind, value)), _, _) if kind == hp => {
+                assert!(
+                    is_heal_step(*hp_now, value, max_hp),
+                    "a lone HP point is a heal tick: {value} from {hp_now}"
+                );
+                *hp_now = value;
+                at += 1;
+            }
+            _ => {
+                kept.push(seen[at].clone());
+                at += 1;
+            }
+        }
+    }
+    (kept, pair_base)
+}
+
+/// [`Keyed::quiet_for`] past the heal ticks: every HP point record in the window folds into
+/// `hp_now`; anything else must be a ping, the revive timer's, a stamina refill or an NPC's
+/// own (ledger 229l). Returns nothing; `hp_now` is the pool at the window's end.
+fn quiet_past_heals(
+    keyed: &mut Keyed,
+    note: &str,
+    window: Duration,
+    vid: u32,
+    hp_now: &mut i64,
+    max_hp: i64,
+) {
+    let hp = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
+    let (records, quiet) = keyed.drain_game(window, |header| match header {
+        GC_PING => 1,
+        GC_POINT_CHANGE => POINT_CHANGE_LEN,
+        GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        other => panic!("{note}: header {other}"),
+    });
+    assert_eq!(quiet, Quiet::Open, "{note} closed the connection");
+    for record in records {
+        if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+            continue;
+        }
+        assert_eq!(record[0], GC_POINT_CHANGE, "{note}: {record:02x?}");
+        assert_eq!(
+            &record[4..8],
+            &vid.to_le_bytes(),
+            "{note}: the drinker's VID"
+        );
+        assert_eq!(record[8], hp, "{note}: only the HP pool moves");
+        let value = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
+        assert!(
+            is_heal_step(*hp_now, value, max_hp),
+            "{note}: a heal tick: {value} from {hp_now}"
+        );
+        *hp_now = value;
+    }
+}
+
+/// The stored hit points of `name`.
+fn query_hp(database: &ScratchDatabase, name: &str) -> i64 {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime should start")
+        .block_on(async {
+            use db::sqlx::Connection;
+            let mut connection = db::sqlx::PgConnection::connect(database.url())
+                .await
+                .expect("the scenario database should connect");
+            let row: (i32,) = db::sqlx::query_as("SELECT hp FROM player WHERE name = $1")
+                .bind(name)
+                .fetch_one(&mut connection)
+                .await
+                .expect("the row should be there");
+            connection.close().await.expect("the close should succeed");
+            i64::from(row.0)
+        })
 }
 
 /// A `GC_ITEM_GROUND_ADD` where Alpha and Zulu stand, [`ALPHA_ENTERS_AT`], with z 0.
@@ -7539,7 +7809,7 @@ fn give_alpha_equipment(database: &ScratchDatabase) {
 
     sql(
         database,
-        "UPDATE player SET level = 9, hp = 1500, sp = 70000 WHERE name = 'Alpha'",
+        "UPDATE player SET level = 9, hp = 1920, sp = 70000 WHERE name = 'Alpha'",
     );
     for (id, pos, vnum) in [
         (20, 0, WORN_ARMOUR),
@@ -8407,46 +8677,68 @@ fn a_potion_drunk_inside_the_window_ticks_on_the_entry_phase() {
     server.wait_for("id 100000000; the client has it");
     assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 27_001, 2));
 
-    // When: one potion is drunk 30 pulses (1.2 s) after the entry, inside the window. Then: 300
-    // hit points are owed, the red effect plays and the stack goes to one. The potion joins the
-    // event the entry started, which its due pulse does not move (`StartAffectEvent` returns
-    // when one runs, `G/char_affect.cpp:238`), so the next tick is the one at 50 pulses.
+    // When: one potion is drunk 1.2 s after the character load starts, inside the window.
+    // Then: 300 hit points are owed, the red effect plays and the stack goes to one. The
+    // potion joins the event the entry started, which its due pulse does not move
+    // (`StartAffectEvent` returns when one runs, `G/char_affect.cpp:238`). The 1.2 s include
+    // the load, so the drink lands just past the tick at 25 pulses on a fast machine and just
+    // before it on a slow one: the first step may already be in this window (ledger 229l).
     std::thread::sleep(Duration::from_millis(1200).saturating_sub(entered_at.elapsed()));
     assert!(
         entered_at.elapsed() < Duration::from_millis(4_500),
         "the drink is inside the window"
     );
     alpha.send_record(&client_item_use(0));
-    assert_eq!(
-        read_a_move_within(&mut alpha, vid, Duration::from_millis(300)),
-        [
-            Seen::Point(recovery, 300),
-            Seen::Effect(1),
-            Seen::Count(0, 1),
-        ]
+    // The heal ticks land in these windows too (ledger 229l) and fold into `hp_now`.
+    let mut hp_now = 500;
+    let (kept, pair_base) = without_heal_ticks(
+        &read_a_move_within(&mut alpha, vid, Duration::from_millis(300)),
+        hp,
+        recovery,
+        &mut hp_now,
+        1420,
     );
-
-    // And: the ticks at 50, 75 and 100 pulses pay 99 each, from the owed 300.
     let mut paid = 0;
-    for _ in 0..3 {
-        paid += 99;
+    if let Some(base) = pair_base {
         assert_eq!(
-            read_a_tick(&mut alpha, vid),
+            kept,
             [
-                Seen::Point(hp, 500 + paid),
-                Seen::Point(recovery, 300 - paid)
-            ]
+                Seen::Point(recovery, 300),
+                Seen::Effect(1),
+                Seen::Count(0, 1),
+                Seen::Point(hp, base + 99),
+                Seen::Point(recovery, 201),
+            ],
+            "the drink and the first step, already in the window"
+        );
+        paid = 99;
+    } else {
+        assert_eq!(
+            kept,
+            [
+                Seen::Point(recovery, 300),
+                Seen::Effect(1),
+                Seen::Count(0, 1),
+            ],
+            "the drink, before the first step"
         );
     }
 
-    // Then: the fifth tick, at 125 pulses, pays the last 3 and the revive ends. The recovery
-    // records come before the removal and the flag update (`G/char_affect.cpp:175-211` before
-    // `:226`): the removal to Alpha, then its look with no flag.
-    assert_eq!(
-        read_a_tick(&mut alpha, vid),
-        [Seen::Point(hp, 800), Seen::Point(recovery, 0)],
-        "the fifth tick pays the last 3"
-    );
+    // And: the rest of the owed 300 pays in steps of 99 with a last 3. Then the revive ends:
+    // the recovery records come before the removal and the flag update
+    // (`G/char_affect.cpp:175-211` before `:226`): the removal to Alpha, then its look with no
+    // flag.
+    while paid < 300 {
+        let step = (300 - paid).min(99);
+        paid += step;
+        let (step_base, potion_hp, owed) =
+            read_tick_events(&mut alpha, vid, hp, recovery, &mut hp_now, 1420);
+        assert_eq!(
+            (potion_hp, owed),
+            (step_base + step, 300 - paid),
+            "the step on top of the heals"
+        );
+    }
     assert_eq!(
         read_past_pings(&mut alpha),
         [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0],
@@ -8956,6 +9248,26 @@ fn target_of(vid: u32, percent: u8, hp: i32, max_hp: i32, element: u8) -> Vec<u8
     record
 }
 
+/// Read until a record that is not one of `vid`'s heal ticks: a `GC_TARGET` of `vid`
+/// whose HP is a heal share above `hp_now` folds into it (ledger 229l). Anything else is
+/// returned. Yankee is stored below its maximum, so its recovery event updates its targeters.
+fn read_past_heal_targets(keyed: &mut Keyed, vid: u32, hp_now: &mut i64, max_hp: i64) -> Vec<u8> {
+    loop {
+        let record = keyed.read_game();
+        let is_yankees =
+            record.first() == Some(&GC_TARGET) && record.get(1..5) == Some(&vid.to_le_bytes());
+        if !is_yankees {
+            return record;
+        }
+        let hp = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
+        assert!(
+            is_heal_step(*hp_now, i64::from(hp), max_hp),
+            "a heal target: {hp} from {hp_now}"
+        );
+        *hp_now = i64::from(hp);
+    }
+}
+
 /// Ledger 229g: `CInputMain::Target` and `CHARACTER::SetTarget` (`G/input_main.cpp:2249-2269`,
 /// `G/char.cpp:6458-6598`), `ClearTarget` (`:654`) and the `@fixme120` consume
 /// (`G/input_login.cpp:1254-1257`).
@@ -9021,10 +9333,18 @@ fn a_click_targets_a_monster_and_a_player_and_a_leave_clears_it() {
     yankee.quiet("the target is not told it was clicked");
 
     // When: Yankee leaves. Then: its own release, then Alpha's target is cleared, then the
-    // removal (`ClearSync` before `ClearTarget`, `G/char.cpp:653-654`).
+    // removal (`ClearSync` before `ClearTarget`, `G/char.cpp:653-654`). Yankee's heal ticks
+    // reach Alpha as target updates between these (ledger 229l) and are read past.
     drop(yankee);
-    assert_eq!(alpha_keyed.read_game(), ownership_of(0, yankee_listed.id));
-    assert_eq!(alpha_keyed.read_game(), target_of(0, 0, 0, 0, 0));
+    let mut yankee_hp = 325;
+    assert_eq!(
+        read_past_heal_targets(&mut alpha_keyed, yankee_listed.id, &mut yankee_hp, 650),
+        ownership_of(0, yankee_listed.id)
+    );
+    assert_eq!(
+        read_past_heal_targets(&mut alpha_keyed, yankee_listed.id, &mut yankee_hp, 650),
+        target_of(0, 0, 0, 0, 0)
+    );
     alpha_keyed.sees_leave(yankee_listed.id);
 }
 
@@ -9095,7 +9415,7 @@ fn a_target_4800_away_is_dropped_by_the_next_recovery_run() {
     seat_yankee_and_charlie(&database);
     sql(
         &database,
-        "UPDATE player SET x = 476000, y = 950000, hp = 325 WHERE name = 'Yankee'",
+        "UPDATE player SET x = 476000, y = 950000, hp = 650 WHERE name = 'Yankee'",
     );
     sql(
         &database,
@@ -9121,9 +9441,10 @@ fn a_target_4800_away_is_dropped_by_the_next_recovery_run() {
     // When: Alpha clicks Yankee. Then: the target, and VID 0 at the next recovery run.
     alice.send_record(&client_target(yankee_listed.id));
     let clicked = std::time::Instant::now();
+    // Yankee is stored at its maximum, so the run it waits for heals nothing (ledger 229l).
     assert_eq!(
         alice.read_game(),
-        target_of(yankee_listed.id, 50, 325, 650, 0)
+        target_of(yankee_listed.id, 100, 650, 650, 0)
     );
     assert_eq!(alice.read_game(), target_of(0, 0, 0, 0, 0));
     assert!(
@@ -9482,6 +9803,57 @@ impl Keyed {
             }
         }
     }
+
+    /// The revive's look update of the player under `vid`, past a ping, a stamina refill
+    /// and what an NPC does on its own. [`Keyed::read_own`] cannot read it: the restart's own
+    /// removal forgot the VID, so the timer's check would note the update and absorb it as the
+    /// revive timer's (ledger 229l).
+    fn read_revive_update(&mut self, vid: u32) -> Vec<u8> {
+        let own: [u8; 4] = vid.to_le_bytes();
+        loop {
+            let record = self.read_wire();
+            if record[0] == GC_PING || is_stamina_refill(&record) || is_npc_chatter(&record) {
+                continue;
+            }
+            if record[0] == GC_CHARACTER_UPDATE && record.len() >= 5 && record[1..5] == own {
+                if !self.timers.contains(&own) {
+                    self.timers.push(own);
+                }
+                return record;
+            }
+            if self.timer_record(&record) {
+                continue;
+            }
+            let npc_own = matches!(
+                record[0],
+                GC_CHARACTER_ADD | GC_CHARACTER_DEL | GC_CHAR_ADDITIONAL_INFO | GC_TARGET
+            ) && record.len() >= 5
+                && record[1..5] != own;
+            if npc_own {
+                continue;
+            }
+            return record;
+        }
+    }
+
+    /// The next record of the player under `vid` past a ping, the revive timer's, a stamina
+    /// refill and what an NPC does on its own: a wandering monster's insert, its removal, its
+    /// additional info or its recovery target lands anywhere, even mid-restart (ledger 229l).
+    fn read_own(&mut self, vid: u32) -> Vec<u8> {
+        let own = vid.to_le_bytes();
+        loop {
+            let record = self.read_fight();
+            let npc_own = matches!(
+                record[0],
+                GC_CHARACTER_ADD | GC_CHARACTER_DEL | GC_CHAR_ADDITIONAL_INFO | GC_TARGET
+            ) && record.len() >= 5
+                && record[1..5] != own;
+            if npc_own {
+                continue;
+            }
+            return record;
+        }
+    }
 }
 
 /// The VID of the `GC_CHARACTER_ADD` among `inserts` shown at `at`.
@@ -9526,6 +9898,246 @@ fn alpha_swinging_by(database: &ScratchDatabase, lines: &str) -> (Server, Keyed,
     );
     alpha.quiet("the swing is not relayed to the swinger");
     (server, alpha, listed.id, entered)
+}
+
+/// Ledger 229l: one swing of a monster on a player, as its victim reads it.
+struct Swing {
+    /// The `DAMAGE_INFO` damage.
+    damage: i32,
+    /// The `DAMAGE_INFO` flag.
+    flag: u8,
+    /// The hit points after the swing's `POINT_CHANGE`, none at clamp 0.
+    hp: Option<i64>,
+    /// The owner of the swing's `GC_OWNERSHIP`, none past 250 (`Kept` sends nothing).
+    owner: Option<u32>,
+    /// Whether the swing stunned: the `POINT_CHANGE{35}`, `{36}` and `GC_STUN` triple.
+    stunned: bool,
+    /// The closing `GC_CHARACTER_MOVE{2}`: rotation, destination and server time.
+    rot: u8,
+    x: i32,
+    y: i32,
+    time: u32,
+}
+
+/// The server time of a `GC_CHARACTER_MOVE`: `dwCurTime` at bytes 16..20.
+fn move_time(record: &[u8]) -> u32 {
+    assert_eq!(record[0], GC_MOVE, "{record:02x?}");
+    u32::from_le_bytes(record[16..20].try_into().expect("four bytes"))
+}
+
+/// Read one monster swing on `victim`: skip by rule until its `DAMAGE_INFO`, then take the
+/// ordered tail: the hit points, the stun triple, the claim and the closing move (ledger 229l).
+///
+/// Skipped: pings, the revive timer's, stamina refills, the monster's own chat, heal ticks, the
+/// monster's `GC_TARGET` (its NPC recovery), and any NPC's own doing. The monster's own move is
+/// tested before the chatter filter, since [`is_npc_chatter`] would skip it.
+fn read_swing(keyed: &mut Keyed, mob: u32, victim: u32, deadline: std::time::Instant) -> Swing {
+    let (damage, flag) = read_swing_head(keyed, mob, victim, deadline);
+    swing_tail(keyed, mob, victim, damage, flag)
+}
+
+/// Skip by rule until a swing's `DAMAGE_INFO` on `victim`: pings, the revive timer's, stamina
+/// refills, the monster's own chat, heal ticks, the monster's `GC_TARGET` and any NPC's own.
+fn read_swing_head(
+    keyed: &mut Keyed,
+    mob: u32,
+    victim: u32,
+    deadline: std::time::Instant,
+) -> (i32, u8) {
+    let hp_kind = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
+    let mut first = true;
+    let (damage, flag) = loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a swing within the window"
+        );
+        let record = keyed.read_game_raw();
+        if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+            continue;
+        }
+        if record[0] == GC_DAMAGE_INFO && record[1..5] == victim.to_le_bytes() {
+            let flag = record[5];
+            let damage = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
+            break (damage, flag);
+        }
+        // The victim's own heal ticks and the monster's recovery target, between swings.
+        let is_heal = record.first() == Some(&GC_POINT_CHANGE)
+            && record.get(4..8) == Some(&victim.to_le_bytes())
+            && record.get(8) == Some(&hp_kind);
+        let is_mob_target =
+            record.first() == Some(&GC_TARGET) && record.get(1..5) == Some(&mob.to_le_bytes());
+        // A chat carries no VID at a fixed point; the monster's ATTACK chat arrives as
+        // chatter and is skipped with it.
+        let is_mob_chat = record.first() == Some(&GC_CHAT);
+        assert!(
+            is_heal || is_mob_target || is_mob_chat || is_npc_chatter(&record),
+            "past a swing, a record nobody accounted for: {record:02x?} (first = {first})"
+        );
+        first = false;
+    };
+    (damage, flag)
+}
+
+/// Take a swing's ordered tail after its `DAMAGE_INFO`: the hit points, the stun triple, the
+/// claim and the closing move.
+fn swing_tail(keyed: &mut Keyed, mob: u32, victim: u32, damage: i32, flag: u8) -> Swing {
+    let hp_kind = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
+    let mut swing = Swing {
+        damage,
+        flag,
+        hp: None,
+        owner: None,
+        stunned: false,
+        rot: 0,
+        x: 0,
+        y: 0,
+        time: 0,
+    };
+    let mut saw_hp = false;
+    let mut saw_35 = false;
+    let mut saw_36 = false;
+    loop {
+        // Below the chatter filter: the closing move is the monster's own.
+        let record = keyed.read_wire();
+        if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+            continue;
+        }
+        if record[0] == GC_MOVE && record[4..8] == mob.to_le_bytes() {
+            assert_eq!(
+                (record[1], record[2]),
+                (FUNC_ATTACK, 0),
+                "the swing closes with MOVE{{2}}: {record:02x?}"
+            );
+            swing.rot = record[3];
+            swing.x = i32::from_le_bytes(record[8..12].try_into().expect("four bytes"));
+            swing.y = i32::from_le_bytes(record[12..16].try_into().expect("four bytes"));
+            swing.time = move_time(&record);
+            return swing;
+        }
+        if record[0] == GC_OWNERSHIP && record[5..9] == victim.to_le_bytes() {
+            assert!(swing.owner.is_none(), "one claim per swing");
+            swing.owner = Some(u32::from_le_bytes(
+                record[1..5].try_into().expect("four bytes"),
+            ));
+            continue;
+        }
+        if record[0] == GC_STUN && record[1..5] == victim.to_le_bytes() {
+            assert!(saw_35 && saw_36, "the stun triple is ordered");
+            swing.stunned = true;
+            continue;
+        }
+        if record.first() == Some(&GC_POINT_CHANGE) && record[4..8] == victim.to_le_bytes() {
+            let value = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
+            match record.get(8).copied() {
+                Some(kind) if kind == hp_kind && !saw_hp => {
+                    saw_hp = true;
+                    swing.hp = Some(value);
+                }
+                Some(kind) if kind == hp_kind => {
+                    // A heal tick inside the tail; the swing's own HP record came first.
+                }
+                Some(35) => {
+                    assert!(!saw_35, "one stun pool record");
+                    saw_35 = true;
+                }
+                Some(36) => {
+                    assert!(saw_35 && !saw_36, "the stun triple is ordered");
+                    saw_36 = true;
+                }
+                kind => panic!("past a swing, a point nobody accounted for: {kind:?}"),
+            }
+            continue;
+        }
+        if record.first() == Some(&GC_TARGET) && record[1..5] == mob.to_le_bytes() {
+            continue;
+        }
+        assert!(
+            is_npc_chatter(&record),
+            "past a swing, a record nobody accounted for: {record:02x?}"
+        );
+    }
+}
+
+/// The heal tick within `due`: each swing stamps `last_move`, so the tick adds exactly 29
+/// to `hp_now`. A third swing may land first and is consumed (ledger 229l).
+fn read_heal_tick(keyed: &mut Keyed, mob: u32, victim: u32, hp_now: i64, due: std::time::Instant) {
+    let mut hp_now = hp_now;
+    loop {
+        assert!(
+            std::time::Instant::now() < due,
+            "a heal tick within four seconds of the first swing"
+        );
+        let record = keyed.read_game_raw();
+        if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+            continue;
+        }
+        if record[0] == GC_DAMAGE_INFO && record[1..5] == victim.to_le_bytes() {
+            let flag = record[5];
+            let damage = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
+            let swing = swing_tail(keyed, mob, victim, damage, flag);
+            hp_now = swing.hp.unwrap_or(hp_now);
+            continue;
+        }
+        if record.first() == Some(&GC_POINT_CHANGE) && record[4..8] == victim.to_le_bytes() {
+            let value = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
+            assert_eq!(
+                value,
+                hp_now + 29,
+                "each swing stamps last_move, so the tick adds 29"
+            );
+            return;
+        }
+        assert!(
+            record.first() == Some(&GC_TARGET) && record[1..5] == mob.to_le_bytes()
+                || is_npc_chatter(&record),
+            "past the tick, a record nobody accounted for: {record:02x?}"
+        );
+    }
+}
+
+/// Read swings until one stuns, returning them all (ledger 229l). A heal tick that lifts the
+/// victim above the first swing's damage only adds a swing.
+fn until_stunned(
+    keyed: &mut Keyed,
+    mob: u32,
+    victim: u32,
+    deadline: std::time::Instant,
+) -> Vec<Swing> {
+    let mut swings = Vec::new();
+    loop {
+        let swing = read_swing(keyed, mob, victim, deadline);
+        let stunned = swing.stunned;
+        swings.push(swing);
+        if stunned {
+            return swings;
+        }
+    }
+}
+
+/// The first `GC_CHARACTER_MOVE` of `mob` with `func` before `deadline` (ledger 229l).
+/// Wandering moves of other funcs are read past; anything else fails.
+fn npc_move_of(keyed: &mut Keyed, mob: u32, func: u8, deadline: std::time::Instant) -> Vec<u8> {
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a move of {mob} with func {func} within the window"
+        );
+        // Below the chatter filter: the wanted move is the monster's own.
+        let record = keyed.read_wire();
+        if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+            continue;
+        }
+        if record[0] == GC_MOVE && record[4..8] == mob.to_le_bytes() {
+            if record[1] == func {
+                return record;
+            }
+            continue;
+        }
+        assert!(
+            is_npc_chatter(&record),
+            "past a move, a record nobody accounted for: {record:02x?}"
+        );
+    }
 }
 
 /// Ledger 229j: `CInputMain::Attack` and `battle_melee_attack` (`G/input_main.cpp:1966-2009`,
@@ -9710,4 +10322,440 @@ fn skill_shoot_and_fly_frames_and_refused_victims_keep_the_connection() {
     alpha.quiet("the skills' frames and the refused attacks send nothing");
     alpha.send_record(&client_target(dog));
     assert_eq!(alpha.read_game(), target_of(dog, 100, DOG_HP, DOG_HP, 0));
+}
+
+/// A 406 (a level-35 boar, MELEE, HP 1736) at regen point (605, 540), where Alpha enters.
+const BOAR_AT_ALPHA: &str = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t406\n";
+
+/// Ledger 229l (P1): a hit melee monster turns on its attacker and swings every two seconds.
+///
+/// Alpha punches the 406 it targets, standing on it. The punch does not stun (HP 1736), so the
+/// monster runs `BeginFight` and swings: `DAMAGE_INFO`, the hit points, the claim and the
+/// closing `MOVE{2}`. The second swing lands 2000 ms on on the server's clock
+/// (`CalculateDuration(100, 2000)`). Each swing stamps `last_move`, so the heal tick that lands
+/// within four seconds of the first swing adds exactly 29 (15 + 1420/100).
+#[test]
+fn a_hit_monster_turns_on_its_attacker_and_swings_every_two_seconds() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (_server, mut alpha, alpha_vid, entered) = alpha_swinging_by(&database, BOAR_AT_ALPHA);
+    let boar = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    alpha.send_record(&client_target(boar));
+    let clicked = alpha.read_game();
+    assert_eq!(clicked[0], GC_TARGET, "{clicked:02x?}");
+    assert_eq!(&clicked[1..5], &boar.to_le_bytes(), "the boar's VID");
+
+    // When: Alpha punches the boar. Then: the damage, the hit points, no stun, the claim.
+    alpha.send_record(&client_attack(boar));
+    let punch = alpha.read_fight();
+    assert_eq!(punch[0], GC_DAMAGE_INFO, "{punch:02x?}");
+    assert_eq!(&punch[1..5], &boar.to_le_bytes(), "the boar's VID");
+    let dealt = i32::from_le_bytes(punch[6..10].try_into().expect("four bytes"));
+    assert!((1..=450).contains(&dealt), "the punch lands: {dealt}");
+    let shown = alpha.read_fight();
+    assert_eq!(shown[0], GC_TARGET, "{shown:02x?}");
+    let boar_hp = i32::from_le_bytes(shown[6..10].try_into().expect("four bytes"));
+    assert_eq!(
+        boar_hp,
+        1736 - dealt,
+        "the punch's damage stays in the hit points"
+    );
+    assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, boar));
+
+    // Then: the first swing within 2 s, in legacy's record order.
+    let first_due = std::time::Instant::now() + Duration::from_secs(2);
+    let first = read_swing(&mut alpha, boar, alpha_vid, first_due);
+    assert_eq!(
+        first.flag, DAMAGE_NORMAL,
+        "no critical, penetrate or death blow"
+    );
+    assert!(
+        (1..=450).contains(&first.damage),
+        "the swing lands: {}",
+        first.damage
+    );
+    assert_eq!(
+        first.hp,
+        Some(1420 - i64::from(first.damage)),
+        "the hit points below the full 1420"
+    );
+    assert_eq!(first.owner, Some(boar), "the claim within 250");
+    assert!(!first.stunned, "25..=92 never stuns 1420");
+    assert_eq!(
+        (first.x, first.y),
+        ALPHA_ENTERS_AT,
+        "the swing holds its point"
+    );
+    let first_at = std::time::Instant::now();
+
+    // And: a second swing 2000 ms on on the server's clock, the claim sent again.
+    let second = read_swing(
+        &mut alpha,
+        boar,
+        alpha_vid,
+        first_at + Duration::from_secs(4),
+    );
+    let gap = second.time.wrapping_sub(first.time);
+    assert!(
+        (1990..=3000).contains(&gap),
+        "the 50-Pulse swing on the server's clock: {gap}"
+    );
+    // Legacy sends the claim on every accepted swing, even with the owner unchanged: the
+    // TODO at the send site says so (`G/char.cpp:5542-5545`).
+    assert_eq!(second.owner, Some(boar), "the claim is sent again");
+    let before = first.hp.expect("the first swing's hit points");
+    let ticked = [0, 29, 86].map(|tick| before + tick - i64::from(second.damage));
+    assert!(
+        second.hp.is_some_and(|hp| ticked.contains(&hp)),
+        "the second swing on top of at most one tick: {:?} from {before}",
+        second.hp
+    );
+
+    // And: a heal tick of exactly 29 within four seconds of the first swing.
+    read_heal_tick(
+        &mut alpha,
+        boar,
+        alpha_vid,
+        second.hp.expect("the second swing's hit points"),
+        first_at + Duration::from_secs(4),
+    );
+}
+
+/// A 115 (an aggressive level-24 boar, sight 2000, range 175, move 130) at regen point
+/// (613, 540), 800 east of where Alpha enters.
+const BOAR_800_EAST: &str = "m\t613\t540\t0\t0\t0\t1\t1000s\t100\t1\t115\n";
+
+/// Ledger 229l (P2): an aggressive monster chases a player into its reach and swings.
+///
+/// The 115 stands 800 east, inside its sight of 2000. Alpha ends its revive with a `FUNC_ATTACK`
+/// move where it stands. The idle search finds it, Battle waits 25 Pulses, and the chase walks
+/// to nine tenths of the range: the first `FUNC_WAIT` whose destination is within 158 of Alpha
+/// is the chase's (a wander walks 300-700 from the monster, never that close). Then a swing.
+#[test]
+fn an_aggressive_monster_chases_a_player_into_its_reach_and_swings() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs(binary(), database.url(), "metin2_map_a1", BOAR_800_EAST);
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    let boar = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        (470_900, 950_000),
+    );
+    alpha.send_record(&client_move(
+        FUNC_ATTACK,
+        7,
+        40,
+        ALPHA_ENTERS_AT.0,
+        ALPHA_ENTERS_AT.1,
+        0x5eed,
+    ));
+    let update = read_past_pings(&mut alpha);
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert!(alpha.timer_record(&update), "the swing ends the revive");
+    assert_eq!(
+        read_past_pings(&mut alpha),
+        [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0]
+    );
+    alpha.quiet("the swing is not relayed to the swinger");
+
+    // Then: the chase's wait within 10 s, then a swing.
+    let due = std::time::Instant::now() + Duration::from_secs(10);
+    let chase = loop {
+        let wait = npc_move_of(&mut alpha, boar, FUNC_WAIT, due);
+        let x = i32::from_le_bytes(wait[8..12].try_into().expect("four bytes"));
+        let y = i32::from_le_bytes(wait[12..16].try_into().expect("four bytes"));
+        if distance_approx(x - ALPHA_ENTERS_AT.0, y - ALPHA_ENTERS_AT.1) <= 158 {
+            break wait;
+        }
+    };
+    let _ = chase;
+    let swing = read_swing(
+        &mut alpha,
+        boar,
+        listed.id,
+        std::time::Instant::now() + Duration::from_secs(10),
+    );
+    assert!(
+        (1..=450).contains(&swing.damage),
+        "the swing lands: {}",
+        swing.damage
+    );
+}
+
+/// A server whose monsters never wander, for scenarios about something else (ledger 229l).
+fn server_without_wander(binary: &std::path::Path, url: &str) -> Server {
+    Server::start_configured(binary, url, &default_channels(), "no_wander = true")
+}
+
+/// Alpha at level 1 with 1 hit point at its entry point, the 406 beside it, its revive
+/// ended by a swing, the boar targeted and punched once: the opening both town-restart
+/// scenarios share (ledger 229l). `gold` replaces the purse when given.
+fn alpha_level_1_vs_boar(
+    database: &ScratchDatabase,
+    gold: Option<u64>,
+) -> (Server, Keyed, u32, u32) {
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        BOAR_AT_ALPHA,
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(database);
+    let purse = gold.map_or(String::new(), |gold| format!(", gold = {gold}"));
+    sql(
+        database,
+        &format!("UPDATE player SET level = 1, hp = 1{purse} WHERE name = 'Alpha'"),
+    );
+    let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    let boar = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    let alpha_vid = listed.id;
+    alpha.send_record(&client_move(
+        FUNC_ATTACK,
+        7,
+        40,
+        ALPHA_ENTERS_AT.0,
+        ALPHA_ENTERS_AT.1,
+        0x5eed,
+    ));
+    let update = read_past_pings(&mut alpha);
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert!(alpha.timer_record(&update), "the swing ends the revive");
+    assert_eq!(
+        read_past_pings(&mut alpha),
+        [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0]
+    );
+    alpha.quiet("the swing is not relayed to the swinger");
+    alpha.send_record(&client_target(boar));
+    let clicked = alpha.read_game();
+    assert_eq!(&clicked[1..5], &boar.to_le_bytes(), "the boar's VID");
+    alpha.send_record(&client_attack(boar));
+    let punch = alpha.read_fight();
+    assert_eq!(punch[0], GC_DAMAGE_INFO, "{punch:02x?}");
+    let shown = alpha.read_fight();
+    assert_eq!(shown[0], GC_TARGET, "{shown:02x?}");
+    assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, boar));
+    (server, alpha, alpha_vid, boar)
+}
+
+/// Ledger 229l (P3a): a player a monster killed restarts now and the gold is stored.
+///
+/// Alpha at level 1 with 1 hit point and 400000 gold punches the 406. The first swing stuns
+/// (damage 178..=245), the next kills, usually: the killing swing sends no `DAMAGE_INFO` of
+/// its own, only `GC_DEAD`, `DAMAGE_INFO{8, 0}` and the closing move. When a lagging server
+/// lets the stun event win, the death has no killer and no tail. Either way `/restart_now`
+/// stands Alpha at full hit points and stores 100000 gold.
+#[test]
+fn a_player_a_monster_killed_restarts_now_and_the_gold_is_stored() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (_server, mut alpha, alpha_vid, boar) = alpha_level_1_vs_boar(&database, Some(400_000));
+
+    // Then: swings until one stuns, and the death by either path, with the path logged.
+    let due = std::time::Instant::now() + Duration::from_secs(20);
+    let swings = until_stunned(&mut alpha, boar, alpha_vid, due);
+    assert_eq!(alpha.read_fight(), ownership_of(0, alpha_vid));
+    // `ClearSync` also releases what the dying player owns: its claim on the boar.
+    assert_eq!(alpha.read_fight(), ownership_of(0, boar));
+    assert_eq!(alpha.read_fight(), [GC_PHASE, 6]);
+    assert_eq!(alpha.read_fight(), dead_of(alpha_vid));
+    let (records, quiet) = alpha.drain_game(Duration::from_secs(1), |header| match header {
+        GC_PING => 1,
+        GC_DAMAGE_INFO => DAMAGE_INFO_LEN,
+        GC_MOVE => GC_MOVE_LEN,
+        GC_TARGET => TARGET_LEN,
+        GC_PHASE => 2,
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        other => panic!("past the death, header {other}"),
+    });
+    assert_eq!(quiet, Quiet::Open, "the death leaves the connection open");
+    // `drain_game` already filtered the NPC's own; the revive timer's, the stamina refill, the
+    // boar's recovery target and its ATTACK chat are read past. What is left is the kill's
+    // tail, if any.
+    let mut tail = Vec::new();
+    for record in records {
+        if record[0] == GC_PING
+            || alpha.timer_record(&record)
+            || is_stamina_refill(&record)
+            || (record.first() == Some(&GC_TARGET) && record[1..5] == boar.to_le_bytes())
+            || record.first() == Some(&GC_CHAT)
+        {
+            continue;
+        }
+        tail.push(record);
+    }
+    // The killing swing's closing `MOVE{2}` is the monster's own, so `drain_game` filtered
+    // it as chatter; the `DAMAGE_INFO{8, 0}` alone marks the swing's path.
+    let swing_killed = tail == [damage_info(alpha_vid, 8, 0)];
+    assert!(
+        swing_killed || tail.is_empty(),
+        "the kill's tail: {tail:02x?} after {} swings",
+        swings.len()
+    );
+
+    // When: `/restart_now`. Then: the window closes, the game phase is back, Alpha is shown
+    // standing at full hit points with its revive, and the gold change ends the records.
+    alpha.send_record(&slash(b"/restart_now"));
+    assert_eq!(alpha.read_own(alpha_vid), close_restart_window());
+    assert_eq!(alpha.read_own(alpha_vid), [GC_PHASE, PHASE_GAME]);
+    assert_eq!(alpha.read_own(alpha_vid), removal_of(alpha_vid));
+    let add = alpha.read_own(alpha_vid);
+    assert_eq!(add[0], GC_CHARACTER_ADD, "{add:02x?}");
+    assert_eq!(&add[1..5], &alpha_vid.to_le_bytes(), "Alpha's VID");
+    // `Show` sends the insert and the additional info with the flags as they stand.
+    let standing = alpha.read_own(alpha_vid);
+    assert_eq!(standing[0], GC_CHAR_ADDITIONAL_INFO, "{standing:02x?}");
+    let full = alpha.read_own(alpha_vid);
+    assert_eq!(
+        full,
+        point_change(alpha_vid, 5, 0, 1420),
+        "full hit points at level 1 with HT 18"
+    );
+    if swing_killed {
+        // A monster killer flags the death penalty, which level 1 does not pay.
+        assert_eq!(
+            alpha.read_own(alpha_vid),
+            info_to_alpha(b"[LS;901]"),
+            "no penalty under level 10"
+        );
+    }
+    let look = alpha.read_revive_update(alpha_vid);
+    assert_eq!(look[0], GC_CHARACTER_UPDATE, "{look:02x?}");
+    let revived = alpha.read_own(alpha_vid);
+    assert_eq!(revived[0], GC_AFFECT_ADD, "{revived:02x?}");
+    assert_eq!(
+        &revived[1..5],
+        &215u32.to_le_bytes(),
+        "AffectType is REVIVE_INVISIBLE"
+    );
+    assert_eq!(
+        alpha.read_own(alpha_vid),
+        gold_change(alpha_vid, 0, 100_000),
+        "400000 less the 300000 cost"
+    );
+    drop(alpha);
+    wait_for(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Alpha') = 100000",
+    );
+}
+
+/// Ledger 229l (P3b): a player a monster killed restarts in town and is warped to the recall
+/// point.
+///
+/// As P3a, without the gold. `/restart_town` in the first seconds is refused with an
+/// `[LS;516;n]` line; the first accepted one closes the window, stands Alpha at 50 hit points
+/// and warps it to empire 1's recall on map 1, which the stored position then shows.
+#[test]
+fn a_player_a_monster_killed_restarts_in_town_and_is_warped_to_the_recall_point() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (_server, mut alpha, alpha_vid, boar) = alpha_level_1_vs_boar(&database, None);
+
+    // Then: the stun, and the death by either path.
+    let due = std::time::Instant::now() + Duration::from_secs(20);
+    let _swings = until_stunned(&mut alpha, boar, alpha_vid, due);
+    assert_eq!(alpha.read_fight(), ownership_of(0, alpha_vid));
+    // `ClearSync` also releases what the dying player owns: its claim on the boar.
+    assert_eq!(alpha.read_fight(), ownership_of(0, boar));
+    assert_eq!(alpha.read_fight(), [GC_PHASE, 6]);
+    assert_eq!(alpha.read_fight(), dead_of(alpha_vid));
+    let died = std::time::Instant::now();
+    // When: `/restart_town` at once, while the death is seconds old. Then: the killing
+    // swing's `DAMAGE_INFO{8, 0}` first when it killed, then a wait refusal.
+    alpha.send_record(&slash(b"/restart_town"));
+    let mut refusal = alpha.read_own(alpha_vid);
+    if refusal == damage_info(alpha_vid, 8, 0) {
+        refusal = alpha.read_own(alpha_vid);
+    }
+    assert_eq!(refusal[0], GC_CHAT, "{refusal:02x?}");
+    assert!(
+        refusal.len() > 10 && refusal[10..].starts_with(b"[LS;516;"),
+        "a wait refusal: {refusal:02x?}"
+    );
+    // The killing swing's tail, if it killed, is already in flight.
+    let (records, _) = alpha.drain_game(Duration::from_secs(1), |header| match header {
+        GC_PING => 1,
+        GC_DAMAGE_INFO => DAMAGE_INFO_LEN,
+        GC_MOVE => GC_MOVE_LEN,
+        GC_TARGET => TARGET_LEN,
+        GC_PHASE => 2,
+        GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+        other => panic!("past the death, header {other}"),
+    });
+    for record in records {
+        if record[0] == GC_PING
+            || alpha.timer_record(&record)
+            || is_stamina_refill(&record)
+            || (record.first() == Some(&GC_TARGET) && record[1..5] == boar.to_le_bytes())
+            || record.first() == Some(&GC_CHAT)
+        {
+            continue;
+        }
+        // The killing swing's closing move is filtered as the monster's own chatter.
+        assert_eq!(
+            record,
+            damage_info(alpha_vid, 8, 0),
+            "the kill's tail: {record:02x?}"
+        );
+    }
+
+    // When: `/restart_town` about once a second. Then: the warp.
+    let deadline = died + Duration::from_secs(15);
+    let mut last_try = std::time::Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("the clock runs");
+    let warp = loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the town restart is accepted within 15 s of the death"
+        );
+        let wait = Duration::from_secs(1).saturating_sub(last_try.elapsed());
+        std::thread::sleep(wait);
+        last_try = std::time::Instant::now();
+        alpha.send_record(&slash(b"/restart_town"));
+        let answer = alpha.read_own(alpha_vid);
+        // A refusal is an `[LS;516;n]` line; the accepted restart opens with the window's
+        // close, which is a chat record too.
+        if answer[0] == GC_CHAT && answer.len() > 10 && answer[10..].starts_with(b"[LS;516;") {
+            continue;
+        }
+        assert_eq!(answer, close_restart_window(), "{answer:02x?}");
+        assert_eq!(alpha.read_own(alpha_vid), [GC_PHASE, PHASE_GAME]);
+        assert_eq!(
+            alpha.read_own(alpha_vid),
+            point_change(alpha_vid, 5, 0, 50),
+            "50 hit points in town"
+        );
+        assert_eq!(alpha.read_own(alpha_vid), removal_of(alpha_vid));
+        let warp = alpha.read_own(alpha_vid);
+        assert_eq!(warp[0], GC_WARP, "{warp:02x?}");
+        break warp;
+    };
+    let x = i32::from_le_bytes(warp[1..5].try_into().expect("four bytes"));
+    let y = i32::from_le_bytes(warp[5..9].try_into().expect("four bytes"));
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/locale/europe/map");
+    let atlas = gamedata::map_atlas::MapAtlas::load(&dir).expect("the owner's atlas");
+    let recall = prodomo::warp::recall_position(&atlas, 1, 1).expect("empire 1's recall on map 1");
+    assert_eq!((x, y), recall, "the warp names the recall point");
+    drop(alpha);
+    wait_for(
+        &database,
+        &format!("(SELECT (x, y) = ({x}, {y}) FROM player WHERE name = 'Alpha')"),
+    );
 }

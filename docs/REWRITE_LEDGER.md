@@ -29685,3 +29685,271 @@ stays out of the commit. 229k added four owner questions to it:
 
 It also added addenda to questions 5 (the restart toggles under `test_server`) and 18 (the town
 restart's 50 hit points).
+
+## 229l. The monster fights back: a hit monster turns on its attacker, an aggressive one chases, and a player it kills restarts
+
+A monster begins to fight when a player hits it (`CanBeginFight` then `BeginFight`,
+`G/char_battle.cpp:299-305`) or when its aggressive Idle finds a victim (`FindVictim`,
+`G/char_state.cpp:668-686`). `BeginFight` stores the victim, takes `POS_FIGHTING` (which asks
+for Battle) and asks for the next Pulse. Battle chases a victim past its reach (`GotoNearTarget`
+then `Follow`, `G/char.cpp:6848-7034`), swings every 2 seconds once the attack timer runs out
+(`Attack`, `G/char_battle.cpp:220-328`), drops one 4000 or more away, and searches again after a
+dead one. A chase 15 seconds past its last hit and 5000 from where it was hit gives up and
+returns there (`Return`). The swing runs `battle_hit`, `CalcMeleeDamage`, `CalcAttBonus` and
+`Damage` on a player victim (`G/battle.cpp:154-817`, `G/char_battle.cpp:1744-2436`) and the
+player's `BeginFight`. The player's recovery event heals (`G/char.cpp:3245-3284`).
+
+Until 229l a hit monster kept its Idle and Move (V17b), nothing in the game killed a player, and
+the player's recovery event ran `CheckTarget` only (V18b). 229l ports the melee family's fight,
+the player's heal, and `ForgetMyAttacker`. RANGE and MAGIC stay passive (V19a), there is no aggro
+or damage map (V19b), and exp, drops and the affect applications wait for 229m. `G/` below means
+`server/server/game/`.
+
+### 229l.1 What landed
+
+- **The victim and the fight's start** (`prodomo/src/game_state/mob_battle.rs`, new;
+  `prodomo/src/game_state/mob_ai.rs`).
+  - `Victim::Here(Vid)` is `m_kVIDVictim`; `Victim::Gone` is a victim that left, whose VID must
+    not be attacked if it comes back (the VID comes back at the next login, so `leave_fight`
+    marks it and every reader takes it as `!victim` without the stand `SetVictim(NULL)` makes).
+  - `can_begin_fight` (`CanBeginFight`, `G/char_battle.cpp:108-115`): neither stunned nor dead,
+    and standing (a missing Mind is standing).
+  - `begin_fight` (`BeginFight`, `:116-122`): the victim is held, Battle is asked, and the next
+    update is the next Pulse. `SetVictim(NULL)` stands a fighting monster down to Idle
+    (`battle_end`, `G/battle.cpp:231-240`); `Some` only stores the victim. `victim_of` is
+    `GetVictim`: the held victim while it is online.
+  - **Idle steps 3-7** (`__StateIdle_Monster`, `G/char_state.cpp:626-757`): berserk off (god
+    speed is dormant), the held victim dropped when gone, dead or on BANPK, an aggressive
+    wanderer's search, and a live victim starting the fight at once. `BeginFight`'s next Pulse
+    is overwritten by the post-Execute line, so Battle starts 25 Pulses after the search (the
+    absolute-pulse rule of 229k's `SetNextStatePulse` reading).
+  - **The wait** stays: aggressive and victimless draws `number(1, 3)`, else `number(1, 2)`,
+    then the idle walk and `MonsterChat(WAIT)` as 229i left them.
+  - `state_move`'s arrival goes to Battle after one Pulse with a live victim that is not a
+    coward's; a chasing boss refollows one time in four. `npc_goto` says
+    `MonsterChat(MONSTER_CHAT_ATTACK)` when entering Move with a live victim (one time in 61,
+    `MONSTER_CHAT_ATTACK * 3 + number(1, 3)`).
+- **The search** (`find_victim`, `G/trigger.cpp:59-174`): the nearest live player around on the
+  monster's map, past the BANPK, `AFF_REVIVE_INVISIBLE` and empire skips, in `around_of` order
+  with a strict nearer-than test (V19g, V1). The empire skip takes the proto text's meaning
+  (B30). Players have no EUNHYUNG, INVISIBILITY, TERROR or buildings.
+- **Battle** (`state_battle`, `G/char_state.cpp:930-1183`).
+  - A stunned monster returns with the duration as it was. A coward drops its victim and runs
+    one time in 50, else asks Idle with a duration of 1.
+  - **Loss:** a dead or BANPK victim of an aggressive wanderer is searched again (with
+    `KILL_AND_GO` when the search finds nobody, B29's fix); otherwise the victim is dropped for
+    25 Pulses.
+  - **Range:** a victim 4000 or more away is dropped with the duration as it was; one past the
+    reach is chased (`GotoNearTarget` then `Follow`, refusing under `AIFLAG_NOMOVE`, to nine
+    tenths of the range).
+  - **The swing:** the `CalculateDuration(ATT_SPEED, 2000)` timer first, then berserk on
+    (`hp_pct < berserk_point`, `SetBerserk(true)`), then `Attack`. A refused swing waits 12
+    Pulses; a landed one sends `FUNC_ATTACK` and waits 50 Pulses (V2: no monster clip is
+    loaded, so the clip's own wait is never read).
+- **The chase** (`Follow`, `G/char.cpp:6882-7034`).
+  - The give-up: a chase 15 seconds past its last hit and 5000 from where it was hit returns
+    there (`Return`: the victim is dropped, Battle is left, and the monster walks home).
+  - The lead (`:6936-6980`): where a moving target is met, with both speeds as `GetMoveSpeed`
+    floats, the cosine in `f64` with pi, and the doubles landing in floats as C stores them
+    (`f64_to_f32`, U18). Skipped for a target that is not moving — which includes a player a
+    monster's first hit took out of Move.
+  - The change of position (`IsChangeAttackPosition`, `:7459-7471`): within range after 10
+    seconds, past 100 plus the range after 1 second, 15 tries at `number(0, 359)` and
+    `number(400, 1500)`.
+  - Lead, change of position, `KILL_AND_GO` and Return are world-proved (G7-G16); the binary
+    proves the chase end to end (P2).
+- **The swing on a player** (`world/src/character/combat/mob_melee.rs`, new;
+  `prodomo/src/game_state/mob_strike.rs`, new).
+  - `strike_pc` is `battle_hit` through `Damage`'s flag: the damage roll, the block (`POINT_BLOCK`
+    and `number(1, 100)`), the attack rating, the damage dice, the element arm (B27), the damage
+    multiply, the DEF subtraction, the `NormalAttackAffect` draws (drawn, not applied, V19i), the
+    critical and penetrate chances with their effects in legacy order, `NORMAL_HIT_DEFEND_BONUS`
+    with the B28 clamp, the down check, the death blow (×4, no flag, D-DB-FLAG), and the HP clamp
+    (`battle_damage_floor`, extracted from `melee.rs` with no change of behaviour).
+  - `mob_attack` (`CHARACTER::Attack`, `G/char_battle.cpp:220-328`): the reach
+    (`(int)(range * 1.15f)`, no floor, no hydra term), `battle_is_attackable` (neither dead,
+    neither on BANPK, the monster neither stunned nor dead; the rest passes for a monster on a
+    player), the swing's records in legacy order (each effect around the player, then the hit),
+    the claim through `claim_pc`, the player's `BeginFight` (`fighting` and `leave_move`), and
+    the stamps (the attacker's `last_attack_ms`, the victim's `last_move`).
+  - `claim_pc` is the one gate for the client's sync and the monster's claim: `!attackable`
+    runs `DAMAGE_BLOCK` to both and refuses; else `judge_sync_ownership` decides, a new owner
+    resetting `last_sync`. `sync.rs`'s player arm moved into it with no change of behaviour.
+  - `damage_pc` lost its `#[cfg(test)]` and gained `shown`: `SendDamagePacket` goes to the
+    player first, then the hit points change, then the targeters see them before `GC_STUN`
+    (V17i narrowed). `stun_pc` is live too.
+- **The player's heal** (`world/src/character/recovery.rs`, new;
+  `prodomo/src/game_state/pc_heal.rs`, new).
+  - `hp_recovery`: `None` at full hit points; else `15 + max_hp * percent / 100` with
+    `RECOVERY_PERCENTS[min(9, idle_ms / 3000)]`, plus the `POINT_HP_REGEN` share. U12-U16 prove
+    it against the Alpha row (max 1420).
+  - `distribute_sp`: `None` at full spell points; the shaman/sura-2 arm, the attacking arm
+    (`2 + max / 200` within 3 seconds of the attack or the move), the moving-or-hurt arm
+    (`2 + max / 100`), else `9 + max / 100`, plus the `POINT_SP_REGEN` share.
+  - `pc_recovery_event` runs `CheckTarget`, then the heal (poison blocks both; the poison arm
+    is dormant), then again 3 seconds on. `UpdateKillerMode` has nothing to end (V18b
+    narrowed). `event.char.recovery_event` is `ported`.
+- **The player's `POS_FIGHTING`** (V17g narrowed). `Body.fighting` is set by its own hit
+  within reach and by a monster's first landed hit, and cleared by its kill, its death
+  (`dead_pc`) and its restart (`stand`). The first monster hit takes a running player out of
+  `StateMove` (`leave_move`, keeping start, destination and duration as `arrive` does), so the
+  server stops stepping it at its last point until its next move (L2).
+- **`ForgetMyAttacker`** (`G/char_battle.cpp:3624-3642`, `:3748-3757`). It calms the monsters
+  around that hold this player: stunned and dead ones are skipped (B26), the rest are stood
+  down with the 215 add and removal and the revive update. It is `#[cfg(test)]`: no live
+  caller exists yet (the white flag 70008 waits for `USE_SPECIAL`, `/forgetme` needs GM
+  levels, and no owner quest calls `pc.forget_my_attacker`), so those rows stay `missing` with
+  the port noted.
+- **What leaves `#[cfg(test)]`:** `damage_pc`, `stun_pc`. **What gains it:**
+  `forget_my_attacker`. `death.rs` keeps one `cfg(test)` (`mod tests`); `mob_battle.rs` has two.
+- **The AIFLAG constants** (`gamedata/src/mob_proto.rs`): `NOATTSHINSU`, `NOATTCHUNJO`,
+  `NOATTJINNO`, `ATTMOB`, `BERSERK`, `STONESKIN`, `DEATHBLOW`, named after the proto text (B30),
+  and the restored `COWARD`. `MobFight` gains the sight range, the damage multiplier (as bits,
+  for `Eq`), and the berserk and death-blow points. `NpcCombat` gains `last_attacked`
+  (seeded by `created` at `Show`, because a default `{0, (0, 0)}` would walk a chaser to the
+  map origin) and the two timers as `Option<u32>` (`None` reads as long ago).
+- **The harness** (`prodomo/tests/parity.rs`).
+  - The fill hook stores each scenario character's pools at its post-equipment maxima, so the
+    heal stays silent except where a scenario proves it; Gamma and the equipment scenario move
+    with it (1920 worn).
+  - The potion scenarios thread `paid` through the drink window (`without_heal_ticks` returns
+    the pool before the potion's pair), because the drink lands just past the 25-pulse tick on
+    a fast machine and just before it on a slow one; `read_tick_events` folds each heal tick
+    into `hp_now`.
+  - `read_swing` skips by rule (the mob's `GC_TARGET`, heal ticks, pings, the stamina refill),
+    `until_stunned` reads swings until one carries `GC_STUN`, and the swing gap is timed on the
+    records' `time` field (`1990..=3000`).
+  - **P1** `a_hit_monster_turns_on_its_attacker_and_swings_every_two_seconds`: the punch, the
+    claim, two swings 50 Pulses apart on the server's clock, and a +29 heal tick.
+  - **P2** `an_aggressive_monster_chases_a_player_into_its_reach_and_swings`: the boar 800
+    east walks into sight, chases, and swings.
+  - **P3a** `a_player_a_monster_killed_restarts_now_and_the_gold_is_stored`: the stun, the
+    kill by either path (the next swing, or the stun event when a Pulse runs late), and
+    `/restart_now` storing 100000 of 400000 gold. Kills `dm_restart_gold_unstored`.
+  - **P3b** `a_player_a_monster_killed_restarts_in_town_and_is_warped_to_the_recall_point`:
+    the same kill, then `/restart_town` refused until 151 Pulses after the death and warping to
+    empire 1's recall. Kills `dm_boot_recall_unwired`.
+  - Five scenarios opt into `no_wander` where a boot-drawn aggressive near the spawn would
+    chase (the view cast, the goto, shop and entering scenarios, P1/P3a/P3b run it).
+
+### 229l.2 The Defects
+
+Five, fixed directly under the 2026-10-14 decision (owner: fix bugs directly, work smart).
+
+- **B26** (`SetVictim(NULL)` stands a stunned monster up). `battle_end` sets `POS_STANDING` on
+  it, so it never dies of its stun. Reachable through `ForgetMyAttacker` and `PM_RETURN`
+  (`G/char_battle.cpp:3624-3642`; `G/battle.cpp:231-240`; `G/party.cpp:892`).
+  `forget_my_attacker` skips a stunned or dead monster; `PM_RETURN` gets the same rule in the
+  group work. **Provisional.**
+- **B27** (the element switch on a bitmask). The resists work against 16 of 470 element
+  monsters (`G/battle.cpp:417-456`). The Rewrite runs the `#else` chain's first matching flag
+  (ELEC, FIRE, ICE, WIND, EARTH, DARK), each with its `RESIST_*` and `RESIST_*_PCT` point, in
+  the ELEC case's rounding. **Provisional** (a balance change for 454 monsters).
+- **B28** (a monster's hit can heal). The victim's `NORMAL_HIT_DEFEND_BONUS` plus
+  `RESIST_COMBAT` above 100 at 90 % hit points, or `MALL_DEFBONUS` above 100
+  (`G/char_battle.cpp:2124-2138`, `:2181-2185`, `:2375-2387`). The Rewrite holds the damage at
+  0 after the bonus steps, before the down check.
+- **B29** (`KILL_AND_GO`'s heading). It turns the monster toward the absolute target point
+  measured from the map origin, so its `FUNC_WAIT` carries a meaningless heading
+  (`G/char_state.cpp:1000-1022`). The Rewrite turns toward the target from the monster, with
+  the truncated `(long)` point.
+- **B30** (a monster's empire tag spares the other empire). The proto text puts `NOATTCHUNJO`
+  at bit 4 and `NOATTJINNO` at bit 5, but the enum and the accessors read bit 4 as Jinno and
+  bit 5 as Chunjo, so each tag spares the wrong empire (`common/length.h:691-693`;
+  `server/server/db/ProtoReader.cpp:676`; `G/char_state.cpp:331-349`; `G/trigger.cpp:114-131`).
+  It reaches 12 protos, none spawned on Channel 1 or 99, so it is dormant. The Rewrite takes
+  the proto text's meaning: bit 4 spares empire 2, bit 5 empire 3; the consts are named after
+  the proto text and their docs say so. **Provisional** (the other option mirrors legacy).
+
+Kept as legacy, provisional, each named in V19 or in a note: the 99 DEATHBLOW monsters that
+draw with a point of 0 (D-DB-DRAW); the ×4 with no flag (D-DB-FLAG); no observer mode (D-OBS);
+the `DAMAGE_INFO{V,8,0}` after `GC_DEAD`; the killer-less stun death when the monster stops
+swinging first (D1/DE4, V19j); the change of position's last blocked try; 229j Defect 12
+(NOMOVE leaves a stale duration); the 25-Pulse delay between the Idle search and Battle, which
+is legacy timing, not a defect.
+
+### 229l.3 The provisional items
+
+- B26, B27 and B30 (229l.2).
+- V16: a monster's update runs after every event of its Pulse, so a stun event due on the
+  Pulse of a swing kills first.
+- V19i: a monster's hit draws its poison, stun and slow and applies none; from the first one
+  that would have landed, the draw stream differs from legacy for the rest of the run, and a
+  slow that would have lowered `GetMoveSpeed` does not.
+- V19j: when the monster stops first, `StunEvent` kills with no killer, which costs no exp and
+  drops nothing.
+- The freeze of a running player at its first monster hit (L2) is legacy behaviour the first
+  binary runs watched: P1 starts Alpha standing, and
+  `a_running_player_stops_at_the_first_monster_hit_until_it_moves_again` proves the freeze in
+  memory.
+
+No owner question is added; the count stays 32. V20 stays free.
+
+### 229l.4 For 229m
+
+- Drops and exp (`Reward`, the exp split, V17c).
+- The aggro and the damage map (`UpdateAggrPoint`, `ChangeVictimByAggro`, V19b).
+- RANGE and MAGIC (`FlyTarget`, `Shoot`, V19a).
+- The hit's stun, slow and poison, with the saved-affect store and the affect part of
+  `ComputePoints` (V19i).
+- The monster `MOTION_NORMAL_ATTACK` clip loader (V2).
+- The group work: `PM_ATTACKED_BY`, `PM_RETURN` with B26's rule, the protector (V19c).
+- Guards, mob skills, summoners and god speed (V19d, V19e).
+
+### 229l.5 The runs
+
+The 2026-10-15 decision deferred the parity binaries and the mutant sweep to a stronger
+machine; 229l ran them here instead, because the machine proved able: the whole parity suite
+passes on the final tree (229l.6).
+
+The two 229k survivors are dead: P3a kills `dm_restart_gold_unstored` (the store holds 100000
+after `/restart_now`) and P3b kills `dm_boot_recall_unwired` (the warp names empire 1's
+recall). No 229l mutant sweep ran: the owner deferred it with the heavy testing, and the four
+new scenarios plus the 66 new world tests are the gate.
+
+### 229l.6 Receipt
+
+The checks below ran on the final tree, one at a time, with `/usr/bin` first on `PATH`.
+
+| check | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| build, workspace, locked, offline | clean |
+| clippy, workspace, all targets, `-D warnings` | clean |
+| `common` lib tests | 99 passed, 0 failed |
+| `gamedata` lib tests | 408 passed, 0 failed |
+| `world` lib tests | 457 passed, 0 failed |
+| `world` `tests/combat.rs` | 3 passed, 0 failed |
+| `prodomo` lib tests | 872 passed, 0 failed |
+| `prodomo` binary tests (`main.rs`) | 11 passed, 0 failed |
+| `prodomo` `tests/game_loop_thread.rs` | 13 passed, 0 failed |
+| parity, whole suite, 4 threads, `DATABASE_URL` set | 101 passed, 0 failed, in 185 s |
+| doc tests, workspace | 1 passed, 0 failed |
+| `cargo doc`, workspace, `-D warnings` | clean |
+
+The full `--all-targets` gate without `DATABASE_URL` counts 3541 passed, 0 failed (the store-backed tests skip). With the store, the parity row above adds the 101 binary scenarios.
+
+The tests grew by 68: `common` +1 (`f64_to_f32_rounds_to_nearest_even`), `world` +23 (17 in
+`mob_melee`, 5 in `recovery`, 1 `melee` refactor net), `prodomo` lib +40 (22 in `mob_battle`, 9
+in `mob_strike`, 3 in `pc_heal`, 6 net elsewhere), and parity +4 (P1, P2, P3a, P3b). One leftover scratch
+database (`prodomo_proc_*`) from an interrupted earlier run was dropped by hand; after the
+suite run the scratch query returns nothing.
+
+Counted the way the gates count it, the workspace has 304 files and 244,636 lines outside
+`server/`, `legacy/`, `target/` and `.scratch/`. The 229k receipt had 261 files and 202,621 lines.
+
+The toolchain:
+- cargo 1.85.1;
+- `clippy 0.1.85`, called as `/usr/bin/cargo-clippy`;
+- `rustfmt 1.8.0`, called as `/usr/bin/cargo-fmt`.
+
+No crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+| | ported | partial | missing | unused | codec |
+|---|---|---|---|---|---|
+| parity before 229l | 137 | 136 | 1311 | 11 | 50 |
+| parity after 229l | 138 | 135 | 1311 | 11 | 50 |
+
+All counts are out of 1645 rows.
+
+No ADR changed. No owner question added.
