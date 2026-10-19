@@ -49,6 +49,9 @@ pub(super) struct Affect {
     pub(super) flag: u32,
     /// `lDuration` in ticks: each tick takes one away, and the affect ends at 0 or below.
     pub(super) remaining: i32,
+    /// `lSPCost`: the spell points each tick spends; under them the affect ends
+    /// (`ProcessAffect`, `G/char_affect.cpp:410-416`).
+    pub(super) sp_cost: i32,
 }
 
 impl Affect {
@@ -60,6 +63,27 @@ impl Affect {
             value: 0,
             flag: AFF_REVIVE_INVISIBLE,
             remaining: REVIVE_INVISIBLE_SECONDS,
+            sp_cost: 0,
+        }
+    }
+
+    /// A skill buff's affect: `AddAffect(vnum, on, amount, flag, dur, sp_cost)`
+    /// (`G/char_skill.cpp:2361-2370`).
+    pub(super) fn buff(
+        kind: u32,
+        on: usize,
+        value: i32,
+        flag: u32,
+        dur: i32,
+        sp_cost: i32,
+    ) -> Self {
+        Self {
+            kind,
+            apply_on: u8::try_from(on).unwrap_or(u8::MAX),
+            value,
+            flag,
+            remaining: dur,
+            sp_cost,
         }
     }
 }
@@ -110,7 +134,7 @@ fn count_down(affects: &mut Vec<Affect>) -> Vec<Affect> {
 }
 
 /// Takes the affects of `kind` out of `affects`, in the order they were added.
-fn take_affects_of_kind(affects: &mut Vec<Affect>, kind: u32) -> Vec<Affect> {
+pub(super) fn take_affects_of_kind(affects: &mut Vec<Affect>, kind: u32) -> Vec<Affect> {
     let mut taken = Vec::new();
     affects.retain(|affect| {
         if affect.kind != kind {
@@ -131,7 +155,7 @@ pub(super) fn affect_remove_frame(affect: &Affect) -> Vec<u8> {
 }
 
 /// The `GC_AFFECT_ADD` of one affect (`SendAffectAddPacket`, `G/char_affect.cpp:111-128`): the
-/// duration is the ticks it has left, and no affect here has a spell-point cost.
+/// duration is the ticks it has left, and the per-tick spell-point cost it carries.
 pub(super) fn affect_add_frame(affect: &Affect) -> Vec<u8> {
     let mut frame = Vec::new();
     GcAffectAdd {
@@ -142,7 +166,7 @@ pub(super) fn affect_add_frame(affect: &Affect) -> Vec<u8> {
             apply_value: affect.value,
             flag: affect.flag,
             duration: affect.remaining,
-            sp_cost: 0,
+            sp_cost: affect.sp_cost,
         },
     }
     .encode_into(&mut frame);
@@ -173,14 +197,16 @@ impl GameState {
         }
     }
 
-    /// `CHARACTER::AddAffect` with override on the player under `vid`
-    /// (`G/char_affect.cpp:668-760`): a zero duration runs one tick; a moving body stops for
-    /// the stun; an affect of the same kind is uncomputed and its remove packet sent, then
-    /// the row is rewritten in place at its old place; else the row is appended. Then the
-    /// row computes, the flags update when the flag is set or either speed moved (a set
-    /// flag always updates), the event starts, and the add packet goes to the player. No
-    /// STUN/SLOW/POISON/263 kind is realtime, and the DB packet is the retired peer's.
-    pub(super) fn add_pc_affect(&mut self, vid: Vid, mut affect: Affect) {
+    /// `CHARACTER::AddAffect` on the player under `vid` (`G/char_affect.cpp:668-760`): a
+    /// zero duration runs one tick; a moving body stops for the stun. With `over` and an
+    /// affect of the same kind, the old row is uncomputed, its remove packet sent, and
+    /// the new row is rewritten in place at its old place (`bOverride`); without it the
+    /// new row appends beside the old one (two rows may share the kind — `RemoveAffect`
+    /// takes all of them). Else the row appends. Then the row computes, the flags
+    /// update when the flag is set or either speed moved (a set flag always updates),
+    /// the event starts, and the add packet goes to the player. No STUN/SLOW/POISON/263
+    /// kind is realtime, and the DB packet is the retired peer's.
+    pub(super) fn add_pc_affect(&mut self, vid: Vid, mut affect: Affect, over: bool) {
         if affect.remaining == 0 {
             affect.remaining = 1;
         }
@@ -189,16 +215,18 @@ impl GameState {
         }
         let mov_before = self.move_speed_of(vid.raw());
         let att_before = self.attack_speed_of(vid.raw());
-        let retired = self.affect_events.get_mut(&vid).and_then(|event| {
-            event
-                .affects
-                .iter_mut()
-                .find(|slot| slot.kind == affect.kind)
-                .map(|slot| {
-                    let retired = *slot;
-                    *slot = affect;
-                    retired
-                })
+        let retired = over.then_some(()).and_then(|()| {
+            self.affect_events.get_mut(&vid).and_then(|event| {
+                event
+                    .affects
+                    .iter_mut()
+                    .find(|slot| slot.kind == affect.kind)
+                    .map(|slot| {
+                        let retired = *slot;
+                        *slot = affect;
+                        retired
+                    })
+            })
         });
         let placed = retired.is_some();
         if let Some(retired) = retired {
@@ -378,20 +406,41 @@ impl GameState {
             );
         }
         let stamina_full = points.stamina() == points.max_stamina();
+        let sp = points.sp();
         let Some(event) = self.affect_events.get_mut(&vid) else {
             return;
         };
+        // The `lSPCost` drain (`ProcessAffect`, `G/char_affect.cpp:410-416`): each
+        // tick spends the cost (the SP gate reads the SP the run started with —
+        // the spend never fails); an affect the SP cannot cover ends before the
+        // countdown.
+        let mut drained = 0;
+        let mut starved: Vec<Affect> = Vec::new();
+        event.affects.retain(|affect| {
+            if affect.sp_cost <= 0 {
+                return true;
+            }
+            if sp - drained < affect.sp_cost {
+                starved.push(*affect);
+                return false;
+            }
+            drained += affect.sp_cost;
+            true
+        });
         let expired = count_down(&mut event.affects);
         let again = recovering || !event.affects.is_empty() || !stamina_full;
         for frame in point_changes(&records, vid.raw()) {
             let _delivered = self.write_to_client(vid, frame);
         }
-        // `ComputeAffect(pkAff, false)` on each expired affect (`ProcessAffect`): the point
-        // is taken back before the remove packet, and the flags update once, after all of
-        // them. `CheckMaximumPoints` is dead here: no affect here touches a maximum.
-        for affect in &expired {
+        // The starved affects end like expired ones (their point back, then the
+        // remove packet); the drain spends after them, so a starved SP row cannot
+        // cover itself.
+        for affect in starved.iter().chain(expired.iter()) {
             self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
             let _delivered = self.write_to_client(vid, affect_remove_frame(affect));
+        }
+        if drained > 0 {
+            self.change_pc_point(vid, point::POINT_SP, -drained, false);
         }
         let flags_after = self.affect_flags_of(vid);
         if flags_after != flags_before {
@@ -846,6 +895,7 @@ mod tests {
                 value: 0,
                 flag: 0,
                 remaining: 1,
+                sp_cost: 0,
             },
         );
         world.add_affect(
@@ -856,6 +906,7 @@ mod tests {
                 value: 0,
                 flag: 0,
                 remaining: 1,
+                sp_cost: 0,
             },
         );
         while inbox.try_recv().is_ok() {}
@@ -893,7 +944,9 @@ mod tests {
                 value: SLOW_MOV_SPEED,
                 flag: AFF_SLOW,
                 remaining: SLOW_TICKS,
+                sp_cost: 0,
             },
+            true,
         );
         assert_eq!(world.move_speed_of(1), (before - 30).max(0));
         while inbox.try_recv().is_ok() {}
@@ -927,7 +980,9 @@ mod tests {
                 value: 0,
                 flag: AFF_STUN,
                 remaining: STUN_TICKS,
+                sp_cost: 0,
             },
+            true,
         );
         let body = world.bodies.get(&vid).unwrap();
         assert_eq!(body.motion.dest, (spot.x, spot.y));
@@ -952,11 +1007,12 @@ mod tests {
             value: 0,
             flag: AFF_STUN,
             remaining: 1,
+            sp_cost: 0,
         };
-        world.add_pc_affect(vid, stun);
+        world.add_pc_affect(vid, stun, true);
         world.run_affect_events(25);
         // The one-tick stun ran its tick; re-add it running, then overwrite it.
-        world.add_pc_affect(vid, stun);
+        world.add_pc_affect(vid, stun, true);
         while inbox.try_recv().is_ok() {}
         world.add_pc_affect(
             vid,
@@ -964,6 +1020,7 @@ mod tests {
                 remaining: STUN_TICKS,
                 ..stun
             },
+            true,
         );
         let event = world.affect_events.get(&vid).unwrap();
         let stuns: Vec<Affect> = event
@@ -1040,6 +1097,7 @@ mod tests {
                 value: SLOW_MOV_SPEED,
                 flag: AFF_SLOW,
                 remaining: 2,
+                sp_cost: 0,
             },
         );
         assert_eq!(
@@ -1104,6 +1162,7 @@ mod tests {
             value: 0,
             flag: AFF_STUN,
             remaining: 4,
+            sp_cost: 0,
         };
         world.add_npc_affect(1000, stun);
         let words = world.npc_affect_words(1000);

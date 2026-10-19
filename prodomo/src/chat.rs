@@ -206,6 +206,10 @@ pub struct ChatContext {
     /// The remaining `AFFECT_BLOCK_CHAT` duration, or `None` when the affect is
     /// absent. Legacy has no way to set it yet, so live it is always `None`.
     pub block_chat_seconds: Option<i32>,
+    /// `ch->GetParty() != NULL`, answered by the world, read only for a party line
+    /// (`input_main.cpp:959`). The descriptor asks lazily: only a party line pays the
+    /// round-trip.
+    pub in_party: bool,
 }
 
 /// What a judged line asks the descriptor to do.
@@ -241,6 +245,21 @@ pub enum ChatEffect {
     /// the process (`input_main.cpp:691-692`). The sender is included, because the
     /// sender's own descriptor is in that set.
     TalkingToMap {
+        /// The `id` field, the speaker's VID.
+        vid: u32,
+        /// The `bEmpire` field, the speaker's empire. Legacy leaves this byte
+        /// uninitialised on this path; see the module note.
+        empire: u8,
+        /// The text, `"<name> : <text>"`, with no terminator.
+        text: Vec<u8>,
+    },
+    /// A `GC_CHAT` party line to every linked member of the sender's party, built the
+    /// way `CInputMain::Chat` builds one (`:957-975`): the same `pack_chat` bytes as a
+    /// talking line except the type, `id` is the speaker's VID, `bCanFormat` is
+    /// `false`, and the text is `"<name> : <text>"`, fanned raw by
+    /// `ForEachOnlineMember` (`G/party.h:277-285`) — the linked members in PID order,
+    /// the speaker included.
+    PartyToMembers {
         /// The `id` field, the speaker's VID.
         vid: u32,
         /// The `bEmpire` field, the speaker's empire. Legacy leaves this byte
@@ -288,6 +307,7 @@ impl ChatEffect {
             Self::DelayedDisconnect
                 | Self::InfoToSender { .. }
                 | Self::TalkingToMap { .. }
+                | Self::PartyToMembers { .. }
                 | Self::ShoutBelowLevel { .. }
                 | Self::Shout { .. }
         )
@@ -366,9 +386,16 @@ pub fn judge_chat(record: &CgChat, state: &mut ChatState, context: &ChatContext)
         },
         CHAT_PARTY => ChatOutcome::Judged {
             // `if (!ch->GetParty()) ch->ChatPacket(CHAT_TYPE_INFO, "[LS;655]");`
-            // The Rewrite has no party, so the no-party arm is the only reachable
-            // one and it is the one taken.
-            effects: vec![ChatEffect::InfoToSender { text: "[LS;655]" }],
+            // else the raw fan over `ForEachOnlineMember` (`:957-975`).
+            effects: vec![if context.in_party {
+                ChatEffect::PartyToMembers {
+                    vid: context.vid,
+                    empire: context.empire,
+                    text: talking_text(&context.name, &record.text),
+                }
+            } else {
+                ChatEffect::InfoToSender { text: "[LS;655]" }
+            }],
         },
         CHAT_GUILD => ChatOutcome::Judged {
             effects: vec![ChatEffect::InfoToSender { text: "[LS;656]" }],
@@ -497,6 +524,23 @@ pub fn talking_record(effect: &ChatEffect) -> Option<GcChat> {
         text: text.clone(),
     })
 }
+/// Build the `GC_CHAT` record for one party fan, as `CInputMain::Chat` does.
+///
+/// The same `pack_chat` bytes as [`talking_record`] except the type
+/// (`input_main.cpp:916-924` shared, `:965-969` fanned).
+#[must_use]
+pub fn party_record(effect: &ChatEffect) -> Option<GcChat> {
+    let ChatEffect::PartyToMembers { vid, empire, text } = effect else {
+        return None;
+    };
+    Some(GcChat {
+        chat_type: CHAT_PARTY,
+        id: *vid,
+        empire: *empire,
+        can_format: false,
+        text: text.clone(),
+    })
+}
 
 /// The encoded `GC_CHAT` line for an effect that `CHARACTER::ChatPacket` answers, or `None`
 /// for every other effect.
@@ -585,6 +629,7 @@ mod tests {
             pulse: 0,
             shout_limit_level: SHOUT_LIMIT_LEVEL,
             block_chat_seconds: None,
+            in_party: false,
         }
     }
 
@@ -805,6 +850,40 @@ mod tests {
                 "type {chat_type} must answer with {text}",
             );
         }
+    }
+    #[test]
+    fn a_party_line_in_a_party_fans_to_the_members() {
+        let mut state = ChatState::new();
+        let mut ctx = context();
+        ctx.in_party = true;
+        let record = CgChat {
+            declared_size: 6,
+            chat_type: CHAT_PARTY,
+            text: b"hello".to_vec(),
+        };
+        let ChatOutcome::Judged { effects } = judge_chat(&record, &mut state, &ctx) else {
+            panic!("a party line must not close");
+        };
+        assert_eq!(
+            effects,
+            vec![ChatEffect::PartyToMembers {
+                vid: 4242,
+                empire: 0,
+                text: b"Ayla : hello".to_vec(),
+            }],
+        );
+        assert!(effects[0].reaches_client(), "the fan reaches the clients");
+        let line = party_record(&effects[0]).expect("a record");
+        assert_eq!(line.chat_type, CHAT_PARTY);
+        assert_eq!(line.id, 4242);
+        assert_eq!(line.empire, 0);
+        assert!(!line.can_format, "this path sets bCanFormat false");
+        assert_eq!(line.text, b"Ayla : hello");
+        assert_eq!(party_record(&effects[0].clone()), party_record(&effects[0]));
+        assert!(
+            talking_record(&effects[0]).is_none(),
+            "the types do not cross"
+        );
     }
 
     #[test]

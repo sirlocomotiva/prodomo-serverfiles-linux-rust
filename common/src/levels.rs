@@ -380,6 +380,42 @@ pub fn exp_level_delta_share(me: u8, victim: u8, value: i64) -> i64 {
     value * i64::from(percent) / 100
 }
 
+/// `PLAYER_EXP_TABLE_MAX` (`common/length.h:59`): the last level the party share table
+/// covers.
+pub const PLAYER_EXP_TABLE_MAX: u8 = 120;
+
+/// `party_exp_distribute_table` (`G/constants.cpp:396-411`): the non-parity weight of a
+/// party member by level. The commented-out 130-250 rows were never enabled; the getter
+/// returns [`PARTY_EXP_NP_FALLBACK`] past the table instead.
+pub const PARTY_EXP_NP: [u32; 121] = [
+    0, 10, 10, 10, 10, 15, 15, 20, 25, 30, 40, // 1 - 10
+    50, 60, 80, 100, 120, 140, 160, 184, 210, 240, // 11 - 20
+    270, 300, 330, 360, 390, 420, 450, 480, 510, 550, // 21 - 30
+    600, 640, 700, 760, 820, 880, 940, 1000, 1100, 1180, // 31 - 40
+    1260, 1320, 1380, 1440, 1500, 1560, 1620, 1680, 1740, 1800, // 41 - 50
+    1860, 1920, 2000, 2100, 2200, 2300, 2450, 2600, 2750, 2900, // 51 - 60
+    3050, 3200, 3350, 3500, 3650, 3800, 3950, 4100, 4250, 4400, // 61 - 70
+    4600, 4800, 5000, 5200, 5400, 5600, 5800, 6000, 6200, 6400, // 71 - 80
+    6600, 6900, 7100, 7300, 7600, 7800, 8000, 8300, 8500, 8800, // 81 - 90
+    9000, 9000, 9000, 9000, 9000, 9000, 9000, 9000, 9000, 9000, // 91 - 100
+    10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, // 101 - 110
+    12000, 12000, 12000, 12000, 12000, 12000, 12000, 12000, 12000, 12000, // 111 - 120
+];
+
+/// What `__GetPartyExpNP` returns for level 0 and past [`PLAYER_EXP_TABLE_MAX`]
+/// (`G/char_battle.cpp:70-76`).
+pub const PARTY_EXP_NP_FALLBACK: u32 = 14000;
+
+/// `__GetPartyExpNP(level)` (`G/char_battle.cpp:70-76`): the party share weight of a
+/// level, or [`PARTY_EXP_NP_FALLBACK`] for 0 and past the table.
+#[must_use]
+pub fn party_exp_np(level: u8) -> u32 {
+    if level == 0 || level > PLAYER_EXP_TABLE_MAX {
+        return PARTY_EXP_NP_FALLBACK;
+    }
+    PARTY_EXP_NP[usize::from(level)]
+}
+
 /// The experience a conqueror level needs, as `CHARACTER::GetConquerorNextExp`
 /// (`char.cpp:8825-8833`).
 #[must_use]
@@ -681,5 +717,22 @@ mod tests {
         assert_eq!(gold_level_delta_share(10, 1, 100, false), 70);
         assert_eq!(gold_level_delta_share(1, 16, 100, true), 180);
         assert_eq!(GOLD_PERCENT_BY_RANK, [20, 20, 25, 30, 50, 100]);
+    }
+    /// The party share table (`G/constants.cpp:396-411`, `G/char_battle.cpp:70-76`): one
+    /// entry per level 0-120, 0 and past-120 take 14000.
+    #[test]
+    fn the_party_share_table_matches_the_legacy_one() {
+        assert_eq!(PARTY_EXP_NP.len(), 121);
+        assert_eq!(party_exp_np(0), 14000);
+        assert_eq!(party_exp_np(1), 10);
+        assert_eq!(party_exp_np(10), 40);
+        assert_eq!(party_exp_np(20), 240);
+        assert_eq!(party_exp_np(50), 1800);
+        assert_eq!(party_exp_np(90), 8800);
+        assert_eq!(party_exp_np(100), 9000);
+        assert_eq!(party_exp_np(110), 10000);
+        assert_eq!(party_exp_np(120), 12000);
+        assert_eq!(party_exp_np(121), 14000);
+        assert_eq!(party_exp_np(250), 14000);
     }
 }

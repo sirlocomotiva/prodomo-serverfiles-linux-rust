@@ -98,24 +98,294 @@ impl QuestStep {
     }
 }
 
+/// What a quest step reports: the records its scripts sent for the client, and the
+/// GRAND climbs its reads landed (each for the store's `store_skill`).
+pub type QuestStepOutcome = (Vec<Vec<u8>>, Vec<(u8, u8, i32)>);
+
 /// What a running script reaches: the character's map, its client and the world's dice.
-struct Session<'s> {
+pub(super) struct Session<'s> {
     /// `GetLevel()` of the character the script runs for.
-    level: u8,
+    pub(super) level: u8,
     /// The NPCs of the character's map.
-    npcs: Option<&'s MapNpcs>,
+    pub(super) npcs: Option<&'s MapNpcs>,
     /// Which monsters exist.
-    protos: &'s MobProtos,
+    pub(super) protos: &'s MobProtos,
     /// Their names.
-    names: &'s MobNamesByLanguage,
+    pub(super) names: &'s MobNamesByLanguage,
     /// The chat lines' formats.
-    locale: &'s LocaleStrings,
+    pub(super) locale: &'s LocaleStrings,
     /// The character's language and empire.
-    mover: Mover,
-    /// `number()`'s draw.
-    dice: &'s mut Pcg32,
+    pub(super) mover: Mover,
+    /// The skill rows, for the GRAND read's gates.
+    pub(super) tables: &'s gamedata::pc_skill_data::PcSkills,
+    /// `number()`'s draw, and the GRAND read's.
+    pub(super) dice: &'s mut Pcg32,
+    /// The character the script runs for.
+    pub(super) reader: Vid,
+    /// Its job and skill group, for the GRAND read's `can_use` arm.
+    pub(super) card: (u8, u8),
+    /// Its level, for the GRAND read's level-limit arm.
+    pub(super) pc_level: u8,
+    /// Its skill slots, which the GRAND read climbs and stamps.
+    pub(super) slots: &'s mut super::pc_skill::PcSkillState,
+    /// Its timed affects, which the GRAND read's book bonus consumes.
+    pub(super) affects: Option<&'s mut super::affect::AffectEvent>,
+    /// Its points, which the GRAND read's 141 recompute rewrites.
+    pub(super) points: Option<&'s mut world::character::Points>,
+    /// What the GRAND read climbed, for the store's `store_skill`: the slot, level
+    /// and stamp of each climb, in order.
+    pub(super) climbs: Vec<(u8, u8, i32)>,
     /// What the client is sent, in order.
-    records: Vec<Vec<u8>>,
+    pub(super) records: Vec<Vec<u8>>,
+}
+
+impl<'s> Session<'s> {
+    /// The skill rows, for the GRAND read's gates.
+    pub(super) fn skill_tables(&self) -> &'s gamedata::pc_skill_data::PcSkills {
+        self.tables
+    }
+
+    /// The reader's level of `vnum` (`GetSkillLevel`): 0 past vnum 254, clamped to 40.
+    pub(super) fn slot(&self, vnum: u32) -> u8 {
+        usize::try_from(vnum)
+            .ok()
+            .and_then(|slot| self.slots.levels.get(slot))
+            .copied()
+            .unwrap_or(0)
+            .min(40)
+    }
+
+    /// `IsLearnableSkill` (`G/char_skill.cpp:260-339`) on the live slots.
+    pub(super) fn learnable(&self, row: &gamedata::records::SkillTableRecord) -> bool {
+        let level = self.slot(row.vnum);
+        if level >= 40 {
+            return false;
+        }
+        if row.skill_type == 0 {
+            return level < row.max_level;
+        }
+        if row.skill_type == 5 {
+            return row.vnum != super::pc_skill::SKILL_HORSE_WILDATTACK_RANGE
+                || self.card.0 == super::pc_skill::JOB_ASSASSIN;
+        }
+        if self.card.1 == 0 {
+            return false;
+        }
+        if row.skill_type.wrapping_sub(1) == self.card.0 {
+            return true;
+        }
+        if row.skill_type == 6 {
+            if (super::pc_skill::SKILL_ANTI_FIRST..super::pc_skill::SKILL_ANTI_FIRST + 4)
+                .contains(&row.vnum)
+            {
+                return (super::pc_skill::SKILL_ANTI_FIRST..super::pc_skill::SKILL_ANTI_FIRST + 4)
+                    .filter(|sibling| *sibling != row.vnum)
+                    .all(|sibling| self.slot(sibling) == 0);
+            }
+            if (super::pc_skill::SKILL_ANTI_FIRST + 4..=super::pc_skill::SKILL_ANTI_LAST)
+                .contains(&row.vnum)
+            {
+                return (super::pc_skill::SKILL_ANTI_FIRST + 4..=super::pc_skill::SKILL_ANTI_LAST)
+                    .filter(|sibling| *sibling != row.vnum)
+                    .all(|sibling| self.slot(sibling) == 0);
+            }
+            if (super::pc_skill::SKILL_NEW_FIRST..=super::pc_skill::SKILL_NEW_LAST)
+                .contains(&row.vnum)
+                || (super::pc_skill::SKILL_HELP_FIRST..=super::pc_skill::SKILL_HELP_LAST)
+                    .contains(&row.vnum)
+            {
+                return level != 0;
+            }
+        }
+        false
+    }
+
+    /// One `ChatPacket` line to the reader, queued for its client.
+    pub(super) fn say(&mut self, chat_type: u8, format: &[u8]) {
+        let to = self.mover.recipient(self.locale);
+        self.records.push(chat_packet(to, chat_type, format, &[]));
+    }
+
+    /// Whether the reader holds a timed affect of `kind`.
+    pub(super) fn has_affect(&self, kind: u32) -> bool {
+        self.affects
+            .as_deref()
+            .is_some_and(|event| event.affects.iter().any(|affect| affect.kind == kind))
+    }
+
+    /// Take every timed affect of `kind`, queuing the `GC_AFFECT_REMOVE`s and the
+    /// point records their values take back. The flags' `GC_CHARACTER_UPDATE` is
+    /// broadcast by the world's next view: the affect words are in `packet_around`.
+    pub(super) fn take_affect(&mut self, kind: u32) {
+        let Some(event) = self.affects.as_deref_mut() else {
+            return;
+        };
+        let taken = super::affect::take_affects_of_kind(&mut event.affects, kind);
+        for affect in &taken {
+            self.records
+                .push(super::affect::affect_remove_frame(affect));
+            if let Some(points) = self.points.as_deref_mut() {
+                let records = points
+                    .point_change(usize::from(affect.apply_on), -affect.value, false, false)
+                    .unwrap_or_default();
+                self.records.extend(crate::loading_phase::point_changes(
+                    &records,
+                    self.reader.raw(),
+                ));
+            }
+        }
+    }
+
+    /// The world's dice, for the GRAND read's draws.
+    pub(super) fn dice_mut(&mut self) -> &mut Pcg32 {
+        self.dice
+    }
+
+    /// `SkillLevelUp(vnum, SKILL_UP_BY_QUEST)`'s climb half (`:802-907`): the
+    /// gates (usable, anti-first, row, below 255, learnable, GRAND, level limit,
+    /// prereq, grouped), the climb (GRAND at 40 stays 40), the 141 recompute,
+    /// and byte 76 with all 255 slots. Queues the climb for the store's
+    /// `store_skill`. Answers whether the level changed.
+    pub(super) fn climb_grand(
+        &mut self,
+        vnum: u32,
+        row: &gamedata::records::SkillTableRecord,
+    ) -> bool {
+        use super::pc_skill::{master_of, SKILL_GRAND_MASTER, SKILL_MAX_NUM};
+        let (job, group) = self.card;
+        let usable = gamedata::pc_skill_data::can_use(job, group, false, vnum)
+            || matches!(
+                vnum,
+                137..=140
+                    | super::pc_skill::SKILL_ANTI_FIRST..=super::pc_skill::SKILL_ANTI_LAST
+                    | super::pc_skill::SKILL_ADD_HP
+                    | super::pc_skill::SKILL_RESIST_PENETRATE
+                    | super::pc_skill::SKILL_NEW_FIRST..=super::pc_skill::SKILL_NEW_LAST
+                    | super::pc_skill::SKILL_HELP_FIRST..=super::pc_skill::SKILL_HELP_LAST,
+            );
+        if !usable {
+            return false;
+        }
+        if (super::pc_skill::SKILL_ANTI_FIRST..=super::pc_skill::SKILL_ANTI_LAST).contains(&vnum)
+            && self.slot(vnum) == 0
+        {
+            return false;
+        }
+        if vnum >= SKILL_MAX_NUM {
+            return false;
+        }
+        if !self.learnable(row) {
+            return false;
+        }
+        let level = self.slot(vnum);
+        if row.skill_type != 0 && master_of(level) != SKILL_GRAND_MASTER {
+            return false;
+        }
+        if self.pc_level < row.level_limit {
+            return false;
+        }
+        if row.pre_skill_vnum != 0
+            && master_of(self.slot(row.pre_skill_vnum)) == super::pc_skill::SKILL_NORMAL
+            && self.slot(row.pre_skill_vnum) < row.pre_skill_level
+        {
+            return false;
+        }
+        if row.skill_type != 0 && group == 0 {
+            return false;
+        }
+        let climbed = if master_of(level) == SKILL_GRAND_MASTER && level.saturating_add(1) >= 40 {
+            40
+        } else {
+            level.saturating_add(1).min(40)
+        };
+        if climbed == level {
+            return false;
+        }
+        if let Some(slot) = usize::try_from(vnum)
+            .ok()
+            .and_then(|slot| self.slots.levels.get_mut(slot))
+        {
+            *slot = climbed;
+        }
+        if vnum == super::pc_skill::SKILL_ADD_HP {
+            self.refresh_passive_hp();
+        }
+        self.send_skill_levels();
+        if let Ok(slot) = u8::try_from(vnum) {
+            let stamp = usize::try_from(vnum)
+                .ok()
+                .and_then(|slot| self.slots.next_read.get(slot))
+                .copied()
+                .unwrap_or(0);
+            self.climbs
+                .push((slot, climbed, i32::from_ne_bytes(stamp.to_ne_bytes())));
+        }
+        true
+    }
+
+    /// `ComputePoints`' `SKILL_ADD_HP` arm (`G/char.cpp:2956-2966`) after a 141
+    /// up: the row's point poly at `k = power / 100` refreshes the passive
+    /// max-HP bonus, recomputes the points, and queues the records.
+    fn refresh_passive_hp(&mut self) {
+        let Some(row) = self.tables.get(super::pc_skill::SKILL_ADD_HP).cloned() else {
+            return;
+        };
+        let level = self.slot(super::pc_skill::SKILL_ADD_HP);
+        let power = self.tables.power(self.card.0, self.card.1, level, false);
+        let bonus = common::cfloat::f64_to_i32(
+            row.point
+                .eval(&BTreeMap::from([("k", f64::from(power) / 100.0)])),
+        );
+        let Some(points) = self.points.as_deref_mut() else {
+            return;
+        };
+        points.set_passive_bonuses(world::character::PassiveBonuses {
+            max_hp: bonus,
+            ..world::character::PassiveBonuses::default()
+        });
+        let records = points.compute_points();
+        self.records.extend(crate::loading_phase::point_changes(
+            &records,
+            self.reader.raw(),
+        ));
+    }
+
+    /// `SkillLevelPacket` (`G/char_skill.cpp:170-181`): byte 76 with all 255 slots.
+    fn send_skill_levels(&mut self) {
+        use protocol::gc_nested::{GcSkill, GcSkillLevelNew};
+        let mut skills = crate::loading_phase::skill_levels();
+        for (slot, entry) in skills.iter_mut().enumerate() {
+            let (level, next_read) = self
+                .slots
+                .levels
+                .get(slot)
+                .zip(self.slots.next_read.get(slot))
+                .map_or((0, 0), |(level, stamp)| (*level, *stamp));
+            *entry = GcSkill {
+                master_type: super::pc_skill::master_of(level),
+                level,
+                next_read: i32::from_ne_bytes(next_read.to_ne_bytes()),
+            };
+        }
+        let frame = GcSkillLevelNew {
+            header: GcSkillLevelNew::header(),
+            skills,
+        };
+        let mut out = Vec::new();
+        frame.encode_into(&mut out);
+        self.records.push(out);
+    }
+
+    /// Stamp the read time of `vnum` and send byte 76 with all 255 slots.
+    pub(super) fn stamp(&mut self, vnum: u32, stamp: u32) {
+        if let Some(slot) = usize::try_from(vnum)
+            .ok()
+            .and_then(|slot| self.slots.next_read.get_mut(slot))
+        {
+            *slot = stamp;
+        }
+        self.send_skill_levels();
+    }
 }
 
 impl Game for Session<'_> {
@@ -167,6 +437,20 @@ impl Game for Session<'_> {
     fn number(&mut self, from: i32, to: i32) -> i32 {
         number(self.dice, from, to)
     }
+
+    fn learn_grand_master_skill(&mut self, vnum: u32, total: i32) -> bool {
+        super::pc_skill::grand_master_read(self, vnum, total)
+    }
+
+    fn skill_level(&self, vnum: u32) -> u8 {
+        // Live: the slots are borrowed, so a climb earlier in this script shows.
+        usize::try_from(vnum)
+            .ok()
+            .and_then(|slot| self.slots.levels.get(slot))
+            .copied()
+            .unwrap_or(0)
+            .min(40)
+    }
 }
 
 impl GameState {
@@ -184,7 +468,8 @@ impl GameState {
     }
 
     /// Run one quest step for the character online under `vid`, standing at `place`, and answer
-    /// the records its script sent.
+    /// the records its script sent and the GRAND climbs its reads landed (each for the
+    /// store's `store_skill`), in order.
     ///
     /// # Errors
     ///
@@ -195,7 +480,7 @@ impl GameState {
         step: &QuestStep,
         place: GroundPlace,
         mover: Mover,
-    ) -> Result<Vec<Vec<u8>>, MoveItemRefused> {
+    ) -> Result<QuestStepOutcome, MoveItemRefused> {
         let character = self
             .characters
             .find_by_vid(vid)
@@ -204,30 +489,31 @@ impl GameState {
         let level = character
             .points()
             .map_or(1, world::character::Points::level);
-        let answered = self.run_quests(place, mover, level, |manager, game| match step {
+        let answered = self.run_quests(place, mover, level, pid, |manager, game| match step {
             QuestStep::Answer(answer) => manager.answer(pid, *answer, game),
             QuestStep::Input(text) => manager.input(pid, text, game),
         });
-        Ok(answered.map(|((), records)| records).unwrap_or_default())
+        Ok(answered.map(|((), outcome)| outcome).unwrap_or_default())
     }
 
     /// `CQuestManager::Click` for the character under `vid` clicking the NPC `target` of race
-    /// `race`: whether a quest took the click, and the records its scripts sent either way.
+    /// `race`: whether a quest took the click, the records its scripts sent either way, and
+    /// the GRAND climbs its reads landed (each for the store's `store_skill`).
     pub(super) fn quest_click(
         &mut self,
         vid: Vid,
         (target, race): (u32, u16),
         place: GroundPlace,
         mover: Mover,
-    ) -> (bool, Vec<Vec<u8>>) {
+    ) -> (bool, QuestStepOutcome) {
         let Ok(character) = self.characters.find_by_vid(vid) else {
-            return (false, Vec::new());
+            return (false, QuestStepOutcome::default());
         };
         let pid = character.player_id();
         let level = character
             .points()
             .map_or(1, world::character::Points::level);
-        self.run_quests(place, mover, level, |manager, game| {
+        self.run_quests(place, mover, level, pid, |manager, game| {
             manager.click(pid, target, u32::from(race), game)
         })
         .unwrap_or_default()
@@ -266,16 +552,19 @@ impl GameState {
         let level = character
             .points()
             .map_or(1, world::character::Points::level);
-        self.run_quests(place, mover, level, |manager, game| {
+        self.run_quests(place, mover, level, pid, |manager, game| {
             manager.levelup(pid, game);
         })
-        .map_or_else(Vec::new, |((), records)| records)
+        .map_or_else(Vec::new, |((), (records, _))| records)
     }
 
     /// `CQuestManager::Kill` for the character under `vid`, which killed race `race` under
     /// `victim` (`G/questmanager.cpp:574-611`): `SetQuestNPCID` first, then the records its
-    /// `kill` and `party_kill` scripts sent. The manager must have seen the character
-    /// already, else it misses as legacy's `GetPC` returns NULL.
+    /// `kill` scripts sent and its leader's `party_kill` scripts sent. The manager must have
+    /// seen the character already, else it misses as legacy's `GetPC` returns NULL. The
+    /// leader is `GetLeaderCharacter`'s PID when the killer is partied and its leader is
+    /// linked, the killer's own PID when partyless, and absent when the leader is offline
+    /// (no `party_kill` then).
     pub(super) fn quest_kill(
         &mut self,
         vid: Vid,
@@ -291,34 +580,82 @@ impl GameState {
         let level = character
             .points()
             .map_or(1, world::character::Points::level);
-        self.run_quests(place, mover, level, |manager, game| {
+        let partied = self.party_leader_of(pid).is_some();
+        let leader = self
+            .quest_kill_leader(vid)
+            .or(if partied { None } else { Some(pid) });
+        self.run_quests(place, mover, level, pid, |manager, game| {
             manager.set_quest_npc(victim);
-            manager.kill(pid, race, game);
+            manager.kill(pid, race, leader, game);
         })
-        .map_or_else(Vec::new, |((), records)| records)
+        .map_or_else(Vec::new, |((), (records, _))| records)
     }
 
-    /// Run `op` on the manager with a [`Game`] for a character standing at `place`.
+    /// Run `op` on the manager with a [`Game`] for the character of `pid` standing
+    /// at `place` (`GetCurrentCharacterPtr` is it). The session borrows the skill
+    /// slots, the timed affects and the points, so a GRAND read runs now, while the
+    /// script that asked still waits for the answer — and the climbs it landed come
+    /// back for the store's `store_skill`.
     fn run_quests<R>(
         &mut self,
         place: GroundPlace,
         mover: Mover,
         level: u8,
+        pid: u32,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
-    ) -> Option<(R, Vec<Vec<u8>>)> {
-        let quests = self.quests.as_mut()?;
+    ) -> Option<(R, QuestStepOutcome)> {
+        let reader = self
+            .characters
+            .find_by_pid(pid)
+            .map_or(Vid::new(0), world::character::Character::vid);
+        let GameState {
+            characters,
+            npcs,
+            quests,
+            locale,
+            dice,
+            bodies,
+            pc_skills,
+            affect_events,
+            pc_skill_tables,
+            ..
+        } = self;
+        let quests = quests.as_mut()?;
+        let card = bodies
+            .get(&reader)
+            .map_or((0, 0), |body| (body.card.job, body.card.skill_group));
+        let pc_level = characters
+            .find_by_vid(reader)
+            .ok()
+            .and_then(|character| character.points())
+            .map_or(0, world::character::Points::level);
+        let points = characters
+            .find_by_vid_mut(reader)
+            .ok()
+            .and_then(|character| character.items_and_points_mut().1);
         let mut session = Session {
             level,
-            npcs: map_npcs(&self.npcs, place),
+            npcs: map_npcs(npcs, place),
             protos: &quests.protos,
             names: &quests.names,
-            locale: &self.locale,
+            locale,
             mover,
-            dice: &mut self.dice,
+            tables: pc_skill_tables,
+            dice,
+            reader,
+            card,
+            pc_level,
+            slots: pc_skills.entry(reader.raw()).or_default(),
+            affects: affect_events.get_mut(&reader),
+            points,
+            climbs: Vec::new(),
             records: Vec::new(),
         };
         let answer = op(&mut quests.manager, &mut session);
-        Some((answer, session.records))
+        let Session {
+            records, climbs, ..
+        } = session;
+        Some((answer, (records, climbs)))
     }
 }
 
@@ -428,6 +765,8 @@ mod tests {
         let names = MobNamesByLanguage::from_tables(vec![english]);
         let locale = LocaleStrings::default();
         let mut dice = Pcg32::new(1, 1);
+        let tables = gamedata::pc_skill_data::PcSkills::default();
+        let mut slots = super::super::pc_skill::PcSkillState::default();
         let mut session = Session {
             level: 1,
             npcs: None,
@@ -435,7 +774,15 @@ mod tests {
             names: &names,
             locale: &locale,
             mover: test_place::MOVER,
+            tables: &tables,
             dice: &mut dice,
+            reader: Vid::new(1),
+            card: (0, 1),
+            pc_level: 10,
+            slots: &mut slots,
+            affects: None,
+            points: None,
+            climbs: Vec::new(),
             records: Vec::new(),
         };
         assert_eq!(session.mob_name(20_016), Some(b"Smith".to_vec()));

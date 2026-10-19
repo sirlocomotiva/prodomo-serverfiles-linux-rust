@@ -128,6 +128,7 @@ impl CommandEntry {
             "do_restart" if self.name == "restart_town" => Command::Restart(RestartKind::Town),
             "do_restart" => Command::Restart(RestartKind::Here),
             "do_restart_now" => Command::Restart(RestartKind::Now),
+            "do_skillup" => Command::SkillUp,
             _ => Command::NotPorted(self.name),
         }
     }
@@ -155,6 +156,8 @@ pub enum Command {
     /// `do_restart` (`restart_here` and `restart_town`) and `do_restart_now`: the restart of the
     /// entry's kind.
     Restart(RestartKind),
+    /// `do_skillup`: the `/skillup` line's vnum climbs a level when every gate passes.
+    SkillUp,
     /// An entry this build does not port, by name.
     NotPorted(&'static str),
 }

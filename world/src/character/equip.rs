@@ -40,12 +40,13 @@ use gamedata::item_kind::{
     COSTUME_AURA, COSTUME_BODY, COSTUME_HAIR, COSTUME_MOUNT, COSTUME_PET, COSTUME_SASH,
     COSTUME_WEAPON, ITEM_ANTIFLAG_ASSASSIN, ITEM_ANTIFLAG_FEMALE, ITEM_ANTIFLAG_MALE,
     ITEM_ANTIFLAG_SHAMAN, ITEM_ANTIFLAG_SURA, ITEM_ANTIFLAG_WARRIOR, ITEM_ARMOR, ITEM_BELT,
-    ITEM_COSTUME, ITEM_DS, ITEM_PICK, ITEM_RING, ITEM_ROD, ITEM_SPECIAL_DS, ITEM_TALISMAN,
-    ITEM_TOTEM, ITEM_UNIQUE, ITEM_WEAPON, LIMIT_CHAMPION, LIMIT_CON, LIMIT_DEX, LIMIT_INT,
-    LIMIT_LEVEL, LIMIT_REAL_TIME, LIMIT_REAL_TIME_START_FIRST_USE, LIMIT_STR, WEARABLE_ABILITY,
-    WEARABLE_ARROW, WEARABLE_BODY, WEARABLE_DARK, WEARABLE_EAR, WEARABLE_EARTH, WEARABLE_ELEC,
-    WEARABLE_FIRE, WEARABLE_FOOTS, WEARABLE_GLOVE, WEARABLE_HEAD, WEARABLE_ICE, WEARABLE_NECK,
-    WEARABLE_SHIELD, WEARABLE_UNIQUE, WEARABLE_WEAPON, WEARABLE_WIND, WEARABLE_WRIST,
+    ITEM_COSTUME, ITEM_DS, ITEM_PICK, ITEM_RING, ITEM_ROD, ITEM_SKILLBOOK, ITEM_SPECIAL_DS,
+    ITEM_TALISMAN, ITEM_TOTEM, ITEM_UNIQUE, ITEM_USE, ITEM_WEAPON, LIMIT_CHAMPION, LIMIT_CON,
+    LIMIT_DEX, LIMIT_INT, LIMIT_LEVEL, LIMIT_REAL_TIME, LIMIT_REAL_TIME_START_FIRST_USE, LIMIT_STR,
+    USE_SPECIAL, WEARABLE_ABILITY, WEARABLE_ARROW, WEARABLE_BODY, WEARABLE_DARK, WEARABLE_EAR,
+    WEARABLE_EARTH, WEARABLE_ELEC, WEARABLE_FIRE, WEARABLE_FOOTS, WEARABLE_GLOVE, WEARABLE_HEAD,
+    WEARABLE_ICE, WEARABLE_NECK, WEARABLE_SHIELD, WEARABLE_UNIQUE, WEARABLE_WEAPON, WEARABLE_WIND,
+    WEARABLE_WRIST,
 };
 use gamedata::item_proto::{ItemProto, ItemProtos};
 use protocol::item_pos::ItemPos;
@@ -821,6 +822,25 @@ const USED_BY_WEARING: [i32; 8] = [
     ITEM_PICK,
 ];
 
+/// The book vnums `read_skill_book` arms (`G/char_item.cpp:4407-4790`), plus every
+/// `ITEM_SKILLBOOK` (the socket/value arm, `:3282-3331`). A book-shaped item of another
+/// vnum runs no read: the consume below would eat a book legacy reads as nothing.
+const BOOK_VNUMS: [u32; 50] = [
+    50060, 50061, 50600, 50301, 50302, 50303, 50304, 50305, 50306, 50311, 50312, 50313, 50314,
+    50315, 50316, 50323, 50324, 50325, 50326, 50335, 50336, 50337, 50338, 50339, 50340, 50401,
+    50402, 50403, 50404, 50405, 50406, 50407, 50408, 50409, 50410, 50411, 50412, 50413, 50414,
+    50415, 50416, 50417, 50418, 50419, 50420, 50421, 50422, 50423, 50424, 50425,
+];
+
+/// Whether `CG_ITEM_USE` on an item of this prototype reads a skill book (230g).
+#[must_use]
+pub fn is_skill_book(proto: &ItemProto) -> bool {
+    if proto.item_type == ITEM_SKILLBOOK {
+        return true;
+    }
+    proto.item_type == ITEM_USE && proto.sub_type == USE_SPECIAL && BOOK_VNUMS.contains(&proto.vnum)
+}
+
 /// Run one `CG_ITEM_USE` on an item that is worn by using it: `CHARACTER::UseItem` and the
 /// equip arm of `UseItemEx` (`G/char_item.cpp:7168-7400`, `:2718-3053`). An item that is
 /// not worn goes on (`EquipItem`), and a worn one comes off (`UnequipItem`).
@@ -866,10 +886,11 @@ pub fn use_item(
         .get(item.vnum)
         .ok_or(MoveRefused::UnknownVnum(item.vnum))?;
     let potion = super::potion::is_potion(proto);
-    if !potion && proto.item_type == gamedata::item_kind::ITEM_USE {
+    let book = is_skill_book(proto);
+    if !potion && !book && proto.item_type == gamedata::item_kind::ITEM_USE {
         return Err(MoveRefused::NotPorted(Unported::UseSubType(proto.sub_type)));
     }
-    if !potion && !USED_BY_WEARING.contains(&proto.item_type) {
+    if !potion && !book && !USED_BY_WEARING.contains(&proto.item_type) {
         return Err(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
     }
     let race = gear.points.race();
@@ -912,6 +933,16 @@ pub fn use_item(
     }
     if potion {
         return super::potion::use_potion(items, &item, proto, &mut *gear.points);
+    }
+    if book {
+        let mut trail = Trail::default();
+        super::potion::use_one(
+            items,
+            &item,
+            super::quickslot::chains_when_used_up(proto),
+            &mut trail,
+        )?;
+        return Ok(done(MoveKind::Used, trail));
     }
     let mut equipper = Equipper::new(items, gear, rules.usable_cells);
     let outcome = if super::inventory::is_equip_position(item.pos) {
@@ -961,6 +992,8 @@ mod tests {
     const LEVEL_TEN_SWORD: u32 = 31;
     const UNIQUE_FLAGGED: u32 = 11_240;
     const SPECIAL: u32 = 71_049;
+    /// A book-shaped `ITEM_USE`/`USE_SPECIAL` in the read set: the summon book.
+    const BOOK: u32 = 50_061;
     const POTION: u32 = 27_101;
     const HIGH_POTION: u32 = 27_102;
     const SURA_REFUSED: u32 = 12;
@@ -1059,6 +1092,7 @@ mod tests {
             proto(UNIQUE_FLAGGED, ITEM_ARMOR, ARMOR_BODY, WEARABLE_UNIQUE),
             // `ITEM_USE`, 3, `USE_SPECIAL`, 10.
             proto(SPECIAL, 3, 10, 0),
+            proto(BOOK, 3, 10, 0),
             potion,
             high_potion,
             sura_refused,
@@ -1242,6 +1276,35 @@ mod tests {
 
     fn defence(points: &Points) -> i32 {
         points.get_point(point::POINT_DEF_GRADE)
+    }
+
+    /// A book-shaped use consumes one: the read gate lives above the world, so a book
+    /// that reaches the world's step is eaten, with the clear and the destroy the potion
+    /// path writes.
+    #[test]
+    fn a_book_shaped_use_consumes_one() {
+        let book = Item::new(7, BOOK);
+        let mut case = Case::new(&[(inv(3), book)]);
+        let done = case.use_at(inv(3)).expect("a book is consumed");
+        assert_eq!(done.kind, MoveKind::Used);
+        assert_eq!(
+            item_records(&done),
+            vec![ItemRecord::Set(gc_item_clear(inv(3)))]
+        );
+        assert_eq!(done.changes, vec![ItemChange::Destroyed { id: 7 }]);
+        assert_eq!(case.at(inv(3)), None);
+    }
+
+    /// An `ITEM_USE`/`USE_SPECIAL` outside the read set still refuses: no read ran, so
+    /// nothing is eaten.
+    #[test]
+    fn a_non_book_special_use_still_refuses() {
+        let special = Item::new(7, SPECIAL);
+        let mut case = Case::new(&[(inv(3), special)]);
+        assert_eq!(
+            case.use_refused(inv(3)),
+            MoveRefused::NotPorted(Unported::UseSubType(10))
+        );
     }
 
     #[test]

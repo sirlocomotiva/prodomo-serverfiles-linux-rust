@@ -464,8 +464,9 @@ pub enum GameCommand {
         place: GroundPlace,
         /// What the descriptor knows of the character.
         mover: Mover,
-        /// Where the game thread reports the records the step's script sent.
-        reply: oneshot::Sender<Result<Vec<Vec<u8>>, MoveItemRefused>>,
+        /// Where the game thread reports the records the step's script sent and the
+        /// GRAND climbs its reads landed.
+        reply: oneshot::Sender<Result<super::game_state::QuestStepOutcome, MoveItemRefused>>,
     },
     /// Runs one `CG_MOVE` of the player online under `vid` (`G/input_main.cpp:1757-1891`): the
     /// world judges it against the body, moves the body and relays the record to the body's
@@ -499,6 +500,83 @@ pub enum GameCommand {
         /// Dropped once the records are sent, see [`Settled`].
         settled: oneshot::Sender<()>,
     },
+    /// `CInputMain::PartyInvite`: the character online under `vid` invites the character
+    /// `guest` names to its party. See `game_state::party`.
+    PartyInvite {
+        /// The VID of the inviting character.
+        vid: common::vid::Vid,
+        /// The guest VID the client sent.
+        guest: u32,
+        /// Dropped once the invite has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// `CInputMain::PartyInviteAnswer`: the character online under `vid` answers the
+    /// invite from the character `inviter` names. See `game_state::party`.
+    PartyInviteAnswer {
+        /// The VID of the answering character.
+        vid: common::vid::Vid,
+        /// The inviter VID the client sent.
+        inviter: u32,
+        /// The answer byte the client sent; non-zero accepts.
+        accept: u8,
+        /// Dropped once the answer has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// `CInputMain::PartyRemove`: the character online under `vid` removes the PID
+    /// `pid` names from its party. See `game_state::party`.
+    PartyRemove {
+        /// The VID of the removing character.
+        vid: common::vid::Vid,
+        /// The PID the client sent.
+        pid: u32,
+        /// Dropped once the removal has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// `CInputMain::PartySetState`: the character online under `vid` sets the role `role`
+    /// names for the PID `pid` names. See `game_state::party`.
+    PartySetState {
+        /// The VID of the setting character.
+        vid: common::vid::Vid,
+        /// The PID the client sent.
+        pid: u32,
+        /// The role byte the client sent.
+        role: u8,
+        /// The flag byte the client sent.
+        flag: u8,
+        /// Dropped once the set has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// `CInputMain::PartyParameter`: the character online under `vid` sets the
+    /// distribution mode `mode` names. See `game_state::party`.
+    PartyParameter {
+        /// The VID of the setting character.
+        vid: common::vid::Vid,
+        /// The mode the client sent.
+        mode: u8,
+        /// Dropped once the set has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// `CInputMain::PartyUseSkill`: the character online under `vid` uses the party
+    /// skill `skill` names on the VID `target` names. See `game_state::party`.
+    PartyUseSkill {
+        /// The VID of the using character.
+        vid: common::vid::Vid,
+        /// The skill index the client sent.
+        skill: u8,
+        /// The target VID the client sent.
+        target: u32,
+        /// Dropped once the use has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// Whether the character online under `vid` holds a party (`ch->GetParty() !=
+    /// NULL`, `G/input_main.cpp:959`): the descriptor asks before judging a party
+    /// chat line. See `game_state::party`.
+    PartyOf {
+        /// The VID of the asking character.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the membership.
+        reply: oneshot::Sender<bool>,
+    },
     /// `CInputMain::Target`: the character online under `vid` targets the character `target`
     /// names, or none for VID 0. The world answers it with `GC_TARGET` when the target changes.
     Target {
@@ -530,6 +608,28 @@ pub enum GameCommand {
         /// Where the game thread reports the gold the hit stole.
         reply: oneshot::Sender<AttackAnswer>,
     },
+    /// `CInputMain::Attack`'s `CG_(ADD_)FLY_TARGETING` arms: the character online
+    /// under `vid` stores (or appends) the VID `record` names. The world relays
+    /// what it stored; see `game_state::pc_skill`.
+    FlyTarget {
+        /// The VID of the targeting character.
+        vid: common::vid::Vid,
+        /// The `CG_FLY_TARGETING` or `CG_ADD_FLY_TARGETING` the client sent.
+        record: protocol::cg_fly_target::CgFlyTarget,
+        /// Dropped once the store has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// `CInputMain::Attack`'s `CG_SHOOT` arm: the character online under `vid`
+    /// shoots the VIDs it stored. The world sends what the shot shows; see
+    /// `game_state::pc_skill`.
+    Shoot {
+        /// The VID of the shooting character.
+        vid: common::vid::Vid,
+        /// The `CG_SHOOT` the client sent.
+        record: protocol::cg_shoot::CgShoot,
+        /// Where the game thread reports the gold the shot stole.
+        reply: oneshot::Sender<AttackAnswer>,
+    },
     /// `do_restart` or `do_restart_now` of the player online under `vid`
     /// (`G/cmd_general.cpp:471-706`); see `game_state::death`.
     Restart {
@@ -541,6 +641,16 @@ pub enum GameCommand {
         mover: Mover,
         /// Where the game thread reports the gold the restart took.
         reply: oneshot::Sender<RestartAnswer>,
+    },
+    /// `do_skillup` of the player online under `vid`
+    /// (`G/cmd_general.cpp:904-972`); see `game_state::pc_skill`.
+    SkillUp {
+        /// The VID of the skilling player.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the climbed slot, when the up lands.
+        reply: oneshot::Sender<SkillUpAnswer>,
     },
     /// Requests terminal loop shutdown.
     Stop,
@@ -574,6 +684,13 @@ pub struct RestartAnswer {
     pub gold: Option<i64>,
 }
 
+/// What a skill-up changed that the descriptor keeps.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SkillUpAnswer {
+    /// The climbed slot, or `None` when the up refused.
+    pub climbed: Option<(u8, u8)>,
+}
+
 /// What a hit changed that the descriptor keeps.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AttackAnswer {
@@ -597,6 +714,11 @@ pub enum RelayScope {
     ViewAndSelf,
     /// `PacketAround(record, this)`: the character's view, without the character.
     ViewExceptSelf,
+    /// Every linked member of the character's party in PID order, the character
+    /// included, as `ForEachOnlineMember` walks the member map
+    /// (`G/party.h:277-285`). Nothing when the character has no party. The order is
+    /// legacy's own `std::map` order, so no Divergence.
+    Party,
 }
 
 /// Where a character enters the world.
@@ -885,6 +1007,9 @@ pub struct Loaded {
     /// (`G/input_login.cpp:590`). `None` admits the character with no body, which nobody
     /// sees and which sees nobody.
     pub show: Option<Showing>,
+    /// The nonzero skill slots the load read (`player_skill`), which the world
+    /// holds as the character's levels from the admission on.
+    pub skills: Vec<db::player_skills::StoredSkill>,
 }
 
 /// What the world holds of a character that a save writes: asked for before a save, and
@@ -1454,7 +1579,7 @@ impl GameLoopController {
         step: QuestStep,
         place: GroundPlace,
         mover: Mover,
-    ) -> Result<Result<Vec<Vec<u8>>, MoveItemRefused>, MoveItemError> {
+    ) -> Result<Result<super::game_state::QuestStepOutcome, MoveItemRefused>, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::Quest {
             vid,
@@ -1529,6 +1654,151 @@ impl GameLoopController {
         Ok(settling)
     }
 
+    /// Hands the world a `CG_PARTY_INVITE` from the character online under `vid`, without
+    /// waiting. The [`Settled`] resolves once the invite has run.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn party_invite(
+        &self,
+        vid: common::vid::Vid,
+        guest: u32,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::PartyInvite {
+            vid,
+            guest,
+            settled,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Hands the world a `CG_PARTY_INVITE_ANSWER` from the character online under `vid`,
+    /// without waiting. The [`Settled`] resolves once the answer has run.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn party_invite_answer(
+        &self,
+        vid: common::vid::Vid,
+        inviter: u32,
+        accept: u8,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::PartyInviteAnswer {
+            vid,
+            inviter,
+            accept,
+            settled,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Hands the world a `CG_PARTY_REMOVE` from the character online under `vid`, without
+    /// waiting. The [`Settled`] resolves once the removal has run.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn party_remove(
+        &self,
+        vid: common::vid::Vid,
+        pid: u32,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::PartyRemove { vid, pid, settled })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Hands the world a `CG_PARTY_SET_STATE` from the character online under `vid`, without
+    /// waiting. The [`Settled`] resolves once the set has run.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn party_set_state(
+        &self,
+        vid: common::vid::Vid,
+        pid: u32,
+        role: u8,
+        flag: u8,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::PartySetState {
+            vid,
+            pid,
+            role,
+            flag,
+            settled,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Hands the world a `CG_PARTY_PARAMETER` from the character online under `vid`, without
+    /// waiting. The [`Settled`] resolves once the set has run.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn party_parameter(
+        &self,
+        vid: common::vid::Vid,
+        mode: u8,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::PartyParameter { vid, mode, settled })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Hands the world a `CG_PARTY_USE_SKILL` from the character online under `vid`, without
+    /// waiting. The [`Settled`] resolves once the use has run.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn party_use_skill(
+        &self,
+        vid: common::vid::Vid,
+        skill: u8,
+        target: u32,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::PartyUseSkill {
+            vid,
+            skill,
+            target,
+            settled,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+    /// Asks the world whether the character online under `vid` holds a party, and
+    /// waits for the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::sync_positions`].
+    pub async fn party_of(&self, vid: common::vid::Vid) -> Result<bool, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::PartyOf { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
     /// Hands the world a `CG_TARGET` from the character online under `vid`, without waiting.
     /// The [`Settled`] resolves once its answer is sent.
     ///
@@ -1592,6 +1862,47 @@ impl GameLoopController {
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 
+    /// Hands the world a `CG_(ADD_)FLY_TARGETING` from the character online under `vid`,
+    /// without waiting. The [`Settled`] resolves once the store has run.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn fly_target(
+        &self,
+        vid: common::vid::Vid,
+        record: protocol::cg_fly_target::CgFlyTarget,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::FlyTarget {
+            vid,
+            record,
+            settled,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Asks the world to run one `CG_SHOOT` from the character online under `vid`, and waits
+    /// for the gold it stole. What the shot shows is written to the player's outbox before the
+    /// answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn shoot(
+        &self,
+        vid: common::vid::Vid,
+        record: protocol::cg_shoot::CgShoot,
+    ) -> Result<AttackAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Shoot { vid, record, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
     /// Asks the world to run one restart command of a player, and waits for the gold it took.
     /// What it shows is written to the player's outbox before the answer.
     ///
@@ -1613,6 +1924,24 @@ impl GameLoopController {
         })
         .await
         .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `/skillup` line of a player, and waits for the
+    /// climbed slot. What the up shows is written to the player's outbox before
+    /// the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn skill_up(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<SkillUpAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SkillUp { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 

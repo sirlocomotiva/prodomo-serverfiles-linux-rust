@@ -9,6 +9,7 @@ pub mod accounts;
 pub mod credentials;
 pub mod item_id_range;
 pub mod items;
+pub mod player_skills;
 pub mod players;
 pub mod quickslots;
 pub mod safebox;

@@ -156,6 +156,10 @@ pub(super) struct PcCombat {
     recovery_due: Option<u64>,
     /// The Pulse `m_pkPoisonEvent` is due on, with the ticks it has left.
     pub(super) poison_due: Option<(u64, u32)>,
+    /// `m_dwLastDeadTime` (`G/char.cpp:1126`), stamped by `Dead`: `CanSummon` reads it.
+    /// `None` is the constructor seed (`now - 180000`), which fails the +180 check the
+    /// same way an old stamp does.
+    pub(super) last_dead_ms: Option<u32>,
 }
 
 impl PcCombat {
@@ -410,7 +414,14 @@ impl GameState {
     }
 
     /// `ChatPacket(type, format, args...)` to the player under `vid`.
-    fn tell(&self, vid: Vid, mover: Mover, chat_type: u8, format: &[u8], args: &[Arg<'_>]) {
+    pub(super) fn tell(
+        &self,
+        vid: Vid,
+        mover: Mover,
+        chat_type: u8,
+        format: &[u8],
+        args: &[Arg<'_>],
+    ) {
         let line = chat_packet(mover.recipient(&self.locale), chat_type, format, args);
         let _sent = self.write_to_client(vid, line);
     }
@@ -623,6 +634,7 @@ impl GameState {
         // go, each with its point taken back, its remove packet, and one flag update.
         let combat = self.pc_combat.entry(raw).or_default();
         combat.dead = true;
+        combat.last_dead_ms = Some(self.clock.now());
         // `POS_DEAD` is not `POS_FIGHTING`.
         if let Some(body) = self.bodies.get_mut(&vid) {
             body.fighting = false;
@@ -937,7 +949,7 @@ impl GameState {
     /// otherwise one is added; then the update goes to the view, the player included, the event
     /// starts, and the client is sent the affect.
     pub(super) fn revive_invisible(&mut self, vid: Vid) {
-        self.add_pc_affect(vid, Affect::revive_invisible());
+        self.add_pc_affect(vid, Affect::revive_invisible(), true);
     }
 
     /// The affects running on the player under `vid`, in the order they were added.
@@ -1075,11 +1087,9 @@ impl GameState {
     }
 
     /// `RemovePoison` of the player under `vid` (`G/char_resist.cpp:233-237`): the poison
-    /// affect goes and its event ends. Legacy never removes a player's poison except by
-    /// death, expiry and cure; `Dead` routes through the death clearing, so this stays for
-    /// the cure to come.
-    #[allow(dead_code)]
-    fn remove_pc_poison(&mut self, vid: Vid) {
+    /// affect goes and its event ends. The cure calls it (the heal 109); `Dead`
+    /// routes through the death clearing.
+    pub(super) fn remove_pc_poison(&mut self, vid: Vid) {
         self.cancel_pc_poison(vid);
     }
 
@@ -3216,7 +3226,9 @@ mod tests {
                 value: 0,
                 flag: AFF_POISON,
                 remaining: POISON_TICKS,
+                sp_cost: 0,
             },
+            true,
         );
         field.world.add_pc_affect(
             ALPHA,
@@ -3226,7 +3238,9 @@ mod tests {
                 value: 0,
                 flag: AFF_STUN,
                 remaining: STUN_TICKS,
+                sp_cost: 0,
             },
+            true,
         );
         field.world.add_pc_affect(
             ALPHA,
@@ -3236,7 +3250,9 @@ mod tests {
                 value: SLOW_MOV_SPEED,
                 flag: AFF_SLOW,
                 remaining: SLOW_TICKS,
+                sp_cost: 0,
             },
+            true,
         );
         assert_eq!(field.world.move_speed_of(ALPHA.raw()), (before - 30).max(0));
         field.killed(ALPHA);

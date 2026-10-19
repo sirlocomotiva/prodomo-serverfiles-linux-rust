@@ -390,6 +390,11 @@ impl GameState {
                 }
                 RelayScope::ViewAndSelf => self.packet_around(me, record, None),
                 RelayScope::ViewExceptSelf => self.packet_around(me, record, Some(me)),
+                RelayScope::Party => {
+                    for other in self.party_member_vids(vid) {
+                        let _sent = self.write_to_client(other, record.clone());
+                    }
+                }
             }
         }
     }

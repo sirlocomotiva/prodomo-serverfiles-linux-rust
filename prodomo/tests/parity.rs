@@ -1455,10 +1455,11 @@ fn game_len(header: u8) -> usize {
         GROUND_ADD => GROUND_ADD_LEN,
         GROUND_DEL => GROUND_DEL_LEN,
         GC_QUICKSLOT_ADD => 1 + 1 + 2,
-        GC_QUICKSLOT_DEL | GC_SAFEBOX_SIZE | GC_MALL_OPEN => 1 + 1,
+        GC_QUICKSLOT_DEL | GC_SAFEBOX_SIZE | GC_MALL_OPEN | GC_PARTY_PARAMETER => 1 + 1,
         GC_QUICKSLOT_SWAP => 1 + 2,
         GC_EXCHANGE => EXCHANGE_LEN,
-        GC_SAFEBOX_DEL | GC_MALL_DEL | GC_CHARACTER_DEL | GC_STUN | GC_DEAD => 1 + 4,
+        GC_SAFEBOX_DEL | GC_MALL_DEL | GC_CHARACTER_DEL | GC_STUN | GC_DEAD | GC_PARTY_INVITE
+        | GC_PARTY_REMOVE => 1 + 4,
         GC_SAFEBOX_WRONG_PASSWORD => 1,
         GC_WARP => WARP_LEN,
         GC_WALK_MODE => WALK_MODE_LEN,
@@ -1466,6 +1467,12 @@ fn game_len(header: u8) -> usize {
         GC_DAMAGE_INFO => DAMAGE_INFO_LEN,
         GC_CREATE_FLY => CREATE_FLY_LEN,
         GC_FLY_TARGETING => FLY_TARGETING_LEN,
+        // The party walk: ADD (header + PID + name), LINK and UNLINK (header + two
+        // VIDs), UPDATE (header + PID + role + percent + seven affect shorts). The
+        // invite and REMOVE fold into the `1 + 4` arm above, the PARAMETER into `1 + 1`.
+        GC_PARTY_ADD => 1 + 4 + 25,
+        GC_PARTY_LINK | GC_PARTY_UNLINK => 1 + 4 + 4,
+        GC_PARTY_UPDATE => 1 + 4 + 1 + 1 + 2 * 7,
         other => panic!("unexpected loading or enter-game header {other}"),
     }
 }
@@ -4678,6 +4685,125 @@ fn chat_packet(chat_type: u8, empire: u8, text: &[u8]) -> Vec<u8> {
     line.extend_from_slice(&[chat_type, 0, 0, 0, 0, empire, 1]);
     line.extend_from_slice(text);
     line
+}
+/// `sys.party`: a party line reaches every linked member, the speaker included, and no
+/// outsider on the same map. Alice invites Yankee; Yankee answers; Alice speaks; both hear
+/// the type-3 line, and Charlie (same map, no party) hears nothing
+/// (`G/input_main.cpp:957-975`, `G/party.h:277-285`).
+/// The party link's walk: read from `who` until the link's shape has arrived — `adds`
+/// ADDs, two LINKs, an UPDATE, and a PARAMETER. The periodic state UPDATE may sit
+/// anywhere, so the walk gates on shape, not on count.
+fn drain_party_walk(who: &mut Keyed, note: &str, adds: usize) {
+    let mut headers = Vec::new();
+    let mut seen_adds = 0;
+    let mut seen_links = 0;
+    for _ in 0..24 {
+        let header = who.read_game()[0];
+        headers.push(header);
+        seen_adds += usize::from(header == GC_PARTY_ADD);
+        seen_links += usize::from(header == GC_PARTY_LINK);
+        if seen_adds >= adds
+            && seen_links >= 2
+            && headers.contains(&GC_PARTY_UPDATE)
+            && headers.contains(&GC_PARTY_PARAMETER)
+        {
+            break;
+        }
+    }
+    assert!(
+        seen_adds >= adds
+            && seen_links >= 2
+            && headers.contains(&GC_PARTY_UPDATE)
+            && headers.contains(&GC_PARTY_PARAMETER),
+        "{note} walked: {headers:02x?}"
+    );
+}
+/// Read from `who` until the party line arrives; an undrained party record may still
+/// sit ahead of it.
+fn read_party_line(who: &mut Keyed) -> Vec<u8> {
+    for _ in 0..8 {
+        let record = who.read_game();
+        if record[0] == GC_CHAT {
+            return record;
+        }
+        assert!(
+            record[0] == GC_PARTY_UPDATE
+                || record[0] == GC_PARTY_PARAMETER
+                || record[0] == GC_PARTY_ADD
+                || record[0] == GC_PARTY_LINK,
+            "ahead of the line: {record:02x?}"
+        );
+    }
+    panic!("no party line arrived");
+}
+#[test]
+fn a_party_line_reaches_the_members_and_no_outsider() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    create_account(&server, "carol");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+ 154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+ 470100, 950100 FROM account WHERE login = 'carol'",
+    );
+    // Yankee keeps the column's 0 and walks; Charlie is seeded, so it does not.
+    stamina(&database, "Charlie", 12_345);
+    let (mut alice, alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, true);
+    let (mut charlie, charlie_listed, _) = enter_world_seeing(&server, b"carol", 0);
+    alice.sees_arrive(charlie_listed.id, false);
+    yankee.sees_arrive(charlie_listed.id, false);
+    let yankee_vid = u32::from_le_bytes(yankee_entered.add[1..5].try_into().unwrap());
+    let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
+    let _ = alpha;
+    // Alice invites Yankee; Yankee answers yes. The invite asks the guest; the
+    // answer's walk (ADDs, LINKs, UPDATEs, PARAMETER) is drained by header, in
+    // legacy order.
+    let mut invite = vec![CG_PARTY_INVITE];
+    invite.extend_from_slice(&yankee_vid.to_le_bytes());
+    alice.send_record(&invite);
+    let asked = yankee.read_game();
+    assert_eq!(
+        asked[0], GC_PARTY_INVITE,
+        "the invite asks the guest: {asked:02x?}"
+    );
+    assert_eq!(&asked[1..5], &alpha_vid.to_le_bytes(), "the inviter's VID");
+    let mut answer = vec![CG_PARTY_INVITE_ANSWER];
+    answer.extend_from_slice(&alpha_vid.to_le_bytes());
+    answer.push(1);
+    yankee.send_record(&answer);
+    // The join's one-to-all ADD reaches nobody (`member.vid` attaches only in
+    // `Link`), so the guest hears its link's own ADD + every ADD (2), and the
+    // leader its link's own ADD + every ADD plus the guest's join ADD and the
+    // guest link's one-to-all ADD.
+    drain_party_walk(&mut yankee, "the guest", 3);
+    drain_party_walk(&mut alice, "the leader", 4);
+    // Alice speaks to the party. Both members hear the same type-3 bytes.
+    alice.send_record(&client_chat(prodomo::chat::CHAT_PARTY, b"hello"));
+    let own = read_party_line(&mut alice);
+    assert_eq!(own[3], prodomo::chat::CHAT_PARTY, "type: {own:02x?}");
+    assert_eq!(&own[4..8], &alpha_vid.to_le_bytes(), "id");
+    assert_eq!(own[8], 1, "bEmpire is the speaker's empire");
+    assert_eq!(own[9], 0, "bCanFormat is false");
+    assert_eq!(&own[10..], b"Alpha : hello");
+    assert_eq!(
+        read_party_line(&mut yankee),
+        own,
+        "the member hears the same bytes"
+    );
+    charlie.quiet("the outsider hears nothing");
 }
 
 /// Three clients in the world for a shout: alice's Alpha, level 154 in empire 1 on map 1 of
@@ -9362,6 +9488,17 @@ fn a_move_resets_the_stop_time_and_delays_the_refill() {
 const CG_TARGET: u8 = 0x3d;
 const GC_TARGET: u8 = 0x3f;
 const TARGET_LEN: usize = 32;
+/// The party headers a client needs to form one: the CG invite and answer, and the GC
+/// walk records (`G/party.cpp` sends).
+const CG_PARTY_INVITE: u8 = 0x48;
+const CG_PARTY_INVITE_ANSWER: u8 = 0x49;
+const GC_PARTY_INVITE: u8 = 0x4d;
+const GC_PARTY_ADD: u8 = 0x4e;
+const GC_PARTY_UPDATE: u8 = 0x4f;
+const GC_PARTY_PARAMETER: u8 = 0x53;
+const GC_PARTY_LINK: u8 = 0x5b;
+const GC_PARTY_UNLINK: u8 = 0x5c;
+const GC_PARTY_REMOVE: u8 = 0x50;
 
 /// `CG_TARGET` naming `vid`.
 fn client_target(vid: u32) -> Vec<u8> {
@@ -11804,4 +11941,81 @@ fn party_swing_tail(
             "past a swing, a record nobody accounted for: {record:02x?}"
         );
     }
+}
+/// Ledger 230f: `/skillup 109` spends a skill point and sends byte 76 with slot
+/// 109 learned, then `CG_USE_SKILL 109` heals: the SP charge and the HP point
+/// change, with no affect add. Alpha is stored group 2 with 100/100, so 109 is
+/// its own row (group 49 refuses `CanUseSkill`) and the heal's point change
+/// goes out (a full pool sends nothing): the charge leaves 50, the heal fills
+/// 1420.
+#[test]
+fn a_skill_up_spends_and_a_cast_heals_over_the_wire() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        DOG_AT_ALPHA,
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+         &database,
+         "UPDATE player SET skill_point = 1, skill_group = 2, hp = 100, sp = 100 WHERE name = 'Alpha'",
+     );
+    let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
+    let alpha_vid = listed.id;
+    let _entered = enter_game_shown(&mut alpha);
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/skillup 109"));
+    // The spend's point change (slot 28) then byte 76.
+    let mut saw_spend = false;
+    let mut burst = Vec::new();
+    for _ in 0..8 {
+        let record = alpha.read_game();
+        if record == point_change(alpha_vid, 28, 0, 0) {
+            assert!(!saw_spend, "one spend");
+            saw_spend = true;
+            continue;
+        }
+        if record[0] == GC_SKILL_LEVEL_NEW {
+            burst = record;
+            break;
+        }
+        panic!("past a skill-up, a record nobody accounted for: {record:02x?}");
+    }
+    assert!(saw_spend, "the spend lands");
+    assert_eq!(burst[0], GC_SKILL_LEVEL_NEW, "{burst:02x?}");
+    assert_eq!(burst.len(), SKILL_LEVEL_LEN);
+    // Slot 109: master 0, level 1 (6 bytes a slot, 1 header byte).
+    assert_eq!(burst[1 + 109 * 6], 0);
+    assert_eq!(burst[1 + 109 * 6 + 1], 1);
+    // The cast heals: the SP charge and the HP point change, no affect add.
+    let mut use_skill = vec![CG_USE_SKILL];
+    use_skill.extend_from_slice(&109_u32.to_le_bytes());
+    use_skill.extend_from_slice(&alpha_vid.to_le_bytes());
+    alpha.send_record(&use_skill);
+    // Alpha's stored 100/100 wounds it, so the heal's point change goes out.
+    let mut charged = false;
+    let mut healed = false;
+    for _ in 0..8 {
+        let record = alpha.read_game();
+        if record == point_change(alpha_vid, 7, 0, 50) {
+            assert!(!charged, "one charge");
+            charged = true;
+        } else if record == point_change(alpha_vid, 5, 0, 1420) {
+            assert!(!healed, "one heal");
+            healed = true;
+        } else if record[0] == GC_AFFECT_ADD {
+            panic!("the heal adds no affect: {record:02x?}");
+        } else {
+            panic!("past a heal, a record nobody accounted for: {record:02x?}");
+        }
+        if charged && healed {
+            break;
+        }
+    }
+    assert!(charged && healed, "the charge and the heal both land");
 }

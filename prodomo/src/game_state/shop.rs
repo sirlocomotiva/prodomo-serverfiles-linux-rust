@@ -158,8 +158,6 @@ pub enum ShopDeclined {
     },
     /// The character trades.
     Trading,
-    /// A quest took the click, and its dialog is the answer (`G/char.cpp:6333-6338`).
-    Quest,
     /// The NPC's click trigger is not the shop's.
     NotAShop {
         /// Its `ON_CLICK_*`.
@@ -211,6 +209,14 @@ pub enum ShopAnswer {
     },
     /// A buy or a sale, stored and sent as a move is, with the gold it left.
     Moved(MovedItems),
+    /// A quest took the click: the records its scripts sent, and the GRAND climbs
+    /// its reads landed (each for the store's `store_skill`), in order.
+    Quest {
+        /// The records the client is sent.
+        records: Vec<Vec<u8>>,
+        /// The climbs, each a slot, level and stamp.
+        climbs: Vec<(u8, u8, i32)>,
+    },
 }
 
 impl ShopAnswer {
@@ -309,12 +315,9 @@ impl GameState {
         if self.trading.contains_key(&vid) {
             return ShopAnswer::silent(ShopDeclined::Trading);
         }
-        let (taken, mut records) = self.quest_click(vid, (target, race), place, mover);
+        let (taken, (mut records, climbs)) = self.quest_click(vid, (target, race), place, mover);
         if taken {
-            return ShopAnswer::Declined {
-                reason: ShopDeclined::Quest,
-                records,
-            };
+            return ShopAnswer::Quest { records, climbs };
         }
         match self.open_window(vid, target, place, mover) {
             ShopAnswer::Sent(sent) => {
@@ -329,6 +332,10 @@ impl GameState {
                 ShopAnswer::Declined { reason, records }
             }
             sold @ ShopAnswer::Moved(_) => sold,
+            ShopAnswer::Quest { .. } => {
+                debug_assert!(false, "the window opens no quest");
+                ShopAnswer::Sent(records)
+            }
         }
     }
 
@@ -1294,9 +1301,9 @@ mod tests {
         GcScript::new(1, b"[QUESTION 1;OX Contest |2;Inchide]".to_vec())
             .encode_into(&mut menu)
             .unwrap();
-        let declined = ShopAnswer::Declined {
-            reason: ShopDeclined::Quest,
+        let declined = ShopAnswer::Quest {
             records: vec![menu],
+            climbs: Vec::new(),
         };
         assert_eq!(click(&mut state, SCRIPTED, at(0)), declined);
         assert!(state.browsing.is_empty());

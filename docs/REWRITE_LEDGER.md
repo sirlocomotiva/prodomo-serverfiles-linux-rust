@@ -32061,3 +32061,505 @@ prodomo 1002 · world 526 · gamedata 436 · common 107 · quest 69 ·
 protocol 1203 · parity 8/8.
 
 No ADR changed. No owner question added. V20 stays free.
+
+## 230e: A player shoots and splashes (V17f, second half)
+
+`CG_FLY_TARGETING`/`CG_ADD_FLY_TARGETING` store (with the around-but-shooter
+relay) and `CG_SHOOT` shoots: the plain bow arm (assassin, bow + arrow, the
+group-2 SP skip, `CalcArrowDamage`, `UseArrow(1)`, `NormalAttackAffect`,
+`RESIST_BOW`, `NORMAL_RANGE` damage with its gold answer), the arrow-skill arm
+(46/47/48/50/140 — hosted: 47), the magic-skill arm (76/80/81/106/20/35/91/33 —
+hosted: 20/35/81/91), `CHAIN`'s shape, and `YONGBI`'s `OnMove(true)`-only arm.
+`compute_skill` grows the SPLASH walk (the victim's sectrees, the
+`DISTANCE_APPROX` rim, `HitOnce` each, uncapped), the SELFONLY centre, the
+`mwep` var, the non-main splash adjust, the RANGE/MAGIC attr arms, and the
+post-damage arms with a hosted caller and a ported pipe: POISON (33/35), STUN
+(18), `FIRE_CONT` (92/93, through the new `NpcCombat` fire-due state and
+`Due::Fire`), and CRUSH (5/20, the 200.0 PC slide with the wall stop). The
+three records leave `is_consumed` for `fly_target_step`s and a `shoot_step`
+(`GameCommand::FlyTarget`/`Shoot` through `apply_pick`).
+
+The vnum audit against `G/skill.h` (whose `SKILL_BUDONG` comment consumes
+nothing) fixed the landed half's hand-counts: `GIGUNG = 50` (`SHOOT_LIST` had
+51), `YONGBI = 92` (not 95), `CHAIN = 108` (not 106 — 106 is `NOEJEON`), the
+`CheckSkillHitCount` refusal `62|77|18|93` (not `122|94|91|95`), and the max-3
+`1|33` (not `1|19` — 19 is `CHUNKEON`). The wear-cell fix: the bow/arrow live
+in the Inventory window at `INVENTORY_MAX_NUM + wear` (`Equipment::of`), so
+`use_arrow`'s restack arm and the tests read them there, not under
+`EWindows::Equipment`. SLOW's functor arm stays documented, not ported — its
+only row (80) is refused — and the shoot path carries no skill-term gate
+(legacy's is `Attack(bType)`-only), so the eighth test proves the MAGIC pipe
+(92) instead.
+
+- `gamedata::pc_skill_data::{splash_and_shoot_rows_sort_into_their_pipes}`:
+  SPLASH-melee 5/18/62 off the list, RANGE 47 alone, MAGIC 35/81/91/92/93,
+  shoot 20/35/47/81/91, the 230d pipe still refusing all eight.
+- `world::character::combat::melee::{an_arrow_shot_falls_off_with_distance_and_reads_the_attackers_def_bonus,
+  the_range_and_magic_attr_arms_read_their_own_resists,
+  the_range_pipe_keeps_the_chances_and_skips_the_gold_steal,
+  a_normal_range_hit_dodges_where_a_normal_one_is_blocked}`: 339 at point
+  blank, 305 at 700, the ignore-defence 349, the sword's 0, the attacker's
+  `DEF_BONUS` doubling the subtracted 10; the bow/magic resists; the quartered
+  chances drawn and no gold steal; the dodge gate where the block gate stood.
+- `game_state::pc_skill::{fly_targets_store_and_relay_skipping_the_shooter,
+  the_plain_bow_shot_lands_and_the_refusals_hold,
+  an_arrow_skill_needs_its_arrow_a_melee_skill_needs_none,
+  a_splash_cast_hits_two_dogs_and_skips_a_far_third,
+  a_selfonly_walk_centres_on_the_caster, crush_slides_the_victim,
+  yongbi_stamps_the_move_and_hits_nothing,
+  a_magic_cast_lands_through_the_magic_pipe}`: the store + relay bytes with
+  the target-0 unknown, the shooter's silence; the bow shot's damage, the
+  10→9 arrow, the cleared store, the warrior/bowless refusals; 47 landing
+  with its arrow and refusing without, its RANGE aggro; the 200-rim splash
+  hitting two dogs and skipping a 500-east third; the SELFONLY walk centred
+  on the caster; the 200 east slide; `YONGBI` stamping the move with the dog
+  whole; 92 through the MAGIC pipe with MAGIC aggro.
+
+`sys.skill.core` row, STATUS header and V17(f) updated here. No crate was
+added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Gates: fmt clean; build with no warnings; clippy `-D warnings` (1.85.1)
+clean after the `f32_to_i32` conversions (no `as` casts), the `after_skill_damage`
+`main`-from-`SkillUse` read, the `restack_arrow` split and the doc backticks;
+doc green; prodomo 1010 · world 530 · gamedata 437 · common 107 · quest 69 ·
+protocol 1203 · parity 8/8.
+
+No ADR changed. No owner question added. V20 stays free.
+
+## 230f. A player ups its skills, holds its self buffs, and pays the grandmaster cost (V17f, third part)
+
+`/skillup <vnum>` climbs a level through `SkillLevelUp(BY_POINT)` (`G/cmd_general.cpp:904-972`,
+`G/char_skill.cpp:723-907`): the `strtoul` parse (leading digits, mod-2^32 wrap, empty/non-digit
+silence), `CanUseSkill` or the else-switch (137-140, the 112-119 anti range, 141/142, the
+compiled-in 221-228/236-243), `IsLearnableSkill` (`:260-339`), the GRAND/PERFECT master refusals,
+the spend (`SUB_SKILL`/`SKILL`/`HORSE_SKILL` by type), `SetSkillLevel`'s ladder with the 17/30/40
+jump draws (`ENABLE_FORCE2MASTERSKILL` ON: NORMAL jumps straight to 20), the point-change record
+and byte 76. `use_skill`'s dispatch tail computes the 9 SELFONLY buffs (3 4 19 34 49 63 64 65 79)
+and the heal 109 through `compute_skill_affect` (`:2443-2890`): target range, the PABEOP-good
+refusal, the MAGIC-attr `OnMove(true)`, the grandmaster amount swap, the cure roll
+(`RemoveBadAffect`: poison-with-event, fire, stun, slow, 80), and the three point arms with 19's
+`CHEONGEUN_WITH_FALL`. The TOGGLE-off arm fires before the charge, 64's cooling refusal before
+it, and a GRAND+ cast with the stamp's grand bit charges the grand-add poly instead. Stored in
+`player_skill` (`0010_player_skill.sql`), carried by the burst's byte 76.
+
+Proved over the wire by `a_skill_up_spends_and_a_cast_heals_over_the_wire` (the spend's point
+change, byte 76 with slot 109 at master 0 level 1, the cast's SP charge and the HP point change,
+no affect add) and in-memory by the 10 new `pc_skill` tests (the climb/spend/76, the silent
+refusals, the `strtoul` parse, the ladder, the buff land + free toggle-off, the poly amount,
+64's pre-charge refusal, the heal's 304, the grand-add 62).
+
+- `prodomo::game_state::pc_skill`: `skill_up` + `skill_up_level` (gates) + `skill_level_up`
+  (spend/climb/jumps/76) + `is_learnable_skill` + `refresh_passive_hp` (141's point poly at
+  `k = power/100`); `use_skill`'s TOGGLE-off arm, `cast_skill` (64's refusal, the grand cost,
+  the stamp, the dispatch tail), `compute_skill_affect` with the `apply_point2` split (19's
+  flag reads before the point2 remove, as legacy's does), `SetSkillLevel`'s `master_of`
+  ladder, `buff_vars`/`on_move_attack`/`remove_bad_affect`.
+- `prodomo::command` + `command::table` + `GameCommand::SkillUp` + `main.rs::skill_up`:
+  `/skillup` runs the world and stores the climbed slot; all refusals silent.
+- `db::player_skills` + `loading_phase::fill_skill_levels`: the burst carries the stored
+  levels (master type from the ladder, read time from the store).
+- `gamedata::pc_skill_data::grand_add_sp`: the grandmaster SP-cost poly per row.
+
+`sys.skill.core` row (230f: skill-up, the buffs, the grandmaster wire), `sys.skill.affect` row
+(the buff affects, 109's `RemoveBadAffect`), `cmd.skillup` row (`ported`), `gc.skill_level_new`
+row (stored levels in the burst, re-sent after an up), STATUS header and V17(f) updated here.
+No crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Gates: fmt clean; build with no warnings; clippy `-D warnings` (1.85.1) clean after the
+`do_skillup` backticks, the `apply_point2` split (which also fixed the `if_not_else`) and the
+`usize` point slot; doc green; prodomo 1019 · world 530 · gamedata 438 · common 107 · quest 69 ·
+protocol 1203 · parity 8/8.
+
+No ADR changed. No owner question added. V20 stays free.
+
+
+## 230g. A player reads its books and trains to grandmaster (V17f, fourth part)
+
+`CG_ITEM_USE` on a skill book reads it (`G/char_item.cpp:3282-3331` for `ITEM_SKILLBOOK`,
+`:4407-4790` for the 17 `ITEM_USE` arms): 50300 reads socket 0, every other book value 0; a
+non-positive skill keeps the book, where legacy's `RemoveItem` destroys it — a Divergence, since
+silently destroying a player's item is worse than the refusal. The leadership ladder (50301-50303),
+combo (50304-50306), the language trio (50311-50313, refusing the reader's own tongue), the summon
+book (50061), the passive ladder (50314-50316, 50325-50326, 50335-50340; 50323/50324 are
+`ITEM_GIFTBOX` on the owner's data and never reach the arm), craft (50902-50904), mining (50600)
+and the horse book (50060, its own body: level 50, the read-time gate, the triple cap, the chance
+roll, `POINT_HORSE_SKILL + 1`) each answer with their legacy lines. `LearnSkillByBook` (`:464-650`)
+takes the 20,000 exp below the max level, refuses a non-MASTER typed row (959/960), gates the
+read time with the wait ladder (`SkillLearnWaitMoreTimeMessage`: 973-986 by the hours out) and
+the no-delay consume (377), consumes the book bonus (512) into the chance, climbs a MASTER
+through `SkillLevelUp(BY_BOOK)`, trains a `prob == 0` MASTER through the read count
+(`traning_master_skill.{vnum}.read_count`, 961-963 and the 995 remainder; without quests the
+count never persists, like legacy's NULL-`GetPC` arm), and stamps `next_read[vnum]`. The shared
+tail talks 954/955 and infos 964 on a climb, 952/953 else. A landed up's slot, level and stamp
+ride `MovedItems.climbed` to the store's `store_skill`. The 7/8th-skills quest's GRAND read runs
+inline: `pc.learn_grand_master_skill` (`questlua_pc.cpp:121-133`) stamps the count in the loaned
+quest flags and `LearnGrandMasterSkill` (`:341-463`) reads it — the type-0 refusal (949), the
+non-GRAND refusal (950/951), the min/max count gates, the `number(1, count) == 2` roll with the
+book-bonus halve, the 8-12 h stamp (`SKILLBOOK_NEXTREAD_MIN/MAX` hardcoded: the config keys are
+dropped), the 954/955/956 tail — and `pc.get_skill_level` answers the live slots, so a second
+read in one script sees the first's climb. Each GRAND climb rides `QuestStepOutcome`'s climbs to
+`store_quest_climbs`. The PARTY dispatch fans through `compute_skill_party` (`:2430-2440`): no
+party is ported, so the fan takes the solo arm and the affects land on the caster, with
+`PARTY_DEFAULT_RANGE` held for the walk.
+
+Proved in-memory by the 8 new `pc_skill` tests (the book read through `use_item` with the
+20k spend, the combo gate's kept book, the own-tongue refusal, the horse point, the wait
+ladder's 985/986, the GRAND climb past its max with the stored climb and the 8-12 h stamp, the
+typeless GRAND refusal) and the quest `the_pc_names_answer_and_count_the_reads` (the level, the
+count in the flags, the live levels).
+
+- `prodomo::game_state::pc_skill`: `read_skill_book` + `book_arm_gates`/`book_basic_arms` +
+  `learn_skill_by_book` + `train_master_skill` + `book_read_tail` + `stamp_next_read` +
+  `read_horse_book` + `grand_master_read` (the `GRAND_BOOK_*` tables) + `compute_skill_party`
+  (the solo arm) + the PARTY dispatch arm.
+- `prodomo::game_state::quests`: `Session` holds the live slots/affects/points, climbs and
+  records; the `Game` impl runs the read inline (`learn_grand_master_skill`) and answers the
+  live slots (`skill_level`); `QuestStepOutcome` carries the records and climbs.
+- `quest::manager`: `pc.learn_grand_master_skill`/`pc.get_skill_level` bridged (the dworded
+  count in the loaned flags), `pc_api` split from `api`.
+- `prodomo::game_state` + `main.rs`: `use_item` reads a book before the world step and climbs
+  to `store_skill`; `store_quest_climbs` stores each GRAND climb before the dialog.
+- `world::character::equip::is_skill_book` + `gamedata::item_kind::USE_SPECIAL`: the book shape.
+
+`sys.skill.core` row (230g: the party solo arm, the books, the GRAND training), `sys.skill.affect`
+row (the party rows' self landing, the 512/513 consume arms), `cg.game.item_use` row (the book
+arms), `lua.pc.learn_grand_master_skill`/`lua.pc.get_skill_level` rows (`ported`), STATUS header
+and V17(f) updated here. No crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Gates: fmt clean; build with no warnings; clippy `-D warnings` (1.85.1) clean after the
+`SkillUpMethod` prefix strip, the `try_from` casts, the `if_not_else` swap, the `QuestStepOutcome`
+alias, the `book_arm_gates`/`book_basic_arms` splits and the `compute_*` helpers; doc green;
+prodomo 1027 · world 532 · gamedata 438 · common 107 · quest 70 · protocol 1203 · parity 8/8.
+
+No ADR changed. No owner question added. V20 stays free.
+
+## 230h. A player toggles its combo, charges its dash, and hides from monsters (V17f, fifth part)
+
+`UseSkill(122)` toggles the combo (`G/char_skill.cpp:2996-3006`): `m_bComboIndex` flips between
+0 and the combo level, chats `combo %d` (`CHAT_TYPE_COMMAND`), and returns true with no SP
+charge, no stamp, and no skill-time update. The arm sits before the level gate, as legacy's
+does before the SP charge — a level-0 combo still toggles and chats `combo 0`. The `gHackCheck`
+readers (`CheckComboHack`) are anti-cheat and never ported, like the speed-hack gates.
+Vnum 5 IS the charge: `SKILL_TANHWAN` (`G/skill.h:57`, auto-incremented after `SKILL_GEOMKYUNG`
+= 4), so the two "no owner PC row charges" comments are struck. A charge with the DASH held
+or a victim that is not the caster recurses through a self-cast when the DASH is missing
+(one SP charge, one cooldown), stamps the main VID, computes the SPLASH eagerly through the
+230e pipe, removes the affect, and returns true with no skill-time stamp (`:2979-2994`). The
+first cast falls through to the normal cast and computes eagerly at dispatch (`:3130`): the
+damage arm's charge-self exclusion (`:2625-2628`) routes to the non-damage else, where the
+empty duration skips the point change (`:2832-2834`) and the MOV_SPEED point2 affect-adds the
+DASH — kind 5, +150, flag 32, `duration2 + PARTY_BUFFER` (`:2842-2847`). `apply_point2` carries
+a charge bit for the DASH flag and the 7-arg cap takes its inputs as one tuple. `ek` stays 0:
+AMSEOP/GUNGSIN rows refuse at load, and no hosted polymorph reads the Eunhyung level. MUYEONG
+(78) stays refused with its row: the TOGGLE-off arm already answers it, and the self-compute
+arm and its 25-75 Pulse walk stay documented. The readers of the hide land in `find_victim`
+(`G/trigger.cpp:114-124`): EUNHYUNG and INVISIBILITY skip outright (no INVISIBILITY source is
+ported, so that half is coded and dead), and TERROR skips a feared player of the mob's level
+or above unless the mob carries `IMMUNE_TERROR` (`1<<5`). The recount fixed a real bug:
+`NEAREST_SKIPPED_WORD` read ordinals, not flags — EUNHYUNG is flag 19 -> bit 18 (not 19, which
+is TERROR's), INVISIBILITY is flag 2 -> bit 1 (not 2). The party walk waits for parties; the
+solo arm stands.
+
+Proved in-memory by the 5 new `pc_skill` tests (the combo toggle's two chats with no SP and
+no stamp, the level-0 toggle, the first cast's DASH with the SP charge and no HP move, the
+second cast's eager strike with the DASH gone and no second charge and no stamp, the
+dashless second cast's recurse-then-strike), the 2 `mob_battle` hide tests (the cloaked
+player skipped, TERROR feared at its level unless the dog is immune), and the `mob_ai` stone
+test (the nearer cloaked attacker skipped, the farther picked).
+
+- `prodomo::game_state::pc_skill`: `SKILL_TANHWAN`/`SKILL_COMBO` + `is_charge_skill` +
+  `AFF_TANHWAN_DASH` + `combo_index` + the combo arm + the charge gate with the recurse +
+  `compute_charge_self` + the charge thread through `compute_skill_affect`/`compute_skill_on`/
+  `apply_point2` + the dispatch eager arm.
+- `prodomo::game_state::mob_battle`: `FIND_SKIPPED_WORD`/`FIND_TERROR_WORD`/`IMMUNE_TERROR` +
+  the EUNHYUNG/INVISIBILITY/TERROR skips + the shared `AFF_REVIVE_INVISIBLE` bit +
+  the `NEAREST_SKIPPED_WORD` bit fix.
+
+`sys.skill.core` row (230h: the combo toggle, the charge pair, the EUNHYUNG hide), STATUS header
+and V17(f) updated here. No crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Gates: fmt clean; build with no warnings; clippy `-D warnings` (1.85.1) clean after the
+`apply_point2` tuple, the `is_some_and` fold, and the `contains_key` swap;
+doc green; prodomo 1035 · world 532 · gamedata 438 · common 107 · quest 70 ·
+protocol 1203 · parity 8/8.
+
+No ADR changed. No owner question added. V20 stays free.
+
+## 230i. The party walk's foundation: invite, join, and the fan (V17f, sixth part)
+
+`GameState.parties` holds the PC parties (`G/party.{h,cpp}`, narrowed): PID-keyed members in
+PID order per party, parties by leader PID, a PID→leader index, and the pending invites as
+`(leader, guest) → lapse Pulse`. Legacy's per-inviter event maps collapse into the one keyed
+map, which answers the same questions. Every `HEADER_GD_PARTY_*` DB packet drops with the rest
+of the server-to-server protocol (ADR-0001); parties are session state and die with the process.
+PC parties are always enabled (no config key — the manager starts enabled on a running legacy
+game, so the `PERR_SERVER` arm is coded and dead), and the dungeon/observer/arena gates pass
+with comments (no dungeons, observers or arenas ported), which leaves the empire check, the
+30-level window, the partyless check and the 8-member cap live. Block modes are unported, so
+the `[LS;833]` line has no sender yet.
+
+`CreateParty` keeps a leader's party or makes one (join + link); `Join` inserts (first member
+becomes LEADER) then join-one-to-all + parameter-to-one (mode 0 — 230j owns the value, 230i
+owns the order); `Link` attaches the VID and sends the six in legacy order + parameter;
+`Quit` removes-one-to-all, detaches, unindexes, and a leader's quit deletes the party;
+`Unlink` unlinks-one-to-all and detaches. The login path links when the PID has a party
+(`enter_world_with_items`), the logout path unlinks (`leave_world_by`). The plan's
+DeleteParty-broadcast question is answered: legacy sends nothing — no remove, no unlink, the
+P2P destroy commented out, no companion broadcast at any caller (`P2PQuit`'s
+`SendPartyRemoveOneToAll` runs only on the non-disband path) — so members' clients keep
+showing a dead party until their own link ends; ported as-is.
+
+Invite/accept/deny follow `G/char.cpp:5839-6021` with the `[LS;...]` lines: the non-leader
+`[LS;832]`, the joinable gates (530/821/824/834/828 — the 822/823 dungeon/observer lines
+have no sender yet), the dup-invite quiet return, the 250-Pulse event and the guest INVITE;
+accept cancels the event, rechecks the leader (`[LS;832]`), runs only the mutable gates
+(530/835/823/824/826/827/837/828+831), then joins the live party or creates one (join + link
++ info-all-to-one); deny and the timeout both run `PartyInviteDeny`, so expiry tells the
+inviter `[LS;838;%s]` too. `LOWLEVEL`/`HILEVEL` are unreachable: the checker never returns
+them, in legacy either. Remove follows `:2578-2675`: the arena/enabled/dungeon gates pass,
+self-or-count-2 disbands, the leader's removal chats `[LS;675]` to the online removed, the
+member's self-leave chats `[LS;532]`, and removing another chats `[LS;677]`. The leaver hears
+its own REMOVE: `SendPartyRemoveOneToAll` runs before the erase, and the test pins that.
+
+The 3 s Update recomputes `near` per member (`DISTANCE_APPROX` below 5000), wipes at ≤1 (a
+solo leader is not near itself), and resends every online member's info on a count change.
+No map check: legacy compares raw x/y across maps too, and the port keeps that. The tick
+driver runs in `process_pulse` beside the invite-timeout tick. The info packet is
+`BuildUpdatePartyPacket` with zeroed affects (their fill is 230j's with the bonus values);
+an offline member reads 255 HP. Headers 75/76/78 take their cheap gates now: SET_STATE's
+partyless/leader/member checks with `[LS;671/672]` + NORMAL no-op (roles are 230j's),
+PARAMETER's leader-only gate under `__FIX_EXP_GRUP__` (the mode store is 230j's), USE_SKILL's
+partyless/leader gates with `[LS;684]` (HEAL is legacy's dead `XXX DELETEME` body, WARP is
+230k's). All six CG headers dispatch through new `GameCommand`s, proved by the world tests
+calling the same entry points the commands call.
+
+`ComputeSkillParty`'s fan walks the near online members in PID order with the caster as the
+attacker — but no hosted PC row is PARTY-flagged (the only PARTY row in the dump is vnum 265,
+unhosted), so the fan is coded and dead, pinned by in-memory tests only (same class as the
+mob heal's party arm). The `pc_skill.rs` solo-arm comment now says the fan exists and waits.
+
+`sys.party` row (missing → partial) and the six `cg.game.party_*` rows (missing → ported, each
+with its world test), the `sys.skill.core` note, STATUS header and V17(f) updated here. No
+crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Gates: fmt clean; build with no warnings; clippy `-D warnings` (1.85.1) clean after the
+`by_leader` rename, the method-call folds, the iter-loop folds, the `u8::try_from` clamp, the
+tail-return restructures, the fan closure, and the `apply` trim (`apply_pick` one-liner +
+`answer_restart` helper for the 100-line cap); doc green; prodomo 1043 · world 532 ·
+gamedata 438 · common 107 · protocol 1203 · parity `inventory_rows_keep_the_rules` green.
+
+No ADR changed. No owner question added. V20 stays free.
+
+## 230j. The party's roles, bonuses, the distribution parameter (V17f, seventh part)
+
+`prodomo/src/game_state/party.rs` grows the Update's second half: role counts and caps,
+the cached leadership, the exp-bonus terms, the start clock, and the distribution mode.
+`SetRole` follows `G/party.cpp:963-1023` exactly — cap refuses, the member must hold
+NORMAL, the role stores, the linked member's points recompute when the leader's member
+row exists, then the count rises, then the info fans out — and the unset arm ports the
+mismatch: it decrements the PASSED role's count, so unsetting TANKER on an ATTACKER
+leaves `count[TANKER] == -1` (pinned by test). The DB state-change packet drops with
+every other `HEADER_GD_PARTY_*`.
+
+`ComputeRolePoint` follows `:1215-1307`: `k` is the member's own `(job, skill_group)`
+power row at `min(40, leadership)` over 100 in `f32` — the leadership level gates the
+row, the member's job/group picks the table — and the six formulas land through
+`PointChange` diffs: `10 + 60k`, `50 + 1450k`, `5 + 45k`, `25 + 600k`, `1 + 5k`,
+`5 + 30k`, truncated by the `as i32` cast (one `#[allow(cast_possible_truncation)]`,
+values are small). The BUFFER asymmetry ports as-is: its arm changes the point without
+a `ComputePoints`. The `bAdd=false` arm zeroes all six and refreshes through
+`ComputeBattlePoints` or `ComputePoints` by caller — `RemoveBonuses` and the Update's
+un-near take battle, `SetRole`/`Quit`/`Destroy` take full — using the port's existing
+split (`compute_battle_points` vs `compute_points`). The zeroing runs on a diff: only
+nonzero slots change, and unchanged bonuses skip the refresh, matching legacy's
+`bonus != current` gates and its `PointChange` sends.
+
+The Update now runs the full `:1308-1443` order: nears, leadership refresh, the exp
+recompute with its resend, the once-only long-time +5 (`now - start > 3_600_000` ms in
+wrapping `u32`, flag is the bonus itself, `[LS;926]` to each member with a desc),
+per-member role points at the cached near with near infos unless resending, the caps
+(ATTACKER 10, HASTE/TANKER 20, BUFFER 25, SKILL_MASTER 35, DEFENDER 40, second ATTACKER
+40), then the resend-all. A leaderless party (or a leader with no spot) takes
+`RemoveBonuses`: recompute the exp bonus, and only when it changed zero every online
+member's six and fan infos. `P2PJoin`'s leadership seed ports at the leader's join.
+`Quit` zeroes through `RemoveBonusForOne` before the erase with the unfloored decrement;
+`DeleteParty` still sends no party packet but `Destroy`'s `RemoveBonus` zeroes every
+online member's six — the two 230i wire tests now pin the point-change tails.
+
+The exp bonus is the upgrade-party table (`min(8, near)`: 12/18/26/40/53/70/100), +30
+while the leader wears 70003, 71012 or 76011. The unique-group half of the +30 is coded
+and dead: the owner's only group is `Vnum 50011`, above the 30000 CHECK_UNIQUE_GROUP
+gate, so `m_ItemToSpecialGroup` never fills (same class as the 265 finding). Not stored
+at all: the att/def party bonuses (both computes are commented-out `return 0`, no live
+reader), the heal-ready block (only send is `if (0)` DELETEME'd, flag feeds dead
+`HealParty`), and exp-centralize state (`SetExpCentralizeCharacter` has no callers; 230k
+ports the Distribute arm as a dead comment).
+
+The UPDATE affects fill behind the live gate — member within 5000 of the linked leader,
+a fresh distance read, not the cached near: `m_iExpBonus` alone (table+30, NOT the
+long-time +5) then the six member points, narrowed `i32→i16` by a saturating helper
+(legacy truncates; live bonuses fit). The parameter stores 0/1 with the `>= 2` quiet
+refusal and fans to every online member; `SendParameter` reads the member's party mode
+(0 partyless).
+
+Seven in-memory tests: caps follow leadership (0 refuses, 10 opens one ATTACKER, 40
+reads 2/1/1/1/1/1), ATTACKER lands at 10 under empty tables and clears on un-near while
+the role stays, the unset mismatch, quit/disband zeroing, the 12→42 table with the
+medal plus the once-only `[LS;926]` and the +5 held out of affects[0], the parameter
+fan with the member-quiet and mode-2 refusal, and the live affect gate (no Update
+between the walk and the fan). The medal test re-enters the leader with the item worn,
+relinks (the re-enter unlinked), and Updates again.
+
+`sys.party` note, STATUS header and V17(f) updated here. No crate was added, and
+`Cargo.toml` and `Cargo.lock` are unchanged.
+
+Gates: fmt clean; build with no warnings; clippy `-D warnings` (1.85.1) clean after the
+const hoists, the doc backticks, the `map_or` fold, the saturating `narrow`, the
+`compute_role_point` doc reword, and the test inbox rebind + chat-count loop; doc
+green; prodomo 1050 · world 532 · gamedata 438 · common 107 · protocol 1203 · parity
+`inventory_rows_keep_the_rules` green.
+
+No ADR changed. No owner question added. V20 stays free.
+## 230k. The party's heal, warp, exp share (V17f, eighth part)
+
+`HealParty` is legacy's dead body — `XXX DELETEME` returns first (`G/party.cpp:1077`) —
+so the 230i no-op stands, with the comment extended to name the dead refill below it.
+`SummonToLeader` (`:1107-1171`) ports whole: the non-member/offline `[LS;685]`, the
+`CanSummon` `[LS;923]`, the 12 radius-250 offsets each through `movable_position` on
+the leader's map, the `n == 0` `[LS;924]`, and the `number(0, n-1)` pick shown and
+stopped. A cross-map summon leaves the member's own index first and joins the leader's
+— the same removes and inserts legacy's cross-map `Show` sends, with no `GC_WARP`
+either way. The warp dispatch (`G/input_main.cpp:2746-2756`) chats the raw
+`<Party> Cannot find target to summon.` LC_TEXT line for a gone VID (no `[LS;N]`), and
+other indexes stay quiet like the switch without a default.
+
+`CanSummon` ports as-written: 20+ always, 12-19 within 180 of `m_dwLastDeadTime`,
+below 12 never. The clock is milliseconds but the check adds 180, so the window is
+180ms — a suspected unit mismatch against the constructor's `now - 180000`
+(`G/char.cpp:298`), recorded here, not widened. `PcCombat.last_dead_ms` holds the
+stamp (`dead_pc` writes it); `None` is the constructor seed, which fails the +180
+check the same way an old stamp does.
+
+`DistributeExp` grows its party rows (`G/char_battle.cpp:2869-2904`): party attackers
+accumulate by leader PID, the rows append after the solos in first-appearance order
+(legacy's `std::map<LPPARTY>` order is pointer order, nondeterministic across runs —
+the deterministic order is noted, not a Divergence row), and the top scan is now over
+ROWS while the return stays the per-character most-attacked. `TDamageInfo::Distribute`
+(`:2782-2815`) feeds solos to `give_exp` and parties to the totaler/distributor
+(`:2704-2767`): the near-leader `* (100 + bonus) / 100` multiplier (strict `< 5000`
+victim-near-leader, `<= 5000` member-near-victim, both kept), the NP table from
+`constants.cpp:396-411` as `common::levels::party_exp_np` (0 and past-120 take 14000),
+the `(DWORD)(exp * (float)NP / total)` f32 math, and the parity `exp / count` split.
+The test-server log arm is not taken; the centralize arm is dead
+(`m_pkChrExpCentralize` has no setter, 230j finding). Ownership rotation is not
+ported: its only reader is chain lightning (`char_skill.cpp:1292`), which is not
+ported.
+
+Seven in-memory tests: the summon gates (685/923/924, the LC_TEXT line, HEAL/unknown
+quiet), the `CanSummon` windows (20 runs, 11 refuses, 12 never-died refuses, 12 fresh
+runs, 12 at +181ms refuses), the summon move-and-stop (movers, start/dest, beside the
+leader, no chat), the non-parity NP split (50/50), the parity split (50/50), and the
+multiplier geometry (112% near via the 56/56 halves, 100% far with only the in-range
+member paid). The multiplier test pulses 76, not 75: the Update's due is
+`last_pulse + 75` at create.
+
+`sys.party` → ported, STATUS header and V17(f) updated here. No crate was added, and
+`Cargo.toml` and `Cargo.lock` are unchanged.
+
+Gates: fmt clean; build with no warnings; clippy `-D warnings` (1.85.1) clean; doc
+green; prodomo 1056 · world 532 · gamedata 438 · common 108 · protocol 1203 · parity
+`inventory_rows_keep_the_rules` green.
+
+No ADR changed. No owner question added. V20 stays free.
+
+## 230l. The leader's unlink and the leader-side party_kill (V17f, ninth part)
+
+The cross-Channel bus turned out to be nothing to port. `HEADER_GD_PARTY_*` /
+`HEADER_DG_PARTY_*` keep a per-Channel party map on the DB server and fan it to the
+Channel's cores; the Rewrite holds one `Parties` on the single `GameState`, so a party
+already spans Channels by construction and there is nothing to fan. The `HEADER_GG_PARTY`
+send sites are all commented out (`G/party.cpp:141,169,524`) and `input_p2p.cpp` has no
+party case — no live GG party wire. `CPartyManager::P2PLogin`/`P2PLogout` have no callers
+(dead code); the live login path is `P2PJoin` naming from `FindByPID` when the member is
+local, which `link_party` covers. So 230l ports the two cross-member behaviours that are
+live, in-party, and unported — the bus the party rides on inside one process. The party
+chat fan stays the judged-next slice (230m): `CHAT_TYPE_PARTY` fans
+`ForEachOnlineMember` on the killer's core only, and the port's judge stays on the
+no-party `[LS;655]` arm until a same-process fan lands.
+
+`CParty::Unlink` (`G/party.cpp:632-670`): when the unlinking member holds LEADER,
+`RemoveBonus()` runs — every linked member's six role points zero through `PointChange` +
+`ComputePoints`, and every member's `bNear` clears. `unlink_party` sends the
+unlink-one-to-all and detaches the VID as before, then, for a leader unlink, zeroes every
+linked member's role points with the `ComputePoints` refresh (`RemoveBonus`, not the
+Update's `RemoveBonuses`) and clears every member's near flag — sends before the zeroing,
+as in `Unlink` (`:649` before `:654`). The dungeon `FExitDungeon` arm (`:656-662`) is not
+ported (no dungeons).
+
+`CQuestManager::Kill` (`G/questmanager.cpp:574-611`): `party_kill` runs on both the raced
+NPC and the no-target NPC for the leader's PC (`GetPC(leader->GetPlayerID())`,
+`GetPCForce` — created when unseen), not the killer's. `Manager::kill` gains the leader
+(`Option<u32>`): the `kill` halves run on the killer's PC, the `party_kill` halves on the
+leader's. The seen-gate stays on the killer (`GetPC(pc)` miss misses the whole call,
+`:581`, the `sys_err` there); the leader's PC is force-created (`operate`'s entry). The
+two halves run as two `operate` calls — the killer's consumes the stored quest NPC VID,
+so it is re-set from the killer PC's own stored `npc_vid` before the leader half (the
+victim publishes to both). `None` is the offline leader (no `party_kill` at all,
+`:598-600`); partyless passes the killer's own PID. `quest_kill` computes it in
+`reward.rs::raise_quest_kill` via the new `quest_kill_leader`: the killer's party leader
+when the killer is linked and the leader is linked, else the killer's own PID. This is
+wire-observable: the only live `party_kill` script is `guild_create`'s
+`when 691.party_kill → set_state(reward)`, which moves the leader's quest state and its
+later `send_letter` traffic.
+
+Three in-memory tests: the leader unlink zeroes every linked member's role points (each
+with a point-change record) and clears every near flag, while a member unlink keeps the
+points; the quest-crate `a_kill_runs_party_kill_on_the_leaders_pc_not_the_killers` pins
+the force-created leader PC with both flags unmoved (all live `party_kill` scripts sit in
+`run`, which neither PC holds); the field test of the same name pins the end-to-end
+routing (member kills race 691, the leader's PC appears, `quest_kill_leader` is
+`Some(2)`), plus the offline-leader `None`.
+
+`sys.party` → note extended, STATUS header and V17(f) updated here. No crate was added, and
+`Cargo.toml` and `Cargo.lock` are unchanged.
+
+Gates: fmt clean; build with no warnings; clippy `-D warnings` (1.85.1) clean; doc
+green; prodomo 1059 · quest 71 · parity green.
+
+No ADR changed. No owner question added. V20 stays free.
+
+## 230m. The party chat fan (V17f, tenth part)
+
+`CInputMain::Chat`, `CHAT_TYPE_PARTY` (`G/input_main.cpp:957-975`): without a party the
+speaker hears `[LS;655]`; with one, the shared `pack_chat` build fans raw over
+`ForEachOnlineMember` — every linked member in PID order, the speaker included
+(`G/party.h:277-285`, `RawPacketToCharacterFunc` at `input_main.cpp:660-668` skipping
+NULL-desc members). No empire conversion: that is the talking functor's alone.
+
+The judge needs membership, which lives on the world. `ChatContext` gains `in_party:
+bool`, and `main.rs` asks it lazily — only a party line pays the world round-trip, via
+the new `GameCommand::PartyOf`, answered from `parties.of` by `holds_party` in the
+`apply_pick` arm. A character outside the world holds no party (`link_party` only runs
+on world entry); a dead world closes, as the talking relay does. The in-party arm judges
+to the new `ChatEffect::PartyToMembers` (the same `talking_text` build, the same
+empire byte rule as talking); `party_record` builds the type-3 line, and `main.rs`
+relays it under the new `RelayScope::Party`, whose world arm fans `party_member_vids`
+— the linked VIDs in PID order (`BTreeMap` order, deterministic, so no Divergence) —
+through `write_to_client`, which is the NULL-desc skip. A partyless fan stays quiet.
+
+Three proofs: the chat unit `a_party_line_in_a_party_fans_to_the_members` (the effect,
+`reaches_client`, the record's type/id/empire/`can_format`, the types not crossing);
+the world test of the same walk (PID order with the speaker included, the unlinked
+member skipped while still holding the party, the partyless speaker quiet, the outsider
+deaf); and the wire scenario `a_party_line_reaches_the_members_and_no_outsider` — two
+scripted clients party up over the six CG dispatches, the speaker's line reaches both
+members byte-identical with the speaker's VID, empire 1 and `bCanFormat` false, and a
+third client hears nothing.
+
+`sys.party` → note extended, STATUS header and V17(f) updated here. No crate was added, and
+`Cargo.toml` and `Cargo.lock` are unchanged.
+
+Gates: fmt clean; build with no warnings; clippy `-D warnings` (1.85.1) clean; doc
+green; prodomo 1061 · parity green.
+
+No ADR changed. No owner question added. V20 stays free.

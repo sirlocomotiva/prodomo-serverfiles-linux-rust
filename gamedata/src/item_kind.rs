@@ -31,6 +31,8 @@ pub const ITEM_METIN: i32 = 10;
 pub const ITEM_ROD: i32 = 13;
 /// `ITEM_UNIQUE`.
 pub const ITEM_UNIQUE: i32 = 16;
+/// `ITEM_SKILLBOOK` (17): a master-training book, read by `LearnSkillByBook`.
+pub const ITEM_SKILLBOOK: i32 = 17;
 /// `ITEM_QUEST`, an item a quest reads.
 pub const ITEM_QUEST: i32 = 18;
 /// `ITEM_PICK`, a pickaxe.
@@ -94,6 +96,9 @@ pub const USE_POTION: i32 = 0;
 pub const USE_ABILITY_UP: i32 = 7;
 /// `USE_POTION_NODELAY`: a potion whose recovery is immediate.
 pub const USE_POTION_NODELAY: i32 = 11;
+/// `USE_SPECIAL` (`C/item_length.h:264`): 10. The skill books' sub type (all the 230g book
+/// vnums carry it).
+pub const USE_SPECIAL: i32 = 10;
 
 /// `COSTUME_BODY`, which the source pins to `ARMOR_BODY`.
 pub const COSTUME_BODY: i32 = 0;
@@ -222,6 +227,7 @@ mod tests {
             (ITEM_METIN, "ITEM_METIN"),
             (ITEM_ROD, "ITEM_ROD"),
             (ITEM_UNIQUE, "ITEM_UNIQUE"),
+            (ITEM_SKILLBOOK, "ITEM_SKILLBOOK"),
             (ITEM_QUEST, "ITEM_QUEST"),
             (ITEM_PICK, "ITEM_PICK"),
             (ITEM_TOTEM, "ITEM_TOTEM"),
@@ -270,6 +276,7 @@ mod tests {
             (USE_POTION, "USE_POTION"),
             (USE_ABILITY_UP, "USE_ABILITY_UP"),
             (USE_POTION_NODELAY, "USE_POTION_NODELAY"),
+            (USE_SPECIAL, "USE_SPECIAL"),
         ] {
             assert_eq!(value, index(usable, name), "{name}");
         }

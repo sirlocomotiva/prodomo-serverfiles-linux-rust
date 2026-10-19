@@ -145,6 +145,15 @@ pub trait Game {
 
     /// `number(from, to)`: a random number from `from` to `to`.
     fn number(&mut self, from: i32, to: i32) -> i32;
+
+    /// `LearnGrandMasterSkill(vnum)` (`G/char_skill.cpp:341`): the 7/8th-skills
+    /// quest's read of a GRAND skill (230g). `total` is the read count including
+    /// this one, which the bridge already stamped in the quest flags. Answers
+    /// whether the skill climbed.
+    fn learn_grand_master_skill(&mut self, vnum: u32, total: i32) -> bool;
+
+    /// `GetSkillLevel(vnum)` of the character the script runs for (230g).
+    fn skill_level(&self, vnum: u32) -> u8;
 }
 
 /// A compiled chunk, or why it could not be compiled; the error ends the script that runs it.
@@ -221,6 +230,11 @@ impl Manager {
     pub fn has_npc(&self, race: u32) -> bool {
         self.npcs.get(&race).is_some_and(|npc| !npc.is_empty())
     }
+    /// Whether the manager holds a PC record for `pid` — it has seen the character
+    /// (a click) or force-created it (a `party_kill` for its leader).
+    pub fn has_seen(&self, pid: u32) -> bool {
+        self.pcs.contains_key(&pid)
+    }
 
     /// Whether a script of character `pid` is suspended, waiting for the client.
     pub fn is_running(&self, pid: u32) -> bool {
@@ -230,6 +244,16 @@ impl Manager {
     /// A quest flag of character `pid`, such as `QUEST.__status`, the state a quest last ran in.
     pub fn quest_flag(&self, pid: u32, name: &[u8]) -> Option<i32> {
         self.pcs.get(&pid)?.flags.get(name).copied()
+    }
+    /// `quest::PC::SetFlag`: sets a quest flag of character `pid`, which the
+    /// book training counts read (`G/char_skill.cpp:407,592,600`). Creates the
+    /// character's record, as legacy's `GetPCForce` does for a writer.
+    pub fn set_quest_flag(&mut self, pid: u32, name: &[u8], value: i32) {
+        self.pcs
+            .entry(pid)
+            .or_default()
+            .flags
+            .insert(name.to_vec(), value);
     }
 
     /// `game.get_event_flag`: an event flag, 0 when it was never set.
@@ -282,16 +306,18 @@ impl Manager {
     /// `CQuestManager::Kill`: character `pid` killed race `race` (`questmanager.cpp:574-611`).
     /// A race at or past `MAIN_RACE_MAX_NUM` (8, `G/char.h:62-73`) runs its own `kill`
     /// scripts, and the no-target scripts' `kill` always runs; `ENABLE_PARTYKILL` (defined,
-    /// `:573`) then runs `party_kill` on both for the leader, which is the killer itself
-    /// while no party is ported. A character the manager never saw still misses, as
-    /// legacy's `GetPC` returns NULL for it (`sys_err` there).
-    pub fn kill(&mut self, pid: u32, race: u32, game: &mut dyn Game) -> bool {
+    /// `:573`) then runs `party_kill` on both for `leader`'s PC (`GetPCForce` — created
+    /// when unseen). `leader` is `Some` killer's own PID when partyless and `None` when the
+    /// killer's leader is offline (`:598-600` — a NULL leader runs nothing). A killer the
+    /// manager never saw still misses the whole call, as legacy's `GetPC` returns NULL for
+    /// it (`sys_err` there).
+    pub fn kill(&mut self, pid: u32, race: u32, leader: Option<u32>, game: &mut dyn Game) -> bool {
         if !self.pcs.contains_key(&pid) {
             tracing::warn!("QUEST KILL_EVENT no such pc id : {pid}");
             return false;
         }
         // `SetQuestNPCID` ran on the caller (`Reward`, `G/char_battle.cpp:810`).
-        self.operate(pid, game, |run, pc, npcs| {
+        let mut ran = self.operate(pid, game, |run, pc, npcs| {
             let mut ran = false;
             if race >= MAIN_RACE_MAX_NUM {
                 if let Some(npc) = npcs.get(&race) {
@@ -300,17 +326,29 @@ impl Manager {
             }
             if let Some(npc) = npcs.get(&QUEST_NO_NPC) {
                 ran |= run.handle_event(pc, npc, "kill");
-                // The leader is the killer itself while no party is ported, so its
-                // `party_kill` runs on the same character (`:597-605`).
-                ran |= run.handle_event(pc, npc, "party_kill");
             }
+            ran
+        });
+        let Some(leader) = leader else {
+            return ran;
+        };
+        // The victim publishes to the leader's half too (`npc.getrace` reads it there):
+        // the killer's `operate` consumed the stored VID, so it is set again.
+        self.quest_npc_vid = self.pcs.get(&pid).map_or(0, |pc| pc.npc_vid);
+        // `GetPCForce(leader)`: `operate`'s entry creates the unseen PC.
+        ran |= self.operate(leader, game, |run, pc, npcs| {
+            let mut ran = false;
             if race >= MAIN_RACE_MAX_NUM {
                 if let Some(npc) = npcs.get(&race) {
                     ran |= run.handle_event(pc, npc, "party_kill");
                 }
             }
+            if let Some(npc) = npcs.get(&QUEST_NO_NPC) {
+                ran |= run.handle_event(pc, npc, "party_kill");
+            }
             ran
-        })
+        });
+        ran
     }
 
     /// `CInputMain::ScriptAnswer`: an answer above 250 continues a `wait`, any other picks entry
@@ -410,6 +448,9 @@ impl Manager {
     }
 
     /// Runs `op` for character `pid` with the bridge set for its whole length.
+    /// `pc` reaches the bridge (`Cx::pc`) so a name whose answer mutates the
+    /// character's quest state (`pc.learn_grand_master_skill`'s count) does it
+    /// now, while the script that asked still waits for the answer.
     fn operate<R: Default>(
         &mut self,
         pid: u32,
@@ -431,6 +472,11 @@ impl Manager {
             pc.npc_vid = *quest_npc_vid;
             *quest_npc_vid = 0;
         }
+        // The bridge owns `pc.flags` while Lua runs (`Cx::quest_flags`): a name whose
+        // answer mutates quest state does it now, while the script that asked still
+        // waits. Swapped out and back — `execute` also writes `__status` there, but
+        // never while a bridge call holds the `RefCell`.
+        let mut loaned = std::mem::take(&mut pc.flags);
         let cx = RefCell::new(Cx {
             output: Output::default(),
             game,
@@ -439,10 +485,20 @@ impl Manager {
             npc_vid: pc.npc_vid,
             quest: pc.current.clone(),
             pending_state: None,
+            quest_flags: Some(&mut loaned),
         });
         let run = Run { host, cx: &cx };
         let result = run.bridged(|| op(&run, pc, npcs));
-        let unsent = cx.into_inner().output.script;
+        let cx = cx.into_inner();
+        let unsent = cx.output.script.clone();
+        drop(cx);
+        // The loaned map is the live one: the bridge's writes landed there, and
+        // `pc.flags` stood empty meanwhile — except `execute`'s `__status`, which
+        // wrote the empty map and is merged back on top.
+        for (name, value) in std::mem::take(&mut pc.flags) {
+            loaned.insert(name, value);
+        }
+        pc.flags = loaned;
         if !unsent.is_empty() {
             tracing::warn!(
                 pid,
@@ -921,6 +977,11 @@ struct Cx<'g> {
     quest: Vec<u8>,
     /// What `set_state` asked for, which `execute` moves the `Pc` to when the script ends.
     pending_state: Option<Vec<u8>>,
+    /// The character's quest flags: the split half the bridge owns while `op` keeps
+    /// the rest (`operate`). A name whose answer mutates quest state
+    /// (`pc.learn_grand_master_skill`'s count) does it here, now. `None` only in
+    /// the direct-call probe, which answers through the `Game` alone.
+    quest_flags: Option<&'g mut BTreeMap<Vec<u8>, i32>>,
 }
 
 /// One call into the manager. No `Cx` borrow is held across a call into Lua, which may call
@@ -1355,12 +1416,62 @@ fn text_api(
     Ok(TextOutcome::Hit(result))
 }
 
+/// The `pc.*` bridged names: the level, the grand-master read and the skill level.
+/// Returns `None` for a name this table does not hold.
+fn pc_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    first: &Value,
+) -> mlua::Result<Option<MultiValue>> {
+    let number = |value: u32| Some(Value::Number(f64::from(value)));
+    let result = match name {
+        b"pc.get_level" => number(u32::from(cx.game.level())),
+        b"pc.is_gm" => Some(Value::Boolean(false)),
+        b"pc.learn_grand_master_skill" => {
+            // `pc_learn_grand_master_skill` (`questlua_pc.cpp:121-133`): a non-number
+            // pushes nothing; a number pushes the climb. The count lives here, in
+            // the character's flags, so the second read in one script sees the first.
+            let Some(vnum) = lua.coerce_number(first.clone())? else {
+                return Ok(Some(MultiValue::new()));
+            };
+            let vnum = dword(vnum);
+            let name = format!("training_grandmaster_skill.skill{vnum}");
+            let total = cx
+                .quest_flags
+                .as_deref()
+                .and_then(|flags| flags.get(name.as_bytes()).copied())
+                .unwrap_or(0)
+                + 1;
+            if let Some(flags) = cx.quest_flags.as_deref_mut() {
+                flags.insert(name.into_bytes(), total);
+            }
+            let climbed = cx.game.learn_grand_master_skill(vnum, total);
+            Some(Value::Boolean(climbed))
+        }
+        b"pc.get_skill_level" => {
+            // `pc_get_skill_level` (`questlua_pc.cpp:1734-1749`): a non-number logs
+            // and answers 0; a number answers the level.
+            let Some(vnum) = lua.coerce_number(first.clone())? else {
+                tracing::warn!("QUEST invalid argument");
+                return Ok(Some(MultiValue::from_iter([Value::Number(0.0)])));
+            };
+            Some(Value::Number(f64::from(cx.game.skill_level(dword(vnum)))))
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(result.into_iter().collect()))
+}
+
 fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Result<MultiValue> {
     let first = args.front().cloned().unwrap_or(Value::Nil);
     let last = args.back().cloned().unwrap_or(Value::Nil);
     let number = |value: u32| Some(Value::Number(f64::from(value)));
     if let TextOutcome::Hit(result) = text_api(lua, cx, name, args, last.clone())? {
         return Ok(result.into_iter().collect());
+    }
+    if let Some(answered) = pc_api(lua, cx, name, &first)? {
+        return Ok(answered);
     }
     let result = match name {
         b"set_skin" | b"setskin" => {
@@ -1423,8 +1534,6 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
             Some(Value::Number(f64::from(value)))
         }
         b"npc.getrace" | b"npc.get_race" => number(cx.game.race_of(cx.npc_vid).unwrap_or(0)),
-        b"pc.get_level" => number(u32::from(cx.game.level())),
-        b"pc.is_gm" => Some(Value::Boolean(false)),
         b"set_state" | b"q.setstate" | b"q.set_state" => {
             match host::c_string(lua, last)? {
                 Some(state) if !state.is_empty() => {
@@ -1470,6 +1579,7 @@ mod tests {
         chats: Vec<(ChatKind, Vec<u8>)>,
         scripts: Vec<(u8, Vec<u8>)>,
         draws: Vec<(i32, i32)>,
+        learned: BTreeSet<u32>,
     }
 
     impl Fake {
@@ -1516,6 +1626,14 @@ mod tests {
         fn number(&mut self, from: i32, to: i32) -> i32 {
             self.draws.push((from, to));
             to
+        }
+
+        fn learn_grand_master_skill(&mut self, vnum: u32, _total: i32) -> bool {
+            !self.learned.insert(vnum)
+        }
+
+        fn skill_level(&self, vnum: u32) -> u8 {
+            u8::from(self.learned.contains(&vnum)) * 40
         }
     }
 
@@ -1855,6 +1973,8 @@ mod tests {
         manager: &'m Manager,
         game: Fake,
         output: Output,
+        /// The loaned quest flags, as `operate` lends them: the count arms persist here.
+        flags: BTreeMap<Vec<u8>, i32>,
     }
 
     impl Probe<'_> {
@@ -1867,6 +1987,7 @@ mod tests {
                 npc_vid: VID,
                 quest: b"q".to_vec(),
                 pending_state: None,
+                quest_flags: Some(&mut self.flags),
             };
             let args: MultiValue = args.iter().cloned().collect();
             let result = api(self.manager.host.lua(), &mut cx, name.as_bytes(), &args);
@@ -1893,6 +2014,7 @@ mod tests {
             manager: &manager,
             game: Fake::at_ox_manager(),
             output: Output::default(),
+            flags: BTreeMap::new(),
         };
         // Text and numbers join, each up to a zero byte; anything else is skipped.
         let parts = [
@@ -1966,14 +2088,52 @@ mod tests {
             number(1.0)
         );
         assert_eq!(flag(&mut probe, &[string(b"nothing")]), number(0.0));
-        assert_eq!(flag(&mut probe, &[table]), number(0.0));
+        assert_eq!(flag(&mut probe, &[table.clone()]), number(0.0));
         for name in ["get_time", "get_global_time"] {
             assert_eq!(probe.call(name, &[]).unwrap(), number(1_790_000_000.0));
         }
-        probe.game.level = 40;
-        assert_eq!(probe.call("pc.get_level", &[]).unwrap(), number(40.0));
         let error = probe.call("pc.warp", &[]).unwrap_err().to_string();
         assert!(error.contains("not ported: pc.warp"), "{error}");
+    }
+
+    /// The `pc.*` arms: the level, the grand-master read (each numbered read bumps the
+    /// count in the flags, dworded), and the skill level.
+    #[test]
+    fn the_pc_names_answer_and_count_the_reads() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let number = |value: f64| vec![Value::Number(value)];
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            flags: BTreeMap::new(),
+        };
+        probe.game.level = 40;
+        assert_eq!(probe.call("pc.get_level", &[]).unwrap(), number(40.0));
+        let table = Value::Table(lua.create_table().unwrap());
+        // a non-number pushes nothing.
+        let climbed = |probe: &mut Probe, args: &[Value]| {
+            probe.call("pc.learn_grand_master_skill", args).unwrap()
+        };
+        assert_eq!(climbed(&mut probe, &number(1.9)), [Value::Boolean(false)]);
+        assert_eq!(climbed(&mut probe, &number(1.9)), [Value::Boolean(true)]);
+        assert_eq!(
+            probe
+                .flags
+                .get(b"training_grandmaster_skill.skill1".as_slice()),
+            Some(&2),
+            "each numbered read bumps the count, dworded"
+        );
+        assert!(climbed(&mut probe, &[table.clone()]).is_empty());
+        assert!(climbed(&mut probe, &[]).is_empty());
+        // The Fake answers 40 for a read vnum, 0 else; a non-number logs and answers 0.
+        let leveled =
+            |probe: &mut Probe, args: &[Value]| probe.call("pc.get_skill_level", args).unwrap();
+        assert_eq!(leveled(&mut probe, &number(1.9)), number(40.0));
+        assert_eq!(leveled(&mut probe, &number(2.0)), number(0.0));
+        assert_eq!(leveled(&mut probe, &[table.clone()]), number(0.0));
+        assert_eq!(leveled(&mut probe, &[]), number(0.0));
     }
 
     /// The skin index rounds ties to even and falls back to the normal skin; a value that
@@ -1986,6 +2146,7 @@ mod tests {
             manager: &manager,
             game: Fake::at_ox_manager(),
             output: Output::default(),
+            flags: BTreeMap::new(),
         };
         for (skin, want) in [
             (4.5, 4),
@@ -2038,6 +2199,34 @@ mod tests {
             "at 120 the yohara quest moves to CRC32(`information_new`)"
         );
         manager.logout(PID);
+    }
+    #[test]
+    fn a_kill_runs_party_kill_on_the_leaders_pc_not_the_killers() {
+        let mut manager = manager().lock().unwrap();
+        manager.logout(PID);
+        manager.logout(PID + 1);
+        let mut game = Fake::at_ox_manager();
+        // The killer exists (a click); the leader is never seen — `GetPCForce`
+        // creates it for the `party_kill` half.
+        assert!(manager.click(PID, VID, OX_MANAGER, &mut game));
+        manager.answer(PID, 1, &mut game);
+        game.scripts.clear();
+        assert!(manager.kill(PID, 691, Some(PID + 1), &mut game));
+        // `guild_create`'s only `party_kill` script sits in `run`, which neither PC
+        // holds, so nothing ran — but the leader's PC now exists and the killer's
+        // holds no `party_kill` trace: the routing is what this pins.
+        assert!(
+            manager.pcs.contains_key(&(PID + 1)),
+            "the leader is force-created"
+        );
+        assert_eq!(manager.quest_flag(PID, b"guild_create.__status"), None);
+        assert_eq!(manager.quest_flag(PID + 1, b"guild_create.__status"), None);
+        // An offline leader (`None`) runs the `kill` halves only: no PC appears.
+        manager.logout(PID + 2);
+        assert!(manager.kill(PID, 691, None, &mut game));
+        assert!(!manager.pcs.contains_key(&(PID + 2)));
+        manager.logout(PID);
+        manager.logout(PID + 1);
     }
 
     #[test]

@@ -69,6 +69,9 @@
 //! Both `long` fields are **signed** 32-bit little-endian. The client sends
 //! map coordinates, which are negative west and south of the origin, so a
 //! `u32` would be wrong even though the width matches.
+use std::error::Error;
+use std::fmt;
+
 use crate::cg_inventory::{CgHeader, HEADER_CG_ADD_FLY_TARGETING, HEADER_CG_FLY_TARGETING};
 use crate::cg_wire::ClientFrame;
 
@@ -146,6 +149,28 @@ pub enum CgFlyTargetError {
         actual: u8,
     },
 }
+
+impl fmt::Display for CgFlyTargetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Truncated { needed, available } => write!(
+                formatter,
+                "fly-targeting record is truncated: need {needed} bytes, have {available}"
+            ),
+            Self::LengthMismatch { expected, actual } => write!(
+                formatter,
+                "fly-targeting record has {actual} bytes; expected exactly {expected}"
+            ),
+            Self::InvalidHeader { expected, actual } => write!(
+                formatter,
+                "expected fly-targeting header 0x{:02x} or 0x{:02x}, got 0x{actual:02x}",
+                expected[0], expected[1]
+            ),
+        }
+    }
+}
+
+impl Error for CgFlyTargetError {}
 
 /// The 13-byte fly-targeting record.
 ///

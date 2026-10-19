@@ -69,6 +69,7 @@ use super::mob_ai::{delta_by_degree, pulses, Victim};
 use super::motion::{calculate_duration, distance_sqrt, get_move_speed, rotation_to_xy};
 use super::view::EntityKey;
 use super::GameState;
+use crate::loading_phase::AFF_REVIVE_INVISIBLE;
 use crate::movement::FUNC_ATTACK;
 use crate::save::PASSES_PER_SEC;
 use crate::sync_position::distance_approx;
@@ -114,11 +115,19 @@ pub(super) const GUARD_IDLE_PULSES: u64 = 12;
 /// `FuncFindGuardVictim(this, 50000)` (`G/char_state.cpp:524-529`): a guard searches this
 /// far for a monster.
 const GUARD_SIGHT: i32 = 50_000;
-/// `AFF_REVIVE_INVISIBLE` (`G/affect.h:242`): bit 28, which `FindVictim` skips.
-const AFF_REVIVE_INVISIBLE_WORD: u32 = 1 << 28;
-/// The words `GetNearestVictim` skips (`G/char_battle.cpp:3394-3397`): `EUNHYUNG` (bit
-/// 19), `INVISIBILITY` (bit 2), `REVIVE_INVISIBLE` (bit 28), all of word 0.
-const NEAREST_SKIPPED_WORD: u32 = (1 << 19) | (1 << 2) | (1 << 28);
+/// The words `GetNearestVictim` skips (`G/char_battle.cpp:3394-3397`): `EUNHYUNG`
+/// (flag 19, bit 18), `INVISIBILITY` (flag 2, bit 1), `REVIVE_INVISIBLE`
+/// (bit 27), all of word 0. (230h fixed every bit: the 229x word read the enum
+/// ordinals, not the flags.)
+const NEAREST_SKIPPED_WORD: u32 = (1 << 18) | (1 << 1) | (1 << (AFF_REVIVE_INVISIBLE - 1));
+/// The words `FindVictim` skips beside the revive (`G/trigger.cpp:114-118`):
+/// `EUNHYUNG` (bit 18) and `INVISIBILITY` (bit 1), of word 0.
+const FIND_SKIPPED_WORD: u32 = (1 << 18) | (1 << 1);
+/// `AFF_TERROR` (`G/affect.h:235`): flag 21, bit 20 of word 0, which `FindVictim`
+/// skips past the level gate (`G/trigger.cpp:120-124`).
+const FIND_TERROR_WORD: u32 = 1 << 20;
+/// `IMMUNE_TERROR` (`C/length.h:720`): bit 5 of the mob's immune flag.
+const IMMUNE_TERROR: u32 = 1 << 5;
 
 /// What Battle and Follow read of the monster, copied once per update. `attack_speed` is
 /// `GetLimitPoint(POINT_ATT_SPEED)`, clamped to 0..250; `move_speed` is `GetMoveSpeed()` with
@@ -446,8 +455,8 @@ impl GameState {
     }
 
     /// `FindVictim` of the monster under `mob` within `sight` (`G/trigger.cpp:59-174`): the
-    /// nearest live player around on its map, past the BANPK, affect and empire skips. Players
-    /// have no EUNHYUNG, INVISIBILITY, TERROR or buildings (V19g).
+    /// nearest live player around on its map, past the BANPK, affect and empire skips. The
+    /// EUNHYUNG/INVISIBILITY/TERROR skips are live (230h); buildings wait (V19g).
     pub(super) fn find_victim(&self, mob: u32, sight: u16) -> Option<Vid> {
         let fighter = self.fighter(mob)?;
         let index = self.maps.get(&(self.npc_of.get(&mob)?.0, fighter.map))?;
@@ -469,8 +478,29 @@ impl GameState {
             if self.is_banpk(fighter.map, spot.x, spot.y) {
                 continue;
             }
-            if self.affect_flags_of(victim)[0] & AFF_REVIVE_INVISIBLE_WORD != 0 {
+            if self.affect_flags_of(victim)[0] & (1 << (AFF_REVIVE_INVISIBLE - 1)) != 0 {
                 continue;
+            }
+            // The EUNHYUNG/INVISIBILITY skip (`:114-118`): a cloaked or invisible
+            // player is never found. No INVISIBILITY source is ported, so that
+            // half of the word is coded and dead.
+            if self.affect_flags_of(victim)[0] & FIND_SKIPPED_WORD != 0 {
+                continue;
+            }
+            // The TERROR skip (`:120-124`): a feared player of the mob's level or
+            // above is not found, unless the mob is terror-immune.
+            if self.affect_flags_of(victim)[0] & FIND_TERROR_WORD != 0 {
+                let npc = self.npc_by_vid(mob)?;
+                let level = i32::from(npc.fight.level);
+                let feared = self
+                    .characters
+                    .find_by_vid(victim)
+                    .ok()
+                    .and_then(world::character::Character::points)
+                    .is_some_and(|points| i32::from(points.level()) >= level);
+                if feared && npc.immune_flag & IMMUNE_TERROR == 0 {
+                    continue;
+                }
             }
             let empire = self.bodies.get(&victim)?.card.empire;
             if spares_empire(fighter.ai_flags, empire) {
@@ -1149,6 +1179,7 @@ fn rotation_byte(rotation: f32) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    use crate::game_state::affect::Affect;
     use common::vid::Vid;
     use gamedata::mob_proto::{
         AIFLAG_AGGRESSIVE, AIFLAG_COWARD, AIFLAG_NOATTCHUNJO, AIFLAG_NOATTJINNO,
@@ -1249,6 +1280,7 @@ mod tests {
                 value: 0,
                 flag: AFF_STUN,
                 remaining: STUN_TICKS_NPC,
+                sp_cost: 0,
             },
         );
         hit(&mut world, 1, ME);
@@ -1276,6 +1308,7 @@ mod tests {
                 value: 0,
                 flag: AFF_STUN,
                 remaining: STUN_TICKS_NPC,
+                sp_cost: 0,
             },
         );
         drained(&mut alpha);
@@ -1342,6 +1375,91 @@ mod tests {
         let died = world.damage_pc(None, Vid::new(1), i32::MAX, None);
         assert!(died);
         assert_eq!(world.find_victim(ME, 2000), None);
+    }
+
+    /// `FindVictim` skips a cloaked player: with 34's flag held, the aggressive
+    /// search finds nobody; without it, the same player is found.
+    #[test]
+    fn find_victim_skips_the_cloaked() {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let npc = a_fighter(
+            ME,
+            115,
+            BATTLE_TYPE_MELEE,
+            (175, 2000),
+            AIFLAG_AGGRESSIVE,
+            SPOT,
+            10_000,
+        );
+        let mut world = stand_field(&clock, vec![npc], open_cells(), false);
+        let mut one = enter(&mut world, 1, NEAR, 12_345);
+        world.process_pulse(P0);
+        drained(&mut one);
+        assert_eq!(world.find_victim(ME, 2000), Some(Vid::new(1)));
+        world.add_pc_affect(
+            Vid::new(1),
+            Affect::buff(34, point::POINT_NONE, 0, 19, 100, 0),
+            false,
+        );
+        assert_eq!(world.affect_flags_of(Vid::new(1))[0] & (1 << 18), 1 << 18);
+        assert_eq!(world.find_victim(ME, 2000), None);
+    }
+
+    /// `FindVictim` fears TERROR at its level and above: a level-10 feared player
+    /// is skipped by a level-7 dog, a level-6 one is found, and a terror-immune
+    /// dog finds the level-10 one anyway.
+    #[test]
+    fn find_victim_fears_terror_at_its_level_unless_immune() {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let npc = a_fighter(
+            ME,
+            115,
+            BATTLE_TYPE_MELEE,
+            (175, 2000),
+            AIFLAG_AGGRESSIVE,
+            SPOT,
+            10_000,
+        );
+        let mut world = stand_field(&clock, vec![npc], open_cells(), false);
+        let mut one = enter(&mut world, 1, NEAR, 12_345);
+        // The spawn path copies the level from the proto (vnum 115 is 7).
+        world.npc_mut(ME).expect("the monster stands").fight.level = 7;
+        world.process_pulse(P0);
+        drained(&mut one);
+        world.add_pc_affect(
+            Vid::new(1),
+            Affect::buff(64, point::POINT_NONE, 0, 21, 100, 0),
+            false,
+        );
+        assert_eq!(world.affect_flags_of(Vid::new(1))[0] & (1 << 20), 1 << 20);
+        // The fixture enters at 10: feared and higher, skipped.
+        assert_eq!(world.find_victim(ME, 2000), None);
+        // At 6, below the dog: found.
+        let stamina = world
+            .characters
+            .find_by_vid(Vid::new(1))
+            .unwrap()
+            .points()
+            .unwrap()
+            .get_point(point::POINT_STAMINA);
+        let points = super::super::fixtures::points_at(6, stamina, 0);
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(1))
+            .expect("the player stands")
+            .set_points(Some(points));
+        assert_eq!(world.find_victim(ME, 2000), Some(Vid::new(1)));
+        // Terror-immune, back at 10: found anyway.
+        let points = super::super::fixtures::points_at(10, stamina, 0);
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(1))
+            .expect("the player stands")
+            .set_points(Some(points));
+        world.npc_mut(ME).unwrap().immune_flag |= IMMUNE_TERROR;
+        assert_eq!(world.find_victim(ME, 2000), Some(Vid::new(1)));
     }
 
     /// `no_wander` stops the search but not a hit monster's fight (G5).
@@ -2062,6 +2180,7 @@ mod tests {
                 value: 0,
                 flag: AFF_STUN,
                 remaining: STUN_TICKS_NPC,
+                sp_cost: 0,
             },
         );
         world.update_aggr_point(ME, Vid::new(1), AggroDamage::Normal, -4);

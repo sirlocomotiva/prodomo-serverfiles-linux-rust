@@ -56,7 +56,7 @@ use prodomo::channel_login::{
     LogonRegistry, MapLocations,
 };
 use prodomo::channel_status::ChannelStatusBoard;
-use prodomo::chat::{judge_chat, ChatContext, ChatEffect, ChatOutcome, ChatState};
+use prodomo::chat::{judge_chat, ChatContext, ChatEffect, ChatOutcome, ChatState, CHAT_PARTY};
 use prodomo::chat_line::Recipient;
 use prodomo::client_live::{
     handshake_token, BootLiveClock, LiveClientSession, LiveClock, LiveError, LiveOutcome, LiveStep,
@@ -102,13 +102,16 @@ use protocol::cg_account::{
 use protocol::cg_attack::CgAttack;
 use protocol::cg_chat::CgChat;
 use protocol::cg_exchange::CgExchange;
+use protocol::cg_fly_target::CgFlyTarget;
 use protocol::cg_inventory::{
     HEADER_CG_ADD_FLY_TARGETING, HEADER_CG_ATTACK, HEADER_CG_CHANGE_NAME,
     HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE, HEADER_CG_CHARACTER_POSITION,
     HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_EMPIRE, HEADER_CG_ENTERGAME,
     HEADER_CG_EXCHANGE, HEADER_CG_FLY_TARGETING, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2,
     HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_LOGIN2,
-    HEADER_CG_LOGIN3, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_QUEST_INPUT_STRING,
+    HEADER_CG_LOGIN3, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE,
+    HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE,
+    HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL, HEADER_CG_QUEST_INPUT_STRING,
     HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP,
     HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER,
     HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_USE_SKILL, HEADER_CG_WARP,
@@ -123,6 +126,9 @@ use protocol::cg_login3::CgLogin3;
 use protocol::cg_micro::{CgScriptAnswer, CgWarp};
 use protocol::cg_move::CgMove;
 use protocol::cg_name::CgChangeName;
+use protocol::cg_party::{CgPartyInvite, CgPartyInviteAnswer, CgPartyRemove};
+use protocol::cg_party::{CgPartyParameter, CgPartySetState};
+use protocol::cg_party_skill::CgPartyUseSkill;
 use protocol::cg_pick::CgTarget;
 use protocol::cg_position::CgCharacterPosition;
 use protocol::cg_quest_text::CgQuestInputString;
@@ -131,6 +137,7 @@ use protocol::cg_quickslot_del::CgQuickslotDel;
 use protocol::cg_quickslot_swap::CgQuickslotSwap;
 use protocol::cg_safebox::{CgSafeBoxItem, SafeBoxKind};
 use protocol::cg_safebox_move::CgSafeboxItemMove;
+use protocol::cg_shoot::CgShoot;
 use protocol::cg_shop::CgShop;
 use protocol::cg_use_skill::CgUseSkill;
 use protocol::cg_vid::CgOnClick;
@@ -314,6 +321,9 @@ struct Held {
     /// The quickslots of that character (legacy `m_quickslot`): the ones the load set, then
     /// the ones the world's last quickslot answer left, which the save writes.
     quickslots: world::character::Quickslots,
+    /// The nonzero skill slots the load read (`player_skill`), which the world
+    /// holds as the character's levels from the admission on.
+    skills: Vec<db::player_skills::StoredSkill>,
     /// The channel the client logged in through, which is `g_bChannel` on the descriptor.
     ///
     /// It is held from the Channel login rather than read from the listener, because a
@@ -995,6 +1005,23 @@ where
     };
     let actor = item_actor(held);
     let answer = context.game.use_item(vid, record.cell, actor).await;
+    // A book read climbed a slot: store it as `Save()` writes the skills with the row.
+    // The store runs before the item rows, so a failure closes without a half-written step.
+    if let Ok(Ok(moved)) = &answer {
+        if let Some((vnum, level, next_read)) = moved.climbed {
+            let Some(character) = held.character.as_ref() else {
+                return true;
+            };
+            if let Err(error) =
+                db::player_skills::store_skill(&context.store, character.id, vnum, level, next_read)
+                    .await
+            {
+                warn!(%addr, %error, vnum, level, "The book read could not be stored; closing");
+                return false;
+            }
+            info!(%addr, vnum, level, "Skill read from a book");
+        }
+    }
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
@@ -1540,6 +1567,102 @@ fn warp_end(addr: SocketAddr, frame: &ClientFrame) -> bool {
     }
 }
 
+/// `ch->GetParty() != NULL` (`G/input_main.cpp:959`), asked lazily: only a party line
+/// pays the world round-trip. A character outside the world holds no party —
+/// `link_party` only runs on world entry. `None` closes the connection: the world
+/// could not answer, as with the talking relay.
+async fn party_answer(
+    game: &GameLoopController,
+    record: &CgChat,
+    addr: SocketAddr,
+    world: Option<common::vid::Vid>,
+) -> Option<bool> {
+    if record.chat_type != CHAT_PARTY {
+        return Some(false);
+    }
+    match world {
+        Some(world_vid) => match game.party_of(world_vid).await {
+            Ok(holds) => Some(holds),
+            Err(error) => {
+                warn!(%addr, %error, "The world could not answer the party question; closing");
+                None
+            }
+        },
+        None => Some(false),
+    }
+}
+/// An info line to the sender: the one `send_all` the judge's sender-only effects share.
+/// `false` closes the connection.
+async fn send_info_line<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    effect: &ChatEffect,
+    to: Recipient<'_>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(bytes) = prodomo::chat::info_line(effect, to) else {
+        warn!(%addr, "Info effect built no line; closing");
+        return false;
+    };
+    if let Err(error) = send_all(session, &[bytes]).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    true
+}
+/// What a relayed chat line did: sent, dropped outside the world, or closing.
+enum Relayed {
+    Sent(Settled),
+    Dropped,
+    Closed,
+}
+/// A talking or party line through the world, in order with the moves it relays.
+/// `FEmpireChatPacket` walks the process client set and filters by map index;
+/// `ForEachOnlineMember` walks the party's member map. Neither self-excludes, so
+/// both reach the speaker too.
+async fn relay_chat_line(
+    context: &ConnectionContext,
+    addr: SocketAddr,
+    world: Option<common::vid::Vid>,
+    effect: &ChatEffect,
+) -> Relayed {
+    let (scope, bytes, vid) = match effect {
+        ChatEffect::TalkingToMap { vid, empire, text } => {
+            let record = prodomo::chat::talking_record(effect)
+                .unwrap_or_else(|| panic!("a talking effect always builds a record"));
+            if record.id != *vid || record.empire != *empire || record.text != *text {
+                warn!(%addr, "Relayed chat record does not match its effect");
+            }
+            (RelayScope::Map, record.encode(), *vid)
+        }
+        ChatEffect::PartyToMembers { vid, empire, text } => {
+            let record = prodomo::chat::party_record(effect)
+                .unwrap_or_else(|| panic!("a party effect always builds a record"));
+            if record.id != *vid || record.empire != *empire || record.text != *text {
+                warn!(%addr, "Relayed chat record does not match its effect");
+            }
+            (RelayScope::Party, record.encode(), *vid)
+        }
+        _ => panic!("a relayed effect is talking or party"),
+    };
+    let bytes = bytes.unwrap_or_else(|error| panic!("a relayed chat record always fits: {error}"));
+    let Some(world_vid) = world else {
+        warn!(%addr, vid, "Chat line from a character outside the world; dropped");
+        return Relayed::Dropped;
+    };
+    match context.game.relay(world_vid, vec![(scope, bytes)]).await {
+        Ok(settling) => {
+            info!(%addr, vid, "Chat line relayed to its scope");
+            Relayed::Sent(settling)
+        }
+        Err(error) => {
+            warn!(%addr, %error, "The world could not relay the chat line; closing");
+            Relayed::Closed
+        }
+    }
+}
 /// `CG_CHAT` (3) in the game phase: `CInputMain::Chat` (`input_main.cpp:781-991`).
 ///
 /// The judge owns the legacy order, so this function only applies the effects. The three
@@ -1578,7 +1701,9 @@ where
         language: descriptor_language(held.account.as_ref()),
         empire: character.empire,
     };
-    let map = held.avatar.as_ref().map_or(0, |avatar| avatar.map);
+    let Some(in_party) = party_answer(&context.game, &record, addr, held.world).await else {
+        return false;
+    };
     let chat_context = ChatContext {
         name: character.name.clone(),
         vid: character.id,
@@ -1587,6 +1712,7 @@ where
         // The Rewrite has no way to set `AFFECT_BLOCK_CHAT` yet, so it is always absent,
         // which is the legacy state for a character that was never silenced.
         block_chat_seconds: None,
+        in_party,
         language: to.language,
         pulse: context.game.pulse(),
         shout_limit_level: context.shout_limit_level,
@@ -1616,43 +1742,16 @@ where
                 return false;
             }
             ChatEffect::InfoToSender { .. } | ChatEffect::ShoutBelowLevel { .. } => {
-                let Some(bytes) = prodomo::chat::info_line(effect, to) else {
-                    warn!(%addr, "Info effect built no line; closing");
-                    return false;
-                };
-                if let Err(error) = send_all(session, &[bytes]).await {
-                    warn!(%addr, %error, "Client session stopped");
+                if !send_info_line(session, addr, effect, to).await {
                     return false;
                 }
             }
-            ChatEffect::TalkingToMap { vid, empire, text } => {
-                let record = prodomo::chat::talking_record(effect)
-                    .unwrap_or_else(|| panic!("a talking effect always builds a record"));
-                if record.id != *vid || record.empire != *empire || record.text != *text {
-                    warn!(%addr, "Talking record does not match its effect");
+            ChatEffect::TalkingToMap { .. } | ChatEffect::PartyToMembers { .. } => {
+                match relay_chat_line(context, addr, held.world, effect).await {
+                    Relayed::Sent(settling) => held.settling = Some(settling),
+                    Relayed::Dropped => continue,
+                    Relayed::Closed => return false,
                 }
-                // `FEmpireChatPacket` walks the process client set and filters by map
-                // index, with no self-exclusion, so this reaches the speaker too. The world
-                // sends it, in order with the moves it relays.
-                let bytes = record
-                    .encode()
-                    .unwrap_or_else(|error| panic!("a talking record always fits: {error}"));
-                let Some(world_vid) = held.world else {
-                    warn!(%addr, vid, "Talking line from a character outside the world; dropped");
-                    continue;
-                };
-                match context
-                    .game
-                    .relay(world_vid, vec![(RelayScope::Map, bytes)])
-                    .await
-                {
-                    Ok(settling) => held.settling = Some(settling),
-                    Err(error) => {
-                        warn!(%addr, %error, "The world could not relay the talking line; closing");
-                        return false;
-                    }
-                }
-                info!(%addr, vid, map, "Talking line sent to the map");
             }
             ChatEffect::UnknownType { chat_type } => {
                 // The legacy default arm only logs. Nothing reaches the client.
@@ -1747,6 +1846,202 @@ async fn target_step(
     true
 }
 
+/// `CInputMain::PartyInvite` (`G/input_main.cpp:2476-2499`): the world invites the VID
+/// the record names.
+async fn party_invite_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    let record = match CgPartyInvite::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed PARTY_INVITE; closing");
+            return false;
+        }
+    };
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "PARTY_INVITE from a character outside the world; ignoring");
+        return true;
+    };
+    match context.game.party_invite(world_vid, record.vid).await {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not take the invite; closing");
+            return false;
+        }
+    }
+    debug!(%addr, guest = record.vid, "Party invite handed to the world");
+    true
+}
+
+/// `CInputMain::PartyInviteAnswer` (`G/input_main.cpp:2501-2519`): the world answers the
+/// invite from the VID the record names.
+async fn party_invite_answer_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    let record = match CgPartyInviteAnswer::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed PARTY_INVITE_ANSWER; closing");
+            return false;
+        }
+    };
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "PARTY_INVITE_ANSWER from a character outside the world; ignoring");
+        return true;
+    };
+    match context
+        .game
+        .party_invite_answer(world_vid, record.leader_vid, record.accept)
+        .await
+    {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not take the answer; closing");
+            return false;
+        }
+    }
+    debug!(%addr, inviter = record.leader_vid, "Party answer handed to the world");
+    true
+}
+
+/// `CInputMain::PartyRemove` (`G/input_main.cpp:2578-2675`): the world removes the PID
+/// the record names.
+async fn party_remove_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    let record = match CgPartyRemove::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed PARTY_REMOVE; closing");
+            return false;
+        }
+    };
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "PARTY_REMOVE from a character outside the world; ignoring");
+        return true;
+    };
+    match context.game.party_remove(world_vid, record.pid).await {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not take the removal; closing");
+            return false;
+        }
+    }
+    debug!(%addr, pid = record.pid, "Party removal handed to the world");
+    true
+}
+
+/// `CInputMain::PartySetState` (`G/input_main.cpp:2522-2575`): the world sets the role
+/// the record names.
+async fn party_set_state_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    let record = match CgPartySetState::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed PARTY_SET_STATE; closing");
+            return false;
+        }
+    };
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "PARTY_SET_STATE from a character outside the world; ignoring");
+        return true;
+    };
+    match context
+        .game
+        .party_set_state(world_vid, record.pid, record.by_role, record.flag)
+        .await
+    {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not take the set; closing");
+            return false;
+        }
+    }
+    debug!(%addr, pid = record.pid, "Party set handed to the world");
+    true
+}
+
+/// `CInputMain::PartyUseSkill` (`G/input_main.cpp:2734-2761`): the world uses the party
+/// skill the record names.
+async fn party_use_skill_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    let record = match CgPartyUseSkill::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed PARTY_USE_SKILL; closing");
+            return false;
+        }
+    };
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "PARTY_USE_SKILL from a character outside the world; ignoring");
+        return true;
+    };
+    match context
+        .game
+        .party_use_skill(world_vid, record.skill_index, record.target_vid)
+        .await
+    {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not take the use; closing");
+            return false;
+        }
+    }
+    debug!(%addr, skill = record.skill_index, "Party skill handed to the world");
+    true
+}
+
+/// `CInputMain::PartyParameter` (`G/input_main.cpp:2763-2772`): the world stores the
+/// distribution mode the record names.
+async fn party_parameter_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    let record = match CgPartyParameter::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed PARTY_PARAMETER; closing");
+            return false;
+        }
+    };
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "PARTY_PARAMETER from a character outside the world; ignoring");
+        return true;
+    };
+    match context
+        .game
+        .party_parameter(world_vid, record.distribute_mode)
+        .await
+    {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not take the mode; closing");
+            return false;
+        }
+    }
+    debug!(%addr, mode = record.distribute_mode, "Party mode handed to the world");
+    true
+}
+
 /// `CInputMain::UseSkill` (`G/input_main.cpp:2173-2177`): the world runs the character's
 /// cast and sends what it shows (see `game_state::pc_skill`). The cast answers nothing
 /// itself, as `CInputMain::UseSkill` ignores `UseSkill`'s answer.
@@ -1816,6 +2111,79 @@ async fn attack_step(
         return false;
     }
     debug!(%addr, gold, "The hit's stolen gold was stored");
+    true
+}
+
+/// `CG_FLY_TARGETING` (51) and `CG_ADD_FLY_TARGETING` (53) in the game phase:
+/// `CInputMain::Attack`'s fly arms (`G/input_main.cpp:2180-2190`, `G/char_battle.cpp:3342-3371`).
+/// The world stores the VID and relays what it stored; see `game_state::pc_skill`.
+async fn fly_target_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    let record = match CgFlyTarget::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed FLY_TARGETING; closing");
+            return false;
+        }
+    };
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "FLY_TARGETING from a character outside the world; ignoring");
+        return true;
+    };
+    match context.game.fly_target(world_vid, record).await {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not take the fly target; closing");
+            return false;
+        }
+    }
+    debug!(%addr, target = record.dw_target_vid, "Fly target handed to the world");
+    true
+}
+
+/// `CG_SHOOT` (54) in the game phase: `CInputMain::Attack`'s shoot arm
+/// (`G/input_main.cpp:2000-2007`, `G/char_battle.cpp:3319-3340`). The world shoots the
+/// stored VIDs and sends what the shot shows; see `game_state::pc_skill`. A shot that
+/// stole gold answers the signed delta, which the store applies with no row changes.
+async fn shoot_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    let record = match CgShoot::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed SHOOT; closing");
+            return false;
+        }
+    };
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "SHOOT from a character outside the world; ignoring");
+        return true;
+    };
+    let answer = match context.game.shoot(world_vid, record).await {
+        Ok(answer) => answer,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not take the shoot; closing");
+            return false;
+        }
+    };
+    // Answered, so the world has run the shot and its records are queued: nothing to settle.
+    debug!(%addr, btype = record.shoot_type, "Shoot handed to the world");
+    let Some(gold) = answer.gold else {
+        return true;
+    };
+    if let Err(error) = db::items::apply_transfer(&context.store, world_vid.raw(), &[], gold).await
+    {
+        warn!(%addr, %error, gold, "The shot's stolen gold could not be stored; closing");
+        return false;
+    }
+    debug!(%addr, gold, "The shot's stolen gold was stored");
     true
 }
 
@@ -2105,23 +2473,13 @@ fn main_record(phase: ClientPhase, header: u8) -> Option<MainRecord> {
 /// - `CG_ENTER_GAME` (10) in the game and dead phases: the header is in the main table
 ///   (`G/packet_info.cpp:116`), and `CInputMain::Analyze` has no case for it, so its `default`
 ///   consumes the record (`G/input_main.cpp:4126-4127`);
-/// - `CG_FLY_TARGETING` (51), `CG_ADD_FLY_TARGETING` (53) and `CG_SHOOT` (54) in the game
-///   and dead phases, which wait for the arrow and magic skills (V17f): legacy's analyzer
-///   runs them, and the Rewrite keeps the connection and does nothing. `CG_USE_SKILL`
-///   (52) runs the melee casts (230d).
+/// - The fly and shoot records (51/53/54) are not consumed: they run the world steps (230e).
 fn is_consumed(phase: ClientPhase, header: u8) -> bool {
     match phase {
         ClientPhase::Login | ClientPhase::Select | ClientPhase::Loading => {
             header == HEADER_CG_ITEM_USE.value() || header == HEADER_CG_TARGET.value()
         }
-        ClientPhase::Game | ClientPhase::Dead => [
-            HEADER_CG_ENTERGAME,
-            HEADER_CG_FLY_TARGETING,
-            HEADER_CG_ADD_FLY_TARGETING,
-            HEADER_CG_SHOOT,
-        ]
-        .iter()
-        .any(|consumed| consumed.value() == header),
+        ClientPhase::Game | ClientPhase::Dead => header == HEADER_CG_ENTERGAME.value(),
         _ => false,
     }
 }
@@ -2138,12 +2496,22 @@ fn is_dead_refused(phase: ClientPhase, header: u8) -> bool {
 }
 
 /// Whether `header` is a record the world answers alone: one that moves a character,
-/// `CG_TARGET`, `CG_USE_SKILL` or `CG_ATTACK`.
+/// `CG_TARGET`, `CG_USE_SKILL`, `CG_ATTACK`, `CG_FLY_TARGETING`,
+/// `CG_ADD_FLY_TARGETING` or `CG_SHOOT`.
 fn is_world_step(header: u8) -> bool {
     is_motion_step(header)
         || header == HEADER_CG_TARGET.value()
+        || header == HEADER_CG_PARTY_INVITE.value()
+        || header == HEADER_CG_PARTY_INVITE_ANSWER.value()
+        || header == HEADER_CG_PARTY_REMOVE.value()
+        || header == HEADER_CG_PARTY_SET_STATE.value()
+        || header == HEADER_CG_PARTY_USE_SKILL.value()
+        || header == HEADER_CG_PARTY_PARAMETER.value()
         || header == HEADER_CG_USE_SKILL.value()
         || header == HEADER_CG_ATTACK.value()
+        || header == HEADER_CG_FLY_TARGETING.value()
+        || header == HEADER_CG_ADD_FLY_TARGETING.value()
+        || header == HEADER_CG_SHOOT.value()
 }
 
 /// Run a step [`is_world_step`] accepts.
@@ -2155,10 +2523,28 @@ async fn world_step(
 ) -> bool {
     if frame.header == HEADER_CG_TARGET.value() {
         target_step(addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_PARTY_INVITE.value() {
+        party_invite_step(addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_PARTY_INVITE_ANSWER.value() {
+        party_invite_answer_step(addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_PARTY_REMOVE.value() {
+        party_remove_step(addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_PARTY_SET_STATE.value() {
+        party_set_state_step(addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_PARTY_USE_SKILL.value() {
+        party_use_skill_step(addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_PARTY_PARAMETER.value() {
+        party_parameter_step(addr, context, held, frame).await
     } else if frame.header == HEADER_CG_USE_SKILL.value() {
         use_skill_step(addr, context, held, frame).await
     } else if frame.header == HEADER_CG_ATTACK.value() {
         attack_step(addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_FLY_TARGETING.value()
+        || frame.header == HEADER_CG_ADD_FLY_TARGETING.value()
+    {
+        fly_target_step(addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_SHOOT.value() {
+        shoot_step(addr, context, held, frame).await
     } else {
         motion_step(addr, context, held, frame).await
     }
@@ -2274,6 +2660,13 @@ where
             info!(%addr, ?step, ?reason, "Shop step declined");
             return send_shop_records(session, addr, &records).await;
         }
+        Ok(Ok(ShopAnswer::Quest { records, climbs })) => {
+            info!(%addr, ?step, "A quest took the click");
+            if !store_quest_climbs(addr, context, held, &climbs).await {
+                return false;
+            }
+            return send_shop_records(session, addr, &records).await;
+        }
         Ok(Err(refused)) => Ok(Err(refused)),
         Err(error) => Err(error),
     };
@@ -2291,7 +2684,34 @@ fn is_quest_step(header: u8) -> bool {
 /// observer check guards (`:3786-3791`).
 ///
 /// The world runs the character's quest step and answers the dialog and the chat lines its
-/// script sent; a malformed record closes the connection.
+/// script sent; a malformed record closes the connection. A GRAND read that climbed is
+/// stored before the dialog is sent, as a book read's is.
+/// Store each GRAND climb a quest step landed, in order: a failure closes, as a
+/// book read's does. Answers whether the step may be sent.
+async fn store_quest_climbs(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    climbs: &[(u8, u8, i32)],
+) -> bool {
+    if climbs.is_empty() {
+        return true;
+    }
+    let Some(character) = held.character.as_ref() else {
+        return true;
+    };
+    for (vnum, level, next_read) in climbs {
+        if let Err(error) =
+            db::player_skills::store_skill(&context.store, character.id, *vnum, *level, *next_read)
+                .await
+        {
+            warn!(%addr, %error, vnum, level, "A quest climb could not be stored; closing");
+            return false;
+        }
+    }
+    true
+}
+
 async fn quest_step<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -2322,8 +2742,14 @@ where
         info!(%addr, ?step, "Quest step without a character in the world; ignoring");
         return true;
     };
+
     match context.game.quest(vid, step, place, item_actor(held)).await {
-        Ok(Ok(records)) => send_shop_records(session, addr, &records).await,
+        Ok(Ok((records, climbs))) => {
+            if !store_quest_climbs(addr, context, held, &climbs).await {
+                return false;
+            }
+            send_shop_records(session, addr, &records).await
+        }
         Ok(Err(refused)) => {
             warn!(%addr, %refused, "The world does not hold this descriptor's character; closing");
             false
@@ -2738,6 +3164,17 @@ where
     let (quickslots, quickslot_records) = prodomo::quickslot::load(&stored);
     burst.after_map_test.splice(0..0, quickslot_records);
     held.quickslots = quickslots;
+    // `TPlayerTable::skills` rides the player row; here the slots are their own
+    // table, loaded with the quickslots and burst before the map test.
+    let skills = match db::player_skills::load_skills(&context.store, player).await {
+        Ok(skills) => skills,
+        Err(error) => {
+            warn!(%addr, player, %error, "Skill load failed; closing");
+            return false;
+        }
+    };
+    prodomo::loading_phase::fill_skill_levels(&mut burst, &skills);
+    held.skills = skills;
     held.character = Some(character.clone());
     held.channel = seat.number;
     info!(
@@ -3145,6 +3582,7 @@ fn loaded_state(
             .as_ref()
             .map_or(0, |character| u64::try_from(character.gold).unwrap_or(0)),
         show,
+        skills: held.skills.clone(),
     }
 }
 
@@ -4106,6 +4544,18 @@ fn load_pc_skills(config: &ServerConfig) -> Result<Arc<gamedata::pc_skill_data::
     Ok(Arc::new(skills))
 }
 
+fn load_guild_skills(
+    config: &ServerConfig,
+) -> Result<Arc<gamedata::guild_skill_data::GuildSkills>, String> {
+    let player_path = config.game_tables.join("player.sql");
+    let player = std::fs::read(&player_path)
+        .map_err(|error| format!("Failed to read {}: {error}", player_path.display()))?;
+    let skills = gamedata::guild_skill_data::GuildSkills::from_dump(&player)
+        .map_err(|error| format!("Guild skills are unusable: {error}"))?;
+    info!("Guild skill tables loaded");
+    Ok(Arc::new(skills))
+}
+
 /// Load the mob skill clips: each skilling folder's `SPECIALn` durations and splash
 /// entries (`CMotionManager::Build`, `G/motion.cpp:327-347`).
 ///
@@ -4234,6 +4684,8 @@ struct GameData {
     mob_clips: Arc<gamedata::mob_skill_data::MobSkillClips>,
     /// The PC skill rows, the same table the game thread holds.
     pc_skills: Arc<gamedata::pc_skill_data::PcSkills>,
+    /// The guild skill rows, the same table the game thread holds.
+    guild_skills: Arc<gamedata::guild_skill_data::GuildSkills>,
 }
 
 /// What boot stands the NPCs and monsters up from: the mob prototypes, the mob groups, the names
@@ -4264,6 +4716,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let mob_skills = load_mob_skills(config)?;
     let mob_clips = load_mob_clips(config, &npcs.protos);
     let pc_skills = load_pc_skills(config)?;
+    let guild_skills = load_guild_skills(config)?;
     let quests = load_quests(config, &npcs)?;
     let data = GameData {
         atlas: Arc::new(atlas),
@@ -4280,6 +4733,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         mob_skills,
         mob_clips,
         pc_skills,
+        guild_skills,
     };
     Ok((data, quests))
 }
@@ -4688,6 +5142,7 @@ fn build_world(
         .with_mob_skills(Arc::clone(&data.mob_skills))
         .with_mob_clips(Arc::clone(&data.mob_clips))
         .with_pc_skills(Arc::clone(&data.pc_skills))
+        .with_guild_skills(Arc::clone(&data.guild_skills))
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
         .with_drop_lifetime(config.game.item_destroy_time_dropitem)
         .with_gold_lifetime(config.game.item_destroy_time_dropgold)
@@ -4895,6 +5350,7 @@ where
             change_store_password(session, addr, context, held, &rest).await
         }
         LineCommand::Restart(kind) => restart(addr, context, held, kind).await,
+        LineCommand::SkillUp => skill_up(addr, context, held, rest).await,
         LineCommand::NotPorted(handler) => {
             info!(%addr, handler, "Command not ported; ignoring");
             true
@@ -4947,6 +5403,40 @@ async fn restart(
         return false;
     }
     info!(%addr, gold, "Restarted for gold");
+    true
+}
+/// `do_skillup`: the world runs the `/skillup` line, and a landed up's slot is
+/// stored (`Save()` writes the skills with the row).
+async fn skill_up(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Skill-up without a character in the world; ignoring");
+        return true;
+    };
+    let answer = match context.game.skill_up(vid, rest).await {
+        Ok(answer) => answer,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a skill-up; closing");
+            return false;
+        }
+    };
+    let Some((vnum, level)) = answer.climbed else {
+        return true;
+    };
+    let Some(character) = held.character.as_ref() else {
+        return true;
+    };
+    if let Err(error) =
+        db::player_skills::store_skill(&context.store, character.id, vnum, level, 0).await
+    {
+        warn!(%addr, %error, vnum, level, "The skill-up could not be stored; closing");
+        return false;
+    }
+    info!(%addr, vnum, level, "Skill up");
     true
 }
 
@@ -5320,10 +5810,16 @@ mod tests {
         ] {
             assert!(!in_main_input(phase), "{phase:?}");
         }
-        for header in [HEADER_CG_ENTERGAME, HEADER_CG_SHOOT] {
-            assert!(is_consumed(ClientPhase::Dead, header.value()));
+        assert!(is_consumed(ClientPhase::Dead, HEADER_CG_ENTERGAME.value()));
+        // `CG_USE_SKILL` runs the melee casts (230d); the fly and shoot records run
+        // the world steps (230e).
+        for header in [
+            HEADER_CG_FLY_TARGETING,
+            HEADER_CG_ADD_FLY_TARGETING,
+            HEADER_CG_SHOOT,
+        ] {
+            assert!(!is_consumed(ClientPhase::Dead, header.value()));
         }
-        // `CG_USE_SKILL` runs the melee casts (230d).
         assert!(!is_consumed(ClientPhase::Dead, HEADER_CG_USE_SKILL.value()));
         assert!(!is_consumed(ClientPhase::Dead, HEADER_CG_ITEM_USE.value()));
 

@@ -13,6 +13,8 @@ pub mod belt_inventory;
 pub mod csv_table;
 pub mod drop;
 pub mod event;
+/// The guild skill rows, 151-162.
+pub mod guild_skill_data;
 pub mod item_attr;
 pub mod item_custom_category;
 pub mod item_kind;

@@ -1485,6 +1485,7 @@ mod tests {
                 value: 0,
                 flag: AFF_STUN,
                 remaining: STUN_TICKS_NPC,
+                sp_cost: 0,
             },
         );
         drained(&mut inbox);
@@ -1536,6 +1537,7 @@ mod tests {
                 value: 0,
                 flag: AFF_STUN,
                 remaining: STUN_TICKS_NPC,
+                sp_cost: 0,
             },
         );
         let stopped = mind(&world);
@@ -2057,6 +2059,7 @@ mod tests {
                 value: SLOW_MOV_SPEED,
                 flag: AFF_SLOW,
                 remaining: SLOW_TICKS,
+                sp_cost: 0,
             },
         );
         let slowed = mind(&world).motion.duration_ms;
@@ -2082,6 +2085,7 @@ mod tests {
                 value: 0,
                 flag: AFF_STUN,
                 remaining: STUN_TICKS_NPC,
+                sp_cost: 0,
             },
         );
         world.dice = Pcg32::new(7, 0);
@@ -2239,6 +2243,44 @@ mod tests {
             "the walk closes on the stone: {dest:?}"
         );
         assert!(!drained(&mut inbox).is_empty(), "the walk tells the view");
+    }
+
+    /// `GetNearestVictim` skips a cloaked attacker: of two stone-hitters, the
+    /// nearer holds 34's flag, so the stone picks the farther one.
+    #[test]
+    fn a_stone_skips_its_cloaked_attacker() {
+        use crate::game_state::affect::Affect;
+        use crate::game_state::fight::NpcDamage;
+        let clock = TestClock::default();
+        clock.set(T0);
+        let stone = an_npc(ME, CHAR_TYPE_STONE, 8001, 0);
+        let mut world = a_map(&clock, vec![stone]).with_no_wander(true);
+        let mut one = enter(&mut world, 1, (SPOT.0 + 100, SPOT.1), 12_345);
+        let mut two = enter(&mut world, 2, (SPOT.0 + 200, SPOT.1), 12_345);
+        world.process_pulse(1);
+        drained(&mut one);
+        drained(&mut two);
+        world.npc_combat.entry(ME).or_default().damage.insert(
+            1,
+            NpcDamage {
+                total: 100,
+                aggro: 0,
+            },
+        );
+        world.npc_combat.entry(ME).or_default().damage.insert(
+            2,
+            NpcDamage {
+                total: 10,
+                aggro: 0,
+            },
+        );
+        assert_eq!(world.nearest_victim(ME), Some(Vid::new(1)));
+        world.add_pc_affect(
+            Vid::new(1),
+            Affect::buff(34, point::POINT_NONE, 0, 19, 100, 0),
+            false,
+        );
+        assert_eq!(world.nearest_victim(ME), Some(Vid::new(2)));
     }
 
     /// A dead stone's son fights on as a lone monster: no nearest victim, no protege,

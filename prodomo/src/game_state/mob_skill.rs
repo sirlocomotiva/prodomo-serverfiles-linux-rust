@@ -969,7 +969,9 @@ impl GameState {
                     value: amount,
                     flag: 0,
                     remaining: duration,
+                    sp_cost: 0,
                 },
+                true,
             );
         }
     }

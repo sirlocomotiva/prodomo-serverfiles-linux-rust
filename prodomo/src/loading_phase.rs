@@ -141,6 +141,26 @@ pub const AFF_SLOW: u32 = 6;
 
 /// `AFF_STUN` (`G/affect.h:216`), numbered from 1.
 pub const AFF_STUN: u32 = 7;
+/// `AFF_JEONGWIHON` (`G/affect.h:230`), numbered from 1 (230f).
+pub const AFF_JEONGWIHON: u32 = 15;
+/// `AFF_GEOMGYEONG` (`G/affect.h:231`), numbered from 1 (230f).
+pub const AFF_GEOMGYEONG: u32 = 16;
+/// `AFF_CHEONGEUN` (`G/affect.h:232`), numbered from 1 (230f).
+pub const AFF_CHEONGEUN: u32 = 17;
+/// `AFF_GYEONGGONG` (`G/affect.h:233`), numbered from 1 (230f).
+pub const AFF_GYEONGGONG: u32 = 18;
+/// `AFF_EUNHYUNG` (`G/affect.h:234`), numbered from 1 (230f).
+pub const AFF_EUNHYUNG: u32 = 19;
+/// `AFF_GWIGUM` (`G/affect.h:235`), numbered from 1 (230f).
+pub const AFF_GWIGUM: u32 = 20;
+/// `AFF_TERROR` (`G/affect.h:236`), numbered from 1 (230f).
+pub const AFF_TERROR: u32 = 21;
+/// `AFF_JUMAGAP` (`G/affect.h:237`), numbered from 1 (230f).
+pub const AFF_JUMAGAP: u32 = 22;
+/// `AFF_MANASHIELD` (`G/affect.h:241`), numbered from 1 (230f).
+pub const AFF_MANASHIELD: u32 = 26;
+/// `AFF_PABEOP` (`G/affect.h:254`), numbered from 1 (230f).
+pub const AFF_PABEOP: u32 = 33;
 
 /// `POISON_LENGTH + 1` (`G/char.h:78`, `G/char_resist.cpp:205`): the poison's ticks.
 pub const POISON_TICKS: i32 = 31;
@@ -548,6 +568,28 @@ pub fn skill_levels() -> [GcSkill; GC_SKILL_SLOT_COUNT] {
         level: 0,
         next_read: 0,
     }; GC_SKILL_SLOT_COUNT]
+}
+/// Fill the burst's skill-level record with the stored slots: each nonzero
+/// slot's level, the ladder's master type, and its read time. The record is
+/// the last of `after_map_test`, where [`loading_burst`] put it.
+pub fn fill_skill_levels(burst: &mut LoadingBurst, skills: &[db::player_skills::StoredSkill]) {
+    if skills.is_empty() {
+        return;
+    }
+    let mut slots = skill_levels();
+    for slot in skills {
+        let entry = &mut slots[usize::from(slot.vnum)];
+        entry.level = slot.level;
+        entry.master_type = crate::game_state::pc_skill::master_of(slot.level);
+        entry.next_read = slot.next_read;
+    }
+    let mut frame = GcSkillLevelNew {
+        header: GcSkillLevelNew::header(),
+        skills: slots,
+    };
+    if let Some(record) = burst.after_map_test.last_mut() {
+        *record = encoded(&mut frame, "the skill-level record");
+    }
 }
 
 /// A character's Name in its 25-byte wire field.

@@ -309,6 +309,53 @@ impl GameState {
                 self.target(vid, target);
                 drop(settled);
             }
+            GameCommand::PartyInvite {
+                vid,
+                guest,
+                settled,
+            } => {
+                self.party_invite(vid, common::vid::Vid::new(guest));
+                drop(settled);
+            }
+            GameCommand::PartyInviteAnswer {
+                vid,
+                inviter,
+                accept,
+                settled,
+            } => {
+                self.party_invite_answer(vid, common::vid::Vid::new(inviter), accept);
+                drop(settled);
+            }
+            GameCommand::PartyRemove { vid, pid, settled } => {
+                self.party_remove(vid, pid);
+                drop(settled);
+            }
+            GameCommand::PartySetState {
+                vid,
+                pid,
+                role,
+                flag,
+                settled,
+            } => {
+                self.party_set_state(vid, pid, role, flag);
+                drop(settled);
+            }
+            GameCommand::PartyParameter { vid, mode, settled } => {
+                self.party_parameter(vid, mode);
+                drop(settled);
+            }
+            GameCommand::PartyUseSkill {
+                vid,
+                skill,
+                target,
+                settled,
+            } => {
+                self.party_use_skill(vid, skill, target);
+                drop(settled);
+            }
+            GameCommand::PartyOf { vid, reply } => {
+                let _heard = reply.send(self.holds_party(vid));
+            }
             GameCommand::UseSkill {
                 vid,
                 record,
@@ -321,9 +368,27 @@ impl GameState {
                 let answer = self.attack(vid, record);
                 let _heard = reply.send(answer);
             }
+            GameCommand::FlyTarget {
+                vid,
+                record,
+                settled,
+            } => {
+                self.fly_target(
+                    vid,
+                    record.header == protocol::cg_fly_target::CgFlyTargetHeader::FlyTarget,
+                    record.dw_target_vid,
+                    record.x,
+                    record.y,
+                );
+                drop(settled);
+            }
+            GameCommand::Shoot { vid, record, reply } => {
+                let answer = self.shoot(vid, record.shoot_type);
+                let _heard = reply.send(answer);
+            }
             _ => debug_assert!(
                 false,
-                "only target, skill and attack commands reach apply_pick"
+                "only target, skill, attack, fly, shoot and party commands reach apply_pick"
             ),
         }
     }
@@ -629,6 +694,7 @@ impl GameState {
                     value: 0,
                     flag: AFF_STUN,
                     remaining: STUN_TICKS_NPC,
+                    sp_cost: 0,
                 },
             );
         }
@@ -641,6 +707,7 @@ impl GameState {
                     value: SLOW_MOV_SPEED,
                     flag: AFF_SLOW,
                     remaining: SLOW_TICKS,
+                    sp_cost: 0,
                 },
             );
         }
@@ -668,6 +735,7 @@ impl GameState {
                 value: 0,
                 flag: AFF_POISON,
                 remaining: POISON_TICKS,
+                sp_cost: 0,
             },
         );
         let when = self.last_pulse.saturating_add(1);
@@ -3609,7 +3677,9 @@ mod tests {
                 value: 0,
                 flag: AFF_STUN,
                 remaining: STUN_TICKS,
+                sp_cost: 0,
             },
+            true,
         );
         drained(&mut alpha);
         hit(&mut world, 1, ME);
@@ -3632,7 +3702,9 @@ mod tests {
                 value: 0,
                 flag: AFF_STUN,
                 remaining: STUN_TICKS,
+                sp_cost: 0,
             },
+            true,
         );
         world.goto(1, NEAR.0 + 2000, NEAR.1);
         world.npc_mut(ME).unwrap().fight.attack_range = 175;
@@ -4041,6 +4113,7 @@ mod tests {
                 value: 0,
                 flag: AFF_STUN,
                 remaining: STUN_TICKS_NPC,
+                sp_cost: 0,
             },
         );
         world.add_npc_affect(
@@ -4051,6 +4124,7 @@ mod tests {
                 value: SLOW_MOV_SPEED,
                 flag: AFF_SLOW,
                 remaining: SLOW_TICKS,
+                sp_cost: 0,
             },
         );
         assert!(!world.can_begin_fight(ME));
@@ -4079,5 +4153,143 @@ mod tests {
         );
         assert_eq!(world.npc_affect_words(ME), [0, 0]);
         assert!(!world.npc_affects.contains_key(&ME));
+    }
+    /// Two party members in non-parity split by the NP table: both level 10 (NP 40 each),
+    /// so each takes half of the row's grant after the level-delta row (100%).
+    #[test]
+    fn a_party_row_splits_non_parity_by_the_np_table() {
+        let (_clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 100, 10, NEAR);
+        let mut beta = a_player(&mut world, 2, EAST);
+        world.party_invite(Vid::new(1), Vid::new(2));
+        world.party_invite_answer(Vid::new(2), Vid::new(1), 1);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        drained(&mut beta);
+        hit(&mut world, 1, ME);
+        // The single party row takes 20 + 80; the two NP-40 halves are 50 each.
+        let alpha_frames = drained(&mut alpha);
+        let beta_frames = drained(&mut beta);
+        assert!(alpha_frames.contains(&exp_change(1, 50, 50)));
+        assert!(beta_frames.contains(&exp_change(2, 50, 50)));
+        let npc = world.npc_by_vid(ME).unwrap();
+        assert_eq!(npc.exp, 0);
+    }
+
+    /// Two party members in parity split evenly: `exp / count` each.
+    #[test]
+    fn a_party_row_splits_parity_evenly() {
+        let (_clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 100, 10, NEAR);
+        let mut beta = a_player(&mut world, 2, EAST);
+        world.party_invite(Vid::new(1), Vid::new(2));
+        world.party_invite_answer(Vid::new(2), Vid::new(1), 1);
+        world.party_parameter(Vid::new(1), 1);
+        drained(&mut alpha);
+        drained(&mut beta);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        drained(&mut beta);
+        hit(&mut world, 1, ME);
+        let alpha_frames = drained(&mut alpha);
+        let beta_frames = drained(&mut beta);
+        assert!(alpha_frames.contains(&exp_change(1, 50, 50)));
+        assert!(beta_frames.contains(&exp_change(2, 50, 50)));
+    }
+
+    /// The party bonus multiplier runs only when the victim stands near the leader: two
+    /// near members (bonus 12) with the victim beside them take 112% of the row; the
+    /// same pair with the victim 6000 from the leader takes 100%.
+    #[test]
+    fn the_party_multiplier_needs_the_victim_near_the_leader() {
+        // Near: the victim at SPOT, leader and member beside it.
+        let (_clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 100, 10, NEAR);
+        let mut beta = a_player(&mut world, 2, EAST);
+        world.party_invite(Vid::new(1), Vid::new(2));
+        world.party_invite_answer(Vid::new(2), Vid::new(1), 1);
+        world.process_pulse(76);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        drained(&mut beta);
+        hit(&mut world, 1, ME);
+        // 100 * 112 / 100 = 112, halved by the NP split.
+        assert!(drained(&mut alpha).contains(&exp_change(1, 56, 56)));
+        assert!(drained(&mut beta).contains(&exp_change(2, 56, 56)));
+        // Far: Beta leads at EAST, Alpha rows beside the victim 6000 east of the
+        // leader. The victim is out of leader range, so no multiplier; Alpha is out of
+        // leader range too, so the Update zeroes the nears — but the multiplier reads
+        // the victim-near-leader check, which is what this arm pins. To keep the bonus
+        // nonzero AND the victim far is impossible in one setup (the bonus needs two
+        // nears, the victim near the leader): so this arm pins the geometry — victim
+        // far from the leader takes 100% — with the bonus at 0.
+        let mut far = a_monster(1);
+        far.x = SPOT.0 + 6000;
+        far.y = SPOT.1;
+        let beside = (SPOT.0 + 5900, SPOT.1);
+        let (_clock, mut world, mut alpha) = a_reward_fight(far, 100, 10, beside);
+        let mut beta = a_player(&mut world, 2, EAST);
+        world.party_invite(Vid::new(2), Vid::new(1));
+        world.party_invite_answer(Vid::new(1), Vid::new(2), 1);
+        world.process_pulse(76);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        drained(&mut beta);
+        hit(&mut world, 1, ME);
+        // No multiplier: the row's 100 splits by NP — but only Alpha stands in victim
+        // range, so Alpha takes the whole 100 and Beta nothing.
+        assert!(drained(&mut alpha).contains(&exp_change(1, 100, 100)));
+        assert!(!drained(&mut beta).contains(&exp_change(2, 100, 100)));
+    }
+    #[test]
+    fn a_party_kill_runs_on_the_leaders_pc_not_the_killers() {
+        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe");
+        let manager = Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
+        let quests = Quests::new(manager, Arc::default(), MobNamesByLanguage::default());
+        let mut npc = a_monster(1);
+        npc.race = 691;
+        npc.exp = 100;
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut world = a_field_on(&clock, vec![npc], open_cells()).with_quests(quests);
+        let mut alpha = a_player(&mut world, 1, NEAR);
+        let mut beta = a_player(&mut world, 2, EAST);
+        // Beta leads; Alpha rows. Only Alpha clicks, so only Alpha has a quest PC.
+        world.party_invite(Vid::new(2), Vid::new(1));
+        world.party_invite_answer(Vid::new(1), Vid::new(2), 1);
+        world.process_pulse(76);
+        world.start_a_quest(Vid::new(1));
+        world.end_the_quest(Vid::new(1));
+        assert_eq!(world.quest_kill_leader(Vid::new(1)), Some(2));
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        drained(&mut beta);
+        hit(&mut world, 1, ME);
+        assert_eq!(
+            world.npc_by_vid(ME).map(|npc| npc.exp),
+            Some(0),
+            "the kill paid"
+        );
+        drained(&mut alpha);
+        drained(&mut beta);
+        // Alpha's kill ran `party_kill` on Beta's PC (`GetPCForce` made it):
+        // `guild_create`'s script sits in `run`, so nothing moved — but Beta's PC
+        // now exists, which a killer-side `party_kill` would never create.
+        let quests = world.quests.as_ref().expect("quests loaded");
+        assert_eq!(
+            quests.manager().quest_flag(1, b"guild_create.__status"),
+            None
+        );
+        assert_eq!(
+            quests.manager().quest_flag(2, b"guild_create.__status"),
+            None
+        );
+        assert!(quests.manager().has_seen(2), "the leader's PC was made");
+        // The leader offline: no leader, no `party_kill`.
+        world.leave_world(Vid::new(2));
+        assert_eq!(world.quest_kill_leader(Vid::new(1)), None);
     }
 }

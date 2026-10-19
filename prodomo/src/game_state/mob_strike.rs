@@ -448,7 +448,9 @@ impl GameState {
                     value: 0,
                     flag: AFF_STUN,
                     remaining: STUN_TICKS,
+                    sp_cost: 0,
                 },
+                true,
             );
         }
         if landed.slowed {
@@ -460,7 +462,9 @@ impl GameState {
                     value: SLOW_MOV_SPEED,
                     flag: AFF_SLOW,
                     remaining: SLOW_TICKS,
+                    sp_cost: 0,
                 },
+                true,
             );
         }
     }
@@ -487,7 +491,9 @@ impl GameState {
                 value: 0,
                 flag: AFF_POISON,
                 remaining: POISON_TICKS,
+                sp_cost: 0,
             },
+            true,
         );
         let when = self.last_pulse.saturating_add(1);
         let combat = self.pc_combat.entry(raw).or_default();
@@ -820,6 +826,7 @@ mod tests {
                 value: 0,
                 flag: AFF_STUN,
                 remaining: STUN_TICKS,
+                sp_cost: 0,
             },
         );
         drained(&mut alpha);
@@ -1495,6 +1502,7 @@ mod tests {
                 value: 0,
                 flag: AFF_STUN,
                 remaining: STUN_TICKS,
+                sp_cost: 0,
             },
         );
         drained(&mut alpha);

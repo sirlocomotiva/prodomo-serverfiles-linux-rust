@@ -12,8 +12,8 @@
 //! carries its compiled polys ([`common::skill_poly::Poly`]); a row whose
 //! point, SP-cost, cooldown, master-bonus or splash-adjust poly falls outside
 //! the hosted subset is refused with its vnum, mirroring legacy's `sys_err` +
-//! skip (`G/skill.cpp`). On the owner's data the 14 `number(`/`floor(` rows
-//! (31 32 46 48 50 51 66 76 77 78 80 106 107 108) are refused, so 34 rows load.
+//! skip (`G/skill.cpp`). On the owner's data the 13 `number(`/`floor(` rows
+//! (31 32 48 50 51 66 76 77 78 80 106 107 108) are refused, so 35 rows load.
 //!
 //! The power table is `SKILL_POWER_BY_LEVEL` plus `SKILL_POWER_BY_LEVEL_TYPEn`
 //! for `n` in 0-8 (`JOB_MAX_NUM * 2`); a missing `TYPEn` row reads the base row
@@ -36,6 +36,12 @@ use crate::sql_dump::{read_table, SqlDumpError, SqlValue};
 const PC_TYPE_MIN: u32 = 1;
 /// The last PC skill vnum: the shaman's (`SkillList[3][1][5]`, `G/char_skill.cpp:4113`).
 const PC_VNUM_MAX: u32 = 111;
+/// The type-0 rows `/skillup` can reach (`do_skillup`'s switch plus the always
+/// list, `G/cmd_general.cpp:939-971`, `G/char_skill.cpp:4169-4174`): leadership,
+/// combo, mining, the languages, polymorph, the horse rows and the two passives.
+/// 123 (`SKILL_CREATE`) is dead (`ClientManagerPlayer.cpp:804` zeroes it).
+const TYPE_ZERO_KEPT: [u32; 11] = [121, 122, 124, 126, 127, 128, 129, 130, 131, 141, 142];
+
 /// `SKILL_COUNT` (`G/char_skill.cpp:4107`): six skills per job and group.
 pub const SKILL_COUNT: usize = 6;
 
@@ -141,8 +147,47 @@ impl PcSkill {
             && self.record.skill_attr_type == SKILL_ATTR_MELEE
             && !SHOOT_LIST.contains(&self.record.vnum)
     }
-}
 
+    /// Whether the row casts through the 230e SPLASH MELEE pipe: `ATTACK` +
+    /// `USE_MELEE_DAMAGE`, MELEE-attr, SPLASH, and off the shoot list (hosted:
+    /// 5/18/62).
+    #[must_use]
+    pub fn is_castable_splash_melee(&self) -> bool {
+        use crate::mob_skill_data::SKILL_FLAG_SPLASH;
+        const WANTED: u32 = SKILL_FLAG_ATTACK | SKILL_FLAG_USE_MELEE_DAMAGE;
+        self.record.flag & WANTED == WANTED
+            && self.record.flag & SKILL_FLAG_SPLASH != 0
+            && self.record.skill_attr_type == SKILL_ATTR_MELEE
+            && !SHOOT_LIST.contains(&self.record.vnum)
+    }
+
+    /// Whether the row casts through the 230e RANGE pipe: `ATTACK` +
+    /// `USE_ARROW_DAMAGE`, RANGE-attr, shoot-listed (hosted: 47 only —
+    /// 46/48/50 are refused; 51 is not on the shoot list).
+    #[must_use]
+    pub fn is_castable_range(&self) -> bool {
+        use crate::mob_skill_data::{SKILL_ATTR_RANGE, SKILL_FLAG_USE_ARROW_DAMAGE};
+        const WANTED: u32 = SKILL_FLAG_ATTACK | SKILL_FLAG_USE_ARROW_DAMAGE;
+        self.record.flag & WANTED == WANTED
+            && self.record.skill_attr_type == SKILL_ATTR_RANGE
+            && SHOOT_LIST.contains(&self.record.vnum)
+    }
+
+    /// Whether the row casts through the 230e MAGIC pipe: `ATTACK`,
+    /// MAGIC-attr (hosted: 35/81/91/92/93 — 76/77/78/80/106/107/108 refused).
+    #[must_use]
+    pub fn is_castable_magic(&self) -> bool {
+        use crate::mob_skill_data::SKILL_ATTR_MAGIC;
+        self.record.flag & SKILL_FLAG_ATTACK != 0 && self.record.skill_attr_type == SKILL_ATTR_MAGIC
+    }
+
+    /// Whether `CG_ATTACK` refuses the row and only `CG_SHOOT` casts it: the
+    /// shoot list (`G/input_main.cpp:1940-1963`), hosted: 20/35/47/81/91.
+    #[must_use]
+    pub fn is_shoot_skill(&self) -> bool {
+        SHOOT_LIST.contains(&self.record.vnum)
+    }
+}
 /// The PC skill tables.
 #[derive(Debug, Clone, Default)]
 pub struct PcSkills {
@@ -169,8 +214,9 @@ impl PcSkills {
         for row in &table.rows {
             let vnum = number_at(&table, row, "dwVnum")?;
             let skill_type = number_at(&table, row, "bType")?;
-            // Type-0 rows wait for skill-up (230f).
-            if !(PC_TYPE_MIN..=4).contains(&skill_type) || vnum > PC_VNUM_MAX {
+            let typed = (PC_TYPE_MIN..=4).contains(&skill_type) && vnum <= PC_VNUM_MAX;
+            let sub = skill_type == 0 && TYPE_ZERO_KEPT.contains(&vnum);
+            if !typed && !sub {
                 continue;
             }
             let record = decode_row(&table, row, vnum)?;
@@ -630,12 +676,6 @@ mod tests {
         // Vnum 20: SPLASH + CRUSH and shoot-listed — the splash/`CG_SHOOT` half.
         let crush = skills.get(20).unwrap();
         assert!(!crush.is_castable_melee());
-        // The 230d pipe refuses every SPLASH and shoot row; vnum 33 (a poisoned
-        // plain melee row, no SPLASH, off the list) casts.
-        for vnum in [5, 18, 20, 35, 47, 62, 81, 91] {
-            assert!(!skills.get(vnum).unwrap().is_castable_melee(), "{vnum}");
-        }
-        assert!(skills.get(33).unwrap().is_castable_melee());
         // Vnum 61: PENETRATE is still a castable melee row (its empty point2
         // poly reads 0, so the ignore-defence draw never fires).
         assert!(skills.get(61).unwrap().is_castable_melee());
@@ -644,10 +684,58 @@ mod tests {
         // Horse (137) and guild (151) rows are not PC rows.
         assert!(skills.get(137).is_none());
         assert!(skills.get(151).is_none());
-        // Type-0 rows wait for skill-up (230f): 121-142 stay out.
+    }
+    #[test]
+    fn type_zero_rows_and_buff_flags_load() {
+        let skills = PcSkills::from_dumps(&dump("player.sql"), &dump("common.sql")).unwrap();
+        // The 11 type-0 rows `/skillup` can reach.
         for vnum in [121, 122, 124, 126, 127, 128, 129, 130, 131, 141, 142] {
-            assert!(skills.get(vnum).is_none(), "{vnum}");
+            assert!(skills.get(vnum).is_some(), "{vnum}");
         }
+        // 123 is dead; 132-140 and 143-150 stay out.
+        assert!(skills.get(123).is_none());
+        assert!(skills.get(137).is_none());
+        // The buff flags are the schema enum index: JEONGWIHON 15 ... MANASHIELD 26.
+        assert_eq!(skills.get(3).unwrap().record.affect_flag, 15);
+        assert_eq!(skills.get(4).unwrap().record.affect_flag, 16);
+        assert_eq!(skills.get(19).unwrap().record.affect_flag, 17);
+        assert_eq!(skills.get(34).unwrap().record.affect_flag, 19);
+        assert_eq!(skills.get(49).unwrap().record.affect_flag, 18);
+        assert_eq!(skills.get(63).unwrap().record.affect_flag, 20);
+        assert_eq!(skills.get(64).unwrap().record.affect_flag, 21);
+        assert_eq!(skills.get(65).unwrap().record.affect_flag, 22);
+        assert_eq!(skills.get(79).unwrap().record.affect_flag, 26);
+        // The buff second flags are empty: no second flag.
+        assert_eq!(skills.get(19).unwrap().record.affect_flag2, 0);
+    }
+    #[test]
+    fn splash_and_shoot_rows_sort_into_their_pipes() {
+        let skills = PcSkills::from_dumps(&dump("player.sql"), &dump("common.sql")).unwrap();
+        let cast = |vnum: u32| skills.get(vnum).unwrap();
+        // SPLASH MELEE off the shoot list: 5/18/62 (5 and 18 are SELFONLY too).
+        for vnum in [5, 18, 62] {
+            assert!(cast(vnum).is_castable_splash_melee(), "{vnum}");
+            assert!(!cast(vnum).is_castable_melee(), "{vnum}");
+            assert!(!cast(vnum).is_shoot_skill(), "{vnum}");
+        }
+        // The RANGE pipe: 47 alone (46/48/50 are refused, 51 never listed).
+        assert!(cast(47).is_castable_range());
+        assert!(cast(47).is_shoot_skill());
+        // The MAGIC pipe: 35/81/91 shoot-listed, 92/93 not.
+        for vnum in [35, 81, 91, 92, 93] {
+            assert!(cast(vnum).is_castable_magic(), "{vnum}");
+        }
+        for vnum in [20, 35, 47, 81, 91] {
+            assert!(cast(vnum).is_shoot_skill(), "{vnum}");
+        }
+        assert!(!cast(92).is_shoot_skill());
+        assert!(!cast(93).is_shoot_skill());
+        // The 230d pipe still refuses the SPLASH and shoot rows.
+        for vnum in [5, 18, 20, 35, 47, 62, 81, 91] {
+            assert!(!cast(vnum).is_castable_melee(), "{vnum}");
+        }
+        // Vnum 33: a poisoned plain melee row, no SPLASH, off the list.
+        assert!(cast(33).is_castable_melee());
     }
 
     #[test]

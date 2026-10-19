@@ -19,7 +19,7 @@
 //!
 //! The damage map is `NpcCombat.damage`, filled by `after_damage` before the recovery
 //! starts. `dead_npc` calls `reward_exp` after the stun cancel and before `GC_DEAD`.
-//! Every attacker rows solo; the party grouping lands with the party (230i)
+//! Party attackers group into one row per party, after the solos; there is no stone link
 //! (OQ11), no priv manager, no premium, no mounts, no marriage, and no ring of exp (its
 //! group does not exist). The devil-tower arm is dead on a hostile map (no hosted map is
 //! in 660000-669999), `AdjustExpByLevel` is a no-op at level 99 and below, and the tower
@@ -41,7 +41,7 @@ use super::view::EntityKey;
 use super::GameState;
 use crate::game_loop_messages::GroundPlace;
 use crate::sync_position::distance_approx;
-use common::cfloat::{f32_to_i32, i32_to_f32, u32_to_f32};
+use common::cfloat::{f32_to_i32, f32_to_u32, i32_to_f32, u32_to_f32};
 use common::levels;
 use common::point_slot as point;
 use common::vid::Vid;
@@ -88,15 +88,20 @@ const ALIGNMENT_CLAMP: i32 = 200_000;
 /// `std::map<LPPARTY>` order is pointer order, nondeterministic across runs — the port's
 /// order is deterministic, which is noted, not a Divergence row).
 enum DamageRow {
-    /// `pAttacker` is set. The `pParty` arm lands with the party (230i).
+    /// `pAttacker` is set.
     Solo { attacker: Vid, damage: i32 },
+    /// `pParty` is set.
+    Party {
+        leader: common::CharacterId,
+        damage: i32,
+    },
 }
 
 impl DamageRow {
     /// `iDam`.
     fn damage(&self) -> i32 {
         match *self {
-            DamageRow::Solo { damage, .. } => damage,
+            DamageRow::Solo { damage, .. } | DamageRow::Party { damage, .. } => damage,
         }
     }
 }
@@ -216,6 +221,7 @@ impl GameState {
         place: Option<(u8, i32)>,
     ) -> (Vec<DamageRow>, i32, Option<(Vid, i32)>) {
         let mut rows: Vec<DamageRow> = Vec::new();
+        let mut party_damage: Vec<(common::CharacterId, i32)> = Vec::new();
         let mut total = 0_i32;
         let mut most: Option<(Vid, i32)> = None;
         // The map iterates in VID order (`std::map`), and the table keeps it.
@@ -241,23 +247,35 @@ impl GameState {
             if most.is_none_or(|(_, held)| dealt > held) {
                 most = Some((attacker, dealt));
             }
-            // Party attackers would accumulate into their party's row (`:2871-2885`);
-            // the party lands with 230i, so every attacker rows solo (`:2886-2896`).
-            rows.push(DamageRow::Solo {
-                attacker,
-                damage: dealt,
-            });
+            // A party attacker accumulates into its party's row (`:2871-2885`); a solo
+            // rows at once (`:2886-2896`).
+            if let Some(leader) = self.party_of_vid(attacker) {
+                if let Some(entry) = party_damage.iter_mut().find(|(held, _)| *held == leader) {
+                    entry.1 = entry.1.saturating_add(dealt);
+                } else {
+                    party_damage.push((leader, dealt));
+                }
+            } else {
+                rows.push(DamageRow::Solo {
+                    attacker,
+                    damage: dealt,
+                });
+            }
+        }
+        // The party rows append after the solos (`:2899-2904`).
+        for (leader, damage) in party_damage {
+            rows.push(DamageRow::Party { leader, damage });
         }
         (rows, total, most)
     }
 
-    /// `TDamageInfo::Distribute` (`G/char_battle.cpp:2782-2815`): the row feeds the
-    /// live `GiveExp`. The party arm lands with the party (230i).
+    /// `TDamageInfo::Distribute` (`G/char_battle.cpp:2782-2815`): a solo row feeds the
+    /// live `GiveExp`; a party row feeds `distribute_party_row`.
     fn distribute_row(
         &mut self,
         victim: u32,
         victim_level: u8,
-        _at: (i32, i32),
+        at: (i32, i32),
         row: &DamageRow,
         exp: i64,
     ) {
@@ -265,6 +283,61 @@ impl GameState {
             DamageRow::Solo { attacker, .. } => {
                 self.give_exp(victim, attacker, victim_level, exp);
             }
+            DamageRow::Party { leader, .. } => {
+                self.distribute_party_row(victim, victim_level, at, leader, exp);
+            }
+        }
+    }
+
+    /// The party arm of `TDamageInfo::Distribute` (`G/char_battle.cpp:2788-2814`): the
+    /// near-leader bonus multiplier, then the totaler and distributor over the online
+    /// members in victim range. The test-server log arm is not taken. The centralize
+    /// arm reads `m_pkChrExpCentralize`, which no setter ever sets (230j finding), so
+    /// it is dead and is not ported.
+    fn distribute_party_row(
+        &mut self,
+        victim: u32,
+        victim_level: u8,
+        (x, y): (i32, i32),
+        leader: common::CharacterId,
+        exp: i64,
+    ) {
+        // `iExp * (100 + GetExpBonusPercent()) / 100` when the victim stands near the
+        // leader (`:2791-2792`); the math runs in `i64` (D1).
+        let mut exp = exp;
+        if self.party_victim_near_leader(leader, x, y) {
+            let percent = self.party_exp_bonus_percent(leader);
+            exp = exp * i64::from(100 + percent) / 100;
+        }
+        let members = self.party_members_near_victim(leader, x, y);
+        if members.is_empty() {
+            return;
+        }
+        let victim = Vid::new(victim);
+        if self.party_mode(leader) == super::party::DISTRIBUTION_PARITY {
+            // `m_iMemberCount` is never 0 here (the walk found members), so no max.
+            let each = exp / i64::try_from(members.len()).unwrap_or(1).max(1);
+            for (member, _) in members {
+                self.give_exp(victim.raw(), member, victim_level, each);
+            }
+            return;
+        }
+        // `FPartyTotaler` (`:2704-2722`) and `FPartyDistributor` (`:2724-2767`): each
+        // member's share is `(DWORD)(exp * (float)NP / total)`.
+        let total: i64 = members
+            .iter()
+            .map(|(_, level)| i64::from(levels::party_exp_np(*level)))
+            .sum();
+        if total <= 0 {
+            return;
+        }
+        let total_f = i32_to_f32(i32::try_from(total.min(i64::from(i32::MAX))).unwrap_or(0));
+        // `exp` fits `u32` on every real kill; a wider value would have wrapped legacy's
+        // `DWORD` multiply, so the narrow keeps the defined half.
+        let exp_f = u32_to_f32(u32::try_from(exp.max(0)).unwrap_or(u32::MAX));
+        for (member, level) in members {
+            let share = f32_to_u32(exp_f * u32_to_f32(levels::party_exp_np(level)) / total_f);
+            self.give_exp(victim.raw(), member, victim_level, i64::from(share));
         }
     }
 

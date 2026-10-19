@@ -72,8 +72,9 @@ mod mob_party;
 mod mob_skill;
 mod mob_strike;
 mod motion;
+mod party;
 mod pc_heal;
-mod pc_skill;
+pub(crate) mod pc_skill;
 mod quests;
 mod regen;
 mod reward;
@@ -86,7 +87,7 @@ mod view;
 mod view_encode;
 mod warp_npc;
 
-pub use quests::{QuestStep, Quests};
+pub use quests::{QuestStep, QuestStepOutcome, Quests};
 pub use safebox::{
     SafeboxAnswer, SafeboxStep, ALREADY_OPEN_NOTICE, LOAD_WAIT_PULSES, MALL_WAIT_NOTICE,
     OTHER_WINDOW_NOTICE, SAFEBOX_WAIT_NOTICE, TRADE_WAIT_NOTICE, TRADE_WAIT_SECONDS,
@@ -432,6 +433,8 @@ pub struct GameState {
     mob_skills: Arc<gamedata::mob_skill_data::MobSkills>,
     /// The hosted PC skill rows and the eight power rows, which a cast reads.
     pc_skill_tables: Arc<gamedata::pc_skill_data::PcSkills>,
+    /// The hosted guild skill rows, which a guild skill-up and a guild cast read.
+    guild_skill_tables: Arc<gamedata::guild_skill_data::GuildSkills>,
     /// The skill clips, which stood-up NPCs copy their `SPECIALn` data from.
     mob_clips: Arc<gamedata::mob_skill_data::MobSkillClips>,
     /// The drop tables, which a monster's death will pay from.
@@ -485,6 +488,8 @@ pub struct GameState {
     /// What each player keeps of its skills: its levels and its use stamps. See
     /// [`pc_skill`].
     pc_skills: HashMap<u32, pc_skill::PcSkillState>,
+    /// The player parties. See [`party`].
+    parties: party::Parties,
     /// `gPlayerMaxLevel` and `g_iStatusPointGetLevelLimit`, which the experience gain reads.
     exp_limits: world::character::ExpLimits,
     /// Where a town restart sends a player. See [`death`].
@@ -559,6 +564,7 @@ impl GameState {
             motions: Arc::default(),
             mob_skills: Arc::default(),
             pc_skill_tables: Arc::default(),
+            guild_skill_tables: Arc::default(),
             mob_clips: Arc::default(),
             drops: Arc::default(),
             item_attrs: Arc::default(),
@@ -584,6 +590,7 @@ impl GameState {
             npc_combat: HashMap::new(),
             pc_combat: HashMap::new(),
             pc_skills: HashMap::new(),
+            parties: party::Parties::default(),
             exp_limits: world::character::ExpLimits {
                 max_level: DEFAULT_MAX_LEVEL,
                 status_point_get_level_limit: DEFAULT_STATUS_POINT_GET_LEVEL_LIMIT,
@@ -888,20 +895,23 @@ impl GameState {
             | GameCommand::Relay { .. }) => self.apply_motion(command),
             command @ (GameCommand::Target { .. }
             | GameCommand::UseSkill { .. }
-            | GameCommand::Attack { .. }) => {
-                self.apply_pick(command);
-            }
+            | GameCommand::Attack { .. }
+            | GameCommand::FlyTarget { .. }
+            | GameCommand::Shoot { .. }
+            | GameCommand::PartyInvite { .. }
+            | GameCommand::PartyInviteAnswer { .. }
+            | GameCommand::PartyRemove { .. }
+            | GameCommand::PartySetState { .. }
+            | GameCommand::PartyParameter { .. }
+            | GameCommand::PartyUseSkill { .. }
+            | GameCommand::PartyOf { .. }) => self.apply_pick(command),
             GameCommand::Restart {
                 vid,
                 kind,
                 mover,
                 reply,
-            } => {
-                let answer = self.restart(vid, kind, mover);
-                if reply.send(answer).is_err() {
-                    debug!(?vid, "nobody was left to hear a restart's answer");
-                }
-            }
+            } => self.answer_restart(vid, kind, mover, reply),
+            GameCommand::SkillUp { vid, rest, reply } => self.answer_skill_up(vid, &rest, reply),
             GameCommand::Stop => {
                 // The loop handles `Stop` itself, before a command ever reaches a
                 // processor. Reaching here would mean the loop and the state
@@ -911,6 +921,20 @@ impl GameState {
             }
         }
         self.broadcast_targets();
+    }
+
+    /// Run a restart and report its answer, logging a caller that went away.
+    fn answer_restart(
+        &mut self,
+        vid: common::vid::Vid,
+        kind: crate::game_loop_messages::RestartKind,
+        mover: Mover,
+        reply: tokio::sync::oneshot::Sender<crate::game_loop_messages::RestartAnswer>,
+    ) {
+        let answer = self.restart(vid, kind, mover);
+        if reply.send(answer).is_err() {
+            debug!(?vid, "nobody was left to hear a restart's answer");
+        }
     }
 
     /// Tell the caller what a save of the character under `vid` writes: its points, its
@@ -924,6 +948,20 @@ impl GameState {
         });
         if reply.send(kept).is_err() {
             debug!(?vid, "nobody was left to hear a character's points");
+        }
+    }
+    /// Run the `/skillup` line and answer with what climbed, or nothing when a
+    /// gate refused.
+    fn answer_skill_up(
+        &mut self,
+        vid: common::vid::Vid,
+        rest: &[u8],
+        reply: oneshot::Sender<crate::game_loop_messages::SkillUpAnswer>,
+    ) {
+        let climbed = self.skill_up(vid, rest);
+        let answer = crate::game_loop_messages::SkillUpAnswer { climbed };
+        if reply.send(answer).is_err() {
+            debug!(?vid, "nobody was left to hear a skill-up's answer");
         }
     }
 
@@ -1062,6 +1100,14 @@ impl GameState {
             character.set_quickslots(loaded.quickslots);
             character.set_gold(loaded.gold);
         }
+        if !loaded.skills.is_empty() {
+            let state = self.pc_skills.entry(vid.raw()).or_default();
+            for slot in &loaded.skills {
+                state.levels[usize::from(slot.vnum)] = slot.level;
+                state.next_read[usize::from(slot.vnum)] =
+                    u32::from_ne_bytes(slot.next_read.to_ne_bytes());
+            }
+        }
         let (records, update) = match loaded.show {
             Some(show) => {
                 let records = self.place_body(vid, show.place, show.card);
@@ -1109,6 +1155,7 @@ impl GameState {
             return Err(refused);
         }
         let _previous = self.outboxes.insert(vid, outbox);
+        self.link_party(vid);
         Ok(())
     }
 
@@ -1163,6 +1210,7 @@ impl GameState {
     /// disconnect also tells its view it has no owner, which a warp leaves to the map it left.
     pub fn leave_world_by(&mut self, vid: common::vid::Vid, departure: Departure) -> Option<Kept> {
         self.cancel_trade(vid);
+        self.unlink_party(vid);
         self.leave_fight(vid, departure);
         self.clear_target(vid);
         let _outbox = self.outboxes.remove(&vid);
@@ -1292,7 +1340,13 @@ impl GameState {
     }
 
     /// Run one `CG_ITEM_USE` for the character online under `vid`: an equippable item goes on
-    /// or comes off, and a potion is drunk (`CHARACTER::UseItem`, `G/char_item.cpp:7168`).
+    /// or comes off, a potion is drunk, and a skill book is read (`CHARACTER::UseItem`,
+    /// `G/char_item.cpp:7168`).
+    ///
+    /// A book is read before the world step, because the read's gates talk and the world
+    /// refuses a gated book without a line. The world then consumes the one it just read:
+    /// a book-shaped item that reaches its step is always consumed, and the read gates keep
+    /// every refused book from reaching it, so the two steps cannot disagree.
     ///
     /// # Errors
     ///
@@ -1306,6 +1360,45 @@ impl GameState {
         if self.is_down(vid.raw()) {
             return Err(MoveItemRefused::Refused(MoveRefused::UsedWhileDown));
         }
+        // The book the read passed, and the slot it climbed, for the store: `None` while
+        // the step is no read.
+        let mut climbed: Option<(u8, u8, i32)> = None;
+        if let Some(book) = self.book_at(vid, at) {
+            let (read, landed) =
+                self.read_skill_book(vid, actor, book.vnum, book.socket0, book.values);
+            if !read {
+                // The read's gates refused, and talked. Legacy's `UseItemEx` returns false
+                // with the book kept; the step consumed nothing, so it answers as one that
+                // was never run. The owner id comes from the book's holder, which is here.
+                let character = self
+                    .characters
+                    .find_by_vid(vid)
+                    .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+                let mut moved = MovedItems::new(
+                    character.player_id(),
+                    vid.raw(),
+                    world::character::MoveDone {
+                        kind: world::character::MoveKind::Used,
+                        records: Vec::new(),
+                        changes: Vec::new(),
+                    },
+                    actor,
+                    &self.protos,
+                    &self.locale,
+                );
+                moved.points = character.points().cloned();
+                moved.quickslots = Some(character.quickslots().clone());
+                let _ = landed;
+                return Ok(moved);
+            }
+            if let Some((slot, level)) = landed {
+                let stamp = self
+                    .pc_skills
+                    .get(&vid.raw())
+                    .map_or(0, |state| state.next_read[usize::from(slot)]);
+                climbed = Some((slot, level, i32::from_ne_bytes(stamp.to_ne_bytes())));
+            }
+        }
         let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
             use_item(items, at, rules, gear)
         })?;
@@ -1318,7 +1411,25 @@ impl GameState {
         {
             self.start_affect_event(vid);
         }
+        let mut moved = moved;
+        moved.climbed = climbed;
         Ok(moved)
+    }
+
+    /// The skill book at `at` for the character online under `vid`, or `None` when the
+    /// step is no read: no item, no proto, or no book shape (`is_skill_book`).
+    fn book_at(&self, vid: common::vid::Vid, at: protocol::item_pos::ItemPos) -> Option<BookAt> {
+        let character = self.characters.find_by_vid(vid).ok()?;
+        let item = character.items().item_at(at)?.clone();
+        let proto = self.protos.get(item.vnum)?;
+        if !world::character::is_skill_book(proto) {
+            return None;
+        }
+        Some(BookAt {
+            vnum: item.vnum,
+            socket0: item.sockets[0],
+            values: proto.values,
+        })
     }
 
     /// Apply one of the steps a character takes with its own items or an NPC: a move, a use, a
@@ -1904,6 +2015,16 @@ impl GameState {
         )
     }
 }
+/// What the book read needs of the item at the step's cell: its vnum, its socket 0
+/// (only 50300 reads it), and its proto's six values (`alValues`).
+struct BookAt {
+    /// The item's vnum.
+    vnum: u32,
+    /// The item's socket 0.
+    socket0: i32,
+    /// The proto's six values.
+    values: [i32; 6],
+}
 
 impl PulseProcessor for GameState {
     fn apply_command(&mut self, command: GameCommand) {
@@ -1931,6 +2052,7 @@ impl PulseProcessor for GameState {
         self.run_warp_npcs(pulse);
         self.run_regens(pulse);
         self.step_motion(pulse);
+        self.run_party_ticks(pulse);
         self.run_minds(pulse);
         self.broadcast_targets();
     }
@@ -4168,6 +4290,7 @@ mod tests {
                 quickslots,
                 gold: 1_200_000_000_000_000_000 - 1,
                 show: None,
+                skills: Vec::new(),
             }),
             outbox,
             reply,

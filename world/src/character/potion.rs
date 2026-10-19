@@ -143,7 +143,7 @@ fn start_recovery(
 /// The last one syncs its slots (`G/item.cpp:303-330`). When `chains`, it is cleared first and
 /// its slots then follow the first item of its vnum; otherwise its slots are deleted before it
 /// is cleared.
-fn use_one(
+pub(super) fn use_one(
     items: &mut CharacterItems,
     item: &Item,
     chains: bool,

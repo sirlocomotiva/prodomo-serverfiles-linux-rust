@@ -114,6 +114,10 @@ pub struct MovedItems {
     /// How much a step that paid or was paid changed the mover's gold, which the row changes'
     /// transaction adds to the stored gold with them.
     pub gold: Option<i64>,
+    /// The skill slot a book read climbed, with its level and read-time stamp, for the
+    /// store (`Save()` writes the skills with the row). `None` while the step read no
+    /// book, or the read climbed nothing (a failed roll, the horse arm).
+    pub climbed: Option<(u8, u8, i32)>,
     /// Where the step's rows stand among another descriptor's on the same item.
     pub store_order: StoreOrder,
 }
@@ -274,6 +278,7 @@ impl MovedItems {
             points: None,
             quickslots: None,
             gold: None,
+            climbed: None,
             store_order: StoreOrder::default(),
         }
     }
