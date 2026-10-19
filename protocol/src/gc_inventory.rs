@@ -6,7 +6,10 @@
 //! width and 19 variable length. The game server's own
 //! `server/server/game/packet_info.cpp` registers only inbound client and
 //! peer packets, so it is the wrong table for this direction and must not be
-//! used to measure game-to-client coverage.
+//! used to measure game-to-client coverage. Bytes 100, 102 and 133 are deliberately
+//! absent: the mark downloader decodes them on its own path, outside this table
+//! (see [`crate::gc_mark`]), so adding them as rows would break the 134-row
+//! definition the counts below pin.
 //!
 //! Each row pairs a client registration name with the server enumerator name
 //! for the same wire byte. The pairing is by byte value and never by name,

@@ -147,12 +147,14 @@ Key every coverage metric on the **wire byte**, never on an identifier name.
 | direction | registered | implemented | missing |
 |---|---|---|---|
 | client to game | 92 | 91 | 1 (`KEY_AGREEMENT`, dead: `_IMPROVED_PACKET_ENCRYPTION_` is never defined) |
-| game to client | 134 | 106 | 28 (13 fixed-size, 15 dynamic) |
+| game to client | 134 | 108 | 26 (13 fixed-size, 13 dynamic) |
 
 - The game-to-client registration table was taken from the client's `PythonNetworkStream.cpp`
   while the client source was in the repository. It is recorded in `protocol/src/gc_inventory.rs`.
   `server/server/game/packet_info.cpp` registers only inbound records and must never be used to
-  measure game-to-client coverage.
+  measure game-to-client coverage. Bytes 100, 102 and 133 are outside the table by design:
+  the mark downloader decodes them on its own path (`protocol/src/gc_mark.rs`), so they are
+  implemented but never rows.
 - The Reference client source is no longer in the repository (ADR-0001). `server/server/game/packet.h`
   and the server's send sites are the reference for record widths; the owner calibrates them against
   the Reference client in the play test.

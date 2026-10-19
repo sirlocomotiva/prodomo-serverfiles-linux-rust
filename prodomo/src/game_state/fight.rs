@@ -301,6 +301,13 @@ impl GameState {
     /// answers the gold it stole.
     pub(super) fn apply_pick(&mut self, command: GameCommand) {
         match command {
+            command @ (GameCommand::PartyInvite { .. }
+            | GameCommand::PartyInviteAnswer { .. }
+            | GameCommand::PartyRemove { .. }
+            | GameCommand::PartySetState { .. }
+            | GameCommand::PartyParameter { .. }
+            | GameCommand::PartyUseSkill { .. }
+            | GameCommand::PartyOf { .. }) => self.apply_party_pick(command),
             GameCommand::Target {
                 vid,
                 target,
@@ -309,13 +316,6 @@ impl GameState {
                 self.target(vid, target);
                 drop(settled);
             }
-            command @ (GameCommand::PartyInvite { .. }
-            | GameCommand::PartyInviteAnswer { .. }
-            | GameCommand::PartyRemove { .. }
-            | GameCommand::PartySetState { .. }
-            | GameCommand::PartyParameter { .. }
-            | GameCommand::PartyUseSkill { .. }
-            | GameCommand::PartyOf { .. }) => self.apply_party_pick(command),
             GameCommand::GuildOf { vid, reply } => {
                 let _heard = reply.send(self.holds_guild(vid));
             }
@@ -388,7 +388,6 @@ impl GameState {
             ),
         }
     }
-
     /// Runs one party command: each handler's `settled` is dropped once its records
     /// are queued.
     fn apply_party_pick(&mut self, command: GameCommand) {

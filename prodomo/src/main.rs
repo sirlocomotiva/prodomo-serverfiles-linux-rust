@@ -3556,7 +3556,6 @@ where
             true
         }
         // The main input and the dead phase's refusal, see [`main_record`].
-        // The main input and the dead phase's refusal, see [`main_record`].
         LiveStep::Record { phase, frame } => {
             main_step(session, addr, context, held, phase, frame).await
         }

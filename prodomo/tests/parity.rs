@@ -22,6 +22,8 @@ use parity::server::default_channels;
 use parity::{Client, Server};
 use prodomo::descriptor_crypto::derive_legacy_descriptor_keys;
 use protocol::cg_inventory::{resolve_cg_base_size, CG_KEEP_ALIVE, HEADER_CG_PONG};
+use protocol::cg_mark::{CgMarkCRCList, CgMarkIdxList, CgMarkLogin, CgMarkUpload, CgSymbolCrc};
+use protocol::cg_variable::encode_guild_symbol_upload;
 use protocol::gc_chat::CHAT_TYPE_TALKING;
 use protocol::gc_guild::{
     GUILD_NAME_FIELD_SIZE, GUILD_SUBHEADER_GC_CHANGE_EXP, GUILD_SUBHEADER_GC_CHANGE_MEMBER_GENERAL,
@@ -31,6 +33,7 @@ use protocol::gc_guild::{
     GUILD_SUBHEADER_GC_LOGIN, GUILD_SUBHEADER_GC_LOGOUT, GUILD_SUBHEADER_GC_REMOVE,
     GUILD_SUBHEADER_GC_SKILL_INFO,
 };
+use protocol::gc_mark::{HEADER_GC_MARK_BLOCK, HEADER_GC_MARK_IDXLIST, HEADER_GC_SYMBOL_DATA};
 use protocol::tea::{decrypt_padded, encrypt_padded, TeaKey};
 use support::{execute, ScratchDatabase};
 
@@ -4785,6 +4788,8 @@ fn a_party_line_reaches_the_members_and_no_outsider() {
         "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
  470100, 950100 FROM account WHERE login = 'carol'",
     );
+    // Yankee keeps the column's 0 and walks; Charlie is seeded, so it does not.
+    stamina(&database, "Charlie", 12_345);
     let (mut alice, alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
     alice.sees_arrive(yankee_listed.id, true, None);
@@ -13366,4 +13371,254 @@ fn a_guild_ups_and_casts_its_skills() {
     assert_eq!(player[0][0], 600_000, "the offer debits land");
     assert_eq!(player[0][1], 471_000, "the warp lands");
     assert_eq!(player[0][2], 951_000, "the warp lands");
+}
+
+/// Read one setup-key-sealed record whose plaintext length `len_of` reads from the first
+/// decrypted unit: the mark answers are dynamic, so their head names their length.
+fn expect_sealed_sized(client: &mut Client, len_of: impl Fn(&[u8]) -> usize) -> Vec<u8> {
+    let mut wire = client.expect_bytes(8);
+    let len = len_of(&decrypt_padded(&wire, &SETUP_KEY).expect("aligned"));
+    wire.extend(client.expect_bytes(len.div_ceil(8) * 8 - 8));
+    let mut plain = decrypt_padded(&wire, &SETUP_KEY).expect("aligned");
+    assert!(
+        plain[len..].iter().all(|&byte| byte == 0),
+        "padding {plain:02x?}"
+    );
+    plain.truncate(len);
+    plain
+}
+
+/// Found guild 1 (`MyGuild`, by Alpha) on a mark-serving `server`: the account, the
+/// characters, the purse, the founding record, and the drained creation walk.
+fn found_guild_for_marks(server: &Server, database: &ScratchDatabase) {
+    create_account(server, "alice");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    give_guild_purse(database);
+    let (mut alice, _alpha, _entered) = enter_world_seeing(server, b"alice", 0);
+    alice.send_record(&client_answer_make_guild(b"MyGuild"));
+    let named = alice.read_game();
+    assert_eq!(check_guild_named(&named), 1);
+    for _ in 0..8 {
+        alice.read_game();
+    }
+    alice.quiet("the creation settled");
+}
+
+/// A mark-downloader connection: past `MARK_LOGIN` on `server`'s Channel 1, on the setup
+/// key. The login goes out plaintext with nonzero handle and key, which legacy never
+/// reads, and the phase answer comes back plaintext, before TEA starts.
+fn mark_downloader(server: &Server) -> Client {
+    let (mut client, _) = accepted(server.channel(1));
+    client.send(&CgMarkLogin::new(0x0102_0304, 0x0506_0708).encode());
+    assert_eq!(client.expect_bytes(2), [GC_PHASE, PHASE_LOGIN]);
+    client
+}
+
+/// The `bufSize` a mark index-list or block answer carries at bytes 1..5.
+fn mark_buf_size(head: &[u8]) -> usize {
+    u32::from_le_bytes(head[1..5].try_into().unwrap()) as usize
+}
+
+/// `sys.guild.mark`, `cg.handshake.mark_login`, `cg.login.mark_login`,
+/// `cg.login.mark_crclist`, `cg.login.mark_idxlist`, `cg.login.mark_upload`,
+/// `gc.mark_idxlist`, `gc.mark_block`: Alpha founds a guild, and a downloader logs in
+/// with an unread handle and key, while a non-serving process closes the login. A login-phase `MARK_LOGIN` is consumed, the empty
+/// index list answers, an upload for an unknown guild is quiet and stores nothing, the
+/// upload for guild 1 lands mark id 0 with its 768 bytes in the store, the index list
+/// names the pair, and the CRC list against all zeros diffs every block in ascending
+/// position order. A reboot keeps the pair, and an all-zero upload deletes it.
+#[test]
+fn a_guild_mark_is_uploaded_listed_and_fetched() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    // A fresh guild is level 1, so the floor is 1; the judge still refuses unknown guilds.
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "guild_mark_min_level = 1",
+    );
+    found_guild_for_marks(&server, &database);
+    let mut downloader = mark_downloader(&server);
+    // A login-phase MARK_LOGIN is consumed with nothing done.
+    downloader.send(&sealed(&CgMarkLogin::new(1, 2).encode()));
+    let (heard, quiet) = downloader.drain(Duration::from_millis(300));
+    assert!(heard.is_empty(), "consumed, no effect: {heard:02x?}");
+    assert_eq!(quiet, Quiet::Open);
+    // No marks yet: the empty index list.
+    downloader.send(&sealed(&CgMarkIdxList::new().encode()));
+    assert_eq!(
+        expect_sealed_sized(&mut downloader, mark_buf_size),
+        vec![HEADER_GC_MARK_IDXLIST, 7, 0, 0, 0, 0, 0]
+    );
+    // An upload for an unknown guild is quiet and stores nothing.
+    let mut image = [0u8; 768];
+    image[0..4].copy_from_slice(&0x1122_3344u32.to_le_bytes());
+    downloader.send(&sealed(&CgMarkUpload::new(999, image).encode()));
+    let (heard, quiet) = downloader.drain(Duration::from_millis(300));
+    assert!(heard.is_empty(), "an unknown guild is quiet: {heard:02x?}");
+    assert_eq!(quiet, Quiet::Open);
+    // The upload for guild 1: quiet on the wire, one row in the store.
+    downloader.send(&sealed(&CgMarkUpload::new(1, image).encode()));
+    let (heard, quiet) = downloader.drain(Duration::from_millis(300));
+    assert!(heard.is_empty(), "an upload answers nothing: {heard:02x?}");
+    assert_eq!(quiet, Quiet::Open);
+    let mark = support::rows(
+        database.url(),
+        "SELECT mark_id, length(image), get_byte(image, 0), get_byte(image, 3) FROM guild_mark \
+         WHERE guild_id = 1",
+        4,
+    );
+    assert_eq!(mark, vec![vec![0, 768, 0x44, 0x11]], "mark id 0, the bytes");
+    // The index list names the pair.
+    downloader.send(&sealed(&CgMarkIdxList::new().encode()));
+    assert_eq!(
+        expect_sealed_sized(&mut downloader, mark_buf_size),
+        vec![HEADER_GC_MARK_IDXLIST, 11, 0, 0, 0, 1, 0, 1, 0, 0, 0]
+    );
+    // The CRC list against all zeros: every block differs, in ascending position order.
+    downloader.send(&sealed(&CgMarkCRCList::new(0, [0; 80]).encode()));
+    let blocks = expect_sealed_sized(&mut downloader, mark_buf_size);
+    assert_eq!(blocks[0], HEADER_GC_MARK_BLOCK);
+    assert_eq!(blocks[5], 0, "imgIdx");
+    let count = u32::from_le_bytes(blocks[6..10].try_into().unwrap());
+    assert_eq!(count, 80, "every zero CRC differs");
+    let mut at = 10;
+    for pos in 0..80u8 {
+        assert_eq!(blocks[at], pos, "ascending position");
+        let comp = u32::from_le_bytes(blocks[at + 1..at + 5].try_into().unwrap()) as usize;
+        assert!(comp > 0, "block {pos} carries bytes");
+        at += 5 + comp;
+    }
+    assert_eq!(at, blocks.len(), "bufSize covers the triples");
+    assert_eq!(at, mark_buf_size(&blocks), "bufSize is exact");
+    // A reboot keeps the pair: the boot install reads the row back.
+    drop(downloader);
+    drop(server);
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "guild_mark_min_level = 1",
+    );
+    let mut downloader = mark_downloader(&server);
+    downloader.send(&sealed(&CgMarkIdxList::new().encode()));
+    assert_eq!(
+        expect_sealed_sized(&mut downloader, mark_buf_size),
+        vec![HEADER_GC_MARK_IDXLIST, 11, 0, 0, 0, 1, 0, 1, 0, 0, 0],
+        "the reboot kept the pair"
+    );
+    // An all-zero upload deletes the mark: the list empties and the row is gone.
+    downloader.send(&sealed(&CgMarkUpload::new(1, [0; 768]).encode()));
+    let (heard, quiet) = downloader.drain(Duration::from_millis(300));
+    assert!(heard.is_empty(), "a delete answers nothing: {heard:02x?}");
+    assert_eq!(quiet, Quiet::Open);
+    downloader.send(&sealed(&CgMarkIdxList::new().encode()));
+    assert_eq!(
+        expect_sealed_sized(&mut downloader, mark_buf_size),
+        vec![HEADER_GC_MARK_IDXLIST, 7, 0, 0, 0, 0, 0],
+        "the delete emptied the list"
+    );
+    let marks = support::rows(database.url(), "SELECT COUNT(*) FROM guild_mark", 1);
+    assert_eq!(marks[0][0], 0, "the row is gone");
+    // A process that serves no marks closes the downloader's login instead.
+    drop(downloader);
+    drop(server);
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "guild_mark_server = false",
+    );
+    let (mut refused, _) = accepted(server.channel(1));
+    refused.send(&CgMarkLogin::new(0x0102_0304, 0x0506_0708).encode());
+    assert_eq!(refused.expect_closed(), Vec::<u8>::new());
+}
+
+/// The IEEE CRC-32 of `bytes`, bit by bit: the scenario's own witness, sharing no code
+/// with the server. The symbol scenario checks it against the standard vector first.
+fn crc32_ieee(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    crc ^ 0xffff_ffff
+}
+
+/// `sys.guild.mark`, `cg.login.guild_symbol_upload`, `cg.login.symbol_crc`,
+/// `gc.symbol_data`: Alpha founds a guild, and a downloader uploads 25 symbol bytes.
+/// The bytes land in the store, a CRC with the wrong word is answered with the bytes,
+/// and a CRC that matches both size and CRC — plus one for an unknown guild — is
+/// quiet. The 25 bytes keep the 7-byte prefix a whole number of TEA units, so no
+/// padding byte follows the record on the wire.
+#[test]
+fn a_guild_symbol_is_uploaded_and_served() {
+    assert_eq!(crc32_ieee(b"123456789"), 0xcbf4_3926, "the standard vector");
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "guild_mark_min_level = 1",
+    );
+    found_guild_for_marks(&server, &database);
+    let mut downloader = mark_downloader(&server);
+    let symbol = b"the-guild-symbol-bytes-01";
+    assert_eq!(symbol.len() % 8, 1, "7 + 25 seals with no padding");
+    // An upload for an unknown guild is quiet and stores nothing.
+    downloader.send(&sealed(
+        &encode_guild_symbol_upload(999, symbol).expect("a 25-byte symbol encodes"),
+    ));
+    let (heard, quiet) = downloader.drain(Duration::from_millis(300));
+    assert!(heard.is_empty(), "an unknown guild is quiet: {heard:02x?}");
+    assert_eq!(quiet, Quiet::Open);
+    // The upload for guild 1: quiet on the wire, one row in the store.
+    downloader.send(&sealed(
+        &encode_guild_symbol_upload(1, symbol).expect("a 25-byte symbol encodes"),
+    ));
+    let (heard, quiet) = downloader.drain(Duration::from_millis(300));
+    assert!(heard.is_empty(), "an upload answers nothing: {heard:02x?}");
+    assert_eq!(quiet, Quiet::Open);
+    let stored = support::rows(
+        database.url(),
+        "SELECT length(data), get_byte(data, 0), get_byte(data, 24) FROM guild_symbol WHERE \
+         guild_id = 1",
+        3,
+    );
+    assert_eq!(stored, vec![vec![25, i64::from(b't'), i64::from(b'1')]]);
+    // A CRC with the wrong word is answered with the stored bytes.
+    let size = u32::try_from(symbol.len()).unwrap();
+    downloader.send(&sealed(&CgSymbolCrc::new(1, 0xdead_beef, size).encode()));
+    let mut want = vec![HEADER_GC_SYMBOL_DATA, 32, 0, 1, 0, 0, 0];
+    want.extend_from_slice(symbol);
+    assert_eq!(
+        expect_sealed_sized(&mut downloader, |head| usize::from(u16::from_le_bytes(
+            head[1..3].try_into().unwrap()
+        ))),
+        want
+    );
+    // A CRC that matches both size and CRC is quiet, as an unknown guild's is.
+    downloader.send(&sealed(
+        &CgSymbolCrc::new(1, crc32_ieee(symbol), size).encode(),
+    ));
+    let (heard, quiet) = downloader.drain(Duration::from_millis(300));
+    assert!(heard.is_empty(), "a match is quiet: {heard:02x?}");
+    assert_eq!(quiet, Quiet::Open);
+    downloader.send(&sealed(&CgSymbolCrc::new(999, 0, size).encode()));
+    let (heard, quiet) = downloader.drain(Duration::from_millis(300));
+    assert!(heard.is_empty(), "an unknown guild is quiet: {heard:02x?}");
+    assert_eq!(quiet, Quiet::Open);
+    let symbols = support::rows(database.url(), "SELECT COUNT(*) FROM guild_symbol", 1);
+    assert_eq!(symbols[0][0], 1, "only guild 1's row");
 }

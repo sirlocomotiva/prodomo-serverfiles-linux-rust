@@ -32062,7 +32062,7 @@ protocol 1203 · parity 8/8.
 
 No ADR changed. No owner question added. V20 stays free.
 
-## 230e: A player shoots and splashes (V17f, second half)
+## 230e. A player shoots and splashes (V17f, second half)
 
 `CG_FLY_TARGETING`/`CG_ADD_FLY_TARGETING` store (with the around-but-shooter
 relay) and `CG_SHOOT` shoots: the plain bow arm (assassin, bow + arrow, the
@@ -32564,7 +32564,7 @@ green; prodomo 1061 · parity green.
 
 No ADR changed. No owner question added. V20 stays free.
  
- ## 230n. A guild is made (sys.guild.core, first part)
+## 230n. A guild is made (sys.guild.core, first part)
  
  `CInputMain::AnswerMakeGuild` (`G/input_main.cpp:2672-2730`) plus `CGuild::CGuild`'s sends
  (`G/guild.cpp:59-127`) and the master's `LoginMember` (`:270-296`): creation is live end to
@@ -32912,3 +32912,68 @@ no warnings; clippy green; doc green; prodomo guild (28 tests) and the new parit
 scenario green, no scratch DBs left.
 
 No ADR changed. No owner question added. V20 stays free.
+
+## 230v. The guild marks go live (`sys.guild.mark`)
+
+The handshake gate, the six login arms, the LZO1X-1 manager, the judged uploads and
+the served lists are live. `G/` below means `server/server/game/`.
+
+The handshake arm (`G/input.cpp:211`) moves the descriptor to the login phase when
+`guild_mark_server` is set and closes it otherwise; the handle and random key are
+opaque, as legacy never reads them, and the phase answer goes out plaintext, before
+TEA starts. The login arms are `MARK_LOGIN` consumed (`G/input_login.cpp:1207`),
+`MARK_CRCLIST` (`:1214`), `MARK_IDXLIST` (`:1218`), `MARK_UPLOAD` (`:1222`),
+`GUILD_SYMBOL_UPLOAD` (`:1229`) — the first variable-length login record on this path,
+framed by the size word its decoder resolves — and `SYMBOL_CRC` (`:1234`).
+
+The manager (`G/MarkManager.cpp`, `G/MarkImage.cpp`) compresses each 768-byte image
+into 80 LZO1X-1 blocks, hands out the lowest free mark id, deletes on an all-zero
+image, and diffs the CRC list caller's way: every block whose CRC differs, in
+ascending position order. Uploads are judged first — the guild exists, its level
+reaches `guild_mark_min_level` — then the descriptor stores the row and the world
+commits into the manager; reads answer from memory with no store round trip. The boot
+install reads the rows back, so a reboot keeps every pair. The symbol judge answers a
+CRC or size mismatch with the stored bytes and stays quiet on a match or an unknown
+guild; an upload for an unknown guild is quiet too, a refusal rather than legacy's
+close. `SaveMark`'s failure returns `INVALID_MARK_ID`, not legacy's `false` (0),
+which collides with mark id 0. `GuildMarkConvert` is not ported: a one-shot migration
+of files absent from this deployment.
+
+Two judgement calls. The symbol land gate treats land as held (V20): no land system
+exists, so `FindLandByGuild` is always NULL, and under a literal port every symbol
+upload would close; the owner's files run `test_server` 1 and real guilds hold land,
+so the port takes the production semantic. Mark pixels cross the world boundary as
+`[u32; 192]` native words, as the upload frame decodes them — the manager's contract,
+matching `SaveMark(DWORD posMark, BYTE *pbMarkImage)`'s word-wise empty test.
+
+Two proofs, both on a pre-character downloader connection past `MARK_LOGIN` on the
+setup key. `a_guild_mark_is_uploaded_listed_and_fetched`: Alpha founds guild 1, the
+login-phase `MARK_LOGIN` is consumed, the empty index list answers, the unknown-guild
+upload is quiet and stores nothing, the upload lands mark id 0 with its 768 bytes in
+the store, the index list names the pair, the all-zero CRC list diffs all 80 blocks in
+ascending position order with an exact `bufSize`, a reboot keeps the pair, the
+all-zero upload deletes it (list empty, row gone), and a non-serving process closes
+the login. `a_guild_symbol_is_uploaded_and_served`: the 25-byte upload lands (7 + 25
+seals with no padding byte after the record), a wrong-word CRC is answered with the
+bytes, a matching CRC and an unknown guild are quiet, and only guild 1's row stands;
+the scenario carries its own bitwise CRC-32, checked against `0xcbf4_3926` first.
+
+Drive-by repair, outside this slice: the party scenario seeded no stamina for Charlie,
+so the server walked it (stamina 0, like Yankee, who is correctly marked walking) and
+`sees_arrive(..., false, ...)` read the walk-mode record as the add. Charlie is now
+seeded at 12345, kept by the author's mixed walking/non-walking arrivals. The failure
+is deterministic on the uncommitted 230m text and untouched by the mark code.
+
+`cg.handshake.mark_login`, `cg.login.mark_login`, `cg.login.mark_crclist`,
+`cg.login.mark_idxlist`, `cg.login.mark_upload`, `cg.login.guild_symbol_upload`,
+`cg.login.symbol_crc` -> ported; `gc.mark_block`, `gc.mark_idxlist`, `gc.symbol_data`
+-> ported (their source column now names `protocol/src/gc_mark.rs`: the three records
+sit outside `gc_inventory` by design, decoded on the downloader's own path);
+`sys.guild.mark` -> ported. STATUS header updated here, the mark-login-table Left text
+retired, V20 recorded. No crate was added, and `Cargo.toml` and `Cargo.lock` are
+unchanged. Gates: fmt clean; build with no warnings; clippy green; doc green; prodomo
+guild (33 tests) and mark (11 tests) green; db green with a live store; both new parity
+scenarios green, no scratch DBs left. Full-suite DB runs: only parallel-load flakes
+outside this change (the potion and the hit-group-member scenarios, each green alone).
+
+No ADR changed. No owner question added. V20 is taken by this section.
