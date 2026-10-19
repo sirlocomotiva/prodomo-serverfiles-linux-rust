@@ -7,6 +7,7 @@
 
 pub mod accounts;
 pub mod credentials;
+pub mod guilds;
 pub mod item_id_range;
 pub mod items;
 pub mod player_skills;

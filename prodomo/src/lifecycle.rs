@@ -296,6 +296,40 @@ impl ClientLifecycle {
         })
     }
 
+    /// Apply the mark downloader's login in the handshake phase
+    /// (`CInputHandshake::Analyze`'s mark arm, `G/input.cpp:211-226`): the outer phase
+    /// becomes `Login` and the TEA boundary goes on, exactly as the normal handshake's
+    /// `SetPhase` does — the `GC_PHASE` record rides the old plaintext boundary and the
+    /// login analyzer reads TEA from then on. The internal handshake reducer moves to
+    /// its own `Login` half, so a later time sync is an ack, not a regression.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LifecycleError::Closed`] after close and
+    /// [`LifecycleError::HandshakeUnsupported`] outside the handshake phase.
+    pub fn on_mark_login(self) -> Result<LifecycleReduction, LifecycleError> {
+        if self.phase == ClientPhase::Close {
+            return Err(LifecycleError::Closed);
+        }
+        if self.phase != ClientPhase::Handshake {
+            return Err(LifecycleError::HandshakeUnsupported { phase: self.phase });
+        }
+        let output_boundary = self.input_boundary();
+        let handshake = self.handshake.mark_login();
+        Ok(LifecycleReduction {
+            state: Self {
+                phase: ClientPhase::Login,
+                handshake,
+                heartbeat: self.heartbeat,
+            },
+            effects: vec![LifecycleEffect::SetPhase {
+                phase: ClientPhase::Login,
+                output_boundary,
+                input_boundary: LifecycleInputBoundary::LegacyTea,
+            }],
+        })
+    }
+
     /// Apply an explicit post-handshake descriptor phase transition.
     ///
     /// The source calls `SetPhase` when login succeeds, a player is loaded,

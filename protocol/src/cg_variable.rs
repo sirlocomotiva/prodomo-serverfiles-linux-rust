@@ -22,10 +22,11 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::cg_guild::{sub_packet_size, GUILD_SUBHEADER_CG_POST_COMMENT};
 use crate::cg_inventory::{
-    HEADER_CG_CHAT, HEADER_CG_FISH_EVENT_SEND, HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_MESSENGER,
-    HEADER_CG_MYSHOP, HEADER_CG_PRIVATE_SHOP, HEADER_CG_SHOP, HEADER_CG_SYNC_POSITION,
-    HEADER_CG_WHISPER,
+    HEADER_CG_CHAT, HEADER_CG_FISH_EVENT_SEND, HEADER_CG_GUILD, HEADER_CG_GUILD_SYMBOL_UPLOAD,
+    HEADER_CG_MESSENGER, HEADER_CG_MYSHOP, HEADER_CG_PRIVATE_SHOP, HEADER_CG_SHOP,
+    HEADER_CG_SYNC_POSITION, HEADER_CG_WHISPER,
 };
 use crate::cg_wire::{
     resolve_client_frame_size, ClientFrame, ClientFrameError, ClientFrameSize,
@@ -108,6 +109,7 @@ pub const RESOLVABLE_VARIABLE_CLIENT_HEADERS: &[u8] = &[
     HEADER_CG_SYNC_POSITION.value(),
     HEADER_CG_MYSHOP.value(),
     HEADER_CG_SHOP.value(),
+    HEADER_CG_GUILD.value(),
     HEADER_CG_GUILD_SYMBOL_UPLOAD.value(),
     HEADER_CG_FISH_EVENT_SEND.value(),
     HEADER_CG_MESSENGER.value(),
@@ -274,6 +276,62 @@ fn three_byte_prefix_declared_size(
         });
     }
     Ok(usize::from(u16::from_le_bytes([prefix[1], prefix[2]])))
+}
+
+/// Resolve the complete frame size of a `HEADER_CG_GUILD` (0x50) frame.
+///
+/// This is the guild arm of [`resolve_variable_client_frame_size`], split out so the
+/// shared resolver stays within its size budget. The body is `GetSubPacketSize`
+/// (`G/input_main.cpp:2773-2795`, ported as [`sub_packet_size`]), except
+/// `POST_COMMENT` (5), whose body is the length byte plus the comment: `1 + length`
+/// (`:3048-3079`). A length over `GUILD_COMMENT_MAX_LEN` (50) closes legacy's
+/// descriptor (`:3052-3059`), so it is a frame error here, which closes the session
+/// the same way.
+///
+/// # Errors
+///
+/// Returns [`ClientFrameError::InvalidInventorySize`] if the registered base size is
+/// not the two-byte `TPacketCGGuild` prefix, or [`ClientFrameError::InvalidVariableSize`]
+/// for a comment longer than the 50 legacy closes on.
+fn guild_frame_size(
+    header: u8,
+    base_size: usize,
+    prefix: &[u8],
+) -> Result<Option<usize>, ClientFrameError> {
+    use crate::cg_guild::CG_GUILD_BASE_WIRE_SIZE;
+    if base_size != CG_GUILD_BASE_WIRE_SIZE {
+        return Err(ClientFrameError::InvalidInventorySize {
+            header,
+            size: base_size,
+        });
+    }
+    let subheader = prefix[CG_GUILD_BASE_WIRE_SIZE - 1];
+    if subheader != GUILD_SUBHEADER_CG_POST_COMMENT {
+        return base_size
+            .checked_add(sub_packet_size(subheader))
+            .ok_or(ClientFrameError::SizeOverflow)
+            .map(Some);
+    }
+    // `POST_COMMENT`: the length byte is the third byte, so a two-byte prefix cannot
+    // decide the length. `Ok(None)` is the existing "need more bytes" signal.
+    if prefix.len() < CG_GUILD_BASE_WIRE_SIZE + 1 {
+        return Ok(None);
+    }
+    let length = usize::from(prefix[CG_GUILD_BASE_WIRE_SIZE]);
+    // `GUILD_COMMENT_MAX_LEN` (`G/guild.h:13`): 50. A longer comment closes legacy's
+    // descriptor (`G/input_main.cpp:3052-3059`), so it is a frame error here.
+    if length > 50 {
+        return Err(ClientFrameError::InvalidVariableSize {
+            header,
+            declared_size: CG_GUILD_BASE_WIRE_SIZE + 1 + length,
+            base_size,
+        });
+    }
+    CG_GUILD_BASE_WIRE_SIZE
+        .checked_add(1)
+        .and_then(|size| size.checked_add(length))
+        .ok_or(ClientFrameError::SizeOverflow)
+        .map(Some)
 }
 
 /// Resolve the complete frame size of a private-shop frame.
@@ -856,6 +914,118 @@ fn resolve_guild_symbol_declared_size(
     Ok(usize::from(u16::from_le_bytes([prefix[1], prefix[2]])))
 }
 
+/// The MYSHOP count arm of [`resolve_variable_client_frame_size`]: the trailing
+/// count byte appends one 68-byte record each.
+///
+/// # Errors
+///
+/// Returns a typed error for a wrong prefix size or a checked-size overflow.
+fn myshop_counted_size(
+    header: u8,
+    base_size: usize,
+    prefix: &[u8],
+) -> Result<usize, ClientFrameError> {
+    if base_size != MY_SHOP_BASE_WIRE_SIZE {
+        return Err(ClientFrameError::InvalidInventorySize {
+            header,
+            size: base_size,
+        });
+    }
+    let count = usize::from(prefix[base_size - 1]);
+    let extra = count
+        .checked_mul(MY_SHOP_ITEM_WIRE_SIZE)
+        .ok_or(ClientFrameError::SizeOverflow)?;
+    base_size
+        .checked_add(extra)
+        .ok_or(ClientFrameError::SizeOverflow)
+}
+
+/// The SHOP count arm of [`resolve_variable_client_frame_size`]: `BUY` appends two
+/// `BYTE` cells, `SELL` one, `SELL2` four, `END` and unknown none.
+///
+/// # Errors
+///
+/// Returns a typed error for a wrong prefix size or a checked-size overflow.
+fn shop_subheader_extra(
+    header: u8,
+    base_size: usize,
+    prefix: &[u8],
+) -> Result<usize, ClientFrameError> {
+    if base_size != SHOP_BASE_WIRE_SIZE {
+        return Err(ClientFrameError::InvalidInventorySize {
+            header,
+            size: base_size,
+        });
+    }
+    let extra = match prefix[1] {
+        // TPacketCGShopBuy is two BYTE cells. The source reads the
+        // second cell as the position and consumes both bytes.
+        SHOP_SUBHEADER_BUY => 2,
+        SHOP_SUBHEADER_SELL => 1,
+        // TfckOFF is declared outside packet.h's pack(1) region.
+        // On the active x86 target it is four bytes: slot, padding,
+        // then a WORD count. The padding byte is not initialized by
+        // the legacy client sender and is preserved as wire data here.
+        SHOP_SUBHEADER_SELL2 => 4,
+        // END and unknown subheaders both consume only the prefix.
+        _ => 0,
+    };
+    base_size
+        .checked_add(extra)
+        .ok_or(ClientFrameError::SizeOverflow)
+}
+
+/// The MESSENGER arm of [`resolve_variable_client_frame_size`].
+///
+/// # Errors
+///
+/// Returns a typed error for a wrong prefix size or a checked-size overflow.
+fn messenger_counted_size(
+    header: u8,
+    base_size: usize,
+    prefix: &[u8],
+) -> Result<usize, ClientFrameError> {
+    if base_size != MESSENGER_BASE_WIRE_SIZE {
+        return Err(ClientFrameError::InvalidInventorySize {
+            header,
+            size: base_size,
+        });
+    }
+    base_size
+        .checked_add(messenger_extra_wire_size(prefix[1]))
+        .ok_or(ClientFrameError::SizeOverflow)
+}
+
+/// The fish-event arm of [`resolve_variable_client_frame_size`]: `BOX_USE` appends
+/// 3, `SHAPE_ADD` 1, unknown subheaders none.
+///
+/// # Errors
+///
+/// Returns a typed error for a wrong prefix size or a checked-size overflow.
+fn fish_event_counted_size(
+    header: u8,
+    base_size: usize,
+    prefix: &[u8],
+) -> Result<usize, ClientFrameError> {
+    if base_size != FISH_EVENT_BASE_WIRE_SIZE {
+        return Err(ClientFrameError::InvalidInventorySize {
+            header,
+            size: base_size,
+        });
+    }
+    match prefix[1] {
+        FISH_EVENT_SUBHEADER_BOX_USE => base_size
+            .checked_add(3)
+            .ok_or(ClientFrameError::SizeOverflow),
+        FISH_EVENT_SUBHEADER_SHAPE_ADD => base_size
+            .checked_add(1)
+            .ok_or(ClientFrameError::SizeOverflow),
+        // The legacy switch has no default action for unknown
+        // subheaders. It consumes only the two-byte prefix.
+        _ => Ok(base_size),
+    }
+}
+
 /// The active C++ code reads `WORD wSize` at offset 1 for chat, whisper, and
 /// sync-position.  My-shop instead has a `BYTE bCount` at the end of its
 /// 35-byte prefix and appends one 68-byte record per count.
@@ -893,43 +1063,16 @@ pub fn resolve_variable_client_frame_size(
             resolve_guild_symbol_declared_size(header, base_size, prefix)?
         }
         value if value == HEADER_CG_MYSHOP.value() => {
-            if base_size != MY_SHOP_BASE_WIRE_SIZE {
-                return Err(ClientFrameError::InvalidInventorySize {
-                    header,
-                    size: base_size,
-                });
-            }
-            let count = usize::from(prefix[base_size - 1]);
-            let extra = count
-                .checked_mul(MY_SHOP_ITEM_WIRE_SIZE)
-                .ok_or(ClientFrameError::SizeOverflow)?;
-            base_size
-                .checked_add(extra)
-                .ok_or(ClientFrameError::SizeOverflow)?
+            myshop_counted_size(header, base_size, prefix)?
         }
         value if value == HEADER_CG_SHOP.value() => {
-            if base_size != SHOP_BASE_WIRE_SIZE {
-                return Err(ClientFrameError::InvalidInventorySize {
-                    header,
-                    size: base_size,
-                });
-            }
-            let extra = match prefix[1] {
-                // TPacketCGShopBuy is two BYTE cells. The source reads the
-                // second cell as the position and consumes both bytes.
-                SHOP_SUBHEADER_BUY => 2,
-                SHOP_SUBHEADER_SELL => 1,
-                // TfckOFF is declared outside packet.h's pack(1) region.
-                // On the active x86 target it is four bytes: slot, padding,
-                // then a WORD count. The padding byte is not initialized by
-                // the legacy client sender and is preserved as wire data here.
-                SHOP_SUBHEADER_SELL2 => 4,
-                // END and unknown subheaders both consume only the prefix.
-                _ => 0,
+            shop_subheader_extra(header, base_size, prefix)?
+        }
+        value if value == HEADER_CG_GUILD.value() => {
+            let Some(size) = guild_frame_size(header, base_size, prefix)? else {
+                return Ok(None);
             };
-            base_size
-                .checked_add(extra)
-                .ok_or(ClientFrameError::SizeOverflow)?
+            size
         }
         value if value == HEADER_CG_PRIVATE_SHOP.value() => {
             let Some(size) = private_shop_frame_size(header, base_size, prefix)? else {
@@ -938,34 +1081,10 @@ pub fn resolve_variable_client_frame_size(
             size
         }
         value if value == HEADER_CG_MESSENGER.value() => {
-            if base_size != MESSENGER_BASE_WIRE_SIZE {
-                return Err(ClientFrameError::InvalidInventorySize {
-                    header,
-                    size: base_size,
-                });
-            }
-            base_size
-                .checked_add(messenger_extra_wire_size(prefix[1]))
-                .ok_or(ClientFrameError::SizeOverflow)?
+            messenger_counted_size(header, base_size, prefix)?
         }
         value if value == HEADER_CG_FISH_EVENT_SEND.value() => {
-            if base_size != FISH_EVENT_BASE_WIRE_SIZE {
-                return Err(ClientFrameError::InvalidInventorySize {
-                    header,
-                    size: base_size,
-                });
-            }
-            match prefix[1] {
-                FISH_EVENT_SUBHEADER_BOX_USE => base_size
-                    .checked_add(3)
-                    .ok_or(ClientFrameError::SizeOverflow)?,
-                FISH_EVENT_SUBHEADER_SHAPE_ADD => base_size
-                    .checked_add(1)
-                    .ok_or(ClientFrameError::SizeOverflow)?,
-                // The legacy switch has no default action for unknown
-                // subheaders. It consumes only the two-byte prefix.
-                _ => base_size,
-            }
+            fish_event_counted_size(header, base_size, prefix)?
         }
         _ => {
             return Err(ClientFrameError::VariableLengthUnsupported { header, base_size });
@@ -2165,12 +2284,101 @@ mod tests {
 
     #[test]
     fn variable_headers_without_a_resolver_remain_explicitly_unsupported() {
+        use crate::cg_inventory::HEADER_CG_AURA;
         let mut decoder = VariableClientFrameDecoder::new();
-        decoder.feed(&[HEADER_CG_GUILD.value(), 0]).unwrap();
+        decoder.feed(&[HEADER_CG_AURA.value(), 0]).unwrap();
         assert!(matches!(
             decoder.try_decode(),
             Err(ClientFrameError::VariableLengthUnsupported { .. })
         ));
+    }
+
+    #[test]
+    fn guild_frames_size_by_sub_packet_size() {
+        use crate::cg_guild::{
+            CG_GUILD_BASE_WIRE_SIZE, GUILD_SUBHEADER_CG_ADD_MEMBER,
+            GUILD_SUBHEADER_CG_CHANGE_GRADE_AUTHORITY, GUILD_SUBHEADER_CG_CHANGE_GRADE_NAME,
+            GUILD_SUBHEADER_CG_CHANGE_MEMBER_GENERAL, GUILD_SUBHEADER_CG_CHANGE_MEMBER_GRADE,
+            GUILD_SUBHEADER_CG_CHARGE_GSP, GUILD_SUBHEADER_CG_DELETE_COMMENT,
+            GUILD_SUBHEADER_CG_DEPOSIT_MONEY, GUILD_SUBHEADER_CG_GUILD_INVITE_ANSWER,
+            GUILD_SUBHEADER_CG_OFFER, GUILD_SUBHEADER_CG_REFRESH_COMMENT,
+            GUILD_SUBHEADER_CG_REMOVE_MEMBER, GUILD_SUBHEADER_CG_USE_SKILL,
+            GUILD_SUBHEADER_CG_WITHDRAW_MONEY,
+        };
+        let guild = HEADER_CG_GUILD.value();
+        // In `GUILD_SUBHEADER_CG` order (`packet.h:2167-2183`), with the
+        // `GetSubPacketSize` arm beside each (`G/input_main.cpp:2777-2791`).
+        // `POST_COMMENT` is count-derived and checked separately.
+        let arms = [
+            (GUILD_SUBHEADER_CG_ADD_MEMBER, 4),
+            (GUILD_SUBHEADER_CG_REMOVE_MEMBER, 4),
+            (GUILD_SUBHEADER_CG_CHANGE_GRADE_NAME, 10),
+            (GUILD_SUBHEADER_CG_CHANGE_GRADE_AUTHORITY, 2),
+            (GUILD_SUBHEADER_CG_OFFER, 4),
+            (GUILD_SUBHEADER_CG_DELETE_COMMENT, 4),
+            (GUILD_SUBHEADER_CG_REFRESH_COMMENT, 0),
+            (GUILD_SUBHEADER_CG_CHANGE_MEMBER_GRADE, 5),
+            (GUILD_SUBHEADER_CG_USE_SKILL, 8),
+            (GUILD_SUBHEADER_CG_CHANGE_MEMBER_GENERAL, 5),
+            (GUILD_SUBHEADER_CG_GUILD_INVITE_ANSWER, 5),
+            (GUILD_SUBHEADER_CG_CHARGE_GSP, 4),
+            (GUILD_SUBHEADER_CG_DEPOSIT_MONEY, 4),
+            (GUILD_SUBHEADER_CG_WITHDRAW_MONEY, 4),
+        ];
+        for (subheader, body) in arms {
+            let prefix = [guild, subheader];
+            assert_eq!(
+                resolve_variable_client_frame_size(guild, &prefix).unwrap(),
+                Some(CG_GUILD_BASE_WIRE_SIZE + body),
+                "subheader {subheader}"
+            );
+        }
+        // Unknown subheaders are 0 bytes (`:2794`): the frame is the base alone.
+        for subheader in [15, 255] {
+            let prefix = [guild, subheader];
+            assert_eq!(
+                resolve_variable_client_frame_size(guild, &prefix).unwrap(),
+                Some(CG_GUILD_BASE_WIRE_SIZE),
+                "subheader {subheader}"
+            );
+        }
+    }
+
+    #[test]
+    fn guild_post_comment_sizes_by_its_length_byte() {
+        let guild = HEADER_CG_GUILD.value();
+        // A two-byte prefix cannot decide the length: more bytes are needed.
+        assert_eq!(
+            resolve_variable_client_frame_size(guild, &[guild, GUILD_SUBHEADER_CG_POST_COMMENT])
+                .unwrap(),
+            None
+        );
+        // `1 + length` past the base (`G/input_main.cpp:3072`).
+        for length in [0, 1, 50] {
+            let prefix = [guild, GUILD_SUBHEADER_CG_POST_COMMENT, length];
+            assert_eq!(
+                resolve_variable_client_frame_size(guild, &prefix).unwrap(),
+                Some(3 + usize::from(length)),
+                "length {length}"
+            );
+        }
+        // Over 50 closes legacy's descriptor (`:3052-3059`): a frame error here.
+        let prefix = [guild, GUILD_SUBHEADER_CG_POST_COMMENT, 51];
+        assert!(matches!(
+            resolve_variable_client_frame_size(guild, &prefix),
+            Err(ClientFrameError::InvalidVariableSize { .. })
+        ));
+    }
+
+    #[test]
+    fn guild_frames_decode_through_the_decoder() {
+        let guild = HEADER_CG_GUILD.value();
+        let mut decoder = VariableClientFrameDecoder::new();
+        decoder.feed(&[guild, 0, 1, 2, 3, 4]).unwrap();
+        let frame = decoder.try_decode().unwrap().expect("one frame");
+        assert_eq!(frame.header, guild);
+        assert_eq!(frame.payload, vec![0, 1, 2, 3, 4]);
+        assert!(decoder.is_empty());
     }
 
     #[test]

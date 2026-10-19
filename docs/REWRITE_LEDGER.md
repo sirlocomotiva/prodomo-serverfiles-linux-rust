@@ -32563,3 +32563,352 @@ Gates: fmt clean; build with no warnings; clippy `-D warnings` (1.85.1) clean; d
 green; prodomo 1061 · parity green.
 
 No ADR changed. No owner question added. V20 stays free.
+ 
+ ## 230n. A guild is made (sys.guild.core, first part)
+ 
+ `CInputMain::AnswerMakeGuild` (`G/input_main.cpp:2672-2730`) plus `CGuild::CGuild`'s sends
+ (`G/guild.cpp:59-127`) and the master's `LoginMember` (`:270-296`): creation is live end to
+ end. The world judges the answer — the 200000 gold, the disband/withdraw delay gates, the
+ guildless state, the 2-to-12 alphanumeric name with the banned-word and mob-name rules, and
+ the in-memory duplicate — and answers `Store` or `Refused`. The descriptor writes the guild,
+ grade and member rows first, then sends the commit; the world commits the registry and the
+ link, takes the fee and one 70101, and answers every record in legacy's own order (`GUILD_NAME`
+ first, inside `CreateGuild`, then `[LS;682]`, the fee, the item, the login walk: GRADE, INFO,
+ LIST, LOGIN, SKILL_INFO). The master's own records go out, the fee and item half stores with
+ `apply_transfer`, and only then does the `GUILD_NAME` broadcast reach every other PC — in that
+ order, so nobody hears of a guild the store did not take. A concurrent name answers `[LS;473]`,
+ as the `SELECT COUNT(*)` arm does; any other store error closes, as an unstored move does.
+ 
+ The boot load rides the allocator's ordering: `CGuildManager::Initialize`'s rows arrive as the
+ `InstallGuilds` command once the schema is up, before the gate opens, and a second install is
+ refused as a second allocator install is. `link_guild`/`unlink_guild` run on world entry and
+ leave, so a member that relogs walks the same login records. `ladder_point`, `win`, `draw` and
+ `loss` stay in the store with no world fields until war lands; the logs stay unported
+ (`sys.log` owns no sink).
+ 
+ Four proofs: the store tests (`a_second_creation_with_the_same_name_answers_taken`, the cased
+ twin, `load_all_reads_what_create_guild_wrote`); the world test
+ `a_second_guild_install_is_refused_rather_than_replacing_the_guilds`; and the two wire
+ scenarios — `a_guild_is_made_and_every_pc_hears_its_name` (the master's walk byte by byte, the
+ other PC hearing the broadcast alone, the rows, the fee and the spent item all read back) and
+ `a_taken_guild_name_is_refused_and_survives_a_reboot` (the `[LS;473]` refusal, the cased twin
+ refused after a reboot, Yankee's fee and item intact).
+ 
+ `cg.game.answer_make_guild` → ported, `gc.guild` → ported, `sys.guild.core` → partial (note
+ only: the `CG_GUILD` arms, the login-phase guild fields, marks and wars are left), STATUS header
+ updated here. No crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+ 
+ Gates: fmt clean; build with no warnings; clippy `-D warnings` (1.85.1) clean across the
+ workspace; doc green; prodomo 1063 · db guilds green with a live store, scratch clean ·
+ parity green (both guild scenarios, inventory check).
+ 
+ No ADR changed. No owner question added. V20 stays free.
+
+## 230o. A guild opens its door (sys.guild.core, second part)
+
+`CInputMain::Guild`'s invite/answer/removal doors (`G/input_main.cpp:2797-3162`, `G/guild.cpp:2115-2208`):
+the door is live end to end. ADD_MEMBER invites — the hostile, own-name, pvp-map and war-map
+refusals, then `VerifyGuildJoinableCondition`'s ladder with the inviter texts — and a judged
+invite rides the descriptor's [LS;1061] INVITE `GUILD_INVITE` bundle to the guest. The answer: a
+deny removes the invite and is quiet; an accept re-runs the ladder with the accept texts, the
+descriptor inserts the member row, and the world commits the grade-15 row — the LIST-one and the
+LOGIN to the already-online members, the joiner's own walk (grades, INFO, LIST, the two LOGINs,
+skills) on its session. REMOVE_MEMBER: the scold-with-removal when the asker lacks `REMOVE`
+authority, the two-sided withdraw stamps (`new_withdraw_time` on both arms), the forced-leave
+line under the online arm's request bit, and the REMOVE and retired-guild LOGOUT fans — all under
+the judged `online`, never a re-read, so a victim that enters between judgement and commit still
+hears the offline arm.
+
+Two orderings the fan got wrong before the scenario proved them: the joiner hears no LIST-one of
+itself (`SendListOneToAll` at `guild.cpp:182` runs before `m_memberOnline.insert` at `:286`), and
+the ladder and the stamps run on the descriptor's `get_global_time()` epoch seconds, because the
+world's own clock counts boot milliseconds and `now - 0 < 86400` fires for the first 86 seconds of
+uptime. Every `now` rides its command, as the creation judge's does.
+
+One proof: `a_guild_invites_accepts_and_removes` — the inviter hears nothing, the guest hears the
+bundle and the joiner's own walk byte by byte, the master hears the LIST-one and the LOGIN, the
+member row reads back at grade 15, the removal lands the stamps and the REMOVE/LOGOUT, and the row
+is gone — plus the six world tests of the invite, join and removal fans.
+
+`cg.game.guild` → partial (the door, scenario named in the note; grades, money, comments, skills and notices are left),
+`gc.guild` → ported (note only: INVITE, the LIST-one, LOGIN, REMOVE and LOGOUT join the walk),
+`sys.guild.core` → partial (note only), STATUS header updated here. No crate was added, and
+`Cargo.toml` and `Cargo.lock` are unchanged.
+
+Gates: fmt clean; build with no warnings; clippy 1.98 reports pre-existing lints in files this
+change does not touch (protocol/common/parity; none in `guild.rs`, `main.rs`,
+`game_loop_messages.rs` or `parity.rs`); doc green; prodomo 6 door tests green; db green with a
+live store; parity green (all 3 guild scenarios). The protocol `cg_wiring` counts moved to 108/26
+with `HEADER_GC_GUILD` implemented. Full-suite DB run: 108 pass, 3 timing-flaky combat scenarios
+fail under parallel load and pass alone (untouched by this change).
+
+No ADR changed. No owner question added. V20 stays free.
+
+## 230p. A guild names its grades (sys.guild.core, third part)
+
+The four grade arms (`CInputMain::Guild`'s `CHANGE_GRADE_NAME`, `CHANGE_GRADE_AUTHORITY`,
+`CHANGE_MEMBER_GRADE` and `CHANGE_MEMBER_GENERAL`, `G/input_main.cpp:2956-3000,3062-3116`,
+plus `CGuild::ChangeGradeName`, `ChangeGradeAuth`, `ChangeMemberGrade` and
+`ChangeMemberGeneral`, `G/guild.cpp:822-913,1144-1229`): every arm is judged, stored and
+committed, and the fan reaches every online member.
+
+The rename judges the leader gate, the grade-1 gate and the name shape — the bytes before
+the first NUL, truncated to 8, as `strlcpy(gradename, c_pData + 1, 9)` reads them (`:2958`),
+so a NUL-less field names its first 8 bytes with no over-read — then the alphabet, the
+banned words and the mob names, as the guild name judges them. The re-auth judges the
+leader and grade-1 gates and stores the auth byte whole, with no mask. The re-grade judges
+the leader, own-row and grade-1 gates; a victim of another guild answers `"Couldn't find
+such a person."`, because the row it names is not this guild's. The general flag judges the
+leader gate and the count gate at 1 (`GetMaxGeneralCount`'s literal, `G/guild.h:233`), the
+byte to 0/1 — and the commit re-checks the count, because a rival flag may have landed
+between the judge and the commit; a full house keeps the stored flag and chats the line, as
+legacy chats it when `ChangeMemberGeneral` answers false (`:3110-3113`). The grade-1 write
+and the missing member stay quiet at the commit, as their early returns do. The money arms
+stay quiet past the frame check: both return before their bodies (`:2826-2878`).
+
+Four proofs: the codec tests (the GRADE_NAME, GRADE_AUTH, CHANGE_MEMBER_GRADE and
+CHANGE_MEMBER_GENERAL layouts); the store test (`grade_and_member_rows_round_trip_through_the_setters`);
+the five world tests (the rename and its three refusals plus the NUL-less truncation, the
+re-auth, the re-grade and its two refusals, the general flag and its judge/commit count
+gates); and the wire scenario `a_guild_renames_regrades_and_flags_its_general` — the four
+fans byte by byte to both members, the closed money arm quiet, and every row read back.
+
+`cg.game.guild` → partial (note only: the grade arms join the door), `gc.guild` → ported
+(note only: GRADE_NAME, GRADE_AUTH, CHANGE_MEMBER_GRADE and CHANGE_MEMBER_GENERAL join the
+walk), `sys.guild.core` → partial (note only), STATUS header updated here. No crate was
+added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Gates: fmt clean; build with no warnings; clippy 1.98 reports pre-existing lints in files
+this change does not touch (protocol/common/parity; none in `guild.rs`, `main.rs`,
+`game_loop_messages.rs`, `game_state.rs`, `db/src/guilds.rs` or `parity.rs`); doc green;
+prodomo 11 guild tests green; db guilds (6 tests) green with a live store; parity green (all
+4 guild scenarios). Full-suite DB runs: only parallel-load flakes outside this change (a VID
+allocator assertion once, two timing-sensitive combat scenarios once), each green alone or in
+its package.
+
+No ADR changed. No owner question added. V20 stays free.
+
+## 230q. A guild takes money and posts (sys.guild.core, fourth part)
+
+The offer, the charge and the three comment arms (`CInputMain::Guild`'s `OFFER`,
+`CHARGE_GSP`, `POST_COMMENT`, `DELETE_COMMENT` and `REFRESH_COMMENT`,
+`G/input_main.cpp:3005-3091`, plus `CGuild::OfferExp`, `ChargeSP`, `AddComment`,
+`DeleteComment` and `RefreshComment`, `G/guild.cpp:942-982,1049-1095,1804-1831`):
+every arm is judged, stored and committed, and the fans reach every online member.
+
+The offer judges the guildless gate, the max-level gate and the speaker's own exp —
+the frame's DWORD floors to hundreds (`:3014`), the wraparound and negative arms are
+unreachable past the frame, and a short purse answers `[LS;929]` — debits the exp
+through `lose_exp`, runs the level loop with the ladder step, and fans the LIST-one
+and the `CHANGE_EXP` (plus one INFO per level step). The charge judges the
+guildless and arithmetic gates, caps the SP to the power headroom, debits the gold
+through `set_gold` plus the `POINT_GOLD` record, and fans the `SKILL_INFO` — with
+the `[LS;938]` count chatting to the speaker on its own session after the store
+(`:1830`), which the first draft of this change missed (the `[LS;938]` commit
+line, caught by the scenario's missing count). The post judges the guildless,
+notice (`!`-first without `GUILD_AUTH_NOTICE`) and minute gates — the Pulses floor
+to seconds on each side before the subtract (`:1058`), and the Romanian countdown
+prints `%02d` — sets the minute at the commit after the insert, and answers the
+board the descriptor read after the insert, as `FuncAfterQuery` does. The refresh
+answers the board for the speaker's own session. The delete names the id (the
+leader) or the id and the speaker's own name, and a missing row chats the
+EUC-KR missing line (`:1088`), relayed as exact bytes. `vsnprintf` grows `%u` for
+the count (the countdown's `%02d` was already there).
+
+Five proofs: the codec tests (the COMMENTS layout, the countdown, the `%u`
+conversion); the store test (`an_offer_charges_and_comments_round_trip...`);
+the world tests (the offer floor/debit/fan, the charge cap/debit/fan/count, the
+post's three gates, the notice auth, the refresh, and the leader/non-leader
+delete); the `%u` unit test; and the wire scenario
+`a_guild_offers_charges_posts_and_deletes` — the LIST-one, the CHANGE_EXP, the
+SKILL_INFO, the `[LS;938]` count, the COMMENTS self packets, and every row read
+back. The dispatcher-wide `apply_guild_step` split keeps `apply_command` and
+`apply_item_step` under the line limit.
+
+`cg.game.guild` -> partial (note only: offer, charge and the comment arms join the
+grades), `gc.guild` -> ported (note only: CHANGE_EXP, the SKILL_INFO update and
+COMMENTS join the walk), `sys.guild.core` -> partial (note only), STATUS header
+updated here. No crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Gates: fmt clean; build with no warnings; clippy 1.98 reports pre-existing lints in
+files this change does not touch (protocol/common/parity/party/pc_skill/safebox/
+shop; none in `guild.rs`, `main.rs`, `game_loop_messages.rs`, `game_state.rs`,
+`chat_line.rs`, `db/src/guilds.rs` or `parity.rs`); doc green; prodomo 18 guild
+tests green; db guilds (7 tests) green with a live store; parity green (all 4 guild
+scenarios).
+
+No ADR changed. No owner question added. V20 stays free.
+
+## 230r. A guild ups and casts its skills (`sys.guild.core`, fifth part)
+
+The `/gskillup` line and the `USE_SKILL` arm (`do_guildskillup`, `G/cmd_general.cpp:875-902`,
+plus `CGuild::SkillLevelUp` and `CGuild::UseSkill`, `G/guild.cpp:1234-1418`, called by the
+`GUILD_SUBHEADER_CG_USE_SKILL` arm, `G/input_main.cpp:3113-3119`): the climb is judged, stored
+and fanned, and the cast is judged, stored and committed, with the teleport and the war gate.
+
+The up judges the empty-arg quiet, the guildless `[LS;523]`, the non-leader `[LS;524]` (the
+gate reads the row's grade, not auth bits; a member row `of` names but `members` lacks is
+quiet — legacy dereferences the row unchecked, a Defect), then out-of-range quiet, missing-row
+quiet, at-max quiet and no-point quiet; else the point is spent, the byte climbs, `ComputeGuildPoints`
+recomputes the max, and the `SKILL_INFO` fans to the online members. The cast judges the
+guildless `[LS;523]` (the shared gate), the member+auth quiet, the stun quiet (only the stun
+arm of `CanMove` — no private shop), the range quiet, the missing-row quiet, the level-0 quiet
+(a fresh guild's teleport is silent, not 935), the SELFONLY-held quiet, then the strips run
+(revive-invisible, then Eunhyung 34 — just the remove, not the cloaked-attack level walk), the
+cost gates (`[LS;931]` underfunded with (power, needed), `[LS;932]` unusable), and the cooldown
+stamps — and the commit lands the power with the `MINMAX` clamp, fans `SKILL_INFO`, and
+branches. 158 teleports to any online PID (legacy's `FindByPID` is global, not guild-scoped):
+same-Channel orders the warp through the lease's order queue (`take_order` flushes the fan
+first, so the `SKILL_INFO` precedes `GC_WARP` deterministically), cross-Channel chats
+`[LS;934]` with (victim channel, own channel), offline chats `[LS;935]`. Every other vnum chats
+`[LS;937]`: no wars run, so the `RemoveAffect` + `ComputeSkill` buff loop waits for
+`sys.guild.war` — and the SP stays consumed, as legacy consumes before branching.
+
+The usable flags are memory-only with Pulse dues (`abSkillUsable` plus the DB server's `m_pqSkill`
+pump, `db/GuildManager.cpp:280-286,761-766`), re-armed quietly in `run_guild_ticks`; a 0-second
+cooldown re-arms on the next tick, so a second cast on the same Pulse still answers 932. The
+spend stores at once with the commit (the charge precedent); the 12 guild rows load at boot from
+the dump into `gamedata::guild_skill_data` (cost `150+150*k` with `k = level/max` on 152-157,
+empty polys on the rest, SELFONLY on 156-160). `SetSkillLevel`/`SetSkillPoint` stay quest rows
+and the empty `SkillRecharge` carries no arm.
+
+Five proofs: the gamedata tests (the 151-162 rows, 152's polys, 158's empties); the store test
+(`skill_levels_and_spent_power_round_trip_through_their_writers`); the world tests (the climb
+and every gate, the 171-cost 937 cast with its 932 follow-up, the underfunded 931, the offline
+935, the warp branch, the re-arm); and the wire scenario `a_guild_ups_and_casts_its_skills` —
+two offers to level 3, the 152 and 158 ups (with the pointless quiet and the 524), the 937 cast
+at power 329, the 932, the 935, and the teleport's departure to Yankee's feet, with every row
+read back.
+
+`cmd.gskillup` -> ported (the scenario), `sub.Guild.GUILD_SUBHEADER_CG_USE_SKILL` stays
+`missing` (the 230o-q arms left theirs `missing` too), `cg.game.guild` -> partial (note only:
+the cast joins the arms), `gc.guild` -> ported (note only: the climb and the cast fan
+`SKILL_INFO`), `sys.guild.core` -> partial (note only), STATUS header updated here. No crate
+was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Gates: fmt clean; build with no warnings; clippy green; doc green; db guilds (9 tests) green
+with a live store; parity green (all 6 guild scenarios).
+
+No ADR changed. No owner question added. V20 stays free.
+
+## 230s. A guild answers its quests (`sys.guild.core`, sixth part)
+
+The 29 `guild.*` quest calls are live: 23 readers answered from memory and the 6 writers
+judged and stored like the wire arms. `G/` below means `server/server/game/`.
+
+The bridge (`quest/src/manager.rs::guild_api`, behind the new `BRIDGED` row for the 29
+names) converts each argument as the answer it becomes: a number-like argument arrives
+dworded (`(DWORD)lua_tonumber`, truncating toward zero, the low 32 bits on wrap), a
+text-only one arrives raw up to its first zero byte (`lua_tostring`), and anything else
+arrives as the empty text. The world's `Session::guild_call` answers mid-script from a
+shadow clone of the guilds — readers push their value now, so the script's control flow
+sees it — and records each call; the world judges the same calls again after the step
+for its records and stores (`GameState::answer_guild_quest`, drained from the two
+`QuestStepOutcome` sites in `prodomo/src/game_state/quests.rs`, committed through the
+new `store_quest_guild_stores` in `prodomo/src/main.rs` and the `db::guilds` writers).
+
+The readers answer legacy's pushed values from memory: the caller-or-named lookups and
+the -1/0/`""` quiets (`get_rank`, `get_ladder_point`, `name`/`get_name` with the soft-arm
+V19l merge, `level`, `get_member_count`), the raw counters (`get_id0`, `get_sp0`,
+`get_maxsp0`, `get_money0`, `get_max_member0`, `get_total_member_level0`), the dead `false`
+(`has_land0`), the war tallies, `get_skill_level0`'s wrapped range gate, `get_skill_point0`,
+and the clamped `get_exp_level0`. The ranking texts walk by ladder then id, as the wire
+list does.
+
+The writers run their wire arm's judge without its frame: `change_master` hands the
+mastership over through `ChangeMasterTo`'s commit (the master's PID, the new master's
+grade 1, the old master's grade 15, INFO plus grades to every online member), `add_comment0`
+judges the wire post's commit, `set_ladder_point0` saturates the signed delta onto the
+ladder, `set_skill_level0`/`set_skill_point0` run the `BYTE` truncation (the dword's low 8
+bits, not a saturating clamp) past the range/proto/max/point gates and fan `SKILL_INFO`,
+`offer_exp0` floors /100*100 and answers whether the wire offer landed, and `give_exp0`
+runs the exp-loop whole answer with its `CHANGE_EXP` and per-step INFO fans. Each queues
+its `GuildQuestStore` half for the descriptor to drain in order.
+
+`change_master_with_limit` (`G/questlua_guild.cpp:346-433`) runs the full ladder past the
+`change_master` gates: a non-text name pushes 0, a non-master caller 1, an offline name 5
+(`FindPC`, case-insensitive, unreachable on undecodable bytes), an under-floor target 6,
+a live `be_other_leader` flag past `get_global_time()` 7 unless the sixth argument is
+truthy (`lua_toboolean`: any live value but false and nil — a dworded 0 is the number 0,
+which is true — and a missing sixth is nil), a non-member or foreign name 2, else 3 with
+the mastership handed over and the six quest flags stamped through the manager now, as the
+withdraw stamp does (the new master is online, so `GetPC` returns its PC; the stamp
+values re-read the dwords as signed `(int)lua_tonumber`). The one deliberate merge: `FindPC`
+lower-cases with the ASCII fold, where legacy lower-cases with the C locale's `tolower`
+(identical on the ASCII names the port accepts).
+
+Three proofs: the bridge test (fractional, text, and wrapping arguments arrive dworded,
+raw, and low-32; `guild.is_war` stays unbridged); the world tests (`a_limit_change_lands_and_stamps_six`:
+the 3, the mastership, all six stamps; `a_limit_change_judges_each_gate`: 0/1/2/5/6/7
+plus the ignore flag's clear, the third player standing but never joined for the 2); and
+the `guild_ranking` placement the live ranking texts serve. No wire scenario: no shipped
+quest calls a writer (only `quest_functions` names them), and the readers' scenario waits
+for the login-phase guild fields.
+
+29 `lua.guild.*` rows -> ported (the bridge test), `sys.guild.core` -> partial (note only),
+STATUS header updated here. No crate was added, and `Cargo.toml` and `Cargo.lock` are
+unchanged. Gates: fmt clean; build with no warnings; clippy green; doc green; quest lib (72
+tests) and prodomo guild (28 tests) green.
+
+No ADR changed. No owner question added. V20 stays free.
+
+## 230t. The select list names the guilds (`sys.guild.core`, seventh part)
+
+The login-phase guild fields are live: `SendLoginSuccessPacket`'s loop over
+`GetLinkedGuild` (`G/desc.cpp:892-904`). `G/` below means `server/server/game/`.
+
+The descriptor asks the store for each lobby slot's linked guild — the id and name off
+the `guild_member`/`guild` join, `None` for an empty or unguilded slot
+(`db::guilds::lobby_guilds`) — and `login_success` writes them into the 357-byte list: a
+guilded slot carries its id and its `strlcpy` name in the 13-byte field, the others zeros.
+Both `login_success` sites ask it (the Channel `LOGIN2` and the empire choose); the
+create/delete single-slot records carry no guild columns, as legacy's don't.
+
+Three proofs: the `login_success` unit test (a guilded slot, an empty slot with a stale
+guild answer, a 12-byte name kept whole), the new `lobby_guilds` store test (guilded,
+empty, unguilded slots), and the extended `a_guild_is_made_and_every_pc_hears_its_name`
+scenario, which logs in again after the founding and reads the id and the padded name
+off the list. The spawn and equip records' `dwGuildID`/`dwNewIsGuildName` (`G/char.cpp`)
+stay zero — a live row's view fields are the next slice, not this one.
+
+`gc.login_success4` -> ported (note only), `sys.guild.core` -> partial (note only),
+STATUS header updated here. No crate was added, and `Cargo.toml` and `Cargo.lock` are
+unchanged. Gates: fmt clean; build with no warnings; clippy green; doc green; prodomo
+channel_login (10 tests), db guilds (9 tests), and the guild parity scenario green.
+
+No ADR changed. No owner question added. V20 stays free.
+## 230u. The view names the guilds (`sys.guild.core`, eighth part)
+
+The spawn and equip guild fields are live: `EncodeInsertPacket`'s additional-info arm
+(`G/char.cpp:1176-1199`), `UpdatePacket`'s guild arm (`:1327-1352`), and the NAME the
+insert sends first (`ch->SendGuildName(GetGuild())`, `:1070`, `:8621-8642`). `G/` below
+means `server/server/game/`.
+
+`GameState::view_guild` answers the pair from the in-memory guilds: the guild id, and 3
+for the master (`GetMasterPID`), 2 for a general (`is_general`), 1 for a plain member, 0
+with no guild — the memory read the insert's arm takes (`:1186`). The update's arm
+re-reads `is_general` from the store per packet (`:1336`); the port answers both from
+the member map, which the link (`LoginMember`) and every writer keep current. No SQL
+runs per spawn or per equip. The `if (false)` empire gates on both records (`:1153`,
+`:1366`) stay dead: every viewer sees the id, as the checked-in server sends.
+
+`character_additional` and `character_update` (via `Mover::view_guild`, which every
+world `Mover` site sets) carry the pair; `deliver_insert` sends the NAME before the add
+on the viewer's first sighting of the id, tracked on the body (`m_known_guild`,
+`G/char.h:2049`, cleared by a fresh body as `Initialize` clears it at `:419`). `deliver`
+is `&mut` for the mark. NPC updates carry `(0, 0)`: a monster holds no guild.
+
+Three unit proofs (`view_guild` names master/general/member/none with the VID twin,
+a viewer hears one NAME and still sees the second spawner's id, an update carries the
+id and 3) and the live `a_newcomer_hears_the_masters_guild_and_sees_its_id` scenario:
+Charlie enters seeing the guilded master and the guildless Yankee, hears the NAME
+before the master's add, reads 3 off the master's info and 0 off Yankee's, arrives
+himself with no NAME, and carries zeros in his own update. The harness's `read_shown`
+accepts the NAME among the shown, and `sees_arrive` takes the expected guild name.
+
+`sys.guild.core` -> partial (note only), STATUS header updated here. No crate was
+added, and `Cargo.toml` and `Cargo.lock` are unchanged. Gates: fmt clean; build with
+no warnings; clippy green; doc green; prodomo guild (28 tests) and the new parity
+scenario green, no scratch DBs left.
+
+No ADR changed. No owner question added. V20 stays free.

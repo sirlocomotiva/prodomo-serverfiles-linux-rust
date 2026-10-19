@@ -501,6 +501,7 @@ mod tests {
             affect_flags: [0; 2],
             dead: false,
             alignment: 0,
+            view_guild: (0, 0),
         }
     }
 

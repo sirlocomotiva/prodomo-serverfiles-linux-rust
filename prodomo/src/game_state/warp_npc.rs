@@ -378,6 +378,7 @@ impl GameState {
                         affect_flags: self.affect_flags_of(common::vid::Vid::new(raw)),
                         dead: false,
                         alignment: self.alignment_of(raw),
+                        view_guild: self.view_guild_of_vid(raw),
                     };
                     if let Some(line) = self.is_hack(vid, mover) {
                         let _sent = self.write_to_client(vid, line);

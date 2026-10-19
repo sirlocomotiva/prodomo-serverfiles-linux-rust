@@ -33,6 +33,10 @@ pub const DEFAULT_EFFECT_CAPACITY: usize = 256;
 
 /// Default maximum commands drained at the start of each pulse.
 pub const DEFAULT_MAX_COMMANDS_PER_PULSE: usize = 512;
+/// `SGuildMark::SIZE`: the 192 words of one mark image.
+pub const MARK_PIXELS: usize = 16 * 12;
+/// `CG_MARK_CRCLIST_WORDS`: the 80 CRC words one image slot holds.
+pub const MARK_CRC_WORDS: usize = 80;
 
 /// Bounded channel and command-drain settings for a game-loop thread.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -184,6 +188,27 @@ pub enum GameCommand {
         /// Where the game thread reports whether it installed.
         ///
         /// Closed, not sent, when the world could not act on the request at all.
+        /// Where the game thread reports whether it installed.
+        ///
+        /// Closed, not sent, when the world could not act on the request at all.
+        reply: oneshot::Sender<bool>,
+    },
+    /// Installs the stored guilds, grades and members, which `CGuildManager::Initialize`
+    /// loads at boot (`G/guild_manager.cpp:212-243`). The rows cannot be a constructor
+    /// argument: they are only readable once the store has migrated, which happens inside
+    /// the accept loop after the listeners are bound, as the item id range is.
+    ///
+    /// The answer is a `bool` for the same reason
+    /// [`GameCommand::InstallItemIdRange`]'s is: `serve` treats a second install as a
+    /// bug it must not paper over.
+    InstallGuilds {
+        /// Every stored guild with its grade and member rows.
+        stored: db::guilds::StoredGuilds,
+        /// Every stored mark row.
+        marks: Vec<db::guilds::StoredMark>,
+        /// Every stored symbol row.
+        symbols: Vec<db::guilds::StoredSymbol>,
+        /// Where the game thread reports whether it installed.
         reply: oneshot::Sender<bool>,
     },
     /// Takes a granted item back out of the world after its row could not be written.
@@ -429,7 +454,261 @@ pub enum GameCommand {
         /// Where the game thread reports what the step did.
         reply: oneshot::Sender<Result<ShopAnswer, MoveItemRefused>>,
     },
-    /// Runs one trade step for the character online under `vid`: a start, an offer, an accept
+    /// Judges one `CG_ANSWER_MAKE_GUILD` for the character online under `vid`
+    /// (`CInputMain::AnswerMakeGuild`, `G/input_main.cpp:2672-2730`): the gold, the delay
+    /// gates, the guildless state, the name, and the in-memory duplicate. The world answers
+    /// what the descriptor must store, if anything; see `game_state::guild`.
+    AnswerMakeGuild {
+        /// The VID of the character whose client sent the answer.
+        vid: common::vid::Vid,
+        /// The raw 13 name bytes the client sent.
+        field: [u8; protocol::cg_guild_answer::GUILD_NAME_FIELD_SIZE],
+        /// `get_global_time()` in seconds, which the descriptor reads.
+        now: u32,
+        /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::GuildMakeAnswer>,
+    },
+    /// Commits one judged creation for the character online under `vid` under the id the
+    /// store answered: the registry and the link, the fee, the item, and every record for
+    /// the descriptor to send and store. See `game_state::guild`.
+    CommitMakeGuild {
+        /// The VID of the character whose client sent the answer.
+        vid: common::vid::Vid,
+        /// The id the store answered plus the judged name.
+        commit: crate::game_state::GuildMakeCommit,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports the commit.
+        reply: oneshot::Sender<crate::game_state::GuildMakeAnswer>,
+    },
+    /// Runs one `GUILD_SUBHEADER_CG_ADD_MEMBER` for the character online under `vid`
+    /// (`CInputMain::Guild`'s arm, `G/input_main.cpp:2880-2899`, plus `CGuild::Invite`,
+    /// `G/guild.cpp:2034-2113`): the world judges and invites in one step; nothing is
+    /// stored.
+    GuildAddMember {
+        /// The VID of the character whose client sent the invite.
+        vid: common::vid::Vid,
+        /// The guest's VID, as the client sent it.
+        guest: u32,
+        /// `get_global_time()` in seconds, which the descriptor reads.
+        now: u32,
+    },
+    /// Judges one `GUILD_SUBHEADER_CG_GUILD_INVITE_ANSWER` for the character online
+    /// under `vid` (`CInputMain::Guild`'s arm, `G/input_main.cpp:3137-3159`, plus
+    /// `InviteAccept`/`InviteDeny`, `G/guild.cpp:2115-2158`): the world answers what
+    /// the descriptor must store, if anything; see `game_state::guild`.
+    AnswerGuildInvite {
+        /// The VID of the character whose client sent the answer.
+        vid: common::vid::Vid,
+        /// The guild the invite named.
+        guild_id: u32,
+        /// The client's accept byte: 1 joins, 0 denies.
+        accept: u8,
+        /// `get_global_time()` in seconds, which the descriptor reads.
+        now: u32,
+        /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::GuildJoinAnswer>,
+    },
+    /// Commits one judged join under the stored member row: the row lands, the PID
+    /// links, and the answer carries every record for the descriptor to send. See
+    /// `game_state::guild`.
+    CommitGuildJoin {
+        /// The guild plus the joiner's PID.
+        commit: crate::game_state::GuildJoinCommit,
+        /// Where the game thread reports the commit.
+        reply: oneshot::Sender<crate::game_state::GuildJoinAnswer>,
+    },
+    /// Judges one `GUILD_SUBHEADER_CG_REMOVE_MEMBER` for the character online under
+    /// `vid` (`CInputMain::Guild`'s arm, `G/input_main.cpp:2901-2954`, plus
+    /// `RequestRemoveMember`, `G/guild.cpp:195-211`): the world answers what the
+    /// descriptor must delete, if anything; see `game_state::guild`.
+    AnswerGuildRemove {
+        /// The VID of the character whose client sent the removal.
+        vid: common::vid::Vid,
+        /// The victim's PID, as the client sent it.
+        pid: u32,
+        /// `get_global_time()` in seconds, which the descriptor reads.
+        now: u32,
+        /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::GuildRemoveAnswer>,
+    },
+    /// Commits one judged removal under the deleted member row: the victim unlinks and
+    /// the answer carries the fan plus the after line, if any. See `game_state::guild`.
+    CommitGuildRemove {
+        /// The speaker's VID plus the victim's PID.
+        commit: crate::game_state::GuildRemoveCommit,
+        /// Where the game thread reports the commit.
+        reply: oneshot::Sender<crate::game_state::GuildRemoveAnswer>,
+    },
+    /// Judges one `GUILD_SUBHEADER_CG_CHANGE_GRADE_NAME` for the character online under
+    /// `vid` (`CInputMain::Guild`'s arm, `G/input_main.cpp:2956-2979`, plus
+    /// `ChangeGradeName`, `G/guild.cpp:822-857`): the world answers what the
+    /// descriptor must store, if anything; see `game_state::guild`.
+    AnswerGuildGradeName {
+        /// The VID of the character whose client sent the rename.
+        vid: common::vid::Vid,
+        /// The 1-based grade, as the client sent it.
+        grade: u8,
+        /// The 9 name field bytes, as the client sent them.
+        field: Vec<u8>,
+        /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::GuildGradeAnswer>,
+    },
+    /// Judges one `GUILD_SUBHEADER_CG_CHANGE_GRADE_AUTHORITY` for the character online
+    /// under `vid` (`CInputMain::Guild`'s arm, `G/input_main.cpp:2982-3000`, plus
+    /// `ChangeGradeAuth`, `G/guild.cpp:870-913`): the world answers what the
+    /// descriptor must store, if anything; see `game_state::guild`.
+    AnswerGuildGradeAuth {
+        /// The VID of the character whose client sent the re-auth.
+        vid: common::vid::Vid,
+        /// The 1-based grade, as the client sent it.
+        grade: u8,
+        /// The auth byte, as the client sent it.
+        auth: u8,
+        /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::GuildGradeAnswer>,
+    },
+    /// Judges one `GUILD_SUBHEADER_CG_CHANGE_MEMBER_GRADE` for the character online
+    /// under `vid` (`CInputMain::Guild`'s arm, `G/input_main.cpp:3062-3081`, plus
+    /// `ChangeMemberGrade`, `G/guild.cpp:1190-1229`): the world answers what the
+    /// descriptor must store, if anything; see `game_state::guild`.
+    AnswerGuildMemberGrade {
+        /// The VID of the character whose client sent the re-grade.
+        vid: common::vid::Vid,
+        /// The victim's PID, as the client sent it.
+        pid: u32,
+        /// The grade, as the client sent it.
+        grade: u8,
+        /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::GuildGradeAnswer>,
+    },
+    /// Judges one `GUILD_SUBHEADER_CG_CHANGE_MEMBER_GENERAL` for the character online
+    /// under `vid` (`CInputMain::Guild`'s arm, `G/input_main.cpp:3095-3116`, plus
+    /// `ChangeMemberGeneral`, `G/guild.cpp:1144-1189`): the world answers what the
+    /// descriptor must store, if anything; see `game_state::guild`.
+    AnswerGuildMemberGeneral {
+        /// The VID of the character whose client sent the flag.
+        vid: common::vid::Vid,
+        /// The victim's PID, as the client sent it.
+        pid: u32,
+        /// The flag byte, as the client sent it.
+        is_general: u8,
+        /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::GuildGradeAnswer>,
+    },
+    /// Judges one `GUILD_SUBHEADER_CG_OFFER` for the character online under `vid`
+    /// (`CInputMain::Guild`'s arm, `G/input_main.cpp:3005-3029`, plus `OfferExp`,
+    /// `G/guild.cpp:942-982`): the world answers what the descriptor must store, if
+    /// anything; see `game_state::guild`.
+    AnswerGuildOffer {
+        /// The VID of the character whose client sent the offer.
+        vid: common::vid::Vid,
+        /// The offered experience, as the client sent it.
+        offer: u32,
+        /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::GuildGradeAnswer>,
+    },
+    /// Judges one `GUILD_SUBHEADER_CG_CHARGE_GSP` for the character online under `vid`
+    /// (`CInputMain::Guild`'s arm, `G/input_main.cpp:3030-3047`, plus `ChargeSP`,
+    /// `G/guild.cpp:1804-1831`): the world answers what the descriptor must store, if
+    /// anything; see `game_state::guild`.
+    AnswerGuildCharge {
+        /// The VID of the character whose client sent the charge.
+        vid: common::vid::Vid,
+        /// The faith to charge, as the client sent it.
+        offer: i32,
+        /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::GuildGradeAnswer>,
+    },
+    /// Judges one `GUILD_SUBHEADER_CG_POST_COMMENT` for the character online under
+    /// `vid` (`CInputMain::Guild`'s arm, `G/input_main.cpp:3048-3080`, plus
+    /// `AddComment`, `G/guild.cpp:1049-1072`): the world answers what the descriptor
+    /// must store, if anything; see `game_state::guild`.
+    AnswerGuildPostComment {
+        /// The VID of the character whose client posted.
+        vid: common::vid::Vid,
+        /// The content bytes, as the client sent them.
+        content: Vec<u8>,
+        /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::GuildCommentAnswer>,
+    },
+    /// Commits one judged post under the inserted row. See `game_state::guild`.
+    CommitGuildPostComment {
+        /// The speaker, the guild and the board after the post.
+        commit: crate::game_state::GuildCommentCommit,
+        /// Where the game thread reports the board.
+        reply: oneshot::Sender<crate::game_state::GuildCommentAnswer>,
+    },
+    /// Runs one `GUILD_SUBHEADER_CG_REFRESH_COMMENT` for the character online under
+    /// `vid` (`CInputMain::Guild`'s arm, `G/input_main.cpp:3089-3091`, plus
+    /// `RefreshComment`, `G/guild.cpp:1092-1095`): the world answers the gates and the
+    /// descriptor reads the board; see `game_state::guild`.
+    AnswerGuildRefreshComment {
+        /// The VID of the character whose client sent the refresh.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the gates.
+        reply: oneshot::Sender<crate::game_state::GuildCommentAnswer>,
+    },
+    /// Runs one `GUILD_SUBHEADER_CG_DELETE_COMMENT` for the character online under
+    /// `vid` (`CInputMain::Guild`'s arm, `G/input_main.cpp:3081-3088`, plus
+    /// `DeleteComment`, `G/guild.cpp:1075-1090`): the world answers the gates and the
+    /// descriptor deletes the row, then reports; see `game_state::guild`.
+    AnswerGuildDeleteComment {
+        /// The VID of the character whose client sent the delete.
+        vid: common::vid::Vid,
+        /// The comment id, as the client sent it.
+        comment_id: u32,
+        /// Where the game thread reports the gates.
+        reply: oneshot::Sender<crate::game_state::GuildCommentAnswer>,
+    },
+    /// Reports one judged delete's store half: whether a row was there, with the board
+    /// after it. See `game_state::guild`.
+    CommitGuildDeleteComment {
+        /// The speaker, the guild, the board, and whether a row was there.
+        commit: crate::game_state::GuildCommentCommit,
+        /// Where the game thread reports the board or the line.
+        reply: oneshot::Sender<crate::game_state::GuildCommentAnswer>,
+    },
+    /// Commits one judged grade-arm step under the stored row: the value lands, the
+    /// fan goes out, and the answer carries the after line, if any. See
+    /// `game_state::guild`.
+    CommitGuildGrade {
+        /// The speaker's VID plus the judged value.
+        commit: crate::game_state::GuildGradeCommit,
+        /// Where the game thread reports the commit.
+        reply: oneshot::Sender<crate::game_state::GuildGradeAnswer>,
+    },
+    /// Judges one `GUILD_SUBHEADER_CG_USE_SKILL` for the character online under `vid`
+    /// (`CGuild::UseSkill`, `G/guild.cpp:1267-1340`): the world answers what the
+    /// descriptor must store, if anything; see `game_state::guild`.
+    AnswerGuildUseSkill {
+        /// The VID of the character whose client sent the cast.
+        vid: common::vid::Vid,
+        /// The cast vnum, as the client sent it.
+        vnum: u32,
+        /// The target PID, as the client sent it.
+        pid: u32,
+        /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::GuildSkillUseAnswer>,
+    },
+    /// Commits one judged cast under the stored power: the power lands, the fan goes
+    /// out, and the branch runs. See `game_state::guild`.
+    CommitGuildUseSkill {
+        /// The speaker, the guild, the cast, and the judged power.
+        commit: crate::game_state::GuildSkillUseCommit,
+        /// Where the game thread reports the commit.
+        reply: oneshot::Sender<crate::game_state::GuildSkillUseAnswer>,
+    },
+    /// Runs one `/gskillup` line (`do_guildskillup`, `G/cmd_general.cpp:878-904`, plus
+    /// `CGuild::SkillLevelUp`); see `game_state::guild`.
+    GuildSkillUp {
+        /// The VID of the skilling player.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the climbed skill, when the up lands.
+        reply: oneshot::Sender<crate::game_state::GuildSkillUpAnswer>,
+    },
     /// or a cancel.
     Trade {
         /// The VID of the character whose client sent the step.
@@ -577,6 +856,71 @@ pub enum GameCommand {
         /// Where the game thread reports the membership.
         reply: oneshot::Sender<bool>,
     },
+    /// Whether the character online under `vid` holds a guild (`ch->GetGuild() !=
+    /// NULL`, `G/input_main.cpp:976`): the descriptor asks before judging a guild
+    /// chat line. See `game_state::guild`.
+    GuildOf {
+        /// The VID of the asking character.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the membership.
+        reply: oneshot::Sender<bool>,
+    },
+    /// Judges one `MARK_UPLOAD` (`GuildMarkUpload`, `G/input_login.cpp:1059-1090`): the
+    /// guild, its level against `min_level`, and the image. An all-zero image deletes;
+    /// anything else commits into the mark manager. Carries the 192 native words the
+    /// upload frame decodes to, as `SaveMark`'s empty test reads them.
+    MarkUpload {
+        /// The opaque guild id the image belongs to.
+        guild_id: u32,
+        /// The 192 image words, in wire order. Boxed: 768 bytes would dwarf every
+        /// other variant.
+        image: Box<[u32; MARK_PIXELS]>,
+        /// `[game] guild_mark_min_level`, clamped to `GUILD_MAX_LEVEL` at parse.
+        min_level: u8,
+        /// Where the game thread reports the judgement.
+        reply: oneshot::Sender<crate::game_state::MarkUploadAnswer>,
+    },
+    /// Lists every (guild, mark) pair (`GuildMarkIDXList`, `G/input_login.cpp:1092-1114`):
+    /// the world's `CopyMarkIdx`, in guild-id order, each truncated to its low 16 bits.
+    MarkIdxList {
+        /// Where the game thread reports the pairs.
+        reply: oneshot::Sender<Vec<(u16, u16)>>,
+    },
+    /// Diffs one image slot against the client's CRC list (`GuildMarkCRCList`,
+    /// `G/input_login.cpp:1116-1162`): the blocks whose CRC differs, in ascending
+    /// position order with their compressed bytes. Unknown slots yield nothing.
+    MarkCrcList {
+        /// The opaque image-slot index the client asked about.
+        img_idx: u8,
+        /// The client's 80 CRC words, in wire order. Boxed with the upload image.
+        crc_list: Box<[u32; MARK_CRC_WORDS]>,
+        /// Where the game thread reports the diff triples.
+        reply: oneshot::Sender<Vec<(u8, Vec<u8>)>>,
+    },
+    /// Commits one judged symbol upload (`GuildSymbolUpload`'s store half,
+    /// `G/input_login.cpp:1025-1026`): the bytes go into the map, replacing any earlier
+    /// ones. Unknown guilds are refused.
+    SymbolUpload {
+        /// The opaque guild id the symbol belongs to.
+        guild_id: u32,
+        /// The uploaded symbol bytes.
+        data: Vec<u8>,
+        /// Where the game thread reports whether the guild held it.
+        reply: oneshot::Sender<bool>,
+    },
+    /// Answers one `SYMBOL_CRC` (`GuildSymbolCRC`, `G/input_login.cpp:1030-1057`): the
+    /// stored bytes when the size or the CRC mismatches, `None` on a match or an
+    /// unknown guild.
+    SymbolCrc {
+        /// The guild the client claims to hold a symbol for.
+        guild_id: u32,
+        /// The client's own CRC of its local symbol file.
+        crc: u32,
+        /// The client's own size of that file.
+        size: u32,
+        /// Where the game thread reports the mismatch bytes, if any.
+        reply: oneshot::Sender<Option<Vec<u8>>>,
+    },
     /// `CInputMain::Target`: the character online under `vid` targets the character `target`
     /// names, or none for VID 0. The world answers it with `GC_TARGET` when the target changes.
     Target {
@@ -719,6 +1063,10 @@ pub enum RelayScope {
     /// (`G/party.h:277-285`). Nothing when the character has no party. The order is
     /// legacy's own `std::map` order, so no Divergence.
     Party,
+    /// Every linked member of the character's guild in PID order, the character
+    /// included, as the member map is walked in PID order (`G/guild.h` `m_member`, a
+    /// `std::map<DWORD, TGuildMember>`). Nothing when the character has no guild.
+    Guild,
 }
 
 /// Where a character enters the world.
@@ -1169,6 +1517,37 @@ impl GameLoopController {
         }
     }
 
+    /// Gives the world its stored guilds, and waits for the answer.
+    ///
+    /// # Errors
+    ///
+    /// [`InstallError::NotSent`] when the game thread has closed its receiver and
+    /// [`InstallError::NoAnswer`] when it closed the reply without sending. The
+    /// caller must not open the ready gate on either: a world without its guilds
+    /// judges a concurrent name free, so a silently missing install is a server that
+    /// looks up and lets two guilds share a name.
+    pub async fn install_guilds(
+        &self,
+        stored: db::guilds::StoredGuilds,
+        marks: Vec<db::guilds::StoredMark>,
+        symbols: Vec<db::guilds::StoredSymbol>,
+    ) -> Result<Result<(), InstallError>, InstallError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::InstallGuilds {
+            stored,
+            marks,
+            symbols,
+            reply,
+        })
+        .await
+        .map_err(|_| InstallError::NotSent)?;
+        if answer.await.map_err(|_| InstallError::NoAnswer)? {
+            Ok(Ok(()))
+        } else {
+            Ok(Err(InstallError::AlreadyInstalled))
+        }
+    }
+
     /// Takes a granted item back out of the world, and waits for the answer.
     ///
     /// # Errors
@@ -1520,6 +1899,451 @@ impl GameLoopController {
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 
+    /// Asks the world to judge one `CG_ANSWER_MAKE_GUILD`, and waits for the judgement.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn answer_make_guild(
+        &self,
+        vid: common::vid::Vid,
+        field: [u8; protocol::cg_guild_answer::GUILD_NAME_FIELD_SIZE],
+        now: u32,
+    ) -> Result<crate::game_state::GuildMakeAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AnswerMakeGuild {
+            vid,
+            field,
+            now,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to commit one judged creation, and waits for the commit.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn commit_make_guild(
+        &self,
+        vid: common::vid::Vid,
+        commit: crate::game_state::GuildMakeCommit,
+        mover: Mover,
+    ) -> Result<crate::game_state::GuildMakeAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::CommitMakeGuild {
+            vid,
+            commit,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `GUILD_SUBHEADER_CG_ADD_MEMBER`, without waiting: the
+    /// invite lands in memory and the guest hears the record on its own client.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn guild_add_member(
+        &self,
+        vid: common::vid::Vid,
+        guest: u32,
+        now: u32,
+    ) -> Result<(), MoveItemError> {
+        self.send_command(GameCommand::GuildAddMember { vid, guest, now })
+            .await
+            .map_err(|_| MoveItemError::NotSent)
+    }
+
+    /// Asks the world to judge one `GUILD_SUBHEADER_CG_GUILD_INVITE_ANSWER`, and waits
+    /// for the judgement.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn answer_guild_invite(
+        &self,
+        vid: common::vid::Vid,
+        guild_id: u32,
+        accept: u8,
+        now: u32,
+    ) -> Result<crate::game_state::GuildJoinAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AnswerGuildInvite {
+            vid,
+            guild_id,
+            accept,
+            now,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to commit one judged join, and waits for the commit.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn commit_guild_join(
+        &self,
+        commit: crate::game_state::GuildJoinCommit,
+    ) -> Result<crate::game_state::GuildJoinAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::CommitGuildJoin { commit, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to judge one `GUILD_SUBHEADER_CG_REMOVE_MEMBER`, and waits for
+    /// the judgement.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn answer_guild_remove(
+        &self,
+        vid: common::vid::Vid,
+        pid: u32,
+        now: u32,
+    ) -> Result<crate::game_state::GuildRemoveAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AnswerGuildRemove {
+            vid,
+            pid,
+            now,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to commit one judged removal, and waits for the commit.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn commit_guild_remove(
+        &self,
+        commit: crate::game_state::GuildRemoveCommit,
+    ) -> Result<crate::game_state::GuildRemoveAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::CommitGuildRemove { commit, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to judge one `GUILD_SUBHEADER_CG_CHANGE_GRADE_NAME`, and waits
+    /// for the judgement.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn answer_guild_grade_name(
+        &self,
+        vid: common::vid::Vid,
+        grade: u8,
+        field: Vec<u8>,
+    ) -> Result<crate::game_state::GuildGradeAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AnswerGuildGradeName {
+            vid,
+            grade,
+            field,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to judge one `GUILD_SUBHEADER_CG_CHANGE_GRADE_AUTHORITY`, and
+    /// waits for the judgement.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn answer_guild_grade_auth(
+        &self,
+        vid: common::vid::Vid,
+        grade: u8,
+        auth: u8,
+    ) -> Result<crate::game_state::GuildGradeAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AnswerGuildGradeAuth {
+            vid,
+            grade,
+            auth,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to judge one `GUILD_SUBHEADER_CG_CHANGE_MEMBER_GRADE`, and waits
+    /// for the judgement.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn answer_guild_member_grade(
+        &self,
+        vid: common::vid::Vid,
+        pid: u32,
+        grade: u8,
+    ) -> Result<crate::game_state::GuildGradeAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AnswerGuildMemberGrade {
+            vid,
+            pid,
+            grade,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to judge one `GUILD_SUBHEADER_CG_CHANGE_MEMBER_GENERAL`, and
+    /// waits for the judgement.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn answer_guild_member_general(
+        &self,
+        vid: common::vid::Vid,
+        pid: u32,
+        is_general: u8,
+    ) -> Result<crate::game_state::GuildGradeAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AnswerGuildMemberGeneral {
+            vid,
+            pid,
+            is_general,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to judge one `GUILD_SUBHEADER_CG_OFFER`, and waits for what the
+    /// step stores. See `game_state::guild`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn answer_guild_offer(
+        &self,
+        vid: common::vid::Vid,
+        offer: u32,
+    ) -> Result<crate::game_state::GuildGradeAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AnswerGuildOffer { vid, offer, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to judge one `GUILD_SUBHEADER_CG_CHARGE_GSP`, and waits for what
+    /// the step stores. See `game_state::guild`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn answer_guild_charge(
+        &self,
+        vid: common::vid::Vid,
+        offer: i32,
+    ) -> Result<crate::game_state::GuildGradeAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AnswerGuildCharge { vid, offer, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to judge one `GUILD_SUBHEADER_CG_POST_COMMENT`, and waits for
+    /// what the step stores. See `game_state::guild`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn answer_guild_post_comment(
+        &self,
+        vid: common::vid::Vid,
+        content: Vec<u8>,
+    ) -> Result<crate::game_state::GuildCommentAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AnswerGuildPostComment {
+            vid,
+            content,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to commit one judged post, and waits for the board. See
+    /// `game_state::guild`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn commit_guild_post_comment(
+        &self,
+        commit: crate::game_state::GuildCommentCommit,
+    ) -> Result<crate::game_state::GuildCommentAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::CommitGuildPostComment { commit, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `GUILD_SUBHEADER_CG_REFRESH_COMMENT`, and waits for
+    /// the gates. See `game_state::guild`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn answer_guild_refresh_comment(
+        &self,
+        vid: common::vid::Vid,
+    ) -> Result<crate::game_state::GuildCommentAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AnswerGuildRefreshComment { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `GUILD_SUBHEADER_CG_DELETE_COMMENT`, and waits for
+    /// the gates. See `game_state::guild`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn answer_guild_delete_comment(
+        &self,
+        vid: common::vid::Vid,
+        comment_id: u32,
+    ) -> Result<crate::game_state::GuildCommentAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AnswerGuildDeleteComment {
+            vid,
+            comment_id,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to report one judged delete's store half, and waits for the
+    /// board or the line. See `game_state::guild`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn commit_guild_delete_comment(
+        &self,
+        commit: crate::game_state::GuildCommentCommit,
+    ) -> Result<crate::game_state::GuildCommentAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::CommitGuildDeleteComment { commit, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to commit one judged grade-arm step, and waits for the commit.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn commit_guild_grade(
+        &self,
+        commit: crate::game_state::GuildGradeCommit,
+    ) -> Result<crate::game_state::GuildGradeAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::CommitGuildGrade { commit, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to judge one `GUILD_SUBHEADER_CG_USE_SKILL`, and waits for
+    /// what the step stores. See `game_state::guild`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn answer_guild_use_skill(
+        &self,
+        vid: common::vid::Vid,
+        vnum: u32,
+        pid: u32,
+    ) -> Result<crate::game_state::GuildSkillUseAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::AnswerGuildUseSkill {
+            vid,
+            vnum,
+            pid,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to commit one judged cast, and waits for the commit.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn commit_guild_use_skill(
+        &self,
+        commit: crate::game_state::GuildSkillUseCommit,
+    ) -> Result<crate::game_state::GuildSkillUseAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::CommitGuildUseSkill { commit, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/gskillup` line, and waits for the climbed skill.
+    /// What the up shows is written to the player's outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn guild_skill_up(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<crate::game_state::GuildSkillUpAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GuildSkillUp { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
     /// Asks the world to run one trade step, and waits for what it did.
     ///
     /// # Errors
@@ -1796,6 +2620,117 @@ impl GameLoopController {
         self.send_command(GameCommand::PartyOf { vid, reply })
             .await
             .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world whether the character online under `vid` holds a guild, and
+    /// waits for the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::sync_positions`].
+    pub async fn guild_of(&self, vid: common::vid::Vid) -> Result<bool, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GuildOf { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to judge one `MARK_UPLOAD`, and waits for the judgement.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn mark_upload(
+        &self,
+        guild_id: u32,
+        image: [u32; MARK_PIXELS],
+        min_level: u8,
+    ) -> Result<crate::game_state::MarkUploadAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::MarkUpload {
+            guild_id,
+            image: Box::new(image),
+            min_level,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world for every (guild, mark) pair, and waits for the list.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn mark_idx_list(&self) -> Result<Vec<(u16, u16)>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::MarkIdxList { reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to diff one image slot, and waits for the blocks.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn mark_crc_list(
+        &self,
+        img_idx: u8,
+        crc_list: [u32; MARK_CRC_WORDS],
+    ) -> Result<Vec<(u8, Vec<u8>)>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::MarkCrcList {
+            img_idx,
+            crc_list: Box::new(crc_list),
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to commit one judged symbol upload, and waits for the verdict.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn symbol_upload(&self, guild_id: u32, data: Vec<u8>) -> Result<bool, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SymbolUpload {
+            guild_id,
+            data,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to answer one `SYMBOL_CRC`, and waits for the bytes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn symbol_crc(
+        &self,
+        guild_id: u32,
+        crc: u32,
+        size: u32,
+    ) -> Result<Option<Vec<u8>>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SymbolCrc {
+            guild_id,
+            crc,
+            size,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 

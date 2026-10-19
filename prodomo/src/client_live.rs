@@ -730,6 +730,19 @@ where
         self.apply(reduction).await
     }
 
+    /// Move to the login phase for the mark downloader's login, as
+    /// `DESC::SetPhase` does: `GC_PHASE` is written through the current output
+    /// boundary, and then the TEA input boundary is installed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiveError::Phase`] when the lifecycle refuses the transition, and
+    /// [`LiveError`] when the record cannot be written.
+    pub async fn mark_login(&mut self) -> Result<Vec<Vec<u8>>, LiveError> {
+        let reduction = self.lifecycle.on_mark_login().map_err(LiveError::Phase)?;
+        self.apply(reduction).await
+    }
+
     /// Close the descriptor the way `DESC::SetPhase(PHASE_CLOSE)` does, writing the phase
     /// record and installing the close input processor.
     ///

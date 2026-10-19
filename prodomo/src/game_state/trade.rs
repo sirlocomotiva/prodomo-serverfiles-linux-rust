@@ -464,6 +464,7 @@ impl GameState {
                 affect_flags: self.affect_flags_of(common::vid::Vid::new(target)),
                 dead: self.is_dead(target),
                 alignment: self.alignment_of(target),
+                view_guild: self.view_guild_of_vid(target),
             },
         })
     }
@@ -1059,6 +1060,7 @@ mod tests {
             affect_flags: [0; 2],
             dead: false,
             alignment: 0,
+            view_guild: (0, 0),
         }
     }
 

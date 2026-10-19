@@ -154,6 +154,34 @@ pub trait Game {
 
     /// `GetSkillLevel(vnum)` of the character the script runs for (230g).
     fn skill_level(&self, vnum: u32) -> u8;
+
+    /// One `guild.*` quest call (230s): the call's member name (`level`, `get_sp0`) and
+    /// its arguments, dworded numbers or raw text. The world's guilds judge it now, while
+    /// the script that asked still waits, and answer what legacy pushed.
+    fn guild_call(&mut self, name: &[u8], args: &[GuildArg]) -> GuildAnswer;
+}
+
+/// One argument of a `guild.*` quest call: a dworded number or the raw bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GuildArg {
+    /// `(DWORD)lua_tonumber`, in the world's units.
+    Number(u32),
+    /// `lua_tostring`, up to its first zero byte.
+    Text(Vec<u8>),
+}
+
+/// What a `guild.*` quest call answers: what legacy pushed, as values.
+#[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+pub enum GuildAnswer {
+    /// Nothing pushed (`return 0`).
+    None,
+    /// `lua_pushnumber`.
+    Number(f64),
+    /// `lua_pushboolean`.
+    Boolean(bool),
+    /// `lua_pushstring`.
+    Text(Vec<u8>),
 }
 
 /// A compiled chunk, or why it could not be compiled; the error ends the script that runs it.
@@ -491,7 +519,6 @@ impl Manager {
         let result = run.bridged(|| op(&run, pc, npcs));
         let cx = cx.into_inner();
         let unsent = cx.output.script.clone();
-        drop(cx);
         // The loaned map is the live one: the bridge's writes landed there, and
         // `pc.flags` stood empty meanwhile — except `execute`'s `__status`, which
         // wrote the empty map and is merged back on top.
@@ -1462,6 +1489,76 @@ fn pc_api(
     };
     Ok(Some(result.into_iter().collect()))
 }
+/// The `guild.*` bridged names (230s): the core readers and writers, answered by the world's
+/// guilds now, while the script that asked still waits. Each argument dword-decides as
+/// legacy's `lua_tonumber`/`lua_tostring` do: a number-like one arrives dworded, a
+/// text-only one arrives raw, and anything else arrives as the empty text. Returns `None`
+/// for a name this table does not hold.
+fn guild_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let Some(member) = name.strip_prefix(b"guild.") else {
+        return Ok(None);
+    };
+    let bridged = matches!(
+        member,
+        b"get_rank"
+            | b"get_ladder_point"
+            | b"high_ranking_string"
+            | b"around_ranking_string"
+            | b"name"
+            | b"level"
+            | b"get_name"
+            | b"get_member_count"
+            | b"change_master"
+            | b"change_master_with_limit"
+            | b"get_id0"
+            | b"get_sp0"
+            | b"get_maxsp0"
+            | b"get_money0"
+            | b"get_max_member0"
+            | b"get_total_member_level0"
+            | b"has_land0"
+            | b"get_win_count0"
+            | b"get_draw_count0"
+            | b"get_loss_count0"
+            | b"add_comment0"
+            | b"set_ladder_point0"
+            | b"get_skill_level0"
+            | b"set_skill_level0"
+            | b"get_skill_point0"
+            | b"set_skill_point0"
+            | b"get_exp_level0"
+            | b"offer_exp0"
+            | b"give_exp0"
+    );
+    if !bridged {
+        return Ok(None);
+    }
+    let mut judged = Vec::with_capacity(args.len());
+    for arg in args {
+        if let Some(number) = lua.coerce_number(arg.clone())? {
+            judged.push(GuildArg::Number(dword(number)));
+        } else {
+            judged.push(GuildArg::Text(
+                host::c_string(lua, arg.clone())?.unwrap_or_default(),
+            ));
+        }
+    }
+    let answer = cx.game.guild_call(member, &judged);
+    let pushed = match answer {
+        GuildAnswer::None => MultiValue::new(),
+        GuildAnswer::Number(value) => MultiValue::from_iter([Value::Number(value)]),
+        GuildAnswer::Boolean(value) => MultiValue::from_iter([Value::Boolean(value)]),
+        GuildAnswer::Text(text) => {
+            MultiValue::from_iter([Value::String(lua.create_string(&text)?)])
+        }
+    };
+    Ok(Some(pushed))
+}
 
 fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Result<MultiValue> {
     let first = args.front().cloned().unwrap_or(Value::Nil);
@@ -1471,6 +1568,9 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
         return Ok(result.into_iter().collect());
     }
     if let Some(answered) = pc_api(lua, cx, name, &first)? {
+        return Ok(answered);
+    }
+    if let Some(answered) = guild_api(lua, cx, name, args)? {
         return Ok(answered);
     }
     let result = match name {
@@ -1580,6 +1680,7 @@ mod tests {
         scripts: Vec<(u8, Vec<u8>)>,
         draws: Vec<(i32, i32)>,
         learned: BTreeSet<u32>,
+        guild_calls: Vec<(Vec<u8>, Vec<GuildArg>)>,
     }
 
     impl Fake {
@@ -1634,6 +1735,11 @@ mod tests {
 
         fn skill_level(&self, vnum: u32) -> u8 {
             u8::from(self.learned.contains(&vnum)) * 40
+        }
+
+        fn guild_call(&mut self, name: &[u8], args: &[GuildArg]) -> GuildAnswer {
+            self.guild_calls.push((name.to_vec(), args.to_vec()));
+            GuildAnswer::None
         }
     }
 
@@ -2094,6 +2200,59 @@ mod tests {
         }
         let error = probe.call("pc.warp", &[]).unwrap_err().to_string();
         assert!(error.contains("not ported: pc.warp"), "{error}");
+    }
+
+    /// The `guild.*` arms: a number-like argument arrives dworded, a text-only one arrives
+    /// raw, and a war name stays unbridged. The Fake answers nothing, so every call pushes
+    /// nothing back.
+    #[test]
+    fn the_guild_names_dword_their_numbers() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let number = |value: f64| vec![Value::Number(value)];
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            flags: BTreeMap::new(),
+        };
+        // A fractional id arrives dworded, truncating toward zero.
+        assert!(probe.call("guild.level", &number(7.9)).unwrap().is_empty());
+        assert_eq!(
+            probe.game.guild_calls.pop(),
+            Some((b"level".to_vec(), vec![GuildArg::Number(7)]))
+        );
+        assert!(probe.call("guild.get_sp0", &[]).unwrap().is_empty());
+        assert_eq!(
+            probe.game.guild_calls.pop(),
+            Some((b"get_sp0".to_vec(), Vec::new()))
+        );
+        // A text name arrives raw; a wrapping id arrives by its low 32 bits.
+        let name = Value::String(lua.create_string(b"Knights").unwrap());
+        assert!(probe
+            .call("guild.change_master", &[name])
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            probe.game.guild_calls.pop(),
+            Some((
+                b"change_master".to_vec(),
+                vec![GuildArg::Text(b"Knights".to_vec())]
+            ))
+        );
+        assert!(probe
+            .call("guild.level", &number(4_294_967_296.0 + 12.9))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            probe.game.guild_calls.pop(),
+            Some((b"level".to_vec(), vec![GuildArg::Number(12)]))
+        );
+        let error = probe
+            .call("guild.is_war", &number(7.0))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not ported: guild.is_war"), "{error}");
     }
 
     /// The `pc.*` arms: the level, the grand-master read (each numbered read bumps the

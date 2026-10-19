@@ -23,6 +23,14 @@ use parity::{Client, Server};
 use prodomo::descriptor_crypto::derive_legacy_descriptor_keys;
 use protocol::cg_inventory::{resolve_cg_base_size, CG_KEEP_ALIVE, HEADER_CG_PONG};
 use protocol::gc_chat::CHAT_TYPE_TALKING;
+use protocol::gc_guild::{
+    GUILD_NAME_FIELD_SIZE, GUILD_SUBHEADER_GC_CHANGE_EXP, GUILD_SUBHEADER_GC_CHANGE_MEMBER_GENERAL,
+    GUILD_SUBHEADER_GC_CHANGE_MEMBER_GRADE, GUILD_SUBHEADER_GC_COMMENTS, GUILD_SUBHEADER_GC_GRADE,
+    GUILD_SUBHEADER_GC_GRADE_AUTH, GUILD_SUBHEADER_GC_GRADE_NAME, GUILD_SUBHEADER_GC_GUILD_INVITE,
+    GUILD_SUBHEADER_GC_GUILD_NAME, GUILD_SUBHEADER_GC_INFO, GUILD_SUBHEADER_GC_LIST,
+    GUILD_SUBHEADER_GC_LOGIN, GUILD_SUBHEADER_GC_LOGOUT, GUILD_SUBHEADER_GC_REMOVE,
+    GUILD_SUBHEADER_GC_SKILL_INFO,
+};
 use protocol::tea::{decrypt_padded, encrypt_padded, TeaKey};
 use support::{execute, ScratchDatabase};
 
@@ -1338,7 +1346,8 @@ fn dynamic_len(header: u8) -> usize {
         | GC_SYNC_POSITION
         | GC_NPC_POSITION
         | GC_SHOP
-        | GC_SCRIPT => usize::MAX,
+        | GC_SCRIPT
+        | GC_GUILD => usize::MAX,
         other => panic!("{other} is a fixed-width loading or enter-game record"),
     }
 }
@@ -1368,6 +1377,9 @@ const GC_MAIN_CHARACTER2_EMPIRE: u8 = 113;
 const GC_CHARACTER_GOLD: u8 = 224;
 const GC_PLAYER_POINTS: u8 = 16;
 const GC_SKILL_LEVEL_NEW: u8 = 76;
+/// `HEADER_GC_GUILD` (75): the envelope is header + WORD size + subheader
+/// (`TPacketGCGuild`, `G/packet.h`), so it sizes from its own `WORD wSize`.
+const GC_GUILD: u8 = 75;
 /// The three quickslot records (`G/packet.h`), 28 to 30.
 const GC_QUICKSLOT_ADD: u8 = 28;
 const GC_QUICKSLOT_DEL: u8 = 29;
@@ -1438,7 +1450,9 @@ fn game_len(header: u8) -> usize {
         GC_SKILL_LEVEL_NEW => SKILL_LEVEL_LEN,
         GC_CHARACTER_ADD => CHARACTER_ADD_LEN,
         GC_CHAR_ADDITIONAL_INFO => CHAR_ADDITIONAL_INFO_LEN,
-        GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT => dynamic_len(header),
+        GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT | GC_GUILD => {
+            dynamic_len(header)
+        }
         GC_AFFECT_ADD => AFFECT_ADD_LEN,
         GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
         GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
@@ -1881,20 +1895,34 @@ impl Keyed {
     }
 
     /// Read the view insert of the character `vid`, which walks when `walking`: its walk mode
-    /// first, which the viewer's own insert to it sends back (`G/char.cpp:1225-1236`), then its
-    /// `GC_CHARACTER_ADD` and `GC_CHAR_ADDITIONAL_INFO`.
-    fn sees_arrive(&mut self, vid: u32, walking: bool) -> (Vec<u8>, Vec<u8>) {
+    /// first, which the viewer's own insert to it sends back (`G/char.cpp:1225-1236`), its
+    /// guild's NAME when `guild` names one it has not heard (`ch->SendGuildName(GetGuild())`,
+    /// `G/char.cpp:1070`), then its `GC_CHARACTER_ADD` and `GC_CHAR_ADDITIONAL_INFO`.
+    /// Answers the NAME, when one was read, with the pair.
+    fn sees_arrive(
+        &mut self,
+        vid: u32,
+        walking: bool,
+        guild: Option<&[u8]>,
+    ) -> (Option<Vec<u8>>, Vec<u8>, Vec<u8>) {
         let id = vid.to_le_bytes();
         if walking {
             assert_eq!(self.read_game(), walk_mode_of(&id), "the newcomer walks");
         }
+        let named = guild.map(|name| {
+            let named = self.read_game();
+            assert_eq!(named[0], GC_GUILD, "{named:02x?}");
+            assert_eq!(guild_subheader(&named), GUILD_SUBHEADER_GC_GUILD_NAME);
+            assert_eq!(&named[8..8 + name.len()], name, "the guild's name");
+            named
+        });
         let add = self.read_game();
         assert_eq!(add[0], GC_CHARACTER_ADD, "{add:02x?}");
         assert_eq!(&add[1..5], &id, "the insert's vid");
         let info = self.read_game();
         assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO, "{info:02x?}");
         assert_eq!(&info[1..5], &id, "the summary's vid");
-        (add, info)
+        (named, add, info)
     }
 
     /// Read the view removal of the character `vid`: `[02, vid]`.
@@ -1948,7 +1976,7 @@ fn read_shown(keyed: &mut Keyed) -> (Shown, Vec<u8>) {
     let mut next = keyed.read_game_raw();
     while matches!(
         next[0],
-        GC_CHARACTER_ADD | GC_CHAR_ADDITIONAL_INFO | GC_MOVE | GC_WALK_MODE | GROUND_ADD
+        GC_CHARACTER_ADD | GC_CHAR_ADDITIONAL_INFO | GC_MOVE | GC_WALK_MODE | GROUND_ADD | GC_GUILD
     ) {
         if keyed.monster_record(&next) {
             if next[0] == GC_CHARACTER_ADD {
@@ -3606,7 +3634,7 @@ fn a_warp_npc_sends_its_neighbour_away_and_the_client_comes_back_at_the_target()
         (450_100, 903_400),
         "Alpha enters beside the warp"
     );
-    bob.sees_arrive(alpha.id, false);
+    bob.sees_arrive(alpha.id, false, None);
 
     // Within one fire, the own character's removal and then the warp. The row was written first.
     let mut removed = vec![GC_CHARACTER_DEL];
@@ -3881,7 +3909,7 @@ fn a_trader_beside_a_warp_is_told_why_and_stays() {
     );
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
     let (mut bob, yankee) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee.id, true);
+    alice.sees_arrive(yankee.id, true, None);
     alice.quiet("Alpha is out of the warp's reach");
 
     alice.send_record(&client_exchange(0, u64::from(yankee.id), 0, 0));
@@ -4551,7 +4579,7 @@ fn a_talking_line_reaches_the_map_including_its_sender() {
 
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
     let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true);
+    alice.sees_arrive(yankee_listed.id, true, None);
     let (mut charlie, _) = enter_world(&server, b"carol", 0);
 
     alice.send_record(&client_chat(CHAT_TALKING, b"hello"));
@@ -4654,7 +4682,7 @@ fn a_line_legacy_answers_itself_comes_back_to_the_sender_alone() {
     );
     let (mut alice, _) = enter_world(&server, b"alice", 0);
     let (mut yankee, yankee_listed) = enter_world_in(&server, b"bob", 0, GERMAN);
-    alice.sees_arrive(yankee_listed.id, true);
+    alice.sees_arrive(yankee_listed.id, true, None);
 
     let info = |empire: u8, text: &[u8]| {
         let mut line = vec![GC_CHAT];
@@ -4757,14 +4785,12 @@ fn a_party_line_reaches_the_members_and_no_outsider() {
         "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
  470100, 950100 FROM account WHERE login = 'carol'",
     );
-    // Yankee keeps the column's 0 and walks; Charlie is seeded, so it does not.
-    stamina(&database, "Charlie", 12_345);
     let (mut alice, alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true);
+    alice.sees_arrive(yankee_listed.id, true, None);
     let (mut charlie, charlie_listed, _) = enter_world_seeing(&server, b"carol", 0);
-    alice.sees_arrive(charlie_listed.id, false);
-    yankee.sees_arrive(charlie_listed.id, false);
+    alice.sees_arrive(charlie_listed.id, false, None);
+    yankee.sees_arrive(charlie_listed.id, false, None);
     let yankee_vid = u32::from_le_bytes(yankee_entered.add[1..5].try_into().unwrap());
     let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
     let _ = alpha;
@@ -5054,7 +5080,7 @@ fn a_move_reaches_the_view_around_the_mover_and_not_a_character_out_of_view() {
         alpha_info, alpha_entered.info,
         "the summary Alpha got of itself"
     );
-    let (_, yankee_info) = alice.sees_arrive(yankee_listed.id, false);
+    let (_, _, yankee_info) = alice.sees_arrive(yankee_listed.id, false, None);
     assert_eq!(
         yankee_info, yankee_entered.info,
         "the summary Yankee got of itself"
@@ -5090,15 +5116,15 @@ fn a_move_reaches_the_view_around_the_mover_and_not_a_character_out_of_view() {
     alice.send_record(&client_move(1, 0, 0, 470_000 + 200_000, 950_000, 0x5eef));
     // The viewer: Alpha's removal.
     yankee.sees_leave(alpha.id);
-    let (shown_again, info_again) = yankee.sees_arrive(alpha.id, false);
+    let (_, shown_again, info_again) = yankee.sees_arrive(alpha.id, false, None);
     assert_eq!(&shown_again[17..21], &0i32.to_le_bytes(), "at its own z");
     assert_eq!(info_again, alpha_entered.info, "then its pair");
     yankee.quiet("no move follows: the refusal stopped Alpha");
     // The mover: its own removal.
     alice.sees_leave(alpha.id);
-    let (own_again, _) = alice.sees_arrive(alpha.id, false);
+    let (_, own_again, _) = alice.sees_arrive(alpha.id, false, None);
     assert_eq!(own_again[21], 6, "CHAR_TYPE_PC");
-    alice.sees_arrive(yankee_listed.id, false);
+    alice.sees_arrive(yankee_listed.id, false, None);
     // Entering walked the NPCs sectree by sectree; the re-encode sends them in key order, by VID.
     let mut npcs: Vec<u32> = alpha_entered
         .shown
@@ -5109,7 +5135,7 @@ fn a_move_reaches_the_view_around_the_mover_and_not_a_character_out_of_view() {
     assert!(!npcs.is_empty(), "map 1's NPCs around Alpha");
     npcs.sort_unstable();
     for npc in npcs {
-        let (insert, _) = alice.sees_arrive(npc, false);
+        let (_, insert, _) = alice.sees_arrive(npc, false, None);
         assert_eq!(insert[21], 1, "CHAR_TYPE_NPC");
     }
     alice.quiet("the refusal's records are over");
@@ -5141,7 +5167,7 @@ fn a_move_reaches_the_view_around_the_mover_and_not_a_character_out_of_view() {
     assert!(line.ends_with(b"level 15 or higher."), "{line:02x?}");
     yankee.quiet("nothing follows the line");
     alice.sees_leave(yankee_listed.id);
-    alice.sees_arrive(yankee_listed.id, false);
+    alice.sees_arrive(yankee_listed.id, false, None);
     alice.quiet("the viewer hears the refusal and not the shout");
 
     // The same write from a character above the limit: the viewer hears the refusal's removal
@@ -5151,7 +5177,7 @@ fn a_move_reaches_the_view_around_the_mover_and_not_a_character_out_of_view() {
     alice.send_record(&both);
     let shout = chat_packet(prodomo::chat::CHAT_SHOUT, 1, b"|Len|l Alpha : hi");
     yankee.sees_leave(alpha.id);
-    yankee.sees_arrive(alpha.id, false);
+    yankee.sees_arrive(alpha.id, false, None);
     assert_eq!(yankee.read_game(), shout, "the shout after the refusal");
     yankee.quiet("the viewer hears nothing more");
     alice.sees_leave(alpha.id);
@@ -5189,7 +5215,7 @@ fn a_pose_reaches_the_view_including_its_sender() {
 
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
     let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, true);
+    alice.sees_arrive(yankee_listed.id, true, None);
     let (mut carol, _charlie) = enter_world(&server, b"carol", 0);
 
     // Legacy `Sitdown` writes `POSITION_SITTING_GROUND` for both chair and ground and drops
@@ -5283,7 +5309,7 @@ fn a_sync_batch_is_relayed_around_the_claimer_only() {
 
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
     let (mut yankee, yankee_id) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee_id.id, false);
+    alice.sees_arrive(yankee_id.id, false, None);
     let (mut charlie, _) = enter_world(&server, b"carol", 0);
 
     // A claim on Yankee from a position 10 units away, inside every limit.
@@ -5426,7 +5452,7 @@ fn alpha_walks_1600_south(database: &ScratchDatabase, dagger: bool, duration: u3
         enter_world_seeing(&server, b"alice", 0)
     };
     let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
-    let (_, yankee_info) = alice.sees_arrive(yankee_listed.id, false);
+    let (_, _, yankee_info) = alice.sees_arrive(yankee_listed.id, false, None);
     assert_eq!(
         yankee_info, yankee_entered.info,
         "the summary Yankee got of itself"
@@ -5596,7 +5622,7 @@ fn players_and_npcs_within_view_range_see_each_other_on_entry() {
         seen[3], alpha_entered.info,
         "the summary Alpha got of itself"
     );
-    let (add, info) = alice.sees_arrive(yankee_listed.id, false);
+    let (_, add, info) = alice.sees_arrive(yankee_listed.id, false, None);
     assert_eq!(insert_body(&add), insert_body(&yankee_entered.add));
     assert_eq!(info, yankee_entered.info);
     alice.quiet("Yankee's pair alone");
@@ -5671,10 +5697,10 @@ fn a_walk_into_view_inserts_both_ways_at_the_sample_and_a_walk_out_removes_both(
     let row_146 = (444_100, 940_000);
     let sent = std::time::Instant::now();
     yankee.send_record(&client_move(FUNC_MOVE, 0, 10, row_146.0, row_146.1, 0x6000));
-    let (add, info) = yankee.sees_arrive(alpha.id, false);
+    let (_, add, info) = yankee.sees_arrive(alpha.id, false, None);
     assert_eq!(insert_body(&add), insert_body(&alpha_entered.add));
     assert_eq!(info, alpha_entered.info);
-    let (add, info) = alice.sees_arrive(yankee_id, false);
+    let (_, add, info) = alice.sees_arrive(yankee_id, false, None);
     let (x, y) = inserted_at(&add);
     assert_eq!(x, 444_100);
     assert!(
@@ -5760,14 +5786,14 @@ fn a_step_never_recomputes_the_view_and_a_goto_does_at_its_sample() {
 
     let dest = (444_100, 938_400);
     yankee.send_record(&client_move(FUNC_MOVE, 0, 0, dest.0, dest.1, 0x6201));
-    let (add, info) = alice.sees_arrive(yankee_id, false);
+    let (_, add, info) = alice.sees_arrive(yankee_id, false, None);
     let (x, y) = inserted_at(&add);
     assert_eq!(x, 444_100);
     assert!((dest.1..=940_000).contains(&y), "the live point: {y}");
     assert_eq!(info, yankee_entered.info);
     assert_insert_move(&alice.read_game(), yankee_id, dest, LONG_WALK_MS);
     assert_eq!(alice.read_game(), walk_mode_of(&yankee_id.to_le_bytes()));
-    let (add, info) = yankee.sees_arrive(alpha.id, false);
+    let (_, add, info) = yankee.sees_arrive(alpha.id, false, None);
     assert_eq!(insert_body(&add), insert_body(&alpha_entered.add));
     assert_eq!(info, alpha_entered.info);
     alice.quiet("one insert");
@@ -5784,7 +5810,7 @@ fn talking_chat_reaches_the_whole_map_including_players_out_of_view() {
     let server = view_cast(&database, [GOTO_TARGET, VIEW_B, VIEW_C], 12_345);
     let (mut alice, _alpha, _) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, false);
+    alice.sees_arrive(yankee_listed.id, false, None);
     let (mut charlie, _, _) = enter_world_seeing(&server, b"carol", 0);
 
     alice.send_record(&client_chat(CHAT_TALKING, b"hello"));
@@ -5812,7 +5838,7 @@ fn a_leaving_player_is_removed_from_its_viewers_only() {
     let mut server = view_cast(&database, [GOTO_TARGET, VIEW_B, VIEW_C], 12_345);
     let (mut alice, alpha, _) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, false);
+    alice.sees_arrive(yankee_listed.id, false, None);
     let (mut charlie, _, _) = enter_world_seeing(&server, b"carol", 0);
     alice.quiet("Charlie is out of view");
 
@@ -5846,7 +5872,7 @@ fn at_zero_stamina_the_walk_mode_rides_with_each_insert() {
     assert_eq!(&seen[2][1..5], &alpha.id.to_le_bytes());
     assert_eq!(seen[3], alpha_entered.info);
     assert_eq!(seen[4], walk_mode_of(&alpha.id.to_le_bytes()));
-    alice.sees_arrive(yankee_listed.id, true);
+    alice.sees_arrive(yankee_listed.id, true, None);
     alice.quiet("Yankee's walk mode and pair alone");
     yankee.quiet("Yankee's burst is over");
 }
@@ -5862,7 +5888,7 @@ fn a_game_phase_enter_game_is_consumed_silently() {
     let server = view_cast(&database, [GOTO_TARGET, VIEW_B, VIEW_C], 12_345);
     let (mut alice, _alpha, _) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
-    alice.sees_arrive(yankee_listed.id, false);
+    alice.sees_arrive(yankee_listed.id, false, None);
 
     alice.unanswered(&client_enter_game());
     yankee.quiet("Alpha is not shown again");
@@ -7787,7 +7813,7 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
         (keyed, character)
     };
     // And: Alpha sees Zulu arrive.
-    alpha.sees_arrive(zulu_listed.id, false);
+    alpha.sees_arrive(zulu_listed.id, false, None);
     // When: Charlie enters out of view. Then: nothing lying there is shown, and nobody sees
     // Charlie arrive.
     let (mut charlie, _, charlie_entered) = enter_world_seeing(&server, b"carol", 0);
@@ -7878,7 +7904,7 @@ fn a_dropped_item_nobody_picks_up_is_destroyed_on_time_and_its_view_sees_it_go()
     server.wait_for("id 100000000; the client has it");
     assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, stackable, 3));
     let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
-    alpha.sees_arrive(zulu_listed.id, false);
+    alpha.sees_arrive(zulu_listed.id, false, None);
 
     // When: Alpha drops the stack whole.
     alpha.send_record(&client_item_drop(0, None));
@@ -7928,7 +7954,7 @@ fn a_pick_up_is_stored_only_after_the_drop_it_follows() {
     server.wait_for("id 100000000; the client has it");
     assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, stackable, 3));
     let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
-    alpha.sees_arrive(zulu_listed.id, false);
+    alpha.sees_arrive(zulu_listed.id, false, None);
     // And: another transaction holds the item's row, so the store cannot delete it yet.
     let (lock, locked) = support::hold_lock(
         database.url(),
@@ -7996,7 +8022,7 @@ fn a_dropped_gold_pile_lies_until_someone_picks_it_up() {
     // Given: Alpha holds 5000 gold, and Zulu stands beside it.
     let (mut alpha, alpha_listed) = enter_world(&server, b"alice", 0);
     let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
-    alpha.sees_arrive(zulu_listed.id, false);
+    alpha.sees_arrive(zulu_listed.id, false, None);
 
     // When: Alpha drops 1500 gold.
     alpha.send_record(
@@ -8406,7 +8432,7 @@ fn a_trade_moves_an_item_and_gold_between_two_players_in_one_transaction() {
     seat_the_traders(&database, vnum);
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
     let (mut bob, yankee) = enter_world(&server, b"bob", 0);
-    alice.sees_arrive(yankee.id, true);
+    alice.sees_arrive(yankee.id, true, None);
     // Given: Alpha's slot 2 names the item's cell 5, and slot 6 skill 3.
     alice.send_record(&client_quickslot_add(2, 1, 5));
     assert_eq!(alice.read_game(), [GC_QUICKSLOT_ADD, 2, 1, 5]);
@@ -8868,7 +8894,7 @@ fn a_look_change_inside_the_window_carries_the_flag() {
     let entered_at = std::time::Instant::now();
     let (mut alpha_keyed, alpha, _alpha_entered) = enter_equipped_world(&server, b"alice");
     let (mut yankee, yankee_listed, _yankee_entered) = enter_world_seeing(&server, b"bob", 0);
-    alpha_keyed.sees_arrive(yankee_listed.id, false);
+    alpha_keyed.sees_arrive(yankee_listed.id, false, None);
     let arrival = alpha_keyed.read_game_raw();
     assert!(
         alpha_keyed.timer_record(&arrival),
@@ -9171,7 +9197,7 @@ fn a_viewer_in_range_gets_the_arrival_pair_then_the_update() {
 
     // When: Alpha enters. Then: Yankee gets Alpha's pair, then the update with the flag.
     let (_alpha, alpha, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
-    yankee.sees_arrive(alpha.id, false);
+    yankee.sees_arrive(alpha.id, false, None);
     let update = yankee.read_game_raw();
     assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
     assert_eq!(&update[1..5], &alpha.id.to_le_bytes(), "Alpha's VID");
@@ -9215,7 +9241,7 @@ fn an_entrant_within_five_seconds_sees_the_flag_in_the_add_and_its_expiry_clears
 
     // Alpha is sent Yankee's arrival: the insert, its summary, and Yankee's look update with the
     // flag, which the timer notes as Yankee's.
-    alpha_keyed.sees_arrive(yankee_listed.id, false);
+    alpha_keyed.sees_arrive(yankee_listed.id, false, None);
     let arrival = alpha_keyed.read_game_raw();
     assert!(
         alpha_keyed.timer_record(&arrival),
@@ -9287,7 +9313,7 @@ fn the_revive_ends_after_five_seconds_with_remove_then_update() {
     let entered_at = std::time::Instant::now();
     let (mut alpha_keyed, alpha, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, _yankee_entered) = enter_world_seeing(&server, b"bob", 0);
-    alpha_keyed.sees_arrive(yankee_listed.id, false);
+    alpha_keyed.sees_arrive(yankee_listed.id, false, None);
     let arrival = alpha_keyed.read_game_raw();
     assert!(
         alpha_keyed.timer_record(&arrival),
@@ -9354,7 +9380,7 @@ fn an_attack_step_ends_the_revive_before_the_move_relay() {
 
     let (mut yankee, _yankee_listed, _yankee_entered) = enter_world_seeing(&server, b"bob", 0);
     let (mut alpha_keyed, alpha, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
-    yankee.sees_arrive(alpha.id, false);
+    yankee.sees_arrive(alpha.id, false, None);
     let entry = yankee.read_game_raw();
     assert!(yankee.timer_record(&entry), "the entry is the timer's");
 
@@ -9417,7 +9443,7 @@ fn a_character_below_max_stamina_is_refilled_about_three_seconds_after_entering(
 
     // Alpha is sent Yankee's arrival before any refill: the insert, its summary, and Yankee's
     // look update with the flag. The refill is read past them.
-    alpha_keyed.sees_arrive(yankee_listed.id, false);
+    alpha_keyed.sees_arrive(yankee_listed.id, false, None);
     let arrival = alpha_keyed.read_game_raw();
     assert_eq!(arrival[0], GC_CHARACTER_UPDATE, "{arrival:02x?}");
     assert_eq!(
@@ -9596,7 +9622,7 @@ fn a_click_targets_a_monster_and_a_player_and_a_leave_clears_it() {
 
     // When: Yankee enters and Alpha clicks it. Then: its hit points, and Yankee hears nothing.
     let (mut yankee, yankee_listed, _yankee_entered) = enter_world_seeing(&server, b"bob", 0);
-    alpha_keyed.sees_arrive(yankee_listed.id, false);
+    alpha_keyed.sees_arrive(yankee_listed.id, false, None);
     alpha_keyed.send_record(&client_target(yankee_listed.id));
     assert_eq!(
         alpha_keyed.read_game(),
@@ -9707,7 +9733,7 @@ fn a_target_4800_away_is_dropped_by_the_next_recovery_run() {
         (474_000, 950_600),
         "Charlie stands where it was stored"
     );
-    alice.sees_arrive(charlie_listed.id, false);
+    alice.sees_arrive(charlie_listed.id, false, None);
     alice.quiet("Yankee is out of view");
 
     // When: Alpha clicks Yankee. Then: the target, and VID 0 at the next recovery run.
@@ -12018,4 +12044,1326 @@ fn a_skill_up_spends_and_a_cast_heals_over_the_wire() {
         }
     }
     assert!(charged && healed, "the charge and the heal both land");
+}
+
+/// `HEADER_CG_ANSWER_MAKE_GUILD` (`G/packet.h:51`): 0x51.
+const CG_ANSWER_MAKE_GUILD: u8 = 0x51;
+
+/// A `CG_ANSWER_MAKE_GUILD`: the header and the 13 raw name bytes.
+fn client_answer_make_guild(name: &[u8]) -> Vec<u8> {
+    let mut record = vec![CG_ANSWER_MAKE_GUILD];
+    let mut field = [0u8; GUILD_NAME_FIELD_SIZE];
+    field[..name.len()].copy_from_slice(name);
+    record.extend_from_slice(&field);
+    assert_eq!(record.len(), 1 + GUILD_NAME_FIELD_SIZE);
+    record
+}
+
+/// The subheader of a `GC_GUILD` envelope: byte 3.
+fn guild_subheader(record: &[u8]) -> u8 {
+    assert_eq!(record[0], GC_GUILD, "a guild record: {record:02x?}");
+    let size = usize::from(u16::from_le_bytes([record[1], record[2]]));
+    assert_eq!(
+        size,
+        record.len(),
+        "the WORD sizes the record: {record:02x?}"
+    );
+    record[3]
+}
+
+/// The GRADE walk's first two grades: grade 1 is `Leader` with auth 15, grade 2 is
+/// `...` with auth 0 (`G/guild.cpp:70-83`).
+fn check_guild_grade_walk(grades: &[u8]) {
+    assert_eq!(grades[4], 15, "15 grades");
+    assert_eq!(grades[5], 1, "grade 1 first");
+    assert_eq!(&grades[6..12], b"Leader", "the leader's name");
+    assert_eq!(grades[14], 0, "grade 1's name pads");
+    assert_eq!(grades[15], 15, "the leader's auth");
+    assert_eq!(grades[16], 2, "grade 2 next");
+    assert_eq!(&grades[17..20], b"...", "the followers' name");
+    assert_eq!(grades[26], 0, "grade 2's auth");
+}
+
+/// The INFO walk of the one-member guild `id` mastered by `master_pid`
+/// (`SendGuildInfoPacket`, `G/guild.cpp:910-939`): one member, room for 32, level 1, no
+/// exp, no gold, no land.
+fn check_guild_info_walk(info: &[u8], id: u32, master_pid: u32) {
+    assert_eq!(u16::from_le_bytes([info[4], info[5]]), 1, "one member");
+    assert_eq!(
+        u16::from_le_bytes([info[6], info[7]]),
+        32,
+        "level 1 holds 32"
+    );
+    assert_eq!(u32::from_le_bytes(info[8..12].try_into().unwrap()), id);
+    assert_eq!(
+        u32::from_le_bytes(info[12..16].try_into().unwrap()),
+        master_pid,
+        "the master"
+    );
+    assert_eq!(
+        u32::from_le_bytes(info[16..20].try_into().unwrap()),
+        0,
+        "no exp"
+    );
+    assert_eq!(info[20], 1, "level 1");
+    assert_eq!(&info[21..28], b"MyGuild", "the info name");
+    assert_eq!(
+        u32::from_le_bytes(info[34..38].try_into().unwrap()),
+        0,
+        "no gold"
+    );
+    assert_eq!(info[38], 0, "no land");
+}
+
+/// The LIST walk's one row: the master of `master_pid`, a grade-1 non-general of job
+/// 3 at level 154 with no offer (`SendListPacket`, `G/guild.cpp:427-459`).
+fn check_guild_list_walk(list: &[u8], master_pid: u32) {
+    assert_eq!(list.len(), 4 + 38, "one 38-byte row");
+    assert_eq!(
+        u32::from_le_bytes(list[4..8].try_into().unwrap()),
+        master_pid,
+        "the master's row"
+    );
+    assert_eq!(list[8], 1, "grade 1");
+    assert_eq!(list[9], 0, "not a general");
+    assert_eq!(list[10], 3, "Alpha's job");
+    assert_eq!(list[11], 154, "Alpha's level");
+    assert_eq!(
+        u32::from_le_bytes(list[12..16].try_into().unwrap()),
+        0,
+        "no offer"
+    );
+    assert_eq!(list[16], 1, "the name flag");
+    assert_eq!(&list[17..22], b"Alpha", "the member name");
+    assert!(
+        list[22..42].iter().all(|&byte| byte == 0),
+        "the 25-byte name pads: {list:02x?}"
+    );
+}
+
+/// The `SKILL_INFO` walk of a new guild (`SendSkillInfoPacket`,
+/// `G/guild.cpp:1419-1437`): no point, no skills, power and max power 400.
+fn check_guild_skill_walk(skills: &[u8]) {
+    assert_eq!(skills[4], 0, "no skill point");
+    assert!(
+        skills[5..17].iter().all(|&byte| byte == 0),
+        "no skills: {skills:02x?}"
+    );
+    assert_eq!(
+        u16::from_le_bytes([skills[17], skills[18]]),
+        400,
+        "power 400"
+    );
+    assert_eq!(u16::from_le_bytes([skills[19], skills[20]]), 400, "max 400");
+}
+
+/// The stored guild of a creation: the row, the grades, and the member
+/// (`CGuild::CGuild`'s saves, `G/guild.cpp:59-127`).
+fn check_guild_rows(database: &ScratchDatabase, id: u32, master_pid: u32) {
+    let guild = support::rows(
+        database.url(),
+        "SELECT id, master_pid, level FROM guild WHERE name = 'MyGuild'",
+        3,
+    );
+    assert_eq!(guild.len(), 1, "one guild row");
+    assert_eq!(guild[0][0], i64::from(id), "the id is the broadcast's");
+    assert_eq!(guild[0][1], i64::from(master_pid), "the master");
+    assert_eq!(guild[0][2], 1, "level 1");
+    let grade_rows = support::rows(
+        database.url(),
+        "SELECT COUNT(*), SUM(auth) FROM guild_grade WHERE guild_id = 1",
+        2,
+    );
+    assert_eq!(grade_rows[0][0], 15, "fifteen grade rows");
+    assert_eq!(grade_rows[0][1], 15, "only the leader holds auth");
+    let member_rows = support::rows(
+        database.url(),
+        "SELECT pid, grade FROM guild_member WHERE guild_id = 1",
+        2,
+    );
+    assert_eq!(member_rows.len(), 1, "the master's member row");
+    assert_eq!(member_rows[0][0], i64::from(master_pid), "the master");
+    assert_eq!(member_rows[0][1], 1, "grade 1");
+}
+
+/// Invite `guest_vid` into `id` and settle: the invite, the accept, and the fans.
+fn join_guild(alice: &mut Keyed, yankee: &mut Keyed, guest_vid: u32, id: u32) {
+    alice.send_record(&client_guild_add_member(guest_vid));
+    yankee.read_game();
+    yankee.send_record(&client_guild_invite_answer(id, 1));
+    for _ in 0..6 {
+        yankee.read_game();
+    }
+    alice.read_game();
+    alice.read_game();
+    alice.quiet("the join settled");
+    yankee.quiet("the join settled");
+}
+
+/// Both members hear the `GRADE_NAME` fan for `grade` and `name`.
+fn check_guild_grade_name(alice: &mut Keyed, yankee: &mut Keyed, grade: u8, name: &[u8]) {
+    let renamed = alice.read_game();
+    assert_eq!(guild_subheader(&renamed), GUILD_SUBHEADER_GC_GRADE_NAME);
+    assert_eq!(renamed[4], grade, "the fan names the grade");
+    assert_eq!(&renamed[5..5 + name.len()], name, "the fan names the name");
+    let renamed = yankee.read_game();
+    assert_eq!(guild_subheader(&renamed), GUILD_SUBHEADER_GC_GRADE_NAME);
+    assert_eq!(
+        &renamed[5..5 + name.len()],
+        name,
+        "the guest hears the rename"
+    );
+    alice.quiet("the rename settled");
+}
+
+/// Both members hear the `GRADE_AUTH` fan for `grade` and `auth`.
+fn check_guild_grade_auth(alice: &mut Keyed, yankee: &mut Keyed, grade: u8, auth: u8) {
+    let reauthed = alice.read_game();
+    assert_eq!(guild_subheader(&reauthed), GUILD_SUBHEADER_GC_GRADE_AUTH);
+    assert_eq!(reauthed[4], grade, "the fan names the grade");
+    assert_eq!(reauthed[5], auth, "the fan names the auth");
+    let reauthed = yankee.read_game();
+    assert_eq!(guild_subheader(&reauthed), GUILD_SUBHEADER_GC_GRADE_AUTH);
+    assert_eq!(reauthed[5], auth, "the guest hears the re-auth");
+    alice.quiet("the re-auth settled");
+}
+
+/// Both members hear the `subheader` fan naming `victim` and `value`.
+fn check_guild_member_fan(
+    alice: &mut Keyed,
+    yankee: &mut Keyed,
+    victim: u32,
+    value: u8,
+    subheader: u8,
+    note: &str,
+) {
+    let fanned = alice.read_game();
+    assert_eq!(guild_subheader(&fanned), subheader);
+    assert_eq!(
+        u32::from_le_bytes(fanned[4..8].try_into().unwrap()),
+        victim,
+        "the fan names the victim"
+    );
+    assert_eq!(fanned[8], value, "the fan names the value");
+    let fanned = yankee.read_game();
+    assert_eq!(guild_subheader(&fanned), subheader);
+    alice.quiet(note);
+}
+
+/// Offer 20 400 exp and check the outcome: the speaker's debit, the `LIST`-one and
+/// the `CHANGE_EXP` to both members at 204 exp and level 1.
+fn check_guild_offer_outcome(alice: &mut Keyed, yankee: &mut Keyed, speaker_vid: u32) {
+    alice.send_record(&client_guild_offer(20_400));
+    assert_eq!(
+        alice.read_game(),
+        point_change(speaker_vid, POINT_EXP, -20_400, 79_600),
+        "the offer debits the speaker"
+    );
+    let one = alice.read_game();
+    assert_eq!(guild_subheader(&one), GUILD_SUBHEADER_GC_LIST);
+    let changed = alice.read_game();
+    assert_eq!(guild_subheader(&changed), GUILD_SUBHEADER_GC_CHANGE_EXP);
+    assert_eq!(changed[4], 1, "level 1");
+    assert_eq!(
+        u32::from_le_bytes(changed[5..9].try_into().unwrap()),
+        204,
+        "204 exp"
+    );
+    let one = yankee.read_game();
+    assert_eq!(guild_subheader(&one), GUILD_SUBHEADER_GC_LIST);
+    let changed = yankee.read_game();
+    assert_eq!(guild_subheader(&changed), GUILD_SUBHEADER_GC_CHANGE_EXP);
+    alice.quiet("the offer settled");
+    yankee.quiet("the offer settled");
+}
+
+/// The `GUILD_NAME` broadcast the master hears first: the envelope, the id, and the
+/// 12-byte name (`CGuild::CGuild`, `G/guild.cpp:117-126`). Answers the new id.
+fn check_guild_named(named: &[u8]) -> u32 {
+    assert_eq!(named.len(), 4 + 4 + 12, "envelope + id + 12 name bytes");
+    let id = u32::from_le_bytes(named[4..8].try_into().unwrap());
+    assert_eq!(id, 1, "the first guild's id");
+    assert_eq!(&named[8..15], b"MyGuild", "the name");
+    assert!(
+        named[15..20].iter().all(|&byte| byte == 0),
+        "the 12-byte name pads to 12: {named:02x?}"
+    );
+    id
+}
+
+/// Give Alpha the 200000 fee and one 70101 in inventory cell 0.
+fn give_guild_purse(database: &ScratchDatabase) {
+    sql(
+        database,
+        "UPDATE player SET gold = 5000000 WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 1, 0, 1, \
+           70101 FROM player WHERE name = 'Alpha'",
+    );
+}
+
+/// `sys.guild.core`, `cg.guild.answer`, `gc.guild.name`: Alpha founds a guild, and Yankee
+/// hears its name. The master's own order is legacy's (`CGuild::CGuild`'s broadcast first,
+/// `G/guild.cpp:117-126`, then `[LS;682]`, the fee, the item, the login walk,
+/// `G/input_main.cpp:2712-2729` + `G/guild.cpp:270-296`); every other PC hears the
+/// `GUILD_NAME` broadcast alone. The guild rows, the fee, and the spent item are all
+/// stored.
+#[test]
+fn a_guild_is_made_and_every_pc_hears_its_name() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+          154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    // Alpha holds the 200000 fee and one 70101 in inventory cell 0.
+    give_guild_purse(&database);
+    let (mut alice, alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, true, None);
+    let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
+    alice.send_record(&client_answer_make_guild(b"MyGuild"));
+    // The master's own order: GUILD_NAME, [LS;682], the fee, the item, the login walk.
+    let named = alice.read_game();
+    assert_eq!(
+        guild_subheader(&named),
+        GUILD_SUBHEADER_GC_GUILD_NAME,
+        "the broadcast first: {named:02x?}"
+    );
+    let id = check_guild_named(&named);
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;682;MyGuild]"),
+        "the made line"
+    );
+    assert_eq!(
+        alice.read_game(),
+        gold_change(alpha_vid, 0, 4_800_000),
+        "the fee leaves the purse"
+    );
+    assert_eq!(
+        alice.read_game(),
+        a_clear_record(0),
+        "the one 70101 is destroyed"
+    );
+    let grades = alice.read_game();
+    assert_eq!(
+        guild_subheader(&grades),
+        GUILD_SUBHEADER_GC_GRADE,
+        "the grade walk: {grades:02x?}"
+    );
+    check_guild_grade_walk(&grades);
+    let info = alice.read_game();
+    assert_eq!(
+        guild_subheader(&info),
+        GUILD_SUBHEADER_GC_INFO,
+        "the info walk: {info:02x?}"
+    );
+    check_guild_info_walk(&info, id, alpha.id);
+    let list = alice.read_game();
+    assert_eq!(
+        guild_subheader(&list),
+        GUILD_SUBHEADER_GC_LIST,
+        "the list walk: {list:02x?}"
+    );
+    check_guild_list_walk(&list, alpha.id);
+    let login = alice.read_game();
+    assert_eq!(
+        guild_subheader(&login),
+        GUILD_SUBHEADER_GC_LOGIN,
+        "its own login: {login:02x?}"
+    );
+    assert_eq!(
+        u32::from_le_bytes(login[4..8].try_into().unwrap()),
+        alpha.id,
+        "the master's PID logs in"
+    );
+    let skills = alice.read_game();
+    assert_eq!(
+        guild_subheader(&skills),
+        GUILD_SUBHEADER_GC_SKILL_INFO,
+        "the skill walk: {skills:02x?}"
+    );
+    check_guild_skill_walk(&skills);
+    // Yankee hears the broadcast alone, byte-identical.
+    assert_eq!(yankee.read_game(), named, "the other PC hears the name");
+    yankee.quiet("and nothing else");
+    // The store holds the guild, the grades, the member, the fee, and no item.
+    check_guild_rows(&database, id, alpha.id);
+    assert_eq!(
+        query_hp_gold(&database, "Alpha"),
+        4_800_000,
+        "the fee is stored"
+    );
+    let items = support::rows(
+        database.url(),
+        "SELECT COUNT(*) FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+          'Alpha')",
+        1,
+    );
+    assert_eq!(items[0][0], 0, "the 70101 row is gone");
+    drop(alice);
+    check_relogin_lists_the_guild(&server, id);
+}
+
+/// `sys.guild.core`, `sys.view.spawn`, `sys.char.affect`: a newcomer who sees the master is
+/// sent the guild's NAME before the master's add (`ch->SendGuildName(GetGuild())`,
+/// `G/char.cpp:1070`), and the master's info and update name the guild id with 3
+/// (`G/char.cpp:1176-1199`, `:1327-1352`).
+#[test]
+fn a_newcomer_hears_the_masters_guild_and_sees_its_id() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    create_account(&server, "carol");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, stamina, x, y) SELECT id, 0, \
+          'Yankee', 1, 154, 12345, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, stamina, x, y) SELECT id, 0, \
+          'Charlie', 2, 154, 12345, 470000, 950000 FROM account WHERE login = 'carol'",
+    );
+    give_guild_purse(&database);
+    let (mut alice, alpha, _) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, false, None);
+    alice.send_record(&client_answer_make_guild(b"MyGuild"));
+    let named = alice.read_game();
+    let id = check_guild_named(&named);
+    for _ in 0..8 {
+        alice.read_game();
+    }
+    assert_eq!(yankee.read_game(), named, "the broadcast");
+    yankee.quiet("and nothing else");
+    // Charlie enters seeing both: the master's NAME comes with his pair, before his add.
+    let (mut charlie, charlie_listed, charlie_entered) = enter_world_seeing(&server, b"carol", 0);
+    let at = charlie_entered
+        .shown
+        .records
+        .iter()
+        .position(|record| record[0] == GC_GUILD)
+        .expect("the NAME in the shown");
+    let record = &charlie_entered.shown.records[at];
+    assert_eq!(
+        guild_subheader(record),
+        GUILD_SUBHEADER_GC_GUILD_NAME,
+        "the subheader: {record:02x?}"
+    );
+    assert_eq!(&record[4..8], &id.to_le_bytes(), "the guild id");
+    assert_eq!(&record[8..15], b"MyGuild", "the guild name");
+    let next = &charlie_entered.shown.records[at + 1];
+    assert_eq!(next[0], GC_CHARACTER_ADD, "the master's add follows");
+    assert_eq!(&next[1..5], &alpha.id.to_le_bytes(), "the master's VID");
+    let (_, master_info) = charlie_entered.shown.pair_of(alpha.id);
+    assert_eq!(&master_info[43..47], &id.to_le_bytes(), "dwGuildID");
+    assert_eq!(master_info[63], 3, "dwNewIsGuildName names the master");
+    let (_, yankee_info) = charlie_entered.shown.pair_of(yankee_listed.id);
+    assert_eq!(&yankee_info[43..47], &[0, 0, 0, 0], "the guildless id");
+    assert_eq!(yankee_info[63], 0, "the guildless flag");
+    // The others see Charlie arrive guildless, with no NAME.
+    alice.sees_arrive(charlie_listed.id, false, None);
+    yankee.sees_arrive(charlie_listed.id, false, None);
+    // Charlie's own update names no guild: he holds none.
+    let update = charlie_entered.shown.update.expect("the own update");
+    assert_eq!(&update[28..32], &[0, 0, 0, 0], "the own update's id");
+    assert_eq!(update[48], 0, "the own update's flag");
+    charlie.quiet("and nothing else");
+}
+/// The next login lists the guild off the linked row (`SendLoginSuccessPacket`,
+/// `G/desc.cpp:892-904`): slot 0 carries the id and the `strlcpy` name, the others zeros.
+/// The old connection is dropped first, so the login is free.
+fn check_relogin_lists_the_guild(server: &Server, id: u32) {
+    let (_auth, key) = login_key(server, b"alice");
+    let mut relog = Keyed::channel(server.channel(1));
+    let (_, relist) = login_by_key_when_free(&mut relog, b"alice", key).expect("relogin");
+    assert_eq!(
+        u32::from_le_bytes(relist[281..285].try_into().unwrap()),
+        id,
+        "slot 0's guild id"
+    );
+    assert_eq!(&relist[297..304], b"MyGuild", "slot 0's guild name");
+    assert!(
+        relist[304..310].iter().all(|&byte| byte == 0),
+        "the 13-byte name pads to 13: {relist:02x?}"
+    );
+    assert!(
+        relist[285..297].iter().all(|&byte| byte == 0)
+            && relist[310..349].iter().all(|&byte| byte == 0),
+        "the other slots carry zeros: {relist:02x?}"
+    );
+}
+
+/// The stored gold of `name`.
+fn query_hp_gold(database: &ScratchDatabase, name: &str) -> i64 {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime should start")
+        .block_on(async {
+            use db::sqlx::Connection;
+            let mut connection = db::sqlx::PgConnection::connect(database.url())
+                .await
+                .expect("the scenario database should connect");
+            let row: (i64,) = db::sqlx::query_as("SELECT gold FROM player WHERE name = $1")
+                .bind(name)
+                .fetch_one(&mut connection)
+                .await
+                .expect("the row should be there");
+            connection.close().await.expect("the close should succeed");
+            row.0
+        })
+}
+
+/// `sys.guild.core`, `cg.guild.answer`: a taken name answers `[LS;473]` and stores nothing,
+/// and the refusal survives a reboot — the boot load re-installs the guild, so the second
+/// server judges the same name taken too. Yankee holds the fee and the item both times, so
+/// only the name gate can refuse.
+#[test]
+fn a_taken_guild_name_is_refused_and_survives_a_reboot() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+          154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET gold = 5000000 WHERE name IN ('Alpha', 'Yankee')",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 1, 0, 1, \
+          70101 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 21, id, 1, 0, 1, \
+          70101 FROM player WHERE name = 'Yankee'",
+    );
+    let (mut alice, _, alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, true, None);
+    let _ = alice_entered;
+    alice.send_record(&client_answer_make_guild(b"MyGuild"));
+    // The walk lands; only its head matters here — the name is taken now.
+    let named = alice.read_game();
+    assert_eq!(guild_subheader(&named), GUILD_SUBHEADER_GC_GUILD_NAME);
+    // Drain the rest of the master's walk: the line, the fee, the item, five login records.
+    for _ in 0..8 {
+        alice.read_game();
+    }
+    assert_eq!(
+        yankee.read_game(),
+        named,
+        "the other PC heard the name first"
+    );
+    yankee.send_record(&client_answer_make_guild(b"MyGuild"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(b"[LS;473]"),
+        "the taken name is refused"
+    );
+    yankee.quiet("a refusal sends only the line");
+    drop(server);
+    // The reboot re-installs the stored guild; Yankee's retry is refused again.
+    let server = Server::start(binary(), database.url());
+    let (mut yankee, _, _) = enter_world_seeing(&server, b"bob", 0);
+    yankee.send_record(&client_answer_make_guild(b"myguild"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(b"[LS;473]"),
+        "the boot load judges the cased twin taken too"
+    );
+    yankee.quiet("still only the line");
+    // Nothing of Yankee's was spent or stored: one guild row, its fee and item intact.
+    let guilds = support::rows(database.url(), "SELECT COUNT(*) FROM guild", 1);
+    assert_eq!(guilds[0][0], 1, "one guild row");
+    assert_eq!(
+        query_hp_gold(&database, "Yankee"),
+        5_000_000,
+        "Yankee's fee is untouched"
+    );
+    let items = support::rows(
+        database.url(),
+        "SELECT COUNT(*) FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
+          'Yankee')",
+        1,
+    );
+    assert_eq!(items[0][0], 1, "Yankee's 70101 row survives");
+}
+
+/// `HEADER_CG_GUILD` (`G/packet.h:52`): 0x50.
+const CG_GUILD: u8 = 0x50;
+
+/// A `CG_GUILD` `ADD_MEMBER`: the header, the subheader 0, and the guest's VID.
+fn client_guild_add_member(guest: u32) -> Vec<u8> {
+    let mut record = vec![CG_GUILD, 0];
+    record.extend_from_slice(&guest.to_le_bytes());
+    record
+}
+
+/// A `CG_GUILD` `INVITE_ANSWER`: the header, the subheader 11, the guild id, and the accept
+/// byte.
+fn client_guild_invite_answer(guild_id: u32, accept: u8) -> Vec<u8> {
+    let mut record = vec![CG_GUILD, 11];
+    record.extend_from_slice(&guild_id.to_le_bytes());
+    record.push(accept);
+    record
+}
+
+/// A `CG_GUILD` `REMOVE_MEMBER`: the header, the subheader 1, and the victim's PID.
+fn client_guild_remove_member(pid: u32) -> Vec<u8> {
+    let mut record = vec![CG_GUILD, 1];
+    record.extend_from_slice(&pid.to_le_bytes());
+    record
+}
+
+/// `sys.guild.doors`, `cg.guild.add`, `cg.guild.answer`, `cg.guild.remove`,
+/// `gc.guild.invite`, `gc.guild.remove`: Alpha founds a guild, invites Yankee by VID,
+/// Yankee accepts and walks the login sends, then Alpha removes Yankee by PID and the
+/// REMOVE fans. The member row lands on accept and leaves on removal.
+#[test]
+fn a_guild_invites_accepts_and_removes() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+          154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    give_guild_purse(&database);
+    let (mut alice, _alpha, _alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, true, None);
+    let yankee_vid = yankee_listed.id;
+    let yankee_player = {
+        let rows = support::rows(
+            database.url(),
+            "SELECT id FROM player WHERE name = 'Yankee'",
+            1,
+        );
+        u32::try_from(rows[0][0]).unwrap()
+    };
+    alice.send_record(&client_answer_make_guild(b"MyGuild"));
+    let named = alice.read_game();
+    let id = check_guild_named(&named);
+    // Drain the master's creation walk: [LS;682], the fee, the item, grades, INFO, LIST,
+    // LOGIN, skills.
+    for _ in 0..8 {
+        alice.read_game();
+    }
+    assert_eq!(yankee.read_game(), named, "the other PC hears the name");
+    alice.quiet("the creation settled");
+    yankee.quiet("the creation settled");
+    // The invite: the guest alone hears the GUILD_INVITE.
+    alice.send_record(&client_guild_add_member(yankee_vid));
+    alice.quiet("the inviter hears nothing");
+    let invited = yankee.read_game();
+    assert_eq!(guild_subheader(&invited), GUILD_SUBHEADER_GC_GUILD_INVITE);
+    assert_eq!(
+        u32::from_le_bytes(invited[4..8].try_into().unwrap()),
+        id,
+        "the invite names the guild"
+    );
+    assert_eq!(&invited[8..15], b"MyGuild", "the invite names the name");
+    // The accept: the joiner's walk goes to Yankee, the LIST-one and LOGIN fan.
+    yankee.send_record(&client_guild_invite_answer(id, 1));
+    let grades = yankee.read_game();
+    assert_eq!(guild_subheader(&grades), GUILD_SUBHEADER_GC_GRADE);
+    let info = yankee.read_game();
+    assert_eq!(guild_subheader(&info), GUILD_SUBHEADER_GC_INFO);
+    assert_eq!(
+        u16::from_le_bytes(info[4..6].try_into().unwrap()),
+        2,
+        "two members"
+    );
+    let list = yankee.read_game();
+    assert_eq!(guild_subheader(&list), GUILD_SUBHEADER_GC_LIST);
+    let login = yankee.read_game();
+    assert_eq!(guild_subheader(&login), GUILD_SUBHEADER_GC_LOGIN);
+    let login = yankee.read_game();
+    assert_eq!(guild_subheader(&login), GUILD_SUBHEADER_GC_LOGIN);
+    let skills = yankee.read_game();
+    assert_eq!(guild_subheader(&skills), GUILD_SUBHEADER_GC_SKILL_INFO);
+    let one = alice.read_game();
+    assert_eq!(guild_subheader(&one), GUILD_SUBHEADER_GC_LIST);
+    let join_login = alice.read_game();
+    assert_eq!(guild_subheader(&join_login), GUILD_SUBHEADER_GC_LOGIN);
+    assert_eq!(
+        u32::from_le_bytes(join_login[4..8].try_into().unwrap()),
+        yankee_player,
+        "the LOGIN names the joiner"
+    );
+    yankee.quiet("the join settled");
+    let members = support::rows(
+        database.url(),
+        "SELECT pid, grade FROM guild_member WHERE guild_id = 1 ORDER BY pid",
+        2,
+    );
+    assert_eq!(members.len(), 2, "master and joiner rows");
+    assert_eq!(members[1][0], i64::from(yankee_player), "the joiner");
+    assert_eq!(members[1][1], 15, "grade 15");
+    // The removal: the REMOVE fans to the master; the victim hears nothing.
+    alice.send_record(&client_guild_remove_member(yankee_player));
+    let removed = alice.read_game();
+    assert_eq!(guild_subheader(&removed), GUILD_SUBHEADER_GC_REMOVE);
+    assert_eq!(
+        u32::from_le_bytes(removed[4..8].try_into().unwrap()),
+        yankee_player,
+        "the REMOVE names the victim"
+    );
+    alice.quiet("the removal settled");
+    yankee.quiet("the victim hears no REMOVE");
+    let members = support::rows(
+        database.url(),
+        "SELECT COUNT(*) FROM guild_member WHERE guild_id = 1",
+        1,
+    );
+    assert_eq!(members[0][0], 1, "the joiner's row is gone");
+}
+
+/// A `CG_GUILD` `CHANGE_GRADE_NAME`: the header, the subheader 2, the grade byte, and
+/// the 9 name field bytes.
+fn client_guild_grade_name(grade: u8, name: &[u8]) -> Vec<u8> {
+    let mut field = [0; 9];
+    let len = name.len().min(9);
+    field[..len].copy_from_slice(&name[..len]);
+    let mut record = vec![CG_GUILD, 2, grade];
+    record.extend_from_slice(&field);
+    record
+}
+
+/// A `CG_GUILD` `CHANGE_GRADE_AUTHORITY`: the header, the subheader 3, the grade byte,
+/// and the auth byte.
+fn client_guild_grade_auth(grade: u8, auth: u8) -> Vec<u8> {
+    vec![CG_GUILD, 3, grade, auth]
+}
+
+/// A `CG_GUILD` `CHANGE_MEMBER_GRADE`: the header, the subheader 8, the victim's PID,
+/// and the grade byte.
+fn client_guild_member_grade(pid: u32, grade: u8) -> Vec<u8> {
+    let mut record = vec![CG_GUILD, 8];
+    record.extend_from_slice(&pid.to_le_bytes());
+    record.push(grade);
+    record
+}
+
+/// A `CG_GUILD` `CHANGE_MEMBER_GENERAL`: the header, the subheader 10, the victim's
+/// PID, and the flag byte.
+fn client_guild_member_general(pid: u32, is_general: u8) -> Vec<u8> {
+    let mut record = vec![CG_GUILD, 10];
+    record.extend_from_slice(&pid.to_le_bytes());
+    record.push(is_general);
+    record
+}
+
+/// A `CG_GUILD` `DEPOSIT_MONEY`: the header, the subheader 13, and the gold DWORD.
+fn client_guild_deposit_money(gold: u32) -> Vec<u8> {
+    let mut record = vec![CG_GUILD, 13];
+    record.extend_from_slice(&gold.to_le_bytes());
+    record
+}
+
+/// `sys.guild.grades`, `cg.guild.grades`, `gc.guild.grades`: Alpha founds a guild,
+/// Yankee joins, and the master renames grade 15, re-auths it, re-grades Yankee to
+/// 5, and flags Yankee general — each fan reaching both members, each row landing
+/// in the store — while a money arm stays quiet.
+#[test]
+fn a_guild_renames_regrades_and_flags_its_general() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+          154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    give_guild_purse(&database);
+    let (mut alice, _alpha, _alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, true, None);
+    let yankee_vid = yankee_listed.id;
+    let yankee_player = {
+        let rows = support::rows(
+            database.url(),
+            "SELECT id FROM player WHERE name = 'Yankee'",
+            1,
+        );
+        u32::try_from(rows[0][0]).unwrap()
+    };
+    alice.send_record(&client_answer_make_guild(b"MyGuild"));
+    let named = alice.read_game();
+    let id = check_guild_named(&named);
+    for _ in 0..8 {
+        alice.read_game();
+    }
+    assert_eq!(yankee.read_game(), named, "the other PC hears the name");
+    alice.quiet("the creation settled");
+    yankee.quiet("the creation settled");
+    join_guild(&mut alice, &mut yankee, yankee_vid, id);
+    // The rename: both members hear the GRADE_NAME fan.
+    alice.send_record(&client_guild_grade_name(15, b"Veteran"));
+    check_guild_grade_name(&mut alice, &mut yankee, 15, b"Veteran");
+    // The re-auth: both members hear the GRADE_AUTH fan.
+    alice.send_record(&client_guild_grade_auth(15, 7));
+    check_guild_grade_auth(&mut alice, &mut yankee, 15, 7);
+    // The re-grade: both members hear the CHANGE_MEMBER_GRADE fan.
+    alice.send_record(&client_guild_member_grade(yankee_player, 5));
+    check_guild_member_fan(
+        &mut alice,
+        &mut yankee,
+        yankee_player,
+        5,
+        GUILD_SUBHEADER_GC_CHANGE_MEMBER_GRADE,
+        "the re-grade settled",
+    );
+    // The general flag: both members hear the CHANGE_MEMBER_GENERAL fan.
+    alice.send_record(&client_guild_member_general(yankee_player, 1));
+    check_guild_member_fan(
+        &mut alice,
+        &mut yankee,
+        yankee_player,
+        1,
+        GUILD_SUBHEADER_GC_CHANGE_MEMBER_GENERAL,
+        "the flag settled",
+    );
+    yankee.quiet("the flag settled");
+    // The money arm stays quiet and stores nothing.
+    alice.send_record(&client_guild_deposit_money(1000));
+    alice.quiet("a closed money arm stays quiet");
+    // Every row lands in the store: the rename as its 7 letters' length and the
+    // auth as its number (`rows` reads integers only).
+    let grades = support::rows(
+        database.url(),
+        "SELECT length(name), auth FROM guild_grade WHERE guild_id = 1 AND grade = 15",
+        2,
+    );
+    assert_eq!(grades.len(), 1, "the grade row");
+    assert_eq!(grades[0][0], 7, "Veteran lands");
+    assert_eq!(grades[0][1], 7, "the auth lands");
+    let members = support::rows(
+        database.url(),
+        "SELECT grade, is_general::int FROM guild_member WHERE pid = (SELECT id FROM player WHERE name = 'Yankee')",
+        2,
+    );
+    assert_eq!(members.len(), 1, "the member row");
+    assert_eq!(members[0][0], 5, "the re-grade lands");
+    assert_eq!(members[0][1], 1, "the flag lands");
+}
+
+/// A `CG_GUILD` `OFFER`: the header, the subheader 4, and the offered exp DWORD.
+fn client_guild_offer(exp: u32) -> Vec<u8> {
+    let mut record = vec![CG_GUILD, 4];
+    record.extend_from_slice(&exp.to_le_bytes());
+    record
+}
+
+/// A `CG_GUILD` `CHARGE_GSP`: the header, the subheader 12, and the SP DWORD.
+fn client_guild_charge(sp: u32) -> Vec<u8> {
+    let mut record = vec![CG_GUILD, 12];
+    record.extend_from_slice(&sp.to_le_bytes());
+    record
+}
+
+/// A `CG_GUILD` `POST_COMMENT`: the header, the subheader 5, the length byte, and the
+/// content.
+fn client_guild_post_comment(content: &[u8]) -> Vec<u8> {
+    let mut record = vec![CG_GUILD, 5, u8::try_from(content.len()).unwrap()];
+    record.extend_from_slice(content);
+    record
+}
+
+/// A `CG_GUILD` `REFRESH_COMMENT`: the header and the subheader 7.
+fn client_guild_refresh_comment() -> Vec<u8> {
+    vec![CG_GUILD, 7]
+}
+
+/// A `CG_GUILD` `DELETE_COMMENT`: the header, the subheader 6, and the comment id.
+fn client_guild_delete_comment(id: u32) -> Vec<u8> {
+    let mut record = vec![CG_GUILD, 6];
+    record.extend_from_slice(&id.to_le_bytes());
+    record
+}
+
+/// `sys.guild.money`, `sys.guild.comments`, the OFFER/CHARGE/COMMENT arms: Alpha founds a
+/// guild, offers 20 400 exp and charges 50 SP, and the `LIST`-one, the `CHANGE_EXP` and the
+/// `SKILL_INFO` fan to both members; a post and a refresh carry the `COMMENTS` self packet,
+/// and a delete clears it. Every row lands in the store.
+#[test]
+fn a_guild_offers_charges_posts_and_deletes() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1,           154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    // The offer's exp and the charge's gold: Alpha holds 100 000 exp and the purse
+    // keeps 5 000 000 past the 200 000 fee.
+    sql(
+        &database,
+        "UPDATE player SET exp = 100000 WHERE name = 'Alpha'",
+    );
+    give_guild_purse(&database);
+    let (mut alice, _alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, true, None);
+    let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
+    let yankee_vid = yankee_listed.id;
+    alice.send_record(&client_answer_make_guild(b"MyGuild"));
+    let named = alice.read_game();
+    let id = check_guild_named(&named);
+    for _ in 0..8 {
+        alice.read_game();
+    }
+    assert_eq!(yankee.read_game(), named, "the other PC hears the name");
+    join_guild(&mut alice, &mut yankee, yankee_vid, id);
+    // The offer: the speaker's exp debits, and the LIST-one and the CHANGE_EXP fan to
+    // both members. 20 400 offers 204: the guild holds 204 exp at level 1.
+    check_guild_offer_outcome(&mut alice, &mut yankee, alpha_vid);
+    // The charge: the headroom caps the 200 SP to 50 — the power is already 350 of
+    // 400 — so the debit is 5 000 gold, the SKILL_INFO fans to both members at 400,
+    // and the `[LS;938]` count chats the 50 to the speaker alone.
+    alice.send_record(&client_guild_charge(200));
+    // The point debit queues through the outbox, so it lands after the commit's
+    // SKILL_INFO fan and the count line the descriptor sends directly: the fan
+    // rides `write_to_client` at the commit, the count rides `send_all` after
+    // it, and the judge's debit — queued first — flushes last, because the
+    // session writes the direct answers before it drains the queue.
+    // The count line the descriptor sends directly lands before the commit's
+    // SKILL_INFO fan: `send_all` writes now, while the fan queues through the
+    // outbox and flushes on the next turn.
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;938;0]"),
+        "the count chats the capped SP"
+    );
+    assert_eq!(
+        alice.read_game(),
+        point_change(alpha_vid, 11, 0, 4_800_000),
+        "a full power debits nothing"
+    );
+    let skills = alice.read_game();
+    assert_eq!(guild_subheader(&skills), GUILD_SUBHEADER_GC_SKILL_INFO);
+    let skills = yankee.read_game();
+    assert_eq!(guild_subheader(&skills), GUILD_SUBHEADER_GC_SKILL_INFO);
+    alice.quiet("the charge settled");
+    yankee.quiet("the charge settled");
+    // The post: the COMMENTS self packet carries the one row.
+    alice.send_record(&client_guild_post_comment(b"hello all"));
+    let comments = alice.read_game();
+    assert_eq!(guild_subheader(&comments), GUILD_SUBHEADER_GC_COMMENTS);
+    assert_eq!(comments[4], 1, "one row");
+    assert_eq!(
+        u32::from_le_bytes(comments[5..9].try_into().unwrap()),
+        1,
+        "the row's id"
+    );
+    assert_eq!(&comments[9..14], b"Alpha", "the poster");
+    assert_eq!(&comments[34..43], b"hello all", "the content");
+    yankee.quiet("a post is self");
+    // The refresh: the same board, to Yankee's own session.
+    yankee.send_record(&client_guild_refresh_comment());
+    let comments = yankee.read_game();
+    assert_eq!(guild_subheader(&comments), GUILD_SUBHEADER_GC_COMMENTS);
+    assert_eq!(comments[4], 1, "one row");
+    alice.quiet("a refresh is self");
+    // The delete: the leader's delete clears the board.
+    alice.send_record(&client_guild_delete_comment(1));
+    let comments = alice.read_game();
+    assert_eq!(guild_subheader(&comments), GUILD_SUBHEADER_GC_COMMENTS);
+    assert_eq!(comments[4], 0, "no rows left");
+    // Every row lands: the offer's 204, the charge's power, and no comment.
+    let guild = support::rows(
+        database.url(),
+        "SELECT exp, level, sp FROM guild WHERE id = 1",
+        3,
+    );
+    assert_eq!(guild[0][0], 204, "the offer lands");
+    assert_eq!(guild[0][1], 1, "level 1");
+    assert_eq!(guild[0][2], 400, "the power lands");
+    let member = support::rows(
+        database.url(),
+        "SELECT offer FROM guild_member WHERE guild_id = 1 AND pid = (SELECT id FROM player \
+          WHERE name = 'Alpha')",
+        1,
+    );
+    assert_eq!(member[0][0], 204, "the member's offer lands");
+    let player = support::rows(
+        database.url(),
+        "SELECT exp, gold FROM player WHERE name = 'Alpha'",
+        2,
+    );
+    assert_eq!(player[0][0], 79_600, "the exp debit lands");
+    assert_eq!(player[0][1], 4_800_000, "no gold leaves a full power");
+    let comments = support::rows(
+        database.url(),
+        "SELECT COUNT(*) FROM guild_comment WHERE guild_id = 1",
+        1,
+    );
+    assert_eq!(comments[0][0], 0, "the delete lands");
+}
+
+/// A `CG_GUILD` `USE_SKILL`: the header, the subheader 9, the vnum DWORD and the target
+/// PID DWORD (`TPacketCGGuildUseSkill`, `G/packet.h`).
+fn client_guild_use_skill(vnum: u32, pid: u32) -> Vec<u8> {
+    let mut record = vec![CG_GUILD, 9];
+    record.extend_from_slice(&vnum.to_le_bytes());
+    record.extend_from_slice(&pid.to_le_bytes());
+    record
+}
+
+/// The bodies of a `SKILL_INFO` fan: point, the 12 skill bytes, power, max power.
+fn skill_info_body(skills: &[u8]) -> (u8, Vec<u8>, u16, u16) {
+    assert_eq!(
+        guild_subheader(skills),
+        GUILD_SUBHEADER_GC_SKILL_INFO,
+        "a SKILL_INFO: {skills:02x?}"
+    );
+    let point = skills[4];
+    let levels = skills[5..17].to_vec();
+    let power = u16::from_le_bytes(skills[17..19].try_into().unwrap());
+    let max = u16::from_le_bytes(skills[19..21].try_into().unwrap());
+    (point, levels, power, max)
+}
+
+/// Both members hear the `SKILL_INFO` fan with `point`, `levels`, `power` and `max`.
+fn check_guild_skill_fan(
+    alice: &mut Keyed,
+    yankee: &mut Keyed,
+    point: u8,
+    levels: &[u8],
+    power: u16,
+    max: u16,
+    note: &str,
+) {
+    assert_eq!(
+        skill_info_body(&alice.read_game()),
+        (point, levels.to_vec(), power, max),
+        "{note} (the master)"
+    );
+    assert_eq!(
+        skill_info_body(&yankee.read_game()),
+        (point, levels.to_vec(), power, max),
+        "{note} (the guest)"
+    );
+}
+
+/// The level byte of a `GUILD_INFO` walk or fan: envelope (4), `member_count` (2),
+/// `max_member_count` (2), `guild_id` (4), `master_pid` (4), `exp` (4), then the byte.
+fn guild_info_level(info: &[u8]) -> u8 {
+    assert_eq!(
+        guild_subheader(info),
+        GUILD_SUBHEADER_GC_INFO,
+        "an INFO: {info:02x?}"
+    );
+    info[20]
+}
+
+/// Offer `offered` exp and check the one-level outcome: the speaker's debit, the
+/// `LIST`-one, the `CHANGE_EXP` at `level` and `exp`, and one `INFO`, to both members.
+fn check_guild_offer_level(
+    alice: &mut Keyed,
+    yankee: &mut Keyed,
+    speaker_vid: u32,
+    offered: u32,
+    left: i64,
+    level: u8,
+    exp: u32,
+) {
+    alice.send_record(&client_guild_offer(offered));
+    assert_eq!(
+        alice.read_game(),
+        point_change(speaker_vid, POINT_EXP, -i64::from(offered), left),
+        "the offer debits the speaker"
+    );
+    let check = |member: &mut Keyed| {
+        let one = member.read_game();
+        assert_eq!(guild_subheader(&one), GUILD_SUBHEADER_GC_LIST);
+        let changed = member.read_game();
+        assert_eq!(guild_subheader(&changed), GUILD_SUBHEADER_GC_CHANGE_EXP);
+        assert_eq!(changed[4], level, "level {level}");
+        assert_eq!(
+            u32::from_le_bytes(changed[5..9].try_into().unwrap()),
+            exp,
+            "{exp} exp"
+        );
+        assert_eq!(
+            guild_info_level(&member.read_game()),
+            level,
+            "the INFO names level {level}"
+        );
+    };
+    check(alice);
+    check(yankee);
+    alice.quiet("the offer settled");
+    yankee.quiet("the offer settled");
+}
+
+/// Up 152 at level 2 and cast it: the climb fans, the pointless re-up is quiet, the
+/// guest hears `[LS;524]`, the cast fans the consumed power with `[LS;937]`, and the
+/// cooling re-cast answers `[LS;932]`. `levels` gains 152's byte.
+fn check_guild_up_and_cast_152(alice: &mut Keyed, yankee: &mut Keyed, levels: &mut [u8; 12]) {
+    alice.send_record(&slash(b"/gskillup 152"));
+    levels[1] = 1;
+    check_guild_skill_fan(
+        &mut *alice,
+        &mut *yankee,
+        0,
+        levels,
+        500,
+        500,
+        "the up fans",
+    );
+    alice.quiet("the up settled");
+    yankee.quiet("the up settled");
+    // No point left: the line is quiet.
+    alice.unanswered(&slash(b"/gskillup 152"));
+    yankee.quiet("a quiet up fans nothing");
+    // The guest is no leader: `[LS;524]`, to her own session.
+    yankee.send_record(&slash(b"/gskillup 152"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(b"[LS;524]"),
+        "a non-leader climbs nothing"
+    );
+    yankee.quiet("the refusal settled");
+    alice.quiet("a refusal is self");
+    // The 152 cast: `150 + 150 * (1/7) = 171.4` truncates to 171, and 500 - 171 = 329.
+    // The fan carries the consumed power to both members, and the war gate's `[LS;937]`
+    // answers the caster alone.
+    alice.send_record(&client_guild_use_skill(152, 0));
+    check_guild_skill_fan(
+        &mut *alice,
+        &mut *yankee,
+        0,
+        levels,
+        329,
+        500,
+        "the cast fans",
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;937]"),
+        "no war runs, so 937 answers"
+    );
+    alice.quiet("the cast settled");
+    yankee.quiet("the cast settled");
+    // Still cooling: the next cast answers `[LS;932]` and fans nothing.
+    alice.send_record(&client_guild_use_skill(152, 0));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;932]"),
+        "the cooling cast refuses"
+    );
+    alice.quiet("the refusal settled");
+    yankee.quiet("a refusal fans nothing");
+}
+
+/// Up 158 at level 3 and cast the teleport: the climb fans, the cast at an offline PID
+/// answers `[LS;935]` with the empty cost consuming nothing, and the cast at Yankee warps
+/// the caster to her feet. `levels` gains 158's byte.
+fn check_guild_up_and_cast_teleport(
+    alice: &mut Keyed,
+    yankee: &mut Keyed,
+    database: &ScratchDatabase,
+    server: &Server,
+    speaker_vid: u32,
+    levels: &mut [u8; 12],
+) {
+    alice.send_record(&slash(b"/gskillup 158"));
+    levels[7] = 1;
+    check_guild_skill_fan(
+        &mut *alice,
+        &mut *yankee,
+        0,
+        levels,
+        600,
+        600,
+        "the up fans",
+    );
+    alice.quiet("the up settled");
+    yankee.quiet("the up settled");
+    // The teleport at an offline PID: `[LS;935]`, and the empty cost consumes nothing.
+    alice.send_record(&client_guild_use_skill(158, 999_999));
+    check_guild_skill_fan(
+        &mut *alice,
+        &mut *yankee,
+        0,
+        levels,
+        600,
+        600,
+        "the cast fans",
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;935]"),
+        "an offline victim chats 935"
+    );
+    alice.quiet("the cast settled");
+    yankee.quiet("the cast settled");
+    // The 0-second cooldown re-arms on the next tick; a breath lets the Pulses run.
+    std::thread::sleep(Duration::from_millis(500));
+    // The teleport at Yankee: the fan first, then the departure's own removal and the
+    // warp to her feet, on this Channel's port.
+    let victim_pid = support::rows(
+        database.url(),
+        "SELECT id FROM player WHERE name = 'Yankee'",
+        1,
+    )[0][0];
+    alice.send_record(&client_guild_use_skill(
+        158,
+        u32::try_from(victim_pid).unwrap(),
+    ));
+    check_guild_skill_fan(
+        &mut *alice,
+        &mut *yankee,
+        0,
+        levels,
+        600,
+        600,
+        "the cast fans",
+    );
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&speaker_vid.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "EncodeRemovePacket(this)");
+    assert_eq!(
+        alice.read_game(),
+        a_warp_record((471_000, 951_000), server.channel(1).port()),
+        "the caster warps to the victim"
+    );
+    let logout = yankee.read_game();
+    assert_eq!(guild_subheader(&logout), GUILD_SUBHEADER_GC_LOGOUT);
+    let departed = support::rows(
+        database.url(),
+        "SELECT id FROM player WHERE name = 'Alpha'",
+        1,
+    )[0][0];
+    assert_eq!(
+        u32::from_le_bytes(logout[4..8].try_into().unwrap()),
+        u32::try_from(departed).unwrap(),
+        "the LOGOUT names the departed"
+    );
+    yankee.sees_leave(speaker_vid);
+    yankee.quiet("the warp settled");
+}
+
+/// `sys.guild.skills`, the `/gskillup` line and the `USE_SKILL` arm: Alpha founds a guild
+/// and offers it to level 3, ups 152 and 158, and casts both. The 152 cast answers the
+/// war gate's `[LS;937]` with the SP consumed and 932 while it cools; the 158 cast at an
+/// offline PID answers `[LS;935]`, and at Yankee warps the caster to her feet. Every row
+/// lands in the store.
+#[test]
+fn a_guild_ups_and_casts_its_skills() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+         154, 471000, 951000 FROM account WHERE login = 'bob'",
+    );
+    // Two offers of 600 000 and 1 800 000: level 2, then level 3, with 600 000 left.
+    sql(
+        &database,
+        "UPDATE player SET exp = 3000000 WHERE name = 'Alpha'",
+    );
+    give_guild_purse(&database);
+    let (mut alice, _alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, true, None);
+    let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
+    let yankee_vid = yankee_listed.id;
+    alice.send_record(&client_answer_make_guild(b"MyGuild"));
+    let named = alice.read_game();
+    let id = check_guild_named(&named);
+    for _ in 0..8 {
+        alice.read_game();
+    }
+    assert_eq!(yankee.read_game(), named, "the other PC hears the name");
+    join_guild(&mut alice, &mut yankee, yankee_vid, id);
+    // Level 2: 6 000 of the 6 000 steps, nothing left, one point, the max at 500.
+    check_guild_offer_level(&mut alice, &mut yankee, alpha_vid, 600_000, 2_400_000, 2, 0);
+    // `/gskillup 152`: the point is spent, 152 climbs to 1, and the fan names both.
+    let mut levels = [0u8; 12];
+    check_guild_up_and_cast_152(&mut alice, &mut yankee, &mut levels);
+    // Level 3: 18 000 of the 18 000 steps, nothing left, one more point, the max at 600.
+    check_guild_offer_level(&mut alice, &mut yankee, alpha_vid, 1_800_000, 600_000, 3, 0);
+    check_guild_up_and_cast_teleport(
+        &mut alice,
+        &mut yankee,
+        &database,
+        &server,
+        alpha_vid,
+        &mut levels,
+    );
+    // Every row lands: level 3 with no exp left, the climbs, and the consumed power.
+    let guild = support::rows(
+        database.url(),
+        "SELECT exp, level, sp, skill_point, get_byte(skills, 1), get_byte(skills, 7) FROM guild \
+         WHERE id = 1",
+        6,
+    );
+    assert_eq!(guild[0][0], 0, "no exp left");
+    assert_eq!(guild[0][1], 3, "level 3");
+    assert_eq!(
+        guild[0][2], 600,
+        "level 3 fills the power, and the teleport costs nothing"
+    );
+    assert_eq!(guild[0][3], 0, "no point left");
+    assert_eq!(guild[0][4], 1, "152 climbed to 1");
+    assert_eq!(guild[0][5], 1, "158 climbed to 1");
+    let player = support::rows(
+        database.url(),
+        "SELECT exp, x, y FROM player WHERE name = 'Alpha'",
+        3,
+    );
+    assert_eq!(player[0][0], 600_000, "the offer debits land");
+    assert_eq!(player[0][1], 471_000, "the warp lands");
+    assert_eq!(player[0][2], 951_000, "the warp lands");
 }

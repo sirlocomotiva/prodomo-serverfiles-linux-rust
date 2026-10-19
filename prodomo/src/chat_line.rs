@@ -73,7 +73,7 @@ fn c_string(bytes: &[u8]) -> &[u8] {
         .map_or(bytes, |nul| &bytes[..nul])
 }
 
-/// The part of `vsnprintf` the ported lines use: `%%`, `%d` and `%s`.
+/// The part of `vsnprintf` the ported lines use: `%%`, `%d`, `%02d` and `%s`.
 ///
 /// Each conversion takes the next argument. A conversion with no argument left, or with one of
 /// the other kind, is written as it is, and so is a `%` before any other byte. A line that needs
@@ -90,10 +90,33 @@ fn vsnprintf(format: &[u8], args: &[Arg<'_>]) -> Vec<u8> {
         let conversion = bytes.clone().next();
         match conversion {
             Some(b'%') => out.push(b'%'),
-            Some(b'd') => match args.next() {
-                Some(Arg::Int(value)) => out.extend_from_slice(value.to_string().as_bytes()),
-                _ => out.extend_from_slice(b"%d"),
-            },
+            Some(b'0')
+                if bytes.clone().nth(1) == Some(b'2') && bytes.clone().nth(2) == Some(b'd') =>
+            {
+                match args.next() {
+                    Some(Arg::Int(value)) => {
+                        let text = value.to_string();
+                        if *value >= 0 && *value < 10 {
+                            out.push(b'0');
+                        }
+                        out.extend_from_slice(text.as_bytes());
+                    }
+                    _ => out.extend_from_slice(b"%02d"),
+                }
+                bytes.next();
+                bytes.next();
+            }
+            Some(b'd' | b'u') => {
+                let literal = if conversion == Some(b'u') {
+                    b"%u"
+                } else {
+                    b"%d"
+                };
+                match args.next() {
+                    Some(Arg::Int(value)) => out.extend_from_slice(value.to_string().as_bytes()),
+                    _ => out.extend_from_slice(literal),
+                }
+            }
             Some(b's') => match args.next() {
                 Some(Arg::Text(text)) => out.extend_from_slice(c_string(text)),
                 _ => out.extend_from_slice(b"%s"),
@@ -203,5 +226,12 @@ mod tests {
         );
         // A `%` before any other byte, or at the end, is written as it is.
         assert_eq!(vsnprintf(b"%x %", &[Arg::Int(1)]), b"%x %");
+        // `%02d` pads one digit with a zero, as the comment countdown's minutes and
+        // seconds print (`G/guild.cpp:1061`).
+        assert_eq!(
+            vsnprintf(b"%02d:%02d", &[Arg::Int(1), Arg::Int(12)]),
+            b"01:12"
+        );
+        assert_eq!(vsnprintf(b"%02d", &[]), b"%02d");
     }
 }

@@ -209,13 +209,16 @@ pub enum ShopAnswer {
     },
     /// A buy or a sale, stored and sent as a move is, with the gold it left.
     Moved(MovedItems),
-    /// A quest took the click: the records its scripts sent, and the GRAND climbs
-    /// its reads landed (each for the store's `store_skill`), in order.
+    /// A quest took the click: the records its scripts sent, the GRAND climbs
+    /// its reads landed (each for the store's `store_skill`), and the `guild.*`
+    /// calls the scripts made (each for the world's judge), in order.
     Quest {
         /// The records the client is sent.
         records: Vec<Vec<u8>>,
         /// The climbs, each a slot, level and stamp.
         climbs: Vec<(u8, u8, i32)>,
+        /// The `guild.*` writers the scripts ran, each for the descriptor to drain.
+        guild_ops: Vec<super::guild::GuildQuestStore>,
     },
 }
 
@@ -315,9 +318,14 @@ impl GameState {
         if self.trading.contains_key(&vid) {
             return ShopAnswer::silent(ShopDeclined::Trading);
         }
-        let (taken, (mut records, climbs)) = self.quest_click(vid, (target, race), place, mover);
+        let (taken, (mut records, climbs, guild_ops)) =
+            self.quest_click(vid, (target, race), place, mover);
         if taken {
-            return ShopAnswer::Quest { records, climbs };
+            return ShopAnswer::Quest {
+                records,
+                climbs,
+                guild_ops,
+            };
         }
         match self.open_window(vid, target, place, mover) {
             ShopAnswer::Sent(sent) => {
@@ -735,6 +743,7 @@ mod tests {
             affect_flags: [0; 2],
             dead: false,
             alignment: 0,
+            view_guild: (0, 0),
         }
     }
 
@@ -1304,6 +1313,7 @@ mod tests {
         let declined = ShopAnswer::Quest {
             records: vec![menu],
             climbs: Vec::new(),
+            guild_ops: Vec::new(),
         };
         assert_eq!(click(&mut state, SCRIPTED, at(0)), declined);
         assert!(state.browsing.is_empty());

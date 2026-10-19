@@ -166,6 +166,15 @@ impl NameRules {
         }
         Name::new(std::str::from_utf8(name).ok()?).ok()
     }
+
+    /// Whether `check_name_independent` accepts `name` (`G/locale_service.cpp:86-99`): it
+    /// holds no banned word and is not a mob's name in lowercase. The alphabet and the
+    /// length belong to the caller: a character Name is 2 to 24 (`check`), a guild name 2
+    /// to 12 (`game_state::guild`).
+    #[must_use]
+    pub fn guild_name_ok(&self, name: &[u8]) -> bool {
+        !holds_banword(&self.banwords, name) && !self.mobs.refuses(name)
+    }
 }
 
 /// When each account last created a character: the DB server's `s_createTimeByAccountID`,

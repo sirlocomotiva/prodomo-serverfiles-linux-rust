@@ -155,6 +155,8 @@ pub enum MoveKind {
     Stored,
     /// An item came out of the safebox or the mall (`SafeboxCheckout`).
     Retrieved,
+    /// A guild was made: the fee and one 70101 item left (`AnswerMakeGuild`).
+    GuildMade,
 }
 
 /// A record the client is sent, in the order legacy sends it.

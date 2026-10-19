@@ -98,9 +98,31 @@ impl QuestStep {
     }
 }
 
-/// What a quest step reports: the records its scripts sent for the client, and the
-/// GRAND climbs its reads landed (each for the store's `store_skill`).
-pub type QuestStepOutcome = (Vec<Vec<u8>>, Vec<(u8, u8, i32)>);
+/// What a quest step reports: the records its scripts sent for the client, the GRAND
+/// climbs its reads landed (each for the store's `store_skill`), and the `guild.*`
+/// writers the scripts ran (each for the descriptor to drain after the step, in order).
+pub type QuestStepOutcome = (
+    Vec<Vec<u8>>,
+    Vec<(u8, u8, i32)>,
+    Vec<super::guild::GuildQuestStore>,
+);
+
+/// What a quest run reports (230s): the records, the GRAND climbs, and the `guild.*`
+/// calls the scripts made (each for [`GameState::answer_guild_quest`] after the step).
+type QuestRun = (
+    Vec<Vec<u8>>,
+    Vec<(u8, u8, i32)>,
+    Vec<super::guild::GuildQuestOp>,
+);
+
+/// `get_global_time()` in seconds: the wall clock a quest step judges against.
+pub(super) fn quest_now() -> u32 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u32::try_from(since.as_secs()).unwrap_or(u32::MAX)
+        })
+}
 
 /// What a running script reaches: the character's map, its client and the world's dice.
 pub(super) struct Session<'s> {
@@ -126,6 +148,8 @@ pub(super) struct Session<'s> {
     pub(super) card: (u8, u8),
     /// Its level, for the GRAND read's level-limit arm.
     pub(super) pc_level: u8,
+    /// The reader's PID, when it is online: the `guild.*` calls' caller.
+    pub(super) caller: Option<u32>,
     /// Its skill slots, which the GRAND read climbs and stamps.
     pub(super) slots: &'s mut super::pc_skill::PcSkillState,
     /// Its timed affects, which the GRAND read's book bonus consumes.
@@ -135,6 +159,12 @@ pub(super) struct Session<'s> {
     /// What the GRAND read climbed, for the store's `store_skill`: the slot, level
     /// and stamp of each climb, in order.
     pub(super) climbs: Vec<(u8, u8, i32)>,
+    /// The `guild.*` calls the scripts made, in order, each for
+    /// [`GameState::answer_guild_quest`] after the step.
+    pub(super) guild_ops: Vec<super::guild::GuildQuestOp>,
+    /// The shadow the `guild.*` calls read: the guilds as the world holds them at the
+    /// step's start, so a call answers the same rows the world would judge.
+    pub(super) guilds: super::guild::GuildShadow,
     /// What the client is sent, in order.
     pub(super) records: Vec<Vec<u8>>,
 }
@@ -451,6 +481,22 @@ impl Game for Session<'_> {
             .unwrap_or(0)
             .min(40)
     }
+
+    fn guild_call(
+        &mut self,
+        name: &[u8],
+        args: &[quest::manager::GuildArg],
+    ) -> quest::manager::GuildAnswer {
+        // The shadow answers now, so the script's control flow sees the pushed value;
+        // the world judges the same call again after the step for its records and
+        // stores.
+        self.guild_ops.push(super::guild::GuildQuestOp {
+            name: name.to_vec(),
+            args: args.to_vec(),
+        });
+        let caller = self.caller;
+        self.guilds.judge_shadow(caller, name, args)
+    }
 }
 
 impl GameState {
@@ -493,7 +539,17 @@ impl GameState {
             QuestStep::Answer(answer) => manager.answer(pid, *answer, game),
             QuestStep::Input(text) => manager.input(pid, text, game),
         });
-        Ok(answered.map(|((), outcome)| outcome).unwrap_or_default())
+        let Some(((), (mut records, climbs, ops))) = answered else {
+            return Ok(QuestStepOutcome::default());
+        };
+        let now = quest_now();
+        let mut stores = Vec::new();
+        for op in &ops {
+            let judged = self.answer_guild_quest(vid, &op.name, &op.args, now);
+            records.extend(judged.own);
+            stores.extend(judged.stores);
+        }
+        Ok((records, climbs, stores))
     }
 
     /// `CQuestManager::Click` for the character under `vid` clicking the NPC `target` of race
@@ -513,10 +569,21 @@ impl GameState {
         let level = character
             .points()
             .map_or(1, world::character::Points::level);
-        self.run_quests(place, mover, level, pid, |manager, game| {
-            manager.click(pid, target, u32::from(race), game)
-        })
-        .unwrap_or_default()
+        let Some((taken, (mut records, climbs, ops))) =
+            self.run_quests(place, mover, level, pid, |manager, game| {
+                manager.click(pid, target, u32::from(race), game)
+            })
+        else {
+            return (false, QuestStepOutcome::default());
+        };
+        let now = quest_now();
+        let mut stores = Vec::new();
+        for op in &ops {
+            let judged = self.answer_guild_quest(vid, &op.name, &op.args, now);
+            records.extend(judged.own);
+            stores.extend(judged.stores);
+        }
+        (taken, (records, climbs, stores))
     }
 
     /// `CQuestManager::GetPCForce(pid)->IsRunning()` for the character under `vid`: whether a
@@ -555,7 +622,7 @@ impl GameState {
         self.run_quests(place, mover, level, pid, |manager, game| {
             manager.levelup(pid, game);
         })
-        .map_or_else(Vec::new, |((), (records, _))| records)
+        .map_or_else(Vec::new, |((), (records, _, _))| records)
     }
 
     /// `CQuestManager::Kill` for the character under `vid`, which killed race `race` under
@@ -588,7 +655,7 @@ impl GameState {
             manager.set_quest_npc(victim);
             manager.kill(pid, race, leader, game);
         })
-        .map_or_else(Vec::new, |((), (records, _))| records)
+        .map_or_else(Vec::new, |((), (records, _, _))| records)
     }
 
     /// Run `op` on the manager with a [`Game`] for the character of `pid` standing
@@ -603,7 +670,7 @@ impl GameState {
         level: u8,
         pid: u32,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
-    ) -> Option<(R, QuestStepOutcome)> {
+    ) -> Option<(R, QuestRun)> {
         let reader = self
             .characters
             .find_by_pid(pid)
@@ -618,6 +685,7 @@ impl GameState {
             pc_skills,
             affect_events,
             pc_skill_tables,
+            guilds,
             ..
         } = self;
         let quests = quests.as_mut()?;
@@ -629,6 +697,10 @@ impl GameState {
             .ok()
             .and_then(|character| character.points())
             .map_or(0, world::character::Points::level);
+        let caller = characters
+            .find_by_vid(reader)
+            .ok()
+            .map(world::character::Character::player_id);
         let points = characters
             .find_by_vid_mut(reader)
             .ok()
@@ -645,17 +717,23 @@ impl GameState {
             reader,
             card,
             pc_level,
+            caller,
             slots: pc_skills.entry(reader.raw()).or_default(),
             affects: affect_events.get_mut(&reader),
             points,
             climbs: Vec::new(),
+            guild_ops: Vec::new(),
+            guilds: guilds.clone(),
             records: Vec::new(),
         };
         let answer = op(&mut quests.manager, &mut session);
         let Session {
-            records, climbs, ..
+            records,
+            climbs,
+            guild_ops,
+            ..
         } = session;
-        Some((answer, (records, climbs)))
+        Some((answer, (records, climbs, guild_ops)))
     }
 }
 
@@ -717,6 +795,7 @@ mod test_place {
         affect_flags: [0; 2],
         dead: false,
         alignment: 0,
+        view_guild: (0, 0),
     };
 }
 
@@ -779,10 +858,13 @@ mod tests {
             reader: Vid::new(1),
             card: (0, 1),
             pc_level: 10,
+            caller: None,
             slots: &mut slots,
             affects: None,
             points: None,
             climbs: Vec::new(),
+            guild_ops: Vec::new(),
+            guilds: super::super::guild::GuildShadow::default(),
             records: Vec::new(),
         };
         assert_eq!(session.mob_name(20_016), Some(b"Smith".to_vec()));

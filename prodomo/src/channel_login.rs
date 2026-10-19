@@ -349,30 +349,34 @@ pub(crate) fn player_record(player: &LobbyPlayer, located: Located) -> GcLoginPl
 }
 
 /// The `GC_LOGIN_SUCCESS` record (`DESC::SendLoginSuccessPacket`, `G/desc.cpp:874`): one summary per
-/// slot, located, with an empty slot left zero. Guilds are not ported yet, so every guild ID and
-/// name is zero.
+/// slot, located, with an empty slot left zero. `guilds` answers the linked guild of each slot's
+/// character (`GetLinkedGuild`, `:892`): a guilded slot carries its id and its `strlcpy` name,
+/// and an empty or unguilded one carries zeros.
 #[must_use]
 pub fn login_success(
     lobby: &Lobby,
     atlas: &MapAtlas,
     locations: &MapLocations,
+    guilds: &[Option<(u32, &[u8])>; PLAYER_SLOTS],
     handle: u32,
     random_key: u32,
 ) -> GcLoginSuccess {
     let mut players = [GcLoginPlayer::default(); PLAYER_SLOTS];
+    let mut guild_ids = [0; PLAYER_SLOTS];
+    let mut guild_names = [[0; 13]; PLAYER_SLOTS];
     for (slot, record) in (0u8..).zip(players.iter_mut()) {
+        let index = usize::from(slot);
         if let Some(player) = lobby.in_slot(slot) {
             let located = locate(atlas, locations, lobby.empire, player.x, player.y);
             *record = player_record(player, located);
+            if let Some((id, name)) = guilds[index] {
+                guild_ids[index] = id;
+                let kept = name.len().min(guild_names[index].len() - 1);
+                guild_names[index][..kept].copy_from_slice(&name[..kept]);
+            }
         }
     }
-    GcLoginSuccess::new(
-        players,
-        [0; PLAYER_SLOTS],
-        [[0; 13]; PLAYER_SLOTS],
-        handle,
-        random_key,
-    )
+    GcLoginSuccess::new(players, guild_ids, guild_names, handle, random_key)
 }
 
 /// A random `random_key` (legacy `DESC_MANAGER::MakeRandomKey`, a `thecore_random()`).
@@ -658,7 +662,21 @@ mod tests {
                 lobby_player(3, "Abcdefghijklmnopqrstuvwx"),
             ],
         };
-        let record = login_success(&lobby, &atlas, &locations, 0x1234_5678, 0x9abc_def0);
+        let guilds: [Option<(u32, &[u8])>; PLAYER_SLOTS] =
+            [None, Some((7, b"Ghost")), Some((9, b"Banner")), None];
+        let record = login_success(
+            &lobby,
+            &atlas,
+            &locations,
+            &guilds,
+            0x1234_5678,
+            0x9abc_def0,
+        );
+        // A guilded slot carries its id and `strlcpy` name; an empty or unguilded one zeros both.
+        assert_eq!(record.guild_ids, [0, 0, 9, 0]);
+        assert_eq!(&record.guild_names[2][..7], b"Banner\0");
+        assert_eq!(record.guild_names[0], [0; 13]);
+        assert_eq!(record.guild_names[1], [0; 13]);
         // A 24-byte Name fills `CHARACTER_NAME_MAX_LEN` and keeps its terminating NUL.
         assert_eq!(&record.players[3].name, b"Abcdefghijklmnopqrstuvwx\0");
         assert_eq!(record.players[1], GcLoginPlayer::default());

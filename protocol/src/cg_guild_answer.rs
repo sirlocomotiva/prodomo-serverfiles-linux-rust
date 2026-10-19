@@ -77,6 +77,27 @@ pub enum CgAnswerMakeGuildError {
     },
 }
 
+impl std::fmt::Display for CgAnswerMakeGuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Truncated { needed, available } => {
+                write!(f, "make-guild record needs {needed} bytes, got {available}")
+            }
+            Self::LengthMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "make-guild record must be exactly {expected} bytes, got {actual}"
+                )
+            }
+            Self::InvalidHeader { expected, actual } => {
+                write!(f, "make-guild header {actual} is not {expected}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CgAnswerMakeGuildError {}
+
 /// The 14-byte `AnswerMakeGuild` record: a header and 13 raw name bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CgAnswerMakeGuild {

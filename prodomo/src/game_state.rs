@@ -66,6 +66,8 @@ mod death;
 mod fight;
 #[cfg(test)]
 mod fixtures;
+mod guild;
+mod guild_mark;
 mod mob_ai;
 mod mob_battle;
 mod mob_party;
@@ -87,6 +89,12 @@ mod view;
 mod view_encode;
 mod warp_npc;
 
+pub use guild::{
+    GuildCommentAnswer, GuildCommentCommit, GuildCommentLine, GuildGradeAnswer, GuildGradeCommit,
+    GuildGradeSet, GuildJoinAnswer, GuildJoinCommit, GuildMakeAnswer, GuildMakeCommit,
+    GuildQuestStore, GuildRemoveAnswer, GuildRemoveCommit, GuildSkillUp, GuildSkillUpAnswer,
+    GuildSkillUseAnswer, GuildSkillUseCommit, MarkUploadAnswer, GUILD_COMMENT_MAX_COUNT,
+};
 pub use quests::{QuestStep, QuestStepOutcome, Quests};
 pub use safebox::{
     SafeboxAnswer, SafeboxStep, ALREADY_OPEN_NOTICE, LOAD_WAIT_PULSES, MALL_WAIT_NOTICE,
@@ -497,6 +505,15 @@ pub struct GameState {
     /// `PK_PROTECT_LEVEL` (`[game] pk_protect_level`): below it a character is in the
     /// protect PK mode, and a level-up that reaches it switches the mode to peace.
     protect_level: u8,
+    /// The guilds and their member index. See [`guild`].
+    guilds: guild::Guilds,
+    /// The guild mark images and their mark-id allocator. See [`guild_mark`].
+    marks: guild_mark::MarkManager,
+    /// The guild symbols by guild id (`m_mapSymbol`, `G/MarkManager.h`). See
+    /// [`guild_mark`].
+    symbols: std::collections::BTreeMap<u32, guild_mark::GuildSymbol>,
+    /// The Name rules: the banned words and the mob names, which refuse a guild name.
+    name_rules: crate::select_phase::NameRules,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -597,6 +614,10 @@ impl GameState {
             },
             recall: death::Recall::default(),
             protect_level: DEFAULT_PROTECT_LEVEL,
+            guilds: guild::Guilds::default(),
+            marks: guild_mark::MarkManager::default(),
+            symbols: std::collections::BTreeMap::new(),
+            name_rules: crate::select_phase::NameRules::default(),
         }
     }
 
@@ -658,6 +679,14 @@ impl GameState {
     #[must_use]
     pub const fn with_item_count_limit(mut self, limit: u16) -> Self {
         self.item_count_limit = limit;
+        self
+    }
+
+    /// Share the Name rules, which refuse a guild name holding a banned word or a mob's
+    /// name, as `check_name_independent` does (`G/locale_service.cpp:86-99`).
+    #[must_use]
+    pub fn with_name_rules(mut self, rules: crate::select_phase::NameRules) -> Self {
+        self.name_rules = rules;
         self
     }
 
@@ -803,36 +832,33 @@ impl GameState {
     ///
     /// Split out from the trait impl so it can be called directly, which is what
     /// the tests do: a test that had to spawn a thread to learn whether a grant
-    /// worked would be testing the scheduler, not the grant.
+    /// worked would be testing the scheduler, not the grant. The dispatch is a
+    /// method of its own so the command count does not trip the line lint.
     pub fn apply(&mut self, command: GameCommand) {
+        self.apply_command(command);
+        self.broadcast_targets();
+    }
+
+    /// Run one command's handler. Every arm answers its reply, if it holds one; the
+    /// caller drains the fans.
+    fn apply_command(&mut self, command: GameCommand) {
+        let Some(command) = self.apply_delegated(command) else {
+            return;
+        };
         match command {
-            GameCommand::ApplyAsyncCompletion { .. } => {
-                // There is nothing to apply it to yet. A completion answers work
-                // that game state asked for, and nothing has asked. Dropping it
-                // here keeps the variant from being handled twice, in the loop and
-                // here, which is how the two drift apart.
-                debug_assert!(
-                    false,
-                    "a completion arrived for work this game state never started"
-                );
-            }
+            GameCommand::ApplyAsyncCompletion { .. } => Self::drop_completion(),
             GameCommand::GrantItem { request, reply } => {
-                let answer = self.grant(&request);
-                // A closed reply means the caller gave up, which it may legitimately
-                // do when the descriptor it was writing to closed. The grant still
-                // happened, and that is not a reason to undo it: the item is in the
-                // world and the caller is the one that went away.
-                if reply.send(answer).is_err() {
-                    warn!(
-                        target = ?request.target,
-                        vnum = request.vnum,
-                        "the item was granted but nobody was left to hear about it"
-                    );
-                }
+                self.answer_grant(&request, reply);
             }
             GameCommand::InstallItemIdRange { range, reply } => {
                 self.answer_install(range, reply);
             }
+            GameCommand::InstallGuilds {
+                stored,
+                marks,
+                symbols,
+                reply,
+            } => self.answer_install_guilds(&stored, &marks, &symbols, reply),
             GameCommand::RevokeGrant { target, id, reply } => {
                 self.answer_revoke(&target, id, reply);
             }
@@ -847,64 +873,17 @@ impl GameState {
                 loaded,
                 outbox,
                 reply,
-            } => {
-                let answer = self.enter_world_with_items(vid, player_id, &name, &items, outbox);
-                let answer = answer.map(|()| self.shown_on_admit(vid, &name, loaded));
-                // A dropped admit answer means the descriptor is already closing, and a
-                // character nobody will play is not a state worth warning about: the
-                // close path runs the leave, which finds nobody and says so at debug.
-                if reply.send(answer).is_err() {
-                    debug!(?vid, player_id, name = ?name.as_str(), "the world admitted a character nobody was left to hear about");
-                }
-            }
+            } => self.answer_enter_world(vid, player_id, &name, &items, loaded, outbox, reply),
             GameCommand::DeliverRecord { vid, record, reply } => {
-                // A `false` here means the character is not online or its descriptor
-                // is gone. It is not logged as a warning: a record that could not be
-                // delivered is a normal outcome for anything sent after a disconnect,
-                // and the caller is told in the answer.
-                if reply.send(self.write_to_client(vid, record)).is_err() {
-                    debug!(
-                        ?vid,
-                        "the world wrote a record nobody was left to hear about"
-                    );
-                }
+                self.answer_deliver(vid, record, reply);
             }
             GameCommand::LeaveWorld {
                 vid,
                 departure,
                 reply,
             } => self.answer_leave(vid, departure, reply),
-            GameCommand::Quickslot { vid, step, reply } => {
-                if reply.send(self.quickslot(vid, step)).is_err() {
-                    debug!(?vid, "nobody was left to hear a quickslot answer");
-                }
-            }
+            GameCommand::Quickslot { vid, step, reply } => self.answer_quickslot(vid, step, reply),
             GameCommand::KeptOf { vid, reply } => self.answer_kept(vid, reply),
-            command @ (GameCommand::MoveItem { .. }
-            | GameCommand::UseItem { .. }
-            | GameCommand::Shop { .. }
-            | GameCommand::Trade { .. }
-            | GameCommand::Safebox { .. }
-            | GameCommand::Quest { .. }) => self.apply_item_step(command),
-            command @ (GameCommand::DropItem { .. }
-            | GameCommand::DropGold { .. }
-            | GameCommand::PickupItem { .. }
-            | GameCommand::NpcsOn { .. }) => self.apply_ground(command),
-            command @ (GameCommand::Move { .. }
-            | GameCommand::SyncPosition { .. }
-            | GameCommand::Relay { .. }) => self.apply_motion(command),
-            command @ (GameCommand::Target { .. }
-            | GameCommand::UseSkill { .. }
-            | GameCommand::Attack { .. }
-            | GameCommand::FlyTarget { .. }
-            | GameCommand::Shoot { .. }
-            | GameCommand::PartyInvite { .. }
-            | GameCommand::PartyInviteAnswer { .. }
-            | GameCommand::PartyRemove { .. }
-            | GameCommand::PartySetState { .. }
-            | GameCommand::PartyParameter { .. }
-            | GameCommand::PartyUseSkill { .. }
-            | GameCommand::PartyOf { .. }) => self.apply_pick(command),
             GameCommand::Restart {
                 vid,
                 kind,
@@ -919,8 +898,170 @@ impl GameState {
                 // hide exactly that.
                 debug_assert!(false, "the game loop must handle Stop itself");
             }
+            _ => debug_assert!(
+                false,
+                "apply_delegated claims every item, ground, motion and pick command"
+            ),
         }
-        self.broadcast_targets();
+    }
+
+    /// Runs one command owned by a subsystem handler (items, ground, motion or
+    /// picks). Returns the command unhandled when no subsystem claims it.
+    fn apply_delegated(&mut self, command: GameCommand) -> Option<GameCommand> {
+        match command {
+            command @ (GameCommand::MoveItem { .. }
+            | GameCommand::UseItem { .. }
+            | GameCommand::Shop { .. }
+            | GameCommand::Trade { .. }
+            | GameCommand::Safebox { .. }
+            | GameCommand::AnswerMakeGuild { .. }
+            | GameCommand::CommitMakeGuild { .. }
+            | GameCommand::GuildAddMember { .. }
+            | GameCommand::AnswerGuildInvite { .. }
+            | GameCommand::CommitGuildJoin { .. }
+            | GameCommand::AnswerGuildRemove { .. }
+            | GameCommand::CommitGuildRemove { .. }
+            | GameCommand::AnswerGuildGradeName { .. }
+            | GameCommand::AnswerGuildGradeAuth { .. }
+            | GameCommand::AnswerGuildMemberGrade { .. }
+            | GameCommand::AnswerGuildMemberGeneral { .. }
+            | GameCommand::AnswerGuildOffer { .. }
+            | GameCommand::AnswerGuildCharge { .. }
+            | GameCommand::AnswerGuildPostComment { .. }
+            | GameCommand::CommitGuildPostComment { .. }
+            | GameCommand::AnswerGuildRefreshComment { .. }
+            | GameCommand::AnswerGuildDeleteComment { .. }
+            | GameCommand::CommitGuildDeleteComment { .. }
+            | GameCommand::CommitGuildGrade { .. }
+            | GameCommand::AnswerGuildUseSkill { .. }
+            | GameCommand::CommitGuildUseSkill { .. }
+            | GameCommand::GuildSkillUp { .. }
+            | GameCommand::Quest { .. }) => {
+                self.apply_item_step(command);
+                None
+            }
+            command @ (GameCommand::DropItem { .. }
+            | GameCommand::DropGold { .. }
+            | GameCommand::PickupItem { .. }
+            | GameCommand::NpcsOn { .. }) => {
+                self.apply_ground(command);
+                None
+            }
+            command @ (GameCommand::Move { .. }
+            | GameCommand::SyncPosition { .. }
+            | GameCommand::Relay { .. }) => {
+                self.apply_motion(command);
+                None
+            }
+            command @ (GameCommand::Target { .. }
+            | GameCommand::UseSkill { .. }
+            | GameCommand::Attack { .. }
+            | GameCommand::FlyTarget { .. }
+            | GameCommand::Shoot { .. }
+            | GameCommand::PartyInvite { .. }
+            | GameCommand::PartyInviteAnswer { .. }
+            | GameCommand::PartyRemove { .. }
+            | GameCommand::PartySetState { .. }
+            | GameCommand::PartyParameter { .. }
+            | GameCommand::PartyUseSkill { .. }
+            | GameCommand::PartyOf { .. }
+            | GameCommand::GuildOf { .. }
+            | GameCommand::MarkUpload { .. }
+            | GameCommand::MarkIdxList { .. }
+            | GameCommand::MarkCrcList { .. }
+            | GameCommand::SymbolUpload { .. }
+            | GameCommand::SymbolCrc { .. }) => {
+                self.apply_pick(command);
+                None
+            }
+            command => Some(command),
+        }
+    }
+
+    /// Drop one async completion. There is nothing to apply it to yet: a completion
+    /// answers work that game state asked for, and nothing has asked. Dropping it
+    /// here keeps the variant from being handled twice, in the loop and here, which
+    /// is how the two drift apart.
+    fn drop_completion() {
+        debug_assert!(
+            false,
+            "a completion arrived for work this game state never started"
+        );
+    }
+
+    /// Run one quickslot step and answer.
+    fn answer_quickslot(
+        &mut self,
+        vid: common::vid::Vid,
+        step: QuickslotStep,
+        reply: tokio::sync::oneshot::Sender<Option<QuickslotAnswer>>,
+    ) {
+        if reply.send(self.quickslot(vid, step)).is_err() {
+            debug!(?vid, "nobody was left to hear a quickslot answer");
+        }
+    }
+
+    /// Grant one item and answer. A closed reply means the caller gave up, which it
+    /// may legitimately do when the descriptor it was writing to closed. The grant
+    /// still happened, and that is not a reason to undo it: the item is in the world
+    /// and the caller is the one that went away.
+    fn answer_grant(
+        &mut self,
+        request: &crate::item_grant::GrantRequest,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::item_grant::GrantOutcome, crate::item_grant::GrantRefusal>,
+        >,
+    ) {
+        let answer = self.grant(request);
+        if reply.send(answer).is_err() {
+            warn!(
+                target = ?request.target,
+                vnum = request.vnum,
+                "the item was granted but nobody was left to hear about it"
+            );
+        }
+    }
+
+    /// Deliver one record. A `false` means the character is not online or its
+    /// descriptor is gone. It is not logged as a warning: a record that could not be
+    /// delivered is a normal outcome for anything sent after a disconnect, and the
+    /// caller is told in the answer.
+    fn answer_deliver(
+        &mut self,
+        vid: common::vid::Vid,
+        record: Vec<u8>,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    ) {
+        if reply.send(self.write_to_client(vid, record)).is_err() {
+            debug!(
+                ?vid,
+                "the world wrote a record nobody was left to hear about"
+            );
+        }
+    }
+    /// Admit one character and report its show, logging a caller that went away. A
+    /// dropped admit answer means the descriptor is already closing, and a character
+    /// nobody will play is not a state worth warning about: the close path runs the
+    /// leave, which finds nobody and says so at debug.
+    #[allow(clippy::too_many_arguments)]
+    fn answer_enter_world(
+        &mut self,
+        vid: common::vid::Vid,
+        player_id: u32,
+        name: &str,
+        items: &[(protocol::item_pos::ItemPos, world::item::Item)],
+        loaded: Box<Loaded>,
+        outbox: ClientOutbox,
+        reply: tokio::sync::oneshot::Sender<Result<Shown, EnterWorldRefused>>,
+    ) {
+        let answer = self.enter_world_with_items(vid, player_id, name, items, outbox);
+        let answer = answer.map(|()| self.shown_on_admit(vid, name, loaded));
+        if reply.send(answer).is_err() {
+            debug!(
+                ?vid,
+                player_id, name, "the world admitted a character nobody was left to hear about"
+            );
+        }
     }
 
     /// Run a restart and report its answer, logging a caller that went away.
@@ -979,6 +1120,29 @@ impl GameState {
         }
     }
 
+    /// Install the stored guilds and tell the caller whether it took. A second install
+    /// is refused, as a second allocator install is: `serve` treats it as a bug.
+    fn answer_install_guilds(
+        &mut self,
+        stored: &db::guilds::StoredGuilds,
+        marks: &[db::guilds::StoredMark],
+        symbols: &[db::guilds::StoredSymbol],
+        reply: oneshot::Sender<bool>,
+    ) {
+        let installed = if self.guilds.installed {
+            false
+        } else {
+            self.install_guilds(stored, marks, symbols);
+            self.guilds.installed = true;
+            true
+        };
+        if reply.send(installed).is_err() {
+            warn!(
+                guilds = stored.guilds.len(),
+                "the stored guilds were installed but nobody was left to hear about it"
+            );
+        }
+    }
     /// Take a granted item back and tell the caller whether it came out.
     fn answer_revoke(&mut self, target: &str, id: u32, reply: oneshot::Sender<bool>) {
         let removed = match self.revoke_grant(target, id) {
@@ -1156,6 +1320,7 @@ impl GameState {
         }
         let _previous = self.outboxes.insert(vid, outbox);
         self.link_party(vid);
+        self.link_guild(vid);
         Ok(())
     }
 
@@ -1211,6 +1376,7 @@ impl GameState {
     pub fn leave_world_by(&mut self, vid: common::vid::Vid, departure: Departure) -> Option<Kept> {
         self.cancel_trade(vid);
         self.unlink_party(vid);
+        self.unlink_guild(vid);
         self.leave_fight(vid, departure);
         self.clear_target(vid);
         let _outbox = self.outboxes.remove(&vid);
@@ -1434,6 +1600,255 @@ impl GameState {
 
     /// Apply one of the steps a character takes with its own items or an NPC: a move, a use, a
     /// shop, trade or safebox step, or a quest step.
+    /// Run one guild step's handler. Every arm answers its reply, if it holds one; the
+    /// caller drains the fans. Split out of `apply_item_step` so neither function runs
+    /// past the line limit.
+    fn apply_guild_step(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::GuildAddMember { vid, guest, now } => {
+                self.guild_add_member(vid, guest, now);
+            }
+            GameCommand::AnswerGuildInvite {
+                vid,
+                guild_id,
+                accept,
+                now,
+                reply,
+            } => {
+                if reply
+                    .send(self.answer_guild_invite(vid, guild_id, accept, now))
+                    .is_err()
+                {
+                    warn!(
+                        ?vid,
+                        "a guild invite answer ran and nobody was left to store it"
+                    );
+                }
+            }
+            GameCommand::CommitGuildJoin { commit, reply } => {
+                if reply.send(self.commit_guild_join(&commit)).is_err() {
+                    warn!(
+                        guild_id = commit.guild_id,
+                        pid = commit.pid,
+                        "a guild join committed and nobody was left to send it"
+                    );
+                }
+            }
+            GameCommand::AnswerGuildRemove {
+                vid,
+                pid,
+                now,
+                reply,
+            } => {
+                if reply.send(self.answer_guild_remove(vid, pid, now)).is_err() {
+                    warn!(?vid, "a guild removal ran and nobody was left to store it");
+                }
+            }
+            GameCommand::CommitGuildRemove { commit, reply } => {
+                if reply.send(self.commit_guild_remove(&commit)).is_err() {
+                    warn!(
+                        pid = commit.pid,
+                        "a guild removal committed and nobody was left to send it"
+                    );
+                }
+            }
+            command @ (GameCommand::AnswerGuildGradeName { .. }
+            | GameCommand::AnswerGuildGradeAuth { .. }
+            | GameCommand::AnswerGuildMemberGrade { .. }
+            | GameCommand::AnswerGuildMemberGeneral { .. }
+            | GameCommand::AnswerGuildOffer { .. }
+            | GameCommand::AnswerGuildCharge { .. }
+            | GameCommand::AnswerGuildUseSkill { .. }
+            | GameCommand::CommitGuildUseSkill { .. }
+            | GameCommand::GuildSkillUp { .. }
+            | GameCommand::AnswerGuildPostComment { .. }
+            | GameCommand::CommitGuildPostComment { .. }
+            | GameCommand::AnswerGuildRefreshComment { .. }
+            | GameCommand::AnswerGuildDeleteComment { .. }
+            | GameCommand::CommitGuildDeleteComment { .. }
+            | GameCommand::CommitGuildGrade { .. }) => self.apply_guild_grade_step(command),
+
+            _ => {
+                debug_assert!(false, "a non-guild step reached the guild handler");
+            }
+        }
+    }
+
+    /// Run one guild grade, skill or board step. Split from [`Self::apply_guild_step`]
+    /// so neither dispatch grows past the line limit.
+    fn apply_guild_grade_step(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::AnswerGuildGradeName {
+                vid,
+                grade,
+                field,
+                reply,
+            } => {
+                if reply
+                    .send(self.answer_grade_name(vid, grade, &field))
+                    .is_err()
+                {
+                    warn!(?vid, "a grade rename ran and nobody was left to store it");
+                }
+            }
+            GameCommand::AnswerGuildGradeAuth {
+                vid,
+                grade,
+                auth,
+                reply,
+            } => {
+                if reply
+                    .send(self.answer_grade_auth(vid, grade, auth))
+                    .is_err()
+                {
+                    warn!(?vid, "a grade re-auth ran and nobody was left to store it");
+                }
+            }
+            GameCommand::AnswerGuildMemberGrade {
+                vid,
+                pid,
+                grade,
+                reply,
+            } => {
+                if reply
+                    .send(self.answer_member_grade(vid, pid, grade))
+                    .is_err()
+                {
+                    warn!(
+                        ?vid,
+                        "a member re-grade ran and nobody was left to store it"
+                    );
+                }
+            }
+            GameCommand::AnswerGuildMemberGeneral {
+                vid,
+                pid,
+                is_general,
+                reply,
+            } => {
+                if reply
+                    .send(self.answer_member_general(vid, pid, is_general))
+                    .is_err()
+                {
+                    warn!(
+                        ?vid,
+                        "a member general-flag ran and nobody was left to store it"
+                    );
+                }
+            }
+            GameCommand::AnswerGuildOffer { vid, offer, reply } => {
+                if reply.send(self.answer_guild_offer(vid, offer)).is_err() {
+                    warn!(?vid, "a guild offer ran and nobody was left to store it");
+                }
+            }
+            GameCommand::AnswerGuildCharge { vid, offer, reply } => {
+                if reply.send(self.answer_guild_charge(vid, offer)).is_err() {
+                    warn!(?vid, "a guild charge ran and nobody was left to store it");
+                }
+            }
+            command @ (GameCommand::AnswerGuildUseSkill { .. }
+            | GameCommand::CommitGuildUseSkill { .. }
+            | GameCommand::GuildSkillUp { .. }) => {
+                self.apply_guild_skill_step(command);
+            }
+            command @ (GameCommand::AnswerGuildPostComment { .. }
+            | GameCommand::CommitGuildPostComment { .. }
+            | GameCommand::AnswerGuildRefreshComment { .. }
+            | GameCommand::AnswerGuildDeleteComment { .. }
+            | GameCommand::CommitGuildDeleteComment { .. }) => {
+                self.apply_guild_board_step(command);
+            }
+            GameCommand::CommitGuildGrade { commit, reply } => {
+                if reply.send(self.commit_guild_grade(&commit)).is_err() {
+                    warn!(
+                        guild_id = commit.guild_id,
+                        "a grade step committed and nobody was left to send it"
+                    );
+                }
+            }
+            _ => {
+                debug_assert!(false, "a non-grade step reached the grade handler");
+            }
+        }
+    }
+
+    /// Run one guild skill step. Split from [`Self::apply_guild_grade_step`]
+    /// so neither dispatch grows past the line limit.
+    fn apply_guild_skill_step(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::AnswerGuildUseSkill {
+                vid,
+                vnum,
+                pid,
+                reply,
+            } => {
+                if reply
+                    .send(self.answer_guild_use_skill(vid, vnum, pid))
+                    .is_err()
+                {
+                    warn!(?vid, "a guild cast ran and nobody was left to store it");
+                }
+            }
+            GameCommand::CommitGuildUseSkill { commit, reply } => {
+                if reply.send(self.commit_guild_use_skill(&commit)).is_err() {
+                    warn!("a guild cast committed and nobody was left to send it");
+                }
+            }
+            GameCommand::GuildSkillUp { vid, rest, reply } => {
+                if reply.send(self.guild_skill_up(vid, &rest)).is_err() {
+                    warn!(?vid, "a guild skill-up ran and nobody was left to store it");
+                }
+            }
+            _ => {
+                debug_assert!(false, "a non-skill step reached the skill handler");
+            }
+        }
+    }
+
+    /// Run one guild board step. Split from [`Self::apply_guild_grade_step`]
+    /// so neither dispatch grows past the line limit.
+    fn apply_guild_board_step(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::AnswerGuildPostComment {
+                vid,
+                content,
+                reply,
+            } => {
+                if reply.send(self.answer_post_comment(vid, &content)).is_err() {
+                    warn!(?vid, "a guild post ran and nobody was left to store it");
+                }
+            }
+            GameCommand::CommitGuildPostComment { commit, reply } => {
+                if reply.send(self.commit_post_comment(&commit)).is_err() {
+                    warn!("a guild post committed and nobody was left to send it");
+                }
+            }
+            GameCommand::AnswerGuildRefreshComment { vid, reply } => {
+                if reply.send(self.answer_refresh_comment(vid)).is_err() {
+                    warn!(?vid, "a guild refresh ran and nobody was left to send it");
+                }
+            }
+            GameCommand::AnswerGuildDeleteComment {
+                vid,
+                comment_id,
+                reply,
+            } => {
+                let _ = comment_id;
+                if reply.send(self.answer_delete_comment(vid)).is_err() {
+                    warn!(?vid, "a guild delete ran and nobody was left to store it");
+                }
+            }
+            GameCommand::CommitGuildDeleteComment { commit, reply } => {
+                if reply.send(self.commit_delete_comment(&commit)).is_err() {
+                    warn!("a guild delete committed and nobody was left to send it");
+                }
+            }
+            _ => {
+                debug_assert!(false, "a non-board step reached the board handler");
+            }
+        }
+    }
+
     fn apply_item_step(&mut self, command: GameCommand) {
         match command {
             GameCommand::MoveItem {
@@ -1492,24 +1907,95 @@ impl GameState {
                     warn!(?vid, "a safebox step ran and nobody was left to store it");
                 }
             }
+            GameCommand::AnswerMakeGuild {
+                vid,
+                field,
+                now,
+                reply,
+            } => self.answer_make_guild_step(vid, &field, now, reply),
+            GameCommand::CommitMakeGuild {
+                vid,
+                commit,
+                mover,
+                reply,
+            } => self.commit_make_guild_step(vid, &commit, mover, reply),
+            command @ (GameCommand::GuildAddMember { .. }
+            | GameCommand::AnswerGuildInvite { .. }
+            | GameCommand::CommitGuildJoin { .. }
+            | GameCommand::AnswerGuildRemove { .. }
+            | GameCommand::CommitGuildRemove { .. }
+            | GameCommand::AnswerGuildGradeName { .. }
+            | GameCommand::AnswerGuildGradeAuth { .. }
+            | GameCommand::AnswerGuildMemberGrade { .. }
+            | GameCommand::AnswerGuildMemberGeneral { .. }
+            | GameCommand::AnswerGuildOffer { .. }
+            | GameCommand::AnswerGuildCharge { .. }
+            | GameCommand::AnswerGuildPostComment { .. }
+            | GameCommand::CommitGuildPostComment { .. }
+            | GameCommand::AnswerGuildRefreshComment { .. }
+            | GameCommand::AnswerGuildDeleteComment { .. }
+            | GameCommand::CommitGuildDeleteComment { .. }
+            | GameCommand::CommitGuildGrade { .. }
+            | GameCommand::AnswerGuildUseSkill { .. }
+            | GameCommand::CommitGuildUseSkill { .. }
+            | GameCommand::GuildSkillUp { .. }) => self.apply_guild_step(command),
             GameCommand::Quest {
                 vid,
                 step,
                 place,
                 mover,
                 reply,
-            } => {
-                // Nothing is stored; the client only misses the dialog.
-                let place = self.live_place(vid, place);
-                if reply.send(self.quest(vid, &step, place, mover)).is_err() {
-                    debug!(
-                        ?vid,
-                        ?step,
-                        "a quest step ran and nobody was left to see it"
-                    );
-                }
-            }
+            } => self.answer_quest_step(vid, &step, place, mover, reply),
             _ => debug_assert!(false, "only item steps reach apply_item_step"),
+        }
+    }
+
+    /// Judge one guild creation and answer.
+    fn answer_make_guild_step(
+        &mut self,
+        vid: common::vid::Vid,
+        field: &[u8; protocol::cg_guild_answer::GUILD_NAME_FIELD_SIZE],
+        now: u32,
+        reply: tokio::sync::oneshot::Sender<GuildMakeAnswer>,
+    ) {
+        if reply.send(self.answer_make_guild(vid, field, now)).is_err() {
+            warn!(?vid, "a guild answer ran and nobody was left to store it");
+        }
+    }
+
+    /// Commit one judged guild creation and answer.
+    fn commit_make_guild_step(
+        &mut self,
+        vid: common::vid::Vid,
+        commit: &GuildMakeCommit,
+        mover: crate::item_move::Mover,
+        reply: tokio::sync::oneshot::Sender<GuildMakeAnswer>,
+    ) {
+        if reply
+            .send(self.commit_make_guild(vid, commit, mover))
+            .is_err()
+        {
+            warn!(?vid, "a guild commit ran and nobody was left to store it");
+        }
+    }
+
+    /// Run one quest step and answer. Nothing is stored; the client only misses
+    /// the dialog.
+    fn answer_quest_step(
+        &mut self,
+        vid: common::vid::Vid,
+        step: &QuestStep,
+        place: GroundPlace,
+        mover: crate::item_move::Mover,
+        reply: tokio::sync::oneshot::Sender<Result<QuestStepOutcome, MoveItemRefused>>,
+    ) {
+        let place = self.live_place(vid, place);
+        if reply.send(self.quest(vid, step, place, mover)).is_err() {
+            debug!(
+                ?vid,
+                ?step,
+                "a quest step ran and nobody was left to see it"
+            );
         }
     }
 
@@ -1963,6 +2449,7 @@ impl GameState {
             affect_flags: self.affect_flags_of(vid),
             dead: self.is_dead(vid.raw()),
             alignment: self.alignment_of(vid.raw()),
+            view_guild: self.view_guild_of_vid(vid.raw()),
             ..actor
         };
         let character = self
@@ -2052,6 +2539,7 @@ impl PulseProcessor for GameState {
         self.run_warp_npcs(pulse);
         self.run_regens(pulse);
         self.step_motion(pulse);
+        self.run_guild_ticks(pulse);
         self.run_party_ticks(pulse);
         self.run_minds(pulse);
         self.broadcast_targets();
@@ -2470,6 +2958,31 @@ mod tests {
         assert_eq!(
             state.item_ids().expect("still one allocator").peek(),
             before
+        );
+    }
+
+    #[test]
+    fn a_second_guild_install_is_refused_rather_than_replacing_the_guilds() {
+        // A second install would wipe the links live characters hold and re-add the
+        // stored rows, so a guild made since boot would vanish from the world while
+        // its rows survive. The refusal is what keeps the two in agreement.
+        let stored = db::guilds::StoredGuilds {
+            guilds: Vec::new(),
+            grades: Vec::new(),
+            members: Vec::new(),
+        };
+        let mut state = a_state();
+        let (first_reply, first_answer) = tokio::sync::oneshot::channel();
+        state.answer_install_guilds(&stored, &[], &[], first_reply);
+        assert!(
+            first_answer.blocking_recv().expect("an answer"),
+            "the first install takes"
+        );
+        let (second_reply, second_answer) = tokio::sync::oneshot::channel();
+        state.answer_install_guilds(&stored, &[], &[], second_reply);
+        assert!(
+            !second_answer.blocking_recv().expect("an answer"),
+            "the second install is refused"
         );
     }
 
@@ -2974,6 +3487,7 @@ mod tests {
             affect_flags: [0; 2],
             dead: false,
             alignment: 0,
+            view_guild: (0, 0),
         }
     }
 

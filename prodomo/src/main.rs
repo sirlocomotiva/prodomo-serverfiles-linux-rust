@@ -32,7 +32,7 @@ use common::point_slot;
 use db::accounts::{find_auth_account, record_login, AccountError};
 use db::players::{
     change_name, create_player, delete_player, load_character, lobby, select_empire, Created,
-    PlayerDelete,
+    PlayerDelete, PLAYER_SLOTS,
 };
 use db::store::{schema_version, Store, StoreConfig};
 use gamedata::banword::banwords_from_dump;
@@ -56,7 +56,9 @@ use prodomo::channel_login::{
     LogonRegistry, MapLocations,
 };
 use prodomo::channel_status::ChannelStatusBoard;
-use prodomo::chat::{judge_chat, ChatContext, ChatEffect, ChatOutcome, ChatState, CHAT_PARTY};
+use prodomo::chat::{
+    judge_chat, ChatContext, ChatEffect, ChatOutcome, ChatState, CHAT_GUILD, CHAT_PARTY,
+};
 use prodomo::chat_line::Recipient;
 use prodomo::client_live::{
     handshake_token, BootLiveClock, LiveClientSession, LiveClock, LiveError, LiveOutcome, LiveStep,
@@ -74,6 +76,12 @@ use prodomo::game_loop_messages::{
 };
 use prodomo::game_state::{
     world_item_id_range, GameState, ShopAnswer, ShopStep, TradeAnswer, TradeSettled, TradeStep,
+};
+use prodomo::game_state::{
+    GuildCommentAnswer, GuildCommentCommit, GuildCommentLine, GuildGradeAnswer, GuildGradeCommit,
+    GuildGradeSet, GuildJoinAnswer, GuildJoinCommit, GuildMakeAnswer, GuildMakeCommit,
+    GuildQuestStore, GuildRemoveAnswer, GuildRemoveCommit, GuildSkillUseAnswer,
+    GuildSkillUseCommit, GUILD_COMMENT_MAX_COUNT,
 };
 use prodomo::game_state::{QuestStep, Quests, SafeboxAnswer, SafeboxStep};
 use prodomo::handshake::HandshakeServerKind;
@@ -103,18 +111,21 @@ use protocol::cg_attack::CgAttack;
 use protocol::cg_chat::CgChat;
 use protocol::cg_exchange::CgExchange;
 use protocol::cg_fly_target::CgFlyTarget;
+use protocol::cg_guild_answer::CgAnswerMakeGuild;
 use protocol::cg_inventory::{
-    HEADER_CG_ADD_FLY_TARGETING, HEADER_CG_ATTACK, HEADER_CG_CHANGE_NAME,
-    HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE, HEADER_CG_CHARACTER_POSITION,
-    HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_EMPIRE, HEADER_CG_ENTERGAME,
-    HEADER_CG_EXCHANGE, HEADER_CG_FLY_TARGETING, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2,
-    HEADER_CG_ITEM_MOVE, HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_LOGIN2,
-    HEADER_CG_LOGIN3, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE,
-    HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE,
-    HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL, HEADER_CG_QUEST_INPUT_STRING,
-    HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP,
-    HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER,
-    HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_USE_SKILL, HEADER_CG_WARP,
+    HEADER_CG_ADD_FLY_TARGETING, HEADER_CG_ANSWER_MAKE_GUILD, HEADER_CG_ATTACK,
+    HEADER_CG_CHANGE_NAME, HEADER_CG_CHARACTER_CREATE, HEADER_CG_CHARACTER_DELETE,
+    HEADER_CG_CHARACTER_POSITION, HEADER_CG_CHARACTER_SELECT, HEADER_CG_CHAT, HEADER_CG_EMPIRE,
+    HEADER_CG_ENTERGAME, HEADER_CG_EXCHANGE, HEADER_CG_FLY_TARGETING, HEADER_CG_GUILD,
+    HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_MOVE,
+    HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3,
+    HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN, HEADER_CG_MARK_UPLOAD,
+    HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER,
+    HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE,
+    HEADER_CG_PARTY_USE_SKILL, HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD,
+    HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SHOOT,
+    HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION,
+    HEADER_CG_TARGET, HEADER_CG_USE_SKILL, HEADER_CG_WARP,
 };
 use protocol::cg_item_drop::CgItemDrop;
 use protocol::cg_item_drop2::CgItemDrop2;
@@ -123,6 +134,7 @@ use protocol::cg_item_pickup::CgItemPickup;
 use protocol::cg_item_use::CgItemUse;
 use protocol::cg_login::CgEmpire;
 use protocol::cg_login3::CgLogin3;
+use protocol::cg_mark::{CgMarkCRCList, CgMarkIdxList, CgMarkLogin, CgMarkUpload, CgSymbolCrc};
 use protocol::cg_micro::{CgScriptAnswer, CgWarp};
 use protocol::cg_move::CgMove;
 use protocol::cg_name::CgChangeName;
@@ -140,11 +152,13 @@ use protocol::cg_safebox_move::CgSafeboxItemMove;
 use protocol::cg_shoot::CgShoot;
 use protocol::cg_shop::CgShop;
 use protocol::cg_use_skill::CgUseSkill;
+use protocol::cg_variable::GuildSymbolUpload;
 use protocol::cg_vid::CgOnClick;
 use protocol::cg_wire::ClientFrame;
 use protocol::gc::{GcAuthSuccess, GcLoginFailure};
 use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO};
 use protocol::gc_inventory::{HEADER_GC_EMPIRE, HEADER_GC_PHASE};
+use protocol::gc_mark::{mark_block_record, mark_idxlist_record, symbol_data_record};
 use protocol::gc_small::GcHeaderAndByte;
 use protocol::item_pos::ItemPos;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -228,6 +242,16 @@ fn initialize_server(config_path: &Path, verbose: bool) -> Result<ServerConfig, 
     Ok(config)
 }
 
+/// `guild_mark_server` and `guild_mark_min_level`: the handshake gate and the upload floor
+/// are one struct so [`ConnectionContext`] keeps three bools.
+#[derive(Clone, Copy)]
+struct MarkServer {
+    /// Whether this process answers the mark downloader.
+    serves: bool,
+    /// `[game] guild_mark_min_level`, clamped to `GUILD_MAX_LEVEL` at parse.
+    min_level: u8,
+}
+
 /// What a connection needs from the server: the descriptor clock, the ping cycle, the server
 /// state, the Channel status list, the store, the auth and logon registries, and where each map
 /// is served.
@@ -247,6 +271,10 @@ struct ConnectionContext {
     block_login: Arc<str>,
     /// `[game] user_limit`.
     user_limit: i32,
+    /// `guild_mark_server` plus `[game] guild_mark_min_level` (`G/config.cpp:912`), one
+    /// field so the struct keeps three bools: the flag gates the handshake (`G/input.cpp:213`)
+    /// and the upload reads the level unconditionally (`G/input_login.cpp:1071-1073`).
+    mark_server: MarkServer,
     /// The logins held by Channel descriptors.
     logons: Arc<LogonRegistry>,
     /// The map regions of the legacy Game data.
@@ -1296,6 +1324,8 @@ fn item_actor(held: &Held) -> Mover {
         dead: false,
         // The world sets it from the body's card, as the PK mode.
         alignment: 0,
+        // The world sets it from the character's guild, as the PK mode.
+        view_guild: (0, 0),
     }
 }
 
@@ -1566,7 +1596,6 @@ fn warp_end(addr: SocketAddr, frame: &ClientFrame) -> bool {
         }
     }
 }
-
 /// `ch->GetParty() != NULL` (`G/input_main.cpp:959`), asked lazily: only a party line
 /// pays the world round-trip. A character outside the world holds no party —
 /// `link_party` only runs on world entry. `None` closes the connection: the world
@@ -1585,6 +1614,30 @@ async fn party_answer(
             Ok(holds) => Some(holds),
             Err(error) => {
                 warn!(%addr, %error, "The world could not answer the party question; closing");
+                None
+            }
+        },
+        None => Some(false),
+    }
+}
+/// `ch->GetGuild() != NULL` (`G/input_main.cpp:976`), asked lazily: only a guild line
+/// pays the world round-trip. A character outside the world holds no guild —
+/// `link_guild` only runs on world entry. `None` closes the connection: the world
+/// could not answer, as with the talking relay.
+async fn guild_answer(
+    game: &GameLoopController,
+    record: &CgChat,
+    addr: SocketAddr,
+    world: Option<common::vid::Vid>,
+) -> Option<bool> {
+    if record.chat_type != CHAT_GUILD {
+        return Some(false);
+    }
+    match world {
+        Some(world_vid) => match game.guild_of(world_vid).await {
+            Ok(holds) => Some(holds),
+            Err(error) => {
+                warn!(%addr, %error, "The world could not answer the guild question; closing");
                 None
             }
         },
@@ -1645,7 +1698,17 @@ async fn relay_chat_line(
             }
             (RelayScope::Party, record.encode(), *vid)
         }
-        _ => panic!("a relayed effect is talking or party"),
+        ChatEffect::GuildToMembers { text } => {
+            // `ChatPacket(CHAT_TYPE_GUILD, ...)`: `id` 0, `bCanFormat` true, and the
+            // world overwrites `bEmpire` per recipient, so the empire here is a placeholder.
+            let record = prodomo::chat::guild_record(effect, 0)
+                .unwrap_or_else(|| panic!("a guild effect always builds a record"));
+            if record.id != 0 || !record.can_format || record.text != *text {
+                warn!(%addr, "Relayed chat record does not match its effect");
+            }
+            (RelayScope::Guild, record.encode(), 0)
+        }
+        _ => panic!("a relayed effect is talking, party, or guild"),
     };
     let bytes = bytes.unwrap_or_else(|error| panic!("a relayed chat record always fits: {error}"));
     let Some(world_vid) = world else {
@@ -1663,13 +1726,14 @@ async fn relay_chat_line(
         }
     }
 }
+
 /// `CG_CHAT` (3) in the game phase: `CInputMain::Chat` (`input_main.cpp:781-991`).
 ///
-/// The judge owns the legacy order, so this function only applies the effects. The three
+/// The judge owns the legacy order, so this function only applies the effects. The four
 /// broadcasts are the ones the judge asks for: an info line to the sender, a talking line to
-/// every client on the sender's map, and a shout to every client on every Channel. The last
-/// two include the sender, because the registry lease makes the sender one of its own
-/// recipients.
+/// every client on the sender's map, a party line to every linked member of the sender's
+/// party, and a shout to every client on every Channel. The last three include the sender,
+/// because the registry lease makes the sender one of its own recipients.
 async fn chat_line<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -1704,6 +1768,9 @@ where
     let Some(in_party) = party_answer(&context.game, &record, addr, held.world).await else {
         return false;
     };
+    let Some(in_guild) = guild_answer(&context.game, &record, addr, held.world).await else {
+        return false;
+    };
     let chat_context = ChatContext {
         name: character.name.clone(),
         vid: character.id,
@@ -1713,6 +1780,7 @@ where
         // which is the legacy state for a character that was never silenced.
         block_chat_seconds: None,
         in_party,
+        in_guild,
         language: to.language,
         pulse: context.game.pulse(),
         shout_limit_level: context.shout_limit_level,
@@ -1746,7 +1814,9 @@ where
                     return false;
                 }
             }
-            ChatEffect::TalkingToMap { .. } | ChatEffect::PartyToMembers { .. } => {
+            ChatEffect::TalkingToMap { .. }
+            | ChatEffect::PartyToMembers { .. }
+            | ChatEffect::GuildToMembers { .. } => {
                 match relay_chat_line(context, addr, held.world, effect).await {
                     Relayed::Sent(settling) => held.settling = Some(settling),
                     Relayed::Dropped => continue,
@@ -1937,6 +2007,1084 @@ async fn party_remove_step(
         }
     }
     debug!(%addr, pid = record.pid, "Party removal handed to the world");
+    true
+}
+
+/// `CInputMain::AnswerMakeGuild` (`G/input_main.cpp:2672-2730`): the world judges the
+/// answer, the descriptor writes the guild rows, and the world commits.
+///
+/// A refusal sends the line, if any, and stays open. A judged creation is stored before
+/// it is committed: the rows land first, then the commit takes the fee and the item and
+/// the master's own records go out, and only then does the `GUILD_NAME` broadcast reach
+/// every other PC — in that order, so nobody hears of a guild the store did not take. A
+/// unique violation answers `[LS;473]`, as the `SELECT COUNT(*)` arm does
+/// (`G/guild_manager.cpp:96-109`); any other store error closes, as an unstored move does.
+async fn answer_make_guild_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgAnswerMakeGuild::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed ANSWER_MAKE_GUILD; closing");
+            return false;
+        }
+    };
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "ANSWER_MAKE_GUILD from a character outside the world; ignoring");
+        return true;
+    };
+    let judged = match context
+        .game
+        .answer_make_guild(world_vid, record.guild_name, global_time())
+        .await
+    {
+        Ok(judged) => judged,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not judge the guild answer; closing");
+            return false;
+        }
+    };
+    let name = match judged {
+        GuildMakeAnswer::Store { name } => name,
+        GuildMakeAnswer::Refused { line } => {
+            if let Some(line) = line {
+                if let Err(error) = send_all(session, &[line]).await {
+                    warn!(%addr, %error, "Client session stopped");
+                    return false;
+                }
+            }
+            return true;
+        }
+        GuildMakeAnswer::Committed { .. } => {
+            warn!(%addr, "The world answered a judgement with a commit; closing");
+            return false;
+        }
+    };
+    let Some(character) = held.character.as_ref() else {
+        warn!(%addr, "ANSWER_MAKE_GUILD without a character; closing");
+        return false;
+    };
+    let pid = character.id;
+    let id = match store_make_guild(context, &name, pid).await {
+        Ok(id) => id,
+        Err(Some(taken)) => {
+            return answer_guild_taken(session, addr, context, held, character, taken).await;
+        }
+        Err(None) => {
+            warn!(%addr, "The guild rows could not be stored; closing");
+            return false;
+        }
+    };
+    let commit = GuildMakeCommit { id, name };
+    let committed = match context
+        .game
+        .commit_make_guild(world_vid, commit, item_actor(held))
+        .await
+    {
+        Ok(committed) => committed,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not commit the guild; closing");
+            return false;
+        }
+    };
+    let GuildMakeAnswer::Committed {
+        id,
+        own,
+        others,
+        gold,
+        changes,
+    } = committed
+    else {
+        warn!(%addr, "The world answered a commit without one; closing");
+        return false;
+    };
+    if let Err(error) = db::items::apply_transfer(&context.store, pid, &changes, gold).await {
+        warn!(%addr, %error, id, "The guild fee could not be stored; closing");
+        return false;
+    }
+    if let Err(error) = send_all(session, &own).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    // The `GUILD_NAME` broadcast to every PC (`CGuild::CGuild`, `G/guild.cpp:117-126`):
+    // the master already holds its copy in `own`, so every other client hears it here.
+    let own_vid = world_vid.raw();
+    let heard = match others.first() {
+        Some(record) => context
+            .clients
+            .deliver_everywhere(|entry| (entry.vid != own_vid).then(|| record.clone())),
+        None => 0,
+    };
+    info!(%addr, id, others = heard, "Guild made");
+    true
+}
+/// Write one judged creation's rows (`CGuild::CGuild`'s saves, `G/guild.cpp:59-127`).
+/// Answers the new id, or the taken name for the `[LS;473]` arm, or nothing for a
+/// store failure that closes.
+async fn store_make_guild(
+    context: &ConnectionContext,
+    name: &str,
+    pid: u32,
+) -> Result<u32, Option<String>> {
+    let grades: [(&str, u8); 15] = std::array::from_fn(|index| {
+        if index == 0 {
+            ("Leader", 15)
+        } else {
+            ("...", 0)
+        }
+    });
+    match db::guilds::create_guild(&context.store, name, pid, &grades).await {
+        Ok(id) => Ok(id),
+        Err(db::guilds::CreateGuildError::GuildNameTaken { name }) => Err(Some(name)),
+        Err(_) => Err(None),
+    }
+}
+
+/// Answer the `[LS;473]` arm: a concurrent creation took the judged name
+/// (`G/guild_manager.cpp:96-109`). Stays open; `false` only when the send died.
+async fn answer_guild_taken<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    character: &db::players::Character,
+    taken: String,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    info!(%addr, name = taken, "A concurrent creation took the guild name; answering 473");
+    let to = Recipient {
+        strings: &context.locale,
+        language: descriptor_language(held.account.as_ref()),
+        empire: character.empire,
+    };
+    let line =
+        prodomo::chat_line::chat_packet(to, protocol::gc_chat::CHAT_TYPE_INFO, b"[LS;473]", &[]);
+    if let Err(error) = send_all(session, &[line]).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    true
+}
+
+/// `CInputMain::Guild` (`G/input_main.cpp:2797-3162`): the 0x50 record's subheader picks the
+/// door — invite, answer, removal, or one of the four grade arms — the closed money arms
+/// stay quiet, and the later slices' sub-packets stay quiet.
+///
+/// Stays open on a refusal or a quiet arm; `false` only when the send died, the world
+/// went silent, or the row could not be stored.
+async fn cg_guild_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use protocol::cg_guild::{
+        sub_packet_size, GUILD_SUBHEADER_CG_ADD_MEMBER, GUILD_SUBHEADER_CG_CHANGE_GRADE_AUTHORITY,
+        GUILD_SUBHEADER_CG_CHANGE_GRADE_NAME, GUILD_SUBHEADER_CG_CHANGE_MEMBER_GENERAL,
+        GUILD_SUBHEADER_CG_CHANGE_MEMBER_GRADE, GUILD_SUBHEADER_CG_CHARGE_GSP,
+        GUILD_SUBHEADER_CG_DELETE_COMMENT, GUILD_SUBHEADER_CG_DEPOSIT_MONEY,
+        GUILD_SUBHEADER_CG_GUILD_INVITE_ANSWER, GUILD_SUBHEADER_CG_OFFER,
+        GUILD_SUBHEADER_CG_POST_COMMENT, GUILD_SUBHEADER_CG_REFRESH_COMMENT,
+        GUILD_SUBHEADER_CG_REMOVE_MEMBER, GUILD_SUBHEADER_CG_USE_SKILL,
+        GUILD_SUBHEADER_CG_WITHDRAW_MONEY,
+    };
+    let Some(subheader) = frame.payload.first().copied() else {
+        warn!(%addr, "Client sent a GUILD record without a subheader; closing");
+        return false;
+    };
+    let body = &frame.payload[1..];
+    if body.len() < sub_packet_size(subheader) {
+        warn!(%addr, subheader, "Client sent a short GUILD sub-packet; closing");
+        return false;
+    }
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "GUILD from a character outside the world; ignoring");
+        return true;
+    };
+    match subheader {
+        GUILD_SUBHEADER_CG_ADD_MEMBER => {
+            let guest = u32::from_le_bytes(body[..4].try_into().unwrap());
+            if let Err(error) = context
+                .game
+                .guild_add_member(world_vid, guest, global_time())
+                .await
+            {
+                warn!(%addr, %error, "The world could not take the invite; closing");
+                return false;
+            }
+            debug!(%addr, guest, "Guild invite handed to the world");
+            true
+        }
+        GUILD_SUBHEADER_CG_GUILD_INVITE_ANSWER => {
+            let guild_id = u32::from_le_bytes(body[..4].try_into().unwrap());
+            let accept = body[4];
+            guild_invite_answer_step(session, addr, context, held, world_vid, guild_id, accept)
+                .await
+        }
+        GUILD_SUBHEADER_CG_REMOVE_MEMBER => {
+            let pid = u32::from_le_bytes(body[..4].try_into().unwrap());
+            guild_remove_step(session, addr, context, world_vid, pid).await
+        }
+        GUILD_SUBHEADER_CG_CHANGE_GRADE_NAME
+        | GUILD_SUBHEADER_CG_CHANGE_GRADE_AUTHORITY
+        | GUILD_SUBHEADER_CG_CHANGE_MEMBER_GRADE
+        | GUILD_SUBHEADER_CG_CHANGE_MEMBER_GENERAL
+        | GUILD_SUBHEADER_CG_OFFER
+        | GUILD_SUBHEADER_CG_CHARGE_GSP => {
+            guild_grade_step(session, addr, context, world_vid, subheader, body).await
+        }
+        GUILD_SUBHEADER_CG_USE_SKILL => {
+            let vnum = u32::from_le_bytes(body[..4].try_into().unwrap());
+            let pid = u32::from_le_bytes(body[4..8].try_into().unwrap());
+            guild_use_skill_step(session, addr, context, world_vid, vnum, pid).await
+        }
+        GUILD_SUBHEADER_CG_POST_COMMENT
+        | GUILD_SUBHEADER_CG_DELETE_COMMENT
+        | GUILD_SUBHEADER_CG_REFRESH_COMMENT => {
+            guild_comment_step(session, addr, context, held, world_vid, subheader, body).await
+        }
+        // `CInputMain::Guild`'s money arms (`G/input_main.cpp:2826-2878`): both return
+        // before their bodies — the funds are closed for now — so the Rewrite stays
+        // quiet past the frame check.
+        GUILD_SUBHEADER_CG_DEPOSIT_MONEY | GUILD_SUBHEADER_CG_WITHDRAW_MONEY => {
+            debug!(%addr, subheader, "a closed GUILD money arm stays quiet");
+            true
+        }
+        _ => {
+            debug!(%addr, subheader, "an unported GUILD sub-packet stays quiet");
+            true
+        }
+    }
+}
+
+/// Map stored comment rows to the lines the `COMMENTS` packet packs.
+fn comment_lines(board: &[db::guilds::StoredComment]) -> Vec<GuildCommentLine> {
+    board
+        .iter()
+        .map(|comment| GuildCommentLine {
+            id: comment.id,
+            name: comment.name.as_bytes().to_vec(),
+            content: comment.content.as_bytes().to_vec(),
+        })
+        .collect()
+}
+
+/// Pack a read board into the COMMENTS self packet (`RefreshCommentForce`,
+/// `G/guild.cpp:1097-1141`): one row per comment, the count byte first.
+fn guild_comments_packet(board: &[GuildCommentLine]) -> Vec<u8> {
+    use protocol::gc_guild::{
+        guild_comments_record, pad_guild_comment, pad_member_name, GcGuildComment,
+    };
+    let rows: Vec<GcGuildComment> = board
+        .iter()
+        .map(|line| GcGuildComment {
+            id: line.id,
+            name: pad_member_name(&line.name),
+            content: pad_guild_comment(&line.content),
+        })
+        .collect();
+    guild_comments_record(&rows)
+}
+
+/// The comment half of [`cg_guild_step`]: the world judges, the descriptor stores the
+/// rows, and the world reports the board. The COMMENTS record and the lines ride the
+/// speaker's own session; nothing fans through the outboxes.
+///
+/// A refusal sends the line, if any, and stays open. A store error closes, as an
+/// unstored move does.
+async fn guild_comment_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    world_vid: common::vid::Vid,
+    subheader: u8,
+    body: &[u8],
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use protocol::cg_guild::{
+        GUILD_SUBHEADER_CG_DELETE_COMMENT, GUILD_SUBHEADER_CG_POST_COMMENT,
+        GUILD_SUBHEADER_CG_REFRESH_COMMENT,
+    };
+    // The post's length byte (`:3053-3060`): over 50 closes, and a body short of the
+    // length closes — the length's own byte is the frame's first, so the check reads
+    // `1 + length` against the body.
+    let text: Vec<u8> = match subheader {
+        GUILD_SUBHEADER_CG_POST_COMMENT => {
+            let length = usize::from(body[0]);
+            if length > protocol::gc_guild::GUILD_COMMENT_MAX_LEN {
+                warn!(%addr, "Client sent a comment past the length; closing");
+                return false;
+            }
+            if body.len() < 1 + length {
+                warn!(%addr, "Client sent a short comment body; closing");
+                return false;
+            }
+            body[1..=length].to_vec()
+        }
+        GUILD_SUBHEADER_CG_REFRESH_COMMENT | GUILD_SUBHEADER_CG_DELETE_COMMENT => Vec::new(),
+        _ => {
+            warn!(%addr, subheader, "an unported GUILD sub-packet reached the comment step");
+            return false;
+        }
+    };
+    if subheader == GUILD_SUBHEADER_CG_REFRESH_COMMENT {
+        return guild_comment_refresh_step(session, addr, context, held, world_vid).await;
+    }
+    if subheader == GUILD_SUBHEADER_CG_DELETE_COMMENT {
+        return guild_comment_delete_step(session, addr, context, held, world_vid, body).await;
+    }
+    guild_comment_post_step(session, addr, context, held, world_vid, subheader, text).await
+}
+
+/// The refresh half of [`guild_comment_step`]: the world judges the gates, the
+/// descriptor reads the board, and the `COMMENTS` record rides the speaker's own
+/// session.
+async fn guild_comment_refresh_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    world_vid: common::vid::Vid,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let judged = match context.game.answer_guild_refresh_comment(world_vid).await {
+        Ok(judged) => judged,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not judge the refresh; closing");
+            return false;
+        }
+    };
+    let GuildCommentAnswer::Done { .. } = judged else {
+        if let GuildCommentAnswer::Refused { line } = judged {
+            if let Some(line) = line {
+                if let Err(error) = send_all(session, &[line]).await {
+                    warn!(%addr, %error, "Client session stopped");
+                    return false;
+                }
+            }
+            return true;
+        }
+        warn!(%addr, "The world answered a refresh with a store; closing");
+        return false;
+    };
+    let Some(character) = held.character.as_ref() else {
+        warn!(%addr, "REFRESH_COMMENT without a character; closing");
+        return false;
+    };
+    let judged = match context.game.answer_guild_delete_comment(world_vid, 0).await {
+        Ok(judged) => judged,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not read the refresh gates; closing");
+            return false;
+        }
+    };
+    let GuildCommentAnswer::Store { guild_id, .. } = judged else {
+        warn!(%addr, "The world answered a refresh without its gates; closing");
+        return false;
+    };
+    let _ = character;
+    let board = match db::guilds::board(&context.store, guild_id, GUILD_COMMENT_MAX_COUNT).await {
+        Ok(board) => board,
+        Err(error) => {
+            warn!(%addr, %error, "The board could not be read; closing");
+            return false;
+        }
+    };
+    let lines: Vec<GuildCommentLine> = board
+        .iter()
+        .map(|comment| GuildCommentLine {
+            id: comment.id,
+            name: comment.name.as_bytes().to_vec(),
+            content: comment.content.as_bytes().to_vec(),
+        })
+        .collect();
+    let packet = guild_comments_packet(&lines);
+    if let Err(error) = send_all(session, &[packet]).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    info!(%addr, "Guild comment refresh stored");
+    true
+}
+
+/// The delete half of [`guild_comment_step`]: the world judges, the descriptor deletes
+/// the row and reads the board, and the world reports it.
+async fn guild_comment_delete_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    world_vid: common::vid::Vid,
+    body: &[u8],
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let comment_id = u32::from_le_bytes(body[..4].try_into().unwrap());
+    let judged = match context
+        .game
+        .answer_guild_delete_comment(world_vid, comment_id)
+        .await
+    {
+        Ok(judged) => judged,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not judge the delete; closing");
+            return false;
+        }
+    };
+    let GuildCommentAnswer::Store {
+        guild_id,
+        pid,
+        content: flag,
+    } = judged
+    else {
+        if let GuildCommentAnswer::Refused { line } = judged {
+            if let Some(line) = line {
+                if let Err(error) = send_all(session, &[line]).await {
+                    warn!(%addr, %error, "Client session stopped");
+                    return false;
+                }
+            }
+            return true;
+        }
+        warn!(%addr, "The world answered a delete without its gates; closing");
+        return false;
+    };
+    let leader = flag.first() == Some(&1);
+    let Some(character) = held.character.as_ref() else {
+        warn!(%addr, "DELETE_COMMENT without a character; closing");
+        return false;
+    };
+    if character.id != pid {
+        warn!(%addr, "A delete judged another speaker; closing");
+        return false;
+    }
+    let name = character.name.clone();
+    let deleted =
+        match db::guilds::delete_comment(&context.store, guild_id, comment_id, leader, &name).await
+        {
+            Ok(deleted) => deleted,
+            Err(error) => {
+                warn!(%addr, %error, "The comment could not be deleted; closing");
+                return false;
+            }
+        };
+    let board = if deleted {
+        match db::guilds::board(&context.store, guild_id, GUILD_COMMENT_MAX_COUNT).await {
+            Ok(board) => Some(comment_lines(&board)),
+            Err(error) => {
+                warn!(%addr, %error, "The board could not be read; closing");
+                return false;
+            }
+        }
+    } else {
+        None
+    };
+    let reported = match context
+        .game
+        .commit_guild_delete_comment(GuildCommentCommit::Read {
+            speaker: world_vid,
+            guild_id,
+            board,
+            deleted,
+        })
+        .await
+    {
+        Ok(reported) => reported,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not report the delete; closing");
+            return false;
+        }
+    };
+    let GuildCommentAnswer::Done { board, line } = reported else {
+        warn!(%addr, "The world answered a delete without a report; closing");
+        return false;
+    };
+    if let Some(board) = board {
+        if let Err(error) = send_all(session, &[guild_comments_packet(&board)]).await {
+            warn!(%addr, %error, "Client session stopped");
+            return false;
+        }
+    }
+    if let Some(line) = line {
+        if let Err(error) = send_all(session, &[line]).await {
+            warn!(%addr, %error, "Client session stopped");
+            return false;
+        }
+    }
+    info!(%addr, "Guild comment delete stored");
+    true
+}
+
+/// The post half of [`guild_comment_step`]: the world judges, the descriptor stores the
+/// row and reads the board, and the world commits it.
+async fn guild_comment_post_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    world_vid: common::vid::Vid,
+    subheader: u8,
+    text: Vec<u8>,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let judged = match context
+        .game
+        .answer_guild_post_comment(world_vid, text)
+        .await
+    {
+        Ok(judged) => judged,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not judge the post; closing");
+            return false;
+        }
+    };
+    let (guild_id, pid, text) = match judged {
+        GuildCommentAnswer::Store {
+            guild_id,
+            pid,
+            content: text,
+        } => (guild_id, pid, text),
+        GuildCommentAnswer::Refused { line } => {
+            if let Some(line) = line {
+                if let Err(error) = send_all(session, &[line]).await {
+                    warn!(%addr, %error, "Client session stopped");
+                    return false;
+                }
+            }
+            return true;
+        }
+        GuildCommentAnswer::Done { .. } => {
+            warn!(%addr, "The world answered a judgement with a report; closing");
+            return false;
+        }
+    };
+    let Some(character) = held.character.as_ref() else {
+        warn!(%addr, "POST_COMMENT without a character; closing");
+        return false;
+    };
+    if character.id != pid {
+        warn!(%addr, "A post judged another speaker; closing");
+        return false;
+    }
+    let name = character.name.clone();
+    let text = String::from_utf8_lossy(&text).into_owned();
+    if let Err(error) = db::guilds::post_comment(&context.store, guild_id, &name, &text).await {
+        warn!(%addr, %error, "The comment could not be posted; closing");
+        return false;
+    }
+    let board = match db::guilds::board(&context.store, guild_id, GUILD_COMMENT_MAX_COUNT).await {
+        Ok(board) => board,
+        Err(error) => {
+            warn!(%addr, %error, "The board could not be read; closing");
+            return false;
+        }
+    };
+    let lines: Vec<GuildCommentLine> = board
+        .iter()
+        .map(|comment| GuildCommentLine {
+            id: comment.id,
+            name: comment.name.as_bytes().to_vec(),
+            content: comment.content.as_bytes().to_vec(),
+        })
+        .collect();
+    let committed = match context
+        .game
+        .commit_guild_post_comment(GuildCommentCommit::Post {
+            speaker: world_vid,
+            guild_id,
+            board: lines,
+        })
+        .await
+    {
+        Ok(committed) => committed,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not commit the post; closing");
+            return false;
+        }
+    };
+    let GuildCommentAnswer::Done { board, line: _ } = committed else {
+        warn!(%addr, "The world answered a commit without a board; closing");
+        return false;
+    };
+    if let Some(board) = board {
+        if let Err(error) = send_all(session, &[guild_comments_packet(&board)]).await {
+            warn!(%addr, %error, "Client session stopped");
+            return false;
+        }
+    }
+    info!(%addr, subheader, "Guild comment step stored");
+    true
+}
+
+/// The invite-answer half of [`cg_guild_step`]: the world judges, the descriptor inserts
+/// the member row, and the world commits.
+///
+/// A refusal sends the line, if any, to `to`'s client — which is this session when the
+/// invitee answers on its own descriptor, as it always does — and stays open. A judged
+/// join is stored before it is committed: the row lands first, then the commit fans and
+/// the joiner's walk goes out. A store error closes, as an unstored move does.
+async fn guild_invite_answer_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    world_vid: common::vid::Vid,
+    guild_id: u32,
+    accept: u8,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let judged = match context
+        .game
+        .answer_guild_invite(world_vid, guild_id, accept, global_time())
+        .await
+    {
+        Ok(judged) => judged,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not judge the invite answer; closing");
+            return false;
+        }
+    };
+    let judged_guild = match judged {
+        GuildJoinAnswer::Store { guild_id } => guild_id,
+        GuildJoinAnswer::Refused { line, .. } => {
+            if let Some(line) = line {
+                if let Err(error) = send_all(session, &[line]).await {
+                    warn!(%addr, %error, "Client session stopped");
+                    return false;
+                }
+            }
+            return true;
+        }
+        GuildJoinAnswer::Committed { .. } => {
+            warn!(%addr, "The world answered a judgement with a commit; closing");
+            return false;
+        }
+    };
+    let Some(character) = held.character.as_ref() else {
+        warn!(%addr, "GUILD_INVITE_ANSWER without a character; closing");
+        return false;
+    };
+    let pid = character.id;
+    if let Err(error) = db::guilds::add_member(&context.store, judged_guild, pid, 15).await {
+        warn!(%addr, %error, "The member row could not be stored; closing");
+        return false;
+    }
+    let committed = match context
+        .game
+        .commit_guild_join(GuildJoinCommit {
+            guild_id: judged_guild,
+            pid,
+        })
+        .await
+    {
+        Ok(committed) => committed,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not commit the join; closing");
+            return false;
+        }
+    };
+    let GuildJoinAnswer::Committed { own } = committed else {
+        warn!(%addr, "The world answered a commit without one; closing");
+        return false;
+    };
+    if let Err(error) = send_all(session, &own).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    info!(%addr, guild_id = judged_guild, pid, "Guild joined");
+    true
+}
+
+/// The removal half of [`cg_guild_step`]: the world judges, the descriptor deletes the
+/// member row, and the world commits.
+///
+/// The pre line, if any, goes out before the delete; the post line, if any, after the
+/// commit. A refusal sends the line, if any, and stays open. A store error closes, as an
+/// unstored move does.
+async fn guild_remove_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    world_vid: common::vid::Vid,
+    pid: u32,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let judged = match context
+        .game
+        .answer_guild_remove(world_vid, pid, global_time())
+        .await
+    {
+        Ok(judged) => judged,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not judge the removal; closing");
+            return false;
+        }
+    };
+    let (victim, online, pre) = match judged {
+        GuildRemoveAnswer::Store { pid, online, pre } => (pid, online, pre),
+        GuildRemoveAnswer::Refused { line } => {
+            if let Some(line) = line {
+                if let Err(error) = send_all(session, &[line]).await {
+                    warn!(%addr, %error, "Client session stopped");
+                    return false;
+                }
+            }
+            return true;
+        }
+        GuildRemoveAnswer::Committed { .. } => {
+            warn!(%addr, "The world answered a judgement with a commit; closing");
+            return false;
+        }
+    };
+    if let Some(pre) = pre {
+        if let Err(error) = send_all(session, &[pre]).await {
+            warn!(%addr, %error, "Client session stopped");
+            return false;
+        }
+    }
+    // The commit carries the judged online-ness, so the offline arm chats after the
+    // store even if the victim entered between.
+    if let Err(error) = db::guilds::remove_member(&context.store, victim).await {
+        warn!(%addr, %error, "The member row could not be deleted; closing");
+        return false;
+    }
+    let committed = match context
+        .game
+        .commit_guild_remove(GuildRemoveCommit {
+            speaker: world_vid,
+            pid: victim,
+            online,
+        })
+        .await
+    {
+        Ok(committed) => committed,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not commit the removal; closing");
+            return false;
+        }
+    };
+    let GuildRemoveAnswer::Committed { post } = committed else {
+        warn!(%addr, "The world answered a commit without one; closing");
+        return false;
+    };
+    if let Some(post) = post {
+        if let Err(error) = send_all(session, &[post]).await {
+            warn!(%addr, %error, "Client session stopped");
+            return false;
+        }
+    }
+    info!(%addr, pid = victim, "Guild member removed");
+    true
+}
+
+/// The grade half of [`cg_guild_step`]: the world judges, the descriptor stores the
+/// row, and the world commits.
+///
+/// A refusal sends the line, if any, and stays open. A store error closes, as an
+/// unstored move does.
+async fn guild_grade_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    world_vid: common::vid::Vid,
+    subheader: u8,
+    body: &[u8],
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let judged = judge_guild_grade_step(context, world_vid, subheader, body).await;
+    let Some(judged) = judged else {
+        warn!(%addr, subheader, "an unported GUILD sub-packet reached the grade step");
+        return false;
+    };
+    let judged = match judged {
+        Ok(judged) => judged,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not judge the grade step; closing");
+            return false;
+        }
+    };
+    let (guild_id, set) = match judged {
+        GuildGradeAnswer::Store { guild_id, set } => (guild_id, set),
+        GuildGradeAnswer::Refused { line } => {
+            if let Some(line) = line {
+                if let Err(error) = send_all(session, &[line]).await {
+                    warn!(%addr, %error, "Client session stopped");
+                    return false;
+                }
+            }
+            return true;
+        }
+        GuildGradeAnswer::Committed { .. } => {
+            warn!(%addr, "The world answered a judgement with a commit; closing");
+            return false;
+        }
+    };
+    if let Err(error) = store_guild_grade_set(context, guild_id, &set).await {
+        warn!(%addr, %error, "The grade row could not be stored; closing");
+        return false;
+    }
+    commit_guild_grade_step(session, addr, context, world_vid, subheader, guild_id, set).await
+}
+
+/// Ask the world to judge one grade sub-packet, or `None` when no arm owns it.
+async fn judge_guild_grade_step(
+    context: &ConnectionContext,
+    world_vid: common::vid::Vid,
+    subheader: u8,
+    body: &[u8],
+) -> Option<Result<GuildGradeAnswer, prodomo::game_loop_messages::MoveItemError>> {
+    use protocol::cg_guild::{
+        GUILD_SUBHEADER_CG_CHANGE_GRADE_AUTHORITY, GUILD_SUBHEADER_CG_CHANGE_GRADE_NAME,
+        GUILD_SUBHEADER_CG_CHANGE_MEMBER_GENERAL, GUILD_SUBHEADER_CG_CHANGE_MEMBER_GRADE,
+        GUILD_SUBHEADER_CG_CHARGE_GSP, GUILD_SUBHEADER_CG_OFFER,
+    };
+    let judged = match subheader {
+        GUILD_SUBHEADER_CG_CHANGE_GRADE_NAME => {
+            context
+                .game
+                .answer_guild_grade_name(world_vid, body[0], body[1..10].to_vec())
+                .await
+        }
+        GUILD_SUBHEADER_CG_CHANGE_GRADE_AUTHORITY => {
+            context
+                .game
+                .answer_guild_grade_auth(world_vid, body[0], body[1])
+                .await
+        }
+        GUILD_SUBHEADER_CG_CHANGE_MEMBER_GRADE => {
+            let pid = u32::from_le_bytes(body[..4].try_into().unwrap());
+            context
+                .game
+                .answer_guild_member_grade(world_vid, pid, body[4])
+                .await
+        }
+        GUILD_SUBHEADER_CG_CHANGE_MEMBER_GENERAL => {
+            let pid = u32::from_le_bytes(body[..4].try_into().unwrap());
+            context
+                .game
+                .answer_guild_member_general(world_vid, pid, body[4])
+                .await
+        }
+        GUILD_SUBHEADER_CG_OFFER => {
+            let offer = u32::from_le_bytes(body[..4].try_into().unwrap());
+            context.game.answer_guild_offer(world_vid, offer).await
+        }
+        GUILD_SUBHEADER_CG_CHARGE_GSP => {
+            let offer = i32::from_le_bytes(body[..4].try_into().unwrap());
+            context.game.answer_guild_charge(world_vid, offer).await
+        }
+        _ => return None,
+    };
+    Some(judged)
+}
+
+/// Store one judged grade set, answering the store's error.
+async fn store_guild_grade_set(
+    context: &ConnectionContext,
+    guild_id: u32,
+    set: &GuildGradeSet,
+) -> Result<bool, db::accounts::AccountError> {
+    match set {
+        GuildGradeSet::GradeName { grade, name } => {
+            db::guilds::set_grade_name(&context.store, guild_id, *grade, name).await
+        }
+        GuildGradeSet::GradeAuth { grade, auth } => {
+            db::guilds::set_grade_auth(&context.store, guild_id, *grade, *auth).await
+        }
+        GuildGradeSet::MemberGrade { pid, grade } => {
+            db::guilds::set_member_grade(&context.store, *pid, *grade).await
+        }
+        GuildGradeSet::MemberGeneral { pid, is_general } => {
+            db::guilds::set_member_general(&context.store, *pid, *is_general != 0).await
+        }
+        GuildGradeSet::Offer {
+            pid,
+            floored,
+            offer,
+            exp,
+            level,
+            ladder,
+        } => {
+            db::guilds::add_offer(
+                &context.store,
+                db::guilds::GuildOffer {
+                    guild_id,
+                    pid: *pid,
+                    floored: *floored,
+                    offer: *offer,
+                    level: *level,
+                    exp: *exp,
+                    ladder: *ladder,
+                },
+            )
+            .await
+        }
+        GuildGradeSet::Charge {
+            pid,
+            debit,
+            power,
+            gained: _,
+        } => {
+            db::guilds::add_power(
+                &context.store,
+                guild_id,
+                *pid,
+                *debit,
+                i32::try_from(*power).unwrap_or(i32::MAX),
+            )
+            .await
+        }
+    }
+}
+
+/// Commit one stored grade set and send the commit's post, if any.
+async fn commit_guild_grade_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    world_vid: common::vid::Vid,
+    subheader: u8,
+    guild_id: u32,
+    set: GuildGradeSet,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let committed = match context
+        .game
+        .commit_guild_grade(GuildGradeCommit {
+            speaker: world_vid,
+            guild_id,
+            set,
+        })
+        .await
+    {
+        Ok(committed) => committed,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not commit the grade step; closing");
+            return false;
+        }
+    };
+    let GuildGradeAnswer::Committed { post } = committed else {
+        warn!(%addr, "The world answered a commit without one; closing");
+        return false;
+    };
+    if let Some(post) = post {
+        if let Err(error) = send_all(session, &[post]).await {
+            warn!(%addr, %error, "Client session stopped");
+            return false;
+        }
+    }
+    info!(%addr, subheader, "Guild grade step stored");
+    true
+}
+
+/// `CInputMain::Guild`'s `GUILD_SUBHEADER_CG_USE_SKILL` arm (`G/input_main.cpp:3113-3119`,
+/// plus `CGuild::UseSkill`, `G/guild.cpp:1267-1418`): the world judges, the descriptor
+/// writes the judged power, the world commits. Every line rides the outbox already, so
+/// the descriptor sends only a refused line itself.
+async fn guild_use_skill_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    world_vid: common::vid::Vid,
+    vnum: u32,
+    pid: u32,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let judged = match context
+        .game
+        .answer_guild_use_skill(world_vid, vnum, pid)
+        .await
+    {
+        Ok(judged) => judged,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not judge the guild cast; closing");
+            return false;
+        }
+    };
+    let (guild_id, judged_vnum, judged_pid, power) = match judged {
+        GuildSkillUseAnswer::Store {
+            guild_id,
+            vnum,
+            pid,
+            power,
+        } => (guild_id, vnum, pid, power),
+        GuildSkillUseAnswer::Refused { line } => {
+            if let Some(line) = line {
+                if let Err(error) = send_all(session, &[line]).await {
+                    warn!(%addr, %error, "Client session stopped");
+                    return false;
+                }
+            }
+            return true;
+        }
+        GuildSkillUseAnswer::Committed => {
+            warn!(%addr, "The world answered a judgement with a commit; closing");
+            return false;
+        }
+    };
+    if let Err(error) = db::guilds::spend_power(
+        &context.store,
+        guild_id,
+        i32::try_from(power).unwrap_or(i32::MAX),
+    )
+    .await
+    {
+        warn!(%addr, %error, "The guild power could not be stored; closing");
+        return false;
+    }
+    let committed = match context
+        .game
+        .commit_guild_use_skill(GuildSkillUseCommit {
+            speaker: world_vid,
+            guild_id,
+            vnum: judged_vnum,
+            pid: judged_pid,
+            power,
+        })
+        .await
+    {
+        Ok(committed) => committed,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not commit the guild cast; closing");
+            return false;
+        }
+    };
+    if committed != GuildSkillUseAnswer::Committed {
+        warn!(%addr, "The world answered a commit without one; closing");
+        return false;
+    }
+    info!(%addr, vnum, "Guild cast stored");
     true
 }
 
@@ -2323,11 +3471,35 @@ where
         {
             send_channel_status(session, addr, context).await
         }
+        // `CInputHandshake::Analyze`'s mark arm (`G/input.cpp:211-226`): on a mark
+        // server the downloader's login moves to the login phase; elsewhere the
+        // connection closes. The handle and key ride unread, as legacy never reads
+        // them; the frame must still be whole, so a short login closes as a
+        // malformed record does.
+        LiveStep::Record { phase, frame }
+            if phase == ClientPhase::Handshake && frame.header == HEADER_CG_MARK_LOGIN.value() =>
+        {
+            mark_login_handshake(session, addr, context, &frame).await
+        }
         // `CInputAuth::Analyze` (`G/input_auth.cpp:209-217`).
         LiveStep::Record { phase, frame }
             if phase == ClientPhase::Auth && frame.header == HEADER_CG_LOGIN3.value() =>
         {
             auth_login(session, addr, context, &frame, &mut held.claim).await
+        }
+        // The mark arms of `CInputLogin::Analyze` (`G/input_login.cpp:1207-1236`,
+        // `ENABLE_HEADER_100_FIX` defined): the mark login is consumed, the CRC list,
+        // the index list, the mark upload, the symbol upload, and the symbol CRC.
+        LiveStep::Record { phase, frame }
+            if matches!(
+                phase,
+                ClientPhase::Login | ClientPhase::Select | ClientPhase::Loading
+            ) && is_mark_record(frame.header) =>
+        {
+            match seat {
+                Some(seat) => mark_step(session, addr, context, &seat, &frame).await,
+                None => report_step(addr, LiveStep::Record { phase, frame }),
+            }
         }
         // `CInputLogin::Analyze` (`G/input_login.cpp:1181-1182`), which serves the
         // login, select, and loading phases (`G/desc.cpp:515-519`).
@@ -2384,25 +3556,48 @@ where
             true
         }
         // The main input and the dead phase's refusal, see [`main_record`].
-        LiveStep::Record { phase, frame } => match main_record(phase, frame.header) {
-            Some(MainRecord::Refused) => {
-                debug!(%addr, header = frame.header, "a dead player's pose is refused");
-                true
-            }
-            Some(MainRecord::Chat) => chat_line(session, addr, context, held, &frame).await,
-            Some(MainRecord::ItemMove) => move_an_item(session, addr, context, held, &frame).await,
-            Some(MainRecord::Belongings) => {
-                belongings_step(session, addr, context, held, &frame).await
-            }
-            Some(MainRecord::World) => world_step(addr, context, held, &frame).await,
-            Some(MainRecord::Npc) => npc_step(session, addr, context, held, &frame).await,
-            Some(MainRecord::Transaction) => {
-                transaction_record(session, addr, context, held, &frame).await
-            }
-            Some(MainRecord::Warp) => warp_end(addr, &frame),
-            None => report_step(addr, LiveStep::Record { phase, frame }),
-        },
+        // The main input and the dead phase's refusal, see [`main_record`].
+        LiveStep::Record { phase, frame } => {
+            main_step(session, addr, context, held, phase, frame).await
+        }
         step => report_step(addr, step),
+    }
+}
+
+/// Runs the main-phase record at `frame`, after [`main_record`] has sorted it.
+async fn main_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    phase: ClientPhase,
+    frame: ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match main_record(phase, frame.header) {
+        Some(MainRecord::Refused) => {
+            debug!(%addr, header = frame.header, "a dead player's pose is refused");
+            true
+        }
+        Some(MainRecord::Chat) => chat_line(session, addr, context, held, &frame).await,
+        Some(MainRecord::ItemMove) => move_an_item(session, addr, context, held, &frame).await,
+        Some(MainRecord::Belongings) => belongings_step(session, addr, context, held, &frame).await,
+        Some(MainRecord::World) => world_step(addr, context, held, &frame).await,
+        Some(MainRecord::Npc) => npc_step(session, addr, context, held, &frame).await,
+        Some(MainRecord::Guild) => {
+            if frame.header == HEADER_CG_GUILD.value() {
+                cg_guild_step(session, addr, context, held, &frame).await
+            } else {
+                answer_make_guild_step(session, addr, context, held, &frame).await
+            }
+        }
+        Some(MainRecord::Transaction) => {
+            transaction_record(session, addr, context, held, &frame).await
+        }
+        Some(MainRecord::Warp) => warp_end(addr, &frame),
+        None => report_step(addr, LiveStep::Record { phase, frame }),
     }
 }
 
@@ -2429,6 +3624,10 @@ enum MainRecord {
     /// `CG_ON_CLICK` (26), `CG_SHOP` (50), `CG_SCRIPT_ANSWER` (29) and `CG_QUEST_INPUT_STRING`
     /// (30).
     Npc,
+    /// `CG_ANSWER_MAKE_GUILD` (49): `CInputMain::AnswerMakeGuild`
+    /// (`G/input_main.cpp:2672-2730`), read through the same main input
+    /// (`G/input_main.cpp:3834-3836`).
+    Guild,
     /// `CG_EXCHANGE` (27).
     Transaction,
     /// `CG_WARP` (65): `CInputMain::Warp` (`G/input_main.cpp:2271-2274`), which
@@ -2456,6 +3655,8 @@ fn main_record(phase: ClientPhase, header: u8) -> Option<MainRecord> {
         MainRecord::World
     } else if is_npc_step(header) {
         MainRecord::Npc
+    } else if header == HEADER_CG_ANSWER_MAKE_GUILD.value() || header == HEADER_CG_GUILD.value() {
+        MainRecord::Guild
     } else if is_transaction_record(header) {
         MainRecord::Transaction
     } else if header == HEADER_CG_WARP.value() {
@@ -2464,6 +3665,18 @@ fn main_record(phase: ClientPhase, header: u8) -> Option<MainRecord> {
         return None;
     };
     Some(record)
+}
+
+/// Whether `header` is one of the six mark records `CInputLogin::Analyze` handles
+/// (`G/input_login.cpp:1207-1236`): the mark login, the CRC list, the index list, the
+/// mark upload, the symbol upload, and the symbol CRC.
+fn is_mark_record(header: u8) -> bool {
+    header == HEADER_CG_MARK_LOGIN.value()
+        || header == HEADER_CG_MARK_CRCLIST.value()
+        || header == HEADER_CG_MARK_IDXLIST.value()
+        || header == HEADER_CG_MARK_UPLOAD.value()
+        || header == HEADER_CG_GUILD_SYMBOL_UPLOAD.value()
+        || header == HEADER_CG_SYMBOL_CRC.value()
 }
 
 /// Whether `phase`'s analyzer consumes a record of `header` and does nothing with it:
@@ -2660,9 +3873,16 @@ where
             info!(%addr, ?step, ?reason, "Shop step declined");
             return send_shop_records(session, addr, &records).await;
         }
-        Ok(Ok(ShopAnswer::Quest { records, climbs })) => {
+        Ok(Ok(ShopAnswer::Quest {
+            records,
+            climbs,
+            guild_ops,
+        })) => {
             info!(%addr, ?step, "A quest took the click");
             if !store_quest_climbs(addr, context, held, &climbs).await {
+                return false;
+            }
+            if !store_quest_guild_stores(session, addr, context, held, &guild_ops).await {
                 return false;
             }
             return send_shop_records(session, addr, &records).await;
@@ -2712,6 +3932,174 @@ async fn store_quest_climbs(
     true
 }
 
+/// Drain one quest step's `guild.*` stores, in order: the same writes the wire arms'
+/// descriptors drain for the same judges — the master's three rows, the comment's
+/// insert plus the board read and its commit (which also lands the post's records),
+/// the ladder's row, the skills' whole-row write, the offer's row (the world already
+/// fanned the commit), the grant's row. Answers whether the step may be sent.
+async fn store_quest_guild_stores<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    stores: &[GuildQuestStore],
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    for store in stores {
+        match store {
+            GuildQuestStore::Master { guild_id, from, to } => {
+                if let Err(error) =
+                    db::guilds::set_master(&context.store, *guild_id, *from, *to).await
+                {
+                    warn!(%addr, %error, "A quest master change could not be stored; closing");
+                    return false;
+                }
+            }
+            GuildQuestStore::Comment {
+                guild_id, content, ..
+            } => {
+                if !store_quest_guild_comment(session, addr, context, held, *guild_id, content)
+                    .await
+                {
+                    return false;
+                }
+            }
+            GuildQuestStore::Ladder { guild_id, ladder } => {
+                if let Err(error) = db::guilds::set_ladder(&context.store, *guild_id, *ladder).await
+                {
+                    warn!(%addr, %error, "A quest ladder could not be stored; closing");
+                    return false;
+                }
+            }
+            GuildQuestStore::Skills {
+                guild_id,
+                skills,
+                skill_point,
+            } => {
+                if let Err(error) =
+                    db::guilds::set_skills(&context.store, *guild_id, skills, *skill_point).await
+                {
+                    warn!(%addr, %error, "Quest guild skills could not be stored; closing");
+                    return false;
+                }
+            }
+            GuildQuestStore::Offer {
+                pid,
+                floored,
+                offer,
+                guild_id,
+                exp,
+                level,
+                ladder,
+            } => {
+                if let Err(error) = db::guilds::add_offer(
+                    &context.store,
+                    db::guilds::GuildOffer {
+                        guild_id: *guild_id,
+                        pid: *pid,
+                        floored: *floored,
+                        offer: *offer,
+                        level: *level,
+                        exp: *exp,
+                        ladder: *ladder,
+                    },
+                )
+                .await
+                {
+                    warn!(%addr, %error, "A quest offer could not be stored; closing");
+                    return false;
+                }
+            }
+            GuildQuestStore::Grant {
+                guild_id,
+                exp,
+                level,
+                ladder,
+            } => {
+                if let Err(error) =
+                    db::guilds::grant_exp(&context.store, *guild_id, *exp, *level, *ladder).await
+                {
+                    warn!(%addr, %error, "A quest grant could not be stored; closing");
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Store one quest comment's post: the row, the board read, and the commit that lands
+/// the post's records. Answers whether the step may be sent.
+async fn store_quest_guild_comment<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    guild_id: u32,
+    posted: &[u8],
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(character) = held.character.as_ref() else {
+        warn!(%addr, "A quest comment without a character; closing");
+        return false;
+    };
+    let name = character.name.clone();
+    let text = String::from_utf8_lossy(posted).into_owned();
+    if let Err(error) = db::guilds::post_comment(&context.store, guild_id, &name, &text).await {
+        warn!(%addr, %error, "A quest comment could not be posted; closing");
+        return false;
+    }
+    let board = match db::guilds::board(&context.store, guild_id, GUILD_COMMENT_MAX_COUNT).await {
+        Ok(board) => board,
+        Err(error) => {
+            warn!(%addr, %error, "A quest board could not be read; closing");
+            return false;
+        }
+    };
+    let Some(world) = held.world else {
+        warn!(%addr, "A quest comment without a character in the world; closing");
+        return false;
+    };
+    let lines: Vec<GuildCommentLine> = board
+        .iter()
+        .map(|comment| GuildCommentLine {
+            id: comment.id,
+            name: comment.name.as_bytes().to_vec(),
+            content: comment.content.as_bytes().to_vec(),
+        })
+        .collect();
+    let committed = match context
+        .game
+        .commit_guild_post_comment(GuildCommentCommit::Post {
+            speaker: world,
+            guild_id,
+            board: lines,
+        })
+        .await
+    {
+        Ok(committed) => committed,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not commit the quest post; closing");
+            return false;
+        }
+    };
+    let GuildCommentAnswer::Done { board, line: _ } = committed else {
+        warn!(%addr, "The world answered a quest commit without a board; closing");
+        return false;
+    };
+    if let Some(board) = board {
+        if let Err(error) = send_all(session, &[guild_comments_packet(&board)]).await {
+            warn!(%addr, %error, "Client session stopped");
+            return false;
+        }
+    }
+    true
+}
+
 async fn quest_step<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -2744,8 +4132,11 @@ where
     };
 
     match context.game.quest(vid, step, place, item_actor(held)).await {
-        Ok(Ok((records, climbs))) => {
+        Ok(Ok((records, climbs, stores))) => {
             if !store_quest_climbs(addr, context, held, &climbs).await {
+                return false;
+            }
+            if !store_quest_guild_stores(session, addr, context, held, &stores).await {
                 return false;
             }
             send_shop_records(session, addr, &records).await
@@ -2966,10 +4357,19 @@ where
     let mut empire = Vec::with_capacity(GcHeaderAndByte::WIRE_SIZE);
     GcHeaderAndByte::new(HEADER_GC_EMPIRE.value(), empire_shown(&account_lobby))
         .encode_into(&mut empire);
+    let linked = match select_guilds(&context.store, &account_lobby).await {
+        Ok(linked) => linked,
+        Err(error) => {
+            error!(%addr, %error, "Channel login failed; closing");
+            return false;
+        }
+    };
+    let guilds = select_guild_views(&linked);
     let success = login_success(
         &account_lobby,
         &context.atlas,
         seat.locations,
+        &guilds,
         seat.handle,
         random_key(),
     )
@@ -2987,9 +4387,23 @@ where
         language: grant.language,
         lobby: account_lobby,
     });
+    send_select_list(session, addr, &empire, &success).await
+}
+
+/// Send the select screen's two records — `GC_EMPIRE` and the character list — and move the
+/// session to the select phase. `false` closes the connection.
+async fn send_select_list<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    empire: &[u8],
+    success: &[u8],
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let delivery = async {
-        session.send(&empire).await?;
-        session.send(&success).await?;
+        session.send(empire).await?;
+        session.send(success).await?;
         session.set_phase(PostHandshakePhase::Select).await
     };
     match delivery.await {
@@ -2999,6 +4413,29 @@ where
             false
         }
     }
+}
+
+/// The linked guild of each lobby slot's character, as `login_success` takes it: the id and
+/// the name bytes (`db::guilds::lobby_guilds`). `None` answers the store error as a string,
+/// for the select-phase callers that return [`SelectReplies`].
+async fn select_guilds(
+    store: &db::store::Store,
+    lobby: &db::players::Lobby,
+) -> Result<[Option<(u32, String)>; PLAYER_SLOTS], String> {
+    db::guilds::lobby_guilds(store, lobby)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// The linked guilds as `login_success` takes them: each id with its name bytes.
+fn select_guild_views(
+    linked: &[Option<(u32, String)>; PLAYER_SLOTS],
+) -> [Option<(u32, &[u8])>; PLAYER_SLOTS] {
+    std::array::from_fn(|slot| {
+        linked[slot]
+            .as_ref()
+            .map(|(id, name)| (*id, name.as_bytes()))
+    })
 }
 
 /// The select-screen headers.
@@ -3811,10 +5248,13 @@ async fn choose_empire(
     empire_selected(&mut account.lobby, empire, start);
     let mut shown = Vec::with_capacity(GcHeaderAndByte::WIRE_SIZE);
     GcHeaderAndByte::new(HEADER_GC_EMPIRE.value(), empire).encode_into(&mut shown);
+    let linked = select_guilds(&context.store, &account.lobby).await?;
+    let guilds = select_guild_views(&linked);
     let success = login_success(
         &account.lobby,
         &context.atlas,
         seat.locations,
+        &guilds,
         seat.handle,
         random_key(),
     )
@@ -3958,6 +5398,289 @@ where
             false
         }
     }
+}
+
+/// Answer the downloader's handshake-phase `MARK_LOGIN`; `false` when the connection
+/// must close. On a mark server the phase moves to login; elsewhere, and on a short
+/// frame, the connection closes, as `CInputHandshake::Analyze`'s mark arm closes it
+/// (`G/input.cpp:211-226`).
+async fn mark_login_handshake<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if CgMarkLogin::decode_frame(frame).is_err() {
+        warn!(%addr, "The downloader sent a short MARK_LOGIN; closing");
+        return false;
+    }
+    if !context.mark_server.serves {
+        warn!(%addr, "A mark login reached a process that serves no marks; closing");
+        return false;
+    }
+    match session.mark_login().await {
+        Ok(_) => true,
+        Err(error) => {
+            warn!(%addr, %error, "Client session stopped");
+            false
+        }
+    }
+}
+
+/// Run one of the six login-phase mark records; `false` when the connection must
+/// close. `MARK_LOGIN` is consumed, the CRC list and the index list are answered from
+/// the world's memory, and the uploads judge, store, then commit, as the guild arms
+/// do. A malformed record closes; a quiet judgement sends nothing; a store error on a
+/// judged upload closes, as an unstored move does.
+async fn mark_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    _seat: &ChannelSeat<'_>,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if frame.header == HEADER_CG_MARK_LOGIN.value() {
+        debug!(%addr, "consumed with nothing done");
+        return true;
+    }
+    if frame.header == HEADER_CG_MARK_CRCLIST.value() {
+        return mark_crc_list(session, addr, context, frame).await;
+    }
+    if frame.header == HEADER_CG_MARK_IDXLIST.value() {
+        return mark_idx_list(session, addr, context, frame).await;
+    }
+    if frame.header == HEADER_CG_MARK_UPLOAD.value() {
+        return mark_upload(session, addr, context, frame).await;
+    }
+    if frame.header == HEADER_CG_GUILD_SYMBOL_UPLOAD.value() {
+        return symbol_upload(session, addr, context, frame).await;
+    }
+    debug_assert_eq!(frame.header, HEADER_CG_SYMBOL_CRC.value());
+    symbol_crc(session, addr, context, frame).await
+}
+
+/// Answer one `MARK_CRCLIST` with the blocks the client's list lacks. A malformed
+/// record or a dead world closes; an unknown image slot answers the empty block
+/// record, as legacy's empty diff does.
+async fn mark_crc_list<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgMarkCRCList::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed MARK_CRCLIST; closing");
+            return false;
+        }
+    };
+    let diff = match context
+        .game
+        .mark_crc_list(record.img_idx, record.crc_list)
+        .await
+    {
+        Ok(diff) => diff,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not diff the mark blocks; closing");
+            return false;
+        }
+    };
+    let blocks: Vec<(u8, &[u8])> = diff
+        .iter()
+        .map(|(pos, bytes)| (*pos, bytes.as_slice()))
+        .collect();
+    let record = mark_block_record(record.img_idx, &blocks);
+    if let Err(error) = session.send(&record).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    true
+}
+
+/// Answer one `MARK_IDXLIST` with every (guild, mark) pair. A malformed record or a
+/// dead world closes; an empty manager answers the empty list, as legacy's zero
+/// `bufSize` does.
+async fn mark_idx_list<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if CgMarkIdxList::decode_frame(frame).is_err() {
+        warn!(%addr, "Client sent a malformed MARK_IDXLIST; closing");
+        return false;
+    }
+    let pairs = match context.game.mark_idx_list().await {
+        Ok(pairs) => pairs,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not list the mark ids; closing");
+            return false;
+        }
+    };
+    let record = mark_idxlist_record(&pairs);
+    if let Err(error) = session.send(&record).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    true
+}
+
+/// Run one `MARK_UPLOAD`: the world judges, the descriptor stores the row, and the
+/// judgement stands. A malformed record closes; a quiet judgement sends nothing; a
+/// store error closes, as an unstored move does. A save stores the id and the 768
+/// image bytes; a delete removes the row.
+async fn mark_upload<S>(
+    _session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgMarkUpload::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed MARK_UPLOAD; closing");
+            return false;
+        }
+    };
+    let mut image = [0_u32; prodomo::game_loop_messages::MARK_PIXELS];
+    for (i, word) in image.iter_mut().enumerate() {
+        let at = i * 4;
+        *word = u32::from_le_bytes([
+            record.image[at],
+            record.image[at + 1],
+            record.image[at + 2],
+            record.image[at + 3],
+        ]);
+    }
+    let judged = match context
+        .game
+        .mark_upload(record.gid, image, context.mark_server.min_level)
+        .await
+    {
+        Ok(judged) => judged,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not judge the mark upload; closing");
+            return false;
+        }
+    };
+    match judged {
+        prodomo::game_state::MarkUploadAnswer::Saved { mark_id } => {
+            if let Err(error) =
+                db::guilds::save_mark(&context.store, record.gid, mark_id, &record.image).await
+            {
+                warn!(%addr, %error, "The mark row could not be stored; closing");
+                return false;
+            }
+        }
+        prodomo::game_state::MarkUploadAnswer::Deleted => {
+            if let Err(error) = db::guilds::delete_mark(&context.store, record.gid).await {
+                warn!(%addr, %error, "The mark row could not be removed; closing");
+                return false;
+            }
+        }
+        prodomo::game_state::MarkUploadAnswer::Quiet => {}
+    }
+    true
+}
+
+/// Run one `GUILD_SYMBOL_UPLOAD`: the size gates close, as legacy's `SetPhase` does;
+/// the world commits the bytes, and the descriptor stores the row. An unknown guild
+/// is quiet, as the land gate's close is: the port refuses instead of closing (230v).
+async fn symbol_upload<S>(
+    _session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match GuildSymbolUpload::decode(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed GUILD_SYMBOL_UPLOAD; closing");
+            return false;
+        }
+    };
+    let held = match context
+        .game
+        .symbol_upload(record.guild_id, record.symbol.clone())
+        .await
+    {
+        Ok(held) => held,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not judge the symbol upload; closing");
+            return false;
+        }
+    };
+    if !held {
+        debug!(%addr, "a symbol upload for an unknown guild is quiet");
+        return true;
+    }
+    if let Err(error) =
+        db::guilds::save_symbol(&context.store, record.guild_id, &record.symbol).await
+    {
+        warn!(%addr, %error, "The symbol row could not be stored; closing");
+        return false;
+    }
+    true
+}
+
+/// Answer one `SYMBOL_CRC` with the stored bytes on a size or CRC mismatch. A
+/// malformed record or a dead world closes; a match or an unknown guild is quiet.
+async fn symbol_crc<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    frame: &ClientFrame,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let record = match CgSymbolCrc::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed SYMBOL_CRC; closing");
+            return false;
+        }
+    };
+    let mismatch = match context
+        .game
+        .symbol_crc(record.guild_id, record.crc, record.size)
+        .await
+    {
+        Ok(mismatch) => mismatch,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not answer the symbol CRC; closing");
+            return false;
+        }
+    };
+    let Some(bytes) = mismatch else {
+        debug!(%addr, "a symbol CRC hit is quiet");
+        return true;
+    };
+    let record = symbol_data_record(record.guild_id, &bytes);
+    if let Err(error) = session.send(&record).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    true
 }
 
 /// Answer `STATE_CHECKER` with the Channel status list; `false` when the connection must close.
@@ -4314,13 +6037,17 @@ async fn run_accept_loop(
             }
             prepared = &mut store_ready, if !ready => {
                 prepared?;
-                // The world's item id allocator is installed before the gate opens,
-                // and not before: its start id is a fact about the stored items, so
-                // it cannot be known until the schema is up and the table is
-                // readable. Opening the gate without it would admit clients onto a
-                // world that refuses every grant, which is the failure this ordering
-                // exists to prevent.
-                install_item_ids(game_loop, store, startup.item_id_span).await?;
+                 // The world's item id allocator is installed before the gate opens,
+                 // and not before: its start id is a fact about the stored items, so
+                 // it cannot be known until the schema is up and the table is
+                 // readable. Opening the gate without it would admit clients onto a
+                 // world that refuses every grant, which is the failure this ordering
+                 // exists to prevent.
+                 install_item_ids(game_loop, store, startup.item_id_span).await?;
+                 // The stored guilds ride the same ordering: they are only readable
+                 // once the schema is up, and a world without them judges a name a
+                 // concurrent boot would see as taken free.
+                 install_guilds(game_loop, store).await?;
                 ready = true;
                 ready_gate.open();
                 info!("Accepting clients");
@@ -4544,6 +6271,11 @@ fn load_pc_skills(config: &ServerConfig) -> Result<Arc<gamedata::pc_skill_data::
     Ok(Arc::new(skills))
 }
 
+/// Load the guild skill rows: the 151-162 `skill_proto` rows (`CSkillManager::
+/// Initialize` lays out the same table, `G/skill.cpp`).
+///
+/// A row whose poly refuses stays out of the map, as legacy's `sys_err` + skip leaves
+/// it uncastable; a dump that does not parse stops the server before any port opens.
 fn load_guild_skills(
     config: &ServerConfig,
 ) -> Result<Arc<gamedata::guild_skill_data::GuildSkills>, String> {
@@ -5055,6 +6787,13 @@ fn connection_context(
         shutdowned: config.game.shutdowned,
         block_login: Arc::from(config.game.block_login.as_str()),
         user_limit: config.game.user_limit,
+        mark_server: MarkServer {
+            serves: config.game.guild_mark_server,
+            min_level: config
+                .game
+                .guild_mark_min_level
+                .min(u8::try_from(common::constants::GUILD_MAX_LEVEL).unwrap_or(u8::MAX)),
+        },
         logons: LogonRegistry::new(),
         atlas: data.atlas,
         cells: data.cells,
@@ -5104,6 +6843,39 @@ async fn install_item_ids(
     match game_loop.controller().install_item_ids(range).await? {
         Ok(()) => Ok(()),
         Err(error) => Err(format!("The world refused the item id range: {error}").into()),
+    }
+}
+
+/// The stored guilds `serve` moves into the game thread once the store is up.
+///
+/// Every failure here stops the server instead of opening the gate, as a missing
+/// allocator does: a world without its guilds judges a concurrent name free.
+async fn install_guilds(
+    game_loop: &mut GameLoopHandle,
+    store: &Store,
+) -> Result<(), Box<dyn Error>> {
+    let stored = db::guilds::load_all(store)
+        .await
+        .map_err(|error| format!("Stored guilds are unusable: {error}"))?;
+    let marks = db::guilds::load_marks(store)
+        .await
+        .map_err(|error| format!("Stored guild marks are unusable: {error}"))?;
+    let symbols = db::guilds::load_symbols(store)
+        .await
+        .map_err(|error| format!("Stored guild symbols are unusable: {error}"))?;
+    info!(
+        guilds = stored.guilds.len(),
+        marks = marks.len(),
+        symbols = symbols.len(),
+        "Stored guilds loaded"
+    );
+    match game_loop
+        .controller()
+        .install_guilds(stored, marks, symbols)
+        .await?
+    {
+        Ok(()) => Ok(()),
+        Err(error) => Err(format!("The world refused the stored guilds: {error}").into()),
     }
 }
 
@@ -5351,6 +7123,7 @@ where
         }
         LineCommand::Restart(kind) => restart(addr, context, held, kind).await,
         LineCommand::SkillUp => skill_up(addr, context, held, rest).await,
+        LineCommand::GuildSkillUp => guild_skill_up_step(addr, context, held, rest).await,
         LineCommand::NotPorted(handler) => {
             info!(%addr, handler, "Command not ported; ignoring");
             true
@@ -5437,6 +7210,44 @@ async fn skill_up(
         return false;
     }
     info!(%addr, vnum, level, "Skill up");
+    true
+}
+
+/// `do_guildskillup`: the world runs the `/gskillup` line, and a landed up's row is
+/// stored (`SaveSkill` writes the power, the point and the blob). A refused up is
+/// quiet on the descriptor: every line rode the outbox already.
+async fn guild_skill_up_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Guild skill-up without a character in the world; ignoring");
+        return true;
+    };
+    let answer = match context.game.guild_skill_up(vid, rest).await {
+        Ok(answer) => answer,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a guild skill-up; closing");
+            return false;
+        }
+    };
+    let Some(climbed) = answer.climbed else {
+        return true;
+    };
+    if let Err(error) = db::guilds::set_skills(
+        &context.store,
+        climbed.guild_id,
+        &climbed.skills,
+        climbed.point,
+    )
+    .await
+    {
+        warn!(%addr, %error, vnum = climbed.vnum, level = climbed.level, "The guild skill-up could not be stored; closing");
+        return false;
+    }
+    info!(%addr, vnum = climbed.vnum, level = climbed.level, "Guild skill up");
     true
 }
 

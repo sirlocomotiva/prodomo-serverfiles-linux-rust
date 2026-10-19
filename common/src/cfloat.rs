@@ -524,7 +524,7 @@ mod tests {
                 if above <= below {
                     continue;
                 }
-                let mid = (f64::from(below) + f64::from(above)) / 2.0;
+                let mid = f64::from(below).midpoint(f64::from(above));
                 let want = if below.to_bits() & 1 == 0 {
                     below
                 } else {

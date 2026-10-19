@@ -78,8 +78,8 @@ use super::affect::Affect;
 use super::motion::rotation_to_xy;
 use super::regen::{pulses, Due};
 use super::view::EntityKey;
-use super::GameState;
-use crate::game_loop_messages::{AttackAnswer, GameCommand};
+use super::{GameState, MarkUploadAnswer};
+use crate::game_loop_messages::{AttackAnswer, GameCommand, MARK_PIXELS};
 use crate::loading_phase::{
     point_changes, AFFECT_POISON, AFFECT_SLOW, AFFECT_STUN, AFF_POISON, AFF_SLOW, AFF_STUN,
     POISON_DAMAGE_RATE, POISON_TICKS, SLOW_MOV_SPEED, SLOW_TICKS, STUN_TICKS_NPC,
@@ -309,6 +309,90 @@ impl GameState {
                 self.target(vid, target);
                 drop(settled);
             }
+            command @ (GameCommand::PartyInvite { .. }
+            | GameCommand::PartyInviteAnswer { .. }
+            | GameCommand::PartyRemove { .. }
+            | GameCommand::PartySetState { .. }
+            | GameCommand::PartyParameter { .. }
+            | GameCommand::PartyUseSkill { .. }
+            | GameCommand::PartyOf { .. }) => self.apply_party_pick(command),
+            GameCommand::GuildOf { vid, reply } => {
+                let _heard = reply.send(self.holds_guild(vid));
+            }
+            GameCommand::MarkUpload {
+                guild_id,
+                image,
+                min_level,
+                reply,
+            } => {
+                self.apply_mark_upload(guild_id, &image, min_level, reply);
+            }
+            GameCommand::MarkIdxList { reply } => {
+                self.apply_mark_idx_list(reply);
+            }
+            GameCommand::MarkCrcList {
+                img_idx,
+                crc_list,
+                reply,
+            } => {
+                self.apply_mark_crc_list(img_idx, crc_list.as_ref(), reply);
+            }
+            GameCommand::SymbolUpload {
+                guild_id,
+                data,
+                reply,
+            } => {
+                self.apply_symbol_upload(guild_id, &data, reply);
+            }
+            GameCommand::SymbolCrc {
+                guild_id,
+                crc,
+                size,
+                reply,
+            } => {
+                self.apply_symbol_crc(guild_id, crc, size, reply);
+            }
+            GameCommand::UseSkill {
+                vid,
+                record,
+                settled,
+            } => {
+                self.use_skill(vid, record.skill_vnum, record.target_vid);
+                drop(settled);
+            }
+            GameCommand::Attack { vid, record, reply } => {
+                let answer = self.attack(vid, record);
+                let _heard = reply.send(answer);
+            }
+            GameCommand::FlyTarget {
+                vid,
+                record,
+                settled,
+            } => {
+                self.fly_target(
+                    vid,
+                    record.header == protocol::cg_fly_target::CgFlyTargetHeader::FlyTarget,
+                    record.dw_target_vid,
+                    record.x,
+                    record.y,
+                );
+                drop(settled);
+            }
+            GameCommand::Shoot { vid, record, reply } => {
+                let answer = self.shoot(vid, record.shoot_type);
+                let _heard = reply.send(answer);
+            }
+            _ => debug_assert!(
+                false,
+                "only target, skill, attack, fly, shoot, party, guild-read and mark commands reach apply_pick"
+            ),
+        }
+    }
+
+    /// Runs one party command: each handler's `settled` is dropped once its records
+    /// are queued.
+    fn apply_party_pick(&mut self, command: GameCommand) {
+        match command {
             GameCommand::PartyInvite {
                 vid,
                 guest,
@@ -356,41 +440,62 @@ impl GameState {
             GameCommand::PartyOf { vid, reply } => {
                 let _heard = reply.send(self.holds_party(vid));
             }
-            GameCommand::UseSkill {
-                vid,
-                record,
-                settled,
-            } => {
-                self.use_skill(vid, record.skill_vnum, record.target_vid);
-                drop(settled);
-            }
-            GameCommand::Attack { vid, record, reply } => {
-                let answer = self.attack(vid, record);
-                let _heard = reply.send(answer);
-            }
-            GameCommand::FlyTarget {
-                vid,
-                record,
-                settled,
-            } => {
-                self.fly_target(
-                    vid,
-                    record.header == protocol::cg_fly_target::CgFlyTargetHeader::FlyTarget,
-                    record.dw_target_vid,
-                    record.x,
-                    record.y,
-                );
-                drop(settled);
-            }
-            GameCommand::Shoot { vid, record, reply } => {
-                let answer = self.shoot(vid, record.shoot_type);
-                let _heard = reply.send(answer);
-            }
-            _ => debug_assert!(
-                false,
-                "only target, skill, attack, fly, shoot and party commands reach apply_pick"
-            ),
+            _ => debug_assert!(false, "only party commands reach apply_party_pick"),
         }
+    }
+
+    /// Answer one judged `MARK_UPLOAD` (`GuildMarkUpload`, `G/input_login.cpp:1059-1090`).
+    fn apply_mark_upload(
+        &mut self,
+        guild_id: u32,
+        image: &[u32; MARK_PIXELS],
+        min_level: u8,
+        reply: tokio::sync::oneshot::Sender<MarkUploadAnswer>,
+    ) {
+        let answer = self.judge_mark_upload(guild_id, image, min_level);
+        let _heard = reply.send(answer);
+    }
+
+    /// Answer one `MARK_IDXLIST` (`GuildMarkIDXList`, `G/input_login.cpp:1092-1114`).
+    fn apply_mark_idx_list(&self, reply: tokio::sync::oneshot::Sender<Vec<(u16, u16)>>) {
+        let _heard = reply.send(self.marks.idx_pairs());
+    }
+
+    /// Answer one `MARK_CRCLIST` (`GuildMarkCRCList`, `G/input_login.cpp:1116-1162`).
+    fn apply_mark_crc_list(
+        &mut self,
+        img_idx: u8,
+        crc_list: &[u32],
+        reply: tokio::sync::oneshot::Sender<Vec<(u8, Vec<u8>)>>,
+    ) {
+        let diff = self
+            .marks
+            .diff_blocks(u32::from(img_idx), crc_list)
+            .into_iter()
+            .map(|(pos, bytes)| (pos, bytes.to_vec()))
+            .collect();
+        let _heard = reply.send(diff);
+    }
+
+    /// Commit one `GUILD_SYMBOL_UPLOAD` (`G/input_login.cpp:1025-1026`).
+    fn apply_symbol_upload(
+        &mut self,
+        guild_id: u32,
+        data: &[u8],
+        reply: tokio::sync::oneshot::Sender<bool>,
+    ) {
+        let _heard = reply.send(self.commit_symbol_upload(guild_id, data));
+    }
+
+    /// Answer one `SYMBOL_CRC` (`GuildSymbolCRC`, `G/input_login.cpp:1030-1057`).
+    fn apply_symbol_crc(
+        &self,
+        guild_id: u32,
+        crc: u32,
+        size: u32,
+        reply: tokio::sync::oneshot::Sender<Option<Vec<u8>>>,
+    ) {
+        let _heard = reply.send(self.symbol_mismatch(guild_id, crc, size));
     }
 
     /// `CInputMain::Attack` of the player under `vid` (`G/input_main.cpp:1918-2008`) and its
@@ -2103,6 +2208,7 @@ mod tests {
                     affect_flags: [0; 2],
                     dead: false,
                     alignment: 0,
+                    view_guild: (0, 0),
                 },
             )
             .expect("the pile pays");

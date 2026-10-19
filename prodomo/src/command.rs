@@ -129,6 +129,7 @@ impl CommandEntry {
             "do_restart" => Command::Restart(RestartKind::Here),
             "do_restart_now" => Command::Restart(RestartKind::Now),
             "do_skillup" => Command::SkillUp,
+            "do_guildskillup" => Command::GuildSkillUp,
             _ => Command::NotPorted(self.name),
         }
     }
@@ -158,6 +159,9 @@ pub enum Command {
     Restart(RestartKind),
     /// `do_skillup`: the `/skillup` line's vnum climbs a level when every gate passes.
     SkillUp,
+    /// `do_guildskillup`: the `/gskillup` line's vnum climbs a level when every gate
+    /// passes.
+    GuildSkillUp,
     /// An entry this build does not port, by name.
     NotPorted(&'static str),
 }

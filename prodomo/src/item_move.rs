@@ -74,6 +74,11 @@ pub struct Mover {
     pub dead: bool,
     /// `GetRealAlignment() / 10` (`G/char.cpp:1320`), which `UpdatePacket` sends.
     pub alignment: i16,
+    /// `dwGuildID` and `dwNewIsGuildName`, which `UpdatePacket` sends
+    /// (`G/char.cpp:1327-1352`): the guild id, and 3 for the master, 2 for a general, 1 for
+    /// a plain member, 0 with no guild. The descriptor does not hold them: the world sets
+    /// them from the character's guild before an item step runs.
+    pub view_guild: (u32, u8),
 }
 
 impl Mover {
@@ -295,8 +300,8 @@ impl MovedItems {
 /// `CHARACTER::UpdatePacket` (`G/char.cpp:1277-1340`) for the look a move left, with the
 /// mover's PK mode (`:1315`), alignment (`:1320`), and the descriptor's language (`:1321`).
 ///
-/// The guild, the mount and the premium come from systems this build does not have, and are
-/// 0. The affect words and the dead bit of the state flags come from the mover.
+/// The mount and the premium come from systems this build does not have, and are 0. The
+/// guild, the affect words and the dead bit of the state flags come from the mover.
 pub(crate) fn character_update(vid: u32, look: &CharacterLook, mover: Mover) -> GcCharacterUpdate {
     GcCharacterUpdate {
         dw_vid: vid,
@@ -305,14 +310,14 @@ pub(crate) fn character_update(vid: u32, look: &CharacterLook, mover: Mover) -> 
         b_attack_speed: look.attack_speed,
         b_state_flag: crate::loading_phase::state_flag(mover.dead),
         dw_affect_flag: mover.affect_flags,
-        dw_guild_id: 0,
+        dw_guild_id: mover.view_guild.0,
         s_alignment: mover.alignment,
         dw_level: look.level,
         dw_conqueror_level: look.conqueror_level,
         b_pk_mode: mover.pk_mode,
         dw_mount_vnum: 0,
         b_refine_element_type: look.refine_element_type,
-        dw_new_is_guild_name: 0,
+        dw_new_is_guild_name: mover.view_guild.1,
         by_premium: 0,
         i_premium_time: 0,
         b_language: mover.language,
@@ -710,6 +715,7 @@ mod tests {
             affect_flags: [0; 2],
             dead: false,
             alignment: 0,
+            view_guild: (0, 0),
         };
         let strings = LocaleStrings::default();
         let moved = MovedItems::new(7, 7, done.clone(), actor, &owners(), &strings);
@@ -761,6 +767,7 @@ mod tests {
             affect_flags: [0; 2],
             dead: false,
             alignment: 0,
+            view_guild: (0, 0),
         };
         let strings = LocaleStrings::default();
         let moved = MovedItems::new(7, 0x0102_0304, done, actor, &owners(), &strings);
@@ -797,6 +804,7 @@ mod tests {
             affect_flags: [0; 2],
             dead: false,
             alignment: 0,
+            view_guild: (0, 0),
         };
         let strings = LocaleStrings::default();
         let moved = MovedItems::new(7, 7, done, actor, &owners(), &strings);

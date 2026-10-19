@@ -144,6 +144,18 @@ impl HandshakeState {
         HandshakeReduction { state, effects }
     }
 
+    /// Move to the internal `Login` half without the timing walk: the mark
+    /// downloader's login (`CInputHandshake::Analyze`'s mark arm,
+    /// `G/input.cpp:211-226`) skips the handshake exchange and lands in the login
+    /// analyzer directly. A later time sync is an ack, not a regression.
+    #[must_use]
+    pub const fn mark_login(self) -> Self {
+        let mut moved = self;
+        moved.phase = HandshakePhase::Login;
+        moved.handshaking = false;
+        moved
+    }
+
     /// Return the caller-provided expected token.
     #[must_use]
     pub const fn expected_token(self) -> u32 {

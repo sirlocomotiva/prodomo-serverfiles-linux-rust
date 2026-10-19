@@ -760,26 +760,34 @@ fn speed_byte(speed: i32) -> u8 {
     u8::try_from(speed).unwrap_or(u8::MAX)
 }
 
-/// A player's `GC_CHAR_ADDITIONAL_INFO`, with no guild, mount or alignment
-/// (`G/char.cpp:1111-1200`). `bPKMode` is `m_bPKMode` (`G/char.cpp:1128`).
+/// A player's `GC_CHAR_ADDITIONAL_INFO`, with no mount or alignment
+/// (`G/char.cpp:1111-1200`). `bPKMode` is `m_bPKMode` (`G/char.cpp:1128`). `guild` is the
+/// pair the world's `view_guild` computes (`dwGuildID` and `dwNewIsGuildName`,
+/// `G/char.cpp:1176-1199`): the guild id, and 3 for the master, 2 for a general, 1 for a
+/// plain member, 0 with no guild.
 ///
 /// The parts are the ones the last `ComputePoints` left (`GetPart`), which after the item load
 /// are the worn armour, weapon, hair costume and sash over the base part.
 #[must_use]
-pub fn character_additional(card: &PcCard, state: &Points, vid: u32) -> GcCharacterAdditionalInfo {
+pub fn character_additional(
+    card: &PcCard,
+    state: &Points,
+    vid: u32,
+    guild: (u32, u8),
+) -> GcCharacterAdditionalInfo {
     GcCharacterAdditionalInfo::new(
         vid,
         name_field(&card.name),
         state.parts(),
         card.empire,
-        0,
+        guild.0,
         u32::from(card.level),
         u32::from(card.conqueror_level),
         0,
         card.pk_mode,
         0,
         0,
-        0,
+        guild.1,
         0,
         0,
         card.language,
@@ -1234,7 +1242,7 @@ mod tests {
         let mut add = Vec::new();
         character_add(&card, &hero_points(), 0x1122_3344, hero_at(), [0; 2]).encode_into(&mut add);
         let mut info = Vec::new();
-        character_additional(&card, &hero_points(), 0x1122_3344).encode_into(&mut info);
+        character_additional(&card, &hero_points(), 0x1122_3344, (0, 0)).encode_into(&mut info);
         vec![add, info]
     }
 
@@ -1756,8 +1764,13 @@ mod tests {
     fn character_additional_is_70_bytes_over_byte_136() {
         let hero = hero();
         let mut bytes = Vec::new();
-        character_additional(&PcCard::of(&hero, 3, 15), &hero_points(), 0x1122_3344)
-            .encode_into(&mut bytes);
+        character_additional(
+            &PcCard::of(&hero, 3, 15),
+            &hero_points(),
+            0x1122_3344,
+            (0, 0),
+        )
+        .encode_into(&mut bytes);
         assert_eq!(bytes.len(), 70);
         assert_eq!(bytes[0], 136, "GC_CHAR_ADDITIONAL_INFO");
         assert_eq!(&bytes[1..5], &0x1122_3344u32.to_le_bytes(), "dwVID");
@@ -1809,7 +1822,7 @@ mod tests {
             let card = PcCard::of(&hero, 0, 15);
             assert_eq!(card.pk_mode, mode, "level {level}");
             let mut bytes = Vec::new();
-            character_additional(&card, &hero_points(), 1).encode_into(&mut bytes);
+            character_additional(&card, &hero_points(), 1, (0, 0)).encode_into(&mut bytes);
             assert_eq!(bytes[57], mode, "bPKMode at level {level}");
         }
     }
@@ -2151,7 +2164,8 @@ mod tests {
         let mut add = Vec::new();
         character_add(&neighbour, &hero_points(), 0x0a0b_0c0d, at, [0; 2]).encode_into(&mut add);
         let mut info = Vec::new();
-        character_additional(&neighbour, &hero_points(), 0x0a0b_0c0d).encode_into(&mut info);
+        character_additional(&neighbour, &hero_points(), 0x0a0b_0c0d, (0, 0))
+            .encode_into(&mut info);
         shown.extend([add, info]);
         let burst = enter_game_burst(&hero(), shown.clone(), &no_npcs(), None, 1, 0);
         assert_eq!(

@@ -36,6 +36,15 @@ pub(super) const WALKMODE_RUN: u8 = 0;
 /// entrant being shown, when there is one.
 type Reply<'a> = Option<(u32, &'a mut Vec<Vec<u8>>)>;
 
+/// Set the `bEmpire` byte of an encoded `GC_CHAT` guild record (`packet.h:979-990`): byte
+/// 8 (1 header + 2 size + 1 type + 4 id). A too-short record is left alone — the guild
+/// fan is the only `RelayScope::Guild` sender, and it always sends a full record.
+fn set_guild_empire(record: &mut [u8], empire: u8) {
+    if record.len() > 8 {
+        record[8] = empire;
+    }
+}
+
 /// `of->EncodeInsertPacket(to)` for a player `of`: the records for `to`'s client, and the
 /// walk-mode record of `to` that `of`'s own client gets when `to` walks.
 #[derive(Debug, PartialEq, Eq)]
@@ -98,12 +107,14 @@ fn framed(encode: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
 }
 
 /// `EncodeInsertPacket` of the player `vid` (`G/char.cpp:1060-1254`). `recipient` is the
-/// receiving player's VID and whether it walks; `now` is `get_dword_time()`.
+/// receiving player's VID and whether it walks; `now` is `get_dword_time()`. `guild` is
+/// the pair [`GameState::view_guild`] computes for `vid`'s guild fields.
 ///
 /// A body whose destination is not its spot reports the destination once the move's time is
 /// up, and is sent with its move while time is left. `iDur` is the `DWORD` arithmetic read as
 /// an `int` (`:1099-1101`); legacy then sends the move for any non-zero `iDur`, so a negative
 /// one becomes a duration near 2^32 (D2). The Rewrite sends it only for a positive one.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn encode_pc_insert(
     vid: u32,
     body: &Body,
@@ -112,6 +123,7 @@ pub(super) fn encode_pc_insert(
     recipient: Option<(u32, bool)>,
     now: u32,
     insert: impl Into<InsertState>,
+    guild: (u32, u8),
 ) -> Encoded {
     let insert = insert.into();
     let at = InsertAt {
@@ -123,7 +135,7 @@ pub(super) fn encode_pc_insert(
     let (at, i_dur) = mid_move(at, body.motion, now);
     let mut to_records = vec![
         framed(|out| character_add(&body.card, points, vid, at, insert).encode_into(out)),
-        framed(|out| character_additional(&body.card, points, vid).encode_into(out)),
+        framed(|out| character_additional(&body.card, points, vid, guild).encode_into(out)),
     ];
     to_records.extend(move_records(
         vid,
@@ -259,10 +271,11 @@ impl GameState {
 
     /// Delivers view effects in order, encoding each at its delivery. `reply` holds the
     /// entrant's own records when an entrant is being shown.
-    pub(super) fn deliver(&self, effects: &[Effect], reply: Reply<'_>) {
+    pub(super) fn deliver(&mut self, effects: &[Effect], reply: Reply<'_>) {
         let mut reply = reply;
-        for effect in effects {
-            match *effect {
+        for effect in effects.iter().copied() {
+            // Copied out: the insert mutates the viewer's known guilds while delivering.
+            match effect {
                 Effect::Insert {
                     of,
                     to: EntityKey::Character(to),
@@ -286,7 +299,7 @@ impl GameState {
     }
 
     /// `of->EncodeInsertPacket(to)` for a receiving player `to`.
-    fn deliver_insert(&self, of: EntityKey, to: u32, reply: &mut Reply<'_>) {
+    fn deliver_insert(&mut self, of: EntityKey, to: u32, reply: &mut Reply<'_>) {
         match of {
             EntityKey::Character(of) => {
                 let (Some(body), Some(spot), Some(points)) = (
@@ -297,6 +310,7 @@ impl GameState {
                     // A body is placed only once its points are loaded.
                     return;
                 };
+                let guild = self.view_guild_of_vid(of);
                 let encoded = encode_pc_insert(
                     of,
                     body,
@@ -308,7 +322,12 @@ impl GameState {
                         flags: self.affect_flags_of(Vid::new(of)),
                         dead: self.is_dead(of),
                     },
+                    guild,
                 );
+                // `ch->SendGuildName(GetGuild())` (`G/char.cpp:1070`), before the add.
+                if let Some(named) = self.send_guild_name(to, guild.0) {
+                    self.send_to(to, named, reply);
+                }
                 for record in encoded.to_records {
                     self.send_to(to, record, reply);
                 }
@@ -393,6 +412,17 @@ impl GameState {
                 RelayScope::Party => {
                     for other in self.party_member_vids(vid) {
                         let _sent = self.write_to_client(other, record.clone());
+                    }
+                }
+                RelayScope::Guild => {
+                    for (other, empire) in self.guild_member_vids(vid).iter().filter_map(|other| {
+                        self.bodies
+                            .get(other)
+                            .map(|body| (*other, body.card.empire))
+                    }) {
+                        let mut record = record.clone();
+                        set_guild_empire(&mut record, empire);
+                        let _sent = self.write_to_client(other, record);
                     }
                 }
             }
@@ -486,7 +516,7 @@ mod tests {
         let at = InsertAt { angle, x, y, z };
         vec![
             framed(|out| character_add(&a_card(), &points, vid, at, [0; 2]).encode_into(out)),
-            framed(|out| character_additional(&a_card(), &points, vid).encode_into(out)),
+            framed(|out| character_additional(&a_card(), &points, vid, (0, 0)).encode_into(out)),
         ]
     }
 
@@ -506,6 +536,7 @@ mod tests {
             None,
             9_000,
             [0; 2],
+            (0, 0),
         );
         assert_eq!(
             encoded,
@@ -537,6 +568,7 @@ mod tests {
             None,
             3_000,
             [0; 2],
+            (0, 0),
         );
         let mut expected = pair(7, 93.0, (4000, 3200, 0), 820);
         // 93 / 5 is 18.6, truncated to 18; the time left is 1000 + 5333 - 3000.
@@ -559,8 +591,16 @@ mod tests {
             moving: true,
         };
         for now in [6_333, 6_334, 1_000 + 5_333 + 0x8000_0000] {
-            let encoded =
-                encode_pc_insert(7, &body, at(4000, 3200, 5), &points(820), None, now, [0; 2]);
+            let encoded = encode_pc_insert(
+                7,
+                &body,
+                at(4000, 3200, 5),
+                &points(820),
+                None,
+                now,
+                [0; 2],
+                (0, 0),
+            );
             assert_eq!(
                 encoded.to_records,
                 pair(7, 90.0, (4800, 3300, 5), 820),
@@ -576,6 +616,7 @@ mod tests {
             None,
             1_000 + 5_333 + 0x8000_0001,
             [0; 2],
+            (0, 0),
         );
         assert_eq!(
             encoded.to_records.len(),
@@ -584,7 +625,16 @@ mod tests {
         );
         // A body at its destination is sent where it stands, whatever the clock says.
         body.motion.dest = (4000, 3200);
-        let encoded = encode_pc_insert(7, &body, at(4000, 3200, 5), &points(820), None, 0, [0; 2]);
+        let encoded = encode_pc_insert(
+            7,
+            &body,
+            at(4000, 3200, 5),
+            &points(820),
+            None,
+            0,
+            [0; 2],
+            (0, 0),
+        );
         assert_eq!(encoded.to_records, pair(7, 90.0, (4000, 3200, 5), 820));
     }
 
@@ -593,9 +643,27 @@ mod tests {
     fn a_walking_recipient_gets_its_own_walk_mode_on_the_other_client() {
         let body = a_body(0.0);
         let spot = at(3200, 3200, 0);
-        let walking = encode_pc_insert(7, &body, spot, &points(820), Some((8, true)), 0, [0; 2]);
+        let walking = encode_pc_insert(
+            7,
+            &body,
+            spot,
+            &points(820),
+            Some((8, true)),
+            0,
+            [0; 2],
+            (0, 0),
+        );
         assert_eq!(walking.reverse, Some(walk_mode(8, WALKMODE_RUN)));
-        let running = encode_pc_insert(7, &body, spot, &points(820), Some((8, false)), 0, [0; 2]);
+        let running = encode_pc_insert(
+            7,
+            &body,
+            spot,
+            &points(820),
+            Some((8, false)),
+            0,
+            [0; 2],
+            (0, 0),
+        );
         assert_eq!(running.reverse, None);
     }
 

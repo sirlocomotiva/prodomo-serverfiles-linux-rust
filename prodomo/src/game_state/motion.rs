@@ -15,6 +15,7 @@
 //! Everything here runs on the game thread only (ADR-0002).
 
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -158,6 +159,10 @@ pub(super) struct Body {
     pub(super) last_sync: Option<Duration>,
     /// `m_pkChrSyncOwner` and `m_fSyncTime`: who owns this body, and when it claimed it.
     pub(super) sync: SyncOwnershipState,
+    /// The guild ids whose name this body has been sent (`m_known_guild`,
+    /// `G/char.h:2049`): a fresh body knows none, like `Initialize`'s clear
+    /// (`G/char.cpp:419`).
+    pub(super) known_guild: BTreeSet<u32>,
     /// What its insert records say that walking does not change.
     pub(super) card: PcCard,
     /// The Pulse the body last stopped moving on, which the stamina refill counts three seconds
@@ -189,6 +194,7 @@ impl Body {
                 owner: None,
                 claimed_at: None,
             },
+            known_guild: BTreeSet::new(),
             card,
             stop_pulse,
         }
@@ -1203,6 +1209,7 @@ mod tests {
                 Some((to, false)),
                 clock.now(),
                 [0; 2],
+                (0, 0),
             )
             .to_records
         };

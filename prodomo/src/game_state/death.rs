@@ -410,6 +410,7 @@ impl GameState {
             affect_flags: self.affect_flags_of(vid),
             dead: self.is_dead(vid.raw()),
             alignment: i16::try_from(body.card.alignment / 10).unwrap_or(i16::MAX),
+            view_guild: self.view_guild_of_vid(vid.raw()),
         })
     }
 
@@ -879,7 +880,7 @@ impl GameState {
     }
 
     /// `WarpSet(x, y)` for the player under `vid`, which its descriptor runs.
-    fn order_warp(&self, vid: Vid, (x, y): (i32, i32)) {
+    pub(super) fn order_warp(&self, vid: Vid, (x, y): (i32, i32)) {
         let raw = vid.raw();
         let (Some(clients), Some((channel, map))) = (self.clients.as_ref(), self.place_of(raw))
         else {
@@ -1527,6 +1528,7 @@ mod tests {
             affect_flags: [0; 2],
             dead: false,
             alignment: 0,
+            view_guild: (0, 0),
         }
     }
 

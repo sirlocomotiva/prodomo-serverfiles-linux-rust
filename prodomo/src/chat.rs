@@ -210,6 +210,10 @@ pub struct ChatContext {
     /// (`input_main.cpp:959`). The descriptor asks lazily: only a party line pays the
     /// round-trip.
     pub in_party: bool,
+    /// `ch->GetGuild() != NULL`, answered by the world, read only for a guild line
+    /// (`input_main.cpp:976`). The descriptor asks lazily: only a guild line pays the
+    /// round-trip.
+    pub in_guild: bool,
 }
 
 /// What a judged line asks the descriptor to do.
@@ -268,6 +272,19 @@ pub enum ChatEffect {
         /// The text, `"<name> : <text>"`, with no terminator.
         text: Vec<u8>,
     },
+    /// A `GC_CHAT` guild line to every linked member of the sender's guild, built the
+    /// way `CGuild::Chat` builds one (`G/guild.cpp:1760-1774`): each member gets a
+    /// `ChatPacket(CHAT_TYPE_GUILD, ...)` (`FGuildChat`, `:1740-1752`) — `id` 0, the
+    /// recipient's empire (`char.cpp:5173-5184`), `bCanFormat` at its constructor value
+    /// of `true` — and the text is `"<name> : <text>"`, the `chatbuf` the input arm
+    /// built (`input_main.cpp:867-868`) and passed down (`:976-979`). The speaker is
+    /// included, because the speaker is in the online set. The GG fan
+    /// (`P2P_MANAGER::Send`, `:1766-1773`) is retired with the game-to-game protocol
+    /// (ADR-0001): one process holds every Channel, so the fan needs no hop.
+    GuildToMembers {
+        /// The text, `"<name> : <text>"`, with no terminator.
+        text: Vec<u8>,
+    },
     /// `sys_err("Unknown chat type %d", pinfo->type)` (`:986`). Nothing is sent.
     UnknownType {
         /// The `type` byte the client sent, which legacy never range-checks.
@@ -308,6 +325,7 @@ impl ChatEffect {
                 | Self::InfoToSender { .. }
                 | Self::TalkingToMap { .. }
                 | Self::PartyToMembers { .. }
+                | Self::GuildToMembers { .. }
                 | Self::ShoutBelowLevel { .. }
                 | Self::Shout { .. }
         )
@@ -398,7 +416,15 @@ pub fn judge_chat(record: &CgChat, state: &mut ChatState, context: &ChatContext)
             }],
         },
         CHAT_GUILD => ChatOutcome::Judged {
-            effects: vec![ChatEffect::InfoToSender { text: "[LS;656]" }],
+            // `if (!ch->GetGuild()) ch->ChatPacket(CHAT_TYPE_INFO, "[LS;656]");`
+            // else the guild fan (`:976-979`).
+            effects: vec![if context.in_guild {
+                ChatEffect::GuildToMembers {
+                    text: talking_text(&context.name, &record.text),
+                }
+            } else {
+                ChatEffect::InfoToSender { text: "[LS;656]" }
+            }],
         },
         CHAT_SHOUT => ChatOutcome::Judged {
             effects: vec![judge_shout(record, state, context)],
@@ -542,6 +568,27 @@ pub fn party_record(effect: &ChatEffect) -> Option<GcChat> {
     })
 }
 
+/// Build the `GC_CHAT` guild record for one recipient, as `CGuild::Chat` does: a
+/// `ChatPacket(CHAT_TYPE_GUILD, ...)` line (`G/guild.cpp:1748-1751`) — `id` 0, the
+/// recipient's empire, `bCanFormat` at its constructor `true` (`G/char.cpp:5173-5184`).
+///
+/// The text is the effect's `"<name> : <text>"`; legacy formats the raw `chatbuf` with
+/// `%s`, and no arm can make it exceed `CHAT_MAX_LEN` (the `snprintf` truncation runs
+/// before the arm is judged), so over-long text cannot reach the encoder.
+#[must_use]
+pub fn guild_record(effect: &ChatEffect, empire: u8) -> Option<GcChat> {
+    let ChatEffect::GuildToMembers { text } = effect else {
+        return None;
+    };
+    Some(GcChat {
+        chat_type: CHAT_GUILD,
+        id: 0,
+        empire,
+        can_format: true,
+        text: text.clone(),
+    })
+}
+
 /// The encoded `GC_CHAT` line for an effect that `CHARACTER::ChatPacket` answers, or `None`
 /// for every other effect.
 ///
@@ -630,6 +677,7 @@ mod tests {
             shout_limit_level: SHOUT_LIMIT_LEVEL,
             block_chat_seconds: None,
             in_party: false,
+            in_guild: false,
         }
     }
 
@@ -882,6 +930,38 @@ mod tests {
         assert_eq!(party_record(&effects[0].clone()), party_record(&effects[0]));
         assert!(
             talking_record(&effects[0]).is_none(),
+            "the types do not cross"
+        );
+    }
+
+    #[test]
+    fn a_guild_line_in_a_guild_builds_a_server_line_per_recipient() {
+        let mut state = ChatState::new();
+        let mut ctx = context();
+        ctx.in_guild = true;
+        let record = CgChat {
+            declared_size: 6,
+            chat_type: CHAT_GUILD,
+            text: b"hello".to_vec(),
+        };
+        let ChatOutcome::Judged { effects } = judge_chat(&record, &mut state, &ctx) else {
+            panic!("a guild line must not close");
+        };
+        assert_eq!(
+            effects,
+            vec![ChatEffect::GuildToMembers {
+                text: b"Ayla : hello".to_vec(),
+            }],
+        );
+        assert!(effects[0].reaches_client(), "the fan reaches the clients");
+        let line = guild_record(&effects[0], 2).expect("a record");
+        assert_eq!(line.chat_type, CHAT_GUILD);
+        assert_eq!(line.id, 0);
+        assert_eq!(line.empire, 2, "the recipient's empire");
+        assert!(line.can_format, "this path leaves bCanFormat true");
+        assert_eq!(line.text, b"Ayla : hello");
+        assert!(
+            party_record(&effects[0]).is_none(),
             "the types do not cross"
         );
     }
