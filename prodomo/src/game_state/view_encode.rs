@@ -12,6 +12,7 @@
 use common::cfloat::f32_to_i32;
 use common::vid::Vid;
 use protocol::gc_actors::GcCharacterMove;
+use protocol::gc_fields::{GcNamed, GC_NAME_FIELD_SIZE, HEADER_GC_ITEM_OWNERSHIP};
 use protocol::gc_item_window::GcItemGroundAdd;
 use protocol::gc_position::GcWalkMode;
 use protocol::gc_vid::{GcHeaderAndDword, HEADER_GC_CHARACTER_DEL, HEADER_GC_ITEM_GROUND_DEL};
@@ -53,8 +54,18 @@ pub(super) fn remove_record(vid: u32) -> Vec<u8> {
     framed(|out| GcHeaderAndDword::new(HEADER_GC_CHARACTER_DEL, vid).encode_into(out))
 }
 
+/// `[1f, vid, name]`, the `GC_ITEM_OWNERSHIP` of `CItem::SetOwnership` and its event
+/// (`G/item.cpp:1770-1774`, `:1710-1728`): the ground VID and the owner's 25-byte name,
+/// all NUL when the ownership ends.
+pub(super) fn ground_ownership(vid: u32, name: [u8; GC_NAME_FIELD_SIZE]) -> Vec<u8> {
+    let mut record = Vec::new();
+    GcNamed::new(HEADER_GC_ITEM_OWNERSHIP, vid, name).encode_into(&mut record);
+    record
+}
+
 /// `[1a, x, y, z, vid, vnum]`, a ground item's `EncodeInsertPacket` (`G/item.cpp:163-202`),
-/// at the item's spot. The ownership record after it waits for `sys.item.ownership`.
+/// at the item's spot. While its ownership event runs, the ownership record follows the
+/// ground add (`:192-199`).
 pub(super) fn ground_add(vid: u32, vnum: u32, spot: Spot) -> Vec<u8> {
     GcItemGroundAdd {
         x: spot.x,
@@ -325,6 +336,9 @@ impl GameState {
                     return;
                 };
                 self.send_to(to, ground_add(vid, lying.ground.item.vnum, spot), reply);
+                if let Some(owner) = &lying.owner {
+                    self.send_to(to, ground_ownership(vid, owner.name), reply);
+                }
             }
         }
     }
@@ -437,6 +451,7 @@ mod tests {
             language: 0,
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             skill_group: 0,
+            alignment: 0,
         }
     }
 

@@ -28,6 +28,7 @@ use clap::{Parser, Subcommand};
 use common::config::{load_server_config, ItemIdSpan, ServerConfig, DEFAULT_CONFIG_PATH};
 use common::enums::EParts;
 use common::logging::{init_from_env, init_logging, LogConfig};
+use common::point_slot;
 use db::accounts::{find_auth_account, record_login, AccountError};
 use db::players::{
     change_name, create_player, delete_player, load_character, lobby, select_empire, Created,
@@ -352,6 +353,9 @@ struct Held {
     /// `m_dwLastItemDropTime`: when a drop last passed the drop limit
     /// (`G/char_item.cpp:7465`), whatever the rest of the drop then did.
     last_item_drop: Option<tokio::time::Instant>,
+    /// `m_dwLastGoldDropTime`: when a gold drop last passed its check
+    /// (`G/char_item.cpp:7570`). Legacy's limit `g_GoldDropTimeLimitValue` is compiled in
+    /// as 0 (`G/questmanager.cpp:33`), so the check never fires.
     /// `m_lWarpMapIndex` and `m_posWarp`: the destination a `WarpSet` stored, which the save
     /// writes instead of the position (`G/char.cpp:1551-1565`).
     warp: Option<prodomo::warp::WarpTarget>,
@@ -854,11 +858,24 @@ fn stand_on_phase_change(held: &mut Held, before: ClientPhase, after: ClientPhas
     }
 }
 
-/// Hold a character's points, and the experience, pools and parts the save writes from the held
-/// row.
+/// Hold a character's points, and the level, experience, counters, pools and parts the save
+/// writes from the held row.
 fn hold_points(held: &mut Held, points: world::character::Points) {
     if let Some(held_character) = held.character.as_mut() {
+        held_character.level = points.level();
         held_character.exp = points.exp();
+        // The counters live in `smallint` columns; a level-up adds at most tens per level,
+        // so the narrowing only guards a row a hand wrote past the slot.
+        held_character.random_hp = i16::try_from(points.random_hp()).unwrap_or(i16::MAX);
+        held_character.random_sp = i16::try_from(points.random_sp()).unwrap_or(i16::MAX);
+        held_character.stat_point =
+            i16::try_from(points.get_point(point_slot::POINT_STAT)).unwrap_or(i16::MAX);
+        held_character.skill_point =
+            i16::try_from(points.get_point(point_slot::POINT_SKILL)).unwrap_or(i16::MAX);
+        held_character.sub_skill_point =
+            i16::try_from(points.get_point(point_slot::POINT_SUB_SKILL)).unwrap_or(i16::MAX);
+        held_character.level_step =
+            i16::try_from(points.get_point(point_slot::POINT_LEVEL_STEP)).unwrap_or(i16::MAX);
         held_character.hp = points.hp();
         held_character.sp = points.sp();
         held_character.stamina = points.stamina();
@@ -1091,12 +1108,13 @@ where
 }
 
 /// `CG_ITEM_DROP` (12) and `CG_ITEM_DROP2` (20) in the game phase: `CInputMain::ItemDrop` and
-/// `ItemDrop2` (`G/input_main.cpp:1024-1051`) → `CHARACTER::DropItem` (`G/char_item.cpp:7444`).
+/// `ItemDrop2` (`G/input_main.cpp:1024-1051`) → `CHARACTER::DropItem` (`G/char_item.cpp:7444`),
+/// or `CHARACTER::DropGold` (`:7554`) when the gold field is set.
 ///
-/// `CG_ITEM_DROP` carries no count, which `DropItem` reads as the whole stack. A gold drop is
-/// `DropGold`, which is not ported: it is logged and ignored. The drop limit is checked here,
-/// because its clock is the descriptor's, and passing it restarts the clock whatever the world
-/// then answers, as legacy's does.
+/// `CG_ITEM_DROP` carries no count, which `DropItem` reads as the whole stack. The drop limit
+/// is checked here, because its clock is the descriptor's, and passing it restarts the clock
+/// whatever the world then answers, as legacy's does. A gold drop skips it: the limit's clock
+/// is legacy's item-drop clock only, and the gold check's own limit is 0.
 async fn drop_an_item<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -1128,8 +1146,10 @@ where
         return true;
     };
     if gold > 0 {
-        info!(%addr, gold, "DropGold is not ported; ignoring the gold drop");
-        return true;
+        let actor = item_actor(held);
+        held.last_item_drop = Some(tokio::time::Instant::now());
+        let answer = context.game.drop_gold(vid, gold, place, actor).await;
+        return finish_item_step(session, addr, context, held, actor, answer).await;
     }
     let actor = item_actor(held);
     let now = tokio::time::Instant::now();
@@ -1246,6 +1266,8 @@ fn item_actor(held: &Held) -> Mover {
         // its fight, before a step runs.
         affect_flags: [0; 2],
         dead: false,
+        // The world sets it from the body's card, as the PK mode.
+        alignment: 0,
     }
 }
 
@@ -3998,6 +4020,48 @@ fn load_pc_motions(config: &ServerConfig) -> Result<Arc<PcMotions>, String> {
     Ok(Arc::new(motions))
 }
 
+/// Load the mob skill tables: the hosted `skill_proto` rows from the Game data
+/// `player.sql` dump and the mob power row from `common.sql`'s `locale` table
+/// (`CClientManager::InitializeSkillTable`, `DB/ClientManagerBoot.cpp:654-740`).
+///
+/// A dump that does not parse, or a hosted row outside the hosted subset, stops the
+/// server before any port opens, as the other Game data files do.
+fn load_mob_skills(
+    config: &ServerConfig,
+) -> Result<Arc<gamedata::mob_skill_data::MobSkills>, String> {
+    let player_path = config.game_tables.join("player.sql");
+    let player = std::fs::read(&player_path)
+        .map_err(|error| format!("Failed to read {}: {error}", player_path.display()))?;
+    let common_path = config.game_tables.join("common.sql");
+    let common = std::fs::read(&common_path)
+        .map_err(|error| format!("Failed to read {}: {error}", common_path.display()))?;
+    let skills = gamedata::mob_skill_data::MobSkills::from_dumps(&player, &common)
+        .map_err(|error| format!("Mob skills are unusable: {error}"))?;
+    info!("Mob skill tables loaded");
+    Ok(Arc::new(skills))
+}
+
+/// Load the mob skill clips: each skilling folder's `SPECIALn` durations and splash
+/// entries (`CMotionManager::Build`, `G/motion.cpp:327-347`).
+///
+/// A malformed clip is skipped and warned about (legacy's `sys_err` arm); a missing
+/// line or file leaves the slot empty.
+fn load_mob_clips(
+    config: &ServerConfig,
+    protos: &Arc<gamedata::mob_proto::MobProtos>,
+) -> Arc<gamedata::mob_skill_data::MobSkillClips> {
+    let clips =
+        gamedata::mob_skill_data::MobSkillClips::load(&config.data_dir().join("monster"), protos);
+    for path in &clips.skipped {
+        warn!(
+            clip = path,
+            "A skill clip failed to parse; its slot stays empty"
+        );
+    }
+    info!("Mob skill clips loaded");
+    Arc::new(clips)
+}
+
 /// Load the locale strings of every language: `<country_dir>/<code>/locale_string.txt`.
 ///
 /// Legacy reads them at boot (`G/locale_service.cpp:418-455`) and goes on without a file it
@@ -4090,8 +4154,19 @@ struct GameData {
     npcs: NpcData,
     /// The shops a keeper opens, which the game thread holds.
     shops: Arc<NpcShops>,
+    /// The drop tables, which the game thread holds.
+    drops: Arc<gamedata::drop::DropTables>,
+    /// The `item_attr` rows, which a dropped item's magic rolls against.
+    attrs: Arc<Vec<gamedata::records::ItemAttrRecord>>,
+    /// The vnum mask table, which a made item's shown vnum answers through.
+    masks: Arc<gamedata::item_mask::ItemMasks>,
+    /// The player motion clips, the same table the game thread holds.
     /// The player motion clips, the same table the game thread holds.
     motions: Arc<PcMotions>,
+    /// The hosted mob skill rows, the same table the game thread holds.
+    mob_skills: Arc<gamedata::mob_skill_data::MobSkills>,
+    /// The mob skill clips, the same table the game thread holds.
+    mob_clips: Arc<gamedata::mob_skill_data::MobSkillClips>,
 }
 
 /// What boot stands the NPCs and monsters up from: the mob prototypes, the mob groups, the names
@@ -4115,7 +4190,12 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let npcs = load_npc_data(config, &atlas)?;
     let cells = load_map_cells(config, &atlas)?;
     let shops = load_npc_shops(config, &protos)?;
+    let drops = load_drop_tables(config, &protos)?;
+    let attrs = load_item_attrs(config)?;
+    let masks = load_item_masks(config)?;
     let motions = load_pc_motions(config)?;
+    let mob_skills = load_mob_skills(config)?;
+    let mob_clips = load_mob_clips(config, &npcs.protos);
     let quests = load_quests(config, &npcs)?;
     let data = GameData {
         atlas: Arc::new(atlas),
@@ -4125,7 +4205,12 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         locale,
         npcs,
         shops,
+        drops,
+        attrs,
+        masks,
         motions,
+        mob_skills,
+        mob_clips,
     };
     Ok((data, quests))
 }
@@ -4160,6 +4245,69 @@ fn load_npc_shops(config: &ServerConfig, protos: &ItemProtos) -> Result<Arc<NpcS
         "NPC shops loaded"
     );
     Ok(Arc::new(shops))
+}
+
+/// Load the drop tables from the Locale folder (`BSelectCalendar`, `G/input_db.cpp:899-942`).
+///
+/// A missing or refused file stops the server, as legacy's boot shuts down; an empty one loads
+/// fine. `protos` is the already-read `item_proto.txt`, which an item is resolved against.
+fn load_drop_tables(
+    config: &ServerConfig,
+    protos: &ItemProtos,
+) -> Result<Arc<gamedata::drop::DropTables>, String> {
+    let locale_dir = config.locale_dir();
+    let tables = gamedata::drop::DropTables::load(&locale_dir, protos).map_err(|error| {
+        format!(
+            "Drop tables are unusable in {}: {error}",
+            locale_dir.display()
+        )
+    })?;
+    info!(
+        limit = tables.mob.limit.len(),
+        kill = tables.mob.kill.len(),
+        gloves = tables.mob.gloves.len(),
+        groups = tables.groups.groups.len(),
+        "Drop tables loaded"
+    );
+    Ok(Arc::new(tables))
+}
+
+/// Load the `item_attr` rows of the Game data tables, which a dropped item's magic rolls
+/// against (`CClientManager::InitializeItemAttrTable`, `DB/ClientManagerBoot.cpp:774-842`).
+///
+/// An empty table refuses boot, as legacy's does (`no result from item_attr`); a malformed
+/// row is the same class.
+fn load_item_attrs(
+    config: &ServerConfig,
+) -> Result<Arc<Vec<gamedata::records::ItemAttrRecord>>, String> {
+    let dump_path = config.game_tables.join("player.sql");
+    let dump = std::fs::read(&dump_path)
+        .map_err(|error| format!("Failed to read {}: {error}", dump_path.display()))?;
+    let rows = gamedata::item_attr::attrs_from_dump(&dump).map_err(|error| {
+        format!(
+            "Failed to read the item attributes in {}: {error}",
+            dump_path.display()
+        )
+    })?;
+    info!(attrs = rows.len(), "Item attributes loaded");
+    Ok(Arc::new(rows))
+}
+
+/// Load the vnum mask table from the Locale folder
+/// (`ITEM_MANAGER::ReadItemVnumMaskTable`, `G/item_manager_read_tables.cpp:938-953`).
+///
+/// A missing file loads as empty, as legacy's boot does (it only logs); a malformed one
+/// refuses.
+fn load_item_masks(config: &ServerConfig) -> Result<Arc<gamedata::item_mask::ItemMasks>, String> {
+    let locale_dir = config.locale_dir();
+    let masks = gamedata::item_mask::ItemMasks::load(&locale_dir).map_err(|error| {
+        format!(
+            "Mask table is unusable in {}: {error}",
+            locale_dir.display()
+        )
+    })?;
+    info!(masks = masks.pairs().len(), "Item masks loaded");
+    Ok(Arc::new(masks))
 }
 
 /// Load what the NPCs are stood up from: `mob_proto.txt` with its names, the `LOCALE_YMIR` mob
@@ -4312,8 +4460,10 @@ fn stand_up_npcs(
     state: &mut GameState,
     data: &NpcData,
     cells: &Arc<HostedCells>,
+    clips: &Arc<gamedata::mob_skill_data::MobSkillClips>,
 ) -> Result<(), String> {
-    let mut spawner = NpcSpawner::new(&data.protos, &data.groups, &data.names, NpcVids::default());
+    let mut spawner = NpcSpawner::new(&data.protos, &data.groups, &data.names, NpcVids::default())
+        .with_clips(clips);
     for (channel, region, entries) in &data.maps {
         let Some(map_cells) = cells.get(region.index) else {
             continue;
@@ -4461,9 +4611,15 @@ fn build_world(
     let mut game_state = GameState::new(Arc::clone(&data.protos))
         .with_item_count_limit(config.game.item_count_limit)
         .with_npc_shops(Arc::clone(&data.shops))
+        .with_drop_tables(Arc::clone(&data.drops))
+        .with_item_attrs(Arc::clone(&data.attrs))
+        .with_item_masks(Arc::clone(&data.masks))
         .with_motions(Arc::clone(&data.motions))
+        .with_mob_skills(Arc::clone(&data.mob_skills))
+        .with_mob_clips(Arc::clone(&data.mob_clips))
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
         .with_drop_lifetime(config.game.item_destroy_time_dropitem)
+        .with_gold_lifetime(config.game.item_destroy_time_dropgold)
         .with_clients(Arc::clone(clients))
         .with_clock(Box::new(clock))
         .with_view_range(config.game.view_range)
@@ -4471,8 +4627,10 @@ fn build_world(
         .with_locale_strings(Arc::clone(&data.locale))
         .with_quests(quests)
         .with_max_level(config.game.max_level)
+        .with_status_point_get_level_limit(config.game.status_point_get_level_limit)
+        .with_protect_level(config.game.pk_protect_level)
         .with_recall(Arc::clone(&data.atlas), &channel_maps, &shared);
-    stand_up_npcs(&mut game_state, &data.npcs, &data.cells)?;
+    stand_up_npcs(&mut game_state, &data.npcs, &data.cells, &data.mob_clips)?;
     Ok(game_state)
 }
 
@@ -5254,8 +5412,8 @@ mod tests {
         assert_eq!(caller_position(ClientPhase::Game, &held), POS_STANDING);
     }
 
-    /// The save writes the experience the world holds, so the death penalty's loss is kept
-    /// rather than the experience the character was loaded with.
+    /// The save writes the level, experience and counters the world holds, so a level-up is
+    /// kept rather than the values the character was loaded with.
     #[test]
     fn the_held_character_takes_the_experience_the_world_left() {
         let character = db::players::Character {
@@ -5267,6 +5425,12 @@ mod tests {
             level: 10,
             exp: 1_000,
             conqueror_level: 0,
+            random_hp: 0,
+            random_sp: 0,
+            stat_point: 0,
+            skill_point: 0,
+            sub_skill_point: 0,
+            level_step: 0,
             st: 6,
             ht: 4,
             dx: 3,
@@ -5299,6 +5463,30 @@ mod tests {
         };
         hold_points(&mut held, points);
         assert_eq!(held.character.as_ref().map(|held| held.exp), Some(900));
+        // A level-up's level, random pools and counters move the same way: level 1 holds
+        // 290 of 300, so 20 crosses the cost and banks 10.
+        let mut low = load_points(
+            &db::players::Character {
+                level: 1,
+                exp: 290,
+                ..held.character.clone().expect("held")
+            },
+            41,
+        );
+        let limits = world::character::ExpLimits {
+            max_level: 120,
+            status_point_get_level_limit: 120,
+        };
+        let outcome = low.gain_exp(20, 0, limits, &mut world::character::Pcg32::new(0, 0));
+        assert_eq!(outcome.level_after, 2);
+        hold_points(&mut held, low);
+        let kept = held.character.as_ref().expect("held");
+        assert_eq!(kept.level, 2);
+        assert_eq!(kept.exp, 10);
+        assert!(kept.random_hp >= 36 && kept.random_hp <= 44);
+        assert!(kept.random_sp >= 18 && kept.random_sp <= 22);
+        assert_eq!(kept.stat_point, 3);
+        assert_eq!(kept.level_step, 0);
     }
 
     /// Boot hands the world what its regens spawn from: an ore vein boot stood ends within 15
@@ -5356,7 +5544,13 @@ mod tests {
             maps: vec![(1, region, vec![vein])],
         };
         let mut state = GameState::new(ItemProtos::default());
-        stand_up_npcs(&mut state, &data, &Arc::new(hosted)).expect("boot stands the vein");
+        stand_up_npcs(
+            &mut state,
+            &data,
+            &Arc::new(hosted),
+            &Arc::new(gamedata::mob_skill_data::MobSkillClips::default()),
+        )
+        .expect("boot stands the vein");
         let vids = |state: &GameState| -> Vec<u32> {
             state
                 .npcs_on(1, 41)

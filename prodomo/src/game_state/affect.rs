@@ -15,7 +15,9 @@
 
 use common::point_slot as point;
 use common::vid::Vid;
+use protocol::gc_inventory::HEADER_GC_SYNC_POSITION;
 use protocol::gc_nested::{GcAffectAdd, GcAffectElement};
+use protocol::gc_position::GcSyncPositionElement;
 use protocol::gc_vid::{GcHeaderAndDwordAndByte, HEADER_GC_AFFECT_REMOVE};
 use world::character::{is_recovering, update_recovery};
 
@@ -23,7 +25,8 @@ use super::view::EntityKey;
 use super::GameState;
 use crate::item_move::Mover;
 use crate::loading_phase::{
-    point_changes, AFFECT_REVIVE_INVISIBLE, AFF_REVIVE_INVISIBLE, REVIVE_INVISIBLE_SECONDS,
+    point_changes, AFFECT_REVIVE_INVISIBLE, AFF_REVIVE_INVISIBLE, AFF_STUN,
+    REVIVE_INVISIBLE_SECONDS,
 };
 use crate::save::PASSES_PER_SEC;
 
@@ -38,6 +41,8 @@ pub(super) struct Affect {
     pub(super) kind: u32,
     /// `bApplyOn`: the point an affect applies to, 0 for none.
     pub(super) apply_on: u8,
+    /// `lApplyValue`: what the affect added to its point, taken back when it ends.
+    pub(super) value: i32,
     /// `dwFlag`, numbered from 1: the affect flag it sets, or 0 for none.
     pub(super) flag: u32,
     /// `lDuration` in ticks: each tick takes one away, and the affect ends at 0 or below.
@@ -50,6 +55,7 @@ impl Affect {
         Self {
             kind: AFFECT_REVIVE_INVISIBLE,
             apply_on: 0,
+            value: 0,
             flag: AFF_REVIVE_INVISIBLE,
             remaining: REVIVE_INVISIBLE_SECONDS,
         }
@@ -122,8 +128,8 @@ pub(super) fn affect_remove_frame(affect: &Affect) -> Vec<u8> {
     frame
 }
 
-/// The `GC_AFFECT_ADD` of one affect (`SendAffectAddPacket`, `G/char_affect.cpp:15-34`): the
-/// duration is the ticks it has left, and no affect here has a value or a spell-point cost.
+/// The `GC_AFFECT_ADD` of one affect (`SendAffectAddPacket`, `G/char_affect.cpp:111-128`): the
+/// duration is the ticks it has left, and no affect here has a spell-point cost.
 pub(super) fn affect_add_frame(affect: &Affect) -> Vec<u8> {
     let mut frame = Vec::new();
     GcAffectAdd {
@@ -131,7 +137,7 @@ pub(super) fn affect_add_frame(affect: &Affect) -> Vec<u8> {
         element: GcAffectElement {
             affect_type: affect.kind,
             apply_on: affect.apply_on,
-            apply_value: 0,
+            apply_value: affect.value,
             flag: affect.flag,
             duration: affect.remaining,
             sp_cost: 0,
@@ -165,6 +171,94 @@ impl GameState {
         }
     }
 
+    /// `CHARACTER::AddAffect` with override on the player under `vid`
+    /// (`G/char_affect.cpp:668-760`): a zero duration runs one tick; a moving body stops for
+    /// the stun; an affect of the same kind is uncomputed and its remove packet sent, then
+    /// the row is rewritten in place at its old place; else the row is appended. Then the
+    /// row computes, the flags update when the flag is set or either speed moved (a set
+    /// flag always updates), the event starts, and the add packet goes to the player. No
+    /// STUN/SLOW/POISON/263 kind is realtime, and the DB packet is the retired peer's.
+    pub(super) fn add_pc_affect(&mut self, vid: Vid, mut affect: Affect) {
+        if affect.remaining == 0 {
+            affect.remaining = 1;
+        }
+        if affect.flag == AFF_STUN {
+            self.stop_for_stun(vid);
+        }
+        let mov_before = self.move_speed_of(vid.raw());
+        let att_before = self.attack_speed_of(vid.raw());
+        let retired = self.affect_events.get_mut(&vid).and_then(|event| {
+            event
+                .affects
+                .iter_mut()
+                .find(|slot| slot.kind == affect.kind)
+                .map(|slot| {
+                    let retired = *slot;
+                    *slot = affect;
+                    retired
+                })
+        });
+        let placed = retired.is_some();
+        if let Some(retired) = retired {
+            self.change_pc_point(vid, usize::from(retired.apply_on), -retired.value, false);
+            let frame = affect_remove_frame(&retired);
+            let _retired = self.write_to_client(vid, frame);
+        }
+        self.start_affect_event(vid);
+        if !placed {
+            if let Some(event) = self.affect_events.get_mut(&vid) {
+                event.affects.push(affect);
+            }
+        }
+        self.change_pc_point(vid, usize::from(affect.apply_on), affect.value, false);
+        let flags_after = self.affect_flags_of(vid);
+        if affect.flag != 0
+            || mov_before != self.move_speed_of(vid.raw())
+            || att_before != self.attack_speed_of(vid.raw())
+        {
+            self.send_affect_update(vid, flags_after);
+        }
+        let frame = affect_add_frame(&affect);
+        let _added = self.write_to_client(vid, frame);
+    }
+
+    /// `AddAffect`'s stun arm on the player under `vid`: a body whose destination is not
+    /// its spot stops where it stands, its fight pose ends (`battle_end`), and the sync
+    /// record goes around (`G/char_affect.cpp:698-707`, `G/char.cpp:3828-3846`). The
+    /// duration is kept, as the arm never touches it.
+    fn stop_for_stun(&mut self, vid: Vid) {
+        let Some(spot) = self.spot_of(vid.raw()) else {
+            return;
+        };
+        let stops = self
+            .bodies
+            .get(&vid)
+            .is_some_and(|body| body.motion.dest.0 != spot.x || body.motion.dest.1 != spot.y);
+        if !stops {
+            return;
+        }
+        let point = (spot.x, spot.y);
+        if let Some(body) = self.bodies.get_mut(&vid) {
+            body.motion.dest = point;
+            body.motion.start = point;
+            body.fighting = false;
+        }
+        let mut record = vec![HEADER_GC_SYNC_POSITION.value(), 0, 0];
+        record.extend_from_slice(&GcSyncPositionElement::new(vid.raw(), spot.x, spot.y).encode());
+        let size = u16::try_from(record.len()).unwrap_or(u16::MAX);
+        record[1..3].copy_from_slice(&size.to_le_bytes());
+        self.packet_around(EntityKey::Character(vid.raw()), &record, None);
+    }
+
+    /// `GetPoint(POINT_ATT_SPEED)` of the player under `vid`, or 0 when it is gone.
+    fn attack_speed_of(&self, vid: u32) -> i32 {
+        self.characters
+            .find_by_vid(Vid::new(vid))
+            .ok()
+            .and_then(|character| character.points())
+            .map_or(0, |points| points.get_point(point::POINT_ATT_SPEED))
+    }
+
     /// The affect flag words `vid` has now: the ones its affects set, or 0 with no event.
     pub(super) fn affect_flags_of(&self, vid: Vid) -> [u32; 2] {
         self.affect_events
@@ -186,6 +280,7 @@ impl GameState {
             pk_mode: body.card.pk_mode,
             affect_flags: flags,
             dead: self.is_dead(vid.raw()),
+            alignment: i16::try_from(body.card.alignment / 10).unwrap_or(i16::MAX),
         };
         let mut frame = Vec::new();
         crate::item_move::character_update(vid.raw(), &look, mover).encode_into(&mut frame);
@@ -289,7 +384,11 @@ impl GameState {
         for frame in point_changes(&records, vid.raw()) {
             let _delivered = self.write_to_client(vid, frame);
         }
+        // `ComputeAffect(pkAff, false)` on each expired affect (`ProcessAffect`): the point
+        // is taken back before the remove packet, and the flags update once, after all of
+        // them. `CheckMaximumPoints` is dead here: no affect here touches a maximum.
         for affect in &expired {
+            self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
             let _delivered = self.write_to_client(vid, affect_remove_frame(affect));
         }
         let flags_after = self.affect_flags_of(vid);
@@ -474,6 +573,7 @@ mod tests {
             Affect {
                 kind: 7,
                 apply_on: 1,
+                value: 0,
                 flag: 0,
                 remaining: 1,
             },
@@ -483,6 +583,7 @@ mod tests {
             Affect {
                 kind: 9,
                 apply_on: 2,
+                value: 0,
                 flag: 0,
                 remaining: 1,
             },
@@ -501,5 +602,117 @@ mod tests {
             [(7, 1), (9, 2)],
             "the affects leave in the order they were added"
         );
+    }
+
+    /// A 20-second slow ends on its 20th tick: the move speed is back, with the remove
+    /// and the flag update.
+    #[test]
+    fn a_slow_that_ends_gives_the_move_speed_back_with_a_remove_and_an_update() {
+        use crate::loading_phase::{AFFECT_SLOW, AFF_SLOW, SLOW_MOV_SPEED, SLOW_TICKS};
+        use common::point_slot as point;
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut inbox = enter_on(&mut world, PLACE, 1, (5, 5), 10_000);
+        let vid = Vid::new(1);
+        let before = world.move_speed_of(1);
+        world.add_pc_affect(
+            vid,
+            Affect {
+                kind: AFFECT_SLOW,
+                apply_on: u8::try_from(point::POINT_MOV_SPEED).unwrap(),
+                value: SLOW_MOV_SPEED,
+                flag: AFF_SLOW,
+                remaining: SLOW_TICKS,
+            },
+        );
+        assert_eq!(world.move_speed_of(1), (before - 30).max(0));
+        while inbox.try_recv().is_ok() {}
+        for tick in 1..=20 {
+            world.run_affect_events(u64::try_from(tick).unwrap() * 25);
+        }
+        assert_eq!(world.move_speed_of(1), before);
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert!(heard.iter().any(|frame| frame.first() == Some(&0x7f)));
+        assert!(heard.iter().any(|frame| frame.first() == Some(&19)));
+    }
+
+    /// An added stun stops a moving body at its spot: the start and destination are
+    /// the spot, the fight pose ends, and the sync record goes around.
+    #[test]
+    fn a_stun_stops_a_moving_body_at_its_spot_with_a_sync_record() {
+        use crate::game_state::fixtures::enter;
+        use crate::loading_phase::{AFFECT_STUN, AFF_STUN, STUN_TICKS};
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut watcher = enter_on(&mut world, PLACE, 2, (6, 5), 10_000);
+        let _entrant = enter(&mut world, 1, (5, 5), 10_000);
+        assert!(world.goto(1, 50, 50));
+        let vid = Vid::new(1);
+        let spot = world.spot_of(1).unwrap();
+        world.add_pc_affect(
+            vid,
+            Affect {
+                kind: AFFECT_STUN,
+                apply_on: 0,
+                value: 0,
+                flag: AFF_STUN,
+                remaining: STUN_TICKS,
+            },
+        );
+        let body = world.bodies.get(&vid).unwrap();
+        assert_eq!(body.motion.dest, (spot.x, spot.y));
+        assert_eq!(body.motion.start, (spot.x, spot.y));
+        assert!(!body.fighting);
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| watcher.try_recv().ok()).collect();
+        assert!(heard.iter().any(|frame| frame.first() == Some(&0x05)));
+    }
+
+    /// A stun added over a running stun rewrites it in place: one row with the new
+    /// duration, one remove and one add.
+    #[test]
+    fn a_stun_over_a_running_stun_rewrites_it_in_place() {
+        use crate::loading_phase::{AFFECT_STUN, AFF_STUN, STUN_TICKS};
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut inbox = enter_on(&mut world, PLACE, 1, (5, 5), 10_000);
+        let vid = Vid::new(1);
+        let stun = Affect {
+            kind: AFFECT_STUN,
+            apply_on: 0,
+            value: 0,
+            flag: AFF_STUN,
+            remaining: 1,
+        };
+        world.add_pc_affect(vid, stun);
+        world.run_affect_events(25);
+        // The one-tick stun ran its tick; re-add it running, then overwrite it.
+        world.add_pc_affect(vid, stun);
+        while inbox.try_recv().is_ok() {}
+        world.add_pc_affect(
+            vid,
+            Affect {
+                remaining: STUN_TICKS,
+                ..stun
+            },
+        );
+        let event = world.affect_events.get(&vid).unwrap();
+        let stuns: Vec<Affect> = event
+            .affects
+            .iter()
+            .filter(|affect| affect.kind == AFFECT_STUN)
+            .copied()
+            .collect();
+        assert_eq!(stuns.len(), 1);
+        assert_eq!(stuns[0].remaining, STUN_TICKS);
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        let removes = heard
+            .iter()
+            .filter(|frame| frame.first() == Some(&0x7f))
+            .count();
+        let adds = heard
+            .iter()
+            .filter(|frame| frame.first() == Some(&0x7e))
+            .count();
+        assert_eq!((removes, adds), (1, 1));
     }
 }

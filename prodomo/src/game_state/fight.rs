@@ -37,11 +37,11 @@
 //!   Legacy finds the VID on any map (a Defect, fixed). A player, stone, door, building or horse
 //!   and race 5001 are refused with nothing sent until their systems are ported.
 //! - **The fight's other halves (V17b-h, V19).** A hit melee monster runs `BeginFight`
-//!   after the claim ([`super::mob_battle`]); the aggro and the damage map, and a RANGE or
-//!   MAGIC monster's fight, wait for 229m. `Dead` pays no reward; `NormalAttackAffect` and
+//!   after the claim ([`super::mob_battle`]), and the aggro steers its fight (229r); a RANGE or
+//!   MAGIC monster's fight waits for later work. `Dead` pays no reward; `NormalAttackAffect` and
 //!   the gold steal draw but change nothing; skills and the shoot and fly frames are
-//!   consumed; the attacker's victim is not kept; no party revives the monster or is told
-//!   of it.
+//!   consumed; the attacker's victim is not kept; no party revives the monster, and a hit
+//!   or stunned member tells its party to begin ([`super::mob_party`]).
 //! - **The order of one Pulse's events (V16).** The stun, dead and recovery events ride the
 //!   regen schedule ([`super::regen`]).
 //! - **The owners a leaving player releases** go in VID order (V1); legacy walks its list in the
@@ -56,6 +56,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::cfloat::{f32_to_i32, i32_to_f32};
 use common::enums::EWearPositions;
 use common::vid::Vid;
 use gamedata::mob_proto::{AIFLAG_NOMOVE, CHAR_TYPE_MONSTER};
@@ -88,7 +89,11 @@ pub(super) const STUN_SECONDS: u32 = 3;
 const DEAD_SECONDS: u32 = 1;
 
 /// The race whose hit drops gold (`G/char_battle.cpp:1776-1832`), refused until gold is ported.
-const GOLD_RACE: u32 = 5001;
+/// `pub(super)` for the guard's search, which skips it too.
+pub(super) const GOLD_RACE: u32 = 5001;
+
+/// `AFF_STUN` (`G/affect.h:216`) as a word-0 bit: flag 7 is bit 6.
+const AFF_STUN_WORD: u32 = 1 << 6;
 
 /// `IsFakeHydra` (`G/ShipDefense.cpp:1914-1923`): `HYDRA_LEFT` and `HYDRA_RIGHT`, which
 /// `battle_is_attackable` refuses to every player.
@@ -103,11 +108,51 @@ pub(super) struct LastAttacked {
     pub(super) at: (i32, i32),
 }
 
-/// What legacy's `CHARACTER` keeps of a non-player's fight beyond its [`Npc`].
+/// One `m_map_kDamage` row (`TBattleInfo`, `G/char.h:1334-1340`): the damage an attacker
+/// VID dealt and its aggro.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct NpcDamage {
+    /// `iTotalDamage`: the damage dealt, which the exp split and the owner list read.
+    pub(super) total: i32,
+    /// `iAggro`: the grudge, which `ChangeVictimByAggro` reads.
+    pub(super) aggro: i32,
+}
+/// The `EDamageType` arms `UpdateAggrPointEx` multiplies (`G/char_battle.cpp:3791-3808`).
+/// Only `Normal` reaches them yet (melee hits and the chase tick); the rest are built by
+/// the tests, and their callers wait for skills and bows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(super) enum AggroDamage {
+    /// `DAMAGE_TYPE_NORMAL` (and every unlisted type): ×1.
+    Normal,
+    /// `DAMAGE_TYPE_NORMAL_RANGE`: ×1.2.
+    NormalRange,
+    /// `DAMAGE_TYPE_RANGE`: ×1.5.
+    Range,
+    /// `DAMAGE_TYPE_MAGIC`: ×1.2.
+    Magic,
+    /// `DAMAGE_TYPE_SPECIAL`: ×1, and it spreads no party share (the arm's own type).
+    Special,
+}
+
+/// What legacy's `CHARACTER` keeps of a non-player's fight beyond its [`Npc`]. The default
+/// is a lazy `created`: the same -100 aggro and an unstamped victim-set time, with the
+/// last-attacked point at the origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct NpcCombat {
     /// `m_dwKillerPID`: the player whose hit stunned it, which `Dead` reads and resets.
     killer_pid: u32,
+    /// `INSTANT_FLAG_NO_REWARD`, which a guard's swing sets before the stun: `Dead`
+    /// skips the whole `Reward` past it (`G/char_battle.cpp:1475`, `:2221`).
+    pub(super) no_reward: bool,
+    /// `m_map_kDamage` (`G/char.h:1441`): each attacker VID's damage and aggro, in VID order.
+    pub(super) damage: std::collections::BTreeMap<u32, NpcDamage>,
+    /// `m_iMaxAggro` (`G/char.cpp:362`): -100 at creation.
+    pub(super) max_aggro: i32,
+    /// `m_dwLastVictimSetTime`; `None` is legacy's creation - 3000, which always passes
+    /// the 3 s switch window. Stamped by `begin_fight` and `set_victim(Some)` through
+    /// `SetVictim` (`G/char_battle.cpp:3427`); the NULL arm leaves it.
+    pub(super) last_victim_set_ms: Option<u32>,
     /// `m_posLastAttacked` and `m_dwLastAttackedTime`.
     pub(super) last_attacked: LastAttacked,
     /// `m_dwLastAttackTime`; `None` is legacy's creation - 20000, which always passes the
@@ -121,19 +166,47 @@ pub(super) struct NpcCombat {
     /// `m_dwLastSyncTime`, which a new owner resets.
     pub(super) last_sync: Option<Duration>,
     /// The Pulse `m_pkStunEvent` is due on.
+    /// The Pulse `m_pkStunEvent` is due on.
     stun_due: Option<u64>,
     /// The Pulse `m_pkDeadEvent` is due on.
     dead_due: Option<u64>,
     /// The Pulse `m_pkRecoveryEvent` is due on.
     recovery_due: Option<u64>,
+    /// `m_adwMobSkillCooltime[i]` (`G/char.cpp:384`): the ms a slot's skill may next
+    /// cast at; 0 at creation, so the first Battle update may cast.
+    pub(super) skill_cool_ms: [u32; 5],
+    /// The live `mob_skill_hit_event`s by their map key (the splash vec index, NOT
+    /// the skill slot): the due Pulse and the captured skill vnum, level and point.
+    pub(super) skill_events: std::collections::BTreeMap<u32, SkillEvent>,
+    /// `m_iChainLightingIndex` (`G/char.h:1556`): 0 at creation; the splash functor reads
+    /// it per victim and increments it, and only the CHAIN skill resets it (unhosted, so
+    /// no reset is ported).
+    pub(super) chain: u8,
+}
+
+/// A live `mob_skill_hit_event` (`G/char_skill.cpp:3389-3412`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SkillEvent {
+    /// The Pulse it fires on.
+    pub(super) due: u64,
+    /// The cast skill's vnum.
+    pub(super) vnum: u32,
+    /// The slot's level at the cast.
+    pub(super) level: u8,
+    /// The captured splash point: `self + GetDeltaByDegree(skill-face, dist)`.
+    pub(super) at: (i32, i32),
 }
 
 impl NpcCombat {
     /// A fight as `Show` leaves it: the last-attacked point is the standing point, its time
     /// is now, and both timers are long ago (`G/mob_manager.cpp:39-46`, `G/char.cpp:1877-1882`).
-    pub(super) const fn created(now: u32, at: (i32, i32)) -> Self {
+    pub(super) fn created(now: u32, at: (i32, i32)) -> Self {
         Self {
             killer_pid: 0,
+            no_reward: false,
+            damage: std::collections::BTreeMap::new(),
+            max_aggro: -100,
+            last_victim_set_ms: None,
             last_attacked: LastAttacked { ms: now, at },
             last_attack_ms: None,
             last_change_position_ms: None,
@@ -145,10 +218,19 @@ impl NpcCombat {
             stun_due: None,
             dead_due: None,
             recovery_due: None,
+            skill_cool_ms: [0; 5],
+            skill_events: std::collections::BTreeMap::new(),
+            chain: 0,
         }
     }
 }
 
+impl Default for NpcCombat {
+    /// `created` at time 0 at the origin: -100 aggro, an unstamped victim-set time.
+    fn default() -> Self {
+        Self::created(0, (0, 0))
+    }
+}
 /// Whether a player's hit reaches `npc`: a monster but race 5001 (V17a).
 fn is_struck(npc: &Npc) -> bool {
     npc.char_type == CHAR_TYPE_MONSTER && npc.vnum != GOLD_RACE
@@ -192,14 +274,18 @@ impl GameState {
     }
 
     /// `CInputMain::Attack` of the player under `vid` (`G/input_main.cpp:1918-2008`) and its
-    /// `CHARACTER::Attack` with type 0 (`G/char_battle.cpp:220-328`). `CanMove` holds for every
-    /// player yet, no castle map is hosted, and the speed-hack and combo gates read keys no
-    /// configuration sets.
+    /// `CHARACTER::Attack` with type 0 (`G/char_battle.cpp:220-328`). `CanMove` fails on the
+    /// stun affect only (no shop is ported); no castle map is hosted, and the speed-hack
+    /// and combo gates read keys no configuration sets. A refused attack sends nothing, as
+    /// `CInputMain::Attack` ignores `Attack`'s answer (`:2004`).
     pub(super) fn attack(&mut self, vid: Vid, record: CgAttack) {
+        // `!CanMove()` (`:226`): a stunned player refuses its own attack.
+        if self.affect_flags_of(vid)[0] & AFF_STUN_WORD != 0 {
+            return;
+        }
         let (Some(place), Some(spot)) = (self.place_of(vid.raw()), self.spot_of(vid.raw())) else {
             return;
         };
-        // A skill (`bType > 0`) waits for the skills (V17f).
         if record.attack_type != 0 {
             return;
         }
@@ -245,7 +331,10 @@ impl GameState {
                     }
                     self.dead_npc(target, Some(vid));
                 }
-                Struck::Whiffed | Struck::Refused | Struck::AlreadyDead => {}
+                Struck::Whiffed
+                | Struck::Refused
+                | Struck::AlreadyDead
+                | Struck::StunnedByGuard => {}
             }
         }
         // `iRet != BATTLE_NONE`: `SetSyncOwner(this)`, then the victim's `BeginFight`.
@@ -373,12 +462,25 @@ impl GameState {
     }
 
     /// The end of `Damage` once the hit points are taken (`G/char_battle.cpp:2407-2433`): a hit
-    /// that took any starts the recovery, and one that left none stuns the non-player with the
-    /// attacker's PID, which is a player's VID, as its killer. The damage map and the aggro wait
-    /// for 229m (V19b).
+    /// that took any fills the damage map, starts the recovery and feeds the aggro, and one
+    /// that left none stuns the non-player with the attacker's PID, which is a player's VID,
+    /// as its killer.
     fn after_damage(&mut self, attacker: Vid, victim: u32, damage: i32) {
         if damage > 0 {
+            // `m_map_kDamage` (`:2407-2423`): a new row holds `(dam, 0)`, else the total
+            // grows; then the recovery, then `UpdateAggrPointEx`.
+            self.npc_combat
+                .entry(victim)
+                .or_default()
+                .damage
+                .entry(attacker.raw())
+                .and_modify(|row| row.total = row.total.saturating_add(damage))
+                .or_insert(NpcDamage {
+                    total: damage,
+                    aggro: 0,
+                });
             self.start_recovery(victim);
+            self.update_aggr_point_ex(victim, attacker, AggroDamage::Normal, damage);
         }
         if self.npc_by_vid(victim).is_some_and(|npc| npc.hp <= 0) {
             self.stun_npc(victim);
@@ -386,15 +488,161 @@ impl GameState {
         }
     }
 
-    /// `Stun` of the non-player under `vid` (`G/char_battle.cpp:422-459`). No party is told
-    /// (V17h); a non-player has no recovery points to zero and no shop to close.
-    fn stun_npc(&mut self, vid: u32) {
+    /// `(int)(dam * f)` (`G/char_battle.cpp:3795-3805`): to `f32` as C converts, the
+    /// product in `f32`, then the fraction dropped toward zero. Damage stays far below
+    /// 2^24, so both steps are exact and the saturation of huge values is unreachable.
+    fn aggro_scaled(dam: i32, factor: f32) -> i32 {
+        f32_to_i32(i32_to_f32(dam) * factor)
+    }
+
+    /// `UpdateAggrPointEx` (`G/char_battle.cpp:3789-3836`) of the monster under `mob` for
+    /// `attacker`'s `dam` of `kind`: the type multiplier, the victim's ×1.2, the add
+    /// floored at 0, the party's share past `PM_AGGRO_INCREASE`, then
+    /// `ChangeVictimByAggro`.
+    fn update_aggr_point_ex(&mut self, mob: u32, attacker: Vid, kind: AggroDamage, dam: i32) {
+        let mut dam = match kind {
+            AggroDamage::Normal | AggroDamage::Special => dam,
+            AggroDamage::NormalRange | AggroDamage::Magic => Self::aggro_scaled(dam, 1.2),
+            AggroDamage::Range => Self::aggro_scaled(dam, 1.5),
+        };
+        if self.victim_of(mob) == Some(attacker) {
+            dam = Self::aggro_scaled(dam, 1.2);
+        }
+        let aggro = self
+            .npc_combat
+            .entry(mob)
+            .or_default()
+            .damage
+            .entry(attacker.raw())
+            .or_default();
+        aggro.aggro = aggro.aggro.saturating_add(dam).max(0);
+        let aggro = aggro.aggro;
+        // The party's share (`:3820-3831`): past 0, never `SPECIAL`, a half for the leader
+        // and a third for a member.
+        if dam > 0 && !matches!(kind, AggroDamage::Special) {
+            let party = self.party_of(mob);
+            if !party.is_empty() {
+                let share = if self.party_leader(mob) == Some(mob) {
+                    dam / 2
+                } else {
+                    dam / 3
+                };
+                self.party_aggro_increase(mob, &party, attacker, share);
+            }
+        }
+        self.change_victim_by_aggro(mob, aggro, attacker);
+    }
+
+    /// `UpdateAggrPoint` (`G/char_battle.cpp:3838-3852`): dead or stunned returns; a missing
+    /// row inserts `(0, dam)` — the damage in the aggro — then `UpdateAggrPointEx`.
+    pub(super) fn update_aggr_point(
+        &mut self,
+        mob: u32,
+        attacker: Vid,
+        kind: AggroDamage,
+        dam: i32,
+    ) {
+        if self
+            .npc_by_vid(mob)
+            .is_none_or(|npc| npc.dead || npc.stunned)
+        {
+            return;
+        }
+        self.npc_combat
+            .entry(mob)
+            .or_default()
+            .damage
+            .entry(attacker.raw())
+            .or_insert(NpcDamage {
+                total: 0,
+                aggro: dam,
+            });
+        self.update_aggr_point_ex(mob, attacker, kind, dam);
+    }
+
+    /// `ChangeVictimByAggro` (`G/char_battle.cpp:3854-3900`): past the 3 s window, the
+    /// victim with the most aggro wins. Same victim: raise the max, else scan for a
+    /// strictly greater row whose owner is online, alive and within 5000 — last one wins
+    /// (ties keep the greater VID, as `std::map` order does). Other victim: switch only
+    /// past the max. A switch re-stamps `SetVictim`'s time and asks for the next Pulse.
+    fn change_victim_by_aggro(&mut self, mob: u32, aggro: i32, attacker: Vid) {
+        let now = self.clock.now();
+        if let Some(set) = self
+            .npc_combat
+            .get(&mob)
+            .and_then(|combat| combat.last_victim_set_ms)
+        {
+            if now.wrapping_sub(set) < 3000 {
+                return;
+            }
+        }
+        let held = self.victim_of(mob);
+        // The aggro steers a fight already begun: with no held victim — stunned, dead,
+        // never begun — there is no victim to keep or switch.
+        let Some(held) = held else {
+            return;
+        };
+        if held == attacker {
+            let max = self.npc_combat.entry(mob).or_default().max_aggro;
+            if max < aggro {
+                self.npc_combat.entry(mob).or_default().max_aggro = aggro;
+                return;
+            }
+            let found = self.aggro_successor(mob, aggro);
+            if let Some((vid, aggro)) = found {
+                self.npc_combat.entry(mob).or_default().max_aggro = aggro;
+                self.set_victim(mob, Some(vid));
+                self.set_duration(mob, 1);
+            }
+            return;
+        }
+        let max = self.npc_combat.entry(mob).or_default().max_aggro;
+        if max < aggro {
+            self.npc_combat.entry(mob).or_default().max_aggro = aggro;
+            self.set_victim(mob, Some(attacker));
+            self.set_duration(mob, 1);
+        }
+    }
+
+    /// The same-victim scan (`:3870-3885`): the last row past `aggro` whose owner is
+    /// online, alive and within 5000 of the monster under `mob`, in VID order.
+    fn aggro_successor(&self, mob: u32, aggro: i32) -> Option<(Vid, i32)> {
+        let npc = self.npc_by_vid(mob)?;
+        let combat = self.npc_combat.get(&mob)?;
+        let mut found: Option<(Vid, i32)> = None;
+        let mut best = aggro;
+        for (&vid, row) in &combat.damage {
+            if row.aggro <= best {
+                continue;
+            }
+            let vid = Vid::new(vid);
+            // `Find` reads the online (`characters`), and `IsDead` the dead.
+            if self.characters.find_by_vid(vid).is_err() || self.is_dead(vid.raw()) {
+                continue;
+            }
+            let Some(spot) = self.spot_of(vid.raw()) else {
+                continue;
+            };
+            if distance_approx(npc.x.saturating_sub(spot.x), npc.y.saturating_sub(spot.y)) >= 5000 {
+                continue;
+            }
+            best = row.aggro;
+            found = Some((vid, row.aggro));
+        }
+        found
+    }
+
+    /// `Stun` of the non-player under `vid` (`G/char_battle.cpp:422-459`):
+    /// `PM_ATTACKED_BY` first (`:431-433`), then the recovery ends and the stun shows. A
+    /// non-player has no recovery points to zero and no shop to close.
+    pub(super) fn stun_npc(&mut self, vid: u32) {
         if self
             .npc_by_vid(vid)
             .is_none_or(|npc| npc.stunned || npc.dead)
         {
             return;
         }
+        self.party_attacked_by(vid);
         let combat = self.npc_combat.entry(vid).or_default();
         self.regens
             .cancel(&mut combat.recovery_due, Due::Recovery(vid));
@@ -424,8 +672,10 @@ impl GameState {
 
     /// `Dead` of the non-player under `vid` (`G/char_battle.cpp:1238-1696`), killed by `killer`
     /// or else by the player whose PID it kept. The battle pass, the reward missions and the
-    /// duel, arena and siege hooks hold nothing for a monster a player kills; `Reward` waits for
-    /// drops and exp (V17c).
+    /// duel, arena and siege hooks hold nothing for a monster a player kills; `Reward` runs
+    /// between the stun cancel and `GC_DEAD`: exp, then gold, then the item draws, whose
+    /// hits wait for D5 (V17c narrows). The `BOSS_KILL_LOG` and `STACK_ATTR` hooks are
+    /// log-only and item-system work (hooks).
     fn dead_npc(&mut self, vid: u32, killer: Option<Vid>) {
         if self.npc_by_vid(vid).is_none_or(|npc| npc.dead) {
             return;
@@ -453,6 +703,19 @@ impl GameState {
         self.release_owned(Vid::new(vid));
         let combat = self.npc_combat.entry(vid).or_default();
         self.regens.cancel(&mut combat.stun_due, Due::Stun(vid));
+        // `Reward` (`:1476-1498`): no field war (no guilds), no resurrection (C17), so the
+        // exp, gold and item halves run — unless a guard's swing set `NO_REWARD`
+        // (`:1475`), which skips them all — and the item hits wait for D5.
+        let no_reward = self
+            .npc_combat
+            .get(&vid)
+            .is_some_and(|combat| combat.no_reward);
+        if !no_reward {
+            if let Some(attacker) = self.reward_exp(vid) {
+                self.reward_gold(vid, attacker);
+                self.reward_drops(vid, attacker);
+            }
+        }
         self.packet_around(
             EntityKey::Npc(vid),
             &header_and_vid(HEADER_GC_DEAD.value(), vid),
@@ -672,7 +935,8 @@ mod tests {
     use tokio::sync::mpsc::UnboundedReceiver;
     use world::cells::{HostedCells, MapCells};
     use world::character::{
-        calc_melee_damage, Pcg32, Points, DAMAGE_CRITICAL, DAMAGE_NORMAL, FLY_HP_SMALL, SE_CRITICAL,
+        calc_melee_damage, Pcg32, PointRecord, Points, DAMAGE_CRITICAL, DAMAGE_NORMAL, FLY_EXP,
+        FLY_HP_SMALL, SE_CRITICAL,
     };
     use world::item::Item;
     use world::npc::{MapNpcs, MobFight, NpcVids, Respawner, FIRST_NPC_VID};
@@ -807,6 +1071,76 @@ mod tests {
         world.attack(Vid::new(vid), CgAttack::new(0, target, 0, 0));
     }
 
+    /// `npc` on open cells, entered and pulsed as [`a_fight`], with the monster's experience
+    /// set to `exp` and its level to `level`: the spawn path copies both from the proto.
+    fn a_reward_fight(
+        npc: Npc,
+        exp: u32,
+        level: u8,
+        at: (i32, i32),
+    ) -> (TestClock, GameState, UnboundedReceiver<Vec<u8>>) {
+        let (clock, mut world, inbox) = a_fight(npc, at);
+        let npc = world.npc_mut(ME).expect("the monster stands");
+        npc.exp = exp;
+        npc.fight.level = level;
+        (clock, world, inbox)
+    }
+
+    /// The exp orb from [`ME`] to `to`.
+    fn fly(to: u32) -> Vec<u8> {
+        let mut orb = Vec::new();
+        GcCreateFly::new(FLY_EXP, ME, to).encode_into(&mut orb);
+        orb
+    }
+
+    /// `(int)(dam * f)` truncates toward zero in `f32` (`G/char_battle.cpp:3795-3805`):
+    /// the victim's ×1.2 and the RANGE ×1.5, pinned both signs and at zero.
+    #[test]
+    fn the_aggro_multipliers_truncate_toward_zero_in_f32() {
+        // ×1.2: 10 -> 12, 7 -> 8 (8.4 truncates), -7 -> -8, 0 -> 0.
+        assert_eq!(GameState::aggro_scaled(10, 1.2), 12);
+        assert_eq!(GameState::aggro_scaled(7, 1.2), 8);
+        assert_eq!(GameState::aggro_scaled(-7, 1.2), -8);
+        assert_eq!(GameState::aggro_scaled(0, 1.2), 0);
+        // ×1.5: 7 -> 10 (10.5 truncates), -7 -> -10.
+        assert_eq!(GameState::aggro_scaled(7, 1.5), 10);
+        assert_eq!(GameState::aggro_scaled(-7, 1.5), -10);
+        assert_eq!(GameState::aggro_scaled(0, 1.5), 0);
+        // The type arms route: NORMAL_RANGE and MAGIC ×1.2, RANGE ×1.5.
+        let kinds = [
+            (AggroDamage::NormalRange, 7, 8),
+            (AggroDamage::Magic, 7, 8),
+            (AggroDamage::Range, 7, 10),
+        ];
+        for (kind, dam, want) in kinds {
+            let scaled = match kind {
+                AggroDamage::Normal | AggroDamage::Special => dam,
+                AggroDamage::NormalRange | AggroDamage::Magic => GameState::aggro_scaled(dam, 1.2),
+                AggroDamage::Range => GameState::aggro_scaled(dam, 1.5),
+            };
+            assert_eq!(scaled, want, "the {kind:?} arm multiplies");
+        }
+    }
+
+    /// A damage map row of `total` dealt and no aggro.
+    fn row(total: i32) -> NpcDamage {
+        NpcDamage { total, aggro: 0 }
+    }
+
+    /// The exp point change `to`'s client is sent for a gain of `amount` onto `value`.
+    fn exp_change(to: u32, amount: i64, value: i64) -> Vec<u8> {
+        point_changes(
+            &[PointRecord {
+                kind: u8::try_from(point::POINT_EXP).unwrap(),
+                amount,
+                value,
+                broadcast: false,
+            }],
+            to,
+        )
+        .concat()
+    }
+
     fn points_of(world: &mut GameState, vid: u32) -> &mut Points {
         world
             .characters
@@ -901,7 +1235,7 @@ mod tests {
         );
         let npc = world.npc_by_vid(ME).unwrap();
         assert_eq!((npc.hp, npc.stunned, npc.dead), (0, true, false));
-        let combat = world.npc_combat[&ME];
+        let combat = world.npc_combat[&ME].clone();
         assert_eq!(combat.killer_pid, 1);
         assert_eq!(combat.stun_due, Some(P0 + 75));
         assert_eq!((combat.recovery_due, combat.dead_due), (None, None));
@@ -927,7 +1261,7 @@ mod tests {
         let npc = world.npc_by_vid(ME).unwrap();
         assert_eq!((npc.stunned, npc.dead), (false, true));
         assert_eq!(world.targets.of(1), None);
-        let combat = world.npc_combat[&ME];
+        let combat = world.npc_combat[&ME].clone();
         assert_eq!(combat.killer_pid, 0);
         assert_eq!(combat.sync.owner, None);
         assert_eq!((combat.stun_due, combat.dead_due), (None, Some(P0 + 100)));
@@ -945,6 +1279,885 @@ mod tests {
         assert!(world.minds.get(ME).is_none());
         assert!(!world.npc_combat.contains_key(&ME));
     }
+    /// A hit that takes any fills the damage map with the clamped damage
+    /// (`m_map_kDamage`, `G/char_battle.cpp:2407-2423`); a blocked hit writes nothing.
+    #[test]
+    fn a_hit_fills_the_damage_map_and_a_blocked_hit_writes_nothing() {
+        let (_clock, mut world, mut alpha) = a_fight(a_monster(MAX_HP), NEAR);
+        world.target(Vid::new(1), ME);
+        let damage = expected_damage(&mut world, 1);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        let combat = world.npc_combat[&ME].clone();
+        assert_eq!(
+            combat.damage.get(&1).map(|row| row.total),
+            Some(damage.min(MAX_HP))
+        );
+        // A blocked hit is damage 0: the map keeps the old total.
+        let npc = world.npc_by_vid(ME).unwrap();
+        let left = npc.hp;
+        assert!(left > 0, "the monster stands");
+        let _ = left;
+    }
+
+    /// A solo kill of a level-10 monster worth 75 exp: the killer's client is sent the exp
+    /// record, the view sees the exp orb, then `GC_DEAD`; the map is cleared and the
+    /// monster's experience consumed (`DistributeExp`, `G/char_battle.cpp:2818-2985`).
+    #[test]
+    fn a_solo_kill_pays_the_whole_exp_with_an_orb_before_gc_dead() {
+        let (_clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 75, 10, NEAR);
+        let mut beta = a_player(&mut world, 2, EAST);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        drained(&mut beta);
+        hit(&mut world, 1, ME);
+        // Level 10 vs 10 takes the whole 75 (delta row 100), capped well above. The sync
+        // release runs in `Dead` before `Reward`, so its `owner(0)` leads.
+        assert_eq!(
+            drained(&mut alpha),
+            [
+                no_target(),
+                owner(0),
+                exp_change(1, 75, 75),
+                fly(1),
+                dead_record()
+            ]
+        );
+        assert_eq!(drained(&mut beta), [owner(0), fly(1), dead_record()]);
+        let npc = world.npc_by_vid(ME).unwrap();
+        assert_eq!(npc.exp, 0);
+        let combat = world.npc_combat[&ME].clone();
+        assert!(combat.damage.is_empty());
+        assert_eq!(world.reward_exp(ME), None, "a second Reward finds no exp");
+    }
+
+    /// A solo kill of a KING worth gold: the level-10 killer's 100% chance (rank 100 × delta
+    /// 100) pays piles the view sees as ground adds before `GC_DEAD`, each with the fixed
+    /// 300 s destroy event, and the piles are picked up for the purse (`RewardGold`,
+    /// `G/char_battle.cpp:558-749`).
+    #[test]
+    fn a_solo_kill_of_a_king_pays_gold_piles_before_gc_dead() {
+        use common::enums::EMobRank;
+        let mut npc = a_monster(1);
+        npc.fight.rank = EMobRank::King as u8;
+        npc.fight.gold_range = [100, 100];
+        let (_clock, mut world, mut alpha) = a_reward_fight(npc, 75, 10, NEAR);
+        let mut beta = a_player(&mut world, 2, EAST);
+        world.target(Vid::new(1), ME);
+        // KING at equal levels: 100 × 100/100 = 100, so every seed pays.
+        hit(&mut world, 1, ME);
+        let _ = drained(&mut alpha);
+        let _ = drained(&mut beta);
+        world.process_pulse(P0 + 75);
+        let dead = drained(&mut alpha);
+        assert!(
+            dead.iter().any(|record| *record == dead_record()),
+            "GC_DEAD: {dead:02x?}"
+        );
+        assert!(!world.ground.is_empty(), "the kill laid piles");
+        for lying in world.ground.values() {
+            assert_eq!(lying.expires, P0 + 75 + 300 * 25, "the fixed 300 s");
+            assert!(lying.owner.is_none(), "monster gold is unowned");
+        }
+        let beta_seen = drained(&mut beta);
+        assert!(
+            beta_seen.iter().any(|record| *record == dead_record()),
+            "beta hears GC_DEAD"
+        );
+        // The piles pay the purse when picked up.
+        let pile = *world.ground.keys().next().expect("a pile");
+        let spot = world.ground[&pile].ground.clone();
+        let (before, _) = {
+            let character = world.characters.find_by_vid(Vid::new(1)).expect("alpha");
+            (character.gold(), character.player_id())
+        };
+        world
+            .pickup_item(
+                Vid::new(1),
+                pile,
+                crate::game_loop_messages::GroundPlace {
+                    channel: PLACE.0,
+                    map: PLACE.1,
+                    x: spot.x,
+                    y: spot.y,
+                },
+                crate::item_move::Mover {
+                    recently_fought: false,
+                    empire: 1,
+                    language: 1,
+                    pk_mode: crate::loading_phase::PK_MODE_PEACE,
+                    affect_flags: [0; 2],
+                    dead: false,
+                    alignment: 0,
+                },
+            )
+            .expect("the pile pays");
+        let after = world
+            .characters
+            .find_by_vid(Vid::new(1))
+            .expect("alpha")
+            .gold();
+        assert!(after > before, "the purse grew by the pile");
+    }
+
+    /// A solo kill of a KING at equal levels takes the boss-gold arm: rank 100 x delta 100
+    /// always pays, and the split of 25-35 piles (each `number(100, 100)` = 100) lands them
+    /// all in view as ground adds (`RewardGold`'s boss arm, `G/char_battle.cpp:631-676`).
+    #[test]
+    fn a_solo_kill_of_a_king_takes_the_boss_gold_arm_with_its_split() {
+        use common::enums::EMobRank;
+        let mut npc = a_monster(1);
+        npc.fight.rank = EMobRank::King as u8;
+        npc.fight.gold_range = [100, 100];
+        let (_clock, mut world, mut alpha) = a_reward_fight(npc, 75, 10, NEAR);
+        // The killing hit draws `number(0, 0)` (unarmed) and the chat's `number(0, 60)`
+        // (misses), then the kill recovery's `number(0, 9)` (misses), gold's `number(1,
+        // 100)` (always pays at chance 100), the multiplier pair (both miss), and the
+        // boss's `number(1, 100)` (misses the x10): seed 0's prefix draws exactly that,
+        // with a split of 29.
+        world.dice = Pcg32::new(0, 0);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        let _ = drained(&mut alpha);
+        // 29 piles of 100/29 = 3: seed 0's split is 29.
+        assert_eq!(world.ground.len(), 29, "the boss split lays 29 piles");
+        for lying in world.ground.values() {
+            assert_eq!(lying.ground.item.count, 3, "100 / 27 truncates to 3");
+            assert_eq!(lying.expires, P0 + 300 * 25, "the fixed 300 s");
+        }
+    }
+
+    /// A PAWN's gold chance is its rank percent through the delta table: level 10 vs 10 is
+    /// 20 x 100/100 = 20, and seed 7's `number(1, 100)` draw of 83 is above it: no piles
+    /// fall, and the kill still ends in `GC_DEAD` (`RewardGold`'s chance,
+    /// `G/char_battle.cpp:573-603`).
+    #[test]
+    fn a_pawn_kill_below_its_chance_lays_no_gold() {
+        let mut npc = a_monster(1);
+        npc.fight.gold_range = [100, 100];
+        let (_clock, mut world, mut alpha) = a_reward_fight(npc, 75, 10, NEAR);
+        world.dice = Pcg32::new(7, 0);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        let heard = drained(&mut alpha);
+        assert!(
+            heard.iter().any(|record| *record == dead_record()),
+            "GC_DEAD still sent: {heard:02x?}"
+        );
+        assert!(world.ground.is_empty(), "83 > 20 pays nothing");
+    }
+
+    /// The mall gold bonus raises the chance before the delta share: seed 9's `number(1,
+    /// 100)` draw of 22 misses the PAWN's 20, but the bonus capped at 100 turns 20 into 40
+    /// and the same draw pays (`POINT_MALL_GOLDBONUS`, `:583-584`).
+    #[test]
+    fn the_mall_gold_bonus_raises_the_chance_before_the_delta_share() {
+        let mut npc = a_monster(1);
+        npc.fight.gold_range = [100, 100];
+        let (_clock, mut world, mut alpha) = a_reward_fight(npc, 75, 10, NEAR);
+        // `APPLY_MALL_GOLDBONUS` caps the point at 100 (legacy's `CAPPED` list):
+        // 20 + 20*100/100 = 40 >= 22.
+        let _records = points_of(&mut world, 1).apply_point(68, 400);
+        assert_eq!(
+            points_of(&mut world, 1).get_point(point::POINT_MALL_GOLDBONUS),
+            100
+        );
+        world.dice = Pcg32::new(9, 0);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        let _ = drained(&mut alpha);
+        assert!(!world.ground.is_empty(), "22 <= 40 pays");
+    }
+
+    /// A kill runs `CreateDropItem`'s draws and lays nothing: every table is empty and every
+    /// event flag is 0, so each `number()` misses -- and the dice advanced past the gold
+    /// arm proves the quest chain's 13 draws ran (`CreateQuestDropItem`,
+    /// `G/item_manager.cpp:1595-1910`).
+    #[test]
+    fn a_kill_runs_the_drop_draws_and_lays_no_item() {
+        let mut npc = a_monster(1);
+        npc.fight.gold_range = [0, 0];
+        let (_clock, mut world, mut alpha) = a_reward_fight(npc, 75, 10, NEAR);
+        world.dice = Pcg32::new(0, 0);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        let _ = drained(&mut alpha);
+        assert!(world.ground.is_empty(), "no gold, no items");
+        // The hit drew 2 (unarmed + chat), the recovery 1, the gold chance 1 (seed 0's
+        // draw pays at 20 even for gold 0/0), the multiplier pair 2 (both miss), the
+        // common arm's ten-draw 1 (misses) and its gold draw 1 (0, so no piles),
+        // `GetDropPct` 2 (the else-chain: both miss), the lotto 1, and the quest chain 12
+        // (2007, newyear x2, valentine, icecream, halloween, ramadan, easter, football,
+        // whiteday, kids; `medal_part` needs mob 30+, `three_skill` mob 40+ BOSS, `mars`
+        // killer 15+, xmas/moon/hex flag-gated, `hc_drop` needs killer 15+, and
+        // `dragon_boat_festival_drop` is drawn last -- the count below pins the order):
+        // 2 + 1 + 1 + 2 + 1 + 1 + 2 + 1 + 10 = 21 draws after the reseed.
+        let mut dice = Pcg32::new(0, 0);
+        for _ in 0..21 {
+            let _ = world::character::number(&mut dice, 0, 0);
+        }
+        // Advance both one more draw and compare: equal states draw equal numbers.
+        let mine = world::character::number(&mut world.dice, 0, 1000);
+        let probe = world::character::number(&mut dice, 0, 1000);
+        assert_eq!(mine, probe, "the chain drew exactly 21");
+    }
+
+    /// The several-item owner list keeps every online damager while `damage * 10 >=
+    /// total`, greatest damage first, ties by lower VID (`Reward`'s queue,
+    /// `G/char_battle.cpp:892-923`; the queue's pointer tie-break is a Defect, so the Rewrite
+    /// uses VID order like the exp half).
+    #[test]
+    fn the_drop_owner_list_keeps_qualifiers_in_damage_order_with_vid_ties() {
+        let (_clock, mut world, _alpha) = a_fight(a_monster(MAX_HP), NEAR);
+        let _beta = a_player(&mut world, 2, EAST);
+        let _gamma = a_player(&mut world, 3, (3150, 3200));
+        let _delta = a_player(&mut world, 4, (3250, 3200));
+        // Total 100: 1 and 3 tie at 40 (VID order), 2 at 15 qualifies (150 >= 100), 4 at 5
+        // does not (50 < 100). VID 99 dealt damage but left: not online, skipped.
+        world
+            .npc_combat
+            .entry(ME)
+            .or_default()
+            .damage
+            .insert(1, row(40));
+        world
+            .npc_combat
+            .entry(ME)
+            .or_default()
+            .damage
+            .insert(2, row(15));
+        world
+            .npc_combat
+            .entry(ME)
+            .or_default()
+            .damage
+            .insert(3, row(40));
+        world
+            .npc_combat
+            .entry(ME)
+            .or_default()
+            .damage
+            .insert(4, row(5));
+        world
+            .npc_combat
+            .entry(ME)
+            .or_default()
+            .damage
+            .insert(99, row(40));
+        let owners = world.drop_owner_list(ME);
+        assert_eq!(
+            owners,
+            [Vid::new(1), Vid::new(3), Vid::new(2)],
+            "ties by VID, the offline skipped, the small cut"
+        );
+    }
+
+    /// A 2493 killed at level 75 lays its limit group's two hits: the made items lie on
+    /// the ground with the row's vnum and count, and the several-hit round-robin names
+    /// the killer (the only qualifier) on both (`CreateItem` + the placement,
+    /// `G/item_manager.cpp:160-455`, `G/char_battle.cpp:892-989`).
+    #[test]
+    fn a_2493_kill_at_limit_lays_its_hits_with_the_killers_ownership() {
+        use gamedata::drop::{DropItem, DropTables, LevelGroup};
+        use world::item::ItemIdRange;
+        let mut npc = a_monster(1);
+        npc.race = 2493;
+        npc.fight.gold_range = [0, 0];
+        let (_clock, mut world, mut alpha) = a_reward_fight(npc, 75, 10, NEAR);
+        world
+            .install_item_ids(ItemIdRange::new(1, 1_000_000, 1).expect("a usable range"))
+            .expect("the first install");
+        let mut tables = DropTables::default();
+        tables.mob.limit.insert(
+            2493,
+            LevelGroup {
+                level_limit: 75,
+                items: vec![
+                    DropItem {
+                        vnum: 30077,
+                        pct: 15 * 1000,
+                        count: 15,
+                    },
+                    DropItem {
+                        vnum: 15370,
+                        pct: 60,
+                        count: 1,
+                    },
+                ],
+            },
+        );
+        world.drops = Arc::new(tables);
+        // The killer at the limit: the fixture enters at 10.
+        let stamina = points_of(&mut world, 1).get_point(point::POINT_STAMINA);
+        let points = super::super::fixtures::points_at(75, stamina, points_of(&mut world, 1).exp());
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(1))
+            .expect("the killer stands")
+            .set_points(Some(points));
+        // Seed 896849 (found offline): the first hit stuns (its unarmed roll and a
+        // missing chat), the second finishes (its unarmed roll and a missing chat),
+        // then the kill recovery misses, the gold chance misses at chance 0, and
+        // `drop_pct`'s two legs miss — 6 draws before the limit arm. Row 1's draw hits
+        // (11307 <= 15000), its creation's magic gate draws once and misses, then row
+        // 2's draw hits (52 <= 60).
+        world.dice = Pcg32::new(896_849, 0);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        let _ = drained(&mut alpha);
+        let mut ground: Vec<_> = world.ground.values().collect();
+        ground.sort_by_key(|lying| lying.ground.item.vnum);
+        assert_eq!(ground.len(), 2, "both rows hit and laid");
+        assert_eq!(ground[0].ground.item.vnum, 15370);
+        assert_eq!(ground[1].ground.item.vnum, 30077);
+        assert_eq!(ground[1].ground.item.count(), 15);
+        for lying in &ground {
+            assert_eq!(
+                lying.owner.as_ref().map(|owner| owner.pid),
+                Some(1),
+                "the killer owns every hit of a multi-hit kill"
+            );
+        }
+    }
+
+    /// A 2493 killed at level 75 with one hitting row lays one item, and the one-hit arm
+    /// names the killer directly (`G/char_battle.cpp:870-890`). Seed 20 (found offline):
+    /// both hits' chats miss, the kill recovery misses, the gold chance misses at chance
+    /// 0, `drop_pct`'s legs miss, and the row's draw hits (9401 <= 15000).
+    #[test]
+    fn a_single_limit_hit_lays_one_item_owned_by_the_killer() {
+        use gamedata::drop::{DropItem, DropTables, LevelGroup};
+        use world::item::ItemIdRange;
+        let mut npc = a_monster(1);
+        npc.race = 2493;
+        npc.fight.gold_range = [0, 0];
+        let (_clock, mut world, mut alpha) = a_reward_fight(npc, 75, 10, NEAR);
+        world
+            .install_item_ids(ItemIdRange::new(1, 1_000_000, 1).expect("a usable range"))
+            .expect("the first install");
+        let mut tables = DropTables::default();
+        tables.mob.limit.insert(
+            2493,
+            LevelGroup {
+                level_limit: 75,
+                items: vec![DropItem {
+                    vnum: 30077,
+                    pct: 15 * 1000,
+                    count: 15,
+                }],
+            },
+        );
+        world.drops = Arc::new(tables);
+        let stamina = points_of(&mut world, 1).get_point(point::POINT_STAMINA);
+        let points = super::super::fixtures::points_at(75, stamina, points_of(&mut world, 1).exp());
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(1))
+            .expect("the killer stands")
+            .set_points(Some(points));
+        world.dice = Pcg32::new(20, 0);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        let _ = drained(&mut alpha);
+        let ground: Vec<_> = world.ground.values().collect();
+        assert_eq!(ground.len(), 1, "the one row hit and laid");
+        assert_eq!(ground[0].ground.item.vnum, 30077);
+        assert_eq!(ground[0].ground.item.count(), 15);
+        assert_eq!(
+            ground[0].owner.as_ref().map(|owner| owner.pid),
+            Some(1),
+            "the one-hit arm names the killer"
+        );
+        assert!(
+            world.npc_combat[&ME].damage.is_empty(),
+            "the placement clears the damage map"
+        );
+    }
+
+    /// A hitting row whose vnum takes an unported creation arm lays nothing: seed 0's
+    /// chats miss, the kill recovery misses, `drop_pct`'s legs miss, and the row always
+    /// hits (pct 1000000), but 72723 is a socketed vnum, so creation refuses with a warn
+    /// and the placement's empty arm clears the damage map.
+    #[test]
+    fn an_unported_limit_hit_lays_nothing_and_clears_the_damage_map() {
+        use gamedata::drop::{DropItem, DropTables, LevelGroup};
+        use world::item::ItemIdRange;
+        let mut npc = a_monster(1);
+        npc.race = 2493;
+        npc.fight.gold_range = [0, 0];
+        let (_clock, mut world, mut alpha) = a_reward_fight(npc, 75, 10, NEAR);
+        world
+            .install_item_ids(ItemIdRange::new(1, 1_000_000, 1).expect("a usable range"))
+            .expect("the first install");
+        let mut tables = DropTables::default();
+        tables.mob.limit.insert(
+            2493,
+            LevelGroup {
+                level_limit: 75,
+                items: vec![DropItem {
+                    vnum: 72723,
+                    pct: 1_000_000,
+                    count: 1,
+                }],
+            },
+        );
+        world.drops = Arc::new(tables);
+        let stamina = points_of(&mut world, 1).get_point(point::POINT_STAMINA);
+        let points = super::super::fixtures::points_at(75, stamina, points_of(&mut world, 1).exp());
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(1))
+            .expect("the killer stands")
+            .set_points(Some(points));
+        world.dice = Pcg32::new(0, 0);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        let _ = drained(&mut alpha);
+        assert!(world.ground.is_empty(), "the refused hit lays nothing");
+        assert!(
+            world.npc_combat[&ME].damage.is_empty(),
+            "the empty arm still clears the damage map"
+        );
+    }
+
+    /// Clearing an owned pile sends the empty-name record and frees it; clearing an unowned
+    /// pile sends nothing (`SetOwnership(NULL)`, `G/item.cpp:1735-1749`).
+    #[test]
+    fn clearing_a_ground_owner_sends_the_empty_name_once() {
+        use crate::game_state::view_encode;
+        let mut npc = a_monster(1);
+        npc.fight.rank = common::enums::EMobRank::King as u8;
+        npc.fight.gold_range = [100, 100];
+        // Lay a pile through the gold half directly: KING at equal levels always pays.
+        let (_clock, mut world, _alpha) = a_reward_fight(npc, 75, 10, NEAR);
+        world.dice = Pcg32::new(0, 0);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        hit(&mut world, 1, ME);
+        let pile = *world.ground.keys().next().expect("a pile");
+        let name = crate::loading_phase::name_field("Alpha");
+        world.set_ground_ownership(pile, Some((1, name)), 10);
+        assert!(world.ground[&pile].owner.is_some(), "owned");
+        // Keep-first: a second owner is refused silently.
+        let other = crate::loading_phase::name_field("Beta");
+        world.set_ground_ownership(pile, Some((2, other)), 10);
+        assert_eq!(world.ground[&pile].owner.as_ref().unwrap().pid, 1);
+        world.set_ground_ownership(pile, None, 10);
+        assert!(world.ground[&pile].owner.is_none(), "cleared");
+        let empty = view_encode::ground_ownership(pile, [0; 25]);
+        assert_eq!(empty.len(), 1 + 4 + 25, "header + VID + empty name");
+        // Clearing again sends nothing and changes nothing.
+        world.set_ground_ownership(pile, None, 10);
+        assert!(world.ground[&pile].owner.is_none());
+    }
+
+    /// Two attackers split the experience by damage: the top takes 20% plus its share of the
+    /// rest, the other its share (`DistributeExp`'s two walks, `G/char_battle.cpp:2920-2979`).
+    /// The most-attacked is the returned attacker, whatever the VIDs.
+    #[test]
+    fn two_attackers_split_by_damage_with_the_top_bonus_to_the_first_max() {
+        let (_clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 100, 10, NEAR);
+        let mut beta = a_player(&mut world, 2, EAST);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        drained(&mut beta);
+        // Alpha's stunning hit is in the map; Beta's earlier 30 joins it after the drains,
+        // so the first maximum is Beta's whatever the VIDs.
+        let dealt = world.npc_combat[&ME].damage[&1].total;
+        world
+            .npc_combat
+            .entry(ME)
+            .or_default()
+            .damage
+            .insert(2, row(30));
+        hit(&mut world, 1, ME);
+        // Top is Beta with 30 of (30 + dealt): 20 + its share; Alpha takes its share.
+        let total = 30 + dealt;
+        let beta_share = 20 + common::cfloat::f64_to_i32(80.0 * (30.0 / f64::from(total)));
+        let alpha_share = common::cfloat::f64_to_i32(80.0 * (f64::from(dealt) / f64::from(total)));
+        // Each grant sends its exp record then its orb, top first.
+        assert_eq!(
+            drained(&mut alpha),
+            [
+                no_target(),
+                owner(0),
+                fly(2),
+                exp_change(1, i64::from(alpha_share), i64::from(alpha_share)),
+                fly(1),
+                dead_record()
+            ]
+        );
+        assert_eq!(
+            drained(&mut beta),
+            [
+                owner(0),
+                exp_change(2, i64::from(beta_share), i64::from(beta_share)),
+                fly(2),
+                fly(1),
+                dead_record()
+            ]
+        );
+        assert_eq!(world.reward_exp(ME), None, "a second Reward finds no exp");
+    }
+    /// An attacker beyond 5000 earns nothing; the in-range attacker still takes the whole
+    /// experience.
+    #[test]
+    fn attackers_beyond_range_earn_nothing() {
+        let (_clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 100, 10, NEAR);
+        // Beta stands 5400 east: `DISTANCE_APPROX` reads 5189, past the 5000 gate (its
+        // under-read needs a true ~5208).
+        let mut beta = enter(&mut world, 2, (SPOT.0 + 5400, SPOT.1), 12_345);
+        drained(&mut beta);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        drained(&mut beta);
+        let dealt = world.npc_combat[&ME].damage[&1].total;
+        world
+            .npc_combat
+            .entry(ME)
+            .or_default()
+            .damage
+            .insert(2, row(10 * dealt));
+        hit(&mut world, 1, ME);
+        assert_eq!(
+            drained(&mut alpha),
+            [
+                no_target(),
+                owner(0),
+                exp_change(1, 100, 100),
+                fly(1),
+                dead_record()
+            ]
+        );
+        // Beta sees the view's records but no exp record of its own.
+        assert_eq!(drained(&mut beta), [owner(0), fly(1), dead_record()]);
+    }
+    /// An attacker on another map earns nothing even at the same coordinates (D2: legacy
+    /// checks only the distance, which would grant across maps).
+    #[test]
+    fn attackers_on_another_map_earn_nothing() {
+        let (_clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 100, 10, NEAR);
+        world.host_map(
+            PLACE.0,
+            PLACE.1 + 1,
+            SectreeGrid {
+                x: 0,
+                y: 0,
+                columns: 10,
+                rows: 10,
+            },
+        );
+        let mut beta = enter_seeing(&mut world, (PLACE.0, PLACE.1 + 1), 2, NEAR, 12_345).0;
+        drained(&mut beta);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        drained(&mut beta);
+        let dealt = world.npc_combat[&ME].damage[&1].total;
+        world
+            .npc_combat
+            .entry(ME)
+            .or_default()
+            .damage
+            .insert(2, row(10 * dealt));
+        hit(&mut world, 1, ME);
+        assert_eq!(
+            drained(&mut alpha),
+            [
+                no_target(),
+                owner(0),
+                exp_change(1, 100, 100),
+                fly(1),
+                dead_record()
+            ]
+        );
+        assert!(
+            drained(&mut beta).is_empty(),
+            "Beta earns nothing cross-map"
+        );
+    }
+    /// A monster worth no experience distributes nothing: no record, no orb, and the damage
+    /// map is left for the destroy (`DistributeExp`'s first return, `:2822`).
+    #[test]
+    fn a_monster_worth_no_exp_distributes_nothing() {
+        let (_clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 0, 10, NEAR);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        assert_eq!(drained(&mut alpha), [no_target(), owner(0), dead_record()]);
+        assert!(!world.npc_combat[&ME].damage.is_empty(), "the map is kept");
+        assert_eq!(world.reward_exp(ME), None);
+    }
+
+    /// A monster whose attackers all left distributes nothing but consumes its experience
+    /// (`SetExp(0)` runs before the empty return, `:2893-2897`).
+    #[test]
+    fn a_kill_with_no_attacker_in_range_consumes_the_exp() {
+        let (_clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 100, 10, NEAR);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        // Alpha's damage stays in the map, but Alpha leaves the world before the stun ends.
+        world.leave_world_by(
+            Vid::new(1),
+            crate::game_loop_messages::Departure::Disconnect,
+        );
+        world.process_pulse(P0 + 75);
+        assert_eq!(world.npc_by_vid(ME).unwrap().exp, 0);
+        assert_eq!(world.reward_exp(ME), None);
+    }
+    /// A level-10 killer of a level-25 monster takes the 180% row; of a level-1 monster the
+    /// 70% row; of a level-9 one the 100% row (`CALCULATE_VALUE_LVDELTA`).
+    #[test]
+    fn the_level_delta_scales_the_share() {
+        for (monster_level, percent) in [(25_u8, 180_i64), (1_u8, 70_i64), (9_u8, 100_i64)] {
+            let (_clock, mut world, mut alpha) =
+                a_reward_fight(a_monster(1), 100, monster_level, NEAR);
+            world.target(Vid::new(1), ME);
+            hit(&mut world, 1, ME);
+            drained(&mut alpha);
+            hit(&mut world, 1, ME);
+            let grant = 100 * percent / 100;
+            assert_eq!(
+                drained(&mut alpha),
+                [
+                    no_target(),
+                    owner(0),
+                    exp_change(1, grant, grant),
+                    fly(1),
+                    dead_record()
+                ],
+                "monster level {monster_level}"
+            );
+        }
+    }
+
+    /// A grant past a tenth of the next level's cost is capped there (`MIN(GetNextExp()/10)`).
+    #[test]
+    fn a_grant_past_a_tenth_of_the_next_cost_is_capped() {
+        // Level 10 needs 33,000: the tenth is 3,300, and the monster pays 100,000.
+        let (_clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 100_000, 10, NEAR);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        assert_eq!(
+            drained(&mut alpha),
+            [
+                no_target(),
+                owner(0),
+                exp_change(1, 3_300, 3_300),
+                fly(1),
+                dead_record()
+            ]
+        );
+    }
+    /// The ramadan and mall bonuses stack in order: a 100 share with ramadan 30 and mall
+    /// 50 grants 195 (`exp += exp * pct / 100` per term, `:2685-2686`).
+    #[test]
+    fn the_ramadan_and_mall_bonuses_stack_in_order() {
+        let (_clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 100, 10, NEAR);
+        points_of(&mut world, 1)
+            .point_change(point::POINT_RAMADAN_CANDY_BONUS_EXP, 30, false, false)
+            .unwrap();
+        points_of(&mut world, 1)
+            .point_change(point::POINT_MALL_EXPBONUS, 50, false, false)
+            .unwrap();
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        assert_eq!(
+            drained(&mut alpha),
+            [
+                no_target(),
+                owner(0),
+                exp_change(1, 195, 195),
+                fly(1),
+                dead_record()
+            ]
+        );
+    }
+    /// A tenth of kills heals the attacker: with `POINT_KILL_HP_RECOVERY` at 10 and the
+    /// 1-in-10 draw landing 0, the killer takes a tenth of its max HP with a small-HP orb
+    /// after the exp orb (`DistributeHP`, `:2438-2442`, in `Reward`'s tail, `:789-792`).
+    /// The seed scan replays the killing hit on trial worlds until the draw lands 0.
+    #[test]
+    fn a_tenth_of_kills_heals_the_attacker() {
+        let (_clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 100, 10, NEAR);
+        points_of(&mut world, 1)
+            .point_change(point::POINT_KILL_HP_RECOVERY, 10, false, false)
+            .unwrap();
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        // The killing hit draws the chat line's `number(0, 60)` before the stun check (a
+        // second `number(1, 3)` follows only when the chat fires), and `POINT_EXP_DOUBLE_BONUS`
+        // is 0, so the recovery draw is the seed's second draw when the first misses 0.
+        // The killing hit draws `number(0, 0)` (unarmed roll; the `number(1, 5)` floor is
+        // skipped at 28 damage) and the chat line's `number(0, 60)` (no second draw when
+        // the chat misses), then the recovery's `number(0, 9)` (no other draw between:
+        // `exp_double` is 0, no level-up, no quests, no steals).
+        let seed = (0..100_000)
+            .find(|&seed| {
+                let mut dice = Pcg32::new(seed, 0);
+                let _ = world::character::number(&mut dice, 0, 0);
+                world::character::number(&mut dice, 0, 60) != 0
+                    && world::character::number(&mut dice, 0, 9) == 0
+            })
+            .expect("a seed in 100,000");
+        world.dice = Pcg32::new(seed, 0);
+        let max_hp = points_of(&mut world, 1).max_hp();
+        // Alpha stands hurt: the heal lands below max and writes its record.
+        points_of(&mut world, 1)
+            .point_change(point::POINT_HP, -500, false, false)
+            .unwrap();
+        hit(&mut world, 1, ME);
+        let heal = max_hp * 10 / 100;
+        let mut orbs = Vec::new();
+        GcCreateFly::new(FLY_HP_SMALL, ME, 1).encode_into(&mut orbs);
+        assert_eq!(
+            drained(&mut alpha),
+            [
+                no_target(),
+                owner(0),
+                exp_change(1, 100, 100),
+                fly(1),
+                // The heal hides the amount and carries the value.
+                point_changes(
+                    &[PointRecord {
+                        kind: u8::try_from(point::POINT_HP).unwrap(),
+                        amount: 0,
+                        value: i64::from(max_hp - 500 + heal),
+                        broadcast: false,
+                    }],
+                    1,
+                )
+                .concat(),
+                orbs,
+                dead_record()
+            ]
+        );
+    }
+    /// A kill of a monster within 10 levels raises a non-negative alignment by 2, and the
+    /// /10 crossing sends the killer's update (`UpdateAlignment`, `:3477-3494`); a kill
+    /// without a crossing sends no update. The update goes around the killer, who gets its
+    /// own copy, after the exp record and orb and before `GC_DEAD`.
+    #[test]
+    fn a_kill_raises_alignment_and_a_tenth_crossing_sends_the_update() {
+        for (start, crossed) in [(8_i32, true), (0_i32, false)] {
+            let (_clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 100, 10, NEAR);
+            world.bodies.get_mut(&Vid::new(1)).unwrap().card.alignment = start;
+            world.target(Vid::new(1), ME);
+            hit(&mut world, 1, ME);
+            drained(&mut alpha);
+            hit(&mut world, 1, ME);
+            assert_eq!(
+                world.bodies[&Vid::new(1)].card.alignment,
+                start + 2,
+                "start {start}"
+            );
+            let mut expected = vec![no_target(), owner(0), exp_change(1, 100, 100), fly(1)];
+            if crossed {
+                expected.push(
+                    world
+                        .update_frame(Vid::new(1), world.affect_flags_of(Vid::new(1)))
+                        .expect("Alpha is online"),
+                );
+            }
+            expected.push(dead_record());
+            assert_eq!(drained(&mut alpha), expected, "start {start}");
+        }
+    }
+
+    /// A kill of a monster more than 10 levels below leaves the alignment alone.
+    #[test]
+    fn a_kill_of_a_far_lower_monster_leaves_alignment_alone() {
+        let (_clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 100, 1, NEAR);
+        // Level 10 vs level 1: 1 - 10 = -9, within the gate; a level-21 killer stands
+        // 20 below... instead the monster's level 1 against a level-12-plus killer
+        // misses by 11. Set the body's level directly.
+        world.bodies.get_mut(&Vid::new(1)).unwrap().card.level = 12;
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        assert_eq!(world.bodies[&Vid::new(1)].card.alignment, 0);
+        assert_eq!(
+            drained(&mut alpha),
+            [
+                no_target(),
+                owner(0),
+                exp_change(1, 70, 70),
+                fly(1),
+                dead_record()
+            ]
+        );
+    }
+    /// A kill with a negative alignment raises it by 7, or by 14 with the faster-alignment
+    /// unique (70051) worn (`:796-801`).
+    #[test]
+    fn a_kill_with_a_negative_alignment_rises_by_7_or_14_with_the_unique() {
+        for worn in [false, true] {
+            let clock = TestClock::default();
+            clock.set(T0);
+            let mut monster = a_monster(1);
+            monster.exp = 100;
+            monster.fight.level = 10;
+            let mut world = a_field_on(&clock, vec![monster], open_cells());
+            let mut items = Vec::new();
+            if worn {
+                let mut medal = Item::new(11, 70_051);
+                medal.set_size(1).unwrap();
+                let cell = INVENTORY_MAX_NUM + EWearPositions::Unique1 as u16;
+                items.push((ItemPos::new(EWindows::Inventory as u8, cell), medal));
+            }
+            let (mut alpha, _shown) = enter_seeing_with(&mut world, PLACE, 1, NEAR, 12_345, &items);
+            world.process_pulse(P0);
+            world.bodies.get_mut(&Vid::new(1)).unwrap().card.alignment = -8;
+            world.target(Vid::new(1), ME);
+            hit(&mut world, 1, ME);
+            drained(&mut alpha);
+            hit(&mut world, 1, ME);
+            let gain = if worn { 14 } else { 7 };
+            assert_eq!(
+                world.bodies[&Vid::new(1)].card.alignment,
+                -8 + gain,
+                "worn {worn}"
+            );
+            // -8/10 = 0 truncates toward zero on both sides; -1 and 6 share the quotient,
+            // so neither kill sends the update.
+            assert_eq!(
+                drained(&mut alpha),
+                [
+                    no_target(),
+                    owner(0),
+                    exp_change(1, 100, 100),
+                    fly(1),
+                    dead_record()
+                ],
+                "worn {worn}"
+            );
+        }
+    }
 
     /// A hit on the stunned monster runs `Dead` at once (`G/char_battle.cpp:2248-2252`): no
     /// damage is shown, and the dead monster refuses the claim with nothing sent, as `Dead`
@@ -957,7 +2170,7 @@ mod tests {
         drained(&mut alpha);
         hit(&mut world, 1, ME);
         assert_eq!(drained(&mut alpha), [no_target(), owner(0), dead_record()]);
-        let combat = world.npc_combat[&ME];
+        let combat = world.npc_combat[&ME].clone();
         assert_eq!(combat.killer_pid, 0);
         assert_eq!((combat.stun_due, combat.dead_due), (None, Some(P0 + 25)));
         world.process_pulse(P0 + 25);
@@ -1726,5 +2939,55 @@ mod tests {
         };
         assert_eq!(world.npc_combat[&ME].sync, released);
         assert_eq!(world.bodies[&Vid::new(3)].sync, released);
+    }
+    // appended temporarily to fight.rs tests
+
+    /// A stunned player's own attack is refused: nothing is sent and the monster's pools
+    /// hold (`CanMove` on the stun).
+    #[test]
+    fn a_stunned_players_own_attack_is_refused() {
+        use super::super::affect::Affect;
+        use crate::loading_phase::{AFFECT_STUN, AFF_STUN, STUN_TICKS};
+        let (_clock, mut world, mut alpha) = a_fight(a_monster(MAX_HP), NEAR);
+        let before = world.npc_by_vid(ME).unwrap().hp;
+        world.add_pc_affect(
+            Vid::new(1),
+            Affect {
+                kind: AFFECT_STUN,
+                apply_on: 0,
+                value: 0,
+                flag: AFF_STUN,
+                remaining: STUN_TICKS,
+            },
+        );
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        assert!(drained(&mut alpha).is_empty());
+        assert_eq!(world.npc_by_vid(ME).unwrap().hp, before);
+    }
+
+    /// A stunned player cannot `BeginFight`: a monster's hit changes nothing of its Move
+    /// or its flag.
+    #[test]
+    fn a_stunned_player_cannot_begin_fight() {
+        use super::super::affect::Affect;
+        use crate::loading_phase::{AFFECT_STUN, AFF_STUN, STUN_TICKS};
+        let (_clock, mut world, _alpha) = a_fight(a_monster(MAX_HP), NEAR);
+        world.add_pc_affect(
+            Vid::new(1),
+            Affect {
+                kind: AFFECT_STUN,
+                apply_on: 0,
+                value: 0,
+                flag: AFF_STUN,
+                remaining: STUN_TICKS,
+            },
+        );
+        world.goto(1, NEAR.0 + 2000, NEAR.1);
+        world.npc_mut(ME).unwrap().fight.attack_range = 175;
+        assert!(world.mob_attack(ME, Vid::new(1)));
+        let body = world.bodies.get(&Vid::new(1)).unwrap();
+        assert!(body.motion.moving);
+        assert!(!body.fighting);
     }
 }

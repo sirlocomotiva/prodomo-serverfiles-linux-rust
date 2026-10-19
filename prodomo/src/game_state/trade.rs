@@ -463,6 +463,7 @@ impl GameState {
                 pk_mode: self.pk_mode_of(target),
                 affect_flags: self.affect_flags_of(common::vid::Vid::new(target)),
                 dead: self.is_dead(target),
+                alignment: self.alignment_of(target),
             },
         })
     }
@@ -1014,6 +1015,7 @@ mod tests {
             language: 1,
             pk_mode: crate::loading_phase::PK_MODE_PROTECT,
             skill_group: 0,
+            alignment: 0,
         }
     }
 
@@ -1056,6 +1058,7 @@ mod tests {
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             affect_flags: [0; 2],
             dead: false,
+            alignment: 0,
         }
     }
 

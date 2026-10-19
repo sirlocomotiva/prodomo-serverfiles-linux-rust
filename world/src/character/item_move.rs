@@ -452,6 +452,13 @@ pub enum MoveRefused {
     DroppedWhileDead,
     /// `PickupItem`: the character is dead (D10).
     PickedUpWhileDead,
+    /// `PickupItem`: `IsOwnership` refused (`G/item.cpp:1696-1702`) — another character's
+    /// ownership event still runs. Legacy sends nothing and returns false (`:8160`).
+    OwnedByOther,
+    /// `PointChange(POINT_GOLD)`: the pile would take the gold to [`super::shop::GOLD_MAX_MAX`], so no
+    /// gold moves and no gold change is sent, while the pile is still consumed
+    /// (`G/char.cpp:4407-4423`).
+    GoldOverflow,
 }
 
 impl MoveRefused {
@@ -607,6 +614,8 @@ impl core::fmt::Display for MoveRefused {
             Self::UsedWhileDown => f.write_str("an item is used while stunned or dead"),
             Self::DroppedWhileDead => f.write_str("an item is dropped while dead"),
             Self::PickedUpWhileDead => f.write_str("an item is picked up while dead"),
+            Self::OwnedByOther => f.write_str("another character owns the ground item"),
+            Self::GoldOverflow => f.write_str("the gold pile would reach the gold cap"),
         }
     }
 }

@@ -4,6 +4,7 @@ mod apply;
 mod combat;
 mod death_penalty;
 mod dice;
+mod drop_item;
 mod equip;
 mod equipment;
 mod grant;
@@ -32,14 +33,20 @@ pub use apply::{
     APPLY_MAX_SP_PCT, APPLY_NONE, APPLY_SKILL, MAX_APPLY_NUM,
 };
 pub use combat::{
-    attack_rating, calc_melee_damage, melee_reach, mob_attack_range, mob_reach, pc_hp_pct,
-    pk_eligibility, strike_npc, strike_pc, AttackRatingInput, HitEvent, MobStriker, PcHitEnd,
-    PcStrike, PcVictim, PkActor, PkDenial, PkEligibility, PkMode, Strike, Striker, Struck,
-    DAMAGE_CRITICAL, DAMAGE_NORMAL, DAMAGE_PENETRATE, FLY_HP_SMALL, FLY_SP_SMALL, SE_CRITICAL,
-    SE_PENETRATE,
+    attack_rating, battle_damage_floor, calc_melee_damage, melee_reach, mob_att_bonus_self,
+    mob_attack_range, mob_calc_attack, mob_reach, pc_hp_pct, pc_poison_rate, pk_eligibility,
+    shoot_pc, skill_damage_pc, strike_npc, strike_npc_by_npc, strike_pc, AttackRatingInput,
+    HitEvent, MobAttackAffect, MobStriker, NpcVictim, PcHitEnd, PcStrike, PcVictim, PkActor,
+    PkDenial, PkEligibility, PkMode, Strike, Striker, Struck, DAMAGE_CRITICAL, DAMAGE_DODGE,
+    DAMAGE_NORMAL, DAMAGE_PENETRATE, DAMAGE_POISON, FLY_EXP, FLY_HP_SMALL, FLY_SP_SMALL,
+    SE_CRITICAL, SE_EFFECT_HEALER, SE_PENETRATE,
 };
 pub use death_penalty::{death_penalty_loss, exp_loss_percent};
 pub use dice::{number, Dice, Pcg32};
+pub use drop_item::{
+    attribute_set_index, gauss_random, make_drop_item, unported_drop, DropAsk, DropMade,
+    DropRefused, Gauss, UnportedDrop,
+};
 pub use equip::{
     find_equip_cell, is_equipable, is_female, look_of, use_item, wear_pos, worn_system_not_ported,
     CharacterLook, Gear, WornSystem,
@@ -49,7 +56,10 @@ pub use equipment::{
     Worn, PARTS,
 };
 pub use grant::{grant, GrantRefused, Granted, GRANT_WINDOW};
-pub use ground::{drop_item, pickup_item, DropAt, GroundItem, Picker, DROPPED_NOTICE};
+pub use ground::{
+    drop_gold, drop_item, pickup_gold, pickup_item, DropAt, GroundItem, Picker, DROPPED_NOTICE,
+    GOLD_DROPPED_NOTICE,
+};
 pub use inventory::{
     character_cell_bound, custom_inventory_category_of, custom_inventory_position,
     inventory_page_by_pos, inventory_type_by_pos, inventory_type_of_cell,
@@ -68,8 +78,9 @@ pub use items::{
 pub use manager::{CharacterManager, CharacterManagerError, UpdateReport};
 pub use model::{Character, CharacterKind};
 pub use points::{
-    apply_is_ported, race_to_job, sungma_will, PassiveBonuses, PointChangeRefused, PointRecord,
-    Points, PointsRow, SungmaWill, IMMUNE_FALL, IMMUNE_SLOW, IMMUNE_STUN, SUNGMA_WILL_MAPS,
+    apply_is_ported, quarter_cost, race_to_job, sungma_will, ExpLimits, GainOutcome,
+    PassiveBonuses, PointChangeRefused, PointRecord, Points, PointsRow, SungmaWill, IMMUNE_FALL,
+    IMMUNE_SLOW, IMMUNE_STUN, SUNGMA_WILL_MAPS,
 };
 pub use potion::{is_recovering, update_recovery, SE_HPUP_RED, SE_SPUP_BLUE};
 pub use quickslot::{

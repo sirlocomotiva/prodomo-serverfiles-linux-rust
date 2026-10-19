@@ -85,13 +85,34 @@ pub(super) enum Due {
     /// `dead_event` of the non-player under this VID.
     Dead(u32),
     /// `recovery_event` of the non-player under this VID.
+    /// `recovery_event` of the non-player under this VID.
     Recovery(u32),
+    /// `mob_skill_hit_event` of the non-player under this VID at this map key (the
+    /// splash vec index). It sorts after [`Due::Recovery`]: at an equal Pulse the
+    /// skill fires after the recovery event (a Divergence — legacy's heap order at
+    /// equal priority is heap-shape dependent).
+    MobSkill {
+        /// The owner's VID.
+        vid: u32,
+        /// The map key.
+        key: u32,
+    },
     /// `StunEvent` of the player under this VID. See [`super::death`].
     PcStun(u32),
     /// `dead_event` of the player under this VID.
     PcDead(u32),
     /// `recovery_event` of the player under this VID.
     PcRecovery(u32),
+    /// `poison_event` of the player under this VID, with the ticks it has left. It sorts
+    /// after [`Due::PcRecovery`]: at an equal Pulse the tick runs after the recovery
+    /// event (a Divergence — legacy's heap order at equal priority is heap-shape
+    /// dependent).
+    PcPoison {
+        /// The victim's VID.
+        vid: u32,
+        /// The ticks left, counting the one this run fires.
+        count: u32,
+    },
 }
 
 /// The regen events and the ore veins' ends, with what a regen spawns from.
@@ -104,7 +125,7 @@ pub(super) struct Regens {
     /// The region of each map boot stood characters up on, keyed as the maps are.
     regions: BTreeMap<(u8, i32), MapRegion>,
     /// The events, by the Pulse each is due on.
-    due: BTreeSet<(u64, Due)>,
+    pub(super) due: BTreeSet<(u64, Due)>,
 }
 
 impl Regens {
@@ -162,6 +183,12 @@ impl GameState {
             .is_some_and(|cells| cells.is_movable(x, y))
     }
 
+    /// `SECTREE_MANAGER::GetMovablePosition` (`G/sectree_manager.cpp:789-813`) on the cells boot
+    /// handed over: `None` on a map it handed none of, or where none of the 161 is movable.
+    pub(super) fn movable_position(&self, map: i32, x: i32, y: i32) -> Option<(i32, i32)> {
+        self.regens.cells.get(map)?.movable_position(x, y)
+    }
+
     /// `SECTREE::IsAttr(x, y, ATTR_BANPK)` on the cells boot handed over: false on a map it
     /// handed none of.
     pub(super) fn is_banpk(&self, map: i32, x: i32, y: i32) -> bool {
@@ -217,9 +244,11 @@ impl GameState {
                 Due::Stun(vid) => self.stun_event(vid),
                 Due::Dead(vid) => self.dead_event(vid),
                 Due::Recovery(vid) => self.recovery_event(vid),
+                Due::MobSkill { vid, key } => self.mob_skill_event(vid, key),
                 Due::PcStun(vid) => self.pc_stun_event(vid),
                 Due::PcDead(vid) => self.pc_dead_event(vid),
                 Due::PcRecovery(vid) => self.pc_recovery_event(vid),
+                Due::PcPoison { vid, count } => self.pc_poison_event(vid, count),
             }
         }
     }

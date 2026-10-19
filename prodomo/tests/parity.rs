@@ -1464,6 +1464,8 @@ fn game_len(header: u8) -> usize {
         GC_WALK_MODE => WALK_MODE_LEN,
         GC_TARGET => TARGET_LEN,
         GC_DAMAGE_INFO => DAMAGE_INFO_LEN,
+        GC_CREATE_FLY => CREATE_FLY_LEN,
+        GC_FLY_TARGETING => FLY_TARGETING_LEN,
         other => panic!("unexpected loading or enter-game header {other}"),
     }
 }
@@ -1493,6 +1495,13 @@ const SYNC_POSITION_LEN: usize = 3 + 12;
 const GC_OWNERSHIP: u8 = 62;
 /// `TPacketGCOwnership` is the header plus two DWORDs.
 const OWNERSHIP_LEN: usize = 1 + 4 + 4;
+/// `HEADER_GC_CREATE_FLY` is 70 (`G/packet.h:158`): the header, the fly type, the victim
+/// and the attacker (`TPacketGCCreateFly`, `:1735-1743`).
+const GC_CREATE_FLY: u8 = 70;
+/// `TPacketGCCreateFly` is the header, a byte, and two DWORDs.
+const CREATE_FLY_LEN: usize = 1 + 1 + 4 + 4;
+/// `FLY_EXP`, the exp orb (`G/char.h:91`).
+const FLY_EXP: u8 = 1;
 /// `GC_CHARACTER_POSITION` is the header, the VID, and the pose.
 const CHARACTER_POSITION_LEN: usize = 6;
 /// The `EChatType` byte of a talking line.
@@ -2199,6 +2208,28 @@ impl Keyed {
         record.truncate(len);
         record
     }
+    /// [`Keyed::read_sized`], but it waits until `deadline` across 5 s read beats instead
+    /// of panicking on one quiet beat, and reports `None` when the window runs out. A
+    /// partial frame's bytes wait on the wire, so the caller's next call resumes the same
+    /// record.
+    fn read_sized_until(
+        &mut self,
+        len_of: &impl Fn(u8, &[u8]) -> usize,
+        deadline: std::time::Instant,
+    ) -> Option<Vec<u8>> {
+        let key = self.output;
+        let mut wire = self.client.expect_bytes_until(8, deadline)?;
+        let first = decrypt_padded(&wire, &key).expect("aligned");
+        let len = len_of(first[0], &first);
+        wire.extend(
+            self.client
+                .expect_bytes_until(len.div_ceil(8) * 8 - 8, deadline)?,
+        );
+        let mut record = decrypt_padded(&wire, &key).expect("aligned");
+        assert!(record[len..].iter().all(|&byte| byte == 0), "{record:02x?}");
+        record.truncate(len);
+        Some(record)
+    }
 
     /// Read the next loading or enter-game record that is not the revive timer's own, a
     /// monster's nor a stamina refill: the first two are noted by [`Keyed::timer_record`] and
@@ -2262,6 +2293,31 @@ impl Keyed {
             usize::MAX => usize::from(first[1]) | (usize::from(first[2]) << 8),
             fixed => fixed,
         })
+    }
+    /// [`Keyed::read_game_raw`], but it waits until `deadline` across 5 s read beats
+    /// instead of panicking on one quiet beat, and reports `None` when the window runs
+    /// out.
+    fn read_game_raw_until(&mut self, deadline: std::time::Instant) -> Option<Vec<u8>> {
+        loop {
+            let record = self.read_wire_until(deadline)?;
+            if !is_npc_chatter(&record) {
+                return Some(record);
+            }
+        }
+    }
+
+    /// [`Keyed::read_wire`], but it waits until `deadline` across 5 s read beats instead
+    /// of panicking on one quiet beat, and reports `None` when the window runs out. A
+    /// fight's critical or penetrate shows `GC_SPECIAL_EFFECT` (byte 114), which
+    /// [`game_len`] does not size, so the width comes from [`fight_len`].
+    fn read_wire_until(&mut self, deadline: std::time::Instant) -> Option<Vec<u8>> {
+        self.read_sized_until(
+            &|header, first| match fight_len(header) {
+                usize::MAX => usize::from(first[1]) | (usize::from(first[2]) << 8),
+                fixed => fixed,
+            },
+            deadline,
+        )
     }
 
     /// Every complete record that arrives within `window`, decrypted.
@@ -4005,6 +4061,17 @@ const GOLD_CHANGE_LEN: usize = 4 + 4 + 8 + 8;
 /// A `GC_SHOP` that carries its subheader alone.
 fn shop_answer(subheader: u8) -> Vec<u8> {
     vec![GC_SHOP, 4, 0, subheader]
+}
+
+/// The amount and value fields of a `GC_CHARACTER_GOLD_CHANGE`: the header is four bytes,
+/// then the VID, the signed amount and the purse.
+fn purse_amount(purse: &[u8]) -> i64 {
+    i64::from_le_bytes(purse[8..16].try_into().expect("eight bytes"))
+}
+
+/// [`purse_amount`]'s value half.
+fn purse_value(purse: &[u8]) -> u64 {
+    u64::from_le_bytes(purse[16..24].try_into().expect("eight bytes"))
 }
 
 /// A `GC_CHARACTER_GOLD_CHANGE` in `TPacketGCGoldChange` field order.
@@ -7663,8 +7730,7 @@ fn a_dropped_stack_lies_on_the_map_until_someone_picks_it_up() {
 
 /// `event.item.item_destroy_event`: with a two-second lifetime, an item nobody picks up is
 /// destroyed on time and every client in its view sees it go (`RemoveFromGround`,
-/// `G/item.cpp:533-547`). A `CG_ITEM_DROP2` carrying gold is ignored before the drop limit,
-/// because `DropGold` is not ported.
+/// `G/item.cpp:533-547`).
 #[test]
 fn a_dropped_item_nobody_picks_up_is_destroyed_on_time_and_its_view_sees_it_go() {
     let Some(database) = ScratchDatabase::create() else {
@@ -7687,16 +7753,6 @@ fn a_dropped_item_nobody_picks_up_is_destroyed_on_time_and_its_view_sees_it_go()
     assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, stackable, 3));
     let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
     alpha.sees_arrive(zulu_listed.id, false);
-
-    // When: Alpha drops gold. Then: nothing answers, and the drop limit is not started.
-    alpha.unanswered(
-        &protocol::cg_item_drop2::CgItemDrop2::new(
-            protocol::item_pos::ItemPos::new(inventory, 0),
-            100,
-            1,
-        )
-        .encode(),
-    );
 
     // When: Alpha drops the stack whole.
     alpha.send_record(&client_item_drop(0, None));
@@ -7786,6 +7842,80 @@ fn a_pick_up_is_stored_only_after_the_drop_it_follows() {
         "EXISTS (SELECT 1 FROM item JOIN player ON player.id = item.owner_id WHERE item.id = \
          100000000 AND name = 'Zulu' AND window_type = 1 AND pos = 0 AND count = 3) AND \
          (SELECT count(*) FROM item) = 1",
+    );
+}
+
+/// `cg.game.item_drop` (gold), `cg.game.item_pickup` (gold): Alpha drops 1500 of its 5000
+/// gold, the pile falls under ground VID 1 and Zulu sees it fall; Zulu picks it up and both
+/// are told. The pile is unnumbered and rowless, and the store follows each purse change.
+#[test]
+fn a_dropped_gold_pile_lies_until_someone_picks_it_up() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    seat_alpha_and_zulu(&server, &database, &[]);
+    sql(
+        &database,
+        "UPDATE player SET gold = 5000 WHERE name = 'Alpha'",
+    );
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    let pile = owners_protos()
+        .rows()
+        .iter()
+        .find(|proto| proto.item_type == gamedata::item_kind::ITEM_ELK)
+        .expect("the owner's table has an ITEM_ELK row")
+        .vnum;
+
+    // Given: Alpha holds 5000 gold, and Zulu stands beside it.
+    let (mut alpha, alpha_listed) = enter_world(&server, b"alice", 0);
+    let (mut zulu, zulu_listed) = enter_game_unread(&server, b"bob");
+    alpha.sees_arrive(zulu_listed.id, false);
+
+    // When: Alpha drops 1500 gold.
+    alpha.send_record(
+        &protocol::cg_item_drop2::CgItemDrop2::new(
+            protocol::item_pos::ItemPos::new(inventory, 0),
+            1500,
+            0,
+        )
+        .encode(),
+    );
+    // Then: the purse is 3500, the pile falls under ground VID 1 with the gold notice, and
+    // Zulu sees it fall. The pile has no id and no row.
+    assert_eq!(alpha.read_game(), gold_change(alpha_listed.id, 0, 3_500));
+    assert_eq!(alpha.read_game(), a_ground_add(1, pile));
+    assert_eq!(alpha.read_game(), an_info_line(b"[LS;1057;2]"));
+    assert_eq!(zulu.read_game(), a_ground_add(1, pile));
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Alpha') = 3500 AND NOT EXISTS (SELECT 1 FROM          item)",
+    );
+
+    // When: Zulu picks the pile up.
+    zulu.send_record(&protocol::cg_item_pickup::CgItemPickup::new(1).encode());
+    // Then: Zulu's purse grows by 1500, then both see the pile go, and the store follows.
+    assert_eq!(zulu.read_game(), gold_change(zulu_listed.id, 1_500, 1_500));
+    assert_eq!(zulu.read_game(), a_ground_del(1));
+    assert_eq!(alpha.read_game(), a_ground_del(1));
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Zulu') = 1500 AND NOT EXISTS (SELECT 1 FROM          item)",
+    );
+
+    // And: a gold drop past the purse refuses silently and lays nothing.
+    alpha.unanswered(
+        &protocol::cg_item_drop2::CgItemDrop2::new(
+            protocol::item_pos::ItemPos::new(inventory, 0),
+            3_501,
+            0,
+        )
+        .encode(),
+    );
+    zulu.quiet("nobody is told of a refused gold drop");
+    check(
+        &database,
+        "(SELECT gold FROM player WHERE name = 'Alpha') = 3500",
     );
 }
 
@@ -9711,6 +9841,11 @@ const CG_ATTACK: u8 = 0x02;
 const CG_FLY_TARGETING: u8 = 0x33;
 const CG_USE_SKILL: u8 = 0x34;
 const CG_ADD_FLY_TARGETING: u8 = 0x35;
+
+/// `HEADER_GC_FLY_TARGETING` (71): a shot's targeting record, 17 bytes.
+const GC_FLY_TARGETING: u8 = 71;
+/// The packed width of `TPacketGCFlyTargeting`: a header, two VIDs, two `long`s.
+const FLY_TARGETING_LEN: usize = 17;
 const CG_SHOOT: u8 = 0x36;
 /// `gc.damage_info`: `HEADER_GC_DAMAGE_INFO`, `TPacketGCDamageInfo`'s header, `dwVID`, `flag`
 /// and `damage` (`G/packet.h:2048-2054`).
@@ -9721,6 +9856,7 @@ const GC_STUN: u8 = 0x0d;
 const GC_DEAD: u8 = 0x0e;
 /// `DAMAGE_NORMAL`, the flag of a plain melee hit (`G/char_battle.cpp:1984`).
 const DAMAGE_NORMAL: u8 = 1;
+
 /// The stray dog's `MAX_HP` (vnum 101).
 const DOG_HP: i32 = 126;
 /// The damage Alpha's bare fist deals the stray dog. `CalcMeleeDamage`'s only draw is the
@@ -9794,6 +9930,17 @@ fn removal_of(vid: u32) -> Vec<u8> {
     record
 }
 
+/// `POINT_EXP`, the exp slot (`G/char.h` via `common::point_slot::POINT_EXP`).
+const POINT_EXP: u8 = 3;
+
+/// A `GC_CREATE_FLY` of `fly_type` from `from` to `to`.
+fn fly_of(fly_type: u8, from: u32, to: u32) -> Vec<u8> {
+    let mut record = vec![GC_CREATE_FLY, fly_type];
+    record.extend_from_slice(&from.to_le_bytes());
+    record.extend_from_slice(&to.to_le_bytes());
+    assert_eq!(record.len(), CREATE_FLY_LEN);
+    record
+}
 impl Keyed {
     /// The next record past a ping, the revive timer's own and a stamina refill, with what an
     /// NPC does on its own skipped as [`Keyed::read_game_raw`] skips it.
@@ -9805,6 +9952,17 @@ impl Keyed {
             let record = self.read_game_raw();
             if record[0] != GC_PING && !self.timer_record(&record) && !is_stamina_refill(&record) {
                 return record;
+            }
+        }
+    }
+    /// [`Keyed::read_fight`], but it waits until `deadline` across 5 s read beats
+    /// instead of panicking on one quiet beat, and reports `None` when the window runs
+    /// out.
+    fn read_fight_until(&mut self, deadline: std::time::Instant) -> Option<Vec<u8>> {
+        loop {
+            let record = self.read_game_raw_until(deadline)?;
+            if record[0] != GC_PING && !self.timer_record(&record) && !is_stamina_refill(&record) {
+                return Some(record);
             }
         }
     }
@@ -10121,7 +10279,18 @@ fn until_stunned(
 
 /// The first `GC_CHARACTER_MOVE` of `mob` with `func` before `deadline` (ledger 229l).
 /// Wandering moves of other funcs are read past; anything else fails.
-fn npc_move_of(keyed: &mut Keyed, mob: u32, func: u8, deadline: std::time::Instant) -> Vec<u8> {
+///
+/// A swing of `mob` on `victim` that lands first is read whole and returned through `early`
+/// (ledger 229n): the chase's last step can end inside its reach, and the swing's
+/// `DAMAGE_INFO` then arrives before any wait within the window.
+fn npc_move_of(
+    keyed: &mut Keyed,
+    mob: u32,
+    victim: u32,
+    func: u8,
+    deadline: std::time::Instant,
+    early: &mut Option<Swing>,
+) -> Vec<u8> {
     loop {
         assert!(
             std::time::Instant::now() < deadline,
@@ -10138,6 +10307,13 @@ fn npc_move_of(keyed: &mut Keyed, mob: u32, func: u8, deadline: std::time::Insta
             }
             continue;
         }
+        if record[0] == GC_DAMAGE_INFO && record[1..5] == victim.to_le_bytes() {
+            let flag = record[5];
+            let damage = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
+            *early = Some(swing_tail(keyed, mob, victim, damage, flag));
+            // A move that never came: the caller takes the swing instead.
+            return Vec::new();
+        }
         assert!(
             is_npc_chatter(&record),
             "past a move, a record nobody accounted for: {record:02x?}"
@@ -10153,8 +10329,9 @@ fn npc_move_of(keyed: &mut Keyed, mob: u32, func: u8, deadline: std::time::Insta
 /// Alpha punches the stray dog it targets, standing on it. Its one hit of 322 takes all 126 of
 /// the dog's hit points: Alpha is shown the damage, the dog's hit points, the stun and its claim
 /// on the dog, in that order. Three seconds later the stun ends in death: Alpha's target is
-/// cleared, the dog has no owner and is dead. A second later the dog goes: no owner, then its
-/// removal; and its regen waits 1000 seconds.
+/// cleared, the dog has no owner, then (ledger 229n) the empty exp record (154 levels above the
+/// dog, the 1% delta row leaves nothing of 15) and the exp orb, and the dog is dead. A second
+/// later the dog goes: no owner, then its removal; and its regen waits 1000 seconds.
 #[test]
 fn a_punch_on_a_targeted_dog_stuns_it_and_it_dies_three_seconds_later_and_leaves() {
     let Some(database) = ScratchDatabase::create() else {
@@ -10189,6 +10366,9 @@ fn a_punch_on_a_targeted_dog_stuns_it_and_it_dies_three_seconds_later_and_leaves
         hit.elapsed()
     );
     assert_eq!(alpha.read_fight(), ownership_of(0, dog));
+    // Ledger 229n: the empty exp record, then the exp orb from the dog to Alpha.
+    assert_eq!(alpha.read_fight(), point_change(alpha_vid, POINT_EXP, 0, 0));
+    assert_eq!(alpha.read_fight(), fly_of(FLY_EXP, dog, alpha_vid));
     assert_eq!(alpha.read_fight(), dead_of(dog));
     let died = std::time::Instant::now();
 
@@ -10207,8 +10387,9 @@ fn a_punch_on_a_targeted_dog_stuns_it_and_it_dies_three_seconds_later_and_leaves
 }
 
 /// Ledger 229j: a hit on a stunned victim runs `Dead` at once and deals nothing
-/// (`G/char_battle.cpp:2248-2252`): no damage is shown, the dog dies and goes a second later,
-/// and the stun's own death never comes (`:1464`).
+/// (`G/char_battle.cpp:2248-2252`): no damage is shown, the dog dies (ledger 229n: with the
+/// empty exp record and the exp orb, as in its twin) and goes a second later, and the stun's
+/// own death never comes (`:1464`).
 #[test]
 fn a_second_punch_on_a_stunned_dog_kills_it_at_once_with_no_number() {
     let Some(database) = ScratchDatabase::create() else {
@@ -10235,6 +10416,9 @@ fn a_second_punch_on_a_stunned_dog_kills_it_at_once_with_no_number() {
     let hit = std::time::Instant::now();
     assert_eq!(alpha.read_fight(), target_of(0, 0, 0, 0, 0));
     assert_eq!(alpha.read_fight(), ownership_of(0, dog));
+    // Ledger 229n: the empty exp record, then the exp orb from the dog to Alpha.
+    assert_eq!(alpha.read_fight(), point_change(alpha_vid, POINT_EXP, 0, 0));
+    assert_eq!(alpha.read_fight(), fly_of(FLY_EXP, dog, alpha_vid));
     assert_eq!(alpha.read_fight(), dead_of(dog));
     assert!(
         hit.elapsed() < Duration::from_millis(1_500),
@@ -10260,8 +10444,8 @@ fn a_second_punch_on_a_stunned_dog_kills_it_at_once_with_no_number() {
 ///
 /// A punch on the far dog does nothing. A punch on the near dog, which Alpha never targeted,
 /// shows Alpha neither the damage (`G/char_battle.cpp:1720-1742`) nor its hit points nor a
-/// claim; only the stun, then the release and the death, then the release and the removal.
-/// The far dog is untouched.
+/// claim; only the stun, then the release, (ledger 229n) the empty exp record and the exp orb,
+/// and the death, then the release and the removal. The far dog is untouched.
 #[test]
 fn an_untargeted_punch_shows_no_number_and_one_beyond_reach_does_nothing() {
     let Some(database) = ScratchDatabase::create() else {
@@ -10269,7 +10453,7 @@ fn an_untargeted_punch_shows_no_number_and_one_beyond_reach_does_nothing() {
     };
     let lines = "m\t608\t540\t0\t0\t0\t1\t1000s\t100\t1\t101\n\
                  m\t610\t540\t0\t0\t0\t1\t1000s\t100\t1\t101\n";
-    let (_server, mut alpha, _alpha_vid, entered) = alpha_swinging_by(&database, lines);
+    let (_server, mut alpha, alpha_vid, entered) = alpha_swinging_by(&database, lines);
     let monsters = || entered.shown.monsters.iter().map(Vec::as_slice);
     let near = vid_shown_at(monsters(), (470_400, 950_000));
     let far = vid_shown_at(monsters(), (470_600, 950_000));
@@ -10283,12 +10467,139 @@ fn an_untargeted_punch_shows_no_number_and_one_beyond_reach_does_nothing() {
     alpha.quiet("no damage, no hit points and no claim for an untargeted dog 288 away");
     assert_eq!(alpha.read_fight(), ownership_of(0, near));
     assert!(hit.elapsed() >= Duration::from_millis(2_500));
+    // Ledger 229n: the empty exp record, then the exp orb from the dog to Alpha.
+    assert_eq!(alpha.read_fight(), point_change(alpha_vid, POINT_EXP, 0, 0));
+    assert_eq!(alpha.read_fight(), fly_of(FLY_EXP, near, alpha_vid));
     assert_eq!(alpha.read_fight(), dead_of(near));
     assert_eq!(alpha.read_fight(), ownership_of(0, near));
     assert_eq!(alpha.read_fight(), removal_of(near));
 
     alpha.send_record(&client_target(far));
     assert_eq!(alpha.read_game(), target_of(far, 100, DOG_HP, DOG_HP, 0));
+}
+
+/// Ledger 229n (P1): a kill pays the killer the monster's experience with an exp orb.
+///
+/// Alpha at level 1 with no exp punches the stray dog until a swing stuns it, then punches
+/// the stunned dog: it dies at once, and after the death's ownership clears come the exp
+/// record (15 at the 100% delta row, onto 0) and the exp orb from the dog to Alpha, then
+/// `GC_DEAD` (`DistributeExp` and the live `GiveExp`, `G/char_battle.cpp:2818-2985`,
+/// `:2567-2700`). The dog fights back (229l), so its swings' claims on Alpha are read past:
+/// the death's clear is the one the exp record follows.
+#[test]
+fn a_kill_pays_the_killer_the_monsters_exp_with_an_exp_orb() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        DOG_AT_ALPHA,
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET level = 1, exp = 0 WHERE name = 'Alpha'",
+    );
+    let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
+    let alpha_vid = listed.id;
+    let entered = enter_game_shown(&mut alpha);
+    let dog = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    alpha.send_record(&client_move(
+        FUNC_ATTACK,
+        7,
+        40,
+        ALPHA_ENTERS_AT.0,
+        ALPHA_ENTERS_AT.1,
+        0x5eed,
+    ));
+    let update = read_past_pings(&mut alpha);
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert!(alpha.timer_record(&update), "the swing ends the revive");
+    assert_eq!(
+        read_past_pings(&mut alpha),
+        [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0]
+    );
+    alpha.quiet("the swing is not relayed to the swinger");
+    alpha.send_record(&client_target(dog));
+    assert_eq!(alpha.read_game(), target_of(dog, 100, DOG_HP, DOG_HP, 0));
+    // The level-1 punch lands but does not stun: the dog keeps most of its hit points,
+    // and Alpha claims it as the sync owner.
+    alpha.send_record(&client_attack(dog));
+    let punch = alpha.read_fight();
+    assert_eq!(punch[0], GC_DAMAGE_INFO, "{punch:02x?}");
+    let shown = alpha.read_fight();
+    assert_eq!(shown[0], GC_TARGET, "{shown:02x?}");
+    assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, dog));
+    // Punch until the dog stuns: each swing shows its damage (a heal tick may land
+    // between swings and is skipped), the hit points, and the claim again. The dog stuns
+    // when a swing takes its last hit points.
+    loop {
+        alpha.send_record(&client_attack(dog));
+        let _punch = loop {
+            let record = alpha.read_fight();
+            if record[0] == GC_DAMAGE_INFO {
+                break record;
+            }
+            assert_eq!(
+                record[0], GC_POINT_CHANGE,
+                "a heal tick at most: {record:02x?}"
+            );
+        };
+        // The stun's hit shows the claim BEFORE the hit points (`show_strike` runs before
+        // the stun is sent); a non-stunning hit shows the points then the claim.
+        let mut shown = loop {
+            let record = alpha.read_fight();
+            if record[0] != GC_POINT_CHANGE {
+                break record;
+            }
+        };
+        // The monster fights back since 229l: its swing's damage or claim may land
+        // between this swing's halves, and is skipped.
+        while shown[0] == GC_OWNERSHIP || shown[0] == GC_DAMAGE_INFO {
+            shown = alpha.read_fight();
+            while shown[0] == GC_POINT_CHANGE {
+                shown = alpha.read_fight();
+            }
+        }
+        // The stun's hit: the zeroed hit points... or a plain hit's.
+        assert_eq!(shown[0], GC_TARGET, "{shown:02x?}");
+        if shown == target_of(dog, 0, 0, DOG_HP, 0) {
+            assert_eq!(alpha.read_fight(), stun_of(dog));
+            assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, dog));
+            break;
+        }
+        assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, dog));
+    }
+    // The punch on the stunned dog kills it at once. The dog's last swings may still be
+    // in flight: their claims and releases are skipped while the death's own sequence is
+    // awaited. A clear followed by a claim is a late swing's; a clear followed by the exp
+    // record is the death's.
+    alpha.send_record(&client_attack(dog));
+    assert_eq!(alpha.read_fight(), target_of(0, 0, 0, 0, 0));
+    // Ownership records are skipped until the death's own exp record arrives: the death's
+    // clear, the dog's late releases of Alpha, and the stun's own death (if the stun event
+    // won the race, its dead_event releases too — but then no second death follows).
+    loop {
+        let record = alpha.read_fight();
+        if record[0] == GC_OWNERSHIP {
+            continue;
+        }
+        assert_eq!(
+            record,
+            point_change(alpha_vid, POINT_EXP, 15, 15),
+            "the death's exp record after the ownership"
+        );
+        break;
+    }
+    assert_eq!(alpha.read_fight(), fly_of(FLY_EXP, dog, alpha_vid));
+    assert_eq!(alpha.read_fight(), dead_of(dog));
 }
 
 /// Ledger 229j: what waits for the skills is consumed, and an attack on what is no monster is
@@ -10430,6 +10741,96 @@ fn a_hit_monster_turns_on_its_attacker_and_swings_every_two_seconds() {
     );
 }
 
+/// Read until the fixed-width record under `header` arrives, skipping pings, timer
+/// records and stamina refills by rule.
+fn read_until(
+    keyed: &mut Keyed,
+    header: u8,
+    width: usize,
+    deadline: std::time::Instant,
+) -> Vec<u8> {
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a record {header} within the window"
+        );
+        let record = keyed.read_game_raw();
+        if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+            continue;
+        }
+        assert_eq!(
+            (record[0], record.len()),
+            (header, width),
+            "the awaited record: {record:02x?}"
+        );
+        return record;
+    }
+}
+
+/// A 403 (a RANGE monster, range 850) at regen point (605, 540), where Alpha enters.
+const ARCHER_AT_ALPHA: &str = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t403\n";
+
+/// Ledger 229s (P4): a hit RANGE monster answers with a shot, and the shot's fly record
+/// names its victim (`G/char_battle.cpp:267-277` for the `Attack` arm, `:3342-3371` for
+/// `FlyTarget`, `:3070-3154` for `CFuncShoot`).
+///
+/// Alpha punches the 403 it targets, standing on it. The monster runs `BeginFight` and
+/// shoots: the `GC_FLY_TARGETING` around it names it and Alpha, then the `DAMAGE_INFO`
+/// lands and the claim and the closing `MOVE{2}` follow as for a swing.
+#[test]
+fn a_hit_range_monster_answers_with_a_shot_and_its_fly_record() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (_server, mut alpha, alpha_vid, entered) = alpha_swinging_by(&database, ARCHER_AT_ALPHA);
+    let archer = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    alpha.send_record(&client_target(archer));
+    let clicked = alpha.read_game();
+    assert_eq!(clicked[0], GC_TARGET, "{clicked:02x?}");
+    assert_eq!(&clicked[1..5], &archer.to_le_bytes(), "the archer's VID");
+
+    // When: Alpha punches the archer. Then: the punch lands and the claim follows.
+    alpha.send_record(&client_attack(archer));
+    let punch = alpha.read_fight();
+    assert_eq!(punch[0], GC_DAMAGE_INFO, "{punch:02x?}");
+    let dealt = i32::from_le_bytes(punch[6..10].try_into().expect("four bytes"));
+    assert!((1..=450).contains(&dealt), "the punch lands: {dealt}");
+    let _shown = alpha.read_fight();
+    assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, archer));
+
+    // Then: the shot within 2 s — the fly record first, then the damage.
+    let first_due = std::time::Instant::now() + Duration::from_secs(2);
+    let fly = read_until(&mut alpha, GC_FLY_TARGETING, FLY_TARGETING_LEN, first_due);
+    assert_eq!(&fly[1..5], &archer.to_le_bytes(), "the shooter: {fly:02x?}");
+    assert_eq!(
+        &fly[5..9],
+        &alpha_vid.to_le_bytes(),
+        "the victim: {fly:02x?}"
+    );
+    assert_eq!(
+        &fly[9..17],
+        &ALPHA_ENTERS_AT
+            .0
+            .to_le_bytes()
+            .iter()
+            .chain(&ALPHA_ENTERS_AT.1.to_le_bytes())
+            .copied()
+            .collect::<Vec<u8>>(),
+        "the victim's point: {fly:02x?}"
+    );
+    let shot = read_swing(&mut alpha, archer, alpha_vid, first_due);
+    assert_eq!(shot.flag, DAMAGE_NORMAL, "no critical or penetrate");
+    assert!(
+        (1..=450).contains(&shot.damage),
+        "the shot lands: {}",
+        shot.damage
+    );
+    assert_eq!(shot.owner, Some(archer), "the claim within 250");
+}
+
 /// A 115 (an aggressive level-24 boar, sight 2000, range 175, move 130) at regen point
 /// (613, 540), 800 east of where Alpha enters.
 const BOAR_800_EAST: &str = "m\t613\t540\t0\t0\t0\t1\t1000s\t100\t1\t115\n";
@@ -10439,7 +10840,9 @@ const BOAR_800_EAST: &str = "m\t613\t540\t0\t0\t0\t1\t1000s\t100\t1\t115\n";
 /// The 115 stands 800 east, inside its sight of 2000. Alpha ends its revive with a `FUNC_ATTACK`
 /// move where it stands. The idle search finds it, Battle waits 25 Pulses, and the chase walks
 /// to nine tenths of the range: the first `FUNC_WAIT` whose destination is within 158 of Alpha
-/// is the chase's (a wander walks 300-700 from the monster, never that close). Then a swing.
+/// is the chase's (a wander walks 300-700 from the monster, never that close). Then a swing —
+/// unless the chase's last step ends inside its reach, and the swing's `DAMAGE_INFO` arrives
+/// before any wait within the window (ledger 229n).
 #[test]
 fn an_aggressive_monster_chases_a_player_into_its_reach_and_swings() {
     let Some(database) = ScratchDatabase::create() else {
@@ -10471,10 +10874,15 @@ fn an_aggressive_monster_chases_a_player_into_its_reach_and_swings() {
     );
     alpha.quiet("the swing is not relayed to the swinger");
 
-    // Then: the chase's wait within 10 s, then a swing.
+    // Then: the chase's wait within 10 s, then a swing — unless the chase's last step
+    // ended inside its reach, and the swing lands first.
     let due = std::time::Instant::now() + Duration::from_secs(10);
+    let mut early = None;
     let chase = loop {
-        let wait = npc_move_of(&mut alpha, boar, FUNC_WAIT, due);
+        let wait = npc_move_of(&mut alpha, boar, listed.id, FUNC_WAIT, due, &mut early);
+        if wait.is_empty() {
+            break wait;
+        }
         let x = i32::from_le_bytes(wait[8..12].try_into().expect("four bytes"));
         let y = i32::from_le_bytes(wait[12..16].try_into().expect("four bytes"));
         if distance_approx(x - ALPHA_ENTERS_AT.0, y - ALPHA_ENTERS_AT.1) <= 158 {
@@ -10482,12 +10890,14 @@ fn an_aggressive_monster_chases_a_player_into_its_reach_and_swings() {
         }
     };
     let _ = chase;
-    let swing = read_swing(
-        &mut alpha,
-        boar,
-        listed.id,
-        std::time::Instant::now() + Duration::from_secs(10),
-    );
+    let swing = early.unwrap_or_else(|| {
+        read_swing(
+            &mut alpha,
+            boar,
+            listed.id,
+            std::time::Instant::now() + Duration::from_secs(10),
+        )
+    });
     assert!(
         (1..=450).contains(&swing.damage),
         "the swing lands: {}",
@@ -10763,4 +11173,633 @@ fn a_player_a_monster_killed_restarts_in_town_and_is_warped_to_the_recall_point(
         &database,
         &format!("(SELECT (x, y) = ({x}, {y}) FROM player WHERE name = 'Alpha')"),
     );
+}
+
+/// Ledger 229p (P1): punch one stacked dog until it dies, past the pack's own swings, and
+/// read its death's ground adds (the piles a paying kill lays).
+///
+/// Returns the kill's piles: empty when the kill paid no gold. Each kill pays its gold
+/// chance at 20% (level 1 vs level 1 is the delta table's middle row, 100%).
+fn punch_one_dog_until_it_dies(alpha: &mut Keyed, alpha_vid: u32, dog: u32) -> Vec<Vec<u8>> {
+    alpha.send_record(&client_target(dog));
+    assert_eq!(alpha.read_game(), target_of(dog, 100, DOG_HP, DOG_HP, 0));
+    alpha.send_record(&client_attack(dog));
+    // The first swing's halves, past the dog's own swings and the pack's chatter.
+    loop {
+        let record = alpha.read_fight();
+        if record[0] == GC_DAMAGE_INFO {
+            break;
+        }
+    }
+    loop {
+        let record = alpha.read_fight();
+        if record[0] == GC_TARGET {
+            break;
+        }
+    }
+    loop {
+        let record = alpha.read_fight();
+        if record[0] == GC_OWNERSHIP {
+            break;
+        }
+    }
+    // Punch until the dog stuns, reading past its swings, its heals, and the pack.
+    loop {
+        alpha.send_record(&client_attack(dog));
+        loop {
+            let record = alpha.read_fight();
+            if record[0] == GC_DAMAGE_INFO {
+                break;
+            }
+            assert!(
+                record[0] == GC_POINT_CHANGE || record[0] == GC_OWNERSHIP,
+                "a heal tick or a late claim at most: {record:02x?}"
+            );
+        }
+        let mut shown = loop {
+            let record = alpha.read_fight();
+            if record[0] != GC_POINT_CHANGE {
+                break record;
+            }
+        };
+        while shown[0] == GC_OWNERSHIP
+            || shown[0] == GC_DAMAGE_INFO
+            || shown[0] == GC_CHARACTER_ADD
+            || shown[0] == GC_CHARACTER_DEL
+            || shown[0] == GC_CHAR_ADDITIONAL_INFO
+        {
+            shown = alpha.read_fight();
+            while shown[0] == GC_POINT_CHANGE {
+                shown = alpha.read_fight();
+            }
+        }
+        assert_eq!(shown[0], GC_TARGET, "{shown:02x?}");
+        if shown == target_of(dog, 0, 0, DOG_HP, 0) {
+            assert_eq!(alpha.read_fight(), stun_of(dog));
+            assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, dog));
+            break;
+        }
+    }
+    // The punch on the stunned dog kills it at once. Its swings may still be in flight:
+    // their HP point changes and releases are skipped while the death's own sequence is
+    // awaited.
+    alpha.send_record(&client_attack(dog));
+    assert_eq!(alpha.read_fight(), target_of(0, 0, 0, 0, 0));
+    let mut adds = Vec::new();
+    let mut orbs = Vec::new();
+    loop {
+        let record = alpha.read_fight();
+        if record[0] == GC_OWNERSHIP {
+            continue;
+        }
+        if record[0] == GC_POINT_CHANGE {
+            continue;
+        }
+        if record[0] == GROUND_ADD {
+            adds.push(record);
+            continue;
+        }
+        if record[0] == GC_CREATE_FLY {
+            orbs.push(record);
+            continue;
+        }
+        if record[0] == GC_CHARACTER_UPDATE {
+            continue;
+        }
+        if record[0] == GC_DEAD {
+            assert_eq!(record, dead_of(dog), "the stunned dog's death");
+            assert!(
+                orbs.contains(&fly_of(FLY_EXP, dog, alpha_vid)),
+                "this death's orb arrived first: {orbs:02x?}"
+            );
+            break;
+        }
+        panic!("the death's sequence holds no {record:02x?}");
+    }
+    // The release after the death, past the other dogs' late swings landing.
+    loop {
+        let record = alpha.read_fight();
+        if record[0] == GC_POINT_CHANGE {
+            continue;
+        }
+        assert_eq!(record, ownership_of(0, dog));
+        break;
+    }
+    assert_eq!(alpha.read_fight(), removal_of(dog));
+    adds
+}
+
+/// Ledger 229p (P1): walk to the first pile of `adds`, pick it up, and return the purse
+/// change: the paid amount and the purse's new value.
+fn pick_up_first_pile(alpha: &mut Keyed, alpha_vid: u32, adds: &[Vec<u8>]) -> (i64, u64) {
+    let at = |add: &[u8]| {
+        (
+            i32::from_le_bytes(add[1..5].try_into().expect("four bytes")),
+            i32::from_le_bytes(add[5..9].try_into().expect("four bytes")),
+        )
+    };
+    let pile = u32::from_le_bytes(adds[0][13..17].try_into().expect("a VID"));
+    let (x, y) = at(&adds[0]);
+    alpha.send_record(&client_move(FUNC_MOVE, 0, 0, x, y, 0x5eee));
+    alpha.quiet("the walk is not relayed to the walker");
+    std::thread::sleep(Duration::from_millis(1500));
+    alpha.send_record(&protocol::cg_item_pickup::CgItemPickup::new(pile).encode());
+    let purse = loop {
+        let record = alpha.read_game();
+        if record[0] != GC_POINT_CHANGE {
+            break record;
+        }
+    };
+    assert_eq!(
+        purse,
+        gold_change(alpha_vid, purse_amount(&purse), purse_value(&purse))
+    );
+    let amount = purse_amount(&purse);
+    let value = purse_value(&purse);
+    assert!(
+        amount > 0 && value == u64::try_from(amount).unwrap_or(0),
+        "the pile paid {amount}"
+    );
+    assert_eq!(alpha.read_game(), a_ground_del(pile));
+    (amount, value)
+}
+
+/// Ledger 229p (P1): a kill pays gold piles that are picked up and stored.
+///
+/// Level-1 Alpha lowers six stacked stray dogs (the regen row's x/y put each where it is
+/// stood). The dogs fight back (229l), so anything but the stun's own zero-HP target is read
+/// past while punching: a late swing's claim or damage, a HP point change, another dog's
+/// insert or removal, a heal tick. Level 1 vs level 1 is the delta table's middle row
+/// (100%), so each kill pays its gold chance at 20%; six dogs miss all 26% of the time, and
+/// the death's own damage claims this kill as its sync owner (which the scenario reads
+/// past) even when the 3 s stun event fires first (229f), so a slow run still pays. The
+/// first kill that pays lays its `GC_ITEM_GROUND_ADD` piles between the death's release
+/// (`SetSyncOwner(NULL)` in `Dead`) and `GC_DEAD`; Alpha walks to the first pile, picks it
+/// up, and the purse change is in the store at once. A relog then finds the purse.
+#[test]
+fn a_kill_pays_gold_piles_that_are_picked_up_and_stored() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let lines = std::iter::repeat_n(DOG_AT_ALPHA, 6).collect::<String>();
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        &lines,
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET level = 1, exp = 0, gold = 0 WHERE name = 'Alpha'",
+    );
+    let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
+    let alpha_vid = listed.id;
+    let entered = enter_game_shown(&mut alpha);
+    let mut dogs: Vec<u32> = entered
+        .shown
+        .monsters
+        .iter()
+        .map(Vec::as_slice)
+        .filter(|insert| u16::from_le_bytes(insert[22..24].try_into().expect("two bytes")) == 101)
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("a VID")))
+        .collect();
+    dogs.sort_unstable();
+    assert_eq!(dogs.len(), 6, "six dogs stand on Alpha");
+    alpha.send_record(&client_move(
+        FUNC_ATTACK,
+        7,
+        40,
+        ALPHA_ENTERS_AT.0,
+        ALPHA_ENTERS_AT.1,
+        0x5eed,
+    ));
+    let update = read_past_pings(&mut alpha);
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert!(alpha.timer_record(&update), "the swing ends the revive");
+    assert_eq!(
+        read_past_pings(&mut alpha),
+        [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0]
+    );
+    alpha.quiet("the swing is not relayed to the swinger");
+    // Punch each dog until it stuns, then punch the stunned dog: it dies at once. A kill
+    // that pays gold lays its piles' adds after the death's ownership clear; the first
+    // such kill stops the loop with its piles read.
+    let mut paid: Option<(u32, Vec<Vec<u8>>)> = None;
+    let mut kills = 0;
+    'dogs: for &dog in &dogs {
+        let adds = punch_one_dog_until_it_dies(&mut alpha, alpha_vid, dog);
+        kills += 1;
+        if !adds.is_empty() {
+            paid = Some((dog, adds));
+            break 'dogs;
+        }
+        assert!(
+            kills != 6,
+            "six dogs died goldless; the chance is 20% a kill"
+        );
+    }
+    let (_dog, adds) = paid.expect("a kill paid");
+    // The first pile: walk to it and pick it up. Its position is the add's x/y.
+    let (_amount, value) = pick_up_first_pile(&mut alpha, alpha_vid, &adds);
+    check(
+        &database,
+        &format!("(SELECT gold FROM player WHERE name = 'Alpha') = {value}"),
+    );
+    drop(alpha);
+    wait_for(
+        &database,
+        &format!("(SELECT gold FROM player WHERE name = 'Alpha') = {value}"),
+    );
+    let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    let _ = entered;
+    let _ = listed;
+    check(
+        &database,
+        &format!("(SELECT gold FROM player WHERE name = 'Alpha') = {value}"),
+    );
+    drop(alpha);
+    drop(server);
+}
+
+/// A group 701 (leader 702 HP 1950, two 701s HP 1447, all MELEE) at regen point
+/// (605, 540), where Alpha enters: the leader in the point's box, each member in a box
+/// 300-500 around the one before it.
+const GROUP_AT_ALPHA: &str = "g\t605\t540\t3\t3\t0\t1\t1000s\t100\t1\t701\n";
+
+/// Ledger 229t (P5): a hit group member tells its party, and the party swings back.
+///
+/// Alpha targets the group 701 under it and punches one member. The punch lands without
+/// stunning (HP 981+), so the hit member runs `BeginFight` and sends `PM_ATTACKED_BY`,
+/// and each other member that `CanBeginFight` begins on Alpha too. Three swings land on
+/// Alpha — one from each VID — each with its own `DAMAGE_INFO` on Alpha, hit points, and
+/// closing `MOVE{2}` naming its swinger. The swing reader skips across the other members'
+/// heads and HP records by rule: every `DAMAGE_INFO` names Alpha, every HP record names
+/// Alpha, every closing move names its own swinger.
+#[test]
+fn a_hit_group_member_tells_its_party_and_the_party_swings_back() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        GROUP_AT_ALPHA,
+        "view_range = 10000\nno_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
+    let alpha_vid = listed.id;
+    let entered = enter_game_shown(&mut alpha);
+    let swing = client_move(
+        FUNC_ATTACK,
+        7,
+        40,
+        ALPHA_ENTERS_AT.0,
+        ALPHA_ENTERS_AT.1,
+        0x5eed,
+    );
+    alpha.send_record(&swing);
+    let update = read_past_pings(&mut alpha);
+    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
+    assert!(alpha.timer_record(&update), "the swing ends the revive");
+    assert_eq!(
+        read_past_pings(&mut alpha),
+        [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0]
+    );
+    alpha.quiet("the swing is not relayed to the swinger");
+    let mut members: Vec<(u32, i32)> = entered
+        .shown
+        .monsters
+        .iter()
+        .map(Vec::as_slice)
+        .filter(|insert| {
+            matches!(
+                u16::from_le_bytes(insert[22..24].try_into().expect("two bytes")),
+                701 | 702
+            )
+        })
+        .map(|insert| {
+            let at = inserted_at(insert);
+            let approx = distance_approx(at.0 - ALPHA_ENTERS_AT.0, at.1 - ALPHA_ENTERS_AT.1);
+            (
+                u32::from_le_bytes(insert[1..5].try_into().expect("a VID")),
+                approx,
+            )
+        })
+        .collect();
+    members.sort_unstable();
+    assert_eq!(members.len(), 3, "the group stands its three");
+    let mut by_vid: Vec<u32> = members.iter().map(|&(vid, _)| vid).collect();
+    by_vid.sort_unstable();
+    let mut by_range = members;
+    by_range.sort_by_key(|&(_, approx)| approx);
+    let members = by_vid;
+    // The punch's victim: the nearest member, so the punch's own claim lands — the
+    // member stands inside 250 — before any swing interleaves.
+    let hit = by_range[0].0;
+    assert!(
+        by_range[0].1 <= 250,
+        "the nearest member stands inside 250: {}",
+        by_range[0].1
+    );
+    alpha.send_record(&client_target(hit));
+    let clicked = alpha.read_game();
+    assert_eq!(clicked[0], GC_TARGET, "{clicked:02x?}");
+    assert_eq!(&clicked[1..5], &hit.to_le_bytes(), "the hit member's VID");
+
+    // When: Alpha punches one member. Then: the punch lands, the hit points follow,
+    // then the claim — each past whatever the party's first swings interleave. Each
+    // wait carries its own window: a slow host can leave the wire quiet past one 5 s
+    // beat before the punch's records land.
+    alpha.send_record(&client_attack(hit));
+    let punch = read_punch_head(&mut alpha, hit);
+    let dealt = i32::from_le_bytes(punch[6..10].try_into().expect("four bytes"));
+    assert!((1..=450).contains(&dealt), "the punch lands: {dealt}");
+    read_punch_tail(&mut alpha, alpha_vid, hit);
+
+    // Then: every member swings on Alpha — three distinct closers — each swing landing.
+    // The reads wait out a slow host's quiet beats until one 25 s window, so a
+    // member's walk-then-swing gap may run past a beat. A swing's flag is not
+    // asserted: the 702's `ENCHANT_CRITICAL` 1 draws a critical one run in a
+    // hundred, and a penetrate lands through `ENCHANT_PENETRATE` the same way.
+    let due = std::time::Instant::now() + Duration::from_secs(25);
+    let mut swingers = Vec::new();
+    let mut swings = 0;
+    while swingers.len() < 3 {
+        let swing = read_party_swing_sized(&mut alpha, &members, alpha_vid, due);
+        assert!(
+            (1..=900).contains(&swing.damage),
+            "the swing lands: {}",
+            swing.damage
+        );
+        swings += 1;
+        assert!(
+            swings <= 6,
+            "three members answer within six swings, else one never began"
+        );
+        if !swingers.contains(&swing.swung_by) {
+            swingers.push(swing.swung_by);
+        }
+    }
+    swingers.sort_unstable();
+    assert_eq!(swingers, members, "every member swings back");
+}
+/// The punch's `DAMAGE_INFO` on `hit`, past whatever the party's first swings
+/// interleave, within its own 15 s window.
+fn read_punch_head(keyed: &mut Keyed, hit: u32) -> Vec<u8> {
+    let wait = || std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let Some(record) = keyed.read_fight_until(wait()) else {
+            panic!("the punch lands within its window");
+        };
+        if record[0] == GC_DAMAGE_INFO && record[1..5] == hit.to_le_bytes() {
+            return record;
+        }
+    }
+}
+/// After the punch's `DAMAGE_INFO`: the hit points, then the claim, each past whatever
+/// the party's first swings interleave. Each wait carries its own 15 s window: a slow
+/// host can leave the wire quiet past one 5 s beat before the records land.
+fn read_punch_tail(keyed: &mut Keyed, owner: u32, hit: u32) {
+    let wait = || std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let Some(record) = keyed.read_fight_until(wait()) else {
+            panic!("the hit points within their window");
+        };
+        if record[0] == GC_TARGET && record[1..5] == hit.to_le_bytes() {
+            break;
+        }
+    }
+    // The punch's own claim: the hit stands inside 250, so the claim is sent before
+    // any swing. The loop reads past the interleaved swings by rule — a `DAMAGE_INFO`
+    // on Alpha, Alpha's HP, a stun triple on Alpha, the swings' claims, their closing
+    // moves, and the punch's own effects — and breaks on the punch's own claim.
+    loop {
+        let Some(record) = keyed.read_fight_until(wait()) else {
+            panic!("the claim within its window");
+        };
+        if record == ownership_of(owner, hit) {
+            break;
+        }
+        let is_swing_claim =
+            record[0] == GC_OWNERSHIP && record.get(5..9) == Some(&owner.to_le_bytes());
+        let is_swing_head =
+            record[0] == GC_DAMAGE_INFO && record.get(1..5) == Some(&owner.to_le_bytes());
+        let is_swing_points =
+            record[0] == GC_POINT_CHANGE && record.get(4..8) == Some(&owner.to_le_bytes());
+        let is_swing_stun = record[0] == GC_STUN && record.get(1..5) == Some(&owner.to_le_bytes());
+        let is_swing_death = record[0] == GC_DEAD && record.get(1..5) == Some(&owner.to_le_bytes());
+        let is_swing_move = record[0] == GC_MOVE;
+        let is_effect = record[0] == GC_SPECIAL_EFFECT;
+        let is_stun_points = record[0] == GC_TARGET && record.len() >= 5;
+        assert!(
+            is_swing_claim
+                || is_swing_head
+                || is_swing_points
+                || is_swing_stun
+                || is_swing_death
+                || is_swing_move
+                || is_effect
+                || is_stun_points,
+            "past the punch's tail, a record nobody accounted for: {record:02x?}"
+        );
+    }
+}
+
+/// One swing of a party's answer: `read_swing`'s damage and flag plus the swinger's VID.
+struct PartySwing {
+    /// The `DAMAGE_INFO` damage.
+    damage: i32,
+    /// The VID of the closing `MOVE{2}`: the monster that swung.
+    swung_by: u32,
+}
+
+/// Whether `vid` names a member of the party under `members`.
+fn is_party_member(members: &[u32], vid: &[u8]) -> bool {
+    vid.try_into()
+        .is_ok_and(|bytes| members.contains(&u32::from_le_bytes(bytes)))
+}
+
+/// Read one swing of a party's answer on `victim`: skip by rule until a `DAMAGE_INFO` on
+/// the victim, take the ordered tail — the hit points, the stun triple, the claim — and
+/// return with the closing move's VID. Any member's `GC_TARGET` and any other member's
+/// closing move are skipped: the party's three `MOVE{2}` arrive in swing order, one per
+/// swing, so the first one past the damage is this swing's own. A `DAMAGE_INFO` on a
+/// member is the punch's own head or a stun's zero-damage write, read past; the punch's
+/// `GC_TARGET` and claim are read past with the members'.
+fn read_party_swing_sized(
+    keyed: &mut Keyed,
+    members: &[u32],
+    victim: u32,
+    deadline: std::time::Instant,
+) -> PartySwing {
+    let sized = |header: u8, _first: &[u8]| fight_len(header);
+    let (damage, _flag) = read_party_swing_head(keyed, members, victim, deadline, &sized);
+    party_swing_tail(keyed, members, victim, damage, deadline, &sized)
+}
+
+/// [`game_len`] plus the fight's `GC_SPECIAL_EFFECT` (byte 114), which the general table
+/// does not size: a critical or penetrate shows it on the fight's victim.
+fn fight_len(header: u8) -> usize {
+    match header {
+        GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
+        other => game_len(other),
+    }
+}
+
+/// Skip by rule until a swing's `DAMAGE_INFO` on `victim`: pings, the revive timer's,
+/// stamina refills, the victim's own heal ticks, the members' `GC_TARGET`, the punch's own
+/// head and claim, the monsters' chats, and any NPC's own chatter.
+fn read_party_swing_head(
+    keyed: &mut Keyed,
+    members: &[u32],
+    victim: u32,
+    deadline: std::time::Instant,
+    sized: &impl Fn(u8, &[u8]) -> usize,
+) -> (i32, u8) {
+    let hp_kind = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
+    loop {
+        let Some(record) = keyed.read_sized_until(sized, deadline) else {
+            panic!("a swing within the window");
+        };
+        if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+            continue;
+        }
+        if record[0] == GC_DAMAGE_INFO && record[1..5] == victim.to_le_bytes() {
+            break (
+                i32::from_le_bytes(record[6..10].try_into().expect("four bytes")),
+                record[5],
+            );
+        }
+        let is_heal = record.first() == Some(&GC_POINT_CHANGE)
+            && record.get(4..8) == Some(&victim.to_le_bytes())
+            && record.get(8) == Some(&hp_kind);
+        let is_member_target = record.first() == Some(&GC_TARGET)
+            && record
+                .get(1..5)
+                .is_some_and(|vid| is_party_member(members, vid));
+        let is_member_damage = record.first() == Some(&GC_DAMAGE_INFO)
+            && record
+                .get(1..5)
+                .is_some_and(|vid| is_party_member(members, vid));
+        let is_member_claim = record.first() == Some(&GC_OWNERSHIP)
+            && record
+                .get(5..9)
+                .is_some_and(|vid| is_party_member(members, vid));
+        let is_mob_chat = record.first() == Some(&GC_CHAT);
+        let is_effect = record.first() == Some(&GC_SPECIAL_EFFECT)
+            && record
+                .get(2..6)
+                .is_some_and(|vid| vid == victim.to_le_bytes());
+        assert!(
+            is_heal
+                || is_member_target
+                || is_member_damage
+                || is_member_claim
+                || is_mob_chat
+                || is_effect
+                || is_npc_chatter(&record),
+            "past a party's swings, a record nobody accounted for: {record:02x?}"
+        );
+    }
+}
+
+/// Take a party swing's ordered tail after its `DAMAGE_INFO`: the hit points, the stun
+/// triple, the claim, and the closing move's VID. The punch's own head and claim are read
+/// past with the members'.
+fn party_swing_tail(
+    keyed: &mut Keyed,
+    members: &[u32],
+    victim: u32,
+    damage: i32,
+    deadline: std::time::Instant,
+    sized: &impl Fn(u8, &[u8]) -> usize,
+) -> PartySwing {
+    let hp_kind = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
+    let mut saw_hp = false;
+    let mut saw_35 = false;
+    let mut saw_36 = false;
+    loop {
+        let Some(record) = keyed.read_sized_until(sized, deadline) else {
+            panic!("a swing's closing move within the window");
+        };
+        if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+            continue;
+        }
+        if record[0] == GC_MOVE
+            && record.get(1) == Some(&FUNC_ATTACK)
+            && record.get(2) == Some(&0)
+            && record.get(4..8).is_some_and(|vid| {
+                members.contains(&u32::from_le_bytes(vid.try_into().expect("a VID")))
+            })
+        {
+            return PartySwing {
+                damage,
+                swung_by: u32::from_le_bytes(record[4..8].try_into().expect("a VID")),
+            };
+        }
+        if record[0] == GC_OWNERSHIP && record[5..9] == victim.to_le_bytes() {
+            continue;
+        }
+        if record.first() == Some(&GC_SPECIAL_EFFECT)
+            && record
+                .get(2..6)
+                .is_some_and(|vid| vid == victim.to_le_bytes())
+        {
+            continue;
+        }
+        if record.first() == Some(&GC_DAMAGE_INFO)
+            && record
+                .get(1..5)
+                .is_some_and(|vid| is_party_member(members, vid))
+        {
+            continue;
+        }
+        if record.first() == Some(&GC_OWNERSHIP)
+            && record
+                .get(5..9)
+                .is_some_and(|vid| is_party_member(members, vid))
+        {
+            continue;
+        }
+        if record[0] == GC_STUN && record[1..5] == victim.to_le_bytes() {
+            assert!(saw_35 && saw_36, "the stun triple is ordered");
+            continue;
+        }
+        if record.first() == Some(&GC_POINT_CHANGE) && record[4..8] == victim.to_le_bytes() {
+            match record.get(8).copied() {
+                Some(kind) if kind == hp_kind && !saw_hp => {
+                    saw_hp = true;
+                }
+                Some(kind) if kind == hp_kind => {}
+                Some(35) => {
+                    assert!(!saw_35, "one stun pool record");
+                    saw_35 = true;
+                }
+                Some(36) => {
+                    assert!(saw_35 && !saw_36, "the stun triple is ordered");
+                    saw_36 = true;
+                }
+                kind => panic!("past a swing, a point nobody accounted for: {kind:?}"),
+            }
+            continue;
+        }
+        if record.first() == Some(&GC_TARGET)
+            && record
+                .get(1..5)
+                .is_some_and(|vid| is_party_member(members, vid))
+        {
+            continue;
+        }
+        assert!(
+            is_npc_chatter(&record),
+            "past a swing, a record nobody accounted for: {record:02x?}"
+        );
+    }
 }

@@ -322,7 +322,7 @@ impl ItemProtos {
             .find(|p| starts_with_ignore_case(&p.locale_name, name))
             .map(|p| p.vnum)
     }
-    /// `ITEM_MANAGER::GetVnumByOriginalName` (`item_manager.cpp:740-756`), against `szName`.
+    /// `ITEM_MANAGER::GetVnumByOriginalName` (`G/item_manager.cpp:740-756`), against `szName`.
     pub fn vnum_by_original_name(&self, name: &[u8]) -> Option<u32> {
         self.by_vnum
             .iter()

@@ -70,7 +70,7 @@ const SALE_TAX_PERCENT: u64 = 3;
 
 /// The auto potions and the skill books `CreateItem` fills a socket of by vnum
 /// (`G/item_manager.cpp:222-247`, `:333-384`, `G/unique_item.h:44-104`).
-const SOCKETED_VNUMS: [u32; 15] = [
+pub(crate) const SOCKETED_VNUMS: [u32; 15] = [
     72_723, 72_724, 72_725, 72_726, 72_727, 72_728, 72_729, 72_730, 76_004, 76_005, 76_021, 76_022,
     50_300, 70_037, 70_055,
 ];

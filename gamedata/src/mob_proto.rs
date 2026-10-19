@@ -125,6 +125,14 @@ pub const BATTLE_TYPE_RANGE: u8 = 1;
 pub const BATTLE_TYPE_MAGIC: u8 = 2;
 /// `BATTLE_TYPE_SPECIAL`: chased and swung at, but never damaged (`G/char_battle.cpp:259-279`).
 pub const BATTLE_TYPE_SPECIAL: u8 = 3;
+/// `BATTLE_TYPE_POWER` (`common/length.h:488`): the attack-melee family with `MELEE`.
+pub const BATTLE_TYPE_POWER: u8 = 4;
+/// `BATTLE_TYPE_TANKER` (`common/length.h:489`).
+pub const BATTLE_TYPE_TANKER: u8 = 5;
+/// `BATTLE_TYPE_SUPER_POWER` (`common/length.h:490`).
+pub const BATTLE_TYPE_SUPER_POWER: u8 = 6;
+/// `BATTLE_TYPE_SUPER_TANKER` (`common/length.h:491`).
+pub const BATTLE_TYPE_SUPER_TANKER: u8 = 7;
 
 /// `MOB_RANK_BOSS` (`common/length.h:455-463`): a chasing boss refollows one time in four.
 pub const MOB_RANK_BOSS: u8 = 4;
@@ -143,24 +151,24 @@ pub const AIFLAG_NOMOVE: u32 = 1 << 1;
 /// `AIFLAG_COWARD` (`common/length.h:690`): the bit `COWARD` sets, which `IsCoward` reads.
 pub const AIFLAG_COWARD: u32 = 1 << 2;
 
-/// `AIFLAG_NOATTSHINSU` (`common/length.h:691`, `G/char_state.cpp:331-333`,
-/// `G/trigger.cpp:114-116`): the bit `NOATTSHINSU` sets, which spares empire 1 (Shinsu)
+/// `AIFLAG_NOATTSHINSU` (`common/length.h:691`, `G/char_state.cpp:326-329`,
+/// `G/trigger.cpp:114-118`): the bit `NOATTSHINSU` sets, which spares empire 1 (Shinsu)
 /// from the monster's victim search.
 pub const AIFLAG_NOATTSHINSU: u32 = 1 << 3;
 
 /// `AIFLAG_NOATTCHUNJO` (`common/length.h:692`, `ProtoReader.cpp:676`,
-/// `G/char_state.cpp:337-339`, `G/trigger.cpp:122-124`): the bit the proto text's
+/// `G/char_state.cpp:336-339`, `G/trigger.cpp:120-124`): the bit the proto text's
 /// `NOATTCHUNJO` sets. The proto text puts it at bit 4, and it spares empire 2 (Chunjo).
 /// Legacy's enum reads bit 4 as Jinno (B30); the Rewrite reads the proto text's meaning.
 pub const AIFLAG_NOATTCHUNJO: u32 = 1 << 4;
 
 /// `AIFLAG_NOATTJINNO` (`common/length.h:693`, `ProtoReader.cpp:676`,
-/// `G/char_state.cpp:343-345`, `G/trigger.cpp:128-130`): the bit the proto text's
+/// `G/char_state.cpp:346-349`, `G/trigger.cpp:127-131`): the bit the proto text's
 /// `NOATTJINNO` sets. The proto text puts it at bit 5, and it spares empire 3 (Jinno).
 /// Legacy's enum reads bit 5 as Chunjo (B30); the Rewrite reads the proto text's meaning.
 pub const AIFLAG_NOATTJINNO: u32 = 1 << 5;
 
-/// `AIFLAG_ATTMOB` (`common/length.h:694`, `G/trigger.cpp:85-89`): the bit `ATTMOB` sets,
+/// `AIFLAG_ATTMOB` (`common/length.h:694`, `G/trigger.cpp:88-91`): the bit `ATTMOB` sets,
 /// which lets a monster attack another monster in `FindVictim`. No proto has it.
 pub const AIFLAG_ATTMOB: u32 = 1 << 6;
 

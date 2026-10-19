@@ -388,6 +388,18 @@ pub struct PlayerSave {
     pub conqueror_level: u8,
     /// The conqueror experience, the conqueror counterpart of `tab.exp`.
     pub conqueror_exp: i64,
+    /// `tab.sRandomHP`, the hit points the level-ups rolled.
+    pub random_hp: i16,
+    /// `tab.sRandomSP`, the spell points the level-ups rolled.
+    pub random_sp: i16,
+    /// `tab.stat_point`, the unspent stat points.
+    pub stat_point: i16,
+    /// `tab.skill_point`, the unspent skill points.
+    pub skill_point: i16,
+    /// `tab.sub_skill_point`, the unspent sub-skill points.
+    pub sub_skill_point: i16,
+    /// `tab.level_step`, the quarters of the next level's cost banked.
+    pub level_step: i16,
     /// `tab.st`.
     pub st: u8,
     /// `tab.ht`.
@@ -446,9 +458,11 @@ pub async fn save_character(
     let player_id = i32::try_from(player).map_err(|_| AccountError::NoSuchPlayer(player))?;
     let updated = sqlx::query(
         "UPDATE player SET level = $3, exp = $4, conqueror_level = $5, conqueror_exp = $6, \
-         st = $7, ht = $8, dx = $9, iq = $10, hp = $11, sp = $12, stamina = $13, \
-         voice = $14, part_base = $15, part_main = $16, part_hair = $17, part_sash = $18, \
-         x = $19, y = $20, skill_group = $21, playtime_minutes = $22 \
+         random_hp = $7, random_sp = $8, stat_point = $9, skill_point = $10, \
+         sub_skill_point = $11, level_step = $12, \
+         st = $13, ht = $14, dx = $15, iq = $16, hp = $17, sp = $18, stamina = $19, \
+         voice = $20, part_base = $21, part_main = $22, part_hair = $23, part_sash = $24, \
+         x = $25, y = $26, skill_group = $27, playtime_minutes = $28 \
          WHERE account_id = $1 AND id = $2",
     )
     .bind(account.to_column()?)
@@ -457,6 +471,12 @@ pub async fn save_character(
     .bind(save.exp)
     .bind(i16::from(save.conqueror_level))
     .bind(save.conqueror_exp)
+    .bind(save.random_hp)
+    .bind(save.random_sp)
+    .bind(save.stat_point)
+    .bind(save.skill_point)
+    .bind(save.sub_skill_point)
+    .bind(save.level_step)
     .bind(i16::from(save.st))
     .bind(i16::from(save.ht))
     .bind(i16::from(save.dx))
@@ -606,6 +626,18 @@ pub struct Character {
     pub gold: i64,
     /// Conqueror experience banked towards the next conqueror level.
     pub conqueror_exp: i64,
+    /// The random hit points the level-ups added (`sRandomHP`).
+    pub random_hp: i16,
+    /// The random spell points the level-ups added (`sRandomSP`).
+    pub random_sp: i16,
+    /// The unspent stat points (`stat_point`).
+    pub stat_point: i16,
+    /// The unspent skill points (`skill_point`).
+    pub skill_point: i16,
+    /// The unspent sub-skill points (`sub_skill_point`).
+    pub sub_skill_point: i16,
+    /// The quarters of the next level's cost banked (`level_step`), 0 to 4.
+    pub level_step: i16,
     /// `POINT_SUNGMA_STR`, the conqueror strength measured against a map's will.
     pub sungma_str: u8,
     /// `POINT_SUNGMA_HP`.
@@ -654,6 +686,7 @@ pub async fn load_character(
     let row = sqlx::query(
         "SELECT p.slot, p.id, p.name, p.job, p.level, p.exp, p.conqueror_level, p.conqueror_exp, p.st, p.ht, \
          p.dx, p.iq, p.sungma_str, p.sungma_hp, p.sungma_move, p.sungma_immune, \
+         p.random_hp, p.random_sp, p.stat_point, p.skill_point, p.sub_skill_point, p.level_step, \
          p.hp, p.sp, p.stamina, p.gold, p.voice, p.part_base, p.part_main, \
          p.part_hair, p.part_sash, p.x, p.y, p.skill_group, p.playtime_minutes, p.change_name, a.empire \
          FROM player AS p JOIN account AS a ON a.id = p.account_id \
@@ -674,6 +707,12 @@ pub async fn load_character(
         exp: row.try_get("exp")?,
         conqueror_level: narrow(row.try_get::<i16, _>("conqueror_level")?, "conqueror")?,
         conqueror_exp: row.try_get("conqueror_exp")?,
+        random_hp: row.try_get("random_hp")?,
+        random_sp: row.try_get("random_sp")?,
+        stat_point: row.try_get("stat_point")?,
+        skill_point: row.try_get("skill_point")?,
+        sub_skill_point: row.try_get("sub_skill_point")?,
+        level_step: row.try_get("level_step")?,
         sungma_str: narrow(row.try_get::<i16, _>("sungma_str")?, "sungma_str")?,
         sungma_hp: narrow(row.try_get::<i16, _>("sungma_hp")?, "sungma_hp")?,
         sungma_move: narrow(row.try_get::<i16, _>("sungma_move")?, "sungma_move")?,

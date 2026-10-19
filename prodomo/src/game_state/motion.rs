@@ -320,6 +320,14 @@ impl GameState {
             .map_or(PK_MODE_PEACE, |body| body.card.pk_mode)
     }
 
+    /// What `UpdatePacket` sends of the alignment of the body under `vid`
+    /// (`GetRealAlignment() / 10`, `G/char.cpp:1320`), or 0 with no body.
+    pub(super) fn alignment_of(&self, vid: u32) -> i16 {
+        self.bodies.get(&Vid::new(vid)).map_or(0, |body| {
+            i16::try_from(body.card.alignment / 10).unwrap_or(i16::MAX)
+        })
+    }
+
     /// Where the body under `vid` stands.
     pub(super) fn spot_of(&self, vid: u32) -> Option<Spot> {
         let place = self.place_of(vid)?;

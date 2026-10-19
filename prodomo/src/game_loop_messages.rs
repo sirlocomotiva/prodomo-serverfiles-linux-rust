@@ -377,6 +377,21 @@ pub enum GameCommand {
         /// Where the game thread reports what the drop did.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Runs one gold `CG_ITEM_DROP` or `CG_ITEM_DROP2` for the character online under `vid`,
+    /// answered as a move is.
+    DropGold {
+        /// The VID of the character whose client sent the drop.
+        vid: common::vid::Vid,
+        /// How much gold the client named.
+        gold: u32,
+        /// Where the character stands.
+        place: GroundPlace,
+        /// What the descriptor knows of the character.
+        mover: Mover,
+        /// Where the game thread reports what the drop did.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
+
     /// Runs one `CG_ITEM_PICKUP` for the character online under `vid`, answered as a move is.
     PickupItem {
         /// The VID of the character whose client sent the pick-up.
@@ -1278,6 +1293,30 @@ impl GameLoopController {
             vid,
             at,
             count,
+            place,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to drop gold, and waits for what it did.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn drop_gold(
+        &self,
+        vid: common::vid::Vid,
+        gold: u32,
+        place: GroundPlace,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::DropGold {
+            vid,
+            gold,
             place,
             mover,
             reply,

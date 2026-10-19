@@ -40,8 +40,9 @@ use gamedata::regen::RegenEntry;
 use gamedata::server_attr::SectreeGrid;
 use world::cells::MapCells;
 use world::character::{
-    drop_item, move_item, pickup_item, use_item, CharacterManager, CharacterManagerError, DropAt,
-    Gear, GroundItem, MoveRefused, MoveRequest, MoveRules, Pcg32, Picker, Rejected, Side,
+    drop_gold, drop_item, move_item, pickup_gold, pickup_item, use_item, CharacterManager,
+    CharacterManagerError, DropAt, Gear, GroundItem, MoveRefused, MoveRequest, MoveRules, Pcg32,
+    Picker, Rejected, Side,
 };
 use world::item::{ItemIdRange, ItemIds};
 use world::npc::{MapNpcs, NpcSpawner, NpcVidsExhausted};
@@ -67,11 +68,14 @@ mod fight;
 mod fixtures;
 mod mob_ai;
 mod mob_battle;
+mod mob_party;
+mod mob_skill;
 mod mob_strike;
 mod motion;
 mod pc_heal;
 mod quests;
 mod regen;
+mod reward;
 mod safebox;
 mod shop;
 mod sync;
@@ -95,6 +99,17 @@ pub use trade::{
 
 /// `PickupItem`'s `DistanceValid` bound (`G/item.cpp:593`), checked at `G/char_item.cpp:7982`.
 const PICKUP_DISTANCE: i32 = 300;
+/// One running `ownership_event` (`G/item.cpp:1704-1728`).
+#[derive(Debug, Clone)]
+struct GroundOwner {
+    /// `m_pkOwnershipEvent`'s `m_dwOwnerPID`: the store id `IsOwnership` matches.
+    pid: u32,
+    /// The 25-byte name `SetOwnership` copies (`strlcpy`, `G/item.cpp:1751-1761`).
+    name: [u8; protocol::gc_fields::GC_NAME_FIELD_SIZE],
+    /// The pulse the event fires on: `PASSES_PER_SEC(iSec)` after it is set, where
+    /// `iSec <= 10` becomes 30 (`:1756-1757`), so the header's 10 s default never shows.
+    due: u64,
+}
 
 /// An item lying on one map of one Channel.
 #[derive(Debug)]
@@ -104,6 +119,10 @@ struct Lying {
     map: i32,
     /// The pulse the destroy event fires on.
     expires: u64,
+    /// `CItem::SetOwnership` (`G/item.cpp:1733-1775`): the store id and 25-byte name of the
+    /// character that may pick the item up until `due`, when the event sends the empty
+    /// name. `None` is no event, which `IsOwnership` lets anyone pick up (`:1696-1702`).
+    owner: Option<GroundOwner>,
     /// Told once the drop that laid it has stored its rows, which each pick-up waits for.
     stored: watch::Receiver<bool>,
 }
@@ -385,6 +404,8 @@ pub struct GameState {
     next_ground_vid: u32,
     /// `item_destroy_time_dropitem`, in pulses.
     drop_lifetime: u64,
+    /// `item_destroy_time_dropgold`, in pulses.
+    gold_lifetime: u64,
     /// The Channel's client registry: who a trade or a warp NPC finds online.
     clients: Option<Arc<ChannelClients>>,
     /// The affect event of each character that has one (`m_pkAffectEvent`): the potion
@@ -401,7 +422,20 @@ pub struct GameState {
     /// The NPC shops, by keeper vnum.
     shops: Arc<gamedata::npc_shop::NpcShops>,
     /// The player motion clips, which give each race and weapon its walk and run speed.
+    /// The player motion clips, which give each race and weapon its walk and run speed.
     motions: Arc<gamedata::pc_motion::PcMotions>,
+    /// The hosted mob skill rows and the mob power row, which a cast reads.
+    mob_skills: Arc<gamedata::mob_skill_data::MobSkills>,
+    /// The skill clips, which stood-up NPCs copy their `SPECIALn` data from.
+    mob_clips: Arc<gamedata::mob_skill_data::MobSkillClips>,
+    /// The drop tables, which a monster's death will pay from.
+    drops: Arc<gamedata::drop::DropTables>,
+    /// The `item_attr` rows, which a dropped item's magic rolls against.
+    item_attrs: Arc<Vec<gamedata::records::ItemAttrRecord>>,
+    /// The vnum mask table, which a made item's shown vnum answers through.
+    item_masks: Arc<gamedata::item_mask::ItemMasks>,
+    /// The cached second Gaussian of the next `gauss_random` call, if one waits.
+    gauss: world::character::Gauss,
     /// `g_bEmpireShopPriceTripleDisable`: a stranger's prices are not tripled.
     shop_price_3x_disabled: bool,
     /// The keeper each character browses, keyed by its VID.
@@ -442,10 +476,13 @@ pub struct GameState {
     /// What each player keeps of its fight: its stun, its death, its killer and its events. See
     /// [`death`].
     pc_combat: HashMap<u32, death::PcCombat>,
-    /// `gPlayerMaxLevel`, which the death penalty's experience loss reads.
-    max_level: i32,
+    /// `gPlayerMaxLevel` and `g_iStatusPointGetLevelLimit`, which the experience gain reads.
+    exp_limits: world::character::ExpLimits,
     /// Where a town restart sends a player. See [`death`].
     recall: death::Recall,
+    /// `PK_PROTECT_LEVEL` (`[game] pk_protect_level`): below it a character is in the
+    /// protect PK mode, and a level-up that reaches it switches the mode to peace.
+    protect_level: u8,
 }
 
 /// An item the world has taken back, together with whose it was.
@@ -503,12 +540,19 @@ impl GameState {
             ground: BTreeMap::new(),
             next_ground_vid: 1,
             drop_lifetime: drop_lifetime_pulses(DEFAULT_DROP_LIFETIME_SECS),
+            gold_lifetime: drop_lifetime_pulses(DEFAULT_GOLD_LIFETIME_SECS),
             clients: None,
             affect_events: HashMap::new(),
             affect_sequence: 0,
             npcs: BTreeMap::new(),
             shops: Arc::default(),
             motions: Arc::default(),
+            mob_skills: Arc::default(),
+            mob_clips: Arc::default(),
+            drops: Arc::default(),
+            item_attrs: Arc::default(),
+            item_masks: Arc::default(),
+            gauss: world::character::Gauss::new(),
             shop_price_3x_disabled: false,
             browsing: HashMap::new(),
             trades: BTreeMap::new(),
@@ -528,8 +572,12 @@ impl GameState {
             minds: mob_ai::Minds::default(),
             npc_combat: HashMap::new(),
             pc_combat: HashMap::new(),
-            max_level: DEFAULT_MAX_LEVEL,
+            exp_limits: world::character::ExpLimits {
+                max_level: DEFAULT_MAX_LEVEL,
+                status_point_get_level_limit: DEFAULT_STATUS_POINT_GET_LEVEL_LIMIT,
+            },
             recall: death::Recall::default(),
+            protect_level: DEFAULT_PROTECT_LEVEL,
         }
     }
 
@@ -567,6 +615,12 @@ impl GameState {
     #[must_use]
     pub fn with_drop_lifetime(mut self, seconds: i32) -> Self {
         self.drop_lifetime = drop_lifetime_pulses(seconds);
+        self
+    }
+    /// Set `item_destroy_time_dropgold`, the seconds a dropped gold pile lies before it is destroyed.
+    #[must_use]
+    pub fn with_gold_lifetime(mut self, seconds: i32) -> Self {
+        self.gold_lifetime = drop_lifetime_pulses(seconds);
         self
     }
 
@@ -823,6 +877,7 @@ impl GameState {
             | GameCommand::Safebox { .. }
             | GameCommand::Quest { .. }) => self.apply_item_step(command),
             command @ (GameCommand::DropItem { .. }
+            | GameCommand::DropGold { .. }
             | GameCommand::PickupItem { .. }
             | GameCommand::NpcsOn { .. }) => self.apply_ground(command),
             command @ (GameCommand::Move { .. }
@@ -1342,6 +1397,16 @@ impl GameState {
                 let place = self.live_place(vid, place);
                 answer_item_step(vid, reply, self.drop_item(vid, at, count, place, mover));
             }
+            GameCommand::DropGold {
+                vid,
+                gold,
+                place,
+                mover,
+                reply,
+            } => {
+                let place = self.live_place(vid, place);
+                answer_item_step(vid, reply, self.drop_gold(vid, gold, place, mover));
+            }
             GameCommand::PickupItem {
                 vid,
                 ground,
@@ -1424,6 +1489,7 @@ impl GameState {
                     channel: place.channel,
                     map: place.map,
                     expires: self.last_pulse.saturating_add(self.drop_lifetime),
+                    owner: None,
                     stored,
                 },
             );
@@ -1442,6 +1508,87 @@ impl GameState {
             self.deliver(&effects, Some((vid.raw(), &mut own)));
             moved.place_ground(own);
         }
+        Ok(moved)
+    }
+
+    /// Run one gold `CG_ITEM_DROP` for the character online under `vid`
+    /// (`CHARACTER::DropGold`, `G/char_item.cpp:7554`). The pile lies where the character
+    /// stands until it is picked up or its destroy event fires, and enters the view there
+    /// (`CItem::AddToGround`, `G/item.cpp:549-584`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`]; [`MoveRefused::NoSectree`] when no sectree holds the point.
+    pub fn drop_gold(
+        &mut self,
+        vid: common::vid::Vid,
+        gold: u32,
+        place: GroundPlace,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        if self.is_dead(vid.raw()) {
+            return Err(MoveItemRefused::Refused(MoveRefused::DroppedWhileDead));
+        }
+        let owner_id = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?
+            .player_id();
+        let (x, y, z) = self
+            .spot_of(vid.raw())
+            .map_or((place.x, place.y, 0), |spot| (spot.x, spot.y, spot.z));
+        let key = (place.channel, place.map);
+        let to = DropAt {
+            vid: self.next_ground_vid,
+            x,
+            y,
+            owner_id,
+            questing: self.quest_running(vid),
+            lands: self
+                .maps
+                .get(&key)
+                .and_then(|index| index.tree_at(x, y))
+                .is_some(),
+        };
+        let character = self
+            .characters
+            .find_by_vid_mut(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let held = character.gold();
+        let (done, ground, left) =
+            drop_gold(held, gold, to, &self.protos).map_err(MoveItemRefused::Refused)?;
+        character.set_gold(left);
+        let laid = ground.vid;
+        let (order, stored) = StoreOrder::laid();
+        let mut moved =
+            MovedItems::new(owner_id, vid.raw(), done, actor, &self.protos, &self.locale);
+        moved.gold = Some(crate::item_move::gold_delta(held, left));
+        moved.store_order = order;
+        self.ground.insert(
+            laid,
+            Lying {
+                ground,
+                channel: place.channel,
+                map: place.map,
+                expires: self.last_pulse.saturating_add(self.gold_lifetime),
+                owner: None,
+                stored,
+            },
+        );
+        self.next_ground_vid = self.next_ground_vid.wrapping_add(1).max(1);
+        let radius = self.view_radius;
+        let mut effects = Vec::new();
+        if let Some(index) = self.maps.get_mut(&key) {
+            index.add_to_ground(
+                view::EntityKey::Ground(laid),
+                (x, y, z),
+                radius,
+                &mut effects,
+            );
+        }
+        let mut own = Vec::new();
+        self.deliver(&effects, Some((vid.raw(), &mut own)));
+        moved.place_ground(own);
         Ok(moved)
     }
 
@@ -1483,9 +1630,31 @@ impl GameState {
         let Some(mut lying) = self.ground.remove(&ground) else {
             return Err(MoveItemRefused::Refused(MoveRefused::NotOnGround));
         };
+        // `IsOwnership` (`G/item.cpp:1696-1702`), checked before the quest gate and the
+        // gold arm: another character's running event refuses the pick-up silently.
+        let owner_id = character.player_id();
+        if lying
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owner.pid != owner_id || owner_id == 0)
+        {
+            let pid = lying.owner.as_ref().map(|owner| owner.pid);
+            self.ground.insert(ground, lying);
+            tracing::debug!(ground, ?pid, "pick-up refused by ground ownership");
+            return Err(MoveItemRefused::Refused(MoveRefused::OwnedByOther));
+        }
         // Its rows wait for the drop's, a remainder's pick-up's too.
         let order = StoreOrder::after(lying.stored.clone());
-        let owner_id = character.player_id();
+        // A gold pile pays the purse, never the storage (`G/char_item.cpp:7996-8004`).
+        // At the cap it is consumed without paying, as `PointChange(POINT_GOLD)`
+        // consumes it.
+        if self
+            .protos
+            .get(lying.ground.item.vnum)
+            .is_some_and(|proto| proto.item_type == gamedata::item_kind::ITEM_ELK)
+        {
+            return self.pickup_gold_pile(vid, ground, &lying, order, owner_id, actor);
+        }
         let rules = MoveRules {
             count_limit: self.item_count_limit,
             usable_cells: usable_inventory_cells(character.inven_point()),
@@ -1517,6 +1686,53 @@ impl GameState {
         Ok(moved)
     }
 
+    /// A gold pile's pick-up: the purse is paid, the index loses the pile, and the picker
+    /// is told. The pile is consumed either way; at the cap nothing is paid.
+    fn pickup_gold_pile(
+        &mut self,
+        vid: common::vid::Vid,
+        ground: u32,
+        lying: &Lying,
+        order: StoreOrder,
+        owner_id: common::CharacterId,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let character = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let held = character.gold();
+        let paid = pickup_gold(held, &lying.ground);
+        let mut effects = Vec::new();
+        if let Some(index) = self.maps.get_mut(&(lying.channel, lying.map)) {
+            index.remove(view::EntityKey::Ground(ground), &mut effects);
+        }
+        let mut own = Vec::new();
+        self.deliver(&effects, Some((vid.raw(), &mut own)));
+        match paid {
+            Ok((done, paid)) => {
+                let character = self
+                    .characters
+                    .find_by_vid_mut(vid)
+                    .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+                character.set_gold(paid);
+                let mut moved =
+                    MovedItems::new(owner_id, vid.raw(), done, actor, &self.protos, &self.locale);
+                moved.gold = Some(crate::item_move::gold_delta(held, paid));
+                moved.place_ground(own);
+                moved.store_order = order;
+                Ok(moved)
+            }
+            Err((done, _)) => {
+                let mut moved =
+                    MovedItems::new(owner_id, vid.raw(), done, actor, &self.protos, &self.locale);
+                moved.place_ground(own);
+                moved.store_order = order;
+                Ok(moved)
+            }
+        }
+    }
+
     /// Fire every destroy event due by `pulse`: the item leaves the ground, and each player
     /// that sees it is sent `GC_ITEM_GROUND_DEL` (`CItem::DestroyEvent`,
     /// `item_destroy_time_dropitem`; `RemoveFromGround`, `G/item.cpp:533-547`).
@@ -1536,6 +1752,61 @@ impl GameState {
                 index.remove(view::EntityKey::Ground(vid), &mut effects);
             }
             self.deliver(&effects, None);
+        }
+    }
+
+    /// `CItem::SetOwnership` (`G/item.cpp:1733-1775`) for the ground item under `vid`: with
+    /// a running event it keeps the first owner and sends nothing; with none it stores
+    /// the character's store id and 25-byte name, runs the event for `PASSES_PER_SEC`
+    /// times the seconds (`iSec <= 10` becomes 30, `:1756-1757`), and sends
+    /// `GC_ITEM_OWNERSHIP` around the item. Clearing (`NULL`) cancels the event and sends
+    /// the empty name; no caller clears yet.
+    fn set_ground_ownership(&mut self, vid: u32, owner: Option<(u32, [u8; 25])>, secs: i32) {
+        let Some(lying) = self.ground.get_mut(&vid) else {
+            return;
+        };
+        let Some((pid, name)) = owner else {
+            // `SetOwnership(NULL)`: no running event is a silent no-op; a running one is
+            // cancelled, the PID cleared, and the empty name sent (`:1735-1749`).
+            if lying.owner.take().is_some() {
+                let record = view_encode::ground_ownership(vid, [0; 25]);
+                self.packet_around(view::EntityKey::Ground(vid), &record, None);
+            }
+            return;
+        };
+        // With a running event it keeps the first owner and sends nothing (`:1752-1753`).
+        if lying.owner.is_some() {
+            return;
+        }
+        let secs = if secs <= 10 { 30 } else { secs };
+        lying.owner = Some(GroundOwner {
+            pid,
+            name,
+            due: self.last_pulse.saturating_add(
+                u64::from(u32::try_from(secs.max(0)).unwrap_or(u32::MAX))
+                    * u64::from(crate::save::PASSES_PER_SEC),
+            ),
+        });
+        let record = view_encode::ground_ownership(vid, name);
+        self.packet_around(view::EntityKey::Ground(vid), &record, None);
+    }
+
+    /// The `ownership_event` sweep (`G/item.cpp:1704-1728`): every ground item whose
+    /// ownership is due loses it, and its view hears the empty-name record.
+    fn release_expired_ownership(&mut self, pulse: u64) {
+        let due: Vec<u32> = self
+            .ground
+            .iter()
+            .filter(|(_, lying)| lying.owner.as_ref().is_some_and(|owner| owner.due <= pulse))
+            .map(|(vid, _)| *vid)
+            .collect();
+        for vid in due {
+            let Some(lying) = self.ground.get_mut(&vid) else {
+                continue;
+            };
+            lying.owner = None;
+            let record = view_encode::ground_ownership(vid, [0; 25]);
+            self.packet_around(view::EntityKey::Ground(vid), &record, None);
         }
     }
 
@@ -1561,6 +1832,7 @@ impl GameState {
             pk_mode: self.pk_mode_of(vid.raw()),
             affect_flags: self.affect_flags_of(vid),
             dead: self.is_dead(vid.raw()),
+            alignment: self.alignment_of(vid.raw()),
             ..actor
         };
         let character = self
@@ -1634,6 +1906,7 @@ impl PulseProcessor for GameState {
         self.last_pulse = pulse;
         self.metrics.pulses.store(pulse, Ordering::SeqCst);
         self.destroy_expired(pulse);
+        self.release_expired_ownership(pulse);
         self.run_affect_events(pulse);
         self.run_warp_npcs(pulse);
         self.run_regens(pulse);
@@ -1645,12 +1918,26 @@ impl PulseProcessor for GameState {
 
 /// Legacy's `item_destroy_time_dropitem` default, in seconds (`G/config.cpp:56`).
 const DEFAULT_DROP_LIFETIME_SECS: i32 = 300;
+/// Legacy's `item_destroy_time_dropgold` default, in seconds (`G/config.cpp:56`).
+const DEFAULT_GOLD_LIFETIME_SECS: i32 = 150;
+/// A monster drop's destroy event, `StartDestroyEvent`'s default delay in Pulses
+/// (`G/item.cpp:247-248`, called with no argument from `RewardGold` and `Reward`). Fixed, not
+/// configured: legacy reads no config for it.
+const MONSTER_DROP_LIFETIME: u64 = 300 * PASSES_PER_SEC as u64;
 
 /// `VIEW_RANGE`'s default (`G/config.cpp:123`), which the configured `game.view_range` replaces.
 const DEFAULT_VIEW_RANGE: i32 = 5000;
 
 /// `gPlayerMaxLevel`'s default (`G/config.cpp:143`), the configured `game.max_level`'s too.
 const DEFAULT_MAX_LEVEL: i32 = 99;
+
+/// `g_iStatusPointGetLevelLimit`'s default (`G/config.cpp:135`), the configured
+/// `game.status_point_get_level_limit`'s too.
+const DEFAULT_STATUS_POINT_GET_LEVEL_LIMIT: i32 = 90;
+
+/// `PK_PROTECT_LEVEL`'s default (`common/config.rs:514`), the configured
+/// `game.pk_protect_level`'s too.
+const DEFAULT_PROTECT_LEVEL: u8 = 15;
 
 /// The view's radius for `view_range`: `VIEW_RANGE + VIEW_BONUS_RANGE` (`G/entity_view.cpp:94`).
 fn view_radius_of(view_range: i32) -> i64 {
@@ -2204,8 +2491,9 @@ mod tests {
         }
     }
 
-    /// A one-cell, non-custom vnum from the owner's table, so the grant lands in the
-    /// base inventory and nothing else decides the cell.
+    /// A one-cell, non-custom, non-gold vnum from the owner's table, so the grant lands in
+    /// the base inventory and nothing else decides the cell. Vnum 1 is `ITEM_ELK`, which a
+    /// pick-up pays to the purse and never places.
     fn a_plain_vnum() -> u32 {
         let protos = owners();
         protos
@@ -2213,6 +2501,7 @@ mod tests {
             .iter()
             .find(|proto| {
                 proto.size == 1
+                    && proto.item_type != gamedata::item_kind::ITEM_ELK
                     && (0..6).all(|category| {
                         !gamedata::item_custom_category::is_custom_category(proto, category)
                     })
@@ -2542,6 +2831,7 @@ mod tests {
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             affect_flags: [0; 2],
             dead: false,
+            alignment: 0,
         }
     }
 
@@ -2854,6 +3144,98 @@ mod tests {
                 (vid, spot.x, spot.y)
             })
             .collect()
+    }
+
+    /// A pile's vnum: the first `ITEM_ELK` row of the owner's table.
+    fn a_pile_vnum() -> u32 {
+        owners()
+            .rows()
+            .iter()
+            .find(|proto| proto.item_type == gamedata::item_kind::ITEM_ELK)
+            .expect("the owner's table has an ITEM_ELK row")
+            .vnum
+    }
+
+    /// A holder with `gold` in its purse.
+    fn a_holder_with_gold(gold: u64) -> GameState {
+        let mut state = a_holder(&[], true);
+        state
+            .characters
+            .find_by_vid_mut(Vid::new(7))
+            .expect("the holder is online")
+            .set_gold(gold);
+        state
+    }
+
+    fn gold_at(state: &GameState) -> u64 {
+        state
+            .characters
+            .find_by_vid(Vid::new(7))
+            .expect("the holder is online")
+            .gold()
+    }
+
+    #[test]
+    fn a_dropped_gold_pile_lies_until_it_is_picked_up_again() {
+        let mut state = a_holder_with_gold(10_000);
+        let dropped = state
+            .drop_gold(Vid::new(7), 1_500, a_place(41, 500, 700), a_mover())
+            .expect("the drop happened");
+        assert_eq!(dropped.kind, world::character::MoveKind::Dropped);
+        assert_eq!(gold_at(&state), 8_500);
+        assert_eq!(dropped.gold, Some(-1_500));
+        assert!(dropped.changes.is_empty(), "no row for a pile");
+        assert_eq!(lying_on(&state, (1, 41)), vec![(1, 500, 700)]);
+        assert_eq!(state.ground[&1].ground.item.vnum, a_pile_vnum());
+
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        state.apply(GameCommand::PickupItem {
+            vid: Vid::new(7),
+            ground: 1,
+            place: a_place(41, 700, 700),
+            mover: a_mover(),
+            reply,
+        });
+        let picked = answer
+            .blocking_recv()
+            .expect("the game thread answered")
+            .expect("the pick-up happened");
+        assert_eq!(picked.kind, world::character::MoveKind::PickedUp);
+        assert_eq!(gold_at(&state), 10_000);
+        assert_eq!(picked.gold, Some(1_500));
+        assert!(lying_on(&state, (1, 41)).is_empty());
+    }
+
+    #[test]
+    fn a_gold_drop_past_the_purse_refuses_and_lays_nothing() {
+        let mut state = a_holder_with_gold(100);
+        let refused = state
+            .drop_gold(Vid::new(7), 101, a_place(41, 500, 700), a_mover())
+            .expect_err("past the purse");
+        assert_eq!(
+            refused,
+            MoveItemRefused::Refused(world::character::MoveRefused::Empty)
+        );
+        assert_eq!(gold_at(&state), 100);
+        assert!(state.ground.is_empty());
+    }
+
+    #[test]
+    fn a_gold_pickup_at_the_cap_consumes_the_pile_without_paying() {
+        let mut state = a_holder_with_gold(1_200_000_000_000_000_000 - 5);
+        state
+            .drop_gold(Vid::new(7), 10, a_place(41, 500, 700), a_mover())
+            .expect("the drop happened");
+        state
+            .characters
+            .find_by_vid_mut(Vid::new(7))
+            .expect("the holder is online")
+            .set_gold(1_200_000_000_000_000_000 - 5);
+        let picked = state
+            .pickup_item(Vid::new(7), 1, a_place(41, 500, 700), a_mover())
+            .expect("the pick-up answers");
+        assert!(lying_on(&state, (1, 41)).is_empty(), "the pile is consumed");
+        assert_eq!(picked.gold, None, "no gold moved, no gold change");
     }
 
     fn drop_at(state: &mut GameState, cell: u16, count: u16) -> MovedItems {
@@ -3372,6 +3754,93 @@ mod tests {
         assert!(drained(&mut far).is_empty(), "out of view");
     }
 
+    /// `SetOwnership` stores the setter and sends its name around; a second setter keeps the
+    /// first and sends nothing (`G/item.cpp:1733-1775`). The default 10 s becomes 30.
+    #[test]
+    fn set_ownership_keeps_the_first_and_sends_its_name_around() {
+        let (mut state, [mut seven, mut eight, mut far]) = three_on_the_ground();
+        let _dropped = drop_seven(&mut state);
+        state.process_pulse(10);
+        let _ = (drained(&mut seven), drained(&mut eight));
+        let mut name = [0; protocol::gc_fields::GC_NAME_FIELD_SIZE];
+        name[..2].copy_from_slice(b"P7");
+        state.set_ground_ownership(1, Some((7, name)), 10);
+        let record = view_encode::ground_ownership(1, name);
+        assert_eq!(drained(&mut seven), vec![record.clone()]);
+        assert_eq!(drained(&mut eight), vec![record]);
+        assert!(drained(&mut far).is_empty(), "out of view");
+        let owner = state.ground[&1].owner.as_ref().expect("owned");
+        assert_eq!((owner.pid, owner.due), (7, 10 + 30 * 25));
+        let mut other = [0; protocol::gc_fields::GC_NAME_FIELD_SIZE];
+        other[..2].copy_from_slice(b"P8");
+        state.set_ground_ownership(1, Some((8, other)), 10);
+        assert_eq!(state.ground[&1].owner.as_ref().expect("still owned").pid, 7);
+        assert!(drained(&mut seven).is_empty(), "keep-first sends nothing");
+        assert!(drained(&mut eight).is_empty());
+    }
+
+    /// The ownership event fires on its pulse: the name goes empty around the item, and a
+    /// stranger's pick-up, refused while the event ran, succeeds after it
+    /// (`G/item.cpp:1704-1728`, `:1696-1702`).
+    #[test]
+    fn the_ownership_event_frees_the_item_and_a_stranger_picks_it_up() {
+        let (mut state, [mut seven, mut eight, _far]) = three_on_the_ground();
+        let _dropped = drop_seven(&mut state);
+        state.process_pulse(10);
+        let _ = (drained(&mut seven), drained(&mut eight));
+        let mut name = [0; protocol::gc_fields::GC_NAME_FIELD_SIZE];
+        name[..2].copy_from_slice(b"P7");
+        state.set_ground_ownership(1, Some((7, name)), 10);
+        let _ = (drained(&mut seven), drained(&mut eight));
+        let refused = state.pickup_item(Vid::new(8), 1, a_place(41, 3300, 3200), a_mover());
+        assert_eq!(
+            refused,
+            Err(MoveItemRefused::Refused(MoveRefused::OwnedByOther))
+        );
+        assert!(drained(&mut eight).is_empty(), "legacy sends nothing");
+        assert!(state.ground.contains_key(&1), "the item stays down");
+        state.process_pulse(10 + 30 * 25 - 1);
+        assert!(state.ground[&1].owner.is_some(), "one pulse early");
+        state.process_pulse(10 + 30 * 25);
+        let empty = view_encode::ground_ownership(1, [0; 25]);
+        assert_eq!(drained(&mut seven), vec![empty.clone()]);
+        assert_eq!(drained(&mut eight), vec![empty]);
+        assert!(state.ground[&1].owner.is_none());
+        state
+            .pickup_item(Vid::new(8), 1, a_place(41, 3300, 3200), a_mover())
+            .expect("owned by nobody now");
+    }
+
+    /// An entrant shown an owned ground item hears the ground add first and the ownership
+    /// record after it (`G/item.cpp:192-199`).
+    #[test]
+    fn an_entrant_sees_an_owned_item_with_its_ownership_after_the_add() {
+        let (mut state, [mut seven, mut eight, _far]) = three_on_the_ground();
+        let _dropped = drop_seven(&mut state);
+        state.process_pulse(10);
+        let mut name = [0; protocol::gc_fields::GC_NAME_FIELD_SIZE];
+        name[..2].copy_from_slice(b"P7");
+        state.set_ground_ownership(1, Some((7, name)), 10);
+        let (inbox, shown) =
+            fixtures::enter_seeing(&mut state, fixtures::PLACE, 10, (3250, 3200), 820);
+        let _ = inbox;
+        let spot = state.maps[&fixtures::PLACE]
+            .spot(view::EntityKey::Ground(1))
+            .expect("the item is in the view");
+        let add = view_encode::ground_add(1, a_plain_vnum(), spot);
+        let owned = view_encode::ground_ownership(1, name);
+        let at = shown
+            .iter()
+            .position(|record| *record == add)
+            .expect("the add");
+        assert_eq!(
+            shown.get(at + 1),
+            Some(&owned),
+            "the ownership follows the add"
+        );
+        let _ = (drained(&mut seven), drained(&mut eight));
+    }
+
     /// A `CG_SYNC_POSITION` naming a ground item's VID finds nothing: `CHARACTER_MANAGER::Find`
     /// finds characters only (`G/input_main.cpp:2062`), and a ground VID is not one.
     #[test]
@@ -3440,6 +3909,12 @@ mod tests {
             sp: 10_000,
             stamina: 820,
             inven_point: 0,
+            random_hp: 0,
+            random_sp: 0,
+            stat_point: 0,
+            skill_point: 0,
+            sub_skill_point: 0,
+            level_step: 0,
             map_index: 1,
             part_base: 0,
             hair_part: 0,
@@ -3789,6 +4264,7 @@ mod tests {
             language: 1,
             pk_mode: crate::loading_phase::PK_MODE_PROTECT,
             skill_group: 0,
+            alignment: 0,
         };
         let place = crate::game_loop_messages::EnterPlace {
             channel: 1,

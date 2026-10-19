@@ -65,7 +65,9 @@ use protocol::gc_inventory::{HEADER_GC_DEAD, HEADER_GC_PHASE};
 use protocol::gc_nested::GcDamageInfo;
 use protocol::gc_small::GcHeaderAndByte;
 use tracing::{debug, warn};
-use world::character::{death_penalty_loss, number, Equipment, PointRecord, Points};
+use world::character::{
+    death_penalty_loss, number, pc_poison_rate, Equipment, PointRecord, Points, DAMAGE_POISON,
+};
 
 use super::affect::{affect_add_frame, affect_remove_frame, Affect};
 use super::fight::{header_and_vid, DAMAGE_BLOCK};
@@ -75,9 +77,10 @@ use super::view::EntityKey;
 use super::GameState;
 use crate::chat_line::{chat_packet, Arg};
 use crate::client_registry::ClientOrder;
+use crate::game_loop_messages::GroundPlace;
 use crate::game_loop_messages::{Departure, RestartAnswer, RestartKind};
 use crate::item_move::{gold_delta, Mover};
-use crate::loading_phase::{point_changes, PHASE_DEAD, PHASE_GAME};
+use crate::loading_phase::{point_changes, PHASE_DEAD, PHASE_GAME, PK_MODE_PEACE, PK_MODE_PROTECT};
 use crate::save::PASSES_PER_SEC;
 use crate::sync_position::{distance_approx, ownership_record};
 use crate::warp;
@@ -87,6 +90,13 @@ const DEAD_SECONDS: u32 = 180;
 
 /// `PASSES_PER_SEC(3)`: a player's recovery event runs every 3 seconds (`G/char.cpp:3311-3313`).
 const RECOVERY_SECONDS: u32 = 3;
+
+/// `PASSES_PER_SEC(3)`: a player's poison event ticks every 3 seconds
+/// (`G/char_resist.cpp:71`).
+const POISON_TICK_SECONDS: u32 = 3;
+
+/// `AFF_POISON` (`G/affect.h:214`) as a word-0 bit: flag 5 is bit 4.
+const AFF_POISON_WORD: u32 = 1 << 4;
 
 /// `eFRS_HERESEC`: `/restart_here` is refused while more seconds than this are left of the dead
 /// event (`G/cmd_general.cpp:552`).
@@ -144,6 +154,8 @@ pub(super) struct PcCombat {
     dead_due: Option<u64>,
     /// The Pulse `m_pkRecoveryEvent` is due on.
     recovery_due: Option<u64>,
+    /// The Pulse `m_pkPoisonEvent` is due on, with the ticks it has left.
+    pub(super) poison_due: Option<(u64, u32)>,
 }
 
 impl PcCombat {
@@ -207,10 +219,27 @@ impl GameState {
         self
     }
 
-    /// Set `gPlayerMaxLevel`, the configured `game.max_level`, which the experience loss reads.
+    /// Set `gPlayerMaxLevel`, the configured `game.max_level`, which the experience arms read.
     #[must_use]
     pub const fn with_max_level(mut self, max_level: i32) -> Self {
-        self.max_level = max_level;
+        self.exp_limits.max_level = max_level;
+        self
+    }
+
+    /// Set `g_iStatusPointGetLevelLimit`, the configured
+    /// `game.status_point_get_level_limit`, which the experience gain reads.
+    #[must_use]
+    pub const fn with_status_point_get_level_limit(mut self, limit: i32) -> Self {
+        self.exp_limits.status_point_get_level_limit = limit;
+        self
+    }
+
+    /// Set `PK_PROTECT_LEVEL`, below which a character is in the protect PK mode.
+    ///
+    /// The configured `game.pk_protect_level`. Until this is called the level is 15.
+    #[must_use]
+    pub const fn with_protect_level(mut self, level: u8) -> Self {
+        self.protect_level = level;
         self
     }
 
@@ -240,16 +269,90 @@ impl GameState {
             .1
     }
 
-    /// Writes each point change to the player's own client.
+    /// `GiveExp`'s `PointChange(POINT_EXP, amount, true)` on the player under `vid`
+    /// (`G/char_battle.cpp:2675`, the live grant without the conqueror gate): the records go to
+    /// the viewers a broadcast record names, each level-up raises the quest `levelup` event
+    /// (`G/char.cpp:4051`), and a level that reaches the protect level switches the body's PK
+    /// mode from `PK_MODE_PROTECT` to `PK_MODE_PEACE` with an update (`SetLevel`,
+    /// `G/char.cpp:2221`).
+    pub(super) fn gain_pc_exp(&mut self, vid: Vid, amount: i64) {
+        let limits = self.exp_limits;
+        let Some(skill_group) = self.bodies.get(&vid).map(|body| body.card.skill_group) else {
+            return;
+        };
+        let Self {
+            characters, dice, ..
+        } = self;
+        let Ok(character) = characters.find_by_vid_mut(vid) else {
+            return;
+        };
+        let Some(points) = character.items_and_points_mut().1 else {
+            return;
+        };
+        let outcome = points.gain_exp(amount, skill_group, limits, dice);
+        self.send_point_records(vid, &outcome.records);
+        for _ in 0..outcome.level_ups {
+            self.raise_quest_levelup(vid);
+        }
+        let crossed = outcome.level_before < self.protect_level
+            && outcome.level_after >= self.protect_level
+            && self
+                .bodies
+                .get(&vid)
+                .is_some_and(|body| body.card.pk_mode == PK_MODE_PROTECT);
+        if crossed {
+            if let Some(body) = self.bodies.get_mut(&vid) {
+                body.card.pk_mode = PK_MODE_PEACE;
+            }
+            let flags = self.affect_flags_of(vid);
+            self.send_affect_update(vid, flags);
+        }
+        if outcome.level_after != outcome.level_before {
+            if let Some(body) = self.bodies.get_mut(&vid) {
+                body.card.level = outcome.level_after;
+            }
+        }
+    }
+
+    /// One quest `levelup` raise for the player under `vid`, which just leveled up: its
+    /// scripts' records go to its own client.
+    fn raise_quest_levelup(&mut self, vid: Vid) {
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        let Some((channel, map)) = self.place_of(vid.raw()) else {
+            return;
+        };
+        let (x, y) = self
+            .spot_of(vid.raw())
+            .map_or((0, 0), |spot| (spot.x, spot.y));
+        let place = GroundPlace { channel, map, x, y };
+        for record in self.quest_levelup(vid, place, mover) {
+            let _sent = self.write_to_client(vid, record);
+        }
+    }
+
+    /// Writes each point change to the player's own client, and a broadcast record to every
+    /// character that sees it (`UpdatePointsPacket`'s `PacketAround`, `G/char.cpp:2112-2115`).
     fn send_point_records(&self, vid: Vid, records: &[PointRecord]) {
-        for frame in point_changes(records, vid.raw()) {
-            let _sent = self.write_to_client(vid, frame);
+        for (record, frame) in records.iter().zip(point_changes(records, vid.raw())) {
+            if record.broadcast {
+                self.packet_around(EntityKey::Character(vid.raw()), &frame, None);
+            } else {
+                let _sent = self.write_to_client(vid, frame);
+            }
         }
     }
 
     /// `PointChange(kind, amount, show_amount)` on the player under `vid`, its records to its
     /// client.
-    fn change_pc_point(&mut self, vid: Vid, kind: usize, amount: i32, show_amount: bool) {
+    pub(super) fn change_pc_point(
+        &mut self,
+        vid: Vid,
+        kind: usize,
+        amount: i32,
+        show_amount: bool,
+    ) {
         let Some(points) = self.pc_points_mut(vid.raw()) else {
             return;
         };
@@ -274,7 +377,7 @@ impl GameState {
 
     /// What a world step that no command carries says to the player under `vid`: its empire,
     /// language and PK mode from its body, and its affect flags.
-    fn own_mover(&self, vid: Vid) -> Option<Mover> {
+    pub(super) fn own_mover(&self, vid: Vid) -> Option<Mover> {
         let body = self.bodies.get(&vid)?;
         Some(Mover {
             recently_fought: false,
@@ -283,6 +386,7 @@ impl GameState {
             pk_mode: body.card.pk_mode,
             affect_flags: self.affect_flags_of(vid),
             dead: self.is_dead(vid.raw()),
+            alignment: i16::try_from(body.card.alignment / 10).unwrap_or(i16::MAX),
         })
     }
 
@@ -319,6 +423,25 @@ impl GameState {
         damage: i32,
         shown: Option<u8>,
     ) -> bool {
+        self.damage_pc_typed(attacker, victim, damage, shown, false)
+    }
+
+    /// The `DAMAGE_TYPE_POISON` path of [`GameState::damage_pc`] (`:2256-2261`): before
+    /// anything else, a tick that would leave no hit points deals all but one. Poison never
+    /// kills by itself, and never stuns. A stunned victim still dies by `Dead` first.
+    pub(super) fn damage_pc_poison(&mut self, victim: Vid, damage: i32) -> bool {
+        self.damage_pc_typed(None, victim, damage, Some(DAMAGE_POISON), true)
+    }
+
+    /// [`GameState::damage_pc`], with `poison` picking the poison clamp.
+    fn damage_pc_typed(
+        &mut self,
+        attacker: Option<Attacker>,
+        victim: Vid,
+        damage: i32,
+        shown: Option<u8>,
+        poison: bool,
+    ) -> bool {
         let raw = victim.raw();
         let Some(combat) = self.pc_combat.get(&raw).copied() else {
             return false;
@@ -332,6 +455,13 @@ impl GameState {
         }
         let Some(hp) = self.pc_points_mut(raw).map(|points| points.hp()) else {
             return false;
+        };
+        // The poison clamp runs before the damage packet: a clamped tick shows the damage
+        // it dealt, not the damage it rolled.
+        let damage = if poison && hp.saturating_sub(damage) <= 0 {
+            hp.saturating_sub(1)
+        } else {
+            damage
         };
         if let Some(flag) = shown {
             self.send_pc_damage_info(victim, flag, damage);
@@ -431,8 +561,10 @@ impl GameState {
                 self.target(killer.vid, 0);
             }
         }
-        // `SetPosition(POS_DEAD)`. `ClearAffect(true)` keeps the revive-invisible affect, the
-        // only one a player has (`G/char_affect.cpp:259-265`, `:43-55`).
+        // `SetPosition(POS_DEAD)`. `ClearAffect(true)` uncomputes every affect but the
+        // no-save and no-clear ones (`G/char_affect.cpp:259-337`): of the affects a player
+        // can hold, the revive-invisible stays and the poison, stun, slow and 263's slow
+        // go, each with its point taken back, its remove packet, and one flag update.
         let combat = self.pc_combat.entry(raw).or_default();
         combat.dead = true;
         // `POS_DEAD` is not `POS_FIGHTING`.
@@ -442,10 +574,14 @@ impl GameState {
         // `INSTANT_FLAG_DEATH_PENALTY`: set for a non-player killer, as no map is forked; cleared
         // for a player killer and for no killer (`:1372-1387`).
         combat.death_penalty = killer.is_some_and(|killer| !killer.pc);
-        // `ClearSync` (`:1461`), then the stun event ends (`:1464`).
+        self.clear_affects_on_death(vid);
+        // `ClearSync` (`:1461`), then the stun event ends (`:1464`). The poison event ends
+        // with the victim: legacy cancels nothing, but the Rewrite's tick resolves the
+        // slot, and a dead victim must tick no more (V18b).
         self.clear_sync(vid, true);
         let combat = self.pc_combat.entry(raw).or_default();
         self.regens.cancel(&mut combat.stun_due, Due::PcStun(raw));
+        self.cancel_pc_poison(vid);
         // `GetDesc()->SetPhase(PHASE_DEAD)` (`:1470`).
         self.write_phase(vid, PHASE_DEAD);
         self.packet_around(
@@ -719,7 +855,7 @@ impl GameState {
         }
         let teardrop = self.wears_teardrop(vid);
         let loss = death_penalty_loss(level, levels::next_exp(level), teardrop);
-        let max_level = self.max_level;
+        let max_level = self.exp_limits.max_level;
         let record = self
             .pc_points_mut(raw)
             .and_then(|points| points.lose_exp(loss, max_level));
@@ -745,25 +881,7 @@ impl GameState {
     /// otherwise one is added; then the update goes to the view, the player included, the event
     /// starts, and the client is sent the affect.
     pub(super) fn revive_invisible(&mut self, vid: Vid) {
-        let fresh = Affect::revive_invisible();
-        let running = self.affect_events.get_mut(&vid).and_then(|event| {
-            event
-                .affects
-                .iter_mut()
-                .find(|affect| affect.kind == fresh.kind)
-        });
-        match running {
-            Some(affect) => {
-                let old = *affect;
-                *affect = fresh;
-                let _sent = self.write_to_client(vid, affect_remove_frame(&old));
-            }
-            None => self.add_affect(vid, fresh),
-        }
-        let flags = self.affect_flags_of(vid);
-        self.send_affect_update(vid, flags);
-        self.start_affect_event(vid);
-        let _sent = self.write_to_client(vid, affect_add_frame(&fresh));
+        self.add_pc_affect(vid, Affect::revive_invisible());
     }
 
     /// The affects running on the player under `vid`, in the order they were added.
@@ -813,8 +931,9 @@ impl GameState {
         let moving = now.wrapping_sub(body.last_move) < 3000;
         let idle_ms = now.wrapping_sub(body.last_move);
         let skill_group = body.card.skill_group;
-        // No poison is ported, so no `IsAffectFlag(AFF_POISON)` ever holds: always false.
-        let poisoned = false;
+        // `IsAffectFlag(AFF_POISON)`: a poisoned player neither heals nor distributes
+        // (`G/char.cpp:3254-3260`).
+        let poisoned = self.affect_flags_of(player)[0] & AFF_POISON_WORD != 0;
         let Some(points) = self.pc_points_mut(vid) else {
             let when = self.last_pulse.saturating_add(pulses(RECOVERY_SECONDS));
             let combat = self.pc_combat.entry(vid).or_default();
@@ -865,6 +984,114 @@ impl GameState {
         self.release_owned(vid);
     }
 
+    /// The `bSave` half of `ClearAffect(true)` on the player under `vid`
+    /// (`G/char_affect.cpp:259-337`): every affect but the no-clear and no-save ones is
+    /// uncomputed, erased, and refused its next run, with its remove packet to the player.
+    /// Of the affects a player can hold, the revive-invisible stays (no-save, `:43-55`) and
+    /// the poison, stun, slow and 263's slow go. Then the flags update when they or either
+    /// speed moved. `CheckMaximumPoints` is dead here: no affect here touches a maximum.
+    fn clear_affects_on_death(&mut self, vid: Vid) {
+        let flags_before = self.affect_flags_of(vid);
+        let mov_before = self.move_speed_of(vid.raw());
+        let Some(event) = self.affect_events.get_mut(&vid) else {
+            return;
+        };
+        let mut cleared = Vec::new();
+        event.affects.retain(|affect| {
+            if affect.kind == crate::loading_phase::AFFECT_REVIVE_INVISIBLE {
+                return true;
+            }
+            cleared.push(*affect);
+            false
+        });
+        if cleared.is_empty() {
+            return;
+        }
+        for affect in &cleared {
+            self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
+            let frame = affect_remove_frame(affect);
+            let _cleared = self.write_to_client(vid, frame);
+        }
+        let flags_after = self.affect_flags_of(vid);
+        if flags_after != flags_before || mov_before != self.move_speed_of(vid.raw()) {
+            self.send_affect_update(vid, flags_after);
+        }
+    }
+
+    /// `RemovePoison` of the player under `vid` (`G/char_resist.cpp:233-237`): the poison
+    /// affect goes and its event ends. Legacy never removes a player's poison except by
+    /// death, expiry and cure; `Dead` routes through the death clearing, so this stays for
+    /// the cure to come.
+    #[allow(dead_code)]
+    fn remove_pc_poison(&mut self, vid: Vid) {
+        self.cancel_pc_poison(vid);
+    }
+
+    /// Ends the poison event of the player under `vid`, if one runs.
+    fn cancel_pc_poison(&mut self, vid: Vid) {
+        let raw = vid.raw();
+        let Some(combat) = self.pc_combat.get_mut(&raw) else {
+            return;
+        };
+        let Some((when, count)) = combat.poison_due.take() else {
+            return;
+        };
+        self.regens
+            .due
+            .remove(&(when, Due::PcPoison { vid: raw, count }));
+    }
+
+    /// `poison_event` of the player under `vid` (`G/char_resist.cpp:42-76`): the victim's
+    /// own slot must still hold this tick, else a re-poison cancelled it. The tick deals
+    /// `maxHP * rate / 1000` through the poison path; on death the event ends, else the
+    /// count falls and while any is left the next tick is due 3 seconds on. The attacker
+    /// is `None`: the poison's PID is 0 for a monster, which `FindByPID` never maps
+    /// (`G/char_manager.cpp:109-119`).
+    pub(super) fn pc_poison_event(&mut self, vid: u32, count: u32) {
+        let held = self
+            .pc_combat
+            .get(&vid)
+            .and_then(|combat| combat.poison_due);
+        let Some((_, held_count)) = held else {
+            return;
+        };
+        if held_count != count {
+            return;
+        }
+        let points = self
+            .characters
+            .find_by_vid(Vid::new(vid))
+            .ok()
+            .and_then(|character| character.points().cloned());
+        let Some(points) = points else {
+            self.cancel_pc_poison(Vid::new(vid));
+            return;
+        };
+        let damage = points
+            .max_hp()
+            .saturating_mul(pc_poison_rate(&points))
+            .wrapping_div(1000);
+        if self.damage_pc_poison(Vid::new(vid), damage) {
+            self.cancel_pc_poison(Vid::new(vid));
+            return;
+        }
+        if count <= 1 {
+            self.cancel_pc_poison(Vid::new(vid));
+            return;
+        }
+        let next = count.saturating_sub(1);
+        let when = self.last_pulse.saturating_add(pulses(POISON_TICK_SECONDS));
+        let old = self
+            .pc_combat
+            .get_mut(&vid)
+            .and_then(|combat| combat.poison_due.replace((when, next)));
+        if let Some((at, _)) = old {
+            self.regens.due.remove(&(at, Due::PcPoison { vid, count }));
+        }
+        self.regens
+            .due
+            .insert((when, Due::PcPoison { vid, count: next }));
+    }
     /// `SendDamagePacket(ch, 0, DAMAGE_BLOCK)` of the player `victim` claimed by `actor`
     /// (`G/char_battle.cpp:1720-1742`): a player victim and a player claimer are both told.
     pub(super) fn block_pc_claim(&self, victim: Vid, actor: Vid) {
@@ -1062,6 +1289,7 @@ mod tests {
                 language: 0,
                 pk_mode: PK_MODE_PROTECT,
                 skill_group: 0,
+                alignment: 0,
             };
             let place = EnterPlace {
                 channel: PLACE.0,
@@ -1232,6 +1460,7 @@ mod tests {
             pk_mode: PK_MODE_PROTECT,
             affect_flags: [0; 2],
             dead: false,
+            alignment: 0,
         }
     }
 
@@ -2734,6 +2963,95 @@ mod tests {
         assert!(!field.world.is_down(ALPHA.raw()));
     }
 
+    /// `GiveExp`'s grant on a player: the experience banks, each record goes to the player
+    /// alone, a broadcast record goes to the view, the level-up raises the quest `levelup`
+    /// event, and the body's card follows the level (`G/char_battle.cpp:2675`).
+    #[test]
+    fn an_exp_gain_banks_sends_and_raises_the_quest_levelup() {
+        use quest::manager::Manager;
+
+        use super::super::quests::Quests;
+        let mut field = a_field(true);
+        field.join_with(ALPHA, (PLACE.1, HERE), 39, &[]);
+        let _bravo = field.join(BRAVO, BESIDE);
+        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe");
+        let manager = Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
+        field.world.quests = Some(Quests::new(
+            manager,
+            std::sync::Arc::default(),
+            gamedata::mob_locale_names::MobNamesByLanguage::default(),
+        ));
+        field.world.start_a_quest(ALPHA);
+        field.world.end_the_quest(ALPHA);
+        field.quiet();
+        // Level 39 holds 5,000 of 6,264,000; the grant crosses the cost onto 40.
+        field.world.dice = Pcg32::new(0, 0);
+        field.world.gain_pc_exp(ALPHA, 6_264_000 - 5_000);
+        assert_eq!(field.points(ALPHA).level(), 40);
+        assert_eq!(field.points(ALPHA).exp(), 0);
+        // The quest `levelup` ran: sash's `set_state("information")` moved its status out of
+        // `start`'s 0, and it sends nothing.
+        let quests = field.world.quests.as_ref().expect("quests loaded");
+        assert_eq!(
+            quests.manager().quest_flag(1, b"sash_mission.__status"),
+            Some(695_801_987)
+        );
+        let heard = field.heard(ALPHA);
+        let exp = point_changes(
+            &[PointRecord {
+                kind: u8::try_from(point::POINT_EXP).unwrap(),
+                amount: 6_264_000 - 5_000,
+                value: 0,
+                broadcast: false,
+            }],
+            ALPHA.raw(),
+        );
+        assert!(heard.iter().any(|record| *record == exp[0]));
+        let seen = field.heard(BRAVO);
+        let level = point_changes(
+            &[PointRecord {
+                kind: u8::try_from(point::POINT_LEVEL).unwrap(),
+                amount: 0,
+                value: 40,
+                broadcast: true,
+            }],
+            ALPHA.raw(),
+        );
+        assert!(seen.iter().any(|record| *record == level[0]));
+    }
+
+    /// A gain that carries the level onto the protect level switches the body's PK mode from
+    /// `PROTECT` to `PEACE` with an update (`SetLevel`, `G/char.cpp:2221`); a gain that stays
+    /// below it changes nothing.
+    #[test]
+    fn a_level_up_onto_the_protect_level_leaves_protect_mode() {
+        use crate::loading_phase::PK_MODE_PEACE;
+        let mut field = a_field(true);
+        field.join_with(ALPHA, (PLACE.1, HERE), 14, &[]);
+        field.quiet();
+        // Level 14 holds 5,000 of 100,000; 95,000 crosses the cost onto 15.
+        field.world.dice = Pcg32::new(0, 0);
+        field.world.gain_pc_exp(ALPHA, 95_000);
+        assert_eq!(field.points(ALPHA).level(), 15);
+        let body = field.world.bodies.get(&ALPHA).expect("Alpha has a body");
+        assert_eq!(body.card.pk_mode, PK_MODE_PEACE);
+        assert_eq!(body.card.level, 15);
+        assert!(field
+            .heard(ALPHA)
+            .iter()
+            .any(|record| *record == update(&field.world)));
+        // Below the protect level the mode stays `PROTECT`.
+        let mut low = a_field(true);
+        low.join_with(ALPHA, (PLACE.1, HERE), 10, &[]);
+        low.quiet();
+        low.world.dice = Pcg32::new(0, 0);
+        low.world.gain_pc_exp(ALPHA, 28_000);
+        assert_eq!(low.points(ALPHA).level(), 11);
+        let body = low.world.bodies.get(&ALPHA).expect("Alpha has a body");
+        assert_eq!(body.card.pk_mode, PK_MODE_PROTECT);
+    }
+
     /// B12 for `dead_event`: in place with half the hit points, the window closed, the revive.
     #[test]
     fn the_automatic_restart_with_no_served_town_restarts_in_place_with_half_hp() {
@@ -2753,5 +3071,141 @@ mod tests {
         let first = [phase(PHASE_GAME), remove_record(ALPHA.raw())];
         reinserted(&field.heard(ALPHA), &first, &after);
         assert!(field.ordered(ALPHA).is_empty());
+    }
+
+    /// A poisoned player ticks: `maxHP * 50 / 1000` through the poison path, ten ticks
+    /// three seconds apart, and the HP floor of 1 it never kills past.
+    #[test]
+    fn the_poison_event_ticks_ten_times_and_never_kills() {
+        use protocol::gc_nested::GcDamageInfo;
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        let max = field.points(ALPHA).max_hp();
+        field.set_hp_sp(ALPHA, max, 100);
+        field.quiet();
+        field.world.poison_pc(ALPHA);
+        let tick = max * 50 / 1000;
+        let mut pulse = P0 + 1;
+        for left in (1..=10).rev() {
+            field.pulse(pulse);
+            let heard = field.heard(ALPHA);
+            let infos: Vec<(u8, i32)> = heard
+                .iter()
+                .filter_map(|record| GcDamageInfo::decode(record).ok())
+                .map(|info| (info.flag, info.damage))
+                .collect();
+            assert_eq!(infos, [(DAMAGE_POISON, tick)], "tick with {left} left");
+            assert!(!field.world.is_dead(ALPHA.raw()));
+            pulse += 75;
+        }
+        assert!(field
+            .world
+            .pc_combat
+            .get(&ALPHA.raw())
+            .is_some_and(|combat| combat.poison_due.is_none()));
+        // The floor: one hit point left, a full tick deals nothing and still lives.
+        field.set_hp_sp(ALPHA, 1, 100);
+        field.world.poison_pc(ALPHA);
+        field.pulse(field.world.last_pulse + 1);
+        let heard = field.heard(ALPHA);
+        let infos: Vec<(u8, i32)> = heard
+            .iter()
+            .filter_map(|record| GcDamageInfo::decode(record).ok())
+            .map(|info| (info.flag, info.damage))
+            .collect();
+        assert_eq!(infos, [(DAMAGE_POISON, 0)]);
+        assert_eq!(field.points(ALPHA).hp(), 1);
+        assert!(!field.world.is_dead(ALPHA.raw()));
+    }
+
+    /// Poison blocks the heal: a poisoned player's recovery sends no point changes.
+    #[test]
+    fn a_poisoned_player_heals_nothing() {
+        use protocol::gc_inventory::HEADER_GC_PLAYER_POINT_CHANGE;
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        let max = field.points(ALPHA).max_hp();
+        field.set_hp_sp(ALPHA, max - 50, 50);
+        field.quiet();
+        field.world.poison_pc(ALPHA);
+        field.quiet();
+        field.world.pc_recovery_event(ALPHA.raw());
+        let heard = field.heard(ALPHA);
+        assert!(
+            heard
+                .iter()
+                .all(|record| record.first() != Some(&HEADER_GC_PLAYER_POINT_CHANGE.value())),
+            "no heal while poisoned: {heard:?}"
+        );
+    }
+
+    /// Death clears the poison, stun and slow with their removes and the +30, keeps the
+    /// revive, and ends the poison event.
+    #[test]
+    fn death_clears_the_hit_affects_and_ends_the_poison() {
+        use crate::loading_phase::{
+            AFFECT_POISON, AFFECT_SLOW, AFFECT_STUN, AFF_POISON, AFF_SLOW, AFF_STUN, POISON_TICKS,
+            SLOW_MOV_SPEED, SLOW_TICKS, STUN_TICKS,
+        };
+        use protocol::gc_inventory::HEADER_GC_AFFECT_REMOVE;
+        use protocol::gc_vid::GcHeaderAndDwordAndByte;
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        let before = field.world.move_speed_of(ALPHA.raw());
+        field.world.add_pc_affect(
+            ALPHA,
+            Affect {
+                kind: AFFECT_POISON,
+                apply_on: 0,
+                value: 0,
+                flag: AFF_POISON,
+                remaining: POISON_TICKS,
+            },
+        );
+        field.world.add_pc_affect(
+            ALPHA,
+            Affect {
+                kind: AFFECT_STUN,
+                apply_on: 0,
+                value: 0,
+                flag: AFF_STUN,
+                remaining: STUN_TICKS,
+            },
+        );
+        field.world.add_pc_affect(
+            ALPHA,
+            Affect {
+                kind: AFFECT_SLOW,
+                apply_on: u8::try_from(point::POINT_MOV_SPEED).unwrap(),
+                value: SLOW_MOV_SPEED,
+                flag: AFF_SLOW,
+                remaining: SLOW_TICKS,
+            },
+        );
+        assert_eq!(field.world.move_speed_of(ALPHA.raw()), (before - 30).max(0));
+        field.killed(ALPHA);
+        let heard = field.heard(ALPHA);
+        let removes: Vec<(u32, u8)> = heard
+            .iter()
+            .filter(|record| record.first() == Some(&HEADER_GC_AFFECT_REMOVE.value()))
+            .map(|record| {
+                let frame = GcHeaderAndDwordAndByte::decode(record).unwrap();
+                (frame.value, frame.flag)
+            })
+            .collect();
+        assert!(removes.contains(&(AFFECT_POISON, 0)));
+        assert!(removes.contains(&(AFFECT_STUN, 0)));
+        assert!(removes.contains(&(AFFECT_SLOW, u8::try_from(point::POINT_MOV_SPEED).unwrap())));
+        assert_eq!(field.world.move_speed_of(ALPHA.raw()), before);
+        assert_eq!(
+            field.world.affect_flags_of(ALPHA),
+            [0, 0],
+            "no flags stay: no revive was running"
+        );
+        assert!(field
+            .world
+            .pc_combat
+            .get(&ALPHA.raw())
+            .is_some_and(|combat| combat.poison_due.is_none()));
     }
 }

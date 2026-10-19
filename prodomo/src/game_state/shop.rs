@@ -230,6 +230,25 @@ impl GameState {
         self.shops = shops;
         self
     }
+    /// Share the drop tables boot read. Without them no monster's death pays.
+    #[must_use]
+    pub fn with_drop_tables(mut self, drops: Arc<gamedata::drop::DropTables>) -> Self {
+        self.drops = drops;
+        self
+    }
+    /// Share the `item_attr` rows boot read. Without them a dropped item's magic rolls
+    /// against nothing.
+    #[must_use]
+    pub fn with_item_attrs(mut self, attrs: Arc<Vec<gamedata::records::ItemAttrRecord>>) -> Self {
+        self.item_attrs = attrs;
+        self
+    }
+    /// Share the vnum mask table boot read. Without it every item shows its own vnum.
+    #[must_use]
+    pub fn with_item_masks(mut self, masks: Arc<gamedata::item_mask::ItemMasks>) -> Self {
+        self.item_masks = masks;
+        self
+    }
 
     /// Set `g_bEmpireShopPriceTripleDisable`, the configured `game.disable_shop_price_3x`.
     ///
@@ -708,6 +727,7 @@ mod tests {
             pk_mode: crate::loading_phase::PK_MODE_PEACE,
             affect_flags: [0; 2],
             dead: false,
+            alignment: 0,
         }
     }
 

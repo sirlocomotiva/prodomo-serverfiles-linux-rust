@@ -662,6 +662,12 @@ async fn a_whole_row_save_is_what_the_next_load_reads() {
         exp: 0x0102_0304_0506,
         conqueror_level: 7,
         conqueror_exp: 0x00fe_dcba_9876,
+        random_hp: 37,
+        random_sp: -41,
+        stat_point: 43,
+        skill_point: 47,
+        sub_skill_point: 53,
+        level_step: 3,
         st: 51,
         ht: 52,
         dx: 53,
@@ -688,6 +694,12 @@ async fn a_whole_row_save_is_what_the_next_load_reads() {
     assert_eq!(read.exp, save.exp);
     assert_eq!(read.conqueror_level, save.conqueror_level);
     assert_eq!(read.conqueror_exp, save.conqueror_exp);
+    assert_eq!(read.random_hp, save.random_hp);
+    assert_eq!(read.random_sp, save.random_sp);
+    assert_eq!(read.stat_point, save.stat_point);
+    assert_eq!(read.skill_point, save.skill_point);
+    assert_eq!(read.sub_skill_point, save.sub_skill_point);
+    assert_eq!(read.level_step, save.level_step);
     assert_eq!(read.st, save.st);
     assert_eq!(read.ht, save.ht);
     assert_eq!(read.dx, save.dx);
@@ -728,6 +740,12 @@ async fn a_save_names_the_account_and_refuses_a_wide_player_id() {
         exp: 1,
         conqueror_level: 0,
         conqueror_exp: 0,
+        random_hp: 2,
+        random_sp: 3,
+        stat_point: 5,
+        skill_point: 7,
+        sub_skill_point: 11,
+        level_step: 2,
         st: 1,
         ht: 1,
         dx: 1,

@@ -36,7 +36,7 @@ use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO, CHAT_TYPE_NOTICE, CHA
 use protocol::gc_script::GcScript;
 use quest::manager::{ChatKind, Game, Manager};
 use tracing::warn;
-use world::character::{number, Character, Pcg32};
+use world::character::{number, Pcg32};
 use world::npc::MapNpcs;
 
 use super::GameState;
@@ -71,6 +71,11 @@ impl Quests {
     pub fn manager(&self) -> &Manager {
         &self.manager
     }
+
+    /// The manager, to change: a test sets `noguard` through it.
+    pub fn manager_mut(&mut self) -> &mut Manager {
+        &mut self.manager
+    }
 }
 
 /// One quest request of a client.
@@ -95,6 +100,8 @@ impl QuestStep {
 
 /// What a running script reaches: the character's map, its client and the world's dice.
 struct Session<'s> {
+    /// `GetLevel()` of the character the script runs for.
+    level: u8,
     /// The NPCs of the character's map.
     npcs: Option<&'s MapNpcs>,
     /// Which monsters exist.
@@ -112,6 +119,10 @@ struct Session<'s> {
 }
 
 impl Game for Session<'_> {
+    fn level(&self) -> u8 {
+        self.level
+    }
+
     fn race_of(&self, vid: u32) -> Option<u32> {
         self.npcs?
             .npcs
@@ -185,12 +196,15 @@ impl GameState {
         place: GroundPlace,
         mover: Mover,
     ) -> Result<Vec<Vec<u8>>, MoveItemRefused> {
-        let pid = self
+        let character = self
             .characters
             .find_by_vid(vid)
-            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?
-            .player_id();
-        let answered = self.run_quests(place, mover, |manager, game| match step {
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let pid = character.player_id();
+        let level = character
+            .points()
+            .map_or(1, world::character::Points::level);
+        let answered = self.run_quests(place, mover, level, |manager, game| match step {
             QuestStep::Answer(answer) => manager.answer(pid, *answer, game),
             QuestStep::Input(text) => manager.input(pid, text, game),
         });
@@ -206,10 +220,14 @@ impl GameState {
         place: GroundPlace,
         mover: Mover,
     ) -> (bool, Vec<Vec<u8>>) {
-        let Ok(pid) = self.characters.find_by_vid(vid).map(Character::player_id) else {
+        let Ok(character) = self.characters.find_by_vid(vid) else {
             return (false, Vec::new());
         };
-        self.run_quests(place, mover, |manager, game| {
+        let pid = character.player_id();
+        let level = character
+            .points()
+            .map_or(1, world::character::Points::level);
+        self.run_quests(place, mover, level, |manager, game| {
             manager.click(pid, target, u32::from(race), game)
         })
         .unwrap_or_default()
@@ -232,16 +250,65 @@ impl GameState {
             quests.manager.logout(character.player_id());
         }
     }
+    /// `CQuestManager::LevelUp` for the character under `vid`, which just leveled up: the
+    /// records its `levelup` scripts sent (`G/questmanager.cpp:667-681`). The manager must have
+    /// seen the character already (a click), else it misses as legacy's `GetPC` returns NULL.
+    pub(super) fn quest_levelup(
+        &mut self,
+        vid: Vid,
+        place: GroundPlace,
+        mover: Mover,
+    ) -> Vec<Vec<u8>> {
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return Vec::new();
+        };
+        let pid = character.player_id();
+        let level = character
+            .points()
+            .map_or(1, world::character::Points::level);
+        self.run_quests(place, mover, level, |manager, game| {
+            manager.levelup(pid, game);
+        })
+        .map_or_else(Vec::new, |((), records)| records)
+    }
+
+    /// `CQuestManager::Kill` for the character under `vid`, which killed race `race` under
+    /// `victim` (`G/questmanager.cpp:574-611`): `SetQuestNPCID` first, then the records its
+    /// `kill` and `party_kill` scripts sent. The manager must have seen the character
+    /// already, else it misses as legacy's `GetPC` returns NULL.
+    pub(super) fn quest_kill(
+        &mut self,
+        vid: Vid,
+        victim: u32,
+        race: u32,
+        place: GroundPlace,
+        mover: Mover,
+    ) -> Vec<Vec<u8>> {
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return Vec::new();
+        };
+        let pid = character.player_id();
+        let level = character
+            .points()
+            .map_or(1, world::character::Points::level);
+        self.run_quests(place, mover, level, |manager, game| {
+            manager.set_quest_npc(victim);
+            manager.kill(pid, race, game);
+        })
+        .map_or_else(Vec::new, |((), records)| records)
+    }
 
     /// Run `op` on the manager with a [`Game`] for a character standing at `place`.
     fn run_quests<R>(
         &mut self,
         place: GroundPlace,
         mover: Mover,
+        level: u8,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
     ) -> Option<(R, Vec<Vec<u8>>)> {
         let quests = self.quests.as_mut()?;
         let mut session = Session {
+            level,
             npcs: map_npcs(&self.npcs, place),
             protos: &quests.protos,
             names: &quests.names,
@@ -312,6 +379,7 @@ mod test_place {
         pk_mode: crate::loading_phase::PK_MODE_PEACE,
         affect_flags: [0; 2],
         dead: false,
+        alignment: 0,
     };
 }
 
@@ -361,6 +429,7 @@ mod tests {
         let locale = LocaleStrings::default();
         let mut dice = Pcg32::new(1, 1);
         let mut session = Session {
+            level: 1,
             npcs: None,
             protos: &protos,
             names: &names,

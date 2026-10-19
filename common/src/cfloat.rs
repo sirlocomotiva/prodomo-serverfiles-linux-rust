@@ -1,4 +1,4 @@
-//! The two C conversions between `int` and `float` that legacy arithmetic relies on.
+//! The C conversions between 32-bit integers and `float` that legacy arithmetic relies on.
 //!
 //! The legacy target is 32-bit x86 built with SSE2 (`server/server/premake5.lua:12`), so a
 //! `(float)i` of a 4-byte `int` rounds to the nearest `float`, ties to even, and a `(int)f` drops
@@ -67,6 +67,37 @@ pub fn f32_to_i32(value: f32) -> i32 {
         -magnitude
     };
     i32::try_from(signed).unwrap_or(if signed < 0 { i32::MIN } else { i32::MAX })
+}
+
+/// `(DWORD)value`: the `f32` with its fraction dropped toward zero.
+///
+/// C leaves a value outside the `DWORD` range undefined. No ported formula can reach that
+/// range from valid points, so the Rewrite saturates, as Rust's `as` does: a value at or
+/// above 2^32 is `u32::MAX`, a negative value or a NaN is 0.
+#[must_use]
+pub fn f32_to_u32(value: f32) -> u32 {
+    const TWO_POW_32: f32 = 4_294_967_296.0;
+    if value.is_nan() || value <= 0.0 {
+        return 0;
+    }
+    if value >= TWO_POW_32 {
+        return u32::MAX;
+    }
+    let bits = value.to_bits();
+    let exponent = (bits >> 23) & 0xff;
+    if exponent < 127 {
+        // The magnitude is below 1, so the fraction is all there is.
+        return 0;
+    }
+    // The range test above keeps the magnitude below 2^32, so the shift is at most 31.
+    let shift = exponent - 127;
+    let mantissa = (bits & 0x7f_ffff) | 0x80_0000;
+    let magnitude = if shift >= 23 {
+        u64::from(mantissa) << (shift - 23)
+    } else {
+        u64::from(mantissa >> (23 - shift))
+    };
+    u32::try_from(magnitude).unwrap_or(u32::MAX)
 }
 
 /// `(int)value` of a `double`: the `f64` with its fraction dropped toward zero.
@@ -435,6 +466,50 @@ mod tests {
                 assert_eq!(f64_to_i32(fraction), value, "{fraction}");
             }
         }
+    }
+    #[test]
+    fn a_float_truncates_toward_zero_for_a_dword() {
+        for (value, expected) in [
+            (0.0_f32, 0),
+            (-0.0, 0),
+            (0.999_999, 0),
+            (1.0, 1),
+            (1.5, 1),
+            (2.5, 2),
+            (123.75, 123),
+            (8_388_607.5, 8_388_607),
+            (16_777_216.0, 16_777_216),
+            (4_294_967_040.0, 4_294_967_040),
+            (f32::MIN_POSITIVE, 0),
+            (-1.5, 0),
+            (-123.75, 0),
+        ] {
+            assert_eq!(f32_to_u32(value), expected, "{value}");
+        }
+        let mut state = 0x2545_f491_u32;
+        for _ in 0..4096 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let value = f32::from_bits(state);
+            if value.is_nan() || !(0.0..4_294_967_296.0).contains(&value) {
+                continue;
+            }
+            let truncated = f64::from(value).trunc();
+            let expected = if truncated < 1.0 { 0.0 } else { truncated };
+            let got = f64::from(f32_to_u32(value));
+            assert_eq!(got.to_bits(), expected.to_bits(), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_float_outside_the_dword_range_saturates_and_nan_is_zero() {
+        assert_eq!(f32_to_u32(4_294_967_296.0), u32::MAX);
+        assert_eq!(f32_to_u32(1.0e20), u32::MAX);
+        assert_eq!(f32_to_u32(f32::INFINITY), u32::MAX);
+        assert_eq!(f32_to_u32(-1.0), 0);
+        assert_eq!(f32_to_u32(f32::NEG_INFINITY), 0);
+        assert_eq!(f32_to_u32(f32::NAN), 0);
     }
 
     /// `f64_to_f32` rounds to nearest, ties to even, over the speeds and distances (U18).

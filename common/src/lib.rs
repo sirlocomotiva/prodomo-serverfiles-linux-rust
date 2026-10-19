@@ -40,6 +40,8 @@ pub mod item_slots;
 
 /// The C `int` to `float` conversions that legacy point arithmetic relies on
 pub mod cfloat;
+/// The skill formula evaluator: the hosted `CPoly` subset.
+pub mod skill_poly;
 
 pub use tracing::{debug, error, info, trace, warn};
 

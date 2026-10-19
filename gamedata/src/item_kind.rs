@@ -83,6 +83,8 @@ pub const WEAPON_TWO_HANDED: i32 = 3;
 pub const WEAPON_BELL: i32 = 4;
 /// `WEAPON_FAN`: its stance is `MOTION_MODE_FAN`.
 pub const WEAPON_FAN: i32 = 5;
+/// `WEAPON_ARROW`: arrows roll no magic attributes (`item_attribute.cpp:18-19`).
+pub const WEAPON_ARROW: i32 = 6;
 /// `WEAPON_MOUNT_SPEAR`, the mounted spear: `CalcMeleeDamage` swings it as a melee weapon.
 pub const WEAPON_MOUNT_SPEAR: i32 = 7;
 

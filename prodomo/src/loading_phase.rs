@@ -124,6 +124,37 @@ pub const PHASE_DEAD: u8 = 6;
 /// `AffectType` 215 (`G/affect.h:40`), the affect `ReviveInvisible` adds.
 pub const AFFECT_REVIVE_INVISIBLE: u32 = 215;
 
+/// `AFFECT_POISON` (`G/affect.h:33`): `AttackedByPoison`'s affect.
+pub const AFFECT_POISON: u32 = 209;
+
+/// `AFFECT_STUN` (`G/affect.h:34`): `NormalAttackAffect`'s stun.
+pub const AFFECT_STUN: u32 = 210;
+
+/// `AFFECT_SLOW` (`G/affect.h:35`): `NormalAttackAffect`'s slow.
+pub const AFFECT_SLOW: u32 = 211;
+
+/// `AFF_POISON` (`G/affect.h:214`), numbered from 1 as `game_state::affect::flags_of` reads it.
+pub const AFF_POISON: u32 = 5;
+
+/// `AFF_SLOW` (`G/affect.h:215`), numbered from 1.
+pub const AFF_SLOW: u32 = 6;
+
+/// `AFF_STUN` (`G/affect.h:216`), numbered from 1.
+pub const AFF_STUN: u32 = 7;
+
+/// `POISON_LENGTH + 1` (`G/char.h:78`, `G/char_resist.cpp:205`): the poison's ticks.
+pub const POISON_TICKS: i32 = 31;
+
+/// `NormalAttackAffect`'s stun ticks on a player (`G/battle.cpp:755-756`): 2, since no
+/// PC-on-monster arm lengthens it.
+pub const STUN_TICKS: i32 = 2;
+
+/// `NormalAttackAffect`'s slow ticks (`G/battle.cpp:757`).
+pub const SLOW_TICKS: i32 = 20;
+
+/// `NormalAttackAffect`'s slow, `MOV_SPEED -30` (`G/battle.cpp:757`).
+pub const SLOW_MOV_SPEED: i32 = -30;
+
 /// `AFFECT_FLAG` 28 (`G/affect.h:243`), the flag that affect carries.
 pub const AFF_REVIVE_INVISIBLE: u32 = 28;
 
@@ -414,6 +445,12 @@ pub fn load_points(character: &Character, map_index: i32) -> Points {
         sp: character.sp,
         stamina: character.stamina,
         inven_point: 0,
+        random_hp: i32::from(character.random_hp),
+        random_sp: i32::from(character.random_sp),
+        stat_point: i32::from(character.stat_point),
+        skill_point: i32::from(character.skill_point),
+        sub_skill_point: i32::from(character.sub_skill_point),
+        level_step: i32::from(character.level_step),
         map_index,
         part_base: character.part_base,
         hair_part: character.hair_part,
@@ -468,9 +505,8 @@ pub fn points(character: &Character, state: &Points) -> [i64; GC_POINT_SLOT_COUN
 /// The `GC_CHARACTER_POINT_CHANGE` records for the changes `state` reports, in order.
 ///
 /// Legacy writes each record with its own `DESC::Packet` call from `UpdatePointsPacket`
-/// (`G/char.cpp:2089-2118`), so each is its own frame. A broadcast record goes to every
-/// descriptor that sees the character, and the character's own descriptor is one of them; no
-/// other character can see it yet, so every record is written to the descriptor.
+/// (`G/char.cpp:2089-2118`), so each is its own frame. The frames carry no address: the caller
+/// sends a broadcast record with `PacketAround` and any other to the character alone.
 #[must_use]
 pub fn point_changes(records: &[PointRecord], vid: u32) -> Vec<Vec<u8>> {
     records
@@ -562,6 +598,8 @@ pub struct PcCard {
     pub pk_mode: u8,
     /// `GetSkillGroup()`: the heal and the shaman shares read it in the world.
     pub skill_group: u8,
+    /// `GetAlignment()`: the kills raise it, in memory until `sys.char.pk` stores it.
+    pub alignment: i32,
 }
 
 impl PcCard {
@@ -578,6 +616,7 @@ impl PcCard {
             language,
             pk_mode: pk_mode(character.level, pk_protect_level),
             skill_group: character.skill_group,
+            alignment: 0,
         }
     }
 }
@@ -1068,6 +1107,12 @@ mod tests {
             level: 9,
             exp: 0x0102_0304_0506,
             conqueror_level: 3,
+            random_hp: 0,
+            random_sp: 0,
+            stat_point: 43,
+            skill_point: 47,
+            sub_skill_point: 53,
+            level_step: 3,
             sungma_str: 21,
             sungma_hp: 22,
             sungma_move: 23,
@@ -2039,6 +2084,7 @@ mod tests {
             language: 5,
             pk_mode: PK_MODE_PEACE,
             skill_group: 0,
+            alignment: 0,
         };
         let at = InsertAt {
             angle: 90.0,

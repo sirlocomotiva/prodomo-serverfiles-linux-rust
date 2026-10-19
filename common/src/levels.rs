@@ -15,11 +15,11 @@
 //! # The exp table is also loaded from the database
 //!
 //! `__LoadExpTableFromDB` (`config.cpp:1529-1554`) replaces the whole array from an
-//! `exp_table` table when that query returns rows. The owner's SQL snapshot has no
-//! `exp_table` table, so the compiled-in array is what legacy uses here and what the
-//! Rewrite must use. A deployment that does have the table needs a config key before the
-//! Rewrite can follow it; that is a separate change, recorded in `docs/STATUS.md`, not
-//! silently assumed here.
+//! `exp_table` table when that query returns rows. The owner's `exp_table` holds 120 rows
+//! (levels 1-120, `legacy/sql/gamedata/common.sql`), every one equal to the compiled-in
+//! array, so the compiled-in array is what legacy uses here and what the Rewrite uses.
+//! A deployment whose table differs needs a config key before the Rewrite can follow it;
+//! that is a separate change, recorded in `docs/STATUS.md`, not silently assumed here.
 //!
 //! # Signedness
 //!
@@ -336,6 +336,50 @@ pub fn next_exp(level: u8) -> i64 {
     EXP_TABLE[usize::from(level)]
 }
 
+/// `aiPercentByDeltaLev_euckr` (`G/constants.cpp:361-394`), the experience share by level
+/// delta, chosen at `G/locale_service.cpp:1348-1352`. Index `victim + 15 - me`, clamped to
+/// 0..30 (`G/constants.h:113`).
+pub const PERCENT_BY_DELTA_LEV: [i32; 31] = [
+    1, 5, 10, 20, 30, 50, 70, 80, 85, 90, 92, 94, 96, 98, 100, 100, 105, 110, 115, 120, 125, 130,
+    135, 140, 145, 150, 155, 160, 165, 170, 180,
+];
+
+/// `aiPercentByDeltaLevForBoss_euckr` (`G/constants.cpp:324-358`), the drop chance share by
+/// level delta for a victim of rank BOSS or above, chosen at `G/locale_service.cpp:1348-1352`.
+/// Index `victim + 15 - me`, clamped to 0..30 (`G/constants.h:114`).
+pub const PERCENT_BY_DELTA_LEV_BOSS: [i32; 31] = [
+    1, 3, 5, 7, 15, 30, 60, 90, 91, 92, 93, 94, 95, 97, 99, 100, 105, 110, 115, 120, 125, 130, 135,
+    140, 145, 150, 155, 160, 165, 170, 180,
+];
+
+/// `MobRankStats[].iGoldPercent` (`G/constants.cpp:25-33`): the gold chance by rank, PAWN to
+/// KING.
+pub const GOLD_PERCENT_BY_RANK: [i32; 6] = [20, 20, 25, 30, 50, 100];
+
+/// The gold chance share of a kill of a level-`victim` monster of `boss` rank by a level-`me`
+/// player: `PERCENT_LVDELTA_BOSS` for rank BOSS and above, `PERCENT_LVDELTA` below
+/// (`G/char_battle.cpp:599-603`, `G/constants.h:113-114`).
+#[must_use]
+pub fn gold_level_delta_share(me: u8, victim: u8, value: i32, boss: bool) -> i32 {
+    let table = if boss {
+        PERCENT_BY_DELTA_LEV_BOSS
+    } else {
+        PERCENT_BY_DELTA_LEV
+    };
+    let index = i32::from(victim) + 15 - i32::from(me);
+    let percent = table[usize::try_from(index.clamp(0, 30)).unwrap_or(0)];
+    value * percent / 100
+}
+
+/// `CALCULATE_VALUE_LVDELTA(me, victim, value)` (`G/constants.h:115`): the experience share
+/// of a kill of a level-`victim` monster by a level-`me` player.
+#[must_use]
+pub fn exp_level_delta_share(me: u8, victim: u8, value: i64) -> i64 {
+    let index = i32::from(victim) + 15 - i32::from(me);
+    let percent = PERCENT_BY_DELTA_LEV[usize::try_from(index.clamp(0, 30)).unwrap_or(0)];
+    value * i64::from(percent) / 100
+}
+
 /// The experience a conqueror level needs, as `CHARACTER::GetConquerorNextExp`
 /// (`char.cpp:8825-8833`).
 #[must_use]
@@ -365,6 +409,14 @@ pub struct JobInitialPoints {
     pub hp_per_ht: i32,
     /// `sp_per_iq`: spell points per point of intelligence.
     pub sp_per_iq: i32,
+    /// `hp_per_lv_begin`: the low end of the level-up's hit-point roll.
+    pub hp_per_lv_begin: i32,
+    /// `hp_per_lv_end`: the high end.
+    pub hp_per_lv_end: i32,
+    /// `sp_per_lv_begin`: the low end of the level-up's spell-point roll.
+    pub sp_per_lv_begin: i32,
+    /// `sp_per_lv_end`: the high end.
+    pub sp_per_lv_end: i32,
     /// The `max_stamina` base.
     pub max_stamina: i32,
     /// `stamina_per_con`: stamina per point of vitality.
@@ -383,6 +435,10 @@ pub const JOB_INITIAL_POINTS: [JobInitialPoints; 4] = [
         max_sp: 200,
         hp_per_ht: 40,
         sp_per_iq: 20,
+        hp_per_lv_begin: 36,
+        hp_per_lv_end: 44,
+        sp_per_lv_begin: 18,
+        sp_per_lv_end: 22,
         max_stamina: 800,
         stamina_per_con: 5,
     },
@@ -396,6 +452,10 @@ pub const JOB_INITIAL_POINTS: [JobInitialPoints; 4] = [
         max_sp: 200,
         hp_per_ht: 40,
         sp_per_iq: 20,
+        hp_per_lv_begin: 36,
+        hp_per_lv_end: 44,
+        sp_per_lv_begin: 18,
+        sp_per_lv_end: 22,
         max_stamina: 800,
         stamina_per_con: 5,
     },
@@ -409,6 +469,10 @@ pub const JOB_INITIAL_POINTS: [JobInitialPoints; 4] = [
         max_sp: 200,
         hp_per_ht: 40,
         sp_per_iq: 20,
+        hp_per_lv_begin: 36,
+        hp_per_lv_end: 44,
+        sp_per_lv_begin: 18,
+        sp_per_lv_end: 22,
         max_stamina: 800,
         stamina_per_con: 5,
     },
@@ -422,6 +486,10 @@ pub const JOB_INITIAL_POINTS: [JobInitialPoints; 4] = [
         max_sp: 200,
         hp_per_ht: 40,
         sp_per_iq: 20,
+        hp_per_lv_begin: 36,
+        hp_per_lv_end: 44,
+        sp_per_lv_begin: 18,
+        sp_per_lv_end: 22,
         max_stamina: 800,
         stamina_per_con: 5,
     },
@@ -586,5 +654,32 @@ mod tests {
                 row.max_stamina + i32::from(row.ht) * row.stamina_per_con
             );
         }
+    }
+
+    /// The delta table is the euckr one (`G/constants.cpp:361-394`): equal levels take the
+    /// whole value, 15 below takes 1%, and 15 above takes 180%.
+    #[test]
+    fn the_delta_table_matches_the_legacy_one() {
+        assert_eq!(PERCENT_BY_DELTA_LEV.len(), 31);
+        assert_eq!(PERCENT_BY_DELTA_LEV[15], 100);
+        assert_eq!(exp_level_delta_share(1, 1, 777), 777);
+        assert_eq!(exp_level_delta_share(16, 1, 1000), 10);
+        assert_eq!(exp_level_delta_share(1, 16, 1000), 1800);
+        // The clamp: 30 below still takes 1%, 30 above 180%.
+        assert_eq!(exp_level_delta_share(99, 1, 1000), 10);
+        assert_eq!(exp_level_delta_share(1, 99, 1000), 1800);
+    }
+
+    /// The boss delta table is the euckr one (`G/constants.cpp:324-358`): equal levels take
+    /// the whole value, and the low end falls faster than the normal table (60 at -9 vs 70).
+    #[test]
+    fn the_boss_delta_table_matches_the_legacy_one() {
+        assert_eq!(PERCENT_BY_DELTA_LEV_BOSS.len(), 31);
+        assert_eq!(PERCENT_BY_DELTA_LEV_BOSS[15], 100);
+        assert_eq!(gold_level_delta_share(1, 1, 100, true), 100);
+        assert_eq!(gold_level_delta_share(10, 1, 100, true), 60);
+        assert_eq!(gold_level_delta_share(10, 1, 100, false), 70);
+        assert_eq!(gold_level_delta_share(1, 16, 100, true), 180);
+        assert_eq!(GOLD_PERCENT_BY_RANK, [20, 20, 25, 30, 50, 100]);
     }
 }

@@ -74,6 +74,11 @@ pub struct MobFight {
     /// The proto's `bStoneSkinPoint`: below this share of its hit points a stone-skinned
     /// monster takes half the damage.
     pub stone_skin_point: u8,
+    /// draws one pile from (`G/char_battle.cpp:558-749`).
+    pub gold_range: [u32; 2],
+    /// The proto's `DROP_ITEM` vnum, which `CreateDropItem`'s etc branch rolls against
+    /// `etc_drop_item.txt` (`G/item_manager.cpp:1262-1277`).
+    pub drop_item_vnum: u32,
     /// `m_pointsInstant.points`: every slot that is not 0.
     points: BTreeMap<usize, i32>,
 }
@@ -101,6 +106,8 @@ impl MobFight {
             regen_percent: proto.regen_percent,
             drain_sp: proto.drain_sp,
             stone_skin_point: proto.stone_skin_point,
+            gold_range: [proto.gold_min, proto.gold_max],
+            drop_item_vnum: proto.drop_item_vnum,
             points: BTreeMap::new(),
         };
         for (slot, value) in [

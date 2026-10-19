@@ -112,6 +112,38 @@ const GROUP_SPREAD: (i32, i32) = (300, 500);
 /// The seconds `regen_load` adds to an entry's first fire: `number(0, 16)`.
 const FIRST_FIRE_JITTER: (i32, i32) = (0, 16);
 
+/// One splash entry of a `SPECIAL` clip: `TMobSplashAttackInfo`
+/// (`G/char.h:1785-1789`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MobSplash {
+    /// `dwTiming`: `100 + (DWORD)(StartingTime * 1000)`.
+    pub timing_ms: u32,
+    /// `dwHitDistance`: `-(DWORD)(y)`.
+    pub hit_distance: u32,
+}
+/// One skill slot: the proto's vnum/level plus the `SPECIALn` clip's skill data.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MobSkillSlots {
+    /// The slot's skill vnum (0 = unset).
+    pub vnum: u32,
+    /// The slot's skill level (the proto byte).
+    pub level: u8,
+    /// The `SPECIALn` clip's `MotionDuration` as its IEEE-754 bits (`None` when
+    /// the motlist has no such line — the empty-vector refusal), because an `f32`
+    /// would break `Eq`.
+    pub duration_bits: Option<u32>,
+    /// The clip's type-4 events, in file order.
+    pub splash: Vec<MobSplash>,
+}
+
+impl MobSkillSlots {
+    /// The clip's duration in seconds, or `None` without a clip.
+    #[must_use]
+    pub fn duration_s(&self) -> Option<f32> {
+        self.duration_bits.map(f32::from_bits)
+    }
+}
+
 /// A non-player standing on a map: an NPC, a warp, a goto, a monster or a stone, with what its
 /// insert packets carry and what its regen and group made it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -162,10 +194,17 @@ pub struct Npc {
     /// `GetMaxHP`: its proto's `dwMaxHP`, which `ComputePoints` makes the maximum of a
     /// non-player (`G/char.cpp:3017`, `:3051-3056`).
     pub max_hp: i32,
+    /// `GetExp`: its proto's `dwExp` (`G/char.cpp:2483`), which `DistributeExp` consumes
+    /// (`SetExp(0)`, `G/char_battle.cpp:2894`).
+    pub exp: u32,
     /// Its proto's `RACE_FLAG_*` bits, which a target's element is read from.
     pub race_flag: u32,
     /// What it fights with: the points `SetProto` gives it.
     pub fight: MobFight,
+    /// `TMobSkillInfo` (`G/char.h:1791-1799`): its 5 skill slots, each with the
+    /// `SPECIALn` clip's duration and splash entries (empty when the motlist has no
+    /// such line — 6418 slot 3). `UseMobSkill` refuses through an empty vector.
+    pub skills: [MobSkillSlots; 5],
     /// `IsStun`: `INSTANT_FLAG_STUN`, which `Stun` sets when its hit points reach 0 and `Dead`
     /// clears (`G/char_battle.cpp:422-459`, `:1558`).
     pub stunned: bool,
@@ -357,6 +396,7 @@ pub struct NpcSpawner<'a> {
     protos: &'a MobProtos,
     groups: &'a MobGroups,
     names: &'a MobLocaleNames,
+    clips: Option<&'a gamedata::mob_skill_data::MobSkillClips>,
     vids: NpcVids,
     report: SpawnReport,
 }
@@ -423,11 +463,20 @@ impl<'a> NpcSpawner<'a> {
             protos,
             groups,
             names,
+            clips: None,
             vids,
             report: SpawnReport::default(),
         }
     }
 
+    /// Share the skill clips: stood-up NPCs copy their `SPECIALn` data from the
+    /// folder's slots. Without them every slot is clip-less (the empty-vector
+    /// refusal).
+    #[must_use]
+    pub fn with_clips(mut self, clips: &'a gamedata::mob_skill_data::MobSkillClips) -> Self {
+        self.clips = Some(clips);
+        self
+    }
     /// What every map spawned so far stood up and did not.
     #[must_use]
     pub fn report(&self) -> SpawnReport {
@@ -758,8 +807,10 @@ impl<'a> NpcSpawner<'a> {
             ore_lifetime,
             hp: max_hp(proto),
             max_hp: max_hp(proto),
+            exp: proto.exp,
             race_flag: proto.race_flag,
             fight: MobFight::of(proto),
+            skills: self.skill_slots_of(proto),
             stunned: false,
             dead: false,
         });
@@ -768,6 +819,33 @@ impl<'a> NpcSpawner<'a> {
             self.report.stones += 1;
         }
         Ok(site.npcs.len() - 1)
+    }
+
+    /// The proto's skill slots (`MobSkillRecord.vnum/level`), with the `SPECIALn`
+    /// clip data of the proto's folder when the spawner holds the clips.
+    fn skill_slots_of(&self, proto: &MobTableRecord) -> [MobSkillSlots; 5] {
+        let folder = String::from_utf8_lossy(&proto.folder);
+        let folder = folder.trim_end_matches('\0');
+        let clips = self.clips.map(|clips| clips.slots(folder));
+        std::array::from_fn(|slot| {
+            let clip = clips.map(|clips| &clips[slot]);
+            MobSkillSlots {
+                vnum: proto.skills[slot].vnum,
+                level: proto.skills[slot].level,
+                duration_bits: clip.and_then(|clip| clip.duration_s).map(f32::to_bits),
+                splash: clip
+                    .map(|clip| {
+                        clip.splash
+                            .iter()
+                            .map(|entry| MobSplash {
+                                timing_ms: entry.timing_ms,
+                                hit_distance: entry.hit_distance,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            }
+        })
     }
 }
 
@@ -1087,8 +1165,10 @@ mod tests {
                 ore_lifetime: None,
                 hp: 1_500,
                 max_hp: 1_500,
+                exp: 0,
                 race_flag: 1 << 3,
                 fight: MobFight::of(protos().get(20_016).expect("the smith")),
+                skills: Default::default(),
                 stunned: false,
                 dead: false,
             }]

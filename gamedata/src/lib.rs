@@ -11,10 +11,12 @@
 pub mod banword;
 pub mod belt_inventory;
 pub mod csv_table;
+pub mod drop;
 pub mod event;
 pub mod item_attr;
 pub mod item_custom_category;
 pub mod item_kind;
+pub mod item_mask;
 pub mod item_proto;
 pub mod item_proto_value;
 pub mod land;
@@ -25,6 +27,8 @@ pub mod mob_group;
 pub mod mob_locale_names;
 pub mod mob_names;
 pub mod mob_proto;
+/// The hosted mob skill rows, the mob power row, and clip splash data.
+pub mod mob_skill_data;
 pub mod npc_shop;
 pub mod object_proto;
 pub mod pc_motion;

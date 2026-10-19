@@ -97,6 +97,13 @@ pub const EVENTS: [&str; 26] = [
 /// The quest a chat menu runs under (`NPC::OnChat`); it has no number, so it is quest 0.
 const CHAT_TEMP_QUEST: &[u8] = b"QUEST_CHAT_TEMP_QUEST";
 
+/// `QUEST_NO_NPC` (`quest.h:18`): the NPC index of the scripts no NPC owns.
+const QUEST_NO_NPC: u32 = 0;
+
+/// `MAIN_RACE_MAX_NUM` (`G/char.h:62-73`): the eight player races; a kill of one of them
+/// runs only the no-target scripts.
+const MAIN_RACE_MAX_NUM: u32 = 8;
+
 /// The largest chat menu index the loader accepts.
 const MAX_ARG_INDEX: i64 = 0xffff;
 
@@ -118,6 +125,9 @@ pub enum ChatKind {
 
 /// What a running script reaches in the game, for the character it runs for.
 pub trait Game {
+    /// `GetLevel()` of the character the script runs for.
+    fn level(&self) -> u8;
+
     /// The race of the character `vid`, when it is in the world.
     fn race_of(&self, vid: u32) -> Option<u32>;
 
@@ -148,6 +158,9 @@ pub struct Manager {
     npc_ids: BTreeMap<Vec<u8>, u32>,
     event_flags: BTreeMap<Vec<u8>, i32>,
     pcs: BTreeMap<u32, Pc>,
+    /// `m_dwQuestNPCVID` (`G/char.h:1772`): the NPC the last `SetQuestNPCID` named. The
+    /// bridge reads it when the character's own click did not name one.
+    quest_npc_vid: u32,
 }
 
 impl Manager {
@@ -195,6 +208,7 @@ impl Manager {
             npc_ids,
             event_flags,
             pcs: BTreeMap::new(),
+            quest_npc_vid: 0,
         }
     }
 
@@ -223,6 +237,12 @@ impl Manager {
         self.event_flags.get(name).copied().unwrap_or(0)
     }
 
+    /// `game.set_event_flag`: sets an event flag, which `noguard` reads. A GM command
+    /// would call this; no quest on the owner's data sets `noguard`.
+    pub fn set_event_flag(&mut self, name: &[u8], value: i32) {
+        self.event_flags.insert(name.to_vec(), value);
+    }
+
     /// `CQuestManager::Click`: character `pid` clicked the NPC `npc_vid` of race `race`. Returns
     /// whether a quest took the click, in which case the NPC's shop does not open.
     pub fn click(&mut self, pid: u32, npc_vid: u32, race: u32, game: &mut dyn Game) -> bool {
@@ -237,6 +257,59 @@ impl Manager {
                 return true;
             }
             run.handle_event(pc, npc, "click")
+        })
+    }
+    /// `CQuestManager::LevelUp`: character `pid` leveled up, so the no-target quests' `levelup`
+    /// scripts run (`questmanager.cpp:667-681`). Every owner script with a `levelup` trigger is
+    /// such a script, and neither takes a chat menu or an argument. A character the manager
+    /// never saw still misses, as legacy's `GetPC` returns NULL for it (`sys_err` there).
+    pub fn levelup(&mut self, pid: u32, game: &mut dyn Game) -> bool {
+        if !self.pcs.contains_key(&pid) {
+            tracing::warn!("QUEST LEVELUP_EVENT no such pc id : {pid}");
+            return false;
+        }
+        self.operate(pid, game, |run, pc, npcs| match npcs.get(&QUEST_NO_NPC) {
+            Some(npc) => run.handle_event(pc, npc, "levelup"),
+            None => false,
+        })
+    }
+    /// `CHARACTER::SetQuestNPCID` (`G/char.cpp:7610-7613`): records `victim` as the quest NPC
+    /// for the next dispatch. `Reward` calls it before `Kill`; `operate` publishes the
+    /// stored VID to the bridge (`cx.npc_vid`).
+    pub fn set_quest_npc(&mut self, victim: u32) {
+        self.quest_npc_vid = victim;
+    }
+    /// `CQuestManager::Kill`: character `pid` killed race `race` (`questmanager.cpp:574-611`).
+    /// A race at or past `MAIN_RACE_MAX_NUM` (8, `G/char.h:62-73`) runs its own `kill`
+    /// scripts, and the no-target scripts' `kill` always runs; `ENABLE_PARTYKILL` (defined,
+    /// `:573`) then runs `party_kill` on both for the leader, which is the killer itself
+    /// while no party is ported. A character the manager never saw still misses, as
+    /// legacy's `GetPC` returns NULL for it (`sys_err` there).
+    pub fn kill(&mut self, pid: u32, race: u32, game: &mut dyn Game) -> bool {
+        if !self.pcs.contains_key(&pid) {
+            tracing::warn!("QUEST KILL_EVENT no such pc id : {pid}");
+            return false;
+        }
+        // `SetQuestNPCID` ran on the caller (`Reward`, `G/char_battle.cpp:810`).
+        self.operate(pid, game, |run, pc, npcs| {
+            let mut ran = false;
+            if race >= MAIN_RACE_MAX_NUM {
+                if let Some(npc) = npcs.get(&race) {
+                    ran |= run.handle_event(pc, npc, "kill");
+                }
+            }
+            if let Some(npc) = npcs.get(&QUEST_NO_NPC) {
+                ran |= run.handle_event(pc, npc, "kill");
+                // The leader is the killer itself while no party is ported, so its
+                // `party_kill` runs on the same character (`:597-605`).
+                ran |= run.handle_event(pc, npc, "party_kill");
+            }
+            if race >= MAIN_RACE_MAX_NUM {
+                if let Some(npc) = npcs.get(&race) {
+                    ran |= run.handle_event(pc, npc, "party_kill");
+                }
+            }
+            ran
         })
     }
 
@@ -349,8 +422,15 @@ impl Manager {
             npc_ids,
             event_flags,
             pcs,
+            quest_npc_vid,
         } = self;
         let pc = pcs.entry(pid).or_default();
+        // `SetQuestNPCID` overwrites what the click recorded (`Reward` runs after any
+        // click, and the kill's scripts read the victim).
+        if *quest_npc_vid != 0 {
+            pc.npc_vid = *quest_npc_vid;
+            *quest_npc_vid = 0;
+        }
         let cx = RefCell::new(Cx {
             output: Output::default(),
             game,
@@ -358,6 +438,7 @@ impl Manager {
             npc_ids,
             npc_vid: pc.npc_vid,
             quest: pc.current.clone(),
+            pending_state: None,
         });
         let run = Run { host, cx: &cx };
         let result = run.bridged(|| op(&run, pc, npcs));
@@ -786,7 +867,9 @@ struct Pc {
     current: Vec<u8>,
     /// `m_bShouldSendDone`: the client answered, so a bare `[DONE]` must close its window.
     send_done: bool,
-    /// The NPC the character clicked last (`CHARACTER::m_dwQuestNPCVID`).
+    /// `SetCurrentQuestStateName`: a `set_state` the running script asked for, applied when
+    /// its thread ends so the bridge's `&mut Cx` never reaches the `Pc`.
+    pending_state: Option<Vec<u8>>,
     npc_vid: u32,
 }
 
@@ -836,6 +919,8 @@ struct Cx<'g> {
     npc_vid: u32,
     /// The quest that runs, for error messages (`GetCurrentQuestName`).
     quest: Vec<u8>,
+    /// What `set_state` asked for, which `execute` moves the `Pc` to when the script ends.
+    pending_state: Option<Vec<u8>>,
 }
 
 /// One call into the manager. No `Cx` borrow is held across a call into Lua, which may call
@@ -1019,7 +1104,16 @@ impl Run<'_, '_> {
             chat,
             state,
         });
-        self.resume(pc, Ok(MultiValue::new()))
+        let ran = self.resume(pc, Ok(MultiValue::new()));
+        let pending = self.cx.borrow_mut().pending_state.take();
+        if pc.running.is_none() {
+            if let Some(state) = pending {
+                self.goto_state(pc, quest, &state);
+            }
+        } else if let Some(state) = pending {
+            pc.pending_state = Some(state);
+        }
+        ran
     }
 
     /// `RunState` (`questlua.cpp:995`), and the `CloseState` and `EndRunning` every caller did
@@ -1055,6 +1149,7 @@ impl Run<'_, '_> {
             );
             self.cx.borrow_mut().output.error = true;
             self.goto_end(pc);
+            pc.pending_state = None;
             pc.running = None;
             return false;
         };
@@ -1117,6 +1212,22 @@ impl Run<'_, '_> {
             .script
             .extend_from_slice(b"[DONE]");
         self.send_script(pc);
+    }
+    /// `SetCurrentQuestStateName` (`questlua_quest.cpp:112`): the quest of the finished script
+    /// moves to the named state. A name the quest does not have is legacy's index 0
+    /// (`GetQuestStateIndex`), and the status flag follows the state.
+    fn goto_state(&self, pc: &mut Pc, quest: u32, state: &[u8]) {
+        let at = usize::try_from(quest.saturating_sub(1)).unwrap_or(usize::MAX);
+        let number = self
+            .host
+            .quests()
+            .get(at)
+            .and_then(|quest| quest.states.get(state))
+            .copied()
+            .unwrap_or(0);
+        pc.quests.insert(quest, number);
+        let name = self.quest_name(quest);
+        pc.flags.insert([&name[..], b".__status"].concat(), number);
     }
 
     /// `SendScript`: a bare `[DONE]` or `[NEXT]` closes the window once the client has
@@ -1194,10 +1305,22 @@ fn dword(number: f64) -> u32 {
 
 /// The [`crate::host::BRIDGED`] names (`questlua_global.cpp`, `questlua_game.cpp`,
 /// `questlua_npc.cpp`).
-fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Result<MultiValue> {
-    let first = args.front().cloned().unwrap_or(Value::Nil);
-    let last = args.back().cloned().unwrap_or(Value::Nil);
-    let number = |value: u32| Some(Value::Number(f64::from(value)));
+/// What the text-output bridge did with a name.
+enum TextOutcome {
+    /// The name was none of its own; the caller keeps matching.
+    Miss,
+    /// The name wrote its text and returns this value.
+    Hit(Option<Value>),
+}
+
+/// The bridged names that write text (`say`, the four chats, `raw_script`).
+fn text_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+    last: Value,
+) -> mlua::Result<TextOutcome> {
     let result = match name {
         b"say" => {
             let mut text = combine(lua, args)?;
@@ -1227,6 +1350,19 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
             }
             None
         }
+        _ => return Ok(TextOutcome::Miss),
+    };
+    Ok(TextOutcome::Hit(result))
+}
+
+fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Result<MultiValue> {
+    let first = args.front().cloned().unwrap_or(Value::Nil);
+    let last = args.back().cloned().unwrap_or(Value::Nil);
+    let number = |value: u32| Some(Value::Number(f64::from(value)));
+    if let TextOutcome::Hit(result) = text_api(lua, cx, name, args, last.clone())? {
+        return Ok(result.into_iter().collect());
+    }
+    let result = match name {
         b"set_skin" | b"setskin" => {
             if let Some(skin) = lua.coerce_number(last)? {
                 // `(int)rint(...)`, then the range check; a rounded value is a whole number, so
@@ -1287,6 +1423,17 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
             Some(Value::Number(f64::from(value)))
         }
         b"npc.getrace" | b"npc.get_race" => number(cx.game.race_of(cx.npc_vid).unwrap_or(0)),
+        b"pc.get_level" => number(u32::from(cx.game.level())),
+        b"pc.is_gm" => Some(Value::Boolean(false)),
+        b"set_state" | b"q.setstate" | b"q.set_state" => {
+            match host::c_string(lua, last)? {
+                Some(state) if !state.is_empty() => {
+                    cx.pending_state = Some(state);
+                }
+                _ => tracing::warn!("QUEST state name is empty"),
+            }
+            None
+        }
         _ => {
             return Err(mlua::Error::runtime(format!(
                 "not ported: {}",
@@ -1318,6 +1465,7 @@ mod tests {
 
     #[derive(Default)]
     struct Fake {
+        level: u8,
         races: BTreeMap<u32, u32>,
         chats: Vec<(ChatKind, Vec<u8>)>,
         scripts: Vec<(u8, Vec<u8>)>,
@@ -1341,6 +1489,10 @@ mod tests {
     }
 
     impl Game for Fake {
+        fn level(&self) -> u8 {
+            self.level
+        }
+
         fn race_of(&self, vid: u32) -> Option<u32> {
             self.races.get(&vid).copied()
         }
@@ -1714,6 +1866,7 @@ mod tests {
                 npc_ids: &self.manager.npc_ids,
                 npc_vid: VID,
                 quest: b"q".to_vec(),
+                pending_state: None,
             };
             let args: MultiValue = args.iter().cloned().collect();
             let result = api(self.manager.host.lua(), &mut cx, name.as_bytes(), &args);
@@ -1817,6 +1970,23 @@ mod tests {
         for name in ["get_time", "get_global_time"] {
             assert_eq!(probe.call(name, &[]).unwrap(), number(1_790_000_000.0));
         }
+        probe.game.level = 40;
+        assert_eq!(probe.call("pc.get_level", &[]).unwrap(), number(40.0));
+        let error = probe.call("pc.warp", &[]).unwrap_err().to_string();
+        assert!(error.contains("not ported: pc.warp"), "{error}");
+    }
+
+    /// The skin index rounds ties to even and falls back to the normal skin; a value that
+    /// is no number keeps the skin.
+    #[test]
+    fn the_skin_index_rounds_and_recovers() {
+        let manager = manager().lock().unwrap();
+        let number = |value: f64| vec![Value::Number(value)];
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+        };
         for (skin, want) in [
             (4.5, 4),
             (5.5, 1),
@@ -1831,8 +2001,43 @@ mod tests {
             probe.call("setskin", &[Value::Boolean(true)]).unwrap();
             assert_eq!(probe.output.skin, want, "{skin}");
         }
-        let error = probe.call("pc.warp", &[]).unwrap_err().to_string();
-        assert!(error.contains("not ported: pc.warp"), "{error}");
+    }
+
+    #[test]
+    fn a_level_up_runs_the_no_target_scripts_and_misses_an_unknown_character() {
+        let mut manager = manager().lock().unwrap();
+        manager.logout(PID);
+        let mut stranger = Fake::default();
+        assert!(!manager.levelup(PID, &mut stranger));
+        assert!(stranger.scripts.is_empty());
+        let mut game = Fake::at_ox_manager();
+        assert!(manager.click(PID, VID, OX_MANAGER, &mut game));
+        game.scripts.clear();
+        manager.logout(PID);
+        manager.pcs.entry(PID).or_default();
+        game.level = 40;
+        assert!(manager.levelup(PID, &mut game));
+        assert_eq!(
+            manager.quest_flag(PID, b"sash_mission.__status"),
+            Some(695_801_987),
+            "the sash quest left `start` for CRC32(`information`)"
+        );
+        assert_eq!(
+            manager.quest_flag(PID, b"yohara_system.__status"),
+            Some(0),
+            "the yohara quest stayed in `start` below 120"
+        );
+        assert!(game.scripts.is_empty(), "a `set_state` sends nothing");
+        manager.logout(PID);
+        manager.pcs.entry(PID).or_default();
+        game.level = 120;
+        assert!(manager.levelup(PID, &mut game));
+        assert_eq!(
+            manager.quest_flag(PID, b"yohara_system.__status"),
+            Some(1_998_515_313),
+            "at 120 the yohara quest moves to CRC32(`information_new`)"
+        );
+        manager.logout(PID);
     }
 
     #[test]

@@ -87,6 +87,101 @@ pub const ITEM_ATTR_QUERY_SQL: &str =
 pub const ITEM_ATTR_RARE_QUERY_SQL: &str =
     "SELECT apply, apply+0, prob, lv1, lv2, lv3, lv4, lv5, weapon, body, wrist, foots, neck, head, shield, ear FROM item_attr_rare%s ORDER BY apply";
 
+/// The `apply` enum of the `item_attr` table, in schema order
+/// (`legacy/sql/schema/player.sql:405`).
+///
+/// MySQL's `apply+0` in the boot query is the 1-based position in this enum, so the
+/// loader computes it by position. The game binary reads only
+/// `legacy/sql/gamedata`, never the schema file, so the order is compiled in and a
+/// test pins it against the schema. The first 58 agree with the `APPLY_*` numbers;
+/// the tail (warrior/assassin/sura/shaman names, `NOUSE*`, a repeated `MAX_HP`) does
+/// not, and no dump row uses it.
+pub const ITEM_ATTR_APPLY_ENUM: [&str; 83] = [
+    "MAX_HP",
+    "MAX_SP",
+    "CON",
+    "INT",
+    "STR",
+    "DEX",
+    "ATT_SPEED",
+    "MOV_SPEED",
+    "CAST_SPEED",
+    "HP_REGEN",
+    "SP_REGEN",
+    "POISON_PCT",
+    "STUN_PCT",
+    "SLOW_PCT",
+    "CRITICAL_PCT",
+    "PENETRATE_PCT",
+    "ATTBONUS_HUMAN",
+    "ATTBONUS_ANIMAL",
+    "ATTBONUS_ORC",
+    "ATTBONUS_MILGYO",
+    "ATTBONUS_UNDEAD",
+    "ATTBONUS_DEVIL",
+    "STEAL_HP",
+    "STEAL_SP",
+    "MANA_BURN_PCT",
+    "DAMAGE_SP_RECOVER",
+    "BLOCK",
+    "DODGE",
+    "RESIST_SWORD",
+    "RESIST_TWOHAND",
+    "RESIST_DAGGER",
+    "RESIST_BELL",
+    "RESIST_FAN",
+    "RESIST_BOW",
+    "RESIST_FIRE",
+    "RESIST_ELEC",
+    "RESIST_MAGIC",
+    "RESIST_WIND",
+    "REFLECT_MELEE",
+    "REFLECT_CURSE",
+    "POISON_REDUCE",
+    "KILL_SP_RECOVER",
+    "EXP_DOUBLE_BONUS",
+    "GOLD_DOUBLE_BONUS",
+    "ITEM_DROP_BONUS",
+    "POTION_BONUS",
+    "KILL_HP_RECOVER",
+    "IMMUNE_STUN",
+    "IMMUNE_SLOW",
+    "IMMUNE_FALL",
+    "SKILL",
+    "BOW_DISTANCE",
+    "ATT_GRADE_BONUS",
+    "DEF_GRADE_BONUS",
+    "MAGIC_ATT_GRADE",
+    "MAGIC_DEF_GRADE",
+    "CURSE_PCT",
+    "MAX_STAMINA",
+    "ATT_BONUS_TO_WARRIOR",
+    "ATT_BONUS_TO_ASSASSIN",
+    "ATT_BONUS_TO_SURA",
+    "ATT_BONUS_TO_SHAMAN",
+    "NORMAL_HIT_DEFEND_BONUS",
+    "SKILL_DEFEND_BONUS",
+    "NOUSE1",
+    "NOUSE2",
+    "NOUSE3",
+    "NOUSE4",
+    "NOUSE5",
+    "NOUSE6",
+    "NOUSE7",
+    "NOUSE8",
+    "NOUSE9",
+    "NOUSE10",
+    "NOUSE11",
+    "NOUSE12",
+    "NOUSE13",
+    "NOUSE14",
+    "RESIST_WARRIOR",
+    "RESIST_ASSASSIN",
+    "RESIST_SURA",
+    "RESIST_SHAMAN",
+    "MAX_HP",
+];
+
 /// Selects which fixed legacy item-attribute table is being converted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemAttrTableKind {
@@ -1074,6 +1169,120 @@ pub fn build_item_attr_table(
     build_records(kind, rows, limits, decode_item_attr_query_row)
 }
 
+/// What [`attrs_from_dump`] reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ItemAttrDumpError {
+    /// The dump could not be read.
+    Dump(crate::sql_dump::SqlDumpError),
+    /// A needed column is missing.
+    NoColumn(&'static str),
+    /// An `apply` is not in [`ITEM_ATTR_APPLY_ENUM`].
+    UnknownApply(Vec<u8>),
+    /// A row could not be decoded.
+    Table(ItemAttrTableError),
+}
+
+impl fmt::Display for ItemAttrDumpError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dump(source) => write!(formatter, "item_attr dump: {source}"),
+            Self::NoColumn(column) => write!(formatter, "item_attr dump has no {column} column"),
+            Self::UnknownApply(apply) => {
+                write!(
+                    formatter,
+                    "item_attr apply is not in the schema enum: {apply:?}"
+                )
+            }
+            Self::Table(source) => write!(formatter, "{source}"),
+        }
+    }
+}
+
+impl Error for ItemAttrDumpError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Dump(source) => Some(source),
+            Self::Table(source) => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// The boot `item_attr` rows of the owner's dump, in the boot query's row order
+/// (`ORDER BY apply`), decoded strict.
+///
+/// The dump holds 17 columns; the query's `apply+0` is computed as the 1-based enum
+/// position of `apply` in [`ITEM_ATTR_APPLY_ENUM`], which is what MySQL answers for an
+/// enum column. An empty table refuses, as legacy's boot does (`no result from
+/// item_attr`, `ClientManagerBoot.cpp:783-787`); a bad row refuses too, the same class.
+///
+/// # Errors
+///
+/// [`ItemAttrDumpError`] for an unreadable dump, a missing column, an `apply` outside
+/// the schema enum, or a row the strict decode refuses.
+pub fn attrs_from_dump(dump: &[u8]) -> Result<Vec<ItemAttrRecord>, ItemAttrDumpError> {
+    use crate::sql_dump::{read_table, SqlValue};
+    const NAMES: [&str; 17] = [
+        "apply", "prob", "lv1", "lv2", "lv3", "lv4", "lv5", "weapon", "body", "wrist", "foots",
+        "neck", "head", "shield", "ear", "talisman", "glove",
+    ];
+    let table = read_table(dump, "item_attr").map_err(ItemAttrDumpError::Dump)?;
+    if table.rows.is_empty() {
+        return Err(ItemAttrDumpError::Table(ItemAttrTableError::EmptySource {
+            kind: ItemAttrTableKind::Normal,
+        }));
+    }
+    let mut at = [0_usize; 17];
+    for (slot, name) in at.iter_mut().zip(NAMES) {
+        *slot = table
+            .column(name)
+            .ok_or(ItemAttrDumpError::NoColumn(match name {
+                "apply" => "apply",
+                "prob" => "prob",
+                "lv1" => "lv1",
+                "lv2" => "lv2",
+                "lv3" => "lv3",
+                "lv4" => "lv4",
+                "lv5" => "lv5",
+                "weapon" => "weapon",
+                "body" => "body",
+                "wrist" => "wrist",
+                "foots" => "foots",
+                "neck" => "neck",
+                "head" => "head",
+                "shield" => "shield",
+                "ear" => "ear",
+                "talisman" => "talisman",
+                _ => "glove",
+            }))?;
+    }
+    let mut rows = Vec::with_capacity(table.rows.len());
+    for values in &table.rows {
+        let cell = |name: usize| match &values[at[name]] {
+            SqlValue::Null => ItemAttrQueryValue::null(),
+            SqlValue::Text(text) => ItemAttrQueryValue::bytes(text.clone()),
+            SqlValue::Bare(bare) => ItemAttrQueryValue::bytes(bare.clone()),
+        };
+        let apply = match &values[at[0]] {
+            SqlValue::Text(text) | SqlValue::Bare(text) => text.clone(),
+            SqlValue::Null => Vec::new(),
+        };
+        let index = ITEM_ATTR_APPLY_ENUM
+            .iter()
+            .position(|name| name.as_bytes() == apply.as_slice())
+            .ok_or(ItemAttrDumpError::UnknownApply(apply.clone()))?;
+        let mut columns = Vec::with_capacity(18);
+        columns.push(cell(0));
+        columns.push(ItemAttrQueryValue::text((index + 1).to_string()));
+        for name in 1..17 {
+            columns.push(cell(name));
+        }
+        rows.push(ItemAttrTableQueryRow::new(columns));
+    }
+    build_item_attr_table(ItemAttrTableKind::Normal, &rows, ItemAttrLimits::default())
+        .map_err(ItemAttrDumpError::Table)
+}
+
 /// Decode `kind` rows with the legacy conversion policy, preserving source
 /// row order and duplicates.
 ///
@@ -1442,5 +1651,73 @@ mod tests {
             matches!(error, ItemAttrTableError::Row { index: 1, .. }),
             "got {error:?}"
         );
+    }
+
+    #[test]
+    fn enum_const_matches_the_schema() {
+        use std::path::Path;
+        let schema = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/sql/schema/player.sql"),
+        )
+        .expect("schema reads");
+        let line = schema
+            .lines()
+            .find(|line| line.starts_with("  `apply` enum("))
+            .expect("apply enum");
+        let mut names = Vec::new();
+        let mut rest = line;
+        while let Some(start) = rest.find('\'') {
+            rest = &rest[start + 1..];
+            let end = rest.find('\'').expect("closing quote");
+            names.push(&rest[..end]);
+            rest = &rest[end + 1..];
+        }
+        assert_eq!(names, ITEM_ATTR_APPLY_ENUM);
+    }
+
+    #[test]
+    fn owner_dump_loads_45_rows() {
+        use std::path::Path;
+        let dump = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/sql/gamedata/player.sql"),
+        )
+        .expect("dump reads");
+        let rows = attrs_from_dump(&dump).expect("attrs load");
+        assert_eq!(rows.len(), 45);
+        let by_apply = |index: u32| {
+            rows.iter()
+                .find(|row| row.apply_index == index)
+                .expect("row")
+        };
+        // STR is enum position 5, which is APPLY_STR too.
+        let str_row = by_apply(5);
+        assert_eq!(str_row.prob, 11);
+        assert_eq!(str_row.values, [6, 6, 8, 10, 12]);
+        assert_eq!(str_row.max_level_by_set, [5, 0, 0, 0, 0, 0, 5, 0, 5, 5]);
+        let hp = by_apply(1);
+        assert_eq!(hp.prob, 35);
+        assert_eq!(hp.values, [1000, 1200, 1500, 1500, 2000]);
+        let grade = by_apply(53);
+        assert_eq!(grade.prob, 9);
+        assert_eq!(grade.values, [30, 30, 30, 30, 50]);
+    }
+
+    #[test]
+    fn empty_dump_refuses() {
+        assert!(matches!(
+            attrs_from_dump(b"-- nothing\n"),
+            Err(ItemAttrDumpError::Table(
+                ItemAttrTableError::EmptySource { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn unknown_apply_refuses() {
+        let dump = b"INSERT INTO `item_attr` (`apply`, `prob`, `lv1`, `lv2`, `lv3`, `lv4`, `lv5`, `weapon`, `body`, `wrist`, `foots`, `neck`, `head`, `shield`, `ear`, `talisman`, `glove`) VALUES ('NOPE','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1','1');";
+        assert!(matches!(
+            attrs_from_dump(dump),
+            Err(ItemAttrDumpError::UnknownApply(_))
+        ));
     }
 }

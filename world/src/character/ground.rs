@@ -6,18 +6,19 @@
 //! the ground is not a character's. A drop deletes the slots that name the dropped cell,
 //! as a [`QuickslotSync`] the caller runs (ledger 220).
 //!
-//! Not ported, and each is the caller's or a later ledger's: gold on the ground, the drop
-//! time limit (the descriptor keeps it), ownership (a player's drop has no owner, so anyone
-//! may pick it up), the party share, the quest events, the lock check, and the item log. While a
+//! Not ported, and each is the caller's or a later ledger's: the drop time limit (the
+//! descriptor keeps it), ownership (a player's drop has no owner, so anyone may pick it
+//! up), the party share, the quest events, the lock check, and the item log. While a
 //! script waits for the character's client it drops nothing and picks up no quest item. A drop
 //! of an item offered in a trade is refused silently (`IsExchanging`, `:7473`); a pickup may
 //! still join an offered stack, as legacy's does.
 
+use super::shop::GOLD_MAX_MAX;
 use common::item_slots::{
     EWindows, CUSTOM_INVENTORY_SLOT_END, CUSTOM_INVENTORY_SLOT_START, INVENTORY_MAX_NUM,
 };
 use gamedata::item_custom_category::{is_custom_category, CATEGORY_NUM};
-use gamedata::item_kind::ITEM_QUEST;
+use gamedata::item_kind::{ITEM_ELK, ITEM_QUEST};
 use gamedata::item_proto::ItemProtos;
 use protocol::item_pos::ItemPos;
 
@@ -37,6 +38,9 @@ use crate::item::{
 
 /// `[LS;443]`: the item was dropped (`G/char_item.cpp:7536`).
 pub const DROPPED_NOTICE: &str = "[LS;443]";
+/// `[LS;1057;2]`: the gold was dropped; `150/60` is legacy's integer 2, the destroy time in
+/// minutes of a gold drop at the compiled-in 150 seconds (`G/char_item.cpp:7592`).
+pub const GOLD_DROPPED_NOTICE: &str = "[LS;1057;2]";
 
 /// An item lying on the ground.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +87,81 @@ pub struct DropAt {
     /// Whether a sectree holds the point, so `AddToGround` can lay the item there
     /// (`G/item.cpp:569-574`).
     pub lands: bool,
+}
+
+/// `CHARACTER::DropGold` (`G/char_item.cpp:7554`): `gold` of `held` goes to the ground as a
+/// `ITEM_ELK` pile. The pile is the same [`GroundItem`] an item drop lays, with no id and no
+/// row, and the records are the gold change, then the ground add, then
+/// [`GOLD_DROPPED_NOTICE`].
+///
+/// Two legacy behaviours are not reproduced. `DropGold` spends nothing: under
+/// `ENABLE_REMOVE_LIMIT_GOLD` the `POINT_GOLD` arm of `PointChange` is compiled out
+/// (`G/char.cpp:4407-4423`), so the record only tells the client the point moved while the
+/// server keeps the gold (a Defect: a dropped pile is free gold). The Rewrite spends the
+/// gold, or a player could mint it. And `CreateItem` would number the pile from the shared
+/// id counter; the Rewrite lays it unnumbered, or a restart could deal its id twice (a
+/// Divergence).
+///
+/// `protos` supplies the pile's vnum: the first row of `item_proto.txt` whose type is
+/// `ITEM_ELK`, which legacy's `CreateItem(1, gold)` finds from `GetTable`.
+///
+/// # Errors
+///
+/// [`MoveRefused::Empty`] for gold of 0 or more than `held`, [`MoveRefused::UnknownVnum`]
+/// when no proto is `ITEM_ELK`, and [`MoveRefused::NoSectree`] when the pile would not
+/// land. Nothing changes on any of them.
+pub fn drop_gold(
+    held: u64,
+    gold: u32,
+    to: DropAt,
+    protos: &ItemProtos,
+) -> Result<(MoveDone, GroundItem, u64), MoveRefused> {
+    if gold == 0 || u64::from(gold) > held {
+        return Err(MoveRefused::Empty);
+    }
+    if !to.lands {
+        return Err(MoveRefused::NoSectree);
+    }
+    let vnum = protos
+        .rows()
+        .iter()
+        .find(|row| row.item_type == ITEM_ELK)
+        .map(|row| row.vnum)
+        .ok_or(MoveRefused::UnknownVnum(1))?;
+    let left = held - u64::from(gold);
+    let ground = GroundItem {
+        vid: to.vid,
+        item: crate::item::Item {
+            id: crate::item::NO_ITEM,
+            vnum,
+            count: u16::try_from(gold.min(u32::from(u16::MAX))).unwrap_or(u16::MAX),
+            flags: 0,
+            anti_flags: 0,
+            sockets: [0; crate::item::SOCKETS],
+            attributes: [protocol::gc_item_window::ItemAttribute::new(0, 0);
+                crate::item::ATTRIBUTES],
+            size: 1,
+            pos: protocol::item_pos::ItemPos::new(0, 0),
+            refine_element: 0,
+            transmutation: 0,
+        },
+        x: to.x,
+        y: to.y,
+        last_owner: to.owner_id,
+    };
+    let done = MoveDone {
+        kind: MoveKind::Dropped,
+        records: vec![
+            MoveRecord::Gold {
+                amount: 0,
+                value: left,
+            },
+            MoveRecord::Ground(ground.add_record()),
+            MoveRecord::Notice(GOLD_DROPPED_NOTICE),
+        ],
+        changes: Vec::new(),
+    };
+    Ok((done, ground, left))
 }
 
 /// `CHARACTER::DropItem`: the item at `at`, or `count` of its stack, goes to the ground.
@@ -221,6 +300,51 @@ fn merge_cells() -> impl Iterator<Item = u16> {
     (0..INVENTORY_MAX_NUM).chain(CUSTOM_INVENTORY_SLOT_START..CUSTOM_INVENTORY_SLOT_END)
 }
 
+/// `CHARACTER::PickupItem` for a gold pile the picker may take (`G/char_item.cpp:7996-8004`):
+/// `held` grows by the pile, which leaves the ground, and the records are the gold change
+/// then the ground delete: legacy's `GiveGold` sends while the pile still lies, and the
+/// delete follows from `RemoveFromGround`. A solo picker keeps it all; the party share
+/// that `CHARACTER::GiveGold` (`G/char_item.cpp:7920`) would split is not ported.
+///
+/// `GiveGold` pays through `PointChange(POINT_GOLD)`, whose compiled-in arm refuses gold at
+/// the cap by returning without spending or sending (`G/char.cpp:4407-4423`): at the cap the
+/// pile is still consumed. The pick-up answers the same: a pile that would reach
+/// [`GOLD_MAX_MAX`] is refused after the ground delete, consumed, with no gold change.
+///
+/// # Errors
+///
+/// [`MoveRefused::GoldOverflow`] when the pile would reach the cap. The pile is consumed
+/// either way.
+pub fn pickup_gold(
+    held: u64,
+    ground: &GroundItem,
+) -> Result<(MoveDone, u64), (MoveDone, MoveRefused)> {
+    let pile = u64::from(ground.item.count);
+    let gone = MoveRecord::Ground(GroundRecord::Del { vid: ground.vid });
+    let held = held.checked_add(pile).filter(|held| *held < GOLD_MAX_MAX);
+    if let Some(held) = held {
+        let done = MoveDone {
+            kind: MoveKind::PickedUp,
+            records: vec![
+                MoveRecord::Gold {
+                    amount: i64::try_from(pile).unwrap_or(i64::MAX),
+                    value: held,
+                },
+                gone,
+            ],
+            changes: Vec::new(),
+        };
+        Ok((done, held))
+    } else {
+        let done = MoveDone {
+            kind: MoveKind::PickedUp,
+            records: vec![gone],
+            changes: Vec::new(),
+        };
+        Err((done, MoveRefused::GoldOverflow))
+    }
+}
+
 /// `CHARACTER::PickupItem` for an item the picker may take.
 ///
 /// A stackable item first tops up every stack of its vnum with the same sockets, in cell
@@ -340,6 +464,8 @@ mod tests {
     const SASH: u32 = 85_004;
     /// An `ITEM_QUEST`.
     const LETTER: u32 = 50_000;
+    /// An `ITEM_ELK`.
+    const PILE: u32 = 50_026;
 
     const RULES: MoveRules = MoveRules {
         count_limit: 200,
@@ -369,6 +495,7 @@ mod tests {
             ItemProto::for_category_rule(BANKED, 0, 0),
             sash,
             ItemProto::for_category_rule(LETTER, ITEM_QUEST, 0),
+            ItemProto::for_category_rule(PILE, ITEM_ELK, 0),
         ])
     }
 
@@ -810,6 +937,101 @@ mod tests {
         assert_eq!(
             pick(&mut items, &mut ground, 42, 0),
             Err(MoveRefused::UnknownVnum(1))
+        );
+    }
+
+    fn drop_to() -> DropAt {
+        DropAt {
+            vid: 9,
+            x: 500,
+            y: 700,
+            owner_id: 42,
+            questing: false,
+            lands: true,
+        }
+    }
+
+    fn pile(count: u16) -> GroundItem {
+        let mut item = Item::new(1, PILE);
+        item.count = count;
+        GroundItem {
+            vid: 9,
+            item,
+            x: 500,
+            y: 700,
+            last_owner: 42,
+        }
+    }
+
+    /// A gold drop spends the gold, lays an unnumbered pile with no row, and sends the gold
+    /// change, the ground add and the notice.
+    #[test]
+    fn a_gold_drop_spends_and_lays_an_unnumbered_pile() {
+        let (done, ground, left) =
+            drop_gold(10_000, 1_500, drop_to(), &protos()).expect("gold drops");
+        assert_eq!(left, 8_500);
+        assert_eq!(ground.item.vnum, PILE);
+        assert_eq!(ground.item.id, crate::item::NO_ITEM);
+        assert_eq!(ground.item.count, 1_500);
+        assert!(done.changes.is_empty(), "no row for a pile");
+        assert_eq!(
+            done.records,
+            vec![
+                MoveRecord::Gold {
+                    amount: 0,
+                    value: 8_500
+                },
+                MoveRecord::Ground(GroundRecord::Add {
+                    vid: 9,
+                    vnum: PILE,
+                    x: 500,
+                    y: 700
+                }),
+                MoveRecord::Notice(GOLD_DROPPED_NOTICE),
+            ]
+        );
+    }
+
+    /// Gold of 0 or past the purse refuses the whole drop.
+    #[test]
+    fn a_gold_drop_past_the_purse_refuses() {
+        assert_eq!(
+            drop_gold(100, 0, drop_to(), &protos()),
+            Err(MoveRefused::Empty)
+        );
+        assert_eq!(
+            drop_gold(100, 101, drop_to(), &protos()),
+            Err(MoveRefused::Empty)
+        );
+    }
+
+    /// A gold pick-up grows the purse and sends the gold change then the ground delete.
+    #[test]
+    fn a_gold_pickup_grows_the_purse() {
+        let ground = pile(1_500);
+        let (done, held) = pickup_gold(8_500, &ground).expect("gold picks up");
+        assert_eq!(held, 10_000);
+        assert_eq!(
+            done.records,
+            vec![
+                MoveRecord::Gold {
+                    amount: 1_500,
+                    value: 10_000
+                },
+                MoveRecord::Ground(GroundRecord::Del { vid: 9 }),
+            ]
+        );
+    }
+
+    /// At the cap the pile is consumed without paying or sending a gold change.
+    #[test]
+    fn a_gold_pickup_at_the_cap_consumes_without_paying() {
+        let ground = pile(10);
+        let (done, refused) = pickup_gold(GOLD_MAX_MAX - 10, &ground).expect_err("the cap refuses");
+        assert_eq!(refused, MoveRefused::GoldOverflow);
+        assert_eq!(
+            done.records,
+            vec![MoveRecord::Ground(GroundRecord::Del { vid: 9 })]
         );
     }
 }

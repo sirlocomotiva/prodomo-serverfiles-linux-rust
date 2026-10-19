@@ -43,12 +43,22 @@ pub const SE_CRITICAL: u8 = 5;
 /// `SE_PENETRATE`: the effect a penetrating hit shows, sent because `ENABLE_EFFECT_PENETRATE`
 /// is defined (`G/char_battle.cpp:69`).
 pub const SE_PENETRATE: u8 = 6;
+/// `SE_EFFECT_HEALER` (`C/length.h:883`): the effect a mob's self-heal shows on it, counted
+/// with `__SASH_SYSTEM__` and `__VERSION_162__` both on.
+pub const SE_EFFECT_HEALER: u8 = 27;
 /// `FLY_SP_SMALL` (`G/char.h:94`): the small blue orb of a stolen or recovered spell point.
 pub const FLY_SP_SMALL: u8 = 4;
 /// `FLY_HP_SMALL` (`G/char.h:105`): the small red orb of a stolen or recovered hit point.
 pub const FLY_HP_SMALL: u8 = 15;
+/// `FLY_EXP` (`G/char.h:91`): the orb that flies from a slain monster to each receiver of
+/// its experience.
+pub const FLY_EXP: u8 = 1;
 /// `DAMAGE_NORMAL` (`G/char.h:131`).
 pub const DAMAGE_NORMAL: u8 = 1 << 0;
+/// `DAMAGE_POISON` (`G/char.h:132`): the flag a poison tick's damage shows.
+pub const DAMAGE_POISON: u8 = 1 << 1;
+/// `DAMAGE_DODGE` (`G/char.h:133`): the flag a dodged `NORMAL_RANGE` hit shows.
+pub const DAMAGE_DODGE: u8 = 1 << 2;
 /// `DAMAGE_PENETRATE`.
 pub const DAMAGE_PENETRATE: u8 = 1 << 4;
 /// `DAMAGE_CRITICAL`.
@@ -60,6 +70,9 @@ const MONSTER_CHAT_ATTACKED: i32 = 3;
 const MOB_RANK_BOSS: u8 = 4;
 /// `BATTLE_TYPE_MELEE`: the battle type whose reach follows its attack range.
 const BATTLE_TYPE_MELEE: u8 = 0;
+/// `BATTLE_TYPE_RANGE` and `BATTLE_TYPE_MAGIC`: the battle types whose range adds `BOW_DISTANCE`.
+const BATTLE_TYPE_RANGE: u8 = 1;
+const BATTLE_TYPE_MAGIC: u8 = 2;
 /// `HYDRA1` to `HYDRA3` (`G/ShipDefense.h:41-43`): `IsHydra`, which a player reaches from
 /// 600 further.
 const HYDRAS: [u32; 3] = [3960, 3961, 3962];
@@ -154,6 +167,11 @@ pub enum Struck {
     Refused,
     /// The victim was stunned: `Damage` calls `Dead(attacker)` and the hit kills.
     Finished,
+    /// A guard's swing (`SET_BIT(NO_REWARD); Stun(); return true`,
+    /// `G/char_battle.cpp:2218-2223`): the caller sets the no-reward flag and runs `Stun`,
+    /// and no hit points were taken. The guard arm preempts the stun and dead checks, so
+    /// this is the only end a guard's swing has.
+    StunnedByGuard,
     /// The victim was already dead.
     AlreadyDead,
     /// The hit took `damage` hit points: `StartRecoveryEvent` follows when it is above 0, and
@@ -188,12 +206,19 @@ pub fn melee_reach(victim: &Npc) -> i32 {
     reach
 }
 
-/// `GetMobAttackRange` of a monster that is neither `RANGE` nor `MAGIC` (`G/char.cpp:2656-2676`):
-/// its proto's range, 300 longer for a ship-defence minion, kept in a `WORD`.
+/// `GetMobAttackRange` (`G/char.cpp:2656-2676`): `RANGE` and `MAGIC` add `BOW_DISTANCE`
+/// to the proto's range, the rest keep it, 300 longer for a ship-defence minion, kept in
+/// a `WORD`. The hydra arm is dead here: a hydra is never the striker.
 #[must_use]
 pub fn mob_attack_range(victim: &Npc) -> u16 {
     let range = victim.fight.attack_range;
-    if MINIONS.iter().any(|minions| minions.contains(&victim.vnum)) {
+    if victim.fight.battle_type == BATTLE_TYPE_RANGE
+        || victim.fight.battle_type == BATTLE_TYPE_MAGIC
+    {
+        // `WORD + int` is an `int`, kept back in the `WORD`: the low two bytes.
+        let sum = i32::from(range).wrapping_add(victim.fight.point(point::POINT_BOW_DISTANCE));
+        u16::from_ne_bytes(sum.to_ne_bytes()[0..2].try_into().unwrap_or([0, 0]))
+    } else if MINIONS.iter().any(|minions| minions.contains(&victim.vnum)) {
         range.wrapping_add(300)
     } else {
         range
@@ -276,7 +301,7 @@ pub fn calc_melee_damage(
 
 /// `CalcBattleDamage` without the level delta (`G/battle.cpp:244-251`): below 3, `number(1, 5)`.
 /// A monster victim's level delta never applies here: the player attacker is never polymorphed.
-pub(crate) fn battle_damage_floor(dice: &mut dyn Dice, damage: i32) -> i32 {
+pub fn battle_damage_floor(dice: &mut dyn Dice, damage: i32) -> i32 {
     if damage < 3 {
         number(dice, 1, 5)
     } else {
@@ -325,12 +350,11 @@ fn att_bonus_on_npc(attack: i32, attacker: &Points, victim: &Npc) -> i32 {
             attack = attack.wrapping_add(share(attack, slot));
         }
     }
-    // `BONUS_PCT`: the `int` product times the `float` percent, then divided by the `double`
-    // 100.0, is added to the attack as a `double` and truncated back.
-    let monster = attack.wrapping_mul(attacker.get_point(point::POINT_ATTBONUS_MONSTER));
-    let percent = point_pct(attacker.get_point(point::POINT_ATTBONUS_MONSTER_PCT));
-    let monster = f64::from(i32_to_f32(monster) * percent) / 100.0;
-    attack = f64_to_i32(f64::from(attack) + monster);
+    attack = monster_share(
+        attack,
+        attacker.get_point(point::POINT_ATTBONUS_MONSTER),
+        attacker.get_point(point::POINT_ATTBONUS_MONSTER_PCT),
+    );
     if victim.char_type == CHAR_TYPE_STONE {
         attack = attack.wrapping_add(share(attack, point::POINT_ATTBONUS_METIN));
     } else if victim.fight.rank >= MOB_RANK_BOSS {
@@ -348,6 +372,17 @@ fn att_bonus_on_npc(attack: i32, attacker: &Points, victim: &Npc) -> i32 {
 /// `float` once, because 53 bits are at least twice 24 plus 2 (Figueroa, 1995).
 pub(crate) fn point_pct(value: i32) -> f32 {
     i32_to_f32(value.wrapping_add(100)) / 100.0
+}
+
+/// `CalcAttBonus`'s `ATTBONUS_MONSTER_PCT` arm (`BONUS_PCT` is defined): the `int` product
+/// times the `float` percent, then divided by the `double` 100.0, is added to the attack
+/// as a `double` and truncated back (`G/battle.cpp:356-361`). Shared by the player's hit
+/// and the monster-on-self `atk`.
+pub(crate) fn monster_share(attack: i32, bonus: i32, bonus_pct: i32) -> i32 {
+    let monster = attack.wrapping_mul(bonus);
+    let percent = point_pct(bonus_pct);
+    let monster = f64::from(i32_to_f32(monster) * percent) / 100.0;
+    f64_to_i32(f64::from(attack) + monster)
 }
 
 /// `NormalAttackAffect`'s draws: the poison, then the stun and the slow of `AttackAffect`. Each
@@ -656,6 +691,12 @@ mod tests {
             sp: 100,
             stamina: 0,
             inven_point: 0,
+            random_hp: 0,
+            random_sp: 0,
+            stat_point: 0,
+            skill_point: 0,
+            sub_skill_point: 0,
+            level_step: 0,
             map_index: 1,
             part_base: 0,
             hair_part: 0,
@@ -983,6 +1024,12 @@ mod tests {
                     sp: 100,
                     stamina: 0,
                     inven_point: 0,
+                    random_hp: 0,
+                    random_sp: 0,
+                    stat_point: 0,
+                    skill_point: 0,
+                    sub_skill_point: 0,
+                    level_step: 0,
                     map_index: 1,
                     part_base: 0,
                     hair_part: 0,
@@ -1015,6 +1062,12 @@ mod tests {
             sp: 100,
             stamina: 0,
             inven_point: 0,
+            random_hp: 0,
+            random_sp: 0,
+            stat_point: 0,
+            skill_point: 0,
+            sub_skill_point: 0,
+            level_step: 0,
             map_index: 373,
             part_base: 0,
             hair_part: 0,
@@ -1395,6 +1448,20 @@ mod tests {
         let hit = strike(&mut Script::new(&[0, 1]), &mut points, &mut victim);
         assert_eq!(hit.struck, Struck::AlreadyDead);
         assert!(hit.events.is_empty());
+    }
+
+    #[test]
+    fn range_and_magic_add_bow_distance_to_their_range() {
+        let mut victim = dog();
+        victim.fight.battle_type = BATTLE_TYPE_RANGE;
+        victim.fight.attack_range = 1000;
+        assert_eq!(mob_attack_range(&victim), 1000);
+        victim.fight.add(point::POINT_BOW_DISTANCE, 500);
+        assert_eq!(mob_attack_range(&victim), 1500);
+        victim.fight.battle_type = BATTLE_TYPE_MAGIC;
+        assert_eq!(mob_attack_range(&victim), 1500);
+        victim.fight.battle_type = BATTLE_TYPE_MELEE;
+        assert_eq!(mob_attack_range(&victim), 1000);
     }
 
     #[test]

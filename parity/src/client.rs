@@ -80,6 +80,40 @@ impl Client {
             .unwrap_or_else(|error| panic!("expected {len} bytes from {}: {error}", self.address));
         buffer
     }
+    /// Read exactly `len` bytes, waiting until `deadline` rather than [`IO_TIMEOUT`].
+    ///
+    /// A slow host can leave the wire quiet past one [`IO_TIMEOUT`] beat while a member
+    /// still walks into range; this retries each beat until `deadline` and returns `None`
+    /// then, and the caller decides what a late record means. Bytes of a frame the wire
+    /// had not finished wait on the wire for the next call.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the connection closes or a read fails for another reason.
+    #[must_use]
+    pub fn expect_bytes_until(&mut self, len: usize, deadline: Instant) -> Option<Vec<u8>> {
+        if len == 0 {
+            return Some(Vec::new());
+        }
+        loop {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            self.stream
+                .set_read_timeout(Some(IO_TIMEOUT))
+                .expect("a read timeout should be settable");
+            let mut buffer = vec![0; len];
+            match self.stream.read_exact(&mut buffer) {
+                Ok(()) => return Some(buffer),
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                {
+                    continue;
+                }
+                Err(error) => panic!("expected {len} bytes from {}: {error}", self.address),
+            }
+        }
+    }
 
     /// Read whatever the server sends within `window`, and say whether it then closed.
     ///

@@ -89,12 +89,13 @@
 
 use std::collections::BTreeMap;
 
-use common::cfloat::{f32_to_i32, i32_to_f32};
+use common::cfloat::{f32_to_i32, f32_to_u32, i32_to_f32, u32_to_f32};
 use common::enums::EParts;
 use common::levels::{self, JobInitialPoints};
 use common::point_slot as point;
 
 use super::apply::ApplyArm;
+use super::dice::{number, Dice};
 use super::equipment::{Equipment, PARTS};
 
 /// The slots in each point array (`POINT_MAX_NUM`).
@@ -176,7 +177,40 @@ pub struct PointRecord {
     /// included) rather than to this character alone.
     pub broadcast: bool,
 }
+/// The two server limits the experience arm reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpLimits {
+    /// `gPlayerMaxLevel` (`config.cpp:417`).
+    pub max_level: i32,
+    /// `g_iStatusPointGetLevelLimit` (`config.cpp:1090`), clamped to the highest level at
+    /// load.
+    pub status_point_get_level_limit: i32,
+}
 
+/// What [`Points::gain_exp`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GainOutcome {
+    /// The records, in the order legacy writes them.
+    pub records: Vec<PointRecord>,
+    /// How many times the level rose: one quest `LevelUp` raise each, which the caller owns.
+    pub level_ups: u32,
+    /// The level before the gain, for the PK-mode switch the caller owns.
+    pub level_before: u8,
+    /// The level after.
+    pub level_after: u8,
+}
+
+/// `DWORD(next_exp / 4.0f)` (`char.cpp:4154`): the quarter of the next level's cost the step
+/// checks compare against.
+///
+/// The division is in `float`, and the cast truncates. Past 2^24 the conversion already
+/// rounds: level 82's cost of 346 970 000 quarters to 86 742 496, not the integer
+/// quotient's 86 742 500.
+#[must_use]
+pub fn quarter_cost(next_exp: i64) -> i64 {
+    let quarter = u32_to_f32(u32::try_from(next_exp).unwrap_or(u32::MAX)) / 4.0;
+    i64::from(f32_to_u32(quarter))
+}
 /// Why [`Points::point_change`] changed nothing. Either way no state changed and no record
 /// was written, which is also what legacy's unknown-type arm does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,9 +245,8 @@ pub struct PassiveBonuses {
 /// What `SetPlayerProto` reads into the points from a stored character.
 ///
 /// The columns the Rewrite does not store yet are absent and read as 0, as a fresh legacy
-/// row has them: the random hit and spell points, the stat, skill and horse-skill points,
-/// the stat-reset count, the level step, the conqueror point and level step, the gaya, and
-/// the private-shop slots.
+/// row has them: the horse-skill points, the stat-reset count, the conqueror point and level
+/// step, the gaya, and the private-shop slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PointsRow {
     /// The race, 0 to 7.
@@ -242,6 +275,18 @@ pub struct PointsRow {
     pub stamina: i32,
     /// `Inven_Point`, the inventory pages unlocked.
     pub inven_point: u16,
+    /// The random hit points the level-ups added.
+    pub random_hp: i32,
+    /// The random spell points the level-ups added.
+    pub random_sp: i32,
+    /// The unspent stat points.
+    pub stat_point: i32,
+    /// The unspent skill points.
+    pub skill_point: i32,
+    /// The unspent sub-skill points.
+    pub sub_skill_point: i32,
+    /// The level step, 0 to 4.
+    pub level_step: i32,
     /// The map the character stands on, which picks the sungma will.
     pub map_index: i32,
     /// `part_base`, the body shape the main part falls back to when no armour is worn.
@@ -493,6 +538,16 @@ pub struct Points {
     target_broadcasts: Vec<(i32, i32)>,
 }
 
+/// One call of the `PointChange(POINT_EXP, iExpBalance)` recursion, as a loop frame: each
+/// writes its own record when it ends, innermost first (`char.cpp:4188`, `:4812-4815`). Only
+/// the outer call shows its amount.
+enum GainFrame {
+    /// A call with this grant, showing its amount or not.
+    Grant(i64, bool),
+    /// This call's own record, with what it added, written once the nested call ends.
+    Record(i64, bool),
+}
+
 impl Points {
     /// The points of a stored character, as `SetPlayerProto` leaves them.
     ///
@@ -522,8 +577,8 @@ impl Points {
             max_hp: 0,
             max_sp: 0,
             max_stamina: 0,
-            random_hp: 0,
-            random_sp: 0,
+            random_hp: row.random_hp,
+            random_sp: row.random_sp,
             inven_point: i32::from(row.inven_point),
             immune_flag: 0,
             map_will: sungma_will(row.map_index),
@@ -552,6 +607,15 @@ impl Points {
             points.real[slot] = i32::from(value);
             points.instant[slot] = i32::from(value);
         }
+        // `SetPlayerProto` sets the point counters from the row before it computes
+        // (`char.cpp:2306-2314`): the stat, skill and sub-skill points into the instant array
+        // only, the level step into both. The horse-skill points and the stat-reset count are
+        // not stored, so both arrays keep 0.
+        points.instant[point::POINT_STAT] = row.stat_point;
+        points.instant[point::POINT_SKILL] = row.skill_point;
+        points.instant[point::POINT_SUB_SKILL] = row.sub_skill_point;
+        points.instant[point::POINT_LEVEL_STEP] = row.level_step;
+        points.real[point::POINT_LEVEL_STEP] = row.level_step;
         let _discarded = points.compute_points();
         points.hp = row.hp;
         points.sp = row.sp;
@@ -569,6 +633,18 @@ impl Points {
     #[must_use]
     pub fn level(&self) -> u8 {
         self.level
+    }
+
+    /// The random hit points the level-ups added, which the save writes.
+    #[must_use]
+    pub fn random_hp(&self) -> i32 {
+        self.random_hp
+    }
+
+    /// The random spell points the level-ups added, which the save writes.
+    #[must_use]
+    pub fn random_sp(&self) -> i32 {
+        self.random_sp
     }
 
     /// The race, which the job and the sex are read from.
@@ -679,6 +755,215 @@ impl Points {
             value: self.exp,
             broadcast: false,
         })
+    }
+
+    /// `PointChange(POINT_EXP, amount, true)`, a gain (`char.cpp:4078-4191`).
+    ///
+    /// The steps rise as the compared experience crosses the quarters of the next level's
+    /// cost: on a crossing that value is the cost itself (`:4131-4132`), while the stored
+    /// experience is already 0. A gain that crosses the cost leaves the rest for a nested call
+    /// (`:4188`), whose record shows no amount (`:4812-4815`); the outer record follows the
+    /// nested one and carries the experience the nested calls left. The level and its quest
+    /// raise, the skill points, and the save are the step arm's; the caller owns the quest
+    /// runtime, the PK-mode switch, and the save (see [`GainOutcome`]). A negative amount
+    /// changes nothing: a loss is [`Points::lose_exp`].
+    pub fn gain_exp(
+        &mut self,
+        amount: i64,
+        skill_group: u8,
+        limits: ExpLimits,
+        dice: &mut dyn Dice,
+    ) -> GainOutcome {
+        let level_before = self.level;
+        let mut outcome = GainOutcome {
+            records: Vec::new(),
+            level_ups: 0,
+            level_before,
+            level_after: level_before,
+        };
+        if amount < 0 {
+            return outcome;
+        }
+        let mut pending = vec![GainFrame::Grant(amount, true)];
+        while let Some(frame) = pending.pop() {
+            match frame {
+                GainFrame::Record(added, shown) => {
+                    let byte = u8::try_from(point::POINT_EXP).unwrap_or(0);
+                    outcome.records.push(PointRecord {
+                        kind: byte,
+                        amount: if shown { added } else { 0 },
+                        value: self.exp,
+                        broadcast: false,
+                    });
+                    continue;
+                }
+                GainFrame::Grant(grant, shown) => {
+                    let next = levels::next_exp(self.level);
+                    if i32::from(self.level) >= limits.max_level && self.exp >= next / 4 {
+                        // The conqueror build's early return (`:4113-4116`): this call writes
+                        // no record, and a nested call falling silent leaves the outer one its
+                        // value.
+                        continue;
+                    }
+                    let at_max = i32::from(self.level) >= limits.max_level;
+                    let byte = u8::try_from(point::POINT_EXP).unwrap_or(0);
+                    if self.exp + grant >= next && !at_max {
+                        // The crossing (`:4126-4132`): the rest is the nested call's amount,
+                        // the stored experience is 0, the compared one is the cost.
+                        let rest = self.exp + grant - next;
+                        let added = next - self.exp;
+                        self.exp = 0;
+                        self.raise_steps(next, skill_group, limits, dice, &mut outcome);
+                        if rest > 0 {
+                            pending.push(GainFrame::Record(added, shown));
+                            pending.push(GainFrame::Grant(rest, false));
+                        } else {
+                            outcome.records.push(PointRecord {
+                                kind: byte,
+                                amount: if shown { added } else { 0 },
+                                value: self.exp,
+                                broadcast: false,
+                            });
+                        }
+                        continue;
+                    }
+                    if at_max && self.exp + grant >= next / 4 {
+                        // A level the server cannot pass banks a quarter of its cost at most
+                        // (`:4134-4147`).
+                        self.exp = next / 4;
+                    } else {
+                        self.exp += grant;
+                    }
+                    let compared = self.exp;
+                    self.raise_steps(compared, skill_group, limits, dice, &mut outcome);
+                    outcome.records.push(PointRecord {
+                        kind: byte,
+                        amount: if shown { grant } else { 0 },
+                        value: self.exp,
+                        broadcast: false,
+                    });
+                }
+            }
+        }
+        outcome.level_after = self.level;
+        outcome
+    }
+
+    /// The step checks a gain runs after setting the experience (`char.cpp:4154-4186`).
+    ///
+    /// The compared experience is the local `exp`: the cost on a crossing, the stored value
+    /// otherwise. The step the checks read is the real slot's, clamped to 4 without the log
+    /// line; a step already at 4 rises no further, because `4 - 4` loops zero times. Each
+    /// satisfied arm runs its loop to completion before the caller looks at the step again, so
+    /// the first arm's loop is the only one that runs. The quarter is the `float` quotient
+    /// truncated, which past 2^24 differs from the integer quotient; see [`quarter_cost`].
+    fn raise_steps(
+        &mut self,
+        compared: i64,
+        skill_group: u8,
+        limits: ExpLimits,
+        dice: &mut dyn Dice,
+        outcome: &mut GainOutcome,
+    ) {
+        let next = levels::next_exp(self.level);
+        let quarter = quarter_cost(next);
+        let step = self.real[point::POINT_LEVEL_STEP].min(4);
+        if compared >= next && step < 4 {
+            for _ in step..4 {
+                self.step_arm(true, skill_group, limits, dice, &mut outcome.records);
+            }
+            outcome.level_ups += 1;
+        } else if compared >= quarter * 3 && step < 3 {
+            for _ in step..3 {
+                self.step_arm(true, skill_group, limits, dice, &mut outcome.records);
+            }
+        } else if compared >= quarter * 2 && step < 2 {
+            for _ in step..2 {
+                self.step_arm(true, skill_group, limits, dice, &mut outcome.records);
+            }
+        } else if compared >= quarter && step < 1 {
+            self.step_arm(false, skill_group, limits, dice, &mut outcome.records);
+        }
+    }
+
+    /// The body of the `POINT_LEVEL_STEP` arm (`char.cpp:4194-4240`), rising by one.
+    ///
+    /// Steps 1 to 3 each grant one stat point while the level is under the server's limits;
+    /// step 4 rolls the new hit and spell points, grants the skill points, raises the level,
+    /// and its record carries 0. Every step heals each pool to its maximum, stores the step
+    /// in both arrays, and shows no amount. The save is the caller's.
+    fn step_arm(
+        &mut self,
+        broadcast: bool,
+        skill_group: u8,
+        limits: ExpLimits,
+        dice: &mut dyn Dice,
+        records: &mut Vec<PointRecord>,
+    ) {
+        let step = self.instant[point::POINT_LEVEL_STEP] + 1;
+        let level = i32::from(self.level);
+        let mut value = i64::from(step);
+        if (1..=3).contains(&step) {
+            if level <= limits.status_point_get_level_limit && level <= limits.max_level {
+                self.nested(point::POINT_STAT, 1, records);
+            }
+        } else if step >= 4 {
+            let job = self.job_points();
+            let hp = number(dice, job.hp_per_lv_begin, job.hp_per_lv_end);
+            let sp = number(dice, job.sp_per_lv_begin, job.sp_per_lv_end);
+            self.random_hp = self.random_hp.saturating_add(hp);
+            self.random_sp = self.random_sp.saturating_add(sp);
+            if skill_group != 0 {
+                if level >= 5 {
+                    self.nested(point::POINT_SKILL, 1, records);
+                }
+                if level >= 9 {
+                    self.nested(point::POINT_SUB_SKILL, 1, records);
+                }
+            }
+            self.nested(point::POINT_MAX_HP, hp, records);
+            self.nested(point::POINT_MAX_SP, sp, records);
+            self.level_arm(limits, records);
+            value = 0;
+        }
+        self.nested(
+            point::POINT_HP,
+            self.max_hp().saturating_sub(self.hp),
+            records,
+        );
+        self.nested(
+            point::POINT_SP,
+            self.max_sp.saturating_sub(self.sp),
+            records,
+        );
+        self.nested(
+            point::POINT_STAMINA,
+            self.max_stamina.saturating_sub(self.stamina),
+            records,
+        );
+        let stored = if step >= 4 { 0 } else { step };
+        self.instant[point::POINT_LEVEL_STEP] = stored;
+        self.real[point::POINT_LEVEL_STEP] = stored;
+        let byte = u8::try_from(point::POINT_LEVEL_STEP).unwrap_or(0);
+        self.emit(byte, 1, false, broadcast, value, records);
+    }
+
+    /// The body of the `POINT_LEVEL` arm (`char.cpp:4024-4076`), rising by one.
+    ///
+    /// Past the server's highest level the change is refused with no record; the step arm only
+    /// calls this below it. Otherwise the level rises, the next cost is written, and the
+    /// battle points are recomputed before the broadcast record. The quest raise, the reward,
+    /// the level log, and the guild and party updates are their systems', and the top-player
+    /// effect at level 120 is a custom hook; none runs here.
+    fn level_arm(&mut self, limits: ExpLimits, records: &mut Vec<PointRecord>) {
+        if i32::from(self.level) + 1 > limits.max_level {
+            return;
+        }
+        let byte = u8::try_from(point::POINT_LEVEL).unwrap_or(0);
+        self.level += 1;
+        self.nested(point::POINT_NEXT_EXP, 0, records);
+        self.battle_points(records);
+        self.emit(byte, 1, false, true, i64::from(self.level), records);
     }
 
     /// Takes the hit points the `POINT_HP` arm left each time it ran since the last take, with
@@ -1430,6 +1715,12 @@ mod tests {
             sp: 0,
             stamina: 0,
             inven_point: 0,
+            random_hp: 0,
+            random_sp: 0,
+            stat_point: 0,
+            skill_point: 0,
+            sub_skill_point: 0,
+            level_step: 0,
             map_index: 1,
             part_base: 0,
             hair_part: 0,
@@ -2634,5 +2925,216 @@ mod tests {
     fn the_exp_survives_the_points_row() {
         assert_eq!(holding(12, 4_321).exp(), 4_321);
         assert_eq!(warrior().exp(), 0);
+    }
+
+    /// Always draws the same number.
+    struct Fixed(u32);
+
+    impl Dice for Fixed {
+        fn random31(&mut self) -> u32 {
+            self.0
+        }
+    }
+
+    fn limits() -> ExpLimits {
+        ExpLimits {
+            max_level: 120,
+            status_point_get_level_limit: 120,
+        }
+    }
+
+    fn broadcast(kind: usize, value: i64) -> PointRecord {
+        PointRecord {
+            kind: u8::try_from(kind).unwrap(),
+            amount: 0,
+            value,
+            broadcast: true,
+        }
+    }
+
+    #[test]
+    fn a_gain_banks_the_exp_and_shows_what_it_added() {
+        // Level 1 costs 300; 10 crosses no quarter (75).
+        let mut points = warrior();
+        let outcome = points.gain_exp(10, 0, limits(), &mut Fixed(0));
+        assert_eq!(points.exp(), 10);
+        assert_eq!(points.level(), 1);
+        assert_eq!(outcome.records, vec![record(point::POINT_EXP, 10, 10)]);
+        assert_eq!(outcome.level_ups, 0);
+        assert_eq!((outcome.level_before, outcome.level_after), (1, 1));
+    }
+
+    #[test]
+    fn a_gain_crossing_a_quarter_raises_the_step_and_grants_a_stat_point() {
+        // The quarter of 300 is 75; exp 70 + 10 crosses it.
+        let mut points = holding(1, 70);
+        points.hp = 100;
+        points.sp = 100;
+        points.stamina = 100;
+        let outcome = points.gain_exp(10, 0, limits(), &mut Fixed(0));
+        assert_eq!(points.exp(), 80);
+        assert_eq!(points.get_point(point::POINT_LEVEL_STEP), 1);
+        assert_eq!(points.real_point(point::POINT_LEVEL_STEP), 1);
+        assert_eq!(points.get_point(point::POINT_STAT), 1);
+        // The step heals every pool to its maximum: 760, 260, 820.
+        assert_eq!(
+            (points.hp(), points.sp(), points.stamina()),
+            (760, 260, 820)
+        );
+        assert_eq!(
+            outcome.records,
+            vec![
+                record(point::POINT_STAT, 0, 1),
+                record(point::POINT_HP, 0, 760),
+                record(point::POINT_SP, 0, 260),
+                record(point::POINT_STAMINA, 0, 820),
+                record(point::POINT_LEVEL_STEP, 0, 1),
+                record(point::POINT_EXP, 10, 80),
+            ]
+        );
+        assert!(!outcome.records[4].broadcast);
+        assert_eq!(outcome.level_ups, 0);
+    }
+
+    #[test]
+    fn a_gain_crossing_two_quarters_runs_each_step_loop_once() {
+        // Exp 70 + 130 = 200 crosses 150 (2 quarters) but not 225 (3 quarters).
+        let mut points = holding(1, 70);
+        let outcome = points.gain_exp(130, 0, limits(), &mut Fixed(0));
+        assert_eq!(points.get_point(point::POINT_LEVEL_STEP), 2);
+        assert_eq!(points.get_point(point::POINT_STAT), 2);
+        let steps: Vec<&PointRecord> = outcome
+            .records
+            .iter()
+            .filter(|record| record.kind == u8::try_from(point::POINT_LEVEL_STEP).unwrap())
+            .collect();
+        assert_eq!(steps.len(), 2);
+        assert!(steps.iter().all(|record| record.broadcast));
+        assert_eq!((steps[0].value, steps[1].value), (1, 2));
+        assert_eq!(
+            outcome.records.last(),
+            Some(&record(point::POINT_EXP, 130, 200))
+        );
+        assert_eq!(outcome.level_ups, 0);
+    }
+
+    #[test]
+    fn a_gain_past_the_cost_levels_up_and_leaves_the_rest() {
+        // 290 + 20 crosses the 300 cost: the compared exp is the cost, the stored 0, and
+        // the nested call banks the 10 left.
+        let mut points = holding(1, 290);
+        // Fixed(3): the HP roll draws 3 % 9 + 36 = 39, the SP roll 3 % 5 + 18 = 21.
+        let outcome = points.gain_exp(20, 0, limits(), &mut Fixed(3));
+        assert_eq!(points.level(), 2);
+        assert_eq!(points.exp(), 10);
+        assert_eq!(points.get_point(point::POINT_LEVEL_STEP), 0);
+        // Steps 1 to 3 each granted one stat point before step 4 leveled up.
+        assert_eq!(points.get_point(point::POINT_STAT), 3);
+        assert_eq!(outcome.level_ups, 1);
+        assert_eq!((outcome.level_before, outcome.level_after), (1, 2));
+        // The random rolls grow the maxima: 760 + 39, 260 + 21.
+        assert_eq!(points.max_hp(), 799);
+        assert_eq!(points.max_sp(), 281);
+        let kinds: Vec<u8> = outcome.records.iter().map(|record| record.kind).collect();
+        let exp = u8::try_from(point::POINT_EXP).unwrap();
+        // The nested call's record (amount 0) comes before the outer one (amount 10).
+        let tail = &outcome.records[kinds.len() - 2..];
+        assert_eq!(tail[0], record(point::POINT_EXP, 0, 10));
+        assert_eq!(tail[1].kind, exp);
+        assert_eq!(tail[1].amount, 10);
+        assert_eq!(tail[1].value, 10);
+        // The level record is broadcast and carries the new level.
+        let level = outcome
+            .records
+            .iter()
+            .find(|record| record.kind == u8::try_from(point::POINT_LEVEL).unwrap())
+            .unwrap();
+        assert_eq!(*level, broadcast(point::POINT_LEVEL, 2));
+    }
+
+    #[test]
+    fn a_level_up_grants_skill_points_to_a_grouped_character_past_the_floors() {
+        let mut row = fresh(0);
+        row.level = 9;
+        row.exp = levels::next_exp(9) - 1;
+        let mut points = Points::load(&row);
+        let outcome = points.gain_exp(1, 1, limits(), &mut Fixed(0));
+        assert_eq!(points.level(), 10);
+        assert_eq!(points.get_point(point::POINT_SKILL), 1);
+        assert_eq!(points.get_point(point::POINT_SUB_SKILL), 1);
+        assert_eq!(outcome.level_ups, 1);
+        // Below level 5 no skill point is granted, and an ungrouped character gets none.
+        let mut young = holding(1, 290);
+        let _ = young.gain_exp(20, 1, limits(), &mut Fixed(0));
+        assert_eq!(young.get_point(point::POINT_SKILL), 0);
+        assert_eq!(young.get_point(point::POINT_SUB_SKILL), 0);
+        let mut ungrouped = holding(1, 290);
+        let _ = ungrouped.gain_exp(20, 0, limits(), &mut Fixed(0));
+        assert_eq!(ungrouped.get_point(point::POINT_SKILL), 0);
+    }
+
+    #[test]
+    fn a_level_up_at_the_highest_level_is_refused_with_no_record() {
+        let cost = levels::next_exp(120);
+        let mut points = holding(120, cost / 4 - 1);
+        let outcome = points.gain_exp(1, 0, limits(), &mut Fixed(0));
+        // The D2 clamp banks a quarter of the cost at most instead of crossing.
+        assert_eq!(points.exp(), cost / 4);
+        assert_eq!(points.level(), 120);
+        assert_eq!(points.get_point(point::POINT_LEVEL_STEP), 1);
+        assert_eq!(points.get_point(point::POINT_STAT), 1);
+        assert_eq!(outcome.level_ups, 0);
+        assert_eq!((outcome.level_before, outcome.level_after), (120, 120));
+    }
+
+    #[test]
+    fn a_gain_at_the_highest_level_banks_a_quarter_at_most() {
+        let cost = levels::next_exp(120);
+        let mut points = holding(120, 0);
+        let outcome = points.gain_exp(cost, 0, limits(), &mut Fixed(0));
+        assert_eq!(points.exp(), cost / 4);
+        assert_eq!(points.level(), 120);
+        assert_eq!(outcome.level_ups, 0);
+        // Holding the quarter already, the gain is refused with no record.
+        let mut full = holding(120, cost / 4);
+        let before = full.clone();
+        let outcome = full.gain_exp(100, 0, limits(), &mut Fixed(0));
+        assert_eq!(full, before);
+        assert!(outcome.records.is_empty());
+    }
+
+    #[test]
+    fn the_step_stops_granting_stat_points_past_the_server_limits() {
+        let tight = ExpLimits {
+            max_level: 120,
+            status_point_get_level_limit: 5,
+        };
+        let mut points = holding(9, quarter_cost(levels::next_exp(9)) - 1);
+        let outcome = points.gain_exp(1, 0, tight, &mut Fixed(0));
+        assert_eq!(points.get_point(point::POINT_LEVEL_STEP), 1);
+        assert_eq!(points.get_point(point::POINT_STAT), 0);
+        assert!(!outcome
+            .records
+            .iter()
+            .any(|record| record.kind == u8::try_from(point::POINT_STAT).unwrap()));
+    }
+
+    #[test]
+    fn a_negative_gain_changes_nothing() {
+        let mut points = holding(12, 4_321);
+        let before = points.clone();
+        let outcome = points.gain_exp(-5, 0, limits(), &mut Fixed(0));
+        assert_eq!(points, before);
+        assert!(outcome.records.is_empty());
+        assert_eq!(outcome.level_ups, 0);
+    }
+
+    #[test]
+    fn the_quarter_of_a_wide_cost_is_the_float_quotient_truncated() {
+        assert_eq!(quarter_cost(300), 75);
+        // Level 82's cost rounds down to the even float before the division.
+        assert_eq!(quarter_cost(346_970_000), 86_742_496);
+        assert_eq!(quarter_cost(188_537_554), 47_134_388);
+        assert_eq!(quarter_cost(2_500_000_000), 625_000_000);
     }
 }

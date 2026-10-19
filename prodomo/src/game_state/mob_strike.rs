@@ -1,24 +1,45 @@
 //! A monster's `Attack` on a player (`G/char_battle.cpp:220-328`): the reach, the swing,
 //! the claim through [`GameState::claim_pc`], the player's `BeginFight`, and the stamps.
 //!
+//! A guard's `Attack` on a monster is the same shape with a monster victim
+//! ([`GameState::guard_attack`]): the reach, the swing's stun with no reward, the NPC
+//! `SetSyncOwner`, the victim's `BeginFight`, and the attack stamp.
 //! Everything here runs on the game thread only (ADR-0002).
 
 use std::time::Duration;
 
+use common::point_slot as point;
 use common::vid::Vid;
-use gamedata::mob_proto::BATTLE_TYPE_SPECIAL;
-use protocol::gc_nested::GcDamageInfo;
+use gamedata::mob_proto::{BATTLE_TYPE_MAGIC, BATTLE_TYPE_RANGE, BATTLE_TYPE_SPECIAL};
+use protocol::gc::HEADER_GC_FLY_TARGETING;
+use protocol::gc_nested::{GcDamageInfo, GcFlyTargeting};
 use protocol::gc_vid::GcSpecialEffect;
 use tracing::warn;
-use world::character::{mob_reach, strike_pc, MobStriker, PcHitEnd, PcStrike, PcVictim};
+use world::character::{
+    mob_reach, shoot_pc, strike_npc_by_npc, strike_pc, MobAttackAffect, MobStriker, NpcVictim,
+    PcHitEnd, PcStrike, PcVictim, DAMAGE_DODGE,
+};
 
+use super::affect::Affect;
 use super::death::Attacker;
+use super::regen::Due;
 use super::view::EntityKey;
 use super::GameState;
+use crate::loading_phase::{
+    AFFECT_POISON, AFFECT_SLOW, AFFECT_STUN, AFF_POISON, AFF_SLOW, AFF_STUN, POISON_TICKS,
+    SLOW_MOV_SPEED, SLOW_TICKS, STUN_TICKS,
+};
 use crate::sync_position::{
     distance_approx, judge_sync_ownership, SyncOwnershipOutcome, SyncOwnershipState,
     SyncPositionVictim,
 };
+
+/// `AttackedByPoison`'s `info->count = 10`: the poison event's ticks
+/// (`G/char_resist.cpp:207`).
+const POISON_COUNT: u32 = 10;
+
+/// `AFF_STUN` (`G/affect.h:216`) as a word-0 bit: flag 7 is bit 6.
+const AFF_STUN_WORD: u32 = 1 << 6;
 
 impl GameState {
     /// `CHARACTER::Attack` of the monster under `mob` on the player `victim`: whether it hit.
@@ -28,13 +49,7 @@ impl GameState {
         }
         // The chat is drawn before the reach test (`:310-316`).
         self.monster_chat_attack(mob);
-        // `SPECIAL` is not in `Attack`'s melee list: the switch's `default` logs and
-        // answers `BATTLE_NONE`, past the chat and before any reach test (`:259-279`).
-        if self
-            .npc_by_vid(mob)
-            .is_some_and(|npc| npc.fight.battle_type == BATTLE_TYPE_SPECIAL)
-        {
-            warn!(mob, "unhandled battle type 3");
+        if self.mob_is_special(mob) {
             return false;
         }
         let Some(target) = self.victim_state(victim) else {
@@ -54,6 +69,13 @@ impl GameState {
         let berserk = self.minds.get(mob).is_some_and(|mind| mind.berserk);
         let affects = self.affect_flags_of(victim);
         let down = self.is_down(victim.raw());
+        // `Attack`'s RANGE and MAGIC arms (`:267-277`): the shot past the same reach, with
+        // the fly record before the damage.
+        let armed = self.shot_type(mob);
+        let shot = armed.is_some();
+        if shot {
+            self.show_fly_target(mob, victim, target.at);
+        }
         // Borrow fields, not methods, as `strike` does: the dice, the monster and the points
         // are disjoint.
         let Some(&(channel, map, at)) = self.npc_of.get(&mob) else {
@@ -74,28 +96,44 @@ impl GameState {
         let Some(npc) = list.npcs.get(at) else {
             return false;
         };
-        let strike = strike_pc(
-            dice,
-            MobStriker { npc, berserk },
-            PcVictim {
-                points,
-                affect_flags: affects,
-                down,
-            },
-        );
-        self.show_mob_strike(mob, victim, &strike);
+        let magic = armed.is_some_and(|magic| magic);
+        let strike = if shot {
+            shoot_pc(
+                dice,
+                MobStriker { npc, berserk },
+                PcVictim {
+                    points,
+                    affect_flags: affects,
+                    down,
+                    immune_flag: points.immune_flag(),
+                },
+                magic,
+            )
+        } else {
+            strike_pc(
+                dice,
+                MobStriker { npc, berserk },
+                PcVictim {
+                    points,
+                    affect_flags: affects,
+                    down,
+                    immune_flag: points.immune_flag(),
+                },
+            )
+        };
+        self.show_mob_strike(mob, victim, &strike, shot);
         // The claim, `SetSyncOwner(mob)` on the player (`:299-302`). The NOMOVE arm reads the
         // victim's AI flags, and a player has none, so it never refuses.
         let attackable = self.npc_can_attack_pc(mob, victim);
         let actor_at = self.npc_spot(mob).unwrap_or((0, 0));
-        let spot = SyncPositionVictim {
+        let mark = SyncPositionVictim {
             vid: victim,
             kind: crate::sync_position::SyncPositionVictimKind::Player,
             x: target.at.0,
             y: target.at.1,
         };
         let now_span = self.clock.elapsed();
-        let _claimed = self.claim_pc(Vid::new(mob), &spot, actor_at, attackable, now_span);
+        let _claimed = self.claim_pc(Vid::new(mob), &mark, actor_at, attackable, now_span);
         // The player's `BeginFight` (`:303-304`).
         if self.can_pc_begin_fight(victim) {
             if let Some(body) = self.bodies.get_mut(&victim) {
@@ -112,6 +150,177 @@ impl GameState {
             body.last_move = now;
         }
         true
+    }
+
+    /// Whether the monster under `mob` is `SPECIAL`, which `Attack`'s switch never lists:
+    /// the `default` logs and answers `BATTLE_NONE`, past the chat and before any reach
+    /// test (`:259-279`).
+    fn mob_is_special(&self, mob: u32) -> bool {
+        if self
+            .npc_by_vid(mob)
+            .is_some_and(|npc| npc.fight.battle_type == BATTLE_TYPE_SPECIAL)
+        {
+            warn!(mob, "unhandled battle type 3");
+            return true;
+        }
+        false
+    }
+
+    /// `Attack`'s shot arm of the monster under `mob`: `Some(magic)` for RANGE and MAGIC,
+    /// `None` for the melee family and SPECIAL (which never reaches here).
+    fn shot_type(&self, mob: u32) -> Option<bool> {
+        let battle_type = self.npc_by_vid(mob)?.fight.battle_type;
+        match battle_type {
+            BATTLE_TYPE_RANGE => Some(false),
+            BATTLE_TYPE_MAGIC => Some(true),
+            _ => None,
+        }
+    }
+
+    /// `CHARACTER::Attack` of the guard under `mob` on the monster `victim`: whether it
+    /// hit. `CanMove` holds (guards walk the state machine), the castle map is not hosted
+    /// (`@fixme131` above the chat), and the chat is drawn before the reach test
+    /// (`:310-316`). Guards are MELEE, so no shot arm runs. The victim's
+    /// `SetSyncOwner` and `BeginFight` follow a hit, with the monster's `OnMove(true)`;
+    /// the victim's `OnMove()` is a shop cancel and a mining cancel, both empty on a
+    /// monster.
+    pub(super) fn guard_attack(&mut self, mob: u32, victim: u32) -> bool {
+        if !self.npc_can_attack_npc(mob, victim) {
+            return false;
+        }
+        self.monster_chat_attack(mob);
+        let Some(target) = self.npc_victim_state(victim) else {
+            return false;
+        };
+        let Some(npc) = self.npc_by_vid(mob) else {
+            return false;
+        };
+        let reach = mob_reach(npc);
+        let (at, berserk) = (
+            (npc.x, npc.y),
+            self.minds.get(mob).is_some_and(|mind| mind.berserk),
+        );
+        let distance = distance_approx(
+            target.at.0.saturating_sub(at.0),
+            target.at.1.saturating_sub(at.1),
+        );
+        if distance > reach {
+            return false;
+        }
+        let Some(&(channel, map, striker_at)) = self.npc_of.get(&mob) else {
+            return false;
+        };
+        let (channel, map, striker_at) = (channel, map, striker_at);
+        let Some(&(victim_channel, victim_map, victim_at)) = self.npc_of.get(&victim) else {
+            return false;
+        };
+        let same_list = channel == victim_channel && map == victim_map;
+        // The swing reads the striker and the victim from the same list (both live on the
+        // guard's map, which `npc_can_attack_npc` checked) or from two lists when the
+        // victim moved between the reach test and the swing.
+        let strike = if same_list {
+            let dice = &mut self.dice;
+            let Some(list) = self.npcs.get(&(channel, map)) else {
+                return false;
+            };
+            let (Some(striker), Some(victim_npc)) =
+                (list.npcs.get(striker_at), list.npcs.get(victim_at))
+            else {
+                return false;
+            };
+            strike_npc_by_npc(
+                dice,
+                MobStriker {
+                    npc: striker,
+                    berserk,
+                },
+                NpcVictim { npc: victim_npc },
+            )
+        } else {
+            return false;
+        };
+        self.show_guard_strike(victim, &strike);
+        debug_assert!(matches!(
+            strike.struck,
+            world::character::Struck::StunnedByGuard
+        ));
+        // The no-reward flag (`SET_BIT(NO_REWARD)`, `:2221`), set before `Stun` runs.
+        self.npc_combat.entry(victim).or_default().no_reward = true;
+        self.stun_npc(victim);
+        // `iRet != BATTLE_NONE`: the victim's `SetSyncOwner(mob)`, then its `BeginFight`
+        // past `CanBeginFight` (`:299-304`). The victim is a monster, so its BeginFight
+        // guard is the same `fights_back` the player's hit checks.
+        let now_span = self.clock.elapsed();
+        let mark = SyncPositionVictim {
+            vid: Vid::new(victim),
+            kind: crate::sync_position::SyncPositionVictimKind::Monster,
+            x: target.at.0,
+            y: target.at.1,
+        };
+        let _claimed = self.set_npc_sync_owner(Vid::new(mob), at, &mark, now_span);
+        if self
+            .npc_by_vid(victim)
+            .is_some_and(super::mob_battle::fights_back)
+            && self.can_begin_fight(victim)
+        {
+            self.begin_fight(victim, Vid::new(mob));
+        }
+        // The stamp: the guard's `OnMove(true)` (`:317`). `m_dwLastAttackTime` is the
+        // same field the swing timer reads.
+        let now = self.clock.now();
+        if let Some(combat) = self.npc_combat.get_mut(&mob) {
+            combat.last_attack_ms = Some(now);
+        }
+        true
+    }
+
+    /// What the guard's swing showed: the critical and penetrate effects around the
+    /// victim, in order. No fly, no chat, no damage record: the guard arm preempts them.
+    fn show_guard_strike(&mut self, victim: u32, strike: &world::character::Strike) {
+        let around = EntityKey::Npc(victim);
+        for event in &strike.events {
+            let world::character::HitEvent::Effect(effect_type) = event else {
+                continue;
+            };
+            let mut record = Vec::new();
+            GcSpecialEffect {
+                effect_type: *effect_type,
+                vid: victim,
+            }
+            .encode_into(&mut record);
+            self.packet_around(around, &record, None);
+        }
+    }
+
+    /// `battle_is_attackable` of the guard under `mob` on the monster `victim`
+    /// (`G/battle.cpp:99-152`): alive victim, neither cell BANPK, the guard neither
+    /// stunned nor dead, and `CanAttack` lets a guard hit a monster (`IsGuardNPC`
+    /// passes `:391`, the NPC arm answers true at `:417`). No castle, arena or
+    /// ship-defence map is hosted, and the victim is no fake hydra (a guard never
+    /// searches one).
+    fn npc_can_attack_npc(&self, mob: u32, victim: u32) -> bool {
+        let Some(npc) = self.npc_by_vid(mob) else {
+            return false;
+        };
+        if npc.stunned || npc.dead {
+            return false;
+        }
+        let Some(target) = self.npc_by_vid(victim) else {
+            return false;
+        };
+        if target.dead {
+            return false;
+        }
+        let Some(&(_, map, _)) = self.npc_of.get(&mob) else {
+            return false;
+        };
+        let Some(&(_, victim_map, _)) = self.npc_of.get(&victim) else {
+            return false;
+        };
+        if map != victim_map {
+            return false;
+        }
+        !self.is_banpk(map, npc.x, npc.y) && !self.is_banpk(map, target.x, target.y)
     }
 
     /// `battle_is_attackable` of the monster under `mob` on the player `victim`
@@ -145,8 +354,10 @@ impl GameState {
         !self.is_banpk(map, npc.x, npc.y)
     }
 
-    /// What the monster's swing showed: each effect around the player, then the hit.
-    fn show_mob_strike(&mut self, mob: u32, victim: Vid, strike: &PcStrike) {
+    /// What the monster's swing showed: each effect around the player, then what
+    /// `NormalAttackAffect` landed (`battle_hit` runs it before the damage), then the hit.
+    /// A shot shows a dodge on a `Blocked` end, where a swing shows a block.
+    fn show_mob_strike(&mut self, mob: u32, victim: Vid, strike: &PcStrike, shot: bool) {
         let around = EntityKey::Character(victim.raw());
         for effect in &strike.effects {
             let mut record = Vec::new();
@@ -157,11 +368,13 @@ impl GameState {
             .encode_into(&mut record);
             self.packet_around(around, &record, None);
         }
+        self.apply_mob_affect(victim, strike.affect);
         let attacker = Attacker {
             vid: Vid::new(mob),
             pc: false,
         };
         match strike.end {
+            PcHitEnd::Blocked if shot => self.send_pc_damage_info(victim, DAMAGE_DODGE, 0),
             PcHitEnd::Blocked => self.send_pc_damage_info(victim, super::fight::DAMAGE_BLOCK, 0),
             PcHitEnd::Down => {
                 let _hit = self.damage_pc(Some(attacker), victim, 0, None);
@@ -170,6 +383,90 @@ impl GameState {
                 let _hit = self.damage_pc(Some(attacker), victim, damage, Some(flag));
             }
         }
+    }
+
+    /// What `NormalAttackAffect` landed on the player `victim`: the poison, the stun and
+    /// the slow, in legacy's arm order (`G/battle.cpp:734-758`).
+    fn apply_mob_affect(&mut self, victim: Vid, landed: MobAttackAffect) {
+        if landed.poisoned {
+            self.poison_pc(victim);
+        }
+        if landed.stunned {
+            self.add_pc_affect(
+                victim,
+                Affect {
+                    kind: AFFECT_STUN,
+                    apply_on: u8::try_from(point::POINT_NONE).unwrap(),
+                    value: 0,
+                    flag: AFF_STUN,
+                    remaining: STUN_TICKS,
+                },
+            );
+        }
+        if landed.slowed {
+            self.add_pc_affect(
+                victim,
+                Affect {
+                    kind: AFFECT_SLOW,
+                    apply_on: u8::try_from(point::POINT_MOV_SPEED).unwrap(),
+                    value: SLOW_MOV_SPEED,
+                    flag: AFF_SLOW,
+                    remaining: SLOW_TICKS,
+                },
+            );
+        }
+    }
+
+    /// `AttackedByPoison` on the player under `victim` (`G/char_resist.cpp:178-220`), past
+    /// the draws the strike already passed: nothing while a poison event runs; else the
+    /// poison affect, and the poison event with 10 ticks, due 1 Pulse on. The
+    /// poisoned-once arm is monster-victim-only, and the commented immunity arm never
+    /// runs. The attacker PID is 0 for a monster, which `FindByPID` never maps.
+    pub(super) fn poison_pc(&mut self, victim: Vid) {
+        let raw = victim.raw();
+        if self
+            .pc_combat
+            .get(&raw)
+            .is_some_and(|combat| combat.poison_due.is_some())
+        {
+            return;
+        }
+        self.add_pc_affect(
+            victim,
+            Affect {
+                kind: AFFECT_POISON,
+                apply_on: u8::try_from(point::POINT_NONE).unwrap(),
+                value: 0,
+                flag: AFF_POISON,
+                remaining: POISON_TICKS,
+            },
+        );
+        let when = self.last_pulse.saturating_add(1);
+        let combat = self.pc_combat.entry(raw).or_default();
+        let old = combat.poison_due.replace((when, POISON_COUNT));
+        if let Some((at, count)) = old {
+            self.regens
+                .due
+                .remove(&(at, Due::PcPoison { vid: raw, count }));
+        }
+        self.regens.due.insert((
+            when,
+            Due::PcPoison {
+                vid: raw,
+                count: POISON_COUNT,
+            },
+        ));
+    }
+
+    /// `FlyTarget` of `mob` on the player `victim` at `at` (`G/char_battle.cpp:3342-3371`):
+    /// the `GC_FLY_TARGETING` around the monster. The victim is online past
+    /// `npc_can_attack_pc`, so the record always names it, never `(0, x, y)`.
+    fn show_fly_target(&mut self, mob: u32, victim: Vid, at: (i32, i32)) {
+        let mut record = Vec::new();
+        GcFlyTargeting::new(HEADER_GC_FLY_TARGETING, mob, victim.raw(), at.0, at.1)
+            .encode_into(&mut record);
+        let me = EntityKey::Npc(mob);
+        self.packet_around(me, &record, Some(me));
     }
 
     /// `SetSyncOwner(actor)` on the player `victim`, past the NOMOVE arm (a player has no AI
@@ -218,10 +515,12 @@ impl GameState {
     }
 
     /// `CanBeginFight` of the player `victim` (`G/char_battle.cpp:108-115`): standing (not
-    /// `fighting`), neither dead nor stunned, and `CanMove` (no stun affect and no own shop,
-    /// neither of which a player can have yet).
+    /// `fighting`), neither dead nor stunned, and `CanMove` (no stun affect and no own
+    /// shop, of which only the stun is ported).
     fn can_pc_begin_fight(&self, victim: Vid) -> bool {
-        self.bodies.get(&victim).is_some_and(|body| !body.fighting) && !self.is_down(victim.raw())
+        self.bodies.get(&victim).is_some_and(|body| !body.fighting)
+            && !self.is_down(victim.raw())
+            && self.affect_flags_of(victim)[0] & AFF_STUN_WORD == 0
     }
 
     /// `SendDamagePacket` to the player under `victim` (`G/char_battle.cpp:1720-1742`): its
@@ -770,5 +1069,119 @@ mod tests {
         world.damage_pc(None, Vid::new(1), i32::MAX, None);
         assert!(world.is_dead(1));
         assert!(!world.bodies.get(&Vid::new(1)).unwrap().fighting);
+    }
+
+    /// A monster's hit lands the poison, stun and slow: three adds before the damage
+    /// info, the move speed down 30, and the poison event due one Pulse on.
+    #[test]
+    fn a_hit_lands_the_poison_stun_and_slow_before_the_damage() {
+        use protocol::gc_inventory::{HEADER_GC_AFFECT_ADD, HEADER_GC_CHARACTER_UPDATE};
+        use protocol::gc_nested::GcAffectAdd;
+        let (_clock, mut world, mut alpha) = a_fight(10_000, NEAR, true);
+        world.dice = Pcg32::new(quiet_seed(), 0);
+        let npc = world.npc_mut(ME).unwrap();
+        npc.fight.add(point::POINT_POISON_PCT, 100);
+        npc.fight.add(point::POINT_STUN_PCT, 100);
+        npc.fight.add(point::POINT_SLOW_PCT, 100);
+        npc.fight.level = 154;
+        let before = world.move_speed_of(1);
+        assert!(world.mob_attack(ME, Vid::new(1)));
+        let heard = drained(&mut alpha);
+        let kinds: Vec<u32> = heard
+            .iter()
+            .filter(|record| record.first() == Some(&HEADER_GC_AFFECT_ADD.value()))
+            .map(|record| GcAffectAdd::decode(record).unwrap().element.affect_type)
+            .collect();
+        assert_eq!(kinds, [AFFECT_POISON, AFFECT_STUN, AFFECT_SLOW]);
+        let damage_at = heard
+            .iter()
+            .position(|record| record.first() == Some(&HEADER_GC_DAMAGE_INFO.value()));
+        let last_add = heard
+            .iter()
+            .rposition(|record| record.first() == Some(&HEADER_GC_AFFECT_ADD.value()));
+        assert!(last_add.is_some_and(|add| damage_at.is_some_and(|hit| add < hit)));
+        assert!(heard
+            .iter()
+            .any(|record| record.first() == Some(&HEADER_GC_CHARACTER_UPDATE.value())));
+        assert_eq!(world.move_speed_of(1), (before - 30).max(0));
+        let combat = world.pc_combat.get(&1).unwrap();
+        assert!(combat
+            .poison_due
+            .is_some_and(|(when, count)| when == P0 + 1 && count == 10));
+    }
+
+    /// A 11000 guard at `at`: NOMOVE, MELEE, range 175, as the proto gives it.
+    fn a_guard(vid: u32, at: (i32, i32)) -> world::npc::Npc {
+        let mut fight = world::npc::MobFight::default();
+        fight.battle_type = BATTLE_TYPE_MELEE;
+        fight.attack_range = 175;
+        fight.aggressive_sight = 2000;
+        world::npc::Npc {
+            vid,
+            vnum: 11_000,
+            race: 11_000,
+            char_type: gamedata::mob_proto::CHAR_TYPE_NPC,
+            x: at.0,
+            y: at.1,
+            ai_flags: gamedata::mob_proto::AIFLAG_NOMOVE,
+            hp: 6938,
+            max_hp: 6938,
+            fight,
+            ..world::npc::Npc::default()
+        }
+    }
+
+    /// A guard's swing stuns the monster: no hit points taken, the no-reward flag set,
+    /// the stun shown, the guard claimed as sync owner, and no fight begun — the victim
+    /// is stunned, so `CanBeginFight` refuses (`G/char_battle.cpp:303-304`). The player
+    /// watches from `NEAR`, which is in the victim's view.
+    #[test]
+    fn a_guard_swing_stuns_the_monster() {
+        use protocol::gc_inventory::HEADER_GC_OWNERSHIP;
+        let clock = TestClock::default();
+        clock.set(T0);
+        let monster = a_fighter(ME, 406, BATTLE_TYPE_MELEE, (175, 2000), 0, SPOT, 10_000);
+        let guard = a_guard(ME + 1, NEAR);
+        let mut world = stand_field(&clock, vec![monster, guard], open_cells(), true);
+        let mut alpha = enter(&mut world, 1, NEAR, 12_345);
+        world.process_pulse(P0);
+        drained(&mut alpha);
+        assert!(world.guard_attack(ME + 1, ME));
+        let victim = world.npc_by_vid(ME).unwrap();
+        assert!(victim.stunned);
+        assert_eq!(victim.hp, 10_000);
+        assert!(world.npc_combat.get(&ME).unwrap().no_reward);
+        let heard = drained(&mut alpha);
+        assert!(heard
+            .iter()
+            .any(|record| record.first() == Some(&HEADER_GC_STUN.value())));
+        assert!(heard
+            .iter()
+            .any(|record| record.first() == Some(&HEADER_GC_OWNERSHIP.value())));
+        // Stunned, so `CanBeginFight` refuses: the victim holds no fight.
+        let mind = world.minds.get(ME);
+        assert!(mind.is_none_or(|mind| !mind.fighting && mind.victim.is_none()));
+    }
+
+    /// A guard's swing past the reach blanks: nothing stunned, nothing claimed, no
+    /// records.
+    #[test]
+    fn a_guard_swing_past_the_reach_blanks() {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let monster = a_fighter(ME, 406, BATTLE_TYPE_MELEE, (175, 2000), 0, SPOT, 10_000);
+        let guard = a_guard(ME + 1, (SPOT.0 + 500, SPOT.1));
+        let mut world = stand_field(&clock, vec![monster, guard], open_cells(), true);
+        let mut alpha = enter(&mut world, 1, NEAR, 12_345);
+        world.process_pulse(P0);
+        drained(&mut alpha);
+        assert!(!world.guard_attack(ME + 1, ME));
+        let victim = world.npc_by_vid(ME).unwrap();
+        assert!(!victim.stunned);
+        assert!(!world
+            .npc_combat
+            .get(&ME)
+            .is_some_and(|combat| combat.no_reward));
+        assert!(drained(&mut alpha).is_empty());
     }
 }

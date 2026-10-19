@@ -118,6 +118,12 @@ pub(super) fn points_at(level: u8, stamina: i32, exp: i64) -> Points {
         sp: 10_000,
         stamina,
         inven_point: 0,
+        random_hp: 0,
+        random_sp: 0,
+        stat_point: 0,
+        skill_point: 0,
+        sub_skill_point: 0,
+        level_step: 0,
         map_index: PLACE.1,
         part_base: 0,
         hair_part: 0,
@@ -188,6 +194,7 @@ pub(super) fn enter_seeing_with(
         language: 0,
         pk_mode: crate::loading_phase::PK_MODE_PROTECT,
         skill_group: 0,
+        alignment: 0,
     };
     let shown = world.place_body(
         Vid::new(vid),

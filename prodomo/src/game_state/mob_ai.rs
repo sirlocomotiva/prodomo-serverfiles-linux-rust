@@ -23,13 +23,16 @@
 //!
 //! - **Idle** (`StateIdle`, `G/char_state.cpp:362-387`). A stone waits 1 second. A monster runs
 //!   `__StateIdle_Monster` (`:626-736`): a coward runs away (`CowardEscape`, `:282-321`);
-//!   otherwise it waits 1 to 3 seconds when aggressive and 3 to 5 when not, and one time in 7
-//!   turns to a random heading and walks 300 to 700 units, when neither `no_wander` nor
-//!   `AIFLAG_NOMOVE` holds it and both the point and the half-way point are movable; a monster
-//!   that does not walk may speak (`MonsterChat(MONSTER_CHAT_WAIT)`).
+//!   otherwise it waits 1 to 3 seconds when aggressive and 3 to 5 when not, walks back to
+//!   its group's leader when past 1000 of it (`:704-717`, [`super::mob_party`]), and one
+//!   time in 7 turns to a random heading and walks 300 to 700 units, when neither
+//!   `no_wander` nor `AIFLAG_NOMOVE` holds it and both the point and the half-way point
+//!   are movable; a monster that does not walk may speak
+//!   (`MonsterChat(MONSTER_CHAT_WAIT)`).
 //!   Any other non-player runs `__StateIdle_NPC` (`:507-624`): it may speak, waits 5 seconds,
-//!   and, unless it is a guard or `AIFLAG_NOMOVE` holds it, one time in 7 walks 200 to 400 units
-//!   at a walk, which tells its view the first time.
+//!   and, unless it is a guard or `AIFLAG_NOMOVE` holds it, walks back to its group's
+//!   leader when past 500 of it (`:586-598`, [`super::mob_party`]), else one time in 7
+//!   walks 200 to 400 units at a walk, which tells its view the first time.
 //! - **Move** (`StateMove`, `:782-928`). `Goto` set the destination, the move's duration and an
 //!   update every 4 Pulses (`G/char.cpp:3471-3508`), and told the view with a `FUNC_WAIT`
 //!   (`SendMovePacket`, `:3624-3636`). Each update moves the NPC to the point the elapsed share
@@ -48,13 +51,14 @@
 //!
 //! # What is not here yet
 //!
-//! - **The fight's missing arms (V19).** The guard's victim search, the aggro of a
-//!   chasing monster, the mob skills, the summoners and god speed, and a RANGE or MAGIC
-//!   monster's fight wait for 229m. A ranging or magic monster near a player therefore
-//!   wanders as a peaceful one does, and the melee family fights ([`super::mob_battle`],
-//!   [`super::mob_strike`]).
-//! - **The protector.** `GetProtege` (a group's leader, a stone's spawn) and `Follow` wait for the
-//!   group's party and follow.
+//! - **The fight's missing arms (V19).** The guard's victim search, the summoners and god
+//!   speed wait for later work (the chase's aggro tick is ported, 229r, RANGE and MAGIC
+//!   fight, 229s, the party fights, 229t, and the mob skills cast, 229u). Every battle
+//!   type on a monster fights ([`super::mob_battle`], [`super::mob_strike`],
+//!   [`super::mob_skill`]).
+//! - **The protector (V19c, ported in 229t).** `GetProtege` reads the group's leader
+//!   ([`super::mob_party`]), and Idle and the dead end walk back to it; the stone arm
+//!   waits for a hit on a stone, which is refused until its spawns are ported.
 //! - **A stone's spawns** at each tenth of its hit points wait for a hit on a stone, which is
 //!   refused until they are ported.
 //! - **Santa, the war flags and the horses** (`StateHorse`) wait for their systems; no spawn file
@@ -110,8 +114,9 @@ const MONSTER_CHAT_WAIT: i32 = 0;
 /// `MONSTER_CHAT_ATTACK` (`G/constants.h:9`): the chat an attacking monster says.
 const MONSTER_CHAT_ATTACK: i32 = 1;
 
-/// The guards' races (`IsGuardNPC`, `G/char.cpp:7664-7667`).
-const GUARD_RACES: [u16; 3] = [11000, 11002, 11004];
+/// The guards' races (`IsGuardNPC`, `G/char.cpp:7664-7667`). `pub(super)` for the guard
+/// search the fight runs.
+pub(super) const GUARD_RACES: [u16; 3] = [11000, 11002, 11004];
 
 /// The races legacy gives `StateHorse` whatever their type (`G/char.cpp:2545-2560`).
 const HORSE_RACES: std::ops::RangeInclusive<u16> = 20101..=20109;
@@ -171,6 +176,9 @@ pub(super) struct Mind {
     pub(super) walking: bool,
     /// `m_kVIDVictim`.
     pub(super) victim: Option<Victim>,
+    /// The same `m_kVIDVictim` when it names a monster: a guard's victim. `None` for
+    /// every other fight; only a guard's paths read it, and only one slot is ever set.
+    pub(super) victim_npc: Option<u32>,
     /// `POS_FIGHTING`.
     pub(super) fighting: bool,
     /// `m_isBerserk`.
@@ -190,6 +198,7 @@ impl Mind {
             motion: Motion::standing((npc.x, npc.y)),
             walking: false,
             victim: None,
+            victim_npc: None,
             fighting: false,
             berserk: false,
         }
@@ -392,12 +401,37 @@ impl GameState {
         }
     }
 
-    /// `__StateIdle_NPC` (`G/char_state.cpp:507-624`). No pet, mount or shaman is ported, the
-    /// guard's victim search waits for the fight, and no protector is ported.
+    /// `__StateIdle_NPC` (`G/char_state.cpp:507-624`). No pet, mount or shaman is ported, and
+    /// Santa waits for his system. A guard searches for a monster victim past the `noguard`
+    /// event flag (`:522-538`); a follower past 500 of its group's leader walks back to
+    /// within `number(100, 300)` of it (`:586-598`; [`super::mob_party`]).
     fn idle_npc(&mut self, vid: u32, who: Who) {
         self.monster_chat_wait(vid, who);
         self.set_duration(vid, pulses(5));
-        if GUARD_RACES.contains(&who.race) || who.ai_flags & AIFLAG_NOMOVE != 0 {
+        if self.is_guard(vid) {
+            // The guard arm (`:522-538`): past `noguard`, the nearest monster within
+            // 50000 starts the fight at once, 12 Pulses out (`passes_per_sec / 2`).
+            let guarded = self
+                .quests
+                .as_ref()
+                .is_some_and(|quests| quests.manager().event_flag(b"noguard") != 0);
+            if !guarded {
+                if let Some(found) = self.find_guard_victim(vid) {
+                    self.set_duration(vid, super::mob_battle::GUARD_IDLE_PULSES);
+                    if self.can_begin_fight(vid) {
+                        self.begin_fight_npc(vid, found);
+                    }
+                }
+            }
+            return;
+        }
+        if who.ai_flags & AIFLAG_NOMOVE != 0 {
+            return;
+        }
+        // The protege follow (`:586-598`): a `Follow` that walks returns before the wander
+        // draw, and one that refuses — within 100 to 300, or a refused walk — falls
+        // through to it.
+        if self.idle_follow_leader(vid, 500, (100, 300)) {
             return;
         }
         if number(&mut self.dice, 0, 6) != 0 {
@@ -446,6 +480,11 @@ impl GameState {
             number(&mut self.dice, 3, 5)
         };
         self.set_duration(vid, pulses(wait));
+        // The protege follow (`:704-717`): past 1000 of its group's leader, a follower
+        // walks back to within `number(150, 400)` of it, before the wander draw.
+        if self.idle_follow_leader(vid, 1000, (150, 400)) {
+            return;
+        }
         if !self.minds.no_wander
             && who.ai_flags & AIFLAG_NOMOVE == 0
             && number(&mut self.dice, 0, 6) == 0
@@ -484,7 +523,7 @@ impl GameState {
             return held;
         }
         // The Meley 40000 retry applies to a map that is not hosted; map 61's `xmas_tree`
-        // flag reads 0 here. RANGE and MAGIC never search (V19a).
+        // flag reads 0 here.
         if !self.minds.no_wander
             && who.aggressive
             && self
@@ -502,6 +541,26 @@ impl GameState {
             return None;
         }
         held
+    }
+
+    /// Idle's protege follow: past `beyond` of its group's leader, `vid` walks back to
+    /// within `number(range.0, range.1)` of it ([`super::mob_party`]). True when it walks.
+    fn idle_follow_leader(&mut self, vid: u32, beyond: i32, range: (i32, i32)) -> bool {
+        let Some(leader) = self.protege(vid) else {
+            return false;
+        };
+        let (Some(at), Some(spot)) = (self.npc_spot(vid), self.npc_spot(leader)) else {
+            return false;
+        };
+        let away = crate::sync_position::distance_approx(
+            spot.0.saturating_sub(at.0),
+            spot.1.saturating_sub(at.1),
+        );
+        if away <= beyond {
+            return false;
+        }
+        let min = i32_to_f32(number(&mut self.dice, range.0, range.1));
+        self.follow_npc(vid, leader, min)
     }
 
     /// The idle walk's point `distance` ahead of the NPC's heading, when both it and the
@@ -655,6 +714,25 @@ impl GameState {
         if let Some((point, _)) = step {
             // `Move(x, y)` (`:793`); a not-a-number rate skips only this (D1).
             self.npc_move(vid, point.0, point.1);
+        }
+        // The chase's aggro tick (`:855-859`): a monster with a victim bleeds the victim's
+        // aggro by `level / 3 + 1` every update, before the boss refollows. The PC-only
+        // stamina arm is dead for an NPC, so every `StateMove` reaches this; the
+        // stunned/dead return sits inside `UpdateAggrPoint`.
+        if let Some(victim) = self.victim_of(vid) {
+            let monster = self
+                .npc_by_vid(vid)
+                .is_some_and(|npc| npc.char_type == CHAR_TYPE_MONSTER);
+            if monster {
+                let level = self
+                    .characters
+                    .find_by_vid(victim)
+                    .ok()
+                    .and_then(|character| character.points())
+                    .map_or(0, |points| i32::from(points.level()));
+                let bleed = level / 3 + 1;
+                self.update_aggr_point(vid, victim, super::fight::AggroDamage::Normal, -bleed);
+            }
         }
         // A chasing boss refollows one time in four (`:880-885`); race 2191 is not spawned.
         if let Some(victim) = self.victim_of(vid) {
@@ -1685,5 +1763,104 @@ mod tests {
         assert_eq!((f32_to_i32(x), f32_to_i32(y)), (-282, -282));
         assert_eq!(pulses(3), 75);
         assert_eq!(pulses(-1), 0);
+    }
+
+    /// Idle's protege follow: a follower past its bound walks back to its leader — a
+    /// non-player past 500 to within `number(100, 300)`, a monster past 1000 to within
+    /// `number(150, 400)` — and one within stays to its wander draw.
+    #[test]
+    fn an_idle_follower_past_its_bound_walks_back_to_its_leader() {
+        // A non-player past 500 of its leader walks back to within `number(100, 300)`;
+        // a monster past 1000 walks back to within `number(150, 400)`.
+        for (char_type, race) in [(CHAR_TYPE_NPC, 20_302), (CHAR_TYPE_MONSTER, 101)] {
+            let clock = TestClock::default();
+            clock.set(T0);
+            let leader = an_npc(ME, char_type, race, 0);
+            let mut follower = an_npc(ME + 1, char_type, race, 0);
+            follower.leader = Some(ME);
+            follower.x = SPOT.0 + 2000;
+            let mut world = a_map_on(&clock, vec![leader, follower], open_cells());
+            let mut inbox = a_player(&mut world);
+            world.dice = Pcg32::new(7, 0);
+            world.process_pulse(1);
+            let mind = world.minds.get(ME + 1).expect("the follower walks");
+            assert_eq!(mind.asked, Some(Fsm::Move), "char type {char_type}");
+            let dest = mind.motion.dest;
+            assert!(
+                dest.0 < SPOT.0 + 2000 && dest.1 == SPOT.1,
+                "the walk closes on the leader: {dest:?} (char type {char_type})"
+            );
+            assert!(
+                !drained(&mut inbox).is_empty(),
+                "the walk tells the view (char type {char_type})"
+            );
+        }
+        // Within the bound, the wander draw runs: dice that walk past both chats do.
+        let seed = a_seed(|dice| {
+            let _leader_chat = number(dice, 0, 60);
+            let _leader_wait = number(dice, 3, 5);
+            let _follower_chat = number(dice, 0, 60);
+            walks_after(dice, &[(3, 5)])
+        });
+        let clock = TestClock::default();
+        clock.set(T0);
+        let leader = an_npc(ME, CHAR_TYPE_MONSTER, 101, 0);
+        let mut follower = an_npc(ME + 1, CHAR_TYPE_MONSTER, 101, 0);
+        follower.leader = Some(ME);
+        follower.x = SPOT.0 + 900;
+        let mut world = a_map_on(&clock, vec![leader, follower], open_cells());
+        let _inbox = a_player(&mut world);
+        world.dice = Pcg32::new(seed, 0);
+        world.process_pulse(1);
+        let mind = world.minds.get(ME + 1).expect("the follower idles");
+        assert_eq!(mind.asked, Some(Fsm::Move), "within 1000 the wander walks");
+        assert!(
+            mind.motion.dest.0 > SPOT.0 + 900,
+            "past the follower, not back at the leader: {:?}",
+            mind.motion.dest
+        );
+    }
+
+    /// An idle guard finds the nearest monster: the far one and the player are passed
+    /// over, Battle is asked 12 Pulses out, and the NPC slot holds the near monster.
+    #[test]
+    fn an_idle_guard_finds_the_nearest_monster() {
+        let guard = an_npc(ME, CHAR_TYPE_NPC, 11_000, AIFLAG_NOMOVE);
+        let mut near = an_npc(ME + 1, CHAR_TYPE_MONSTER, 101, 0);
+        near.x = SPOT.0 + 500;
+        let mut far = an_npc(ME + 2, CHAR_TYPE_MONSTER, 101, 0);
+        far.x = SPOT.0 + 1000;
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut world = a_map(&clock, vec![guard, near, far]).with_quests(quests());
+        let _inbox = a_player(&mut world);
+        world.process_pulse(1);
+        let mind = world.minds.get(ME).expect("the guard idles");
+        assert_eq!(mind.asked, Some(Fsm::Battle));
+        assert_eq!(mind.duration, 12);
+        assert_eq!(mind.victim_npc, Some(ME + 1));
+        assert!(mind.victim.is_none());
+        assert!(mind.fighting);
+    }
+
+    /// `noguard` holds the guard: no victim, no fight, the wait stays 5 seconds and the
+    /// guard never walks.
+    #[test]
+    fn noguard_holds_the_guard() {
+        let guard = an_npc(ME, CHAR_TYPE_NPC, 11_000, AIFLAG_NOMOVE);
+        let mut monster = an_npc(ME + 1, CHAR_TYPE_MONSTER, 101, 0);
+        monster.x = SPOT.0 + 500;
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut quests = quests();
+        quests.manager_mut().set_event_flag(b"noguard", 1);
+        let mut world = a_map(&clock, vec![guard, monster]).with_quests(quests);
+        let _inbox = a_player(&mut world);
+        world.process_pulse(1);
+        let mind = world.minds.get(ME).expect("the guard idles");
+        assert!(mind.asked.is_none());
+        assert_eq!(mind.duration, pulses(5));
+        assert!(mind.victim_npc.is_none());
+        assert!(!mind.fighting);
     }
 }
