@@ -77,6 +77,8 @@ pub const SKILL_FLAG_USE_MELEE_DAMAGE: u32 = 1 << 1;
 pub const SKILL_FLAG_SELFONLY: u32 = 1 << 3;
 /// `SKILL_FLAG_USE_MAGIC_DAMAGE`.
 pub const SKILL_FLAG_USE_MAGIC_DAMAGE: u32 = 1 << 4;
+/// `SKILL_FLAG_USE_ARROW_DAMAGE`: the functor's `atk` is `CalcArrowDamage` (hosted: vnum 47).
+pub const SKILL_FLAG_USE_ARROW_DAMAGE: u32 = 1 << 9;
 /// `SKILL_FLAG_SPLASH`.
 pub const SKILL_FLAG_SPLASH: u32 = 1 << 7;
 /// `SKILL_FLAG_PENETRATE`: the functor's per-victim ignore-defence roll (no hosted row
@@ -87,6 +89,27 @@ pub const SKILL_FLAG_PENETRATE: u32 = 1 << 10;
 pub const SKILL_FLAG_IGNORE_TARGET_RATING: u32 = 1 << 11;
 /// `SKILL_FLAG_CRUSH`.
 pub const SKILL_FLAG_CRUSH: u32 = 1 << 19;
+/// `SKILL_FLAG_CRUSH_LONG` (`G/skill.h:32`): doubles the CRUSH slide. No hosted PC
+/// row sets it, but the doubling is coded with the slide.
+pub const SKILL_FLAG_CRUSH_LONG: u32 = 1 << 23;
+/// `SKILL_FLAG_SLOW` (`G/skill.h:21`): the functor's slow arm. No hosted PC row sets it
+/// (vnum 80 is refused), so the arm is not ported.
+pub const SKILL_FLAG_SLOW: u32 = 1 << 12;
+/// `SKILL_FLAG_STUN` (`G/skill.h:22`): the functor's stun arm (hosted: vnum 18).
+pub const SKILL_FLAG_STUN: u32 = 1 << 13;
+/// `SKILL_FLAG_FIRE_CONT` (`G/skill.h:25`): the functor's fire arm (hosted: vnums 92/93).
+pub const SKILL_FLAG_FIRE_CONT: u32 = 1 << 16;
+/// `SKILL_FLAG_POISON` (`G/skill.h:29`): the functor's poison arm (hosted: vnums 33/35).
+pub const SKILL_FLAG_POISON: u32 = 1 << 20;
+/// `SKILL_FLAG_REMOVE_BAD_AFFECT` (`G/skill.h:26`): bit 17 — the heal's cure arm
+/// (hosted: vnum 109).
+pub const SKILL_FLAG_REMOVE_BAD_AFFECT: u32 = 1 << 17;
+/// `SKILL_FLAG_REMOVE_GOOD_AFFECT` (`G/skill.h:27`): bit 18. No hosted PC row
+/// sets it, so the arm is not ported.
+/// `SKILL_FLAG_TOGGLE` (`G/skill.h:30`): bit 21 (230f).
+pub const SKILL_FLAG_TOGGLE: u32 = 1 << 21;
+/// `SKILL_FLAG_DISABLE_BY_POINT_UP` (`G/skill.h:31`): bit 22 (230f).
+pub const SKILL_FLAG_DISABLE_BY_POINT_UP: u32 = 1 << 22;
 /// `SKILL_FLAG_PARTY` (`G/skill.h:36`): bit 27 — but the schema's `setFlag` member
 /// order puts `PARTY` 29th, so MySQL `setFlag+0` sets bit 28 instead (the schema
 /// gained `ATTACK_BLEEDING`, which the 2008-era enum lacks). Legacy decodes the
@@ -99,6 +122,10 @@ pub const SKILL_FLAG_PARTY: u32 = 1 << 27;
 pub const SKILL_ATTR_MELEE: u8 = 2;
 /// `SKILL_ATTR_TYPE_NORMAL`: 1.
 pub const SKILL_ATTR_NORMAL: u8 = 1;
+/// `SKILL_ATTR_TYPE_RANGE` (`C/length.h:753-756`): 3, the MySQL enum index of `RANGE`.
+pub const SKILL_ATTR_RANGE: u8 = 3;
+/// `SKILL_ATTR_TYPE_MAGIC`: 4.
+pub const SKILL_ATTR_MAGIC: u8 = 4;
 
 /// `HEALING_SKILL_VNUM` (`C/prodomodefines.h:41`).
 pub const HEALING_SKILL_VNUM: u32 = 265;

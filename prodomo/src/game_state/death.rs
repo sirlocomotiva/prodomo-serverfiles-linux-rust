@@ -93,7 +93,7 @@ const RECOVERY_SECONDS: u32 = 3;
 
 /// `PASSES_PER_SEC(3)`: a player's poison event ticks every 3 seconds
 /// (`G/char_resist.cpp:71`).
-const POISON_TICK_SECONDS: u32 = 3;
+pub(super) const POISON_TICK_SECONDS: u32 = 3;
 
 /// `AFF_POISON` (`G/affect.h:214`) as a word-0 bit: flag 5 is bit 4.
 const AFF_POISON_WORD: u32 = 1 << 4;
@@ -173,6 +173,25 @@ pub(super) struct Attacker {
     pub(super) vid: Vid,
     /// Whether the attacker is a player.
     pub(super) pc: bool,
+}
+
+/// What [`GameState::damage_pc_head`] decided: the victim is gone (no combat row or no
+/// points), died by `Dead`, was already dead, or is open for the hit-point change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PcDamageHead {
+    /// No combat row or no points: nothing ran.
+    Gone,
+    /// Stunned: `Dead` ran.
+    Died,
+    /// Already dead: nothing ran.
+    Dead,
+    /// Live: the head sent the damage packet; the tail changes `hp` by `damage`.
+    Open {
+        /// Hit points the head read.
+        hp: i32,
+        /// The poison-clamped damage the head showed.
+        damage: i32,
+    },
 }
 
 /// Where a recall may send a player: the atlas, and the maps each Channel and the Shared Channel
@@ -261,7 +280,7 @@ impl GameState {
     }
 
     /// The points of the player under `vid`, to change.
-    fn pc_points_mut(&mut self, vid: u32) -> Option<&mut Points> {
+    pub(super) fn pc_points_mut(&mut self, vid: u32) -> Option<&mut Points> {
         self.characters
             .find_by_vid_mut(Vid::new(vid))
             .ok()?
@@ -334,7 +353,7 @@ impl GameState {
 
     /// Writes each point change to the player's own client, and a broadcast record to every
     /// character that sees it (`UpdatePointsPacket`'s `PacketAround`, `G/char.cpp:2112-2115`).
-    fn send_point_records(&self, vid: Vid, records: &[PointRecord]) {
+    pub(super) fn send_point_records(&self, vid: Vid, records: &[PointRecord]) {
         for (record, frame) in records.iter().zip(point_changes(records, vid.raw())) {
             if record.broadcast {
                 self.packet_around(EntityKey::Character(vid.raw()), &frame, None);
@@ -409,10 +428,11 @@ impl GameState {
         let _sent = self.write_to_client(vid, record);
     }
 
-    /// The victim's side of `CHARACTER::Damage` on the player `victim` (`G/char_battle.cpp:2248`
-    /// to `:2433`): a hit on a stunned player kills it, a hit on a dead one does nothing, and a
-    /// hit that leaves no hit points stuns it, with the attacker's PID as its killer when the
-    /// attacker is a player. Returns whether the player died, as legacy's `Damage` does.
+    /// The victim's side of `CHARACTER::Damage` on the player `victim`
+    /// (`G/char_battle.cpp:2248-2433`): a hit on a stunned player kills it, a hit on a dead one
+    /// does nothing, and a hit that leaves no hit points stuns it, with the attacker's PID as its
+    /// killer when the attacker is a player. Returns whether the player died, as legacy's `Damage`
+    /// does.
     ///
     /// `shown` is the strike's flag: `SendDamagePacket` goes to the player first, then the hit
     /// points change, then the targeters see them before `GC_STUN` (V17i).
@@ -442,19 +462,42 @@ impl GameState {
         shown: Option<u8>,
         poison: bool,
     ) -> bool {
+        match self.damage_pc_head(attacker, victim, damage, shown, poison) {
+            PcDamageHead::Gone => false,
+            PcDamageHead::Died | PcDamageHead::Dead => true,
+            PcDamageHead::Open { hp, damage } => {
+                self.damage_pc_tail(attacker, victim, hp, damage);
+                false
+            }
+        }
+    }
+
+    /// What [`GameState::damage_pc`] sends before the hit points change: the stunned
+    /// victim dies by `Dead`, a dead one takes nothing, and a live one gets its damage
+    /// packet (poison-clamped first). The reflected hit runs between this and
+    /// [`GameState::damage_pc_tail`], as legacy's reflect arm (`:1979-1988`) runs
+    /// inside the victim's `Damage` before its hit-point change (`:2387`).
+    pub(super) fn damage_pc_head(
+        &mut self,
+        attacker: Option<Attacker>,
+        victim: Vid,
+        damage: i32,
+        shown: Option<u8>,
+        poison: bool,
+    ) -> PcDamageHead {
         let raw = victim.raw();
         let Some(combat) = self.pc_combat.get(&raw).copied() else {
-            return false;
+            return PcDamageHead::Gone;
         };
         if combat.stunned {
             self.dead_pc(victim, attacker);
-            return true;
+            return PcDamageHead::Died;
         }
         if combat.dead {
-            return true;
+            return PcDamageHead::Dead;
         }
         let Some(hp) = self.pc_points_mut(raw).map(|points| points.hp()) else {
-            return false;
+            return PcDamageHead::Gone;
         };
         // The poison clamp runs before the damage packet: a clamped tick shows the damage
         // it dealt, not the damage it rolled.
@@ -466,6 +509,20 @@ impl GameState {
         if let Some(flag) = shown {
             self.send_pc_damage_info(victim, flag, damage);
         }
+        PcDamageHead::Open { hp, damage }
+    }
+
+    /// What [`GameState::damage_pc`] does from the hit-point change on: the lethal clamp,
+    /// the change, the targeters' broadcast, and the stun with the attacker's PID as the
+    /// killer when the attacker is a player.
+    pub(super) fn damage_pc_tail(
+        &mut self,
+        attacker: Option<Attacker>,
+        victim: Vid,
+        hp: i32,
+        damage: i32,
+    ) {
+        let raw = victim.raw();
         // `cannot_dead` is a GM's flag, which no player has.
         let damage = if hp.saturating_sub(damage) <= 0 {
             hp
@@ -483,7 +540,6 @@ impl GameState {
             self.pc_combat.entry(raw).or_default().killer_pid =
                 killer.map_or(0, |attacker| attacker.vid.raw());
         }
-        false
     }
 
     /// `Stun` of the player under `vid` (`G/char_battle.cpp:422-459`): its potion pools empty,

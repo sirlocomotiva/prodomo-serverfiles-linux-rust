@@ -63,6 +63,7 @@ use gamedata::mob_proto::{
 };
 use protocol::gc_actors::GcCharacterMove;
 use world::character::number;
+use world::npc::Npc;
 
 use super::mob_ai::{delta_by_degree, pulses, Victim};
 use super::motion::{calculate_duration, distance_sqrt, get_move_speed, rotation_to_xy};
@@ -90,8 +91,21 @@ const CHANGE_POSITION_TRIES: usize = 15;
 const KILL_AND_GO: (i32, i32) = (400, 1500);
 /// `CalculateDuration(GetLimitPoint(POINT_ATT_SPEED), 2000)`: the swing's wait (`:1119`).
 const ATTACK_MS: i32 = 2000;
-/// `PASSES_PER_SEC(2)`: the wait after a swing, with no clip (V2).
+/// `PASSES_PER_SEC(2)`: the wait after a swing, with no clip.
 const SWING_PULSES: u64 = 50;
+
+/// The hold after a swing (`G/char_state.cpp:1179-1181`): `(DWORD)(fDuration *
+/// 25)`, the product in `float`, then the cast truncates; a zero or missing
+/// duration holds 50 (`PASSES_PER_SEC(2)`).
+fn swing_hold(seconds: Option<f32>) -> u64 {
+    seconds.map_or(SWING_PULSES, |seconds| {
+        if seconds == 0.0 {
+            return SWING_PULSES;
+        }
+        let pulses = f32_to_i32(seconds * 25.0).max(0);
+        u64::try_from(pulses).unwrap_or(u64::MAX)
+    })
+}
 /// `passes_per_sec / 2`: the wait after a failed `Attack` (`:1173`).
 const FAILED_ATTACK_PULSES: u64 = 12;
 /// `passes_per_sec / 2`: the wait when a guard's Idle finds a monster (`:532`). Shared
@@ -102,6 +116,9 @@ pub(super) const GUARD_IDLE_PULSES: u64 = 12;
 const GUARD_SIGHT: i32 = 50_000;
 /// `AFF_REVIVE_INVISIBLE` (`G/affect.h:242`): bit 28, which `FindVictim` skips.
 const AFF_REVIVE_INVISIBLE_WORD: u32 = 1 << 28;
+/// The words `GetNearestVictim` skips (`G/char_battle.cpp:3394-3397`): `EUNHYUNG` (bit
+/// 19), `INVISIBILITY` (bit 2), `REVIVE_INVISIBLE` (bit 28), all of word 0.
+const NEAREST_SKIPPED_WORD: u32 = (1 << 19) | (1 << 2) | (1 << 28);
 
 /// What Battle and Follow read of the monster, copied once per update. `attack_speed` is
 /// `GetLimitPoint(POINT_ATT_SPEED)`, clamped to 0..250; `move_speed` is `GetMoveSpeed()` with
@@ -123,8 +140,9 @@ struct Fighter {
 
 /// What they read of the victim. `moving` is `body.motion.moving`, which leaving Move at the
 /// first monster hit clears; `move_speed` is the player's `GetMoveSpeed()`. A monster
-/// victim is read through [`GameState::npc_victim_state`], which returns `None` for a
-/// stunned victim; its `moving` is the victim's Battle chase.
+/// victim is read through [`GameState::npc_victim_state`], which yields `None` for a
+/// stunned victim — `StateBattle` loses it the same way it loses a gone one
+/// (`G/char_state.cpp:967`) — so no fourth flag is needed.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct VictimState {
     pub(super) at: (i32, i32),
@@ -229,12 +247,16 @@ fn lead_point(fighter: Fighter, target: VictimState) -> (i32, i32) {
 
 impl GameState {
     /// `CanBeginFight` of the monster under `mob` (`G/char_battle.cpp:108-115`): neither
-    /// stunned nor dead, and standing. A missing Mind is standing.
+    /// stunned nor dead, no `AFF_STUN` (`CannotMoveByAffect`), and standing. A missing
+    /// Mind is standing. A victim stunned by the very hit that asks does not begin.
     pub(super) fn can_begin_fight(&self, mob: u32) -> bool {
         let Some(npc) = self.npc_by_vid(mob) else {
             return false;
         };
         if npc.stunned || npc.dead {
+            return false;
+        }
+        if self.npc_affect_words(mob)[0] & super::fight::AFF_STUN_WORD != 0 {
             return false;
         }
         self.minds.get(mob).is_none_or(|mind| !mind.fighting)
@@ -334,7 +356,8 @@ impl GameState {
     }
 
     /// What Battle reads of the monster under `victim`, on the guard's map. A stunned
-    /// victim reads as gone (`G/char_state.cpp:967`).
+    /// victim reads as gone (`None`): Battle drops it before engaging, as legacy's
+    /// victim-loss arm drops a stunned victim of a guard (`G/char_state.cpp:967`).
     pub(super) fn npc_victim_state(&self, victim: u32) -> Option<VictimState> {
         let &(_, map, _) = self.npc_of.get(&victim)?;
         let npc = self.npc_by_vid(victim)?;
@@ -465,6 +488,37 @@ impl GameState {
         best.map(|(victim, _)| victim)
     }
 
+    /// `GetNearestVictim(stone)` (`G/char_battle.cpp:3373-3408`): over the stone's damage
+    /// map in VID order, skipping offline and hidden attackers, the nearest by
+    /// `DISTANCE_APPROX` to the stone; ties to the first met. No range cap.
+    pub(super) fn nearest_victim(&self, stone: u32) -> Option<Vid> {
+        let &(channel, map, _) = self.npc_of.get(&stone)?;
+        let (x, y) = self.npc_spot(stone)?;
+        let damage = self.npc_combat.get(&stone)?;
+        let mut best: Option<(Vid, i32)> = None;
+        // The map iterates in VID order (`std::map`); ties keep the first.
+        for &raw in damage.damage.keys() {
+            let attacker = Vid::new(raw);
+            let Some(body) = self.bodies.get(&attacker) else {
+                continue;
+            };
+            if (body.channel, body.map) != (channel, map) {
+                continue;
+            }
+            if self.affect_flags_of(attacker)[0] & NEAREST_SKIPPED_WORD != 0 {
+                continue;
+            }
+            let Some(spot) = self.spot_of(raw) else {
+                continue;
+            };
+            let distance = distance_approx(spot.x.saturating_sub(x), spot.y.saturating_sub(y));
+            if best.is_none_or(|(_, held)| distance < held) {
+                best = Some((attacker, distance));
+            }
+        }
+        best.map(|(victim, _)| victim)
+    }
+
     /// `StateBattle` (`G/char_state.cpp:930-1183`) of the monster under `mob`, or the guard
     /// on its monster victim: a held NPC slot dispatches to [`GameState::state_battle_npc`].
     pub(super) fn state_battle(&mut self, mob: u32) {
@@ -480,11 +534,15 @@ impl GameState {
             return;
         };
         // Stones and players never reach Battle; `!CanMove()` always holds and `IsStun()`
-        // returns with the duration as it was.
+        // returns with the duration as it was. The instant arm stays first: both arms
+        // return alike, so the order is unobservable (`:941-944`).
         if self
             .npc_by_vid(mob)
             .is_none_or(|npc| npc.char_type != CHAR_TYPE_MONSTER || npc.stunned)
         {
+            return;
+        }
+        if self.npc_affect_words(mob)[0] & super::fight::AFF_STUN_WORD != 0 {
             return;
         }
         // Coward (`:949-965`): dead returns; else the victim is dropped, and one time in
@@ -659,7 +717,8 @@ impl GameState {
         .encode();
         let me = EntityKey::Npc(mob);
         self.packet_around(me, &record, Some(me));
-        self.set_duration(mob, SWING_PULSES);
+        let seconds = self.npc_by_vid(mob).and_then(Npc::attack_s);
+        self.set_duration(mob, swing_hold(seconds));
     }
 
     /// Battle's victim loss (`:967-1036`): true when it handled one. A dead or BANPK victim
@@ -823,7 +882,8 @@ impl GameState {
         .encode();
         let me = EntityKey::Npc(mob);
         self.packet_around(me, &record, Some(me));
-        self.set_duration(mob, SWING_PULSES);
+        let seconds = self.npc_by_vid(mob).and_then(Npc::attack_s);
+        self.set_duration(mob, swing_hold(seconds));
     }
 
     /// `__CHARACTER_GotoNearTarget` (`G/char_state.cpp:759-780`): NOMOVE refuses; RANGE and
@@ -847,9 +907,16 @@ impl GameState {
         self.follow(mob, victim, min)
     }
 
-    /// `GetProtege` (`G/char_battle.cpp:3436-3445`): a group's leader. The stone arm waits:
-    /// no hit lands on a stone yet, so no stone ever spawns a group.
+    /// `GetProtege` (`G/char_battle.cpp:3436-3445`): a stone's son answers its live stone;
+    /// a group's member answers its leader. A dead or missing stone reads as none (D-new:
+    /// legacy would read freed memory).
     pub(super) fn protege(&self, mob: u32) -> Option<u32> {
+        if let Some(stone) = self.npc_by_vid(mob).and_then(|npc| npc.stone) {
+            if self.npc_by_vid(stone).is_some_and(|stone| !stone.dead) {
+                return Some(stone);
+            }
+            return None;
+        }
         self.party_leader(mob)
     }
 
@@ -1166,6 +1233,63 @@ mod tests {
         hit(&mut world, 1, ME);
         assert!(world.npc_by_vid(ME).unwrap().stunned, "the one punch stuns");
         assert_eq!(world.minds.get(ME).and_then(|mind| mind.victim), None);
+    }
+
+    /// The flag twin of G2: `AFF_STUN` through `AddAffect` gates `BeginFight` too.
+    #[test]
+    fn a_flag_stunned_monster_never_begins_to_fight() {
+        use crate::game_state::affect::Affect;
+        use crate::loading_phase::{AFFECT_STUN, AFF_STUN, STUN_TICKS_NPC};
+        let (_clock, mut world, _alpha) = a_fight(10_000, NEAR, true);
+        world.add_npc_affect(
+            ME,
+            Affect {
+                kind: AFFECT_STUN,
+                apply_on: 0,
+                value: 0,
+                flag: AFF_STUN,
+                remaining: STUN_TICKS_NPC,
+            },
+        );
+        hit(&mut world, 1, ME);
+        assert_eq!(world.minds.get(ME).and_then(|mind| mind.victim), None);
+    }
+
+    /// `AFF_STUN` in Battle returns with the duration kept (`:941-943`): no swing, no
+    /// record, the victim held.
+    #[test]
+    fn a_flag_stunned_battle_returns_with_its_duration_kept() {
+        use crate::game_state::affect::Affect;
+        use crate::loading_phase::{AFFECT_STUN, AFF_STUN, STUN_TICKS_NPC};
+        let (_clock, mut world, mut alpha) = a_fight(10_000, NEAR, true);
+        hit(&mut world, 1, ME);
+        world.process_pulse(P0 + 1);
+        assert_eq!(
+            world.minds.get(ME).map(|mind| mind.state),
+            Some(Fsm::Battle)
+        );
+        world.add_npc_affect(
+            ME,
+            Affect {
+                kind: AFFECT_STUN,
+                apply_on: 0,
+                value: 0,
+                flag: AFF_STUN,
+                remaining: STUN_TICKS_NPC,
+            },
+        );
+        drained(&mut alpha);
+        let duration = world.minds.get(ME).map_or(0, |mind| mind.duration);
+        let next = world.minds.get(ME).map_or(0, |mind| mind.next_pulse);
+        world.process_pulse(next);
+        let mind = world.minds.get(ME).expect("the Mind runs");
+        assert_eq!(mind.duration, duration, "the duration stays");
+        assert_eq!(
+            mind.victim,
+            Some(Victim::Here(Vid::new(1))),
+            "the victim stays"
+        );
+        assert_eq!(drained(&mut alpha), Vec::<Vec<u8>>::new(), "no swing");
     }
 
     /// An aggressive idle monster finds the nearest player and fights 25 Pulses later (G3).
@@ -1920,6 +2044,37 @@ mod tests {
         assert_eq!(bled, first - 4, "one chase update bleeds 4");
     }
 
+    /// The bleed's stun check is the instant flag only (`:3838-3840`): a flagged chase
+    /// still bleeds, an instant-stunned attacker bleeds nothing.
+    #[test]
+    fn the_chase_bleed_reads_only_the_instant_stun() {
+        use crate::game_state::affect::Affect;
+        use crate::game_state::fight::AggroDamage;
+        use crate::loading_phase::{AFFECT_STUN, AFF_STUN, STUN_TICKS_NPC};
+        let (_clock, mut world, _alpha) = a_fight(10_000, NEAR, true);
+        hit(&mut world, 1, ME);
+        let first = world.npc_combat[&ME].damage[&1].aggro;
+        world.add_npc_affect(
+            ME,
+            Affect {
+                kind: AFFECT_STUN,
+                apply_on: 0,
+                value: 0,
+                flag: AFF_STUN,
+                remaining: STUN_TICKS_NPC,
+            },
+        );
+        world.update_aggr_point(ME, Vid::new(1), AggroDamage::Normal, -4);
+        assert_eq!(world.npc_combat[&ME].damage[&1].aggro, first - 4);
+        world.npc_mut(ME).unwrap().stunned = true;
+        world.update_aggr_point(ME, Vid::new(1), AggroDamage::Normal, -4);
+        assert_eq!(
+            world.npc_combat[&ME].damage[&1].aggro,
+            first - 4,
+            "no bleed"
+        );
+    }
+
     /// A 11000 guard at `at`: NOMOVE, MELEE, range 175, as the proto gives it.
     fn a_guard(vid: u32, at: (i32, i32)) -> world::npc::Npc {
         let mut fight = world::npc::MobFight::default();
@@ -1978,6 +2133,48 @@ mod tests {
                 && GcCharacterMove::decode(record).is_ok_and(|moved| moved.b_func == FUNC_ATTACK)
         }));
         assert_eq!(world.minds.get(ME + 1).unwrap().duration, 50);
+    }
+
+    /// The guard arm reads the clip too: a guard stood with the dog's swing
+    /// holds 23, not 50.
+    #[test]
+    fn a_guards_swing_holds_for_its_clip() {
+        let (_clock, mut world, mut alpha) = a_guard_fight();
+        world.npc_mut(ME + 1).unwrap().attack_bits = Some(0.933_333_f32.to_bits());
+        world.process_pulse(P0 + 1);
+        assert_eq!(world.minds.get(ME + 1).unwrap().duration, 23);
+        drained(&mut alpha);
+    }
+
+    /// `swing_hold`'s arithmetic: the clip's seconds times 25, truncated in `f32`;
+    /// a zero or missing duration holds 50 (`PASSES_PER_SEC(2)`).
+    #[test]
+    fn a_swings_hold_is_the_clips_seconds_times_25() {
+        assert_eq!(swing_hold(None), 50);
+        assert_eq!(swing_hold(Some(0.0)), 50);
+        assert_eq!(swing_hold(Some(0.933_333)), 23);
+        assert_eq!(swing_hold(Some(1.5)), 37);
+        assert_eq!(swing_hold(Some(3.6)), 90, "f32 3.6*25 is 90, f64 89");
+        assert_eq!(swing_hold(Some(4.333_333)), 108);
+    }
+
+    /// A swing holds Battle for the stood clip's seconds (the stray dog's
+    /// 0.933333 s is 23 Pulses); without a clip it holds 50.
+    #[test]
+    fn a_swing_holds_battle_for_its_clip() {
+        let (_clock, mut world, mut alpha) = a_fight(10_000, NEAR, true);
+        world.npc_mut(ME).unwrap().attack_bits = Some(0.933_333_f32.to_bits());
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        world.process_pulse(P0 + 1);
+        assert_eq!(world.minds.get(ME).unwrap().state, Fsm::Battle);
+        assert_eq!(world.minds.get(ME).unwrap().duration, 23);
+        let (_clock, mut world, mut alpha) = a_fight(10_000, NEAR, true);
+        assert_eq!(world.npc_by_vid(ME).unwrap().attack_s(), None);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        world.process_pulse(P0 + 1);
+        assert_eq!(world.minds.get(ME).unwrap().duration, 50);
     }
 
     /// A guard's Battle drops a stunned victim: both slots clear, the duration is 1

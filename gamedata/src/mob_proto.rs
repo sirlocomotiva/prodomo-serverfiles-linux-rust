@@ -179,10 +179,18 @@ pub const AIFLAG_BERSERK: u32 = 1 << 7;
 /// `AIFLAG_STONESKIN` (`common/length.h:696`): the bit `STONESKIN` sets.
 pub const AIFLAG_STONESKIN: u32 = 1 << 8;
 
+/// `AIFLAG_GODSPEED` (`common/length.h:697`): the bit `GODSPEED` sets. No reader yet;
+/// the constant closes the hole in the bit table.
+pub const AIFLAG_GODSPEED: u32 = 1 << 9;
+
 /// `AIFLAG_DEATHBLOW` (`common/length.h:698`, `G/char_battle.cpp:2286-2296`): the bit
 /// `DEATHBLOW` sets, which Battle draws when the monster has a death-blow point, rolling
 /// `number(1, 100) <= bDeathBlowPoint` and, on success, multiplying the damage by 4.
 pub const AIFLAG_DEATHBLOW: u32 = 1 << 10;
+
+/// `AIFLAG_REVIVE` (`common/length.h:699`, `G/char.cpp:8516`): the bit `REVIVE` sets,
+/// which the reviver search reads (`HasReviverInParty`).
+pub const AIFLAG_REVIVE: u32 = 1 << 11;
 
 /// `get_Mob_AIFlag_Value` (`ProtoReader.cpp:678-702`), bit by bit.
 pub const AI_FLAG: &[&str] = &[
@@ -820,6 +828,15 @@ mod tests {
             (AIFLAG_AGGRESSIVE, "AGGR"),
             (AIFLAG_NOMOVE, "NOMOVE"),
             (AIFLAG_COWARD, "COWARD"),
+            (AIFLAG_NOATTSHINSU, "NOATTSHINSU"),
+            (AIFLAG_NOATTCHUNJO, "NOATTCHUNJO"),
+            (AIFLAG_NOATTJINNO, "NOATTJINNO"),
+            (AIFLAG_ATTMOB, "ATTMOB"),
+            (AIFLAG_BERSERK, "BERSERK"),
+            (AIFLAG_STONESKIN, "STONESKIN"),
+            (AIFLAG_GODSPEED, "GODSPEED"),
+            (AIFLAG_DEATHBLOW, "DEATHBLOW"),
+            (AIFLAG_REVIVE, "REVIVE"),
         ] {
             assert_eq!(bit, 1 << index(AI_FLAG, name), "{name}");
         }

@@ -36,7 +36,7 @@ use crate::sync_position::{
 
 /// `AttackedByPoison`'s `info->count = 10`: the poison event's ticks
 /// (`G/char_resist.cpp:207`).
-const POISON_COUNT: u32 = 10;
+pub(super) const POISON_COUNT: u32 = 10;
 
 /// `AFF_STUN` (`G/affect.h:216`) as a word-0 bit: flag 7 is bit 6.
 const AFF_STUN_WORD: u32 = 1 << 6;
@@ -73,6 +73,7 @@ impl GameState {
         // the fly record before the damage.
         let armed = self.shot_type(mob);
         let shot = armed.is_some();
+        let mob_rate = self.mob_damage_rate();
         if shot {
             self.show_fly_target(mob, victim, target.at);
         }
@@ -108,6 +109,7 @@ impl GameState {
                     immune_flag: points.immune_flag(),
                 },
                 magic,
+                mob_rate,
             )
         } else {
             strike_pc(
@@ -119,6 +121,7 @@ impl GameState {
                     down,
                     immune_flag: points.immune_flag(),
                 },
+                mob_rate,
             )
         };
         self.show_mob_strike(mob, victim, &strike, shot);
@@ -333,6 +336,10 @@ impl GameState {
         if npc.stunned || npc.dead {
             return false;
         }
+        // `Attack`'s `CannotMoveByAffect` (`G/char_battle.cpp:225`): no swing under `AFF_STUN`.
+        if self.npc_affect_words(mob)[0] & AFF_STUN_WORD != 0 {
+            return false;
+        }
         if self.is_dead(victim.raw()) {
             return false;
         }
@@ -356,7 +363,10 @@ impl GameState {
 
     /// What the monster's swing showed: each effect around the player, then what
     /// `NormalAttackAffect` landed (`battle_hit` runs it before the damage), then the hit.
-    /// A shot shows a dodge on a `Blocked` end, where a swing shows a block.
+    /// A shot shows a dodge on a `Blocked` end, where a swing shows a block. A `Landed`
+    /// or `Down` hit reflects off the player's `POINT_REFLECT_MELEE` between the damage
+    /// packet and the hit-point change (`damage_pc_head`, the reflect, `damage_pc_tail`);
+    /// a `Blocked` hit never reflects (`Damage` returns before `:1979`).
     fn show_mob_strike(&mut self, mob: u32, victim: Vid, strike: &PcStrike, shot: bool) {
         let around = EntityKey::Character(victim.raw());
         for effect in &strike.effects {
@@ -377,12 +387,50 @@ impl GameState {
             PcHitEnd::Blocked if shot => self.send_pc_damage_info(victim, DAMAGE_DODGE, 0),
             PcHitEnd::Blocked => self.send_pc_damage_info(victim, super::fight::DAMAGE_BLOCK, 0),
             PcHitEnd::Down => {
+                self.reflect_mob_swing(mob, victim, strike.reflected_base);
                 let _hit = self.damage_pc(Some(attacker), victim, 0, None);
             }
             PcHitEnd::Landed { damage, flag } => {
-                let _hit = self.damage_pc(Some(attacker), victim, damage, Some(flag));
+                let head = self.damage_pc_head(Some(attacker), victim, damage, Some(flag), false);
+                match head {
+                    super::death::PcDamageHead::Open { hp, damage } => {
+                        self.reflect_mob_swing(mob, victim, strike.reflected_base);
+                        self.damage_pc_tail(Some(attacker), victim, hp, damage);
+                    }
+                    super::death::PcDamageHead::Gone
+                    | super::death::PcDamageHead::Died
+                    | super::death::PcDamageHead::Dead => {}
+                }
             }
         }
+    }
+
+    /// The reflect arm of the monster's swing (`G/char_battle.cpp:1979-1988`): the
+    /// player's `POINT_REFLECT_MELEE` share of the pre-bonus `base`, thirded when the
+    /// monster is immune to reflect, runs back at it as `DAMAGE_TYPE_SPECIAL`. `None`
+    /// (a shot or skill, never NORMAL) or a zero share reflects nothing — but a zero
+    /// `reflect_damage` still calls `Damage` in legacy, so the runner runs even at 0
+    /// (the chat draw, the checks, the shown 0). A negative share is fixture-only and
+    /// clamps at the hit-point change, as 229s clamps a negative skill hit.
+    fn reflect_mob_swing(&mut self, mob: u32, victim: Vid, base: Option<i32>) {
+        let Some(base) = base else {
+            return;
+        };
+        let Ok(character) = self.characters.find_by_vid(victim) else {
+            return;
+        };
+        let Some(points) = character.points() else {
+            return;
+        };
+        let reflect = points.get_point(point::POINT_REFLECT_MELEE);
+        if reflect == 0 {
+            return;
+        }
+        let immune = self
+            .npc_by_vid(mob)
+            .is_some_and(|npc| npc.immune_flag & world::character::IMMUNE_REFLECT != 0);
+        let damage = world::character::reflect_damage(reflect, immune, base);
+        self.reflect_on_npc(victim, mob, damage);
     }
 
     /// What `NormalAttackAffect` landed on the player `victim`: the poison, the stun and
@@ -755,6 +803,32 @@ mod tests {
             drained(&mut alpha).is_empty(),
             "no swing before the wait is over"
         );
+    }
+
+    /// An `AFF_STUN` attacker never swings (`:225`): the Battle update sends nothing, the
+    /// chat draw never runs, and the victim's hit points stay.
+    #[test]
+    fn a_flag_stunned_attacker_never_swings() {
+        use crate::game_state::affect::Affect;
+        let (_clock, mut world, mut alpha) = a_fight(10_000, NEAR, true);
+        world.dice = Pcg32::new(quiet_seed(), 0);
+        world.add_npc_affect(
+            ME,
+            Affect {
+                kind: AFFECT_STUN,
+                apply_on: 0,
+                value: 0,
+                flag: AFF_STUN,
+                remaining: STUN_TICKS,
+            },
+        );
+        drained(&mut alpha);
+        let expect = Pcg32::new(quiet_seed(), 0);
+        let hp = hp_of(&mut world);
+        assert!(!world.mob_attack(ME, Vid::new(1)));
+        assert_eq!(drained(&mut alpha), Vec::<Vec<u8>>::new(), "no swing");
+        assert_eq!(world.dice, expect, "no chat draw");
+        assert_eq!(hp_of(&mut world), hp, "untouched");
     }
 
     /// A monster on a BANPK cell cannot swing and waits 12 (G8).
@@ -1183,5 +1257,373 @@ mod tests {
             .get(&ME)
             .is_some_and(|combat| combat.no_reward));
         assert!(drained(&mut alpha).is_empty());
+    }
+
+    /// The tests' dice replay: the chat, the damage roll, the `<3` floor.
+    fn swing_draws(seed: u64) -> (i32, i32, i32) {
+        let mut dice = Pcg32::new(seed, 0);
+        let chat = number(&mut dice, 0, 60);
+        let roll = number(&mut dice, 0, 0);
+        let floor = number(&mut dice, 1, 5);
+        (chat, roll, floor)
+    }
+
+    /// The first seed whose swing chats nothing and floors at `floor`.
+    fn swing_seed(floor: i32) -> u64 {
+        (0..10_000u64)
+            .find(|&seed| {
+                let (chat, _, floored) = swing_draws(seed);
+                chat != 0 && floored == floor
+            })
+            .expect("a seed in 10,000")
+    }
+
+    /// The player's `POINT_REFLECT_MELEE`.
+    fn give_reflect(world: &mut GameState, amount: i32) {
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(1))
+            .unwrap()
+            .items_and_points_mut()
+            .1
+            .unwrap()
+            .point_change(point::POINT_REFLECT_MELEE, amount, false, false)
+            .expect("reflect is ported");
+    }
+
+    /// A NORMAL swing at a reflecting player runs back at the monster (G1): the
+    /// empire tenth of the full share, the damage map without the party share, and the
+    /// damage info only while the player targets it.
+    #[test]
+    fn a_swing_at_a_reflecting_player_runs_back_at_the_monster() {
+        let (clock, mut world, mut alpha) = a_fight(10_000, NEAR, true);
+        let _ = clock;
+        give_reflect(&mut world, 100);
+        world.target(Vid::new(1), ME);
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        drained(&mut alpha);
+        let seed = swing_seed(4);
+        world.dice = Pcg32::new(seed, 0);
+        let before = world.npc_by_vid(ME).unwrap().hp;
+        let row = world.npc_combat.get(&ME).unwrap().damage[&1].total;
+        world.process_pulse(P0 + 1);
+        let heard = drained(&mut alpha);
+        // The incoming info, the reflected info, the target bar's refresh, then the
+        // player's hit-point change: the reflect lands between the head and the tail
+        // (G6's order, pinned here too).
+        assert_eq!(
+            headers(&heard)[..4],
+            [
+                HEADER_GC_DAMAGE_INFO.value(),
+                HEADER_GC_DAMAGE_INFO.value(),
+                HEADER_GC_TARGET.value(),
+                HEADER_GC_PLAYER_POINT_CHANGE.value(),
+            ]
+        );
+        let incoming = GcDamageInfo::decode(&heard[0]).expect("the incoming info");
+        assert_eq!((incoming.vid, incoming.flag, incoming.damage), (1, 1, 4));
+        let reflected = GcDamageInfo::decode(&heard[1]).expect("the reflected info");
+        // The full share 4 takes the empire tenth (1 vs map 41's 3): 3.
+        assert_eq!(
+            (reflected.vid, reflected.flag, reflected.damage),
+            (ME, 1, 3)
+        );
+        assert_eq!(world.npc_by_vid(ME).unwrap().hp, before - 3);
+        assert_eq!(world.npc_combat.get(&ME).unwrap().damage[&1].total, row + 3);
+        let mut expect = Pcg32::new(seed, 0);
+        let _chat = number(&mut expect, 0, 60);
+        let _roll = number(&mut expect, 0, 0);
+        let _floor = number(&mut expect, 1, 5);
+        let _reflect_chat = number(&mut expect, 0, 60);
+        assert_eq!(world.dice, expect, "the swing plus the reflect's chat draw");
+    }
+
+    /// The reflected hit spreads no party share (G1): the follower's row is untouched.
+    #[test]
+    fn a_reflected_hit_spreads_no_party_share() {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let master = a_fighter(ME, 406, BATTLE_TYPE_MELEE, (175, 2000), 0, SPOT, 10_000);
+        let mut follower = a_fighter(
+            ME + 1,
+            406,
+            BATTLE_TYPE_MELEE,
+            (175, 2000),
+            0,
+            (3300, 3200),
+            10_000,
+        );
+        follower.leader = Some(ME);
+        let mut world = stand_field(&clock, vec![master, follower], open_cells(), true);
+        let mut alpha = enter(&mut world, 1, NEAR, 12_345);
+        world.start_pc_recovery(Vid::new(1));
+        world.process_pulse(P0);
+        drained(&mut alpha);
+        give_reflect(&mut world, 100);
+        hit(&mut world, 1, ME);
+        // The NORMAL hit shares half the grudge with the follower.
+        let shared = world.npc_combat.get(&(ME + 1)).unwrap().damage[&1].aggro;
+        assert!(shared > 0, "the NORMAL hit shares");
+        world.dice = Pcg32::new(swing_seed(4), 0);
+        world.process_pulse(P0 + 1);
+        drained(&mut alpha);
+        assert_eq!(
+            world.npc_combat.get(&(ME + 1)).unwrap().damage[&1].aggro,
+            shared,
+            "the SPECIAL reflect shares nothing"
+        );
+        assert_eq!(world.npc_combat.get(&(ME + 1)).unwrap().damage[&1].total, 0);
+    }
+
+    /// A reflected kill pays (G2): the monster stuns at 0 with the player as its killer,
+    /// and the stun event's `Dead` lays the gold.
+    #[test]
+    fn a_reflected_kill_pays_gold() {
+        use common::enums::EMobRank;
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut npc = a_fighter(ME, 406, BATTLE_TYPE_MELEE, (175, 2000), 0, SPOT, 1);
+        npc.fight.rank = EMobRank::King as u8;
+        npc.fight.gold_range = [100, 100];
+        npc.exp = 75;
+        npc.fight.level = 10;
+        let mut world = stand_field(&clock, vec![npc], open_cells(), true);
+        let mut alpha = enter(&mut world, 1, NEAR, 12_345);
+        world.start_pc_recovery(Vid::new(1));
+        world.process_pulse(P0);
+        drained(&mut alpha);
+        // No player hit: it would kill the 1-HP monster first. The fight begins bare.
+        give_reflect(&mut world, 100);
+        world.target(Vid::new(1), ME);
+        world.begin_fight(ME, Vid::new(1));
+        world.dice = Pcg32::new(swing_seed(4), 0);
+        world.process_pulse(P0 + 1);
+        drained(&mut alpha);
+        let stunned = world.npc_by_vid(ME).unwrap();
+        assert_eq!((stunned.hp, stunned.stunned), (0, true));
+        for pulse in P0 + 2..=P0 + 76 {
+            world.process_pulse(pulse);
+        }
+        let dead = drained(&mut alpha);
+        assert!(
+            dead.iter()
+                .any(|record| record[0] == HEADER_GC_DEAD.value()),
+            "GC_DEAD: {dead:02x?}"
+        );
+        assert!(!world.ground.is_empty(), "the kill laid gold");
+        assert_ne!(
+            world.targets.of(1),
+            Some(ME),
+            "Dead read the killer and cleared its target"
+        );
+    }
+
+    /// A blocked swing reflects nothing (G3): no hit points, no row, no chat draw.
+    #[test]
+    fn a_blocked_swing_reflects_nothing() {
+        let (_clock, mut world, mut alpha) = a_fight(10_000, NEAR, true);
+        give_reflect(&mut world, 100);
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(1))
+            .unwrap()
+            .items_and_points_mut()
+            .1
+            .unwrap()
+            .point_change(point::POINT_BLOCK, 100, false, false)
+            .expect("block is ported");
+        world.begin_fight(ME, Vid::new(1));
+        drained(&mut alpha);
+        let seed = swing_seed(4);
+        world.dice = Pcg32::new(seed, 0);
+        world.process_pulse(P0 + 1);
+        let heard = drained(&mut alpha);
+        assert_eq!(world.npc_by_vid(ME).unwrap().hp, 10_000);
+        assert!(world
+            .npc_combat
+            .get(&ME)
+            .is_none_or(|combat| !combat.damage.contains_key(&1)));
+        // The chat, the roll, the floor, the block: the reflect's chat never draws.
+        let mut expect = Pcg32::new(seed, 0);
+        let _chat = number(&mut expect, 0, 60);
+        let _roll = number(&mut expect, 0, 0);
+        let _floor = number(&mut expect, 1, 5);
+        let _block = number(&mut expect, 1, 100);
+        assert_eq!(world.dice, expect, "no reflect draw on a block");
+        assert_eq!(heard[0][0], HEADER_GC_DAMAGE_INFO.value());
+    }
+
+    /// A `Down` swing still reflects (G4): the monster takes the share, then the player
+    /// dies by `Dead`.
+    #[test]
+    fn a_down_swing_still_reflects_before_the_player_dies() {
+        let (_clock, mut world, mut alpha) = a_fight(10_000, NEAR, true);
+        give_reflect(&mut world, 100);
+        world.stun_pc(Vid::new(1));
+        world.begin_fight(ME, Vid::new(1));
+        drained(&mut alpha);
+        world.dice = Pcg32::new(swing_seed(4), 0);
+        world.process_pulse(P0 + 1);
+        drained(&mut alpha);
+        // The share 4 takes the tenth to 3, as in the `Landed` test.
+        assert_eq!(world.npc_by_vid(ME).unwrap().hp, 10_000 - 3);
+        assert!(
+            world.pc_combat.get(&1).is_some_and(|combat| combat.dead),
+            "the stunned player dies by Dead"
+        );
+    }
+
+    /// The head guard covers the shot too: an `AFF_STUN` RANGE monster never shoots.
+    #[test]
+    fn a_flag_stunned_range_monster_never_shoots() {
+        use crate::game_state::affect::Affect;
+        use gamedata::mob_proto::BATTLE_TYPE_RANGE;
+        use protocol::gc::HEADER_GC_FLY_TARGETING;
+        let clock = TestClock::default();
+        clock.set(T0);
+        let npc = a_fighter(ME, 406, BATTLE_TYPE_RANGE, (175, 2000), 0, SPOT, 10_000);
+        let mut world = stand_field(&clock, vec![npc], open_cells(), true);
+        let mut alpha = enter(&mut world, 1, NEAR, 12_345);
+        world.start_pc_recovery(Vid::new(1));
+        world.process_pulse(P0);
+        world.add_npc_affect(
+            ME,
+            Affect {
+                kind: AFFECT_STUN,
+                apply_on: 0,
+                value: 0,
+                flag: AFF_STUN,
+                remaining: STUN_TICKS,
+            },
+        );
+        drained(&mut alpha);
+        world.begin_fight(ME, Vid::new(1));
+        world.process_pulse(P0 + 1);
+        let heard = drained(&mut alpha);
+        assert!(
+            heard
+                .iter()
+                .all(|record| record.first() != Some(&HEADER_GC_FLY_TARGETING)),
+            "no shot: {heard:02x?}"
+        );
+    }
+
+    /// A shot at a reflecting player reflects nothing (G5): only NORMAL reflects.
+    #[test]
+    fn a_shot_at_a_reflecting_player_reflects_nothing() {
+        use gamedata::mob_proto::BATTLE_TYPE_RANGE;
+        let clock = TestClock::default();
+        clock.set(T0);
+        let npc = a_fighter(ME, 406, BATTLE_TYPE_RANGE, (175, 2000), 0, SPOT, 10_000);
+        let mut world = stand_field(&clock, vec![npc], open_cells(), true);
+        let mut alpha = enter(&mut world, 1, NEAR, 12_345);
+        world.start_pc_recovery(Vid::new(1));
+        world.process_pulse(P0);
+        drained(&mut alpha);
+        give_reflect(&mut world, 100);
+        world.begin_fight(ME, Vid::new(1));
+        world.dice = Pcg32::new(swing_seed(4), 0);
+        world.process_pulse(P0 + 1);
+        drained(&mut alpha);
+        assert_eq!(world.npc_by_vid(ME).unwrap().hp, 10_000);
+        assert!(world
+            .npc_combat
+            .get(&ME)
+            .is_none_or(|combat| !combat.damage.contains_key(&1)));
+    }
+
+    /// The immune third (G8): an `IMMUNE_REFLECT` monster takes a third of the share.
+    #[test]
+    fn an_immune_monster_takes_a_third_of_the_share() {
+        let (_clock, mut world, mut alpha) = a_fight(10_000, NEAR, true);
+        give_reflect(&mut world, 100);
+        world.npc_mut(ME).unwrap().immune_flag |= world::character::IMMUNE_REFLECT;
+        world.begin_fight(ME, Vid::new(1));
+        drained(&mut alpha);
+        world.dice = Pcg32::new(swing_seed(4), 0);
+        world.process_pulse(P0 + 1);
+        drained(&mut alpha);
+        // `int(4 / 3.0 + 0.5)` is 1; the tenth of 1 is 0 — the runner still runs.
+        assert_eq!(world.npc_by_vid(ME).unwrap().hp, 10_000);
+        assert!(world
+            .npc_combat
+            .get(&ME)
+            .is_none_or(|combat| !combat.damage.contains_key(&1)));
+    }
+
+    /// The damage rates read the quest flags live (G7): `user_dam` doubles the
+    /// player's swing, `mob_dam` doubles the monster's.
+    #[test]
+    fn the_quest_flags_scale_both_sides_damage() {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut fighter = a_fighter(ME, 406, BATTLE_TYPE_MELEE, (175, 2000), 0, SPOT, 10_000);
+        fighter.fight.damage_range = [30, 30];
+        fighter.fight.dam_multiply_bits = 1.0f32.to_bits();
+        let mut user_quests = quests();
+        user_quests.manager_mut().set_event_flag(b"user_dam", 200);
+        let mut mob_quests = quests();
+        mob_quests.manager_mut().set_event_flag(b"mob_dam", 200);
+        let plain = run_swings(&clock, fighter.clone(), None);
+        let user = run_swings(&clock, fighter.clone(), Some(user_quests));
+        let mob = run_swings(&clock, fighter.clone(), Some(mob_quests));
+        // The player's swing draws only the damage roll: weaponless, no crit or
+        // penetrate points, so `user_dam` multiplies the shown number exactly.
+        assert_eq!(user.0, plain.0 * 2, "user_dam doubles the player's hit");
+        assert_eq!(user.1, plain.1, "user_dam leaves the monster's swing");
+        assert_eq!(mob.0, plain.0, "mob_dam leaves the player's hit");
+        assert!(mob.1 > plain.1, "mob_dam grows the monster's swing");
+    }
+
+    /// The quest runtime over the legacy locale, for the flag tests.
+    fn quests() -> super::super::quests::Quests {
+        use gamedata::mob_locale_names::MobNamesByLanguage;
+        use quest::manager::Manager;
+        use std::sync::Arc;
+        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe");
+        let manager = Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
+        super::super::quests::Quests::new(manager, Arc::default(), MobNamesByLanguage::default())
+    }
+
+    /// The player's shown hit and the monster's shown swing on a fresh field with
+    /// `quests`: the player's hit starts the fight, the seed fixes the dice.
+    fn run_swings(
+        clock: &TestClock,
+        fighter: world::npc::Npc,
+        quests: Option<super::super::quests::Quests>,
+    ) -> (i32, i32) {
+        let mut world = stand_field(clock, vec![fighter], open_cells(), true);
+        if let Some(quests) = quests {
+            world = world.with_quests(quests);
+        }
+        let mut alpha = enter(&mut world, 1, NEAR, 12_345);
+        world.start_pc_recovery(Vid::new(1));
+        world.process_pulse(P0);
+        world.target(Vid::new(1), ME);
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        let struck = drained(&mut alpha);
+        let shown = GcDamageInfo::decode(
+            struck
+                .iter()
+                .find(|record| record[0] == HEADER_GC_DAMAGE_INFO.value())
+                .expect("the player's info"),
+        )
+        .expect("the player's damage")
+        .damage;
+        world.dice = Pcg32::new(swing_seed(4), 0);
+        world.process_pulse(P0 + 1);
+        let swung = drained(&mut alpha);
+        let back = GcDamageInfo::decode(
+            swung
+                .iter()
+                .find(|record| record[0] == HEADER_GC_DAMAGE_INFO.value())
+                .expect("the monster's info"),
+        )
+        .expect("the monster's damage")
+        .damage;
+        (shown, back)
     }
 }

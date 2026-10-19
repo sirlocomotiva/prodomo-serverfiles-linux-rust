@@ -312,7 +312,7 @@ const SUNGMA_SLOTS: [usize; 4] = [
 /// tree does not define, so neither is a slot here. Five attack bonuses are **not** in the
 /// list: `POINT_ATTBONUS_INSECT`, `_FIRE`, `_ICE`, `_DESERT` and `_TREE` fall to the
 /// unknown-type arm.
-const PLAIN: [usize; 119] = [
+const PLAIN: [usize; 120] = [
     point::POINT_ST,
     point::POINT_HT,
     point::POINT_DX,
@@ -353,6 +353,7 @@ const PLAIN: [usize; 119] = [
     point::POINT_CURSE_PCT,
     point::POINT_STEAL_HP,
     point::POINT_STEAL_SP,
+    point::POINT_STEAL_GOLD,
     point::POINT_MANA_BURN_PCT,
     point::POINT_DAMAGE_SP_RECOVER,
     point::POINT_RESIST_NORMAL_DAMAGE,
@@ -2632,7 +2633,7 @@ mod tests {
             assert_eq!(written.value, expected, "{kind}");
             assert_eq!(points.get_point(kind), start + 7);
         }
-        assert_eq!(PLAIN.len(), 119);
+        assert_eq!(PLAIN.len(), 120);
     }
 
     #[test]

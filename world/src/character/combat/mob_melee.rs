@@ -77,6 +77,10 @@ pub struct PcStrike {
     pub end: PcHitEnd,
     /// What `NormalAttackAffect` landed: the poison, the stun and the slow.
     pub affect: MobAttackAffect,
+    /// The pre-bonus damage `Damage` reflects a share of (`:1981-1983`):
+    /// `CalcMeleeDamage` through `attMul`, before block. `None` on the
+    /// paths that never reflect (shot, skill).
+    pub reflected_base: Option<i32>,
 }
 
 /// What `NormalAttackAffect` (`G/battle.cpp:734-758`) landed on the player: each arm
@@ -135,6 +139,29 @@ pub fn pc_hp_pct(points: &Points) -> i32 {
     }
 }
 
+/// `IMMUNE_REFLECT` (`G/length.h:721`): the attacker's immune bit that thirds a
+/// reflected hit.
+pub const IMMUNE_REFLECT: u32 = 1 << 6;
+
+/// The reflect arm of `Damage` (`G/char_battle.cpp:1980-1988`): the victim's
+/// `POINT_REFLECT_MELEE` share of the pre-bonus `damage`, thirded when the attacker
+/// is immune to reflect (`int(reflect / 3.0f + 0.5f)`: the float divide, the
+/// round-half-up, the truncating cast). 0 when the victim holds no reflect point.
+/// No hosted mob names `REFLECT` in its `IMMUNE_FLAG`, so the third never fires on
+/// a hosted row; it is live for fixtures.
+#[must_use]
+pub fn reflect_damage(reflect: i32, immune: bool, damage: i32) -> i32 {
+    if reflect == 0 {
+        return 0;
+    }
+    let reflected = damage.wrapping_mul(reflect) / 100;
+    if immune {
+        f32_to_i32(i32_to_f32(reflected) / 3.0 + 0.5)
+    } else {
+        reflected
+    }
+}
+
 /// The monster a guard swings at, as `Damage` reads it. The hit takes no hit points —
 /// the guard arm preempts the change — so the borrow is shared.
 #[derive(Debug, Clone, Copy)]
@@ -172,23 +199,34 @@ pub fn strike_npc_by_npc(
     Strike {
         events,
         struck: Struck::StunnedByGuard,
+        affect: super::melee::NpcAttackAffect::default(),
+        // A guard's swing stuns with no hit-point change and no steal arm.
+        stolen_gold: 0,
     }
 }
 
 /// `battle_hit` of a melee monster on a player, from `CalcMeleeDamage` through `Damage`'s
 /// flag: the damage roll, the `+0.5` of `attMul` 1.0, the block, critical and penetrate
 /// chances, the bonuses, the down check, the death blow, and the `+0.5` of `damMul` 1.0.
-pub fn strike_pc(dice: &mut dyn Dice, striker: MobStriker<'_>, victim: PcVictim<'_>) -> PcStrike {
+/// `mob_rate` is `GetMobDamageRate`, read by the caller.
+pub fn strike_pc(
+    dice: &mut dyn Dice,
+    striker: MobStriker<'_>,
+    victim: PcVictim<'_>,
+    mob_rate: i32,
+) -> PcStrike {
     let mut effects = Vec::new();
-    let damage = mob_melee_damage(dice, striker, victim.points);
+    let damage = mob_melee_damage(dice, striker, victim.points, mob_rate);
     let affect = mob_attack_affect(dice, striker.npc, &victim);
     // `iDam = attMul * (float)iDam + 0.5f`, with `attMul` 1.0, which multiplies exactly.
     let damage = f32_to_i32(i32_to_f32(damage) + 0.5);
+    let reflected_base = Some(damage);
     if pc_blocks(dice, victim.points) {
         return PcStrike {
             effects,
             end: PcHitEnd::Blocked,
             affect,
+            reflected_base,
         };
     }
     let (damage, flag) = pc_chances(dice, striker.npc, victim.points, damage, &mut effects);
@@ -198,6 +236,7 @@ pub fn strike_pc(dice: &mut dyn Dice, striker: MobStriker<'_>, victim: PcVictim<
             effects,
             end: PcHitEnd::Down,
             affect,
+            reflected_base,
         };
     }
     let damage = death_blow(dice, striker.npc, victim.points, damage);
@@ -207,6 +246,7 @@ pub fn strike_pc(dice: &mut dyn Dice, striker: MobStriker<'_>, victim: PcVictim<
         effects,
         end: PcHitEnd::Landed { damage, flag },
         affect,
+        reflected_base,
     }
 }
 /// `FuncSplashDamage`'s melee arm on a player (`G/char_skill.cpp:1485-1572`) and `Damage`'s
@@ -293,6 +333,7 @@ pub fn skill_damage_pc(
             effects,
             end: PcHitEnd::Down,
             affect: MobAttackAffect::default(),
+            reflected_base: None,
         };
     }
     let damage = death_blow(dice, mob, victim.points, damage);
@@ -304,6 +345,7 @@ pub fn skill_damage_pc(
             flag,
         },
         affect: MobAttackAffect::default(),
+        reflected_base: None,
     }
 }
 
@@ -316,9 +358,10 @@ pub fn shoot_pc(
     striker: MobStriker<'_>,
     victim: PcVictim<'_>,
     magic: bool,
+    mob_rate: i32,
 ) -> PcStrike {
     let mut effects = Vec::new();
-    let damage = mob_melee_damage(dice, striker, victim.points);
+    let damage = mob_melee_damage(dice, striker, victim.points, mob_rate);
     let affect = mob_attack_affect(dice, striker.npc, &victim);
     let resist = if magic {
         victim.points.get_point(point::POINT_RESIST_MAGIC)
@@ -345,6 +388,7 @@ pub fn shoot_pc(
             effects,
             end: PcHitEnd::Blocked,
             affect,
+            reflected_base: None,
         };
     }
     let (damage, flag) = pc_chances(dice, striker.npc, victim.points, damage, &mut effects);
@@ -452,6 +496,7 @@ fn finish_shot(
             effects,
             end: PcHitEnd::Down,
             affect,
+            reflected_base: None,
         };
     }
     let damage = death_blow(dice, mob, victim.points, damage);
@@ -461,13 +506,19 @@ fn finish_shot(
         effects,
         end: PcHitEnd::Landed { damage, flag },
         affect,
+        reflected_base: None,
     }
 }
 
 /// `CalcMeleeDamage` of a monster on a player, through `CalcBattleDamage`'s `<3` floor.
-fn mob_melee_damage(dice: &mut dyn Dice, striker: MobStriker<'_>, victim: &Points) -> i32 {
+fn mob_melee_damage(
+    dice: &mut dyn Dice,
+    striker: MobStriker<'_>,
+    victim: &Points,
+    mob_rate: i32,
+) -> i32 {
     let mob = striker.npc;
-    let attack = mob_calc_attack(dice, mob, Some(victim), striker.berserk, false);
+    let attack = mob_calc_attack(dice, mob, Some(victim), striker.berserk, false, mob_rate);
     let defence = victim
         .get_point(point::POINT_DEF_GRADE)
         .wrapping_mul(100_i32.wrapping_add(victim.get_point(point::POINT_DEF_BONUS)))
@@ -486,7 +537,8 @@ fn mob_melee_damage(dice: &mut dyn Dice, striker: MobStriker<'_>, victim: &Point
 /// the self the same way). A monster draws no weapon roll and keeps no weapon; its
 /// stone/berserk (`StoneSkinPoint`, the `ATTBONUS` halves of `Damage`) and its marriage
 /// bonuses are 0, so those arms are identities. Berserk doubles the multiply
-/// (`G/char.cpp:2605-2612`).
+/// (`G/char.cpp:2605-2612`). `mob_rate` is `GetMobDamageRate` (`:311-318`), read by the
+/// caller: it applies to a player victim only, never to the pre-check's self.
 #[must_use]
 pub fn mob_calc_attack(
     dice: &mut dyn Dice,
@@ -494,6 +546,7 @@ pub fn mob_calc_attack(
     victim: Option<&Points>,
     berserk: bool,
     ignore_target_rating: bool,
+    mob_rate: i32,
 ) -> i32 {
     let rating = attack_rating(AttackRatingInput {
         attacker_dexterity: mob.fight.point(point::POINT_DX),
@@ -527,7 +580,7 @@ pub fn mob_calc_attack(
         )
         .wrapping_div(100);
     let attack = match victim {
-        Some(victim) => mob_att_bonus(attack, mob, victim),
+        Some(victim) => mob_att_bonus(attack, mob, victim, mob_rate),
         None => mob_att_bonus_self(attack, mob),
     };
     let multiply = mob.fight.dam_multiply();
@@ -536,10 +589,10 @@ pub fn mob_calc_attack(
 }
 
 /// `CalcAttBonus` of a monster on itself (`G/battle.cpp:299-319`, `:321-369`): the
-/// marriage attack bonus (0, no marriage ported), the marriage transfer (0) and the mob
-/// damage rate (100, no `mob_dam` flag ported) are identities — `BONUS_PTC` is a typo
-/// legacy never defines, so the rate is a plain `int`; then the NPC-victim `:321-369`
-/// arms — the race-flag shares, the `ENCHANT_*` shares, the `ATTBONUS_MONSTER_PCT` arm
+/// marriage attack bonus (0, no marriage ported) and the marriage transfer (0) are
+/// identities, and the mob damage rate never applies to a non-player victim (`:311`:
+/// `pkAttacker->IsNPC() && pkVictim->IsPC()`); then the NPC-victim `:321-369` arms —
+/// the race-flag shares, the `ENCHANT_*` shares, the `ATTBONUS_MONSTER_PCT` arm
 /// (`BONUS_PCT` is defined) in `melee.rs`'s rounding, and the metin/boss share — and the
 /// B27 element arm on the caster's own resists.
 #[must_use]
@@ -565,8 +618,8 @@ pub fn mob_att_bonus_self(attack: i32, mob: &Npc) -> i32 {
         (1 << 15, point::POINT_ENCHANT_EARTH),
         (1 << 16, point::POINT_ENCHANT_DARK),
     ];
-    // `GetMarriageBonus(ATTACK_BONUS)`: 0. `GetMobDamageRate`: 100, `BONUS_PTC` undefined.
-    let attack = attack.wrapping_mul(100) / 100;
+    // `GetMarriageBonus(ATTACK_BONUS)`: 0. The mob damage rate never applies to a
+    // non-player victim (`:311`), so no rate multiplies here.
     let race = mob.race_flag;
     let mut attack = attack;
     for (bit, slot) in SHARES {
@@ -621,15 +674,15 @@ pub fn mob_att_bonus_self(attack: i32, mob: &Npc) -> i32 {
 }
 
 /// `CalcAttBonus` for a non-player attacker and a player victim (`G/battle.cpp:299-319`,
-/// `:371-393`, `:417-441`): the marriage transfer (0, no marriage ported) and the mob
-/// damage rate (100, no `mob_dam` flag ported) are identities — `BONUS_PTC` is a typo
-/// legacy never defines, so the rate is a plain `int`; then the attacker's
-/// `ATTBONUS_HUMAN` and job share (`:371-393`), and the B27 element arm. The attacker's
-/// own race cuts nothing for a non-player (`:395-415` is a player attacker only).
-fn mob_att_bonus(attack: i32, mob: &Npc, victim: &Points) -> i32 {
-    // `GetMarriageBonus(TRANSFER_DAMAGE)` and `GetMobDamageRate` are 0 and 100: no marriage
-    // and no `mob_dam` event flag are ported; `BONUS_PTC` is undefined either way.
-    let attack = attack.wrapping_mul(100) / 100;
+/// `:371-393`, `:417-441`): the marriage transfer (0, no marriage ported) is an identity
+/// and `mob_rate` is `GetMobDamageRate` (`:311-318`), 100 while no quest set `mob_dam` —
+/// `BONUS_PTC` is a typo legacy never defines, so the rate is a plain `int`; then the
+/// attacker's `ATTBONUS_HUMAN` and job share (`:371-393`), and the B27 element arm. The
+/// attacker's own race cuts nothing for a non-player (`:395-415` is a player attacker
+/// only).
+fn mob_att_bonus(attack: i32, mob: &Npc, victim: &Points, mob_rate: i32) -> i32 {
+    // `GetMarriageBonus(TRANSFER_DAMAGE)`: 0, no marriage ported.
+    let attack = attack.wrapping_mul(mob_rate) / 100;
     let share = |attack: i32, slot: usize| attack.wrapping_mul(mob.fight.point(slot)) / 100;
     let attack = attack.wrapping_add(share(attack, point::POINT_ATTBONUS_HUMAN));
     let job_slots = [
@@ -1177,6 +1230,30 @@ mod tests {
                 immune_flag: 0,
             },
             magic,
+            100,
+        )
+    }
+
+    fn hit_with(
+        dice: &mut Script,
+        mob: &Npc,
+        points: &Points,
+        down: bool,
+        mob_rate: i32,
+    ) -> PcStrike {
+        strike_pc(
+            dice,
+            MobStriker {
+                npc: mob,
+                berserk: false,
+            },
+            PcVictim {
+                points,
+                affect_flags: [0; 2],
+                down,
+                immune_flag: 0,
+            },
+            mob_rate,
         )
     }
 
@@ -1193,6 +1270,7 @@ mod tests {
                 down,
                 immune_flag: 0,
             },
+            100,
         )
     }
 
@@ -1248,6 +1326,7 @@ mod tests {
                 down: false,
                 immune_flag: 0,
             },
+            100,
         );
         let mut dice = Script::new(&[0]);
         let berserk = strike_pc(
@@ -1262,6 +1341,7 @@ mod tests {
                 down: false,
                 immune_flag: 0,
             },
+            100,
         );
         // Roll 59: calm `(int)(193 * 1.0) - 168 = 25`; berserk `(int)(193 * 2.0) - 168`.
         assert_eq!(
@@ -1715,6 +1795,7 @@ mod tests {
                 down: false,
                 immune_flag: 0,
             },
+            100,
         );
         assert!(dice.0.is_empty());
         assert!(matches!(strike.end, PcHitEnd::Landed { flag: 1, .. }));
@@ -1939,6 +2020,7 @@ mod tests {
                 down: false,
                 immune_flag: 0,
             },
+            100,
         );
         assert!(dice.0.is_empty());
         assert!(!strike.affect.stunned);
@@ -1967,6 +2049,7 @@ mod tests {
                 down: false,
                 immune_flag: crate::character::IMMUNE_STUN | crate::character::IMMUNE_SLOW,
             },
+            100,
         );
         assert!(dice.0.is_empty());
         assert!(!strike.affect.stunned);
@@ -1993,6 +2076,7 @@ mod tests {
                 down: false,
                 immune_flag: u32::MAX,
             },
+            100,
         );
         assert!(dice.0.is_empty());
         assert!(!strike.affect.stunned);
@@ -2026,6 +2110,7 @@ mod tests {
                 down: false,
                 immune_flag: 0,
             },
+            100,
         );
         assert!(!strike.affect.stunned);
         assert_eq!(dice.0.len(), 1, "the stun draw was never taken");
@@ -2051,6 +2136,7 @@ mod tests {
                 down: false,
                 immune_flag: crate::character::IMMUNE_STUN,
             },
+            100,
         );
         assert!(dice.0.is_empty());
         assert!(!strike.affect.stunned);
@@ -2079,6 +2165,7 @@ mod tests {
                     down: false,
                     immune_flag: 0,
                 },
+                100,
             );
             (strike.affect.poisoned, dice.0.is_empty())
         };
@@ -2170,5 +2257,94 @@ mod tests {
         );
         assert_eq!(strike.struck, crate::character::Struck::StunnedByGuard);
         assert_eq!(victim.hp, 1000);
+    }
+
+    #[test]
+    fn reflect_damage_shares_the_pre_bonus_hit_and_thirds_when_immune() {
+        assert_eq!(reflect_damage(0, false, 1000), 0);
+        assert_eq!(reflect_damage(10, false, 1000), 100);
+        // A small base rounds down to nothing: the runner still runs.
+        assert_eq!(reflect_damage(6, false, 1), 0);
+        // `int(reflect / 3.0f + 0.5f)`: 99 thirds to 33, 100 to 33, 101 to 34.
+        assert_eq!(reflect_damage(99, true, 100), 33);
+        assert_eq!(reflect_damage(100, true, 100), 33);
+        assert_eq!(reflect_damage(101, true, 100), 34);
+        assert_eq!(reflect_damage(10, true, 1000), 33);
+        assert_eq!(IMMUNE_REFLECT, 1 << 6);
+    }
+
+    #[test]
+    fn a_mob_swing_reports_its_pre_bonus_damage_for_the_reflect() {
+        let proto = wind_proto();
+        let mob = monster(&proto, 1 << 3, 0);
+        let points = alpha();
+        // Draw 0: `number(59, 110)` rolls 59, doubled to 118; the grade 140 less
+        // the doubled level 70 is 188; the rating 0.6563... takes it to 193; no
+        // party, percent, HUMAN, job or element share moves it; less the defence
+        // 168 is 25, and `attMul` rounds it to 25.
+        let mut dice = Script::new(&[0]);
+        let strike = hit(&mut dice, &mob, &points, false);
+        assert!(dice.0.is_empty());
+        assert_eq!(strike.reflected_base, Some(25));
+        assert_eq!(
+            strike.end,
+            PcHitEnd::Landed {
+                damage: 25,
+                flag: 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_mob_rate_of_200_doubles_the_pre_bonus_damage() {
+        let proto = wind_proto();
+        let mob = monster(&proto, 1 << 3, 0);
+        let points = alpha();
+        let mut dice = Script::new(&[0]);
+        let strike = hit_with(&mut dice, &mob, &points, false, 200);
+        assert!(dice.0.is_empty());
+        // The rate multiplies the attack 193 to 386 before the defence: 386 - 168
+        // is 218, and `attMul` rounds it to 218.
+        assert_eq!(strike.reflected_base, Some(218));
+    }
+
+    #[test]
+    fn a_blocked_or_down_swing_still_reports_its_pre_bonus_damage() {
+        let proto = wind_proto();
+        let mob = monster(&proto, 1 << 3, 0);
+        let mut points = alpha();
+        points.set_point(point::POINT_BLOCK, 100);
+        // The damage roll, then the block draw (raw 0 gives 1, held).
+        let mut dice = Script::new(&[0, 0]);
+        let strike = hit(&mut dice, &mob, &points, false);
+        assert!(dice.0.is_empty());
+        assert_eq!(strike.end, PcHitEnd::Blocked);
+        assert_eq!(strike.reflected_base, Some(25));
+        let points = alpha();
+        let mut dice = Script::new(&[0]);
+        let strike = hit(&mut dice, &mob, &points, true);
+        assert!(dice.0.is_empty());
+        assert_eq!(strike.end, PcHitEnd::Down);
+        assert_eq!(strike.reflected_base, Some(25));
+    }
+
+    #[test]
+    fn a_shot_or_skill_reports_no_pre_bonus_damage() {
+        let proto = wind_proto();
+        let mob = monster(&proto, 1 << 3, 0);
+        let points = alpha();
+        let mut dice = Script::new(&[0]);
+        let strike = shot(&mut dice, &mob, &points, false, false);
+        assert!(dice.0.is_empty());
+        assert_eq!(strike.reflected_base, None);
+        let victim = PcVictim {
+            points: &points,
+            affect_flags: [0; 2],
+            down: false,
+            immune_flag: 0,
+        };
+        let mut dice = Script::new(&[]);
+        let strike = skill_damage_pc(&mut dice, &mob, &victim, 200, false);
+        assert_eq!(strike.reflected_base, None);
     }
 }

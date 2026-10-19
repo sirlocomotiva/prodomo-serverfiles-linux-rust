@@ -33,12 +33,15 @@ pub use apply::{
     APPLY_MAX_SP_PCT, APPLY_NONE, APPLY_SKILL, MAX_APPLY_NUM,
 };
 pub use combat::{
-    attack_rating, battle_damage_floor, calc_melee_damage, melee_reach, mob_att_bonus_self,
-    mob_attack_range, mob_calc_attack, mob_reach, pc_hp_pct, pc_poison_rate, pk_eligibility,
-    shoot_pc, skill_damage_pc, strike_npc, strike_npc_by_npc, strike_pc, AttackRatingInput,
-    HitEvent, MobAttackAffect, MobStriker, NpcVictim, PcHitEnd, PcStrike, PcVictim, PkActor,
-    PkDenial, PkEligibility, PkMode, Strike, Striker, Struck, DAMAGE_CRITICAL, DAMAGE_DODGE,
-    DAMAGE_NORMAL, DAMAGE_PENETRATE, DAMAGE_POISON, FLY_EXP, FLY_HP_SMALL, FLY_SP_SMALL,
+    attack_rating, battle_damage_floor, calc_arrow_damage, calc_arrow_skill_atk, calc_melee_damage,
+    calc_melee_skill_atk, damage_magic, damage_melee, damage_normal_range, damage_range,
+    damage_special, melee_reach, mob_att_bonus_self, mob_attack_range, mob_calc_attack, mob_reach,
+    normal_attack_affect, pc_hp_pct, pc_poison_rate, pk_eligibility, reflect_damage, shoot_pc,
+    skill_damage_pc, skill_magic_attr, skill_melee_attr, skill_range_attr, strike_npc,
+    strike_npc_by_npc, strike_pc, AttackRatingInput, HitEvent, MobAttackAffect, MobStriker,
+    NpcAttackAffect, NpcVictim, PcHitEnd, PcStrike, PcVictim, PkActor, PkDenial, PkEligibility,
+    PkMode, Strike, Striker, Struck, DAMAGE_CRITICAL, DAMAGE_DODGE, DAMAGE_NORMAL,
+    DAMAGE_PENETRATE, DAMAGE_POISON, FLY_EXP, FLY_HP_SMALL, FLY_SP_SMALL, IMMUNE_REFLECT,
     SE_CRITICAL, SE_EFFECT_HEALER, SE_PENETRATE,
 };
 pub use death_penalty::{death_penalty_loss, exp_loss_percent};

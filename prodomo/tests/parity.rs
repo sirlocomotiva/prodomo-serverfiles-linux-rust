@@ -10603,11 +10603,13 @@ fn a_kill_pays_the_killer_the_monsters_exp_with_an_exp_orb() {
 }
 
 /// Ledger 229j: what waits for the skills is consumed, and an attack on what is no monster is
-/// refused, each keeping the connection. `CG_SHOOT`, `CG_FLY_TARGETING`,
-/// `CG_ADD_FLY_TARGETING` and `CG_USE_SKILL` do nothing (V17f; legacy's relay of a fly target
-/// skips its sender, `G/char_battle.cpp:3342-3371`); a `CG_ATTACK` of a skill's type, on the
-/// shopkeeper 100 east, on Alpha itself and on a VID that names nothing does nothing
-/// (`G/input_main.cpp:1966-2009`, `G/battle.cpp:99-152`). The dog is still whole after.
+/// refused, each keeping the connection. `CG_SHOOT`, `CG_FLY_TARGETING` and
+/// `CG_ADD_FLY_TARGETING` do nothing (V17f; legacy's relay of a fly target
+/// skips its sender, `G/char_battle.cpp:3342-3371`); a `CG_USE_SKILL` of an unlearned
+/// skill and a `CG_ATTACK` of a skill's type, on the shopkeeper 100 east, on Alpha
+/// itself and on a VID that names nothing do nothing (`G/input_main.cpp:1966-2009`,
+/// `G/battle.cpp:99-152`, `G/char_skill.cpp:2896-3135` — the store starts every level
+/// at 0). The dog is still whole after.
 #[test]
 fn skill_shoot_and_fly_frames_and_refused_victims_keep_the_connection() {
     let Some(database) = ScratchDatabase::create() else {

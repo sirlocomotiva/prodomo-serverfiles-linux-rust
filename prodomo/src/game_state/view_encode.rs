@@ -199,6 +199,7 @@ pub(super) fn encode_npc_insert(
     npc: &world::npc::Npc,
     mind: Option<&Mind>,
     now: u32,
+    words: [u32; 2],
 ) -> Vec<Vec<u8>> {
     let at = InsertAt {
         angle: mind.map_or(f32::from(npc.rotation), |mind| mind.rotation),
@@ -207,7 +208,7 @@ pub(super) fn encode_npc_insert(
         z: npc.z,
     };
     let (at, i_dur) = mind.map_or((at, 0), |mind| mid_move(at, mind.motion, now));
-    let mut records = vec![framed(|out| npc_add_at(npc, at).encode_into(out))];
+    let mut records = vec![framed(|out| npc_add_at(npc, at, words).encode_into(out))];
     if let Some(additional) = npc_additional(npc) {
         records.push(framed(|out| additional.encode_into(out)));
     }
@@ -320,7 +321,8 @@ impl GameState {
                     return;
                 };
                 let mind = self.minds.get(npc.vid);
-                for record in encode_npc_insert(npc, mind, self.clock.now()) {
+                let words = self.npc_affect_words(npc.vid);
+                for record in encode_npc_insert(npc, mind, self.clock.now(), words) {
                     self.send_to(to, record, reply);
                 }
             }

@@ -38,10 +38,11 @@
 //!   and race 5001 are refused with nothing sent until their systems are ported.
 //! - **The fight's other halves (V17b-h, V19).** A hit melee monster runs `BeginFight`
 //!   after the claim ([`super::mob_battle`]), and the aggro steers its fight (229r); a RANGE or
-//!   MAGIC monster's fight waits for later work. `Dead` pays no reward; `NormalAttackAffect` and
-//!   the gold steal draw but change nothing; skills and the shoot and fly frames are
-//!   consumed; the attacker's victim is not kept; no party revives the monster, and a hit
-//!   or stunned member tells its party to begin ([`super::mob_party`]).
+//!   MAGIC monster's fight waits for later work. `Dead` pays no reward; skills and the shoot
+//!   and fly frames are consumed; the attacker's victim is not kept; a dead monster with a
+//!   living reviver in its party stands back up, and a hit or stunned member tells its party
+//!   to begin ([`super::mob_party`]). `NormalAttackAffect` lands on the victim (229z) and
+//!   the gold steal pays the purse (230a).
 //! - **The order of one Pulse's events (V16).** The stun, dead and recovery events ride the
 //!   regen schedule ([`super::regen`]).
 //! - **The owners a leaving player releases** go in VID order (V1); legacy walks its list in the
@@ -58,22 +59,31 @@ use std::time::Duration;
 
 use common::cfloat::{f32_to_i32, i32_to_f32};
 use common::enums::EWearPositions;
+use common::point_slot as point;
 use common::vid::Vid;
-use gamedata::mob_proto::{AIFLAG_NOMOVE, CHAR_TYPE_MONSTER};
+use gamedata::mob_proto::{AIFLAG_AGGRESSIVE, AIFLAG_NOMOVE, CHAR_TYPE_MONSTER, CHAR_TYPE_STONE};
 use protocol::cg_attack::CgAttack;
+use protocol::gc_actors::GcCharacterGoldChange;
 use protocol::gc_fields::GcCreateFly;
 use protocol::gc_inventory::{HEADER_GC_DEAD, HEADER_GC_STUN};
 use protocol::gc_nested::GcDamageInfo;
 use protocol::gc_vid::{GcHeaderAndDword, GcSpecialEffect};
-use world::character::{melee_reach, strike_npc, Equipment, HitEvent, Strike, Striker, Struck};
+use world::character::{
+    damage_special, melee_reach, strike_npc, Equipment, HitEvent, NpcAttackAffect, Strike, Striker,
+    Struck, DAMAGE_NORMAL, DAMAGE_POISON, GOLD_MAX_MAX,
+};
 use world::npc::Npc;
 
+use super::affect::Affect;
 use super::motion::rotation_to_xy;
 use super::regen::{pulses, Due};
 use super::view::EntityKey;
 use super::GameState;
-use crate::game_loop_messages::GameCommand;
-use crate::loading_phase::point_changes;
+use crate::game_loop_messages::{AttackAnswer, GameCommand};
+use crate::loading_phase::{
+    point_changes, AFFECT_POISON, AFFECT_SLOW, AFFECT_STUN, AFF_POISON, AFF_SLOW, AFF_STUN,
+    POISON_DAMAGE_RATE, POISON_TICKS, SLOW_MOV_SPEED, SLOW_TICKS, STUN_TICKS_NPC,
+};
 use crate::sync_position::{
     distance_approx, judge_sync_ownership, ownership_record, SyncOwnershipOutcome,
     SyncOwnershipState, SyncPositionVictim, SyncPositionVictimKind,
@@ -85,15 +95,21 @@ pub(super) const DAMAGE_BLOCK: u8 = 1 << 3;
 /// `PASSES_PER_SEC(3)`: the stun before `Dead` (`G/char_battle.cpp:458`), a player's too.
 pub(super) const STUN_SECONDS: u32 = 3;
 
-/// `PASSES_PER_SEC(1)`: a dead monster no party revives waits this long to go (`:1607`).
+/// `PASSES_PER_SEC(1)`: a dead monster with no reviver waits this long to go (`:1607`).
 const DEAD_SECONDS: u32 = 1;
+
+/// `PASSES_PER_SEC(3)`: the wait when a living reviver stands in its party (`:1601`).
+const REVIVE_DEAD_SECONDS: u32 = 3;
 
 /// The race whose hit drops gold (`G/char_battle.cpp:1776-1832`), refused until gold is ported.
 /// `pub(super)` for the guard's search, which skips it too.
 pub(super) const GOLD_RACE: u32 = 5001;
 
 /// `AFF_STUN` (`G/affect.h:216`) as a word-0 bit: flag 7 is bit 6.
-const AFF_STUN_WORD: u32 = 1 << 6;
+pub(super) const AFF_STUN_WORD: u32 = 1 << 6;
+
+/// `AFF_POISON` (`G/affect.h:214`) as a word-0 bit: flag 5 is bit 4.
+const AFF_POISON_WORD: u32 = 1 << 4;
 
 /// `IsFakeHydra` (`G/ShipDefense.cpp:1914-1923`): `HYDRA_LEFT` and `HYDRA_RIGHT`, which
 /// `battle_is_attackable` refuses to every player.
@@ -119,7 +135,8 @@ pub(super) struct NpcDamage {
 }
 /// The `EDamageType` arms `UpdateAggrPointEx` multiplies (`G/char_battle.cpp:3791-3808`).
 /// Only `Normal` reaches them yet (melee hits and the chase tick); the rest are built by
-/// the tests, and their callers wait for skills and bows.
+/// the tests, and their callers wait for skills and bows. `DAMAGE_TYPE_MELEE` has no arm
+/// in the switch, so it feeds ×1 with a party share, like `Normal`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(super) enum AggroDamage {
@@ -133,6 +150,9 @@ pub(super) enum AggroDamage {
     Magic,
     /// `DAMAGE_TYPE_SPECIAL`: ×1, and it spreads no party share (the arm's own type).
     Special,
+    /// `DAMAGE_TYPE_MELEE`: no switch arm, so ×1, and the party share spreads (the only
+    /// kind excluded is `SPECIAL`, `:3818-3820`).
+    Melee,
 }
 
 /// What legacy's `CHARACTER` keeps of a non-player's fight beyond its [`Npc`]. The default
@@ -145,6 +165,12 @@ pub(super) struct NpcCombat {
     /// `INSTANT_FLAG_NO_REWARD`, which a guard's swing sets before the stun: `Dead`
     /// skips the whole `Reward` past it (`G/char_battle.cpp:1475`, `:2221`).
     pub(super) no_reward: bool,
+    /// `CMobInstance::m_IsRevive` (`G/mob_manager.cpp:40`): set by the stand-up, read by the
+    /// dead wait and `dead_event`. False at creation.
+    pub(super) revived: bool,
+    /// `GetMaxSP` of a stone: `__StateIdle_Stone`'s ladder floor (`G/char_state.cpp:404-494`).
+    /// 0 at creation, as `ComputePoints` sets no SP for a non-player. Unread on monsters.
+    pub(super) max_sp: i32,
     /// `m_map_kDamage` (`G/char.h:1441`): each attacker VID's damage and aggro, in VID order.
     pub(super) damage: std::collections::BTreeMap<u32, NpcDamage>,
     /// `m_iMaxAggro` (`G/char.cpp:362`): -100 at creation.
@@ -172,6 +198,18 @@ pub(super) struct NpcCombat {
     dead_due: Option<u64>,
     /// The Pulse `m_pkRecoveryEvent` is due on.
     recovery_due: Option<u64>,
+    /// `m_pkPoisonEvent`: the Pulse the poison tick is due on and the ticks it has left.
+    pub(super) poison_due: Option<(u64, u32)>,
+    /// `m_bHasPoisoned`: a monster is poisoned once per life (`G/char_resist.cpp:183`).
+    pub(super) poisoned_once: bool,
+    /// The `poison_event`'s attacker PID: the player's VID, which `FindByPID` maps while
+    /// the player is online (`G/char_resist.cpp:44`). `None` while no event runs.
+    pub(super) poison_attacker: Option<u32>,
+    /// `m_pkFireEvent`: the Pulse the fire tick is due on, the ticks it has left, and the
+    /// per-tick amount (`G/char_resist.cpp:95-128`). `None` while no event runs.
+    pub(super) fire_due: Option<(u64, u32, i32)>,
+    /// The `fire_event`'s attacker PID (`G/char_resist.cpp:173`). `None` while no event runs.
+    pub(super) fire_attacker: Option<u32>,
     /// `m_adwMobSkillCooltime[i]` (`G/char.cpp:384`): the ms a slot's skill may next
     /// cast at; 0 at creation, so the first Battle update may cast.
     pub(super) skill_cool_ms: [u32; 5],
@@ -204,6 +242,8 @@ impl NpcCombat {
         Self {
             killer_pid: 0,
             no_reward: false,
+            revived: false,
+            max_sp: 0,
             damage: std::collections::BTreeMap::new(),
             max_aggro: -100,
             last_victim_set_ms: None,
@@ -218,6 +258,11 @@ impl NpcCombat {
             stun_due: None,
             dead_due: None,
             recovery_due: None,
+            poison_due: None,
+            poisoned_once: false,
+            poison_attacker: None,
+            fire_due: None,
+            fire_attacker: None,
             skill_cool_ms: [0; 5],
             skill_events: std::collections::BTreeMap::new(),
             chain: 0,
@@ -231,9 +276,11 @@ impl Default for NpcCombat {
         Self::created(0, (0, 0))
     }
 }
-/// Whether a player's hit reaches `npc`: a monster but race 5001 (V17a).
-fn is_struck(npc: &Npc) -> bool {
-    npc.char_type == CHAR_TYPE_MONSTER && npc.vnum != GOLD_RACE
+/// Whether a player's hit reaches `npc`: a monster or a stone, but not race 5001 (V17a
+/// narrows: a stone is hit, and only the empire arm refuses it).
+pub(super) fn is_struck(npc: &Npc) -> bool {
+    (npc.char_type == CHAR_TYPE_MONSTER || npc.char_type == CHAR_TYPE_STONE)
+        && npc.vnum != GOLD_RACE
 }
 
 /// A record of a header and a VID, as `GC_STUN` and `GC_DEAD` are.
@@ -249,8 +296,9 @@ fn recovery_pulses(npc: &Npc) -> u64 {
 }
 
 impl GameState {
-    /// Runs one `Target` or `Attack` command; its `settled` is dropped once its records are
-    /// queued.
+    /// Runs one `Target`, `UseSkill` or `Attack` command: a target's `settled` is dropped
+    /// once its records are queued; a cast's `settled` once the cast has run; an attack
+    /// answers the gold it stole.
     pub(super) fn apply_pick(&mut self, command: GameCommand) {
         match command {
             GameCommand::Target {
@@ -261,45 +309,56 @@ impl GameState {
                 self.target(vid, target);
                 drop(settled);
             }
-            GameCommand::Attack {
+            GameCommand::UseSkill {
                 vid,
                 record,
                 settled,
             } => {
-                self.attack(vid, record);
+                self.use_skill(vid, record.skill_vnum, record.target_vid);
                 drop(settled);
             }
-            _ => debug_assert!(false, "only target and attack commands reach apply_pick"),
+            GameCommand::Attack { vid, record, reply } => {
+                let answer = self.attack(vid, record);
+                let _heard = reply.send(answer);
+            }
+            _ => debug_assert!(
+                false,
+                "only target, skill and attack commands reach apply_pick"
+            ),
         }
     }
 
     /// `CInputMain::Attack` of the player under `vid` (`G/input_main.cpp:1918-2008`) and its
-    /// `CHARACTER::Attack` with type 0 (`G/char_battle.cpp:220-328`). `CanMove` fails on the
-    /// stun affect only (no shop is ported); no castle map is hosted, and the speed-hack
+    /// `CHARACTER::Attack` (`G/char_battle.cpp:220-328`): type 0 swings the weapon (the
+    /// stun, reach and attackable gates below); a type above 0 runs the skill cast
+    /// (`CanUseSkill`, the shoot-list refusal, the hit count, the term gate, and the
+    /// MELEE damage arm — see `game_state::pc_skill`). `CanMove` fails on the stun
+    /// affect only (no shop is ported); no castle map is hosted, and the speed-hack
     /// and combo gates read keys no configuration sets. A refused attack sends nothing, as
-    /// `CInputMain::Attack` ignores `Attack`'s answer (`:2004`).
-    pub(super) fn attack(&mut self, vid: Vid, record: CgAttack) {
+    /// `CInputMain::Attack` ignores `Attack`'s answer (`:2004`), and steals no gold.
+    pub(super) fn attack(&mut self, vid: Vid, record: CgAttack) -> AttackAnswer {
         // `!CanMove()` (`:226`): a stunned player refuses its own attack.
         if self.affect_flags_of(vid)[0] & AFF_STUN_WORD != 0 {
-            return;
+            return AttackAnswer::default();
+        }
+        if record.attack_type != 0 {
+            self.skill_attack(vid, record.attack_type, record.target_vid);
+            return AttackAnswer::default();
         }
         let (Some(place), Some(spot)) = (self.place_of(vid.raw()), self.spot_of(vid.raw())) else {
-            return;
+            return AttackAnswer::default();
         };
-        if record.attack_type != 0 {
-            return;
-        }
         let Some(npc) = self
             .npc_on(record.target_vid, place)
             .filter(|npc| is_struck(npc))
         else {
-            return;
+            return AttackAnswer::default();
         };
         // `battle_is_attackable` (`G/battle.cpp:165`), then `battle_melee_attack`'s reach
         // (`:172-210`): beyond it the attack is `BATTLE_NONE` and sends nothing.
         let distance = distance_approx(spot.x.saturating_sub(npc.x), spot.y.saturating_sub(npc.y));
         if !self.is_attackable(vid, (place.1, spot.x, spot.y), npc) || distance > melee_reach(npc) {
-            return;
+            return AttackAnswer::default();
         }
         let victim = SyncPositionVictim {
             vid: Vid::new(npc.vid),
@@ -316,7 +375,10 @@ impl GameState {
             );
         }
         let target = victim.vid.raw();
+        let mut stolen = None;
         if let Some(strike) = self.strike(vid, target) {
+            stolen = self.steal_gold(vid, strike.stolen_gold);
+            self.apply_npc_affect(vid, target, strike.affect);
             self.show_strike(vid, target, strike.events);
             match strike.struck {
                 Struck::Landed { damage } => {
@@ -355,10 +417,11 @@ impl GameState {
             body.last_attack = Some(now);
         }
         self.remove_revive_invisible(vid);
+        AttackAnswer { gold: stolen }
     }
 
     /// The non-player `vid` names on `place`, a Channel and map.
-    fn npc_on(&self, vid: u32, place: (u8, i32)) -> Option<&Npc> {
+    pub(super) fn npc_on(&self, vid: u32, place: (u8, i32)) -> Option<&Npc> {
         let &(channel, map, _) = self.npc_of.get(&vid)?;
         if (channel, map) != place {
             return None;
@@ -379,7 +442,12 @@ impl GameState {
     /// is neither stunned nor dead (`:122`), and the victim is no fake hydra. No castle, arena
     /// or ship-defence map is hosted, and `CPVPManager::CanAttack` lets a player hit every
     /// non-player that reaches here.
-    fn is_attackable(&self, attacker: Vid, (map, x, y): (i32, i32, i32), npc: &Npc) -> bool {
+    pub(super) fn is_attackable(
+        &self,
+        attacker: Vid,
+        (map, x, y): (i32, i32, i32),
+        npc: &Npc,
+    ) -> bool {
         !npc.dead
             && !self.is_banpk(map, x, y)
             && !self.is_banpk(map, npc.x, npc.y)
@@ -391,6 +459,7 @@ impl GameState {
     fn strike(&mut self, vid: Vid, target: u32) -> Option<Strike> {
         let &(channel, map, at) = self.npc_of.get(&target)?;
         let empire = self.bodies.get(&vid)?.card.empire;
+        let user_rate = self.user_damage_rate();
         let character = self.characters.find_by_vid_mut(vid).ok()?;
         let (items, points) = character.items_and_points_mut();
         let points = points?;
@@ -405,14 +474,95 @@ impl GameState {
             weapon,
             empire,
             map,
+            user_rate,
         };
         // `battle_is_attackable` refused a victim on an `ATTR_BANPK` cell, and a standing
         // non-player has a sectree, so `Damage` never refuses it here.
         Some(strike_npc(&mut self.dice, &mut striker, npc, false))
     }
 
+    /// `ChangeGold` for the `amount` the hit stole (`G/char.cpp:3823-3850`): nothing when
+    /// the steal drew nothing; at `GOLD_MAX_MAX` the purse refuses with nothing sent, as
+    /// the `OVERFLOW_GOLD` arm returns without changing or sending; else the purse gains
+    /// the amount and the attacker hears `GC_CHARACTER_GOLD_CHANGE`. Returns the signed
+    /// delta the store applies, or `None` when nothing moved. Runs before the damage
+    /// packet and the hit-point change, inside `Damage` (`:2080-2092`); `SendMoneyLog`
+    /// is log-only. Ahead of `show_strike` here rather than mid-pipeline: the gold
+    /// record lands before the affect updates where legacy's steal lands after them.
+    fn steal_gold(&mut self, vid: Vid, amount: i32) -> Option<i64> {
+        if amount <= 0 {
+            return None;
+        }
+        let held = self.characters.find_by_vid(vid).ok()?.gold();
+        let paid = held
+            .checked_add(u64::try_from(amount).unwrap_or(u64::MAX))
+            .filter(|paid| *paid < GOLD_MAX_MAX)?;
+        if let Ok(character) = self.characters.find_by_vid_mut(vid) {
+            character.set_gold(paid);
+        }
+        let mut record = Vec::new();
+        GcCharacterGoldChange::new(vid.raw(), i64::from(amount), paid).encode_into(&mut record);
+        let _sent = self.write_to_client(vid, record);
+        Some(crate::item_move::gold_delta(held, paid))
+    }
+
+    /// The reflect arm's `DAMAGE_TYPE_SPECIAL` hit on the monster under `mob`
+    /// (`G/char_battle.cpp:1987`, `:2179-2433`): the player's `POINT_REFLECT_MELEE`
+    /// share `damage` of the pre-bonus hit runs the SPECIAL tail (no chance or bonus
+    /// arm), shows through the player-hit's pipeline, fills the damage map with the
+    /// SPECIAL kind (no party share), and kills rewarded — the killer is the player.
+    /// `Finished` dies at once by `Dead(player)` (`:2248-2252`), as a hit on a stunned
+    /// monster does; `AlreadyDead` takes nothing. No claim, no `BeginFight`: the reflect
+    /// is inside `Damage`, not an `Attack`, and the monster already fights the player.
+    pub(super) fn reflect_on_npc(&mut self, victim: Vid, mob: u32, damage: i32) {
+        let Some(&(channel, map, at)) = self.npc_of.get(&mob) else {
+            return;
+        };
+        let (channel, map, at) = (channel, map, at);
+        let Some(empire) = self.bodies.get(&victim).map(|body| body.card.empire) else {
+            return;
+        };
+        let user_rate = self.user_damage_rate();
+        let Ok(character) = self.characters.find_by_vid_mut(victim) else {
+            return;
+        };
+        let (items, points) = character.items_and_points_mut();
+        let Some(points) = points else {
+            return;
+        };
+        let weapon = Equipment::of(items, &self.protos)
+            .wear(EWearPositions::Weapon as u16)
+            .map(|worn| worn.proto);
+        let Some(list) = self.npcs.get_mut(&(channel, map)) else {
+            return;
+        };
+        let Some(npc) = Arc::make_mut(list).npcs.get_mut(at) else {
+            return;
+        };
+        let mut striker = Striker {
+            points,
+            weapon,
+            empire,
+            map,
+            user_rate,
+        };
+        let (struck, events) = damage_special(&mut self.dice, &mut striker, npc, damage);
+        self.show_strike(victim, mob, events);
+        match struck {
+            Struck::Landed { damage } => {
+                self.set_last_attacked(mob);
+                self.after_damage_typed(victim, mob, damage, AggroDamage::Special);
+            }
+            Struck::Finished => {
+                self.set_last_attacked(mob);
+                self.dead_npc(mob, Some(victim));
+            }
+            Struck::Whiffed | Struck::Refused | Struck::AlreadyDead | Struck::StunnedByGuard => {}
+        }
+    }
+
     /// Sends what a hit on the non-player under `victim` showed, in order.
-    fn show_strike(&mut self, attacker: Vid, victim: u32, events: Vec<HitEvent>) {
+    pub(super) fn show_strike(&mut self, attacker: Vid, victim: u32, events: Vec<HitEvent>) {
         let around = EntityKey::Npc(victim);
         for event in events {
             match event {
@@ -461,11 +611,291 @@ impl GameState {
         let _sent = self.write_to_client(attacker, record);
     }
 
+    /// What `NormalAttackAffect` landed on the non-player `victim`: the poison, the stun
+    /// and the slow, in legacy's arm order (`G/battle.cpp:734-758`). Runs before the
+    /// damage packet and the hit-point change, as `battle_hit` runs the affects before
+    /// the resist arm and `Damage` — so a victim stunned by this very hit still takes
+    /// the hit. A stone takes them too (its Idle guards nothing, ported as found).
+    pub(super) fn apply_npc_affect(&mut self, attacker: Vid, victim: u32, landed: NpcAttackAffect) {
+        if landed.poisoned {
+            self.poison_npc(attacker, victim);
+        }
+        if landed.stunned {
+            self.add_npc_affect(
+                victim,
+                Affect {
+                    kind: AFFECT_STUN,
+                    apply_on: u8::try_from(point::POINT_NONE).unwrap_or(u8::MAX),
+                    value: 0,
+                    flag: AFF_STUN,
+                    remaining: STUN_TICKS_NPC,
+                },
+            );
+        }
+        if landed.slowed {
+            self.add_npc_affect(
+                victim,
+                Affect {
+                    kind: AFFECT_SLOW,
+                    apply_on: u8::try_from(point::POINT_MOV_SPEED).unwrap_or(u8::MAX),
+                    value: SLOW_MOV_SPEED,
+                    flag: AFF_SLOW,
+                    remaining: SLOW_TICKS,
+                },
+            );
+        }
+    }
+
+    /// `AttackedByPoison` on the non-player under `victim` (`G/char_resist.cpp:178-220`),
+    /// past the draws the strike already passed: nothing while a poison event runs or the
+    /// victim has ever been poisoned — a monster is poisoned once per life — else the
+    /// flag is set, the poison affect lands, and the poison event with 10 ticks is due
+    /// 1 Pulse on. The commented immunity arm never runs. The attacker PID is the
+    /// player's VID, which `FindByPID` maps while the player is online.
+    pub(super) fn poison_npc(&mut self, attacker: Vid, victim: u32) {
+        if self
+            .npc_combat
+            .get(&victim)
+            .is_some_and(|combat| combat.poison_due.is_some() || combat.poisoned_once)
+        {
+            return;
+        }
+        self.add_npc_affect(
+            victim,
+            Affect {
+                kind: AFFECT_POISON,
+                apply_on: u8::try_from(point::POINT_NONE).unwrap_or(u8::MAX),
+                value: 0,
+                flag: AFF_POISON,
+                remaining: POISON_TICKS,
+            },
+        );
+        let when = self.last_pulse.saturating_add(1);
+        let combat = self.npc_combat.entry(victim).or_default();
+        combat.poisoned_once = true;
+        combat.poison_attacker = Some(attacker.raw());
+        let old = combat
+            .poison_due
+            .replace((when, super::mob_strike::POISON_COUNT));
+        if let Some((at, count)) = old {
+            self.regens
+                .due
+                .remove(&(at, Due::Poison { vid: victim, count }));
+        }
+        self.regens.due.insert((
+            when,
+            Due::Poison {
+                vid: victim,
+                count: super::mob_strike::POISON_COUNT,
+            },
+        ));
+    }
+
+    /// `GetPoisonDamageRate` of the non-player under `victim` (`G/char_resist.cpp:11-20`):
+    /// the rank table's per-mille less `POINT_POISON_REDUCE`, floored at 0. A rank at or
+    /// past the table's end reads the last per-mille: legacy would read out of bounds
+    /// (a Defect), and there is no game rank past KING.
+    fn npc_poison_rate(&self, victim: u32) -> i32 {
+        let Some(npc) = self.npc_by_vid(victim) else {
+            return 0;
+        };
+        let rank = usize::from(npc.fight.rank).min(POISON_DAMAGE_RATE.len() - 1);
+        POISON_DAMAGE_RATE[rank]
+            .wrapping_sub(npc.fight.point(point::POINT_POISON_REDUCE))
+            .max(0)
+    }
+
+    /// Cancels the poison event the slot of the non-player under `vid` keeps, if any.
+    fn cancel_npc_poison(&mut self, vid: u32) {
+        let Some(combat) = self.npc_combat.get_mut(&vid) else {
+            return;
+        };
+        let Some((when, count)) = combat.poison_due.take() else {
+            return;
+        };
+        combat.poison_attacker = None;
+        self.regens.due.remove(&(when, Due::Poison { vid, count }));
+    }
+
+    /// `poison_event` of the non-player under `vid` (`G/char_resist.cpp:42-76`): the
+    /// victim's own slot must still hold this tick, else a re-poison cancelled it. A
+    /// gone, dead or stunned victim ends the event (`Damage` true). Else the tick deals
+    /// `maxHP * rate / 1000` through the poison floor — a tick that would leave no hit
+    /// points deals all but one, so poison never kills and the event never stuns — with
+    /// the target broadcast and the `DAMAGE_POISON` damage packet. Past 0 damage and an
+    /// online attacker the damage map row fills, the recovery starts and `Ex` feeds
+    /// NORMAL aggro (`:2416-2430`'s non-null arm). Then the count falls; while any is
+    /// left the next tick is 3 seconds on, else the event ends.
+    pub(super) fn npc_poison_event(&mut self, vid: u32, count: u32) {
+        let held = self
+            .npc_combat
+            .get(&vid)
+            .and_then(|combat| combat.poison_due);
+        let Some((_, held_count)) = held else {
+            return;
+        };
+        if held_count != count {
+            return;
+        }
+        let Some(npc) = self.npc_by_vid(vid) else {
+            self.cancel_npc_poison(vid);
+            return;
+        };
+        if npc.dead || npc.stunned {
+            self.cancel_npc_poison(vid);
+            return;
+        }
+        let max_hp = npc.max_hp;
+        let hp = npc.hp;
+        let mut damage = max_hp
+            .saturating_mul(self.npc_poison_rate(vid))
+            .wrapping_div(1000);
+        // `GetHP() - dam <= 0 → dam = GetHP() - 1` (`G/char_battle.cpp:2256-2261`).
+        if hp.saturating_sub(damage) <= 0 {
+            damage = hp.saturating_sub(1).max(0);
+        }
+        if let Some(npc) = self.npc_mut(vid) {
+            npc.hp = npc.hp.saturating_sub(damage);
+        }
+        self.broadcast_npc_target(vid);
+        let attacker = self
+            .npc_combat
+            .get(&vid)
+            .and_then(|combat| combat.poison_attacker)
+            .filter(|attacker| self.is_online(Vid::new(*attacker)));
+        if let Some(attacker) = attacker {
+            self.send_damage_packet(vid, Vid::new(attacker), damage, DAMAGE_POISON);
+        }
+        if damage > 0 {
+            if let Some(attacker) = attacker {
+                self.after_damage(Vid::new(attacker), vid, damage);
+            }
+        }
+        if count <= 1 {
+            self.cancel_npc_poison(vid);
+            return;
+        }
+        let next = count.saturating_sub(1);
+        let when = self
+            .last_pulse
+            .saturating_add(pulses(super::death::POISON_TICK_SECONDS));
+        let old = self
+            .npc_combat
+            .get_mut(&vid)
+            .and_then(|combat| combat.poison_due.replace((when, next)));
+        if let Some((at, _)) = old {
+            self.regens.due.remove(&(at, Due::Poison { vid, count }));
+        }
+        self.regens
+            .due
+            .insert((when, Due::Poison { vid, count: next }));
+    }
+
+    /// Cancels the fire event the slot of the non-player under `vid` keeps, if any.
+    fn cancel_npc_fire(&mut self, vid: u32) {
+        let Some(combat) = self.npc_combat.get_mut(&vid) else {
+            return;
+        };
+        let Some((when, count, amount)) = combat.fire_due.take() else {
+            return;
+        };
+        combat.fire_attacker = None;
+        self.regens
+            .due
+            .remove(&(when, Due::Fire { vid, count, amount }));
+    }
+
+    /// `fire_event` of the non-player under `vid` (`G/char_resist.cpp:95-128`): the
+    /// victim's own slot must still hold this tick. A gone, dead or stunned victim
+    /// ends the event (`Damage` true). Else the tick deals the stored amount with
+    /// the target broadcast and the `DAMAGE_NORMAL` damage packet; past an online
+    /// attacker the damage map row fills, the recovery starts and `Ex` feeds NORMAL
+    /// aggro (`:2416-2430`'s non-null arm — FIRE carries no aggro kind of its own).
+    /// A tick that leaves no hit points stuns with the attacker's PID as killer
+    /// (`after_damage`'s second arm). Then the count falls; while any is left the
+    /// next tick is 3 seconds on, else the event ends.
+    pub(super) fn npc_fire_event(&mut self, vid: u32, count: u32, amount: i32) {
+        let held = self.npc_combat.get(&vid).and_then(|combat| combat.fire_due);
+        let Some((_, held_count, held_amount)) = held else {
+            return;
+        };
+        if held_count != count || held_amount != amount {
+            return;
+        }
+        let Some(npc) = self.npc_by_vid(vid) else {
+            self.cancel_npc_fire(vid);
+            return;
+        };
+        if npc.dead || npc.stunned {
+            self.cancel_npc_fire(vid);
+            return;
+        }
+        let damage = amount.max(0).min(npc.hp);
+        if let Some(npc) = self.npc_mut(vid) {
+            npc.hp = npc.hp.saturating_sub(damage);
+        }
+        self.broadcast_npc_target(vid);
+        let attacker = self
+            .npc_combat
+            .get(&vid)
+            .and_then(|combat| combat.fire_attacker)
+            .filter(|attacker| self.is_online(Vid::new(*attacker)));
+        if let Some(attacker) = attacker {
+            self.send_damage_packet(vid, Vid::new(attacker), damage, DAMAGE_NORMAL);
+            if damage > 0 {
+                self.after_damage(Vid::new(attacker), vid, damage);
+            }
+        } else if damage > 0 {
+            // `Damage` with a null attacker still stuns at 0 (`:2280-2290`): the row
+            // and aggro need an attacker, the stun does not.
+            if self.npc_by_vid(vid).is_some_and(|npc| npc.hp <= 0) {
+                self.stun_npc(vid);
+            }
+        }
+        if count <= 1 {
+            self.cancel_npc_fire(vid);
+            return;
+        }
+        let next = count.saturating_sub(1);
+        let when = self
+            .last_pulse
+            .saturating_add(pulses(super::death::POISON_TICK_SECONDS));
+        let old = self
+            .npc_combat
+            .get_mut(&vid)
+            .and_then(|combat| combat.fire_due.replace((when, next, amount)));
+        if let Some((at, _, _)) = old {
+            self.regens
+                .due
+                .remove(&(at, Due::Fire { vid, count, amount }));
+        }
+        self.regens.due.insert((
+            when,
+            Due::Fire {
+                vid,
+                count: next,
+                amount,
+            },
+        ));
+    }
+
     /// The end of `Damage` once the hit points are taken (`G/char_battle.cpp:2407-2433`): a hit
     /// that took any fills the damage map, starts the recovery and feeds the aggro, and one
     /// that left none stuns the non-player with the attacker's PID, which is a player's VID,
     /// as its killer.
     fn after_damage(&mut self, attacker: Vid, victim: u32, damage: i32) {
+        self.after_damage_typed(attacker, victim, damage, AggroDamage::Normal);
+    }
+
+    /// [`GameState::after_damage`], with the aggro kind of the hit: a reflected hit
+    /// fills the same row but feeds `SPECIAL` aggro (×1, no party share, `:3818-3820`).
+    pub(super) fn after_damage_typed(
+        &mut self,
+        attacker: Vid,
+        victim: u32,
+        damage: i32,
+        kind: AggroDamage,
+    ) {
         if damage > 0 {
             // `m_map_kDamage` (`:2407-2423`): a new row holds `(dam, 0)`, else the total
             // grows; then the recovery, then `UpdateAggrPointEx`.
@@ -480,7 +910,7 @@ impl GameState {
                     aggro: 0,
                 });
             self.start_recovery(victim);
-            self.update_aggr_point_ex(victim, attacker, AggroDamage::Normal, damage);
+            self.update_aggr_point_ex(victim, attacker, kind, damage);
         }
         if self.npc_by_vid(victim).is_some_and(|npc| npc.hp <= 0) {
             self.stun_npc(victim);
@@ -501,7 +931,7 @@ impl GameState {
     /// `ChangeVictimByAggro`.
     fn update_aggr_point_ex(&mut self, mob: u32, attacker: Vid, kind: AggroDamage, dam: i32) {
         let mut dam = match kind {
-            AggroDamage::Normal | AggroDamage::Special => dam,
+            AggroDamage::Normal | AggroDamage::Special | AggroDamage::Melee => dam,
             AggroDamage::NormalRange | AggroDamage::Magic => Self::aggro_scaled(dam, 1.2),
             AggroDamage::Range => Self::aggro_scaled(dam, 1.5),
         };
@@ -676,7 +1106,7 @@ impl GameState {
     /// between the stun cancel and `GC_DEAD`: exp, then gold, then the item draws, whose
     /// hits wait for D5 (V17c narrows). The `BOSS_KILL_LOG` and `STACK_ATTR` hooks are
     /// log-only and item-system work (hooks).
-    fn dead_npc(&mut self, vid: u32, killer: Option<Vid>) {
+    pub(super) fn dead_npc(&mut self, vid: u32, killer: Option<Vid>) {
         if self.npc_by_vid(vid).is_none_or(|npc| npc.dead) {
             return;
         }
@@ -693,19 +1123,25 @@ impl GameState {
                 self.target(killer, 0);
             }
         }
-        // `SetPosition(POS_DEAD)`; `ClearAffect` finds nothing on a non-player.
+        // `SetPosition(POS_DEAD)`, then `ClearAffect(true)` (`:1370`): the poison, stun
+        // and slow go — none is in the no-clear tables — each computed off, with no
+        // update packet, before `GC_DEAD`. The poison event's next run would find the
+        // victim dead and end, but the slot cancels so it never blocks a re-stood VID.
         if let Some(npc) = self.npc_mut(vid) {
             npc.dead = true;
         }
+        self.clear_npc_affects(vid, false);
+        self.cancel_npc_poison(vid);
         // `ClearSync` (`:1461`): its own release, then what it owns, then the stun event
         // ends (`:1464`).
         self.release_npc_sync(vid);
         self.release_owned(Vid::new(vid));
         let combat = self.npc_combat.entry(vid).or_default();
         self.regens.cancel(&mut combat.stun_due, Due::Stun(vid));
-        // `Reward` (`:1476-1498`): no field war (no guilds), no resurrection (C17), so the
-        // exp, gold and item halves run — unless a guard's swing set `NO_REWARD`
-        // (`:1475`), which skips them all — and the item hits wait for D5.
+        // `Reward` (`:1476-1498`): no field war (no guilds) and no resurrection — only vnum
+        // 8479 carries one (4305), and neither spawns on a hosted map — so the exp, gold
+        // and item halves run, unless a guard's swing set `NO_REWARD` (`:1475`), which
+        // skips them all.
         let no_reward = self
             .npc_combat
             .get(&vid)
@@ -721,23 +1157,113 @@ impl GameState {
             &header_and_vid(HEADER_GC_DEAD.value(), vid),
             None,
         );
+        // `ClearStone` (`:1579-1580`): a stone's sons die with it — `Dead(NULL)` each,
+        // which pays their damage maps and feeds the stone (`distribute_exp` reads the
+        // link while it still stands). A son unlinks via its own `Dead` arm below.
+        self.kill_stone_sons(vid);
         if let Some(npc) = self.npc_mut(vid) {
             npc.stunned = false;
         }
-        let when = self.last_pulse.saturating_add(pulses(DEAD_SECONDS));
+        let revived = self
+            .npc_combat
+            .get(&vid)
+            .is_some_and(|combat| combat.revived);
+        // `m_pkDeadEvent` (`:1599-1610`): 3 s past a living reviver, 1 s else.
+        let wait = if !revived && self.has_reviver_in_party(vid) {
+            REVIVE_DEAD_SECONDS
+        } else {
+            DEAD_SECONDS
+        };
+        let when = self.last_pulse.saturating_add(pulses(wait));
         let combat = self.npc_combat.entry(vid).or_default();
         self.regens.cancel(&mut combat.dead_due, Due::Dead(vid));
         self.regens
             .schedule(&mut combat.dead_due, when, Due::Dead(vid));
     }
 
-    /// `dead_event` of a monster (`G/char_battle.cpp:473-548`): no party revives it (V17h), so
-    /// `M2_DESTROY_CHARACTER`.
+    /// `dead_event` of a monster (`G/char_battle.cpp:473-548`): a monster its party revives
+    /// stands back up; else `M2_DESTROY_CHARACTER`.
     pub(super) fn dead_event(&mut self, vid: u32) {
         if let Some(combat) = self.npc_combat.get_mut(&vid) {
             combat.dead_due = None;
         }
+        // The stand-up (`:529-541`): a monster only, once, past a living reviver.
+        let revived = self
+            .npc_combat
+            .get(&vid)
+            .is_some_and(|combat| combat.revived);
+        let monster = self
+            .npc_by_vid(vid)
+            .is_some_and(|npc| npc.char_type == CHAR_TYPE_MONSTER);
+        if monster && !revived && self.has_reviver_in_party(vid) {
+            // `SetPosition(POS_STANDING)` clears the dead flag; `SetHP(GetMaxHP())`
+            // refills; `SetAggressive` sets the bit (`G/char_state.cpp:242-245`).
+            if let Some(npc) = self.npc_mut(vid) {
+                npc.dead = false;
+                npc.hp = npc.max_hp;
+                npc.ai_flags |= AIFLAG_AGGRESSIVE;
+            }
+            if let Some(combat) = self.npc_combat.get_mut(&vid) {
+                combat.revived = true;
+            }
+            self.reencode_npc(vid);
+            return;
+        }
         self.destroy_npc(vid);
+    }
+
+    /// `ViewReencode` of the NPC under `vid` (`G/entity_view.cpp:23-45`): a same-spot `show`
+    /// removes and re-inserts it for itself and its view.
+    fn reencode_npc(&mut self, vid: u32) {
+        let (Some((channel, map, _)), Some(spot)) =
+            (self.npc_of.get(&vid).copied(), self.npc_spot(vid))
+        else {
+            return;
+        };
+        let z = self.npc_by_vid(vid).map_or(0, |npc| npc.z);
+        let radius = self.view_radius;
+        let mut effects = Vec::new();
+        if let Some(index) = self.maps.get_mut(&(channel, map)) {
+            let _shown = index.show(
+                EntityKey::Npc(vid),
+                (spot.0, spot.1, z),
+                radius,
+                &mut effects,
+            );
+        }
+        self.deliver(&effects, None);
+    }
+
+    /// `ClearStone`'s stone arm (`G/char.cpp:6402-6410`) in `Dead`: every live son of the
+    /// stone under `vid` dies — `Dead(NULL)` pays its damage map — and unlinks. Nothing
+    /// when `vid` is no stone. Sons in map order (V1: legacy iterates a pointer set).
+    pub(super) fn kill_stone_sons(&mut self, vid: u32) {
+        let is_stone = self
+            .npc_by_vid(vid)
+            .is_some_and(|npc| npc.char_type == CHAR_TYPE_STONE);
+        if !is_stone {
+            return;
+        }
+        let Some(&(channel, map, _)) = self.npc_of.get(&vid) else {
+            return;
+        };
+        let sons: Vec<u32> = self
+            .npcs
+            .get(&(channel, map))
+            .map(|list| {
+                list.npcs
+                    .iter()
+                    .filter(|npc| npc.stone == Some(vid) && !npc.dead)
+                    .map(|npc| npc.vid)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for son in sons {
+            self.dead_npc(son, None);
+            if let Some(son) = self.npc_mut(son) {
+                son.stone = None;
+            }
+        }
     }
 
     /// `StartRecoveryEvent` of the non-player under `vid` (`G/char.cpp:3287-3314`): none while
@@ -758,13 +1284,21 @@ impl GameState {
         }
     }
 
-    /// `recovery_event` of a non-player (`G/char.cpp:3191-3240`): `bRegenPercent` of its
-    /// maximum, at least 1 and held to the maximum, shown to its targeters; again `bRegenCycle`
-    /// seconds on until it is full. No affect poisons a non-player, no regen stands race 2493,
-    /// and no door is hit.
+    /// `recovery_event` of a non-player (`G/char.cpp:3187-3240`): a poisoned one heals
+    /// nothing and reschedules (`:3187-3194`); else `bRegenPercent` of its maximum, at
+    /// least 1 and held to the maximum, shown to its targeters; again `bRegenCycle`
+    /// seconds on until it is full. No regen stands race 2493, and no door is hit.
     pub(super) fn recovery_event(&mut self, vid: u32) {
         if let Some(combat) = self.npc_combat.get_mut(&vid) {
             combat.recovery_due = None;
+        }
+        if self.npc_affect_words(vid)[0] & AFF_POISON_WORD != 0 {
+            let cycle = self.npc_by_vid(vid).map_or(0, recovery_pulses);
+            let when = self.last_pulse.saturating_add(cycle);
+            let combat = self.npc_combat.entry(vid).or_default();
+            self.regens
+                .schedule(&mut combat.recovery_due, when, Due::Recovery(vid));
+            return;
         }
         let Some(npc) = self.npc_mut(vid) else {
             return;
@@ -897,8 +1431,9 @@ impl GameState {
         }
     }
 
-    /// What a destroyed non-player's fight leaves: its stun, dead and recovery events end
-    /// (`G/char.cpp:713-718`), and nothing of it is kept.
+    /// What a destroyed non-player's fight leaves: its stun, dead, recovery and poison
+    /// events end (`G/char.cpp:713-720`), its affects clear without packets (`:768`), and
+    /// nothing of it is kept.
     pub(super) fn forget_npc_fight(&mut self, vid: u32) {
         let Some(mut combat) = self.npc_combat.remove(&vid) else {
             return;
@@ -907,6 +1442,10 @@ impl GameState {
         self.regens.cancel(&mut combat.dead_due, Due::Dead(vid));
         self.regens
             .cancel(&mut combat.recovery_due, Due::Recovery(vid));
+        if let Some((when, count)) = combat.poison_due.take() {
+            self.regens.due.remove(&(when, Due::Poison { vid, count }));
+        }
+        self.clear_npc_affects(vid, false);
     }
 }
 
@@ -980,6 +1519,7 @@ mod tests {
     /// 1 % every 6 seconds.
     fn a_monster(hp: i32) -> Npc {
         let mut fight = MobFight::default();
+        fight.level = 1;
         fight.regen_cycle = 6;
         fight.regen_percent = 1;
         Npc {
@@ -1114,7 +1654,7 @@ mod tests {
         ];
         for (kind, dam, want) in kinds {
             let scaled = match kind {
-                AggroDamage::Normal | AggroDamage::Special => dam,
+                AggroDamage::Normal | AggroDamage::Special | AggroDamage::Melee => dam,
                 AggroDamage::NormalRange | AggroDamage::Magic => GameState::aggro_scaled(dam, 1.2),
                 AggroDamage::Range => GameState::aggro_scaled(dam, 1.5),
             };
@@ -1279,7 +1819,112 @@ mod tests {
         assert!(world.minds.get(ME).is_none());
         assert!(!world.npc_combat.contains_key(&ME));
     }
-    /// A hit that takes any fills the damage map with the clamped damage
+
+    /// A dead monster with a passing reviver waits 3 s, not 1 s (`G/char_battle.cpp:1601`).
+    #[test]
+    fn a_dead_monster_with_a_reviver_waits_three_seconds() {
+        use gamedata::mob_proto::AIFLAG_REVIVE;
+        let clock = TestClock::default();
+        clock.set(T0);
+        let master = a_monster(1);
+        let mut follower = a_monster(MAX_HP);
+        follower.vid = ME + 1;
+        follower.x = SPOT.0 + 100;
+        follower.leader = Some(ME);
+        follower.ai_flags |= AIFLAG_REVIVE;
+        follower.fight.revive_point = 100;
+        let mut world = a_field_on(&clock, vec![master, follower], open_cells());
+        let mut inbox = enter(&mut world, 1, NEAR, 12_345);
+        world.process_pulse(P0);
+        drained(&mut inbox);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut inbox);
+        world.process_pulse(P0 + 75);
+        drained(&mut inbox);
+        assert!(
+            world.npc_by_vid(ME).is_some_and(|npc| npc.dead),
+            "the stun ends in death"
+        );
+        assert_eq!(world.npc_combat[&ME].dead_due, Some(P0 + 150));
+    }
+
+    /// `dead_event` with a passing reviver stands the monster up: dead cleared, full hit
+    /// points, the aggressive bit, `revived` set, and the remove+insert pair — and the
+    /// monster is not destroyed (`G/char_battle.cpp:529-541`).
+    #[test]
+    fn dead_event_with_a_reviver_stands_the_monster_back_up() {
+        use gamedata::mob_proto::{AIFLAG_AGGRESSIVE, AIFLAG_REVIVE};
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut follower = a_monster(MAX_HP);
+        follower.vid = ME + 1;
+        follower.x = SPOT.0 + 100;
+        follower.leader = Some(ME);
+        follower.ai_flags |= AIFLAG_REVIVE;
+        follower.fight.revive_point = 100;
+        let mut world = a_field_on(&clock, vec![a_monster(1), follower], open_cells());
+        let mut inbox = enter(&mut world, 1, NEAR, 12_345);
+        world.process_pulse(P0);
+        drained(&mut inbox);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut inbox);
+        world.process_pulse(P0 + 75);
+        drained(&mut inbox);
+        world.process_pulse(P0 + 150);
+        let heard = drained(&mut inbox);
+        assert_eq!(heard.len(), 2, "the remove and the insert: {heard:02x?}");
+        assert_eq!(heard[0], remove_record(ME));
+        assert_eq!(
+            heard[1][0],
+            protocol::gc_inventory::HEADER_GC_CHARACTER_ADD.value()
+        );
+        let npc = world.npc_by_vid(ME).expect("the monster stands");
+        assert_eq!((npc.dead, npc.hp), (false, MAX_HP));
+        assert_ne!(npc.ai_flags & AIFLAG_AGGRESSIVE, 0);
+        assert!(world.npc_combat[&ME].revived);
+    }
+
+    /// A revived monster dies for good: the second `dead_event` finds `revived` set and
+    /// destroys it.
+    #[test]
+    fn a_revived_monster_dies_for_good_the_second_time() {
+        use gamedata::mob_proto::AIFLAG_REVIVE;
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut follower = a_monster(MAX_HP);
+        follower.vid = ME + 1;
+        follower.x = SPOT.0 + 100;
+        follower.leader = Some(ME);
+        follower.ai_flags |= AIFLAG_REVIVE;
+        follower.fight.revive_point = 100;
+        let mut world = a_field_on(&clock, vec![a_monster(1), follower], open_cells());
+        let mut inbox = enter(&mut world, 1, NEAR, 12_345);
+        world.process_pulse(P0);
+        drained(&mut inbox);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        drained(&mut inbox);
+        world.process_pulse(P0 + 75);
+        drained(&mut inbox);
+        world.process_pulse(P0 + 150);
+        drained(&mut inbox);
+        assert!(world.npc_combat[&ME].revived, "the stand-up ran");
+        world.npc_mut(ME).expect("the monster stands").hp = 1;
+        hit(&mut world, 1, ME);
+        drained(&mut inbox);
+        world.process_pulse(P0 + 225);
+        drained(&mut inbox);
+        assert!(
+            world.npc_by_vid(ME).is_some_and(|npc| npc.dead),
+            "the stun ends in death again"
+        );
+        // Already revived, so the wait is back to 1 s even past the reviver.
+        assert_eq!(world.npc_combat[&ME].dead_due, Some(P0 + 250));
+        world.process_pulse(P0 + 250);
+        assert!(world.npc_by_vid(ME).is_none(), "the second death destroys");
+    }
     /// (`m_map_kDamage`, `G/char_battle.cpp:2407-2423`); a blocked hit writes nothing.
     #[test]
     fn a_hit_fills_the_damage_map_and_a_blocked_hit_writes_nothing() {
@@ -2452,15 +3097,15 @@ mod tests {
         assert_eq!(drained(&mut beta), [fly, said]);
     }
 
-    /// Only a monster standing on the attacker's Channel and map is hit (V17a): any other
-    /// kind of non-player, race 5001, a fake hydra (`G/battle.cpp:134-139`), a player, the
-    /// attacker itself, a monster on another Channel or on another map of this one, a VID that
-    /// names nothing and a skill's type are refused before any draw, with nothing sent.
+    /// Only a monster or a stone standing on the attacker's Channel and map is hit (V17a):
+    /// any other kind of non-player, race 5001, a fake hydra (`G/battle.cpp:134-139`), a
+    /// player, the attacker itself, a monster on another Channel or on another map of this
+    /// one, a VID that names nothing and a skill's type are refused before any draw, with
+    /// nothing sent.
     #[test]
     fn only_a_monster_is_hit() {
         let refused = [
             (CHAR_TYPE_NPC, 101),
-            (CHAR_TYPE_STONE, 8001),
             (CHAR_TYPE_WARP, 101),
             // `CHAR_TYPE_DOOR` and `CHAR_TYPE_BUILDING`.
             (4, 101),
@@ -2491,6 +3136,12 @@ mod tests {
         // Control: race 3962 is a hydra, not a fake one, and is hit.
         let mut npc = a_monster(1);
         npc.vnum = 3962;
+        let (_clock, mut world, _alpha) = a_fight(npc, NEAR);
+        hit(&mut world, 1, ME);
+        assert!(world.npc_by_vid(ME).unwrap().stunned);
+        // Control: a stone is struck (it fights nothing back).
+        let mut npc = a_monster(1);
+        npc.char_type = CHAR_TYPE_STONE;
         let (_clock, mut world, _alpha) = a_fight(npc, NEAR);
         hit(&mut world, 1, ME);
         assert!(world.npc_by_vid(ME).unwrap().stunned);
@@ -2989,5 +3640,444 @@ mod tests {
         let body = world.bodies.get(&Vid::new(1)).unwrap();
         assert!(body.motion.moving);
         assert!(!body.fighting);
+    }
+
+    /// A stone is hit: its HP falls, the damage map fills, the recovery starts, and it
+    /// holds no victim and asks no Battle.
+    #[test]
+    fn a_stone_is_hit_but_fights_nothing() {
+        let mut stone = a_monster(MAX_HP);
+        stone.char_type = CHAR_TYPE_STONE;
+        stone.vnum = 8001;
+        stone.empire = 0;
+        let (_clock, mut world, mut alpha) = a_fight(stone, NEAR);
+        world.target(Vid::new(1), ME);
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        let npc = world.npc_by_vid(ME).expect("the stone stands");
+        assert!(npc.hp < MAX_HP);
+        let combat = world.npc_combat.get(&ME).expect("the stone fights");
+        assert!(combat.damage.contains_key(&1));
+        assert!(combat.recovery_due.is_some());
+        assert!(world.minds.get(ME).is_none_or(|mind| !mind.fighting));
+        assert!(world.victim_of(ME).is_none());
+        assert!(!drained(&mut alpha).is_empty());
+    }
+
+    /// A same-empire attacker on a nonzero-empire stone is blocked: 0 damage, HP
+    /// unchanged, and the targeting attacker is shown `DAMAGE_BLOCK`.
+    #[test]
+    fn a_same_empire_stone_hit_is_blocked() {
+        let mut stone = a_monster(MAX_HP);
+        stone.char_type = CHAR_TYPE_STONE;
+        stone.vnum = 8001;
+        stone.empire = 1;
+        let (_clock, mut world, mut alpha) = a_fight(stone, NEAR);
+        world.target(Vid::new(1), ME);
+        drained(&mut alpha);
+        let dice = world.dice.clone();
+        hit(&mut world, 1, ME);
+        assert_ne!(world.dice, dice, "the rating draws ran");
+        assert_eq!(world.npc_by_vid(ME).unwrap().hp, MAX_HP);
+        assert_eq!(
+            drained(&mut alpha),
+            [damage_info(0, DAMAGE_BLOCK), owner(1)]
+        );
+    }
+
+    /// A son's death feeds half its exp to its live stone before the split: the stone's
+    /// exp grows by `exp >> 1`, and the killer takes the rest's share.
+    #[test]
+    fn a_sons_death_feeds_half_its_exp_to_the_stone() {
+        let mut son = a_monster(1);
+        son.stone = Some(ME + 1);
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut stone = a_monster(MAX_HP);
+        stone.vid = ME + 1;
+        stone.char_type = CHAR_TYPE_STONE;
+        stone.vnum = 8001;
+        stone.empire = 0;
+        stone.exp = 1000;
+        let mut world = a_field_on(&clock, vec![son, stone], open_cells());
+        let mut inbox = enter(&mut world, 1, NEAR, 12_345);
+        world.process_pulse(P0);
+        drained(&mut inbox);
+        world.npc_mut(ME).expect("the son stands").exp = 100;
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        hit(&mut world, 1, ME);
+        assert!(world.npc_by_vid(ME).unwrap().dead);
+        assert_eq!(world.npc_by_vid(ME + 1).unwrap().exp, 1000 + 50);
+        assert_eq!(world.npc_by_vid(ME).unwrap().exp, 0);
+    }
+
+    /// A stone's death kills its sons in map order: each is dead, each sent `GC_DEAD`
+    /// after the stone's, and each unlinked.
+    #[test]
+    fn a_stones_death_kills_its_sons() {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut stone = a_monster(1);
+        stone.char_type = CHAR_TYPE_STONE;
+        stone.vnum = 8001;
+        stone.empire = 0;
+        let mut son_a = a_monster(MAX_HP);
+        son_a.vid = ME + 1;
+        son_a.stone = Some(ME);
+        let mut son_b = a_monster(MAX_HP);
+        son_b.vid = ME + 2;
+        son_b.stone = Some(ME);
+        let mut world = a_field_on(&clock, vec![stone, son_a, son_b], open_cells());
+        let mut inbox = enter(&mut world, 1, NEAR, 12_345);
+        world.process_pulse(P0);
+        drained(&mut inbox);
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        hit(&mut world, 1, ME);
+        assert!(world.npc_by_vid(ME).unwrap().dead);
+        assert!(world.npc_by_vid(ME + 1).unwrap().dead);
+        assert!(world.npc_by_vid(ME + 2).unwrap().dead);
+        assert!(world.npc_by_vid(ME + 1).unwrap().stone.is_none());
+        assert!(world.npc_by_vid(ME + 2).unwrap().stone.is_none());
+        let frames = drained(&mut inbox);
+        let dead_of = |vid| header_and_vid(HEADER_GC_DEAD.value(), vid);
+        let at = |vid: u32| frames.iter().position(|f| *f == dead_of(vid));
+        assert!(at(ME) < at(ME + 1), "the stone dies first");
+        assert!(at(ME + 1) < at(ME + 2), "sons in map order");
+    }
+
+    /// Destroying a stone dead-ends its sons the same; destroying a son drops it from
+    /// the stone's derived set, and the stone still idles.
+    #[test]
+    fn destroying_a_stone_kills_its_sons() {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut stone = a_monster(MAX_HP);
+        stone.char_type = CHAR_TYPE_STONE;
+        stone.vnum = 8001;
+        let mut son = a_monster(MAX_HP);
+        son.vid = ME + 1;
+        son.stone = Some(ME);
+        let mut world = a_field_on(&clock, vec![stone, son], open_cells());
+        let mut inbox = enter(&mut world, 1, NEAR, 12_345);
+        world.process_pulse(P0);
+        drained(&mut inbox);
+        world.destroy_npc(ME);
+        assert!(world.npc_by_vid(ME).is_none());
+        assert!(world.npc_by_vid(ME + 1).unwrap().dead);
+        assert!(world.npc_by_vid(ME + 1).unwrap().stone.is_none());
+        // The son's destroy drops it from the set; the stone idles on.
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut stone = a_monster(MAX_HP);
+        stone.char_type = CHAR_TYPE_STONE;
+        stone.vnum = 8001;
+        let mut son = a_monster(MAX_HP);
+        son.vid = ME + 1;
+        son.stone = Some(ME);
+        let mut world = a_field_on(&clock, vec![stone, son], open_cells());
+        let mut inbox = enter(&mut world, 1, NEAR, 12_345);
+        world.process_pulse(P0);
+        drained(&mut inbox);
+        world.destroy_npc(ME + 1);
+        assert!(world.npc_by_vid(ME + 1).is_none());
+        world.npc_mut(ME).expect("the stone stands").hp = 40;
+        world.process_pulse(P0 + 1);
+        assert!(world.npc_by_vid(ME).is_some());
+    }
+
+    /// Seeds 100 % poison, stun and slow chances on the player 1.
+    fn all_chances(world: &mut GameState) {
+        let _records = points_of(world, 1).apply_point(12, 100);
+        let _records = points_of(world, 1).apply_point(13, 100);
+        let _records = points_of(world, 1).apply_point(14, 100);
+    }
+
+    /// A hit with every chance lands the poison affect and schedules its event one Pulse
+    /// on, stuns and slows the victim, and the neighbourhood hears the updates.
+    #[test]
+    fn a_hit_with_every_chance_lands_the_poison_stun_and_slow() {
+        use protocol::gc_actors::GcCharacterUpdate;
+        let (_clock, mut world, mut alpha) = a_fight(a_monster(MAX_HP), NEAR);
+        all_chances(&mut world);
+        world.target(Vid::new(1), ME);
+        drained(&mut alpha);
+        hit(&mut world, 1, ME);
+        let words = world.npc_affect_words(ME);
+        assert_eq!(
+            words[0] & (AFF_POISON_WORD | AFF_STUN_WORD),
+            AFF_POISON_WORD | AFF_STUN_WORD
+        );
+        assert_ne!(words[0] & (1 << 5), 0, "the slow word");
+        let combat = world.npc_combat[&ME].clone();
+        assert!(combat.poisoned_once);
+        assert_eq!(combat.poison_due, Some((P0 + 1, 10)));
+        assert_eq!(combat.poison_attacker, Some(1));
+        assert_eq!(
+            world
+                .npc_by_vid(ME)
+                .unwrap()
+                .fight
+                .point(point::POINT_MOV_SPEED),
+            -30
+        );
+        let heard: Vec<Vec<u8>> = drained(&mut alpha);
+        let updates: Vec<GcCharacterUpdate> = heard
+            .iter()
+            .filter_map(|record| GcCharacterUpdate::decode(record).ok())
+            .collect();
+        assert!(!updates.is_empty(), "an update went out: {heard:02x?}");
+        assert!(
+            !world.can_begin_fight(ME),
+            "stunned by the hit, it does not begin"
+        );
+    }
+
+    /// A hit with `POINT_STEAL_GOLD` pays the purse `number(1, victim level)`: the dog is
+    /// level 1, so the purse gains 1, the attacker hears `GC_CHARACTER_GOLD_CHANGE`, and
+    /// the answer carries the delta. The steal lands before the damage packet and the
+    /// hit-point change, inside `Damage` (`G/char_battle.cpp:2080-2092`).
+    #[test]
+    fn a_hit_with_steal_gold_pays_the_purse_and_answers_the_delta() {
+        use protocol::gc_actors::GcCharacterGoldChange;
+        let (_clock, mut world, mut alpha) = a_fight(a_monster(MAX_HP), NEAR);
+        let _records =
+            points_of(&mut world, 1).point_change(point::POINT_STEAL_GOLD, 100, false, false);
+        world.target(Vid::new(1), ME);
+        drained(&mut alpha);
+        let held = world.characters.find_by_vid(Vid::new(1)).unwrap().gold();
+        let answer = world.attack(Vid::new(1), CgAttack::new(0, ME, 0, 0));
+        assert_eq!(answer.gold, Some(1));
+        let paid = world.characters.find_by_vid(Vid::new(1)).unwrap().gold();
+        assert_eq!(paid, held + 1);
+        let heard: Vec<Vec<u8>> = drained(&mut alpha);
+        let mut gold = Vec::new();
+        GcCharacterGoldChange::new(1, 1, paid).encode_into(&mut gold);
+        assert!(
+            heard.iter().any(|record| *record == gold),
+            "the gold record went out: {heard:02x?}"
+        );
+        let at = heard
+            .iter()
+            .position(|record| *record == gold)
+            .expect("the gold record");
+        let damage_at = heard.iter().position(|record| {
+            record.first() == Some(&protocol::gc_nested::GcDamageInfo::header())
+        });
+        if let Some(damage_at) = damage_at {
+            assert!(at < damage_at, "gold before the damage packet");
+        }
+    }
+
+    /// At the cap the steal refuses with nothing changed, nothing sent and no delta:
+    /// `ChangeGold`'s `OVERFLOW_GOLD` arm returns (`G/char.cpp:3827-3832`).
+    #[test]
+    fn a_steal_at_the_gold_cap_refuses_silently() {
+        use protocol::gc_inventory::HEADER_GC_CHARACTER_GOLD_CHANGE;
+        let (_clock, mut world, mut alpha) = a_fight(a_monster(MAX_HP), NEAR);
+        let _records =
+            points_of(&mut world, 1).point_change(point::POINT_STEAL_GOLD, 100, false, false);
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(1))
+            .unwrap()
+            .set_gold(GOLD_MAX_MAX - 1);
+        world.target(Vid::new(1), ME);
+        drained(&mut alpha);
+        let answer = world.attack(Vid::new(1), CgAttack::new(0, ME, 0, 0));
+        assert_eq!(answer.gold, None);
+        assert_eq!(
+            world.characters.find_by_vid(Vid::new(1)).unwrap().gold(),
+            GOLD_MAX_MAX - 1
+        );
+        let heard: Vec<Vec<u8>> = drained(&mut alpha);
+        assert!(
+            heard
+                .iter()
+                .all(|record| record.first() != Some(&HEADER_GC_CHARACTER_GOLD_CHANGE.value())),
+            "no gold record: {heard:02x?}"
+        );
+    }
+
+    /// The rate reads the rank table less `POISON_REDUCE`, floored at 0, and a rank past
+    /// the table's end reads the last per-mille (legacy would read out of bounds).
+    #[test]
+    fn the_poison_rate_follows_the_rank_and_the_reduce_with_a_clamp() {
+        let mut npc = a_monster(MAX_HP);
+        npc.fight.rank = 5;
+        let (_clock, mut world, _alpha) = a_fight(npc, NEAR);
+        assert_eq!(world.npc_poison_rate(ME), 1, "KING's per-mille");
+        world
+            .npc_mut(ME)
+            .unwrap()
+            .fight
+            .add(point::POINT_POISON_REDUCE, 1);
+        assert_eq!(world.npc_poison_rate(ME), 0, "the floor");
+        world.npc_mut(ME).unwrap().fight.rank = 200;
+        assert_eq!(world.npc_poison_rate(ME), 0, "the clamp, still reduced");
+        world
+            .npc_mut(ME)
+            .unwrap()
+            .fight
+            .add(point::POINT_POISON_REDUCE, -1);
+        assert_eq!(world.npc_poison_rate(ME), 1, "the clamp reads KING");
+        world.npc_mut(ME).unwrap().fight.rank = 1;
+        assert_eq!(world.npc_poison_rate(ME), 50, "PAWN's per-mille");
+    }
+
+    /// The poison tick deals `maxHP * rate / 1000`, ten ticks three seconds apart, feeds
+    /// the damage map and the aggro, and shows `DAMAGE_POISON` to the targeter.
+    #[test]
+    fn the_npc_poison_event_ticks_ten_times_with_the_rank_rate() {
+        use protocol::gc_nested::GcDamageInfo;
+        let mut npc = a_monster(MAX_HP);
+        npc.fight.rank = 0;
+        let (_clock, mut world, mut alpha) = a_fight(npc, NEAR);
+        world.target(Vid::new(1), ME);
+        drained(&mut alpha);
+        world.poison_npc(Vid::new(1), ME);
+        let tick = MAX_HP * 80 / 1000;
+        let mut pulse = P0 + 1;
+        for left in (1..=10).rev() {
+            world.process_pulse(pulse);
+            let heard = drained(&mut alpha);
+            let infos: Vec<(u8, i32)> = heard
+                .iter()
+                .filter_map(|record| GcDamageInfo::decode(record).ok())
+                .map(|info| (info.flag, info.damage))
+                .collect();
+            assert_eq!(infos, [(DAMAGE_POISON, tick)], "tick with {left} left");
+            assert!(!world.npc_by_vid(ME).unwrap().dead);
+            pulse += 75;
+        }
+        assert!(world.npc_combat[&ME].poison_due.is_none());
+        assert_eq!(
+            world.npc_combat[&ME].damage.get(&1).map(|row| row.total),
+            Some(tick * 10)
+        );
+        assert!(world.npc_combat[&ME].damage[&1].aggro > 0);
+    }
+
+    /// The HP-1 floor: a tick on 1 hit point deals 0, the event continues, and a
+    /// re-poison is gated by the running event and then by the once flag.
+    #[test]
+    fn the_poison_floor_never_kills_and_a_re_poison_is_gated() {
+        let mut npc = a_monster(MAX_HP);
+        npc.hp = 1;
+        let (_clock, mut world, mut alpha) = a_fight(npc, NEAR);
+        world.target(Vid::new(1), ME);
+        drained(&mut alpha);
+        world.poison_npc(Vid::new(1), ME);
+        world.process_pulse(P0 + 1);
+        assert_eq!(world.npc_by_vid(ME).unwrap().hp, 1);
+        assert_eq!(world.npc_combat[&ME].poison_due, Some((P0 + 1 + 75, 9)));
+        // A re-poison while the event runs is gated by it.
+        world.poison_npc(Vid::new(1), ME);
+        assert_eq!(world.npc_combat[&ME].poison_due, Some((P0 + 1 + 75, 9)));
+        // The event runs out; the once flag gates the next.
+        for n in 1..10 {
+            world.process_pulse(P0 + 1 + 75 * n);
+        }
+        assert!(world.npc_combat[&ME].poison_due.is_none());
+        world.poison_npc(Vid::new(1), ME);
+        assert!(world.npc_combat[&ME].poison_due.is_none());
+        assert!(
+            world.npc_affects.get(&ME).is_none_or(|event| {
+                event
+                    .affects
+                    .iter()
+                    .all(|affect| affect.kind != AFFECT_POISON)
+            }) || world.npc_affect_words(ME)[0] & AFF_POISON_WORD != 0
+        );
+    }
+
+    /// A poisoned monster's recovery heals nothing and reschedules; death clears the
+    /// affects before `GC_DEAD` with no update packet.
+    #[test]
+    fn a_poisoned_monster_recovers_nothing_and_death_clears_silently() {
+        use protocol::gc_actors::GcCharacterUpdate;
+        let (_clock, mut world, mut alpha) = a_fight(a_monster(MAX_HP), NEAR);
+        world.target(Vid::new(1), ME);
+        drained(&mut alpha);
+        world.poison_npc(Vid::new(1), ME);
+        drained(&mut alpha);
+        world.npc_mut(ME).unwrap().hp = 500;
+        world.recovery_event(ME);
+        assert_eq!(world.npc_by_vid(ME).unwrap().hp, 500);
+        assert!(world.npc_combat[&ME].recovery_due.is_some());
+        assert!(drained(&mut alpha).is_empty(), "no target broadcast");
+        // Death clears without an update: only `GC_DEAD` and the sync release go out.
+        world.npc_mut(ME).unwrap().hp = 0;
+        world.dead_npc(ME, Some(Vid::new(1)));
+        assert!(!world.npc_affects.contains_key(&ME));
+        let heard = drained(&mut alpha);
+        assert!(
+            heard
+                .iter()
+                .all(|record| GcCharacterUpdate::decode(record).is_err()),
+            "no update for the clear: {heard:02x?}"
+        );
+        assert!(
+            heard
+                .iter()
+                .any(|record| record[0] == HEADER_GC_DEAD.value()),
+            "GC_DEAD went out: {heard:02x?}"
+        );
+    }
+
+    /// The affect tick expires the stun at 4 ticks and the slow at 20: the slow's −30
+    /// comes back and the words clear.
+    #[test]
+    fn the_npc_affect_tick_expires_the_stun_and_the_slow() {
+        let (_clock, mut world, mut alpha) = a_fight(a_monster(MAX_HP), NEAR);
+        world.target(Vid::new(1), ME);
+        drained(&mut alpha);
+        world.add_npc_affect(
+            ME,
+            crate::game_state::affect::Affect {
+                kind: AFFECT_STUN,
+                apply_on: u8::try_from(point::POINT_NONE).unwrap(),
+                value: 0,
+                flag: AFF_STUN,
+                remaining: STUN_TICKS_NPC,
+            },
+        );
+        world.add_npc_affect(
+            ME,
+            crate::game_state::affect::Affect {
+                kind: AFFECT_SLOW,
+                apply_on: u8::try_from(point::POINT_MOV_SPEED).unwrap(),
+                value: SLOW_MOV_SPEED,
+                flag: AFF_SLOW,
+                remaining: SLOW_TICKS,
+            },
+        );
+        assert!(!world.can_begin_fight(ME));
+        for n in 1..=4 {
+            world.process_pulse(P0 + 25 * n);
+        }
+        assert!(world.can_begin_fight(ME), "the stun expired");
+        assert_eq!(
+            world
+                .npc_by_vid(ME)
+                .unwrap()
+                .fight
+                .point(point::POINT_MOV_SPEED),
+            -30
+        );
+        for n in 5..=20 {
+            world.process_pulse(P0 + 25 * n);
+        }
+        assert_eq!(
+            world
+                .npc_by_vid(ME)
+                .unwrap()
+                .fight
+                .point(point::POINT_MOV_SPEED),
+            0
+        );
+        assert_eq!(world.npc_affect_words(ME), [0, 0]);
+        assert!(!world.npc_affects.contains_key(&ME));
     }
 }

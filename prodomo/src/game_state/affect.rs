@@ -1,5 +1,7 @@
 //! The affect event of each character (`m_pkAffectEvent`, `G/char_affect.cpp:143-162`), and the
 //! timed affects it counts down (`CHARACTER::AddAffect`, `CAffect`, `G/char_affect.cpp`).
+//! The same event serves a non-player that holds timed affects: the countdown only, no
+//! recovery and no stamina, and the neighbourhood learns through `UpdatePacket` alone.
 //!
 //! One event serves one character. Every 25 Pulses it runs the potion recovery, then the
 //! stamina refill, then the countdown of each timed affect, and it runs again while any of
@@ -403,6 +405,274 @@ impl GameState {
             let _ended = self.affect_events.remove(&vid);
         }
     }
+    /// Starts the affect event of the non-player `vid` if it has none, due one tick from now.
+    fn start_npc_affect_event(&mut self, vid: u32) {
+        if self.npc_affects.contains_key(&vid) {
+            return;
+        }
+        let due = self.last_pulse.saturating_add(u64::from(PASSES_PER_SEC));
+        self.affect_sequence = self.affect_sequence.saturating_add(1);
+        let event = AffectEvent {
+            due,
+            sequence: self.affect_sequence,
+            affects: Vec::new(),
+        };
+        let _started = self.npc_affects.insert(vid, event);
+    }
+
+    /// The affect flag words the non-player `vid` shows now: its base words with the ones
+    /// its timed affects set, or the base alone with no event. `m_afAffectFlag` holds both
+    /// the spawn bit and the timed bits (`G/char.h:1078`); the Rewrite keeps the spawn
+    /// words on the `Npc` and ORs the timed ones in at every read.
+    pub(super) fn npc_affect_words(&self, vid: u32) -> [u32; 2] {
+        let base = self.npc_by_vid(vid).map_or([0; 2], |npc| npc.affect_flags);
+        let Some(event) = self.npc_affects.get(&vid) else {
+            return base;
+        };
+        let timed = flags_of(&event.affects);
+        [base[0] | timed[0], base[1] | timed[1]]
+    }
+
+    /// `CHARACTER::AddAffect` with override on the non-player under `vid`
+    /// (`G/char_affect.cpp:668-770`): a zero duration runs one tick; a moving mind stops
+    /// for the stun; an affect of the same kind is uncomputed, then the row is rewritten
+    /// in place at its old place; else the row is appended. Then the row computes, a
+    /// `MOV_SPEED` change rescales the in-flight leg (`SetPoint`), and the update goes
+    /// to the neighbourhood when the flag is set or either speed moved (a set flag
+    /// always updates). No add or remove packet: both are `GetDesc()` arms, and a
+    /// non-player has no desc.
+    pub(super) fn add_npc_affect(&mut self, vid: u32, mut affect: Affect) {
+        if affect.remaining == 0 {
+            affect.remaining = 1;
+        }
+        if affect.flag == AFF_STUN {
+            self.stop_npc_for_stun(vid);
+        }
+        let mov_before = self.npc_point(vid, point::POINT_MOV_SPEED);
+        let att_before = self.npc_point(vid, point::POINT_ATT_SPEED);
+        let retired = self.npc_affects.get_mut(&vid).and_then(|event| {
+            event
+                .affects
+                .iter_mut()
+                .find(|slot| slot.kind == affect.kind)
+                .map(|slot| {
+                    let retired = *slot;
+                    *slot = affect;
+                    retired
+                })
+        });
+        let placed = retired.is_some();
+        if let Some(retired) = retired {
+            self.change_npc_point(vid, usize::from(retired.apply_on), -retired.value);
+        }
+        self.start_npc_affect_event(vid);
+        if !placed {
+            if let Some(event) = self.npc_affects.get_mut(&vid) {
+                event.affects.push(affect);
+            }
+        }
+        self.change_npc_point(vid, usize::from(affect.apply_on), affect.value);
+        let mov_after = self.npc_point(vid, point::POINT_MOV_SPEED);
+        if mov_after != mov_before {
+            self.rescale_npc_leg(vid, mov_after);
+        }
+        let words_after = self.npc_affect_words(vid);
+        if affect.flag != 0
+            || mov_before != mov_after
+            || att_before != self.npc_point(vid, point::POINT_ATT_SPEED)
+        {
+            self.send_npc_update(vid, words_after);
+        }
+    }
+
+    /// `SetPoint(POINT_MOV_SPEED)`'s mid-walk arm (`G/char.cpp:3812-3815`): while the mind's
+    /// leg is still in flight, `CalculateMoveDuration` re-anchors it — the start snaps to
+    /// the spot, the duration is recomputed from the spot to the destination at the new
+    /// limited speed, and the start time is now (`:3585-3603`). A leg already arrived
+    /// (`now >= start + duration`) keeps its times: the next `StateMove` arrives it.
+    fn rescale_npc_leg(&mut self, vid: u32, move_speed: i32) {
+        let Some(spot) = self.npc_spot(vid) else {
+            return;
+        };
+        let now = self.clock.now();
+        let Some(mind) = self.minds.get_mut(vid) else {
+            return;
+        };
+        let elapsed = now.wrapping_sub(mind.motion.start_ms);
+        if elapsed >= mind.motion.duration_ms {
+            return;
+        }
+        mind.motion.start = spot;
+        mind.motion.duration_ms = super::motion::move_duration(
+            spot,
+            mind.motion.dest,
+            super::motion::MOTION_SPEED_FALLBACK,
+            super::mob_battle::npc_limit_speed(move_speed),
+        );
+        mind.motion.start_ms = now;
+    }
+
+    /// `AddAffect`'s stun arm on the non-player under `vid`: a mind whose destination is
+    /// not its spot stops where it stands, its fight pose ends (`battle_end`), and the
+    /// sync record goes around (`G/char_affect.cpp:690-701`). The Rewrite keeps no
+    /// `m_dwMoveDuration` to leave untouched: `Motion` carries its own.
+    fn stop_npc_for_stun(&mut self, vid: u32) {
+        let Some(spot) = self.npc_spot(vid) else {
+            return;
+        };
+        let stops = self
+            .minds
+            .get(vid)
+            .is_some_and(|mind| mind.motion.dest.0 != spot.0 || mind.motion.dest.1 != spot.1);
+        if !stops {
+            return;
+        }
+        let point = (spot.0, spot.1);
+        if let Some(mind) = self.minds.get_mut(vid) {
+            mind.motion.dest = point;
+            mind.motion.start = point;
+            mind.fighting = false;
+        }
+        let mut record = vec![HEADER_GC_SYNC_POSITION.value(), 0, 0];
+        record.extend_from_slice(&GcSyncPositionElement::new(vid, spot.0, spot.1).encode());
+        let size = u16::try_from(record.len()).unwrap_or(u16::MAX);
+        record[1..3].copy_from_slice(&size.to_le_bytes());
+        self.packet_around(EntityKey::Npc(vid), &record, None);
+    }
+
+    /// `GetPoint` of the non-player under `vid`, or 0 when it is gone.
+    fn npc_point(&self, vid: u32, slot: usize) -> i32 {
+        self.npc_by_vid(vid).map_or(0, |npc| npc.fight.point(slot))
+    }
+
+    /// `PointChange` of the non-player under `vid`: the slot moves, with no packet — the
+    /// caller sends the one update for the whole change. Slot 0 (`POINT_NONE`) changes
+    /// nothing but still lands in the row, as `ComputeAffect` still writes the field.
+    fn change_npc_point(&mut self, vid: u32, slot: usize, value: i32) {
+        if slot == point::POINT_NONE {
+            return;
+        }
+        if let Some(npc) = self.npc_mut(vid) {
+            npc.fight.add(slot, value);
+        }
+    }
+
+    /// `UpdatePacket` of the non-player under `vid` with `words` in its affect words
+    /// (`G/char.cpp:1277-1340`): its limited live speeds, and 0 for every worn part,
+    /// guild, mount, premium and alignment — a monster wears and owns nothing. Sent to
+    /// the neighbourhood only, as the victim has no desc.
+    pub(super) fn send_npc_update(&mut self, vid: u32, words: [u32; 2]) {
+        let Some(npc) = self.npc_by_vid(vid) else {
+            return;
+        };
+        let look = world::character::CharacterLook {
+            parts: [0; world::character::PARTS],
+            moving_speed: u8::try_from(super::mob_battle::npc_limit_speed(
+                npc.fight.point(point::POINT_MOV_SPEED),
+            ))
+            .unwrap_or(u8::MAX),
+            attack_speed: u8::try_from(super::mob_battle::npc_limit_speed(
+                npc.fight.point(point::POINT_ATT_SPEED),
+            ))
+            .unwrap_or(u8::MAX),
+            level: u32::from(npc.fight.level),
+            conqueror_level: 0,
+            refine_element_type: 0,
+        };
+        let mover = Mover {
+            recently_fought: false,
+            empire: npc.empire,
+            language: 0,
+            pk_mode: 0,
+            affect_flags: words,
+            dead: npc.dead,
+            alignment: 0,
+        };
+        let mut frame = Vec::new();
+        crate::item_move::character_update(vid, &look, mover).encode_into(&mut frame);
+        self.packet_around(EntityKey::Npc(vid), &frame, None);
+    }
+
+    /// Runs the affect events of the non-players due by `pulse`, in the order they were
+    /// started. Shares the sequence with the players' events: a monster's and a player's
+    /// event due on one Pulse run in start order.
+    pub(super) fn run_npc_affect_events(&mut self, pulse: u64) {
+        let mut due: Vec<(u64, u64, u32)> = self
+            .npc_affects
+            .iter()
+            .filter(|(_, event)| event.due <= pulse)
+            .map(|(vid, event)| (event.due, event.sequence, *vid))
+            .collect();
+        due.sort_unstable_by_key(|&(_, sequence, _)| sequence);
+        for (_, _, vid) in due {
+            self.run_npc_affect_event(vid, pulse);
+        }
+    }
+
+    /// One run of the affect event of the non-player `vid`: the countdown, then the
+    /// removals and the flag update, and the next run while any affect is left. No
+    /// recovery, no stamina, no `CheckMaximumPoints`: nothing here touches a maximum,
+    /// and a monster holds neither recovery points nor stamina.
+    fn run_npc_affect_event(&mut self, vid: u32, pulse: u64) {
+        let words_before = self.npc_affect_words(vid);
+        let mov_before = self.npc_point(vid, point::POINT_MOV_SPEED);
+        let att_before = self.npc_point(vid, point::POINT_ATT_SPEED);
+        let Some(event) = self.npc_affects.get_mut(&vid) else {
+            return;
+        };
+        let expired = count_down(&mut event.affects);
+        let again = !event.affects.is_empty();
+        // `ComputeAffect(pkAff, false)` on each expired affect (`ProcessAffect`): the point
+        // is taken back, with no remove packet for a non-player, and the flags update
+        // once, after all of them.
+        for affect in &expired {
+            self.change_npc_point(vid, usize::from(affect.apply_on), -affect.value);
+        }
+        let mov_after = self.npc_point(vid, point::POINT_MOV_SPEED);
+        if mov_after != mov_before {
+            self.rescale_npc_leg(vid, mov_after);
+        }
+        let words_after = self.npc_affect_words(vid);
+        if words_after != words_before
+            || mov_before != mov_after
+            || att_before != self.npc_point(vid, point::POINT_ATT_SPEED)
+        {
+            self.send_npc_update(vid, words_after);
+        }
+        if again {
+            if let Some(event) = self.npc_affects.get_mut(&vid) {
+                event.due = pulse.saturating_add(u64::from(PASSES_PER_SEC));
+            }
+        } else {
+            let _ended = self.npc_affects.remove(&vid);
+        }
+    }
+
+    /// `ClearAffect(true)` on the non-player under `vid` (`G/char_battle.cpp:1370`): kinds
+    /// 209/210/211 go — none is in the no-clear tables — each computed off. `update`
+    /// sends the one `UpdatePacket` for the clear; death clears without one, before
+    /// `GC_DEAD`.
+    pub(super) fn clear_npc_affects(&mut self, vid: u32, update: bool) {
+        let words_before = self.npc_affect_words(vid);
+        let taken = match self.npc_affects.get_mut(&vid) {
+            Some(event) => std::mem::take(&mut event.affects),
+            None => Vec::new(),
+        };
+        if taken.is_empty() {
+            return;
+        }
+        for affect in &taken {
+            self.change_npc_point(vid, usize::from(affect.apply_on), -affect.value);
+        }
+        let _ended = self.npc_affects.remove(&vid);
+        if update {
+            self.rescale_npc_leg(vid, self.npc_point(vid, point::POINT_MOV_SPEED));
+            let words_after = self.npc_affect_words(vid);
+            if words_after != words_before {
+                self.send_npc_update(vid, words_after);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -714,5 +984,147 @@ mod tests {
             .filter(|frame| frame.first() == Some(&0x7e))
             .count();
         assert_eq!((removes, adds), (1, 1));
+    }
+
+    /// A stood NPC for the non-player affect tests: race 101 at (3200, 3200).
+    fn stood_npc(world: &mut GameState, vid: u32) {
+        use crate::game_state::fixtures::{open_cells, region};
+        use gamedata::mob_group::MobGroups;
+        use gamedata::mob_locale_names::MobLocaleNames;
+        use gamedata::mob_proto::{MobProtos, CHAR_TYPE_MONSTER};
+        use std::sync::Arc;
+        use world::npc::{MapNpcs, Npc, NpcVids, Respawner, FIRST_NPC_VID};
+        let respawner = Respawner::new(
+            Arc::new(MobProtos::from_rows(Vec::new())),
+            Arc::new(MobGroups::default()),
+            Arc::new(MobLocaleNames::parse(b"VNUM\tNAME\n").unwrap()),
+            NpcVids::starting_at(FIRST_NPC_VID + 100),
+        );
+        world.install_respawner(respawner, open_cells());
+        world.stand_npcs(
+            PLACE.0,
+            &region(),
+            MapNpcs {
+                npcs: vec![Npc {
+                    vid,
+                    vnum: 101,
+                    race: 101,
+                    char_type: CHAR_TYPE_MONSTER,
+                    x: 3200,
+                    y: 3200,
+                    hp: 100,
+                    max_hp: 100,
+                    ..Npc::default()
+                }],
+                positions: Vec::new(),
+                regens: Vec::new(),
+            },
+        );
+    }
+
+    /// A non-player slow ticks down and gives the speed back on its last tick with one
+    /// neighbourhood update; the event ends with the last affect.
+    #[test]
+    fn a_npc_slow_ticks_down_and_ends_its_event() {
+        use crate::loading_phase::{AFFECT_SLOW, AFF_SLOW, SLOW_MOV_SPEED};
+        use common::point_slot as point;
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        stood_npc(&mut world, 1000);
+        let mut inbox = enter_on(&mut world, PLACE, 1, (3100, 3200), 10_000);
+        world.add_npc_affect(
+            1000,
+            Affect {
+                kind: AFFECT_SLOW,
+                apply_on: u8::try_from(point::POINT_MOV_SPEED).unwrap(),
+                value: SLOW_MOV_SPEED,
+                flag: AFF_SLOW,
+                remaining: 2,
+            },
+        );
+        assert_eq!(
+            world
+                .npc_by_vid(1000)
+                .unwrap()
+                .fight
+                .point(point::POINT_MOV_SPEED),
+            -30
+        );
+        while inbox.try_recv().is_ok() {}
+        let due = world.npc_affects[&1000].due;
+        world.run_npc_affect_events(due);
+        assert_eq!(world.npc_affects[&1000].affects[0].remaining, 1);
+        assert_eq!(
+            world
+                .npc_by_vid(1000)
+                .unwrap()
+                .fight
+                .point(point::POINT_MOV_SPEED),
+            -30
+        );
+        while inbox.try_recv().is_ok() {}
+        let due = world.npc_affects[&1000].due;
+        world.run_npc_affect_events(due);
+        assert_eq!(
+            world
+                .npc_by_vid(1000)
+                .unwrap()
+                .fight
+                .point(point::POINT_MOV_SPEED),
+            0
+        );
+        assert!(!world.npc_affects.contains_key(&1000));
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert_eq!(
+            heard
+                .iter()
+                .filter(|frame| frame.first() == Some(&19))
+                .count(),
+            1,
+            "one update: {heard:02x?}"
+        );
+        assert!(
+            heard.iter().all(|frame| frame.first() != Some(&0x7e)),
+            "no add for a non-player: {heard:02x?}"
+        );
+    }
+
+    /// A non-player stun over a running stun rewrites it in place: one row, no add or
+    /// remove, the words unchanged.
+    #[test]
+    fn a_npc_stun_over_a_running_stun_rewrites_it_in_place() {
+        use crate::loading_phase::{AFFECT_STUN, AFF_STUN};
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        stood_npc(&mut world, 1000);
+        let mut inbox = enter_on(&mut world, PLACE, 1, (3100, 3200), 10_000);
+        let stun = Affect {
+            kind: AFFECT_STUN,
+            apply_on: 0,
+            value: 0,
+            flag: AFF_STUN,
+            remaining: 4,
+        };
+        world.add_npc_affect(1000, stun);
+        let words = world.npc_affect_words(1000);
+        while inbox.try_recv().is_ok() {}
+        world.add_npc_affect(
+            1000,
+            Affect {
+                remaining: 2,
+                ..stun
+            },
+        );
+        let event = world.npc_affects.get(&1000).unwrap();
+        assert_eq!(event.affects.len(), 1);
+        assert_eq!(event.affects[0].remaining, 2);
+        assert_eq!(world.npc_affect_words(1000), words);
+        let heard: Vec<Vec<u8>> = std::iter::from_fn(|| inbox.try_recv().ok()).collect();
+        assert!(
+            heard
+                .iter()
+                .all(|frame| !matches!(frame.first(), Some(0x7e | 0x7f))),
+            "no add or remove: {heard:02x?}"
+        );
     }
 }

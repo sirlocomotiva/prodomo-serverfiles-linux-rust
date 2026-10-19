@@ -149,6 +149,13 @@ pub const POISON_TICKS: i32 = 31;
 /// PC-on-monster arm lengthens it.
 pub const STUN_TICKS: i32 = 2;
 
+/// `NormalAttackAffect`'s stun ticks on a non-player of a player's hit (`G/battle.cpp:752-753`).
+pub const STUN_TICKS_NPC: i32 = 4;
+
+/// `poison_damage_rate` (`G/char_resist.cpp:4-7`): the poison tick's per-mille of the
+/// maximum by mob rank, PAWN to KING.
+pub const POISON_DAMAGE_RATE: [i32; 6] = [80, 50, 40, 30, 25, 1];
+
 /// `NormalAttackAffect`'s slow ticks (`G/battle.cpp:757`).
 pub const SLOW_TICKS: i32 = 20;
 
@@ -356,12 +363,16 @@ pub fn npc_add(npc: &Npc) -> GcCharacterAdd {
             y: npc.y,
             z: npc.z,
         },
+        npc.affect_flags,
     )
 }
 
 /// [`npc_add`] with the angle and the point the view reads from the NPC's state machine.
+/// The speeds are its limited live points (`GetLimitPoint`, `:1089-1091`), not the spawn
+/// bytes: a slowed NPC inserts slowed. The caller passes the live affect words beside
+/// the row, as the row keeps the base (spawn) words only.
 #[must_use]
-pub fn npc_add_at(npc: &Npc, at: InsertAt) -> GcCharacterAdd {
+pub fn npc_add_at(npc: &Npc, at: InsertAt, words: [u32; 2]) -> GcCharacterAdd {
     GcCharacterAdd::new(
         npc.vid,
         at.angle,
@@ -370,11 +381,11 @@ pub fn npc_add_at(npc: &Npc, at: InsertAt) -> GcCharacterAdd {
         at.z,
         npc.char_type,
         npc.race,
-        npc.moving_speed,
-        npc.attack_speed,
+        u8::try_from(npc.fight.point(point::POINT_MOV_SPEED).clamp(0, 250)).unwrap_or(u8::MAX),
+        u8::try_from(npc.fight.point(point::POINT_ATT_SPEED).clamp(0, 250)).unwrap_or(u8::MAX),
         // `ADD_CHARACTER_STATE_DEAD` once it has died (`G/char.cpp:1446-1447`), until it goes.
         u8::from(npc.dead),
-        npc.affect_flags,
+        words,
     )
 }
 
@@ -1981,7 +1992,7 @@ mod tests {
 
     /// An NPC whose every field differs, so that no field can stand in for another.
     fn smith() -> Npc {
-        Npc {
+        let mut npc = Npc {
             vid: 0x8000_0007,
             vnum: 0x1_4e30,
             race: 0x4e30,
@@ -1996,7 +2007,10 @@ mod tests {
             attack_speed: 90,
             name: b"Fierar".to_vec(),
             ..world::npc::Npc::default()
-        }
+        };
+        npc.fight.add(common::point_slot::POINT_MOV_SPEED, 120);
+        npc.fight.add(common::point_slot::POINT_ATT_SPEED, 90);
+        npc
     }
 
     /// An NPC's insert carries each of its own fields, and nothing it does not have.

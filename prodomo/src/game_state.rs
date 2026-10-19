@@ -73,6 +73,7 @@ mod mob_skill;
 mod mob_strike;
 mod motion;
 mod pc_heal;
+mod pc_skill;
 mod quests;
 mod regen;
 mod reward;
@@ -413,6 +414,9 @@ pub struct GameState {
     affect_events: HashMap<common::vid::Vid, affect::AffectEvent>,
     /// The number of the last affect event started, which orders two events due on one Pulse.
     affect_sequence: u64,
+    /// The affect event of each non-player that has one: the timed affects only, no
+    /// recovery and no stamina. Shares [`affect::AffectEvent`] and the sequence above.
+    npc_affects: HashMap<u32, affect::AffectEvent>,
     /// The NPCs standing on each map of each Channel, keyed by (Channel, map index).
     ///
     /// Shared with the descriptor that shows them. A regen's spawn and a `Destroy` change a
@@ -426,6 +430,8 @@ pub struct GameState {
     motions: Arc<gamedata::pc_motion::PcMotions>,
     /// The hosted mob skill rows and the mob power row, which a cast reads.
     mob_skills: Arc<gamedata::mob_skill_data::MobSkills>,
+    /// The hosted PC skill rows and the eight power rows, which a cast reads.
+    pc_skill_tables: Arc<gamedata::pc_skill_data::PcSkills>,
     /// The skill clips, which stood-up NPCs copy their `SPECIALn` data from.
     mob_clips: Arc<gamedata::mob_skill_data::MobSkillClips>,
     /// The drop tables, which a monster's death will pay from.
@@ -476,6 +482,9 @@ pub struct GameState {
     /// What each player keeps of its fight: its stun, its death, its killer and its events. See
     /// [`death`].
     pc_combat: HashMap<u32, death::PcCombat>,
+    /// What each player keeps of its skills: its levels and its use stamps. See
+    /// [`pc_skill`].
+    pc_skills: HashMap<u32, pc_skill::PcSkillState>,
     /// `gPlayerMaxLevel` and `g_iStatusPointGetLevelLimit`, which the experience gain reads.
     exp_limits: world::character::ExpLimits,
     /// Where a town restart sends a player. See [`death`].
@@ -544,10 +553,12 @@ impl GameState {
             clients: None,
             affect_events: HashMap::new(),
             affect_sequence: 0,
+            npc_affects: HashMap::new(),
             npcs: BTreeMap::new(),
             shops: Arc::default(),
             motions: Arc::default(),
             mob_skills: Arc::default(),
+            pc_skill_tables: Arc::default(),
             mob_clips: Arc::default(),
             drops: Arc::default(),
             item_attrs: Arc::default(),
@@ -572,6 +583,7 @@ impl GameState {
             minds: mob_ai::Minds::default(),
             npc_combat: HashMap::new(),
             pc_combat: HashMap::new(),
+            pc_skills: HashMap::new(),
             exp_limits: world::character::ExpLimits {
                 max_level: DEFAULT_MAX_LEVEL,
                 status_point_get_level_limit: DEFAULT_STATUS_POINT_GET_LEVEL_LIMIT,
@@ -812,16 +824,7 @@ impl GameState {
                 }
             }
             GameCommand::InstallItemIdRange { range, reply } => {
-                let answer = self.install_item_ids(range);
-                // A dropped install answer leaves the world without an allocator,
-                // which is the state it started in, so the caller can ask again.
-                if reply.send(answer.is_ok()).is_err() {
-                    warn!(
-                        first = range.first,
-                        last = range.last,
-                        "the item id range was installed but nobody was left to hear about it"
-                    );
-                }
+                self.answer_install(range, reply);
             }
             GameCommand::RevokeGrant { target, id, reply } => {
                 self.answer_revoke(&target, id, reply);
@@ -883,7 +886,9 @@ impl GameState {
             command @ (GameCommand::Move { .. }
             | GameCommand::SyncPosition { .. }
             | GameCommand::Relay { .. }) => self.apply_motion(command),
-            command @ (GameCommand::Target { .. } | GameCommand::Attack { .. }) => {
+            command @ (GameCommand::Target { .. }
+            | GameCommand::UseSkill { .. }
+            | GameCommand::Attack { .. }) => {
                 self.apply_pick(command);
             }
             GameCommand::Restart {
@@ -919,6 +924,20 @@ impl GameState {
         });
         if reply.send(kept).is_err() {
             debug!(?vid, "nobody was left to hear a character's points");
+        }
+    }
+
+    /// Install the item-id range and tell the caller whether it took.
+    fn answer_install(&mut self, range: ItemIdRange, reply: oneshot::Sender<bool>) {
+        let answer = self.install_item_ids(range);
+        // A dropped install answer leaves the world without an allocator,
+        // which is the state it started in, so the caller can ask again.
+        if reply.send(answer.is_ok()).is_err() {
+            warn!(
+                first = range.first,
+                last = range.last,
+                "the item id range was installed but nobody was left to hear about it"
+            );
         }
     }
 
@@ -1908,6 +1927,7 @@ impl PulseProcessor for GameState {
         self.destroy_expired(pulse);
         self.release_expired_ownership(pulse);
         self.run_affect_events(pulse);
+        self.run_npc_affect_events(pulse);
         self.run_warp_npcs(pulse);
         self.run_regens(pulse);
         self.step_motion(pulse);

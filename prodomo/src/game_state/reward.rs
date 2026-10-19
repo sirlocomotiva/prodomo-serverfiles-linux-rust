@@ -19,10 +19,10 @@
 //!
 //! The damage map is `NpcCombat.damage`, filled by `after_damage` before the recovery
 //! starts. `dead_npc` calls `reward_exp` after the stun cancel and before `GC_DEAD`.
-//! There is no party, so every attacker is solo; there is no stone link (OQ11), no
-//! priv manager, no premium, no mounts, no marriage, and no ring of exp (its group
-//! does not exist). The devil-tower arm is dead on a hostile map (no hosted map is in
-//! 660000-669999), `AdjustExpByLevel` is a no-op at level 99 and below, and the tower
+//! Every attacker rows solo; the party grouping lands with the party (230i)
+//! (OQ11), no priv manager, no premium, no mounts, no marriage, and no ring of exp (its
+//! group does not exist). The devil-tower arm is dead on a hostile map (no hosted map is
+//! in 660000-669999), `AdjustExpByLevel` is a no-op at level 99 and below, and the tower
 //! of the instant `POINT_EXP` percent is always 0 (Defect D3). What is not ported is a
 //! hook, and every hook is named where its term would run.
 //!
@@ -83,11 +83,22 @@ const EXP_RANGE: i32 = 5000;
 const ALIGNMENT_CLAMP: i32 = 200_000;
 
 /// One row of `DistributeExp`'s damage table (`TDamageInfo`, `G/char_battle.cpp:2769`):
-/// a solo attacker and the damage it dealt. Legacy also rows parties; this build has
-/// none, so its `pParty` arm never runs.
-struct DamageRow {
-    attacker: Vid,
-    damage: i32,
+/// a solo attacker, or a party by its leader PID, and the damage dealt. Solos row in
+/// VID order; parties append after them, in first-appearance order (legacy's
+/// `std::map<LPPARTY>` order is pointer order, nondeterministic across runs — the port's
+/// order is deterministic, which is noted, not a Divergence row).
+enum DamageRow {
+    /// `pAttacker` is set. The `pParty` arm lands with the party (230i).
+    Solo { attacker: Vid, damage: i32 },
+}
+
+impl DamageRow {
+    /// `iDam`.
+    fn damage(&self) -> i32 {
+        match *self {
+            DamageRow::Solo { damage, .. } => damage,
+        }
+    }
 }
 
 impl GameState {
@@ -125,51 +136,9 @@ impl GameState {
             .get(&vid)
             .map(|&(channel, map, _)| (channel, map));
         let level = npc.fight.level;
-        let damage: Vec<(u32, i32)> = self
-            .npc_combat
-            .get(&vid)
-            .map(|combat| {
-                combat
-                    .damage
-                    .iter()
-                    .map(|(&vid, row)| (vid, row.total))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut rows: Vec<DamageRow> = Vec::new();
-        let mut total = 0_i32;
-        let mut most: Option<Vid> = None;
-        let mut most_damage = 0_i32;
-        // The map iterates in VID order (`std::map`), and the table keeps it.
-        for (attacker, dealt) in damage {
-            let attacker = Vid::new(attacker);
-            let Some(body) = self.bodies.get(&attacker) else {
-                continue;
-            };
-            // A NPC VID in the map is skipped (`IsNPC()`), and an attacker on another
-            // Channel or map is skipped (D2: legacy checks only the distance).
-            if self.npc_by_vid(attacker.raw()).is_some() || Some((body.channel, body.map)) != place
-            {
-                continue;
-            }
-            let Some(spot) = self.spot_of(attacker.raw()) else {
-                continue;
-            };
-            if distance_approx(spot.x.saturating_sub(at.0), spot.y.saturating_sub(at.1)) > EXP_RANGE
-            {
-                continue;
-            }
-            total = total.saturating_add(dealt);
-            // The first strict maximum (`!pkChrMostAttacked || iDam > iMostDam`).
-            if most.is_none() || dealt > most_damage {
-                most = Some(attacker);
-                most_damage = dealt;
-            }
-            rows.push(DamageRow {
-                attacker,
-                damage: dealt,
-            });
-        }
+        let damage = self.damage_entries(vid);
+        let (rows, total, most) = self.build_damage_rows(vid, &damage, at, place);
+        let most = most.map(|(attacker, _)| attacker);
         // `SetExp(0)` runs before the empty returns (`:2893-2897`): the experience is
         // consumed even when nobody takes any.
         if let Some(npc) = self.npc_mut(vid) {
@@ -178,29 +147,30 @@ impl GameState {
         if total == 0 {
             return None;
         }
+        let exp = self.stone_feed(vid, exp);
         if rows.is_empty() {
             return None;
         }
         let most = most?;
-        // The top damager is the first maximum in table order (strict `>` scan from
-        // `begin()`), which is the same first maximum the walk above kept.
-        let top = rows
-            .iter()
-            .position(|row| row.attacker == most)
-            .unwrap_or(0);
+        // The top row is the first maximum in table order (strict `>` scan from
+        // `begin()`), which a grouped table need not share with the most-attacked
+        // character.
+        let mut top = 0;
+        for (index, row) in rows.iter().enumerate() {
+            if row.damage() > rows[top].damage() {
+                top = index;
+            }
+        }
+        let top_damage = rows[top].damage();
         let bonus = exp / 5;
         let rest = exp - bonus;
         let share = |damage: i32| {
             let f = i32_to_f32(damage) / i32_to_f32(total);
             f32_to_i32(u32_to_f32(rest) * f)
         };
-        self.give_exp(
-            vid,
-            rows[top].attacker,
-            level,
-            i64::from(bonus) + i64::from(share(most_damage)),
-        );
-        let f = i32_to_f32(most_damage) / i32_to_f32(total);
+        let first = i64::from(bonus) + i64::from(share(top_damage));
+        self.distribute_row(vid, level, at, &rows[top], first);
+        let f = i32_to_f32(top_damage) / i32_to_f32(total);
         if f > 1.0 {
             tracing::error!(victim = vid, f, "DistributeExp percent over 1.0");
         }
@@ -214,9 +184,106 @@ impl GameState {
             if index == top {
                 continue;
             }
-            self.give_exp(vid, row.attacker, level, i64::from(share(row.damage)));
+            let share = i64::from(share(row.damage()));
+            self.distribute_row(vid, level, at, row, share);
         }
         Some(most)
+    }
+
+    /// `m_map_kDamage` under `vid` as (attacker VID, total) in VID order.
+    fn damage_entries(&self, vid: u32) -> Vec<(u32, i32)> {
+        self.npc_combat
+            .get(&vid)
+            .map(|combat| {
+                combat
+                    .damage
+                    .iter()
+                    .map(|(&vid, row)| (vid, row.total))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// `DistributeExp`'s damage-table walk (`G/char_battle.cpp:2839-2904`): the rows, the
+    /// total, and the most-attacked character with its damage. The walk skips attackers
+    /// that left, are NPCs, stand on another Channel or map (D2: legacy checks only
+    /// the distance), or stand beyond 5000 of `at`.
+    fn build_damage_rows(
+        &self,
+        _victim: u32,
+        damage: &[(u32, i32)],
+        at: (i32, i32),
+        place: Option<(u8, i32)>,
+    ) -> (Vec<DamageRow>, i32, Option<(Vid, i32)>) {
+        let mut rows: Vec<DamageRow> = Vec::new();
+        let mut total = 0_i32;
+        let mut most: Option<(Vid, i32)> = None;
+        // The map iterates in VID order (`std::map`), and the table keeps it.
+        for &(raw, dealt) in damage {
+            let attacker = Vid::new(raw);
+            let Some(body) = self.bodies.get(&attacker) else {
+                continue;
+            };
+            // A NPC VID in the map is skipped (`IsNPC()`).
+            if self.npc_by_vid(raw).is_some() || Some((body.channel, body.map)) != place {
+                continue;
+            }
+            let Some(spot) = self.spot_of(raw) else {
+                continue;
+            };
+            if distance_approx(spot.x.saturating_sub(at.0), spot.y.saturating_sub(at.1)) > EXP_RANGE
+            {
+                continue;
+            }
+            total = total.saturating_add(dealt);
+            // The first strict maximum (`!pkChrMostAttacked || iDam > iMostDam`), over
+            // CHARACTERS, not rows: the return.
+            if most.is_none_or(|(_, held)| dealt > held) {
+                most = Some((attacker, dealt));
+            }
+            // Party attackers would accumulate into their party's row (`:2871-2885`);
+            // the party lands with 230i, so every attacker rows solo (`:2886-2896`).
+            rows.push(DamageRow::Solo {
+                attacker,
+                damage: dealt,
+            });
+        }
+        (rows, total, most)
+    }
+
+    /// `TDamageInfo::Distribute` (`G/char_battle.cpp:2782-2815`): the row feeds the
+    /// live `GiveExp`. The party arm lands with the party (230i).
+    fn distribute_row(
+        &mut self,
+        victim: u32,
+        victim_level: u8,
+        _at: (i32, i32),
+        row: &DamageRow,
+        exp: i64,
+    ) {
+        match *row {
+            DamageRow::Solo { attacker, .. } => {
+                self.give_exp(victim, attacker, victim_level, exp);
+            }
+        }
+    }
+
+    /// `DistributeExp`'s stone arm (`G/char_battle.cpp:2899-2906`): a son feeds `exp >> 1`
+    /// to its live stone and splits the rest. A dead or missing stone reads as none
+    /// (D-new: legacy would read freed memory).
+    fn stone_feed(&mut self, vid: u32, exp: u32) -> u32 {
+        let stone = self
+            .npc_by_vid(vid)
+            .and_then(|npc| npc.stone)
+            .filter(|stone| self.npc_by_vid(*stone).is_some_and(|stone| !stone.dead));
+        let Some(stone) = stone else {
+            return exp;
+        };
+        let half = exp >> 1;
+        if let Some(stone) = self.npc_mut(stone) {
+            stone.exp = stone.exp.saturating_add(half);
+        }
+        exp - half
     }
 
     /// The live `GiveExp` (`G/char_battle.cpp:2567-2700`): the level-delta table and the
@@ -284,9 +351,32 @@ impl GameState {
             .unwrap_or(100)
     }
 
+    /// `CHARACTER_MANAGER::GetMobDamageRate` (`G/char_manager.cpp:980-983`): 100, or the
+    /// `mob_dam` event flag while a quest set it (`G/questmanager.cpp:1354-1357`).
+    /// `BONUS_PTC` is a typo legacy never defines, so the `RESIST_COMBAT` factor of
+    /// `G/battle.cpp:314-315` never applies and the rate is a plain `int`.
+    pub(super) fn mob_damage_rate(&self) -> i32 {
+        self.quests
+            .as_ref()
+            .map(|quests| quests.manager().event_flag(b"mob_dam"))
+            .filter(|&rate| rate != 0)
+            .unwrap_or(100)
+    }
+
+    /// `CHARACTER_MANAGER::GetUserDamageRate` (`G/char_manager.cpp:1060-1070`): 100, or
+    /// the `user_dam` event flag while a quest set it (`G/questmanager.cpp:1362-1365`).
+    /// No premium time exists, so the buyer rate never applies.
+    pub(super) fn user_damage_rate(&self) -> i32 {
+        self.quests
+            .as_ref()
+            .map(|quests| quests.manager().event_flag(b"user_dam"))
+            .filter(|&rate| rate != 0)
+            .unwrap_or(100)
+    }
+
     /// Whether the player under `vid` wears unique item `vnum`
     /// (`IsEquipUniqueItem`, `G/char_item.cpp:9519-9540`).
-    fn wears_unique(&self, vid: Vid, vnum: u32) -> bool {
+    pub(super) fn wears_unique(&self, vid: Vid, vnum: u32) -> bool {
         use common::enums::EWearPositions;
         use world::character::Equipment;
         let Ok(character) = self.characters.find_by_vid(vid) else {

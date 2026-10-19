@@ -32,6 +32,8 @@ pub mod mob_skill_data;
 pub mod npc_shop;
 pub mod object_proto;
 pub mod pc_motion;
+/// The PC skill rows, the eight power rows, and the `CanUseSkill` gates.
+pub mod pc_skill_data;
 pub mod records;
 pub mod refine;
 pub mod regen;

@@ -18,10 +18,8 @@
 //!   is no block draw and no reflected damage;
 //! * the quest-set multipliers `attMul` and `damMul` are 1.0, `cannot_dead` is false, the user
 //!   damage rate is 100 and `BlueDragon_Damage` is the identity for every race the Rewrite stands
-//!   up.
-//!
-//! What it draws but does not yet apply: the poison, stun and slow of `NormalAttackAffect` wait
-//! for the affect work, and the stolen gold for `POINT_GOLD`.
+//!   up. The gold steal draws its amount and returns it on [`Strike::stolen_gold`]; the caller
+//!   applies `ChangeGold` (the cap refusal, the purse, the gold record).
 
 use std::ops::RangeInclusive;
 
@@ -59,10 +57,18 @@ pub const DAMAGE_NORMAL: u8 = 1 << 0;
 pub const DAMAGE_POISON: u8 = 1 << 1;
 /// `DAMAGE_DODGE` (`G/char.h:133`): the flag a dodged `NORMAL_RANGE` hit shows.
 pub const DAMAGE_DODGE: u8 = 1 << 2;
+/// `DAMAGE_BLOCK` (`G/char.h:134`): the flag a same-empire stone hit shows.
+pub const DAMAGE_BLOCK: u8 = 1 << 3;
 /// `DAMAGE_PENETRATE`.
 pub const DAMAGE_PENETRATE: u8 = 1 << 4;
 /// `DAMAGE_CRITICAL`.
 pub const DAMAGE_CRITICAL: u8 = 1 << 5;
+/// `AFF_POISON` (`G/affect.h:214`): bit 4, the first word's `0x08`.
+const AFF_POISON_WORD: u32 = 1 << 3;
+/// `AFF_SLOW` (`G/affect.h:215`): bit 5.
+const AFF_SLOW_WORD: u32 = 1 << 4;
+/// `AFF_STUN` (`G/affect.h:216`): bit 6.
+const AFF_STUN_WORD: u32 = 1 << 5;
 
 /// `MONSTER_CHAT_ATTACKED` (`G/constants.h:11`): the chat a monster may say when it is hit.
 const MONSTER_CHAT_ATTACKED: i32 = 3;
@@ -131,6 +137,10 @@ pub struct Striker<'a> {
     pub empire: u8,
     /// `GetMapIndex`.
     pub map: i32,
+    /// `CHARACTER_MANAGER::GetUserDamageRate` (`G/char_manager.cpp:1060-1070`): 100, or the
+    /// `user_dam` event flag while a quest set it. The caller reads it; no premium time
+    /// exists, so the buyer rate never applies.
+    pub user_rate: i32,
 }
 
 /// What a hit shows, in the order legacy sends it.
@@ -181,7 +191,6 @@ pub enum Struck {
         damage: i32,
     },
 }
-
 /// One hit: what it showed and how it ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Strike {
@@ -189,6 +198,26 @@ pub struct Strike {
     pub events: Vec<HitEvent>,
     /// How it ended.
     pub struck: Struck,
+    /// What `NormalAttackAffect` landed: the poison, the stun and the slow.
+    pub affect: NpcAttackAffect,
+    /// What the gold steal drew (`G/char_battle.cpp:2080-2092`): 0 when the chance
+    /// missed or the point is 0, else `number(1, victim level)`. The caller applies
+    /// `ChangeGold` (the cap refusal, the purse, the gold record); the dice order is
+    /// already spent here.
+    pub stolen_gold: i32,
+}
+
+/// What `NormalAttackAffect` (`G/battle.cpp:734-758`) landed on the non-player: each arm
+/// passed its draws, and the caller applies it. The poison still needs the poison
+/// event's gates (no running poison event, never poisoned before), which the caller owns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NpcAttackAffect {
+    /// `AttackedByPoison` passed the poison and level draws.
+    pub poisoned: bool,
+    /// The stun passed its draw and no `IMMUNE_STUN` refused it.
+    pub stunned: bool,
+    /// The slow passed its draw and no `IMMUNE_SLOW` refused it.
+    pub slowed: bool,
 }
 
 /// `battle_melee_attack`'s reach for a player hitting `victim`: 300, or for a `MELEE` monster
@@ -239,14 +268,21 @@ pub fn strike_npc(
         return Strike {
             events,
             struck: Struck::Whiffed,
+            affect: NpcAttackAffect::default(),
+            stolen_gold: 0,
         };
     }
-    normal_attack_affect(dice, striker.points);
+    let affect = normal_attack_affect(dice, striker.points, victim);
     let damage = weapon_resist(damage, striker.weapon, &victim.fight);
     // `iDam = attMul * tempIDam + 0.5f`, with `attMul` 1.0, which multiplies exactly.
     let damage = f32_to_i32(i32_to_f32(damage) + 0.5);
-    let struck = damage_normal(dice, striker, victim, damage, banned, &mut events);
-    Strike { events, struck }
+    let (struck, stolen_gold) = damage_normal(dice, striker, victim, damage, banned, &mut events);
+    Strike {
+        events,
+        struck,
+        affect,
+        stolen_gold,
+    }
 }
 
 /// `CalcMeleeDamage` of a player who is not polymorphed on a non-player.
@@ -255,6 +291,122 @@ pub fn calc_melee_damage(
     attacker: &Points,
     weapon: Option<&ItemProto>,
     victim: &Npc,
+) -> i32 {
+    calc_melee_core(dice, attacker, weapon, victim, false, false)
+}
+
+/// The functor's per-cast `atk`: `CalcMeleeDamage(pc, victim, true, false)` (ignore-defence,
+/// rated, `G/char_skill.cpp:1424-1425`). The functor reads no other arm.
+pub fn calc_melee_skill_atk(
+    dice: &mut dyn Dice,
+    attacker: &Points,
+    weapon: Option<&ItemProto>,
+    victim: &Npc,
+) -> i32 {
+    calc_melee_core(dice, attacker, weapon, victim, true, false)
+}
+
+/// `CalcArrowDamage` of a player on a non-player (`G/battle.cpp:668-727`): the bow must
+/// be `ITEM_WEAPON`/`WEAPON_BOW` and an arrow present, else 0; the distance percent
+/// (`iDist/100 - 5 - BOW_DISTANCE`, `100 - gap*5`, ≤0 → 0, >100 → 100); the rated
+/// attack with the **attacker's** `DEF_BONUS` on the defence (unlike melee's victim
+/// one); `MAX(0, atk - def)` times the percent. No sung-ma halve, no `<3` floor.
+/// `distance` is the `DISTANCE_SQRT` the caller measured; the rating is never ignored.
+#[must_use]
+pub fn calc_arrow_damage(
+    dice: &mut dyn Dice,
+    attacker: &Points,
+    bow: &ItemProto,
+    arrow: &ItemProto,
+    victim: &Npc,
+    distance: i32,
+) -> i32 {
+    calc_arrow_core(dice, attacker, bow, arrow, victim, distance, false)
+}
+
+/// The functor's per-cast `atk` for a `USE_ARROW_DAMAGE` row: `CalcArrowDamage(pc,
+/// victim, bow, arrow, true)` (ignore-defence, rated, `G/char_skill.cpp:1429-1437`).
+/// The caller looked the bow and arrow up already (a missing pair reads 0 `atk`
+/// without calling here).
+#[must_use]
+pub fn calc_arrow_skill_atk(
+    dice: &mut dyn Dice,
+    attacker: &Points,
+    bow: &ItemProto,
+    arrow: &ItemProto,
+    victim: &Npc,
+    distance: i32,
+) -> i32 {
+    calc_arrow_core(dice, attacker, bow, arrow, victim, distance, true)
+}
+
+/// `CalcArrowDamage` (`G/battle.cpp:668-727`), shared by the plain bow shot and the
+/// skill functor. The NPC `damMul` arm never fires for a player attacker.
+fn calc_arrow_core(
+    dice: &mut dyn Dice,
+    attacker: &Points,
+    bow: &ItemProto,
+    arrow: &ItemProto,
+    victim: &Npc,
+    distance: i32,
+    ignore_defence: bool,
+) -> i32 {
+    if bow.item_type != ITEM_WEAPON || bow.sub_type != WEAPON_BOW {
+        return 0;
+    }
+    let gap = distance
+        .wrapping_div(100)
+        .wrapping_sub(5)
+        .wrapping_sub(attacker.get_point(point::POINT_BOW_DISTANCE));
+    let percent = 100_i32.wrapping_sub(gap.wrapping_mul(5)).clamp(0, 100);
+    if percent == 0 {
+        return 0;
+    }
+    let rating = attack_rating(AttackRatingInput {
+        attacker_dexterity: attacker.get_point(point::POINT_DX),
+        attacker_level: i32::from(attacker.level()),
+        victim_dexterity: victim.fight.point(point::POINT_DX),
+        ignore_target_rating: false,
+    });
+    let rolled = number(dice, bow.values[3], bow.values[4])
+        .wrapping_mul(2)
+        .wrapping_add(arrow.values[3]);
+    let percent_points = attacker
+        .get_point(point::POINT_ATT_BONUS)
+        .wrapping_add(attacker.get_point(point::POINT_MELEE_MAGIC_ATT_BONUS_PER));
+    let attack = melee_attack(&MeleeAttack {
+        level: i32::from(attacker.level()),
+        attack_grade: attacker.get_point(point::POINT_ATT_GRADE),
+        rolled,
+        rating,
+        refine: bow.values[5],
+        party_bonus: attacker.get_point(point::POINT_PARTY_ATTACKER_BONUS),
+        percent: percent_points,
+    });
+    let attack = att_bonus_on_npc(attack, attacker, victim);
+    let defence = if ignore_defence {
+        0
+    } else {
+        victim
+            .fight
+            .point(point::POINT_DEF_GRADE)
+            .wrapping_mul(100_i32.wrapping_add(attacker.get_point(point::POINT_DEF_BONUS)))
+            .wrapping_div(100)
+    };
+    let damage = attack.wrapping_sub(defence).max(0);
+    damage.wrapping_mul(percent).wrapping_div(100)
+}
+
+/// `CalcMeleeDamage` (`G/battle.cpp:489-666`): a bow complains and gives 0, any other weapon
+/// the swing cannot use gives 0, else the attack minus the defence (`bIgnoreDefense` skips
+/// the subtraction), halved past the sung-ma will, through `CalcBattleDamage`.
+fn calc_melee_core(
+    dice: &mut dyn Dice,
+    attacker: &Points,
+    weapon: Option<&ItemProto>,
+    victim: &Npc,
+    ignore_defence: bool,
+    ignore_target_rating: bool,
 ) -> i32 {
     if let Some(weapon) = weapon {
         if weapon.item_type != ITEM_WEAPON || !MELEE_WEAPONS.contains(&weapon.sub_type) {
@@ -266,7 +418,7 @@ pub fn calc_melee_damage(
         attacker_dexterity: attacker.get_point(point::POINT_DX),
         attacker_level: level,
         victim_dexterity: victim.fight.point(point::POINT_DX),
-        ignore_target_rating: false,
+        ignore_target_rating,
     });
     // `Item_GetDamage`: the weapon's values 3 and 4; an unarmed player rolls 0 to 0.
     let (low, high) = weapon.map_or((0, 0), |weapon| (weapon.values[3], weapon.values[4]));
@@ -285,11 +437,15 @@ pub fn calc_melee_damage(
         percent,
     });
     let attack = att_bonus_on_npc(attack, attacker, victim);
-    let defence = victim
-        .fight
-        .point(point::POINT_DEF_GRADE)
-        .wrapping_mul(100_i32.wrapping_add(victim.fight.point(point::POINT_DEF_BONUS)))
-        .wrapping_div(100);
+    let defence = if ignore_defence {
+        0
+    } else {
+        victim
+            .fight
+            .point(point::POINT_DEF_GRADE)
+            .wrapping_mul(100_i32.wrapping_add(victim.fight.point(point::POINT_DEF_BONUS)))
+            .wrapping_div(100)
+    };
     let mut damage = attack.wrapping_sub(defence).max(0);
     if i32::from(attacker.will().strength) > attacker.get_point(point::POINT_SUNGMA_STR)
         && damage > 0
@@ -385,25 +541,71 @@ pub(crate) fn monster_share(attack: i32, bonus: i32, bonus_pct: i32) -> i32 {
     f64_to_i32(f64::from(attack) + monster)
 }
 
-/// `NormalAttackAffect`'s draws: the poison, then the stun and the slow of `AttackAffect`. Each
-/// draws only when the attacker has the point; the victim is never already affected.
-fn normal_attack_affect(dice: &mut dyn Dice, attacker: &Points) {
+/// `NormalAttackAffect` (`G/battle.cpp:734-758`): the poison, then the stun and the slow
+/// of `AttackAffect`. Each draws only when the attacker has the point and the victim
+/// lacks the flag. The plain bow shot runs it between `CalcArrowDamage` and the
+/// `RESIST_BOW` arm (`G/char_battle.cpp:3095-3098`), ahead of any damage.
+#[must_use]
+pub fn normal_attack_affect(
+    dice: &mut dyn Dice,
+    attacker: &Points,
+    victim: &Npc,
+) -> NpcAttackAffect {
+    let mut landed = NpcAttackAffect::default();
     let poison = attacker.get_point(point::POINT_POISON_PCT);
-    if poison != 0 {
+    if poison != 0 && victim.affect_flags[0] & AFF_POISON_WORD == 0 {
         // `BYTE bPoisonPct`: the low byte, halved when the map's immune will exceeds the
         // attacker's.
         let mut percent = poison.to_le_bytes()[0];
         if i32::from(attacker.will().immune) > attacker.get_point(point::POINT_SUNGMA_IMMUNE) {
             percent /= 2;
         }
-        let _poisoned = number(dice, 1, 100) <= i32::from(percent);
-    }
-    for slot in [point::POINT_STUN_PCT, point::POINT_SLOW_PCT] {
-        let chance = attacker.get_point(slot);
-        if chance != 0 {
-            let _affected = number(dice, 1, 100) <= chance;
+        if number(dice, 1, 100) <= i32::from(percent) {
+            // `AttackedByPoison`'s level arm, past the running-event and poisoned-once
+            // gates, which the caller owns (`G/char_resist.cpp:178-197`). The commented
+            // immunity arm never runs.
+            let level = i32::from(victim.fight.level);
+            let over = level.wrapping_sub(i32::from(attacker.level()));
+            if over <= 0 {
+                landed.poisoned = true;
+            } else {
+                const ADJUST: [i32; 9] = [100, 90, 80, 70, 50, 30, 10, 5, 0];
+                let delta = over.min(8);
+                if number(dice, 1, 100) <= ADJUST[usize::try_from(delta).unwrap_or(8)] {
+                    landed.poisoned = true;
+                }
+            }
         }
     }
+    // `AttackAffect` (`G/battle.h:35-62`): the immune check is inside the draw's success
+    // arm, so a failed roll spends exactly one draw. With `__FIX_BUG_IMMUNE__` the check
+    // itself draws nothing (`G/char_resist.cpp:250-256`).
+    for (slot, held, immune) in [
+        (
+            point::POINT_STUN_PCT,
+            AFF_STUN_WORD,
+            crate::character::IMMUNE_STUN,
+        ),
+        (
+            point::POINT_SLOW_PCT,
+            AFF_SLOW_WORD,
+            crate::character::IMMUNE_SLOW,
+        ),
+    ] {
+        let chance = attacker.get_point(slot);
+        if chance != 0
+            && victim.affect_flags[0] & held == 0
+            && number(dice, 1, 100) <= chance
+            && victim.immune_flag & immune == 0
+        {
+            if immune == crate::character::IMMUNE_STUN {
+                landed.stunned = true;
+            } else {
+                landed.slowed = true;
+            }
+        }
+    }
+    landed
 }
 
 /// `battle_hit`'s resist to the weapon's sub-type. A mounted spear has none.
@@ -422,6 +624,42 @@ fn weapon_resist(damage: i32, weapon: Option<&ItemProto>, victim: &MobFight) -> 
     };
     damage
         .wrapping_mul(100_i32.wrapping_sub(victim.point(slot)))
+        .wrapping_div(100)
+}
+/// The functor's MELEE attr arm (`G/char_skill.cpp:1549-1579`): the wielded weapon's kind
+/// resist, then `- victim DEF_GRADE` unless the PENETRATE draw ignored the defence.
+/// A mounted spear and an unwielded weapon have no kind resist, as in `battle_hit`.
+pub fn skill_melee_attr(
+    damage: i32,
+    weapon: Option<&ItemProto>,
+    victim_def_grade: i32,
+    victim_resist: &MobFight,
+    ignore_defence: bool,
+) -> i32 {
+    let damage = weapon_resist(damage, weapon, victim_resist);
+    if ignore_defence {
+        damage
+    } else {
+        damage.wrapping_sub(victim_def_grade)
+    }
+}
+
+/// The functor's RANGE attr arm (`G/char_skill.cpp:1580-1585`): `RESIST_BOW` only (the
+/// commented DEF line stays out).
+#[must_use]
+pub fn skill_range_attr(damage: i32, victim: &MobFight) -> i32 {
+    damage
+        .wrapping_mul(100_i32.wrapping_sub(victim.point(point::POINT_RESIST_BOW)))
+        .wrapping_div(100)
+}
+
+/// The functor's MAGIC attr arm (`G/char_skill.cpp:1586-1600`): `CalcAttBonus`, then
+/// `RESIST_MAGIC` — the `#else` arm (`ENABLE_MAGIC_REDUCTION_SYSTEM` is not defined).
+#[must_use]
+pub fn skill_magic_attr(damage: i32, attacker: &Points, victim: &Npc) -> i32 {
+    let damage = att_bonus_on_npc(damage, attacker, victim);
+    damage
+        .wrapping_mul(100_i32.wrapping_sub(victim.fight.point(point::POINT_RESIST_MAGIC)))
         .wrapping_div(100)
 }
 
@@ -463,24 +701,37 @@ fn damage_normal(
     damage: i32,
     banned: bool,
     events: &mut Vec<HitEvent>,
-) -> Struck {
+) -> (Struck, i32) {
     let current_hp = victim.hp;
+    // `Damage`'s empire arm (`:1763-1771`, `ENABLE_NEWSTUFF`): a stone of nonzero empire
+    // refuses a same-empire player attacker, after the rating, roll and affect draws ran
+    // (`battle_hit`) but before `Damage`'s own dice. Every hosted stone is empire 0, so
+    // only a fixture reaches it.
+    if victim.char_type == CHAR_TYPE_STONE && victim.empire != 0 && victim.empire == striker.empire
+    {
+        events.push(HitEvent::DamageInfo {
+            damage: 0,
+            flag: DAMAGE_BLOCK,
+        });
+        return (Struck::Refused, 0);
+    }
     let (damage, flag) = damage_chances(dice, striker.points, victim, damage, events);
-    damage_steals(dice, striker.points, victim, damage, current_hp, events);
-    let mut damage = damage_bonuses(striker, victim, damage, events);
+    let stolen_gold = damage_steals(dice, striker.points, victim, damage, current_hp, events);
+    let damage = damage_bonuses(striker, victim, damage, events);
     if banned {
-        return Struck::Refused;
+        return (Struck::Refused, stolen_gold);
     }
     if victim.char_type == CHAR_TYPE_MONSTER && number(dice, 0, 60) == 0 {
         let line = MONSTER_CHAT_ATTACKED * 3 + number(dice, 1, 3);
         events.push(HitEvent::Chat(line));
     }
     if victim.stunned {
-        return Struck::Finished;
+        return (Struck::Finished, stolen_gold);
     }
     if victim.dead {
-        return Struck::AlreadyDead;
+        return (Struck::AlreadyDead, stolen_gold);
     }
+    let mut damage = user_rate(damage, striker.user_rate);
     if victim.char_type == CHAR_TYPE_MONSTER
         && victim.ai_flags & AIFLAG_STONESKIN != 0
         && hp_pct(victim) < i32::from(victim.fight.stone_skin_point)
@@ -496,7 +747,373 @@ fn damage_normal(
         damage
     };
     npc_hp_change(victim, -damage, events);
-    Struck::Landed { damage }
+    (Struck::Landed { damage }, stolen_gold)
+}
+
+/// `CHARACTER::Damage(attacker, dam, DAMAGE_TYPE_SPECIAL)` of a non-player
+/// (`G/char_battle.cpp:2179-2433`): what a reflected hit runs. SPECIAL takes no chance
+/// arm (`:1858`, `:1933-2125` skipped) and neither bonus switch (`:2126-2177`,
+/// `default: break`), so the flag stays `DAMAGE_NORMAL` and no effect lands. What runs:
+/// the monarch power-up (off — no monarch is ported, `:2224-2228`), the attacker's
+/// empire tenth (`:2213-2222`), the victim's SP drain (`:2204-2217`), the user rate
+/// (`:2263-2267`), the stoneskin (`:2268-2272`), the `+0.5` of `damMul` 1.0, the damage
+/// packet, and the hit-point change. The manashield, mall, defence-up, death-blow and
+/// `BlueDragon` arms never fire for a monster victim of a player attacker (no shield,
+/// no mall points, a non-player victim, a player attacker, vnum 2493 unhosted). The
+/// BANPK refusal was checked by the swing, so `banned` is always false here. The
+/// caller fills the damage map with the SPECIAL aggro kind and stuns at 0, as
+/// `after_damage` does for a normal hit.
+pub fn damage_special(
+    dice: &mut dyn Dice,
+    striker: &mut Striker<'_>,
+    victim: &mut Npc,
+    damage: i32,
+) -> (Struck, Vec<HitEvent>) {
+    let mut events = Vec::new();
+    let mut damage = damage;
+    // The monarch power-up (`:2224-2228`): off, as in `damage_bonuses`.
+    let points = &mut *striker.points;
+    let map_empire = map_empire(striker.map);
+    if striker.empire != 0 && map_empire != 0 && striker.empire != map_empire {
+        damage = damage.wrapping_mul(9) / 10;
+    }
+    let drain = i32::try_from(victim.fight.drain_sp).unwrap_or(i32::MAX);
+    if drain != 0 {
+        let drained = drain.min(points.sp());
+        attacker_change(points, point::POINT_SP, -drained, &mut events);
+    }
+    if victim.char_type == CHAR_TYPE_MONSTER && number(dice, 0, 60) == 0 {
+        let line = MONSTER_CHAT_ATTACKED * 3 + number(dice, 1, 3);
+        events.push(HitEvent::Chat(line));
+    }
+    if victim.stunned {
+        return (Struck::Finished, events);
+    }
+    if victim.dead {
+        return (Struck::AlreadyDead, events);
+    }
+    damage = user_rate(damage, striker.user_rate);
+    if victim.char_type == CHAR_TYPE_MONSTER
+        && victim.ai_flags & AIFLAG_STONESKIN != 0
+        && hp_pct(victim) < i32::from(victim.fight.stone_skin_point)
+    {
+        damage /= 2;
+    }
+    // `dam = tempDam * damMul + 0.5f`, with `damMul` 1.0, which multiplies exactly.
+    // A negative (fixture-only: a negative reflect point) is clamped at 0, as 229s
+    // clamps a negative skill hit — legacy would heal, and the Rewrite never ports a
+    // heal-by-damage.
+    let damage = f32_to_i32(i32_to_f32(damage) + 0.5).max(0);
+    events.push(HitEvent::DamageInfo {
+        damage,
+        flag: DAMAGE_NORMAL,
+    });
+    let damage = if victim.hp.wrapping_sub(damage) <= 0 {
+        victim.hp
+    } else {
+        damage
+    };
+    npc_hp_change(victim, -damage, &mut events);
+    (Struck::Landed { damage }, events)
+}
+/// `CHARACTER::Damage(attacker, dam, DAMAGE_TYPE_MELEE)` of a non-player
+/// (`G/char_battle.cpp:1744-2436`): what a melee skill lands through. Against the NORMAL
+/// path this keeps the quartered chances (`:1862-1930`), the steals (`:2038-2120`, all but
+/// gold — the gold steal's `type == DAMAGE_TYPE_NORMAL` arm at `:1979-1992` skips it),
+/// and the skill bonus switch (`POINT_SKILL_DAMAGE_BONUS` / `POINT_SKILL_DEFEND_BONUS`,
+/// `:2145-2162`). What runs in order: the chances, the non-gold steals, the skill bonuses,
+/// the empire tenth and the victim's SP drain, the attacked chat, the stun/dead checks,
+/// the user rate, the stoneskin, the `+0.5`, the damage packet, and the hit-point change.
+/// The monarch tenth never applies (no arrays are ported).
+///
+/// The caller fills the damage map with the MELEE aggro kind and stuns at 0, as
+/// `after_damage` does for a normal hit. The functor's `NormalAttackAffect`
+/// equivalent never runs for skills: `battle_hit` owns it, and a skill lands
+/// through `ComputeSkill`, not a swing.
+pub fn damage_melee(
+    dice: &mut dyn Dice,
+    striker: &mut Striker<'_>,
+    victim: &mut Npc,
+    damage: i32,
+) -> (Struck, Vec<HitEvent>) {
+    let mut events = Vec::new();
+    let current_hp = victim.hp;
+    let (damage, flag) = damage_melee_chances(dice, striker.points, victim, damage, &mut events);
+    damage_melee_steals(
+        dice,
+        striker.points,
+        victim,
+        damage,
+        current_hp,
+        &mut events,
+    );
+    let mut damage = damage_skill_bonuses(striker, victim, damage, &mut events);
+    if victim.char_type == CHAR_TYPE_MONSTER && number(dice, 0, 60) == 0 {
+        let line = MONSTER_CHAT_ATTACKED * 3 + number(dice, 1, 3);
+        events.push(HitEvent::Chat(line));
+    }
+    if victim.stunned {
+        return (Struck::Finished, events);
+    }
+    if victim.dead {
+        return (Struck::AlreadyDead, events);
+    }
+    damage = user_rate(damage, striker.user_rate);
+    if victim.char_type == CHAR_TYPE_MONSTER
+        && victim.ai_flags & AIFLAG_STONESKIN != 0
+        && hp_pct(victim) < i32::from(victim.fight.stone_skin_point)
+    {
+        damage /= 2;
+    }
+    // `dam = tempDam * damMul + 0.5f`, with `damMul` 1.0, which multiplies exactly.
+    // A negative skill hit is clamped at 0 (as 229s clamps a negative one) —
+    // legacy would heal, and the Rewrite never ports a heal-by-damage.
+    let damage = f32_to_i32(i32_to_f32(damage) + 0.5).max(0);
+    events.push(HitEvent::DamageInfo { damage, flag });
+    let damage = if victim.hp.wrapping_sub(damage) <= 0 {
+        victim.hp
+    } else {
+        damage
+    };
+    npc_hp_change(victim, -damage, &mut events);
+    (Struck::Landed { damage }, events)
+}
+
+/// `CHARACTER::Damage(attacker, dam, DAMAGE_TYPE_RANGE)` of a non-player: the same
+/// branch as [`damage_melee`] (`G/char_battle.cpp:1855`, `:2038`, `:2145` list the
+/// three types together). The caller fills the damage map with the RANGE aggro kind.
+pub fn damage_range(
+    dice: &mut dyn Dice,
+    striker: &mut Striker<'_>,
+    victim: &mut Npc,
+    damage: i32,
+) -> (Struck, Vec<HitEvent>) {
+    damage_melee(dice, striker, victim, damage)
+}
+
+/// `CHARACTER::Damage(attacker, dam, DAMAGE_TYPE_MAGIC)` of a non-player: the same
+/// branch as [`damage_melee`]. The caller fills the damage map with the MAGIC aggro kind.
+pub fn damage_magic(
+    dice: &mut dyn Dice,
+    striker: &mut Striker<'_>,
+    victim: &mut Npc,
+    damage: i32,
+) -> (Struck, Vec<HitEvent>) {
+    damage_melee(dice, striker, victim, damage)
+}
+
+/// `CHARACTER::Damage(attacker, dam, DAMAGE_TYPE_NORMAL_RANGE)` of a non-player
+/// (`G/char_battle.cpp:1744-2436`): what the plain bow shot lands through. Against the
+/// NORMAL path this swaps the block gate for the dodge gate (`POINT_DODGE`,
+/// `:1955-1969`) and skips the reflect arm (`type == DAMAGE_TYPE_NORMAL` only,
+/// `:1982`). The same-empire stone refusal (`:1763-1771`) sits above the type switch
+/// and fires for every type, so it is kept. Otherwise the chances are unquartered,
+/// the steals keep the gold, and the normal-bonus switch runs — the NORMAL body.
+pub fn damage_normal_range(
+    dice: &mut dyn Dice,
+    striker: &mut Striker<'_>,
+    victim: &mut Npc,
+    damage: i32,
+    banned: bool,
+) -> (Struck, i32, Vec<HitEvent>) {
+    let mut events = Vec::new();
+    let current_hp = victim.hp;
+    if victim.char_type == CHAR_TYPE_STONE && victim.empire != 0 && victim.empire == striker.empire
+    {
+        events.push(HitEvent::DamageInfo {
+            damage: 0,
+            flag: DAMAGE_BLOCK,
+        });
+        return (Struck::Refused, 0, events);
+    }
+    if victim.fight.point(point::POINT_DODGE) != 0
+        && number(dice, 1, 100) <= victim.fight.point(point::POINT_DODGE)
+    {
+        events.push(HitEvent::DamageInfo {
+            damage: 0,
+            flag: DAMAGE_DODGE,
+        });
+        return (Struck::Whiffed, 0, events);
+    }
+    let (damage, flag) = damage_chances(dice, striker.points, victim, damage, &mut events);
+    let stolen_gold = damage_steals(
+        dice,
+        striker.points,
+        victim,
+        damage,
+        current_hp,
+        &mut events,
+    );
+    let damage = damage_bonuses(striker, victim, damage, &mut events);
+    if banned {
+        return (Struck::Refused, stolen_gold, events);
+    }
+    if victim.char_type == CHAR_TYPE_MONSTER && number(dice, 0, 60) == 0 {
+        let line = MONSTER_CHAT_ATTACKED * 3 + number(dice, 1, 3);
+        events.push(HitEvent::Chat(line));
+    }
+    if victim.stunned {
+        return (Struck::Finished, stolen_gold, events);
+    }
+    if victim.dead {
+        return (Struck::AlreadyDead, stolen_gold, events);
+    }
+    let mut damage = user_rate(damage, striker.user_rate);
+    if victim.char_type == CHAR_TYPE_MONSTER
+        && victim.ai_flags & AIFLAG_STONESKIN != 0
+        && hp_pct(victim) < i32::from(victim.fight.stone_skin_point)
+    {
+        damage /= 2;
+    }
+    let damage = f32_to_i32(i32_to_f32(damage) + 0.5);
+    events.push(HitEvent::DamageInfo { damage, flag });
+    let damage = if victim.hp.wrapping_sub(damage) <= 0 {
+        victim.hp
+    } else {
+        damage
+    };
+    npc_hp_change(victim, -damage, &mut events);
+    (Struck::Landed { damage }, stolen_gold, events)
+}
+
+/// `Damage`'s critical and penetrating chances on the MELEE/RANGE/MAGIC branch
+/// (`G/char_battle.cpp:1855-1930`): each percent is quartered (`5 + (pct - 10) / 4` past
+/// 10, else halved) before the resist and the draw.
+fn damage_melee_chances(
+    dice: &mut dyn Dice,
+    points: &Points,
+    victim: &Npc,
+    damage: i32,
+    events: &mut Vec<HitEvent>,
+) -> (i32, u8) {
+    let mut damage = damage;
+    let mut flag = DAMAGE_NORMAL;
+    let critical_pct = points.get_point(point::POINT_CRITICAL_PCT);
+    if critical_pct != 0 {
+        let critical_pct = quarter_chance(critical_pct)
+            .wrapping_sub(victim.fight.point(point::POINT_RESIST_CRITICAL));
+        if number(dice, 1, 100) <= critical_pct {
+            flag |= DAMAGE_CRITICAL;
+            damage = damage.wrapping_mul(2);
+            events.push(HitEvent::Effect(SE_CRITICAL));
+        }
+    }
+    // The `SKILL_RESIST_PENETRATE` poly runs for every hit and gives 0 for a victim with no
+    // skill, so a percent of 0 is kept and a negative one still draws.
+    let penetrate_pct = points.get_point(point::POINT_PENETRATE_PCT);
+    if penetrate_pct != 0 {
+        let penetrate_pct = quarter_chance(penetrate_pct)
+            .wrapping_sub(victim.fight.point(point::POINT_RESIST_PENETRATE));
+        if number(dice, 1, 100) <= penetrate_pct {
+            flag |= DAMAGE_PENETRATE;
+            damage = damage.wrapping_add(defence(&victim.fight));
+            events.push(HitEvent::Effect(SE_PENETRATE));
+        }
+    }
+    (damage, flag)
+}
+
+/// The MELEE branch's quartered percent (`G/char_battle.cpp:1873-1876`, `:1916-1923`):
+/// `5 + (pct - 10) / 4` at 10 and past, else halved (`/` truncates toward 0).
+fn quarter_chance(percent: i32) -> i32 {
+    if percent >= 10 {
+        5_i32.wrapping_add(percent.wrapping_sub(10) / 4)
+    } else {
+        percent / 2
+    }
+}
+
+/// `Damage`'s steals on the MELEE branch (`G/char_battle.cpp:2038-2120`), without the gold
+/// steal: the gold steal's `type == DAMAGE_TYPE_NORMAL` arm (`:1979-1992`) skips a MELEE
+/// hit, and so does its amount draw. The HP and SP steals, the two hit recoveries, and
+/// the mana-burn draw still run.
+fn damage_melee_steals(
+    dice: &mut dyn Dice,
+    points: &mut Points,
+    victim: &mut Npc,
+    damage: i32,
+    current_hp: i32,
+    events: &mut Vec<HitEvent>,
+) {
+    let life = points.get_point(point::POINT_STEAL_HP);
+    if life != 0 && number(dice, 1, 10) <= 1 {
+        let stolen = damage.min(current_hp.max(0)).wrapping_mul(life) / 100;
+        if stolen > 0 && victim.hp >= stolen {
+            events.push(HitEvent::Fly(FLY_HP_SMALL));
+            attacker_change(points, point::POINT_HP, stolen, events);
+            npc_hp_change(victim, -stolen, events);
+        }
+    }
+    let mana = points.get_point(point::POINT_STEAL_SP);
+    if mana != 0 && number(dice, 1, 10) <= 1 {
+        // A non-player's spell points are read from its hit points.
+        let stolen = damage.min(current_hp.max(0)).wrapping_mul(mana) / 100;
+        if stolen > 0 && current_hp >= stolen {
+            events.push(HitEvent::Fly(FLY_SP_SMALL));
+            attacker_change(points, point::POINT_SP, stolen, events);
+        }
+    }
+    let recovered = if current_hp >= 0 {
+        damage.min(current_hp)
+    } else {
+        damage
+    };
+    for (slot, kind, fly) in [
+        (point::POINT_HIT_HP_RECOVERY, point::POINT_HP, FLY_HP_SMALL),
+        (point::POINT_HIT_SP_RECOVERY, point::POINT_SP, FLY_SP_SMALL),
+    ] {
+        let share = points.get_point(slot);
+        if share != 0 && number(dice, 0, 4) > 0 {
+            let amount = recovered.wrapping_mul(share) / 100;
+            if amount != 0 {
+                events.push(HitEvent::Fly(fly));
+                attacker_change(points, kind, amount, events);
+            }
+        }
+    }
+    // A non-player's `PointChange(POINT_SP, -50)` changes spell points nothing reads.
+    let mana_burn = points.get_point(point::POINT_MANA_BURN_PCT);
+    if mana_burn != 0 {
+        let _burned = number(dice, 1, 100) <= mana_burn;
+    }
+}
+
+/// `Damage`'s bonus switch on the MELEE arm (`G/char_battle.cpp:2145-2162`, `BONUS_PCT`
+/// defined): the attacker's `POINT_SKILL_DAMAGE_BONUS`, then `POINT_SKILL_DEFEND_BONUS`
+/// and (at 90 % hit points and past) `POINT_RESIST_COMBAT`, each held at 99. Then the
+/// empire tenth and the victim's SP drain.
+fn damage_skill_bonuses(
+    striker: &mut Striker<'_>,
+    victim: &Npc,
+    damage: i32,
+    events: &mut Vec<HitEvent>,
+) -> i32 {
+    let points = &mut *striker.points;
+    let mut damage = damage;
+    let bonus = points.get_point(point::POINT_SKILL_DAMAGE_BONUS);
+    if bonus != 0 {
+        damage = damage.wrapping_mul(100_i32.wrapping_add(bonus)) / 100;
+    }
+    let defend = victim.fight.point(point::POINT_SKILL_DEFEND_BONUS).min(99);
+    let combat = if hp_pct(victim) >= 90 {
+        victim.fight.point(point::POINT_RESIST_COMBAT).min(99)
+    } else {
+        0
+    };
+    damage = damage.wrapping_mul(100_i32.wrapping_sub(defend).wrapping_sub(combat)) / 100;
+    let map_empire = map_empire(striker.map);
+    if striker.empire != 0 && map_empire != 0 && striker.empire != map_empire {
+        damage = damage.wrapping_mul(9) / 10;
+    }
+    // `CMonarch::IsPowerUp` (`G/char_battle.cpp:2224-2228`, `G/monarch.cpp:23`): the
+    // arrays start at 0 and no hosted quest or command sets them, so the tenth never
+    // applies. The arm lands with the monarch system.
+    let drain = i32::try_from(victim.fight.drain_sp).unwrap_or(i32::MAX);
+    if drain != 0 {
+        let drained = drain.min(points.sp());
+        attacker_change(points, point::POINT_SP, -drained, events);
+    }
+    damage
 }
 
 /// `Damage`'s critical and penetrating chances: the damage they leave and the flag they make.
@@ -535,7 +1152,8 @@ fn damage_chances(
 }
 
 /// `Damage`'s steals, recoveries and mana burn, which read the damage before its bonuses and
-/// the hit points the victim had before the hit.
+/// the hit points the victim had before the hit. Returns what the gold steal drew: 0 when
+/// the chance missed or the point is 0, else `number(1, victim level)`.
 fn damage_steals(
     dice: &mut dyn Dice,
     points: &mut Points,
@@ -543,7 +1161,7 @@ fn damage_steals(
     damage: i32,
     current_hp: i32,
     events: &mut Vec<HitEvent>,
-) {
+) -> i32 {
     let life = points.get_point(point::POINT_STEAL_HP);
     if life != 0 && number(dice, 1, 10) <= 1 {
         let stolen = damage.min(current_hp.max(0)).wrapping_mul(life) / 100;
@@ -563,9 +1181,11 @@ fn damage_steals(
         }
     }
     let gold = points.get_point(point::POINT_STEAL_GOLD);
-    if gold != 0 && number(dice, 1, 100) <= gold {
-        let _gold = number(dice, 1, i32::from(victim.fight.level));
-    }
+    let stolen_gold = if gold != 0 && number(dice, 1, 100) <= gold {
+        number(dice, 1, i32::from(victim.fight.level))
+    } else {
+        0
+    };
     let recovered = if current_hp >= 0 {
         damage.min(current_hp)
     } else {
@@ -589,6 +1209,7 @@ fn damage_steals(
     if mana_burn != 0 {
         let _burned = number(dice, 1, 100) <= mana_burn;
     }
+    stolen_gold
 }
 
 /// `Damage`'s bonuses and defences, then the spell points a draining victim takes.
@@ -626,12 +1247,21 @@ fn damage_bonuses(
     if striker.empire != 0 && map_empire != 0 && striker.empire != map_empire {
         damage = damage.wrapping_mul(9) / 10;
     }
+    // `CMonarch::IsPowerUp` (`G/char_battle.cpp:2224-2228`, `G/monarch.cpp:23`): the
+    // arrays start at 0 and no hosted quest or command sets them, so the tenth never
+    // applies. The arm lands with the monarch system.
     let drain = i32::try_from(victim.fight.drain_sp).unwrap_or(i32::MAX);
     if drain != 0 {
         let drained = drain.min(points.sp());
         attacker_change(points, point::POINT_SP, -drained, events);
     }
     damage
+}
+
+/// The user damage rate (`G/char_battle.cpp:2263-2267`): `dam * rate / 100`, 100 while
+/// no quest set `user_dam`.
+fn user_rate(damage: i32, rate: i32) -> i32 {
+    damage.wrapping_mul(rate) / 100
 }
 
 /// `GetPoint(POINT_DEF_GRADE) * (100 + GetPoint(POINT_DEF_BONUS)) / 100`.
@@ -647,7 +1277,7 @@ mod tests {
     use std::collections::{BTreeMap, VecDeque};
     use std::path::Path;
 
-    use gamedata::item_kind::{ITEM_ARMOR, WEAPON_BOW};
+    use gamedata::item_kind::{ITEM_ARMOR, WEAPON_ARROW, WEAPON_BOW};
     use gamedata::mob_proto::{MobProtos, RACE_FLAG};
     use gamedata::records::MobTableRecord;
 
@@ -748,6 +1378,7 @@ mod tests {
             weapon: None,
             empire: 1,
             map: 1,
+            user_rate: 100,
         };
         strike_npc(dice, &mut striker, victim, false)
     }
@@ -850,6 +1481,7 @@ mod tests {
             weapon: Some(&bow),
             empire: 1,
             map: 1,
+            user_rate: 100,
         };
         let mut victim = dog();
         let hit = strike_npc(&mut Script::new(&[]), &mut striker, &mut victim, false);
@@ -1171,6 +1803,40 @@ mod tests {
         );
     }
 
+    /// The gold steal draws its amount from the victim's level (`:2080-2092`): the dog is
+    /// level 1, so a passed chance steals exactly 1.
+    #[test]
+    fn a_passed_gold_chance_steals_1_from_a_level_1_victim() {
+        let mut points = alpha();
+        points.set_point(point::POINT_STEAL_GOLD, 100);
+        let mut victim = dog();
+        // The roll, the gold chance, the amount, the chat arm.
+        let mut dice = Script::new(&[0, 0, 0, 1]);
+        let hit = strike(&mut dice, &mut points, &mut victim);
+        assert_eq!(dice.left(), 0);
+        assert_eq!(hit.stolen_gold, 1);
+    }
+
+    /// A missed gold chance draws once and steals nothing; a 0 point draws nothing.
+    #[test]
+    fn a_missed_or_missing_gold_chance_steals_nothing() {
+        let mut points = alpha();
+        points.set_point(point::POINT_STEAL_GOLD, 1);
+        let mut victim = dog();
+        // The roll, the missed chance (99 > 1), the chat arm; no amount draw.
+        let mut dice = Script::new(&[0, 99, 1]);
+        let hit = strike(&mut dice, &mut points, &mut victim);
+        assert_eq!(dice.left(), 0);
+        assert_eq!(hit.stolen_gold, 0);
+        let mut points = alpha();
+        let mut victim = dog();
+        // The roll and the chat arm only.
+        let mut dice = Script::new(&[0, 1]);
+        let hit = strike(&mut dice, &mut points, &mut victim);
+        assert_eq!(dice.left(), 0);
+        assert_eq!(hit.stolen_gold, 0);
+    }
+
     #[test]
     fn a_chance_of_0_draws_nothing_and_a_resisted_one_still_draws() {
         let mut points = alpha();
@@ -1190,22 +1856,25 @@ mod tests {
     fn the_poison_chance_is_its_low_byte_and_the_immune_will_halves_it() {
         let mut points = alpha();
         points.set_point(point::POINT_POISON_PCT, 256 + 3);
-        // The draw happens; nothing is applied yet.
-        let mut dice = Script::new(&[0, 50]);
+        // The draw happens; the victim below the attacker lands it.
+        let mut dice = Script::new(&[0, 2]);
         let damage = calc_melee_damage(&mut dice, &points, None, &dog());
-        normal_attack_affect(&mut dice, &points);
+        let landed = normal_attack_affect(&mut dice, &points, &dog());
         assert_eq!((damage, dice.left()), (322, 0));
+        assert!(landed.poisoned);
         // The gate reads the whole point, so a chance whose low byte is 0 still draws.
         points.set_point(point::POINT_POISON_PCT, 256);
         let mut dice = Script::new(&[0]);
-        normal_attack_affect(&mut dice, &points);
+        let landed = normal_attack_affect(&mut dice, &points, &dog());
         assert_eq!(dice.left(), 0);
+        assert!(!landed.poisoned);
         points.set_point(point::POINT_POISON_PCT, 0);
         points.set_point(point::POINT_STUN_PCT, -1);
         points.set_point(point::POINT_SLOW_PCT, 1);
         let mut dice = Script::new(&[0, 0]);
-        normal_attack_affect(&mut dice, &points);
+        let landed = normal_attack_affect(&mut dice, &points, &dog());
         assert_eq!(dice.left(), 0);
+        assert!(!landed.stunned && landed.slowed);
     }
 
     #[test]
@@ -1318,6 +1987,7 @@ mod tests {
                 weapon: None,
                 empire,
                 map,
+                user_rate: 100,
             };
             let hit = strike_npc(&mut Script::new(&[0, 1]), &mut striker, &mut victim, false);
             assert_eq!(hit.events[0], HitEvent::DamageInfo { damage, flag: 1 });
@@ -1327,6 +1997,7 @@ mod tests {
             weapon: None,
             empire: 1,
             map: 500,
+            user_rate: 100,
         };
         victim.hp = 1000;
         let hit = strike_npc(&mut Script::new(&[0, 1]), &mut striker, &mut victim, false);
@@ -1422,6 +2093,7 @@ mod tests {
             weapon: None,
             empire: 1,
             map: 1,
+            user_rate: 100,
         };
         let mut dice = Script::new(&[0]);
         let hit = strike_npc(&mut dice, &mut striker, &mut victim, true);
@@ -1555,5 +2227,498 @@ mod tests {
             .map(|name| slots[name])
             .collect();
         assert_eq!(resists, JOB_RESISTS);
+    }
+
+    fn special(
+        dice: &mut Script,
+        points: &mut Points,
+        victim: &mut Npc,
+        damage: i32,
+    ) -> (Struck, Vec<HitEvent>) {
+        let mut striker = Striker {
+            points,
+            weapon: None,
+            empire: 1,
+            map: 25,
+            user_rate: 100,
+        };
+        damage_special(dice, &mut striker, victim, damage)
+    }
+
+    #[test]
+    fn a_reflected_hit_runs_the_special_tail_with_no_chance_or_bonus_arm() {
+        let mut points = alpha();
+        let mut victim = dog();
+        // Map 25 is empire 2, so the empire tenth fires; then the monster chat's
+        // 1 in 61, which says nothing. No crit, penetrate, steal or bonus draws.
+        let mut dice = Script::new(&[1]);
+        let (struck, events) = special(&mut dice, &mut points, &mut victim, 100);
+        assert_eq!(dice.left(), 0);
+        assert_eq!(
+            events,
+            [
+                HitEvent::DamageInfo {
+                    damage: 90,
+                    flag: DAMAGE_NORMAL,
+                },
+                HitEvent::VictimHp,
+            ]
+        );
+        assert_eq!(struck, Struck::Landed { damage: 90 });
+        assert_eq!(victim.hp, 36);
+    }
+
+    #[test]
+    fn a_reflected_hit_drains_and_chats_and_halves_under_stoneskin() {
+        let mut points = alpha();
+        let mut victim = dog();
+        victim.fight.drain_sp = 30;
+        victim.ai_flags |= gamedata::mob_proto::AIFLAG_STONESKIN;
+        victim.fight.stone_skin_point = 40;
+        victim.hp = 40;
+        // The chat draw fires (raw 60 gives 0... `number(0, 60)` maps raw 0 to 0),
+        // then the line draw (raw 0 gives 1).
+        let mut dice = Script::new(&[0, 0]);
+        let (struck, events) = special(&mut dice, &mut points, &mut victim, 100);
+        assert_eq!(dice.left(), 0);
+        // 100 takes the empire tenth (90), drains 30 SP, chats, halves under
+        // stoneskin (40 HP of 126 is 31%, under 40), and rounds to 45 — shown 45,
+        // but only 40 hit points are left to take.
+        assert_eq!(struck, Struck::Landed { damage: 40 });
+        assert_eq!(victim.hp, 0);
+        assert_eq!(points.sp(), 70);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HitEvent::DamageInfo {
+                damage: 45,
+                flag: DAMAGE_NORMAL,
+            }
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, HitEvent::Chat(_))));
+    }
+
+    #[test]
+    fn a_reflected_hit_on_a_stunned_or_dead_monster_takes_nothing() {
+        let mut points = alpha();
+        let mut victim = dog();
+        victim.stunned = true;
+        let mut dice = Script::new(&[1]);
+        let (struck, events) = special(&mut dice, &mut points, &mut victim, 100);
+        assert_eq!(dice.left(), 0);
+        assert_eq!(struck, Struck::Finished);
+        assert!(events.is_empty());
+        assert_eq!(victim.hp, 126);
+        victim.stunned = false;
+        victim.dead = true;
+        let mut dice = Script::new(&[1]);
+        let (struck, _) = special(&mut dice, &mut points, &mut victim, 100);
+        assert_eq!(struck, Struck::AlreadyDead);
+        assert_eq!(victim.hp, 126);
+    }
+
+    #[test]
+    fn a_reflected_hit_clamps_a_negative_at_zero_and_still_shows_it() {
+        let mut points = alpha();
+        let mut victim = dog();
+        let mut dice = Script::new(&[1]);
+        // Empire 2 map: -100 takes the tenth to -90, then clamps at 0.
+        let (struck, events) = special(&mut dice, &mut points, &mut victim, -100);
+        assert_eq!(dice.left(), 0);
+        assert_eq!(struck, Struck::Landed { damage: 0 });
+        assert_eq!(victim.hp, 126);
+        assert_eq!(
+            events,
+            [
+                HitEvent::DamageInfo {
+                    damage: 0,
+                    flag: DAMAGE_NORMAL,
+                },
+                HitEvent::VictimHp,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_players_own_hit_applies_the_user_rate_after_the_checks() {
+        let mut points = alpha();
+        let mut victim = dog();
+        // The punch's 0-to-0 roll, then the silent chat draw.
+        let mut dice = Script::new(&[0, 1]);
+        let mut striker = Striker {
+            points: &mut points,
+            weapon: None,
+            empire: 1,
+            map: 1,
+            user_rate: 200,
+        };
+        // 322 doubles to 644; the dog has 126.
+        let hit = strike_npc(&mut dice, &mut striker, &mut victim, false);
+        assert_eq!(dice.left(), 0);
+        assert_eq!(
+            hit.events,
+            [
+                HitEvent::DamageInfo {
+                    damage: 644,
+                    flag: DAMAGE_NORMAL
+                },
+                HitEvent::VictimHp
+            ]
+        );
+        assert_eq!(hit.struck, Struck::Landed { damage: 126 });
+        assert_eq!(victim.hp, 0);
+    }
+
+    #[test]
+    fn the_level_arm_passes_high_draws_low_and_clamps_at_8() {
+        let mut points = alpha();
+        points.set_point(point::POINT_POISON_PCT, 100);
+        // The dog is level 1, below the attacker: the poison draw alone lands it.
+        let mut dice = Script::new(&[50]);
+        let landed = normal_attack_affect(&mut dice, &points, &dog());
+        assert_eq!(dice.left(), 0);
+        assert!(landed.poisoned);
+        // A victim 5 over: the second draw reads ADJUST[5] = 30.
+        let mut king = dog();
+        king.fight.level = 159;
+        let mut dice = Script::new(&[50, 29]);
+        let landed = normal_attack_affect(&mut dice, &points, &king);
+        assert_eq!(dice.left(), 0);
+        assert!(landed.poisoned);
+        let mut dice = Script::new(&[50, 30]);
+        let landed = normal_attack_affect(&mut dice, &points, &king);
+        assert_eq!(dice.left(), 0);
+        assert!(!landed.poisoned);
+        // A victim 8 over reads 0: even a draw of 1 fails.
+        king.fight.level = 162;
+        let mut dice = Script::new(&[50, 0]);
+        let landed = normal_attack_affect(&mut dice, &points, &king);
+        assert_eq!(dice.left(), 0);
+        assert!(!landed.poisoned);
+        // A victim 20 over clamps to the same 0.
+        king.fight.level = 174;
+        let mut dice = Script::new(&[50, 0]);
+        let landed = normal_attack_affect(&mut dice, &points, &king);
+        assert_eq!(dice.left(), 0);
+        assert!(!landed.poisoned);
+    }
+
+    #[test]
+    fn a_holder_and_an_immune_draw_once_or_none() {
+        let mut points = alpha();
+        points.set_point(point::POINT_POISON_PCT, 100);
+        points.set_point(point::POINT_STUN_PCT, 100);
+        points.set_point(point::POINT_SLOW_PCT, 100);
+        // A holder of every flag draws nothing at all.
+        let mut held = dog();
+        held.affect_flags[0] = AFF_POISON_WORD | AFF_STUN_WORD | AFF_SLOW_WORD;
+        let mut dice = Script::new(&[]);
+        let landed = normal_attack_affect(&mut dice, &points, &held);
+        assert_eq!(dice.left(), 0);
+        assert_eq!(
+            landed,
+            NpcAttackAffect {
+                poisoned: false,
+                stunned: false,
+                slowed: false,
+            }
+        );
+        // An immune victim still spends the one draw, then refuses.
+        let mut immune = dog();
+        immune.immune_flag = crate::character::IMMUNE_STUN | crate::character::IMMUNE_SLOW;
+        let mut dice = Script::new(&[50, 50, 50]);
+        let landed = normal_attack_affect(&mut dice, &points, &immune);
+        assert_eq!(dice.left(), 0);
+        assert!(landed.poisoned && !landed.stunned && !landed.slowed);
+        // All-zero points spend nothing.
+        let mut dice = Script::new(&[]);
+        let landed = normal_attack_affect(&mut dice, &alpha(), &dog());
+        assert_eq!(dice.left(), 0);
+        assert_eq!(landed, NpcAttackAffect::default());
+    }
+
+    #[test]
+    fn a_refused_hit_carries_its_affect_and_a_bow_whiffs_before_any_draw() {
+        let mut points = alpha();
+        points.set_point(point::POINT_POISON_PCT, 100);
+        points.set_point(point::POINT_STUN_PCT, 100);
+        points.set_point(point::POINT_SLOW_PCT, 100);
+        // A refused hit still ran the arms: calc's roll, the three draws (the dog is
+        // level 1, so no level arm), the chat roll of 1.
+        let mut victim = dog();
+        victim.char_type = CHAR_TYPE_STONE;
+        victim.empire = 1;
+        let hit = strike(
+            &mut Script::new(&[0, 50, 50, 50, 1]),
+            &mut points,
+            &mut victim,
+        );
+        assert_eq!(hit.struck, Struck::Refused);
+        assert!(hit.affect.poisoned && hit.affect.stunned && hit.affect.slowed);
+        // A weapon the swing cannot use whiffs before any draw: the arms never ran.
+        let mut victim = dog();
+        let bow = weapon(ITEM_WEAPON, WEAPON_BOW, [0, 0, 0, 0, 0, 0]);
+        let mut striker = Striker {
+            points: &mut points,
+            weapon: Some(&bow),
+            empire: 1,
+            map: 1,
+            user_rate: 100,
+        };
+        let mut dice = Script::new(&[]);
+        let hit = strike_npc(&mut dice, &mut striker, &mut victim, false);
+        assert_eq!(hit.struck, Struck::Whiffed);
+        assert_eq!(hit.affect, NpcAttackAffect::default());
+    }
+
+    #[test]
+    fn a_skill_blow_ignores_the_defence_a_punch_subtracts() {
+        let points = alpha();
+        let victim = dog();
+        // The punch's 0-to-0 roll; the ignore-defence blow draws the same one roll.
+        let mut dice = Script::new(&[12_345]);
+        assert_eq!(calc_melee_damage(&mut dice, &points, None, &victim), 322);
+        assert_eq!(dice.left(), 0);
+        let mut dice = Script::new(&[12_345]);
+        assert_eq!(calc_melee_skill_atk(&mut dice, &points, None, &victim), 332);
+        assert_eq!(dice.left(), 0);
+    }
+
+    #[test]
+    fn a_melee_skill_hit_keeps_the_chances_and_skips_the_gold_steal() {
+        let mut points = alpha();
+        points.set_point(point::POINT_CRITICAL_PCT, 10);
+        points.set_point(point::POINT_PENETRATE_PCT, 10);
+        points.set_point(point::POINT_STEAL_GOLD, 100);
+        points.set_point(point::POINT_STEAL_HP, 100);
+        let mut victim = dog();
+        // The quartered chances draw: 50 % 100 + 1 = 51 past both quartered 0s, so no
+        // critical and no penetrate; the steals draw: the HP steal's 1-in-10 says no.
+        // A NORMAL hit would then draw the gold steal; the MELEE pipe draws nothing
+        // more (its chat draw alone is left).
+        let mut striker = Striker {
+            points: &mut points,
+            weapon: None,
+            empire: 1,
+            map: 1,
+            user_rate: 100,
+        };
+        let mut dice = Script::new(&[50, 50, 5, 60]);
+        let (struck, events) = damage_melee(&mut dice, &mut striker, &mut victim, 20);
+        assert_eq!(dice.left(), 0);
+        assert_eq!(struck, Struck::Landed { damage: 20 });
+        assert_eq!(
+            events,
+            [
+                HitEvent::DamageInfo {
+                    damage: 20,
+                    flag: DAMAGE_NORMAL
+                },
+                HitEvent::VictimHp
+            ]
+        );
+        assert_eq!(victim.hp, 106);
+    }
+
+    #[test]
+    fn a_melee_skills_attr_arm_reads_the_kind_resist_then_the_defence() {
+        let mut victim = dog();
+        victim.fight.add(point::POINT_RESIST_SWORD, 50);
+        let sword = weapon(ITEM_WEAPON, WEAPON_SWORD, [0, 0, 0, 10, 20, 0]);
+        // 200 halved by the 50 sword resist, less the dog's 10 DEF_GRADE.
+        assert_eq!(
+            skill_melee_attr(200, Some(&sword), 10, &victim.fight, false),
+            90
+        );
+        // The PENETRATE draw skips the defence but keeps the kind resist.
+        assert_eq!(
+            skill_melee_attr(200, Some(&sword), 10, &victim.fight, true),
+            100
+        );
+        // Unwielded: no kind resist, only the defence.
+        // Unwielded: no kind resist, only the defence.
+        assert_eq!(skill_melee_attr(200, None, 10, &victim.fight, false), 190);
+    }
+
+    #[test]
+    fn an_arrow_shot_falls_off_with_distance_and_reads_the_attackers_def_bonus() {
+        let points = alpha();
+        let victim = dog();
+        // Bow values 3/4 pin the roll (10 * 2), the arrow's value 3 adds 5.
+        let bow = weapon(ITEM_WEAPON, WEAPON_BOW, [0, 0, 0, 10, 10, 0]);
+        let arrow = weapon(ITEM_WEAPON, WEAPON_ARROW, [0, 0, 0, 5, 0, 0]);
+        // Point blank: 344 grade + 25 roll through the 0.683 rating, less the
+        // dog's 10 defence: 339.
+        let mut dice = Script::new(&[9_999]);
+        assert_eq!(
+            calc_arrow_damage(&mut dice, &points, &bow, &arrow, &victim, 0),
+            339
+        );
+        assert_eq!(dice.left(), 0);
+        // At 700: the gap is 2, the percent 90, so 305.
+        let mut dice = Script::new(&[9_999]);
+        assert_eq!(
+            calc_arrow_damage(&mut dice, &points, &bow, &arrow, &victim, 700),
+            305
+        );
+        // The skill variant ignores the defence: 349.
+        let mut dice = Script::new(&[9_999]);
+        assert_eq!(
+            calc_arrow_skill_atk(&mut dice, &points, &bow, &arrow, &victim, 0),
+            349
+        );
+        // A sword is no bow: the shot reads 0 before any draw.
+        let sword = weapon(ITEM_WEAPON, WEAPON_SWORD, [0, 0, 0, 10, 10, 0]);
+        let mut dice = Script::new(&[]);
+        assert_eq!(
+            calc_arrow_damage(&mut dice, &points, &sword, &arrow, &victim, 0),
+            0
+        );
+        // The defence carries the *attacker's* DEF_BONUS, not the dog's: +100
+        // doubles the subtracted 10 to 20 (329), while a +100 on the dog's own
+        // fight changes nothing (339).
+        let mut boosted = alpha();
+        boosted.set_point(point::POINT_DEF_BONUS, 100);
+        let mut dice = Script::new(&[9_999]);
+        assert_eq!(
+            calc_arrow_damage(&mut dice, &boosted, &bow, &arrow, &victim, 0),
+            329
+        );
+        let mut hard = dog();
+        hard.fight.add(point::POINT_DEF_BONUS, 100);
+        let mut dice = Script::new(&[9_999]);
+        assert_eq!(
+            calc_arrow_damage(&mut dice, &points, &bow, &arrow, &hard, 0),
+            339
+        );
+    }
+
+    #[test]
+    fn the_range_and_magic_attr_arms_read_their_own_resists() {
+        let points = alpha();
+        let mut victim = dog();
+        victim.fight.add(point::POINT_RESIST_BOW, 25);
+        victim.fight.add(point::POINT_RESIST_MAGIC, 25);
+        // RANGE: 200 times 75/100. The dog's 10 DEF_GRADE is never subtracted
+        // (the commented DEF line stays out).
+        assert_eq!(skill_range_attr(200, &victim.fight), 150);
+        // MAGIC: `CalcAttBonus` first (the dog hosts no bonus or resist, so a
+        // no-op), then times 75/100.
+        assert_eq!(skill_magic_attr(200, &points, &victim), 150);
+    }
+
+    #[test]
+    fn the_range_pipe_keeps_the_chances_and_skips_the_gold_steal() {
+        let mut points = alpha();
+        points.set_point(point::POINT_CRITICAL_PCT, 10);
+        points.set_point(point::POINT_PENETRATE_PCT, 10);
+        points.set_point(point::POINT_STEAL_GOLD, 100);
+        points.set_point(point::POINT_STEAL_HP, 100);
+        let mut victim = dog();
+        // The same four draws as the MELEE proof: quartered chances (51 past
+        // both quartered 0s), the HP steal's 1-in-10 saying no, the chat miss.
+        let mut striker = Striker {
+            points: &mut points,
+            weapon: None,
+            empire: 1,
+            map: 1,
+            user_rate: 100,
+        };
+        let mut dice = Script::new(&[50, 50, 5, 60]);
+        let (struck, _events) = damage_range(&mut dice, &mut striker, &mut victim, 20);
+        assert_eq!(dice.left(), 0);
+        assert_eq!(struck, Struck::Landed { damage: 20 });
+        assert_eq!(victim.hp, 106);
+        // And the MAGIC pipe on the same script.
+        let mut points = alpha();
+        points.set_point(point::POINT_CRITICAL_PCT, 10);
+        points.set_point(point::POINT_PENETRATE_PCT, 10);
+        points.set_point(point::POINT_STEAL_GOLD, 100);
+        points.set_point(point::POINT_STEAL_HP, 100);
+        let mut victim = dog();
+        let mut striker = Striker {
+            points: &mut points,
+            weapon: None,
+            empire: 1,
+            map: 1,
+            user_rate: 100,
+        };
+        let mut dice = Script::new(&[50, 50, 5, 60]);
+        let (struck, events) = damage_magic(&mut dice, &mut striker, &mut victim, 20);
+        assert_eq!(dice.left(), 0);
+        assert_eq!(struck, Struck::Landed { damage: 20 });
+        assert_eq!(victim.hp, 106);
+        assert_eq!(
+            events,
+            [
+                HitEvent::DamageInfo {
+                    damage: 20,
+                    flag: DAMAGE_NORMAL
+                },
+                HitEvent::VictimHp
+            ]
+        );
+    }
+
+    #[test]
+    fn a_normal_range_hit_dodges_where_a_normal_one_is_blocked() {
+        let mut points = alpha();
+        let mut victim = dog();
+        victim.fight.add(point::POINT_DODGE, 50);
+        // The dodge gate draws first: 30 % 100 + 1 = 31, under the 50 — the
+        // hit whiffs with `DAMAGE_DODGE` and draws nothing more.
+        let mut striker = Striker {
+            points: &mut points,
+            weapon: None,
+            empire: 1,
+            map: 1,
+            user_rate: 100,
+        };
+        let mut dice = Script::new(&[30]);
+        let (struck, stolen, events) =
+            damage_normal_range(&mut dice, &mut striker, &mut victim, 20, false);
+        assert_eq!(dice.left(), 0);
+        assert_eq!(struck, Struck::Whiffed);
+        assert_eq!(stolen, 0);
+        assert_eq!(
+            events,
+            [HitEvent::DamageInfo {
+                damage: 0,
+                flag: DAMAGE_DODGE
+            }]
+        );
+        assert_eq!(victim.hp, 126);
+        // Past the gate (99 % 100 + 1 = 100), the NORMAL body runs with the
+        // gold steal: the gold steal's 100-of-100 says yes and draws
+        // 1-of-level-1.
+        let mut points = alpha();
+        points.set_point(point::POINT_STEAL_GOLD, 100);
+        let mut victim = dog();
+        victim.fight.add(point::POINT_DODGE, 50);
+        let mut striker = Striker {
+            points: &mut points,
+            weapon: None,
+            empire: 1,
+            map: 1,
+            user_rate: 100,
+        };
+        let mut dice = Script::new(&[99, 7, 3, 60]);
+        let (struck, stolen, events) =
+            damage_normal_range(&mut dice, &mut striker, &mut victim, 20, false);
+        assert_eq!(dice.left(), 0);
+        assert_eq!(struck, Struck::Landed { damage: 20 });
+        assert_eq!(stolen, 1);
+        assert_eq!(
+            events,
+            [
+                HitEvent::DamageInfo {
+                    damage: 20,
+                    flag: DAMAGE_NORMAL
+                },
+                HitEvent::VictimHp
+            ]
+        );
+        assert_eq!(victim.hp, 106);
     }
 }

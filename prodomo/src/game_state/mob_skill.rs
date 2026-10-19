@@ -62,16 +62,47 @@ fn is_monster(npc: &Npc) -> bool {
     npc.char_type == CHAR_TYPE_MONSTER
 }
 
-/// `point_on` as `FindPointType` reads it (`G/skill.cpp:81-89`): the hosted rows name only
-/// `NONE`, `HP` and `MOV_SPEED`.
-fn point_on(field: &[u8]) -> usize {
+/// `FindPointType` (`G/skill.cpp:81-89`): the `szPointOn*` name, case-blind, to its
+/// point. Legacy reads the column bytes with `strcasecmp`; the owner rows name only
+/// uppercase, so the match is on the raw bytes. Unknown names and the empty point3
+/// read `POINT_NONE` (an unknown point1/2 drops the row at load,
+/// `G/skill.cpp:124-146`).
+pub(super) fn point_on(field: &[u8]) -> usize {
     let end = field
         .iter()
         .position(|byte| *byte == 0)
         .unwrap_or(field.len());
     match &field[..end] {
+        b"MAX_HP" => point::POINT_MAX_HP,
+        b"MAX_SP" => point::POINT_MAX_SP,
+        b"HP_REGEN" => point::POINT_HP_REGEN,
+        b"SP_REGEN" => point::POINT_SP_REGEN,
+        b"BLOCK" => point::POINT_BLOCK,
         b"HP" => point::POINT_HP,
+        b"SP" => point::POINT_SP,
+        b"ATT_GRADE" => point::POINT_ATT_GRADE_BONUS,
+        b"DEF_GRADE" => point::POINT_DEF_GRADE_BONUS,
+        b"MAGIC_ATT_GRADE" => point::POINT_MAGIC_ATT_GRADE_BONUS,
+        b"MAGIC_DEF_GRADE" => point::POINT_MAGIC_DEF_GRADE_BONUS,
+        b"BOW_DISTANCE" => point::POINT_BOW_DISTANCE,
         b"MOV_SPEED" => point::POINT_MOV_SPEED,
+        b"ATT_SPEED" => point::POINT_ATT_SPEED,
+        b"POISON_PCT" => point::POINT_POISON_PCT,
+        b"RESIST_RANGE" => point::POINT_RESIST_BOW,
+        b"CASTING_SPEED" => point::POINT_CASTING_SPEED,
+        b"REFLECT_MELEE" => point::POINT_REFLECT_MELEE,
+        b"ATT_BONUS" => point::POINT_ATT_BONUS,
+        b"DEF_BONUS" => point::POINT_DEF_BONUS,
+        b"RESIST_NORMAL" => point::POINT_RESIST_NORMAL_DAMAGE,
+        b"DODGE" => point::POINT_DODGE,
+        b"KILL_HP_RECOVER" => point::POINT_KILL_HP_RECOVERY,
+        b"KILL_SP_RECOVER" => point::POINT_KILL_SP_RECOVER,
+        b"HIT_HP_RECOVER" => point::POINT_HIT_HP_RECOVERY,
+        b"HIT_SP_RECOVER" => point::POINT_HIT_SP_RECOVERY,
+        b"CRITICAL" => point::POINT_CRITICAL_PCT,
+        b"MANASHIELD" => point::POINT_MANASHIELD,
+        b"SKILL_DAMAGE_BONUS" => point::POINT_SKILL_DAMAGE_BONUS,
+        b"NORMAL_HIT_DAMAGE_BONUS" => point::POINT_NORMAL_HIT_DAMAGE_BONUS,
         _ => point::POINT_NONE,
     }
 }
@@ -185,12 +216,14 @@ impl GameState {
             return 0;
         };
         let berserk = self.minds.get(mob).is_some_and(|mind| mind.berserk);
+        let mob_rate = self.mob_damage_rate();
         mob_calc_attack(
             &mut self.dice,
             &npc,
             Some(&target),
             berserk,
             ignore_target_rating,
+            mob_rate,
         )
         .max(0)
     }
@@ -460,7 +493,8 @@ impl GameState {
             // `CalcMeleeDamage(self, self, true, false)`: the shared calc with no victim
             // (the NPC arms) draws the roll, and `CalcBattleDamage` floors below 3.
             let berserk = self.minds.get(mob).is_some_and(|mind| mind.berserk);
-            let atk = mob_calc_attack(&mut self.dice, &npc, None, berserk, false).max(0);
+            let mob_rate = self.mob_damage_rate();
+            let atk = mob_calc_attack(&mut self.dice, &npc, None, berserk, false, mob_rate).max(0);
             vars.insert("atk", f64::from(atk));
         }
         // `USE_MAGIC_DAMAGE` and `USE_ARROW_DAMAGE` are dead for hosted rows (no row sets
@@ -763,6 +797,7 @@ impl GameState {
                 effects: Vec::new(),
                 end: PcHitEnd::Blocked,
                 affect: MobAttackAffect::default(),
+                reflected_base: None,
             };
         };
         let Some(points) = character.points().cloned() else {
@@ -770,6 +805,7 @@ impl GameState {
                 effects: Vec::new(),
                 end: PcHitEnd::Blocked,
                 affect: MobAttackAffect::default(),
+                reflected_base: None,
             };
         };
         let Some(npc) = self.npc_by_vid(mob).cloned() else {
@@ -777,6 +813,7 @@ impl GameState {
                 effects: Vec::new(),
                 end: PcHitEnd::Blocked,
                 affect: MobAttackAffect::default(),
+                reflected_base: None,
             };
         };
         let berserk = self.minds.get(mob).is_some_and(|mind| mind.berserk);

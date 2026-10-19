@@ -3,15 +3,17 @@ mod mob_melee;
 mod pk;
 
 pub use melee::{
-    battle_damage_floor, calc_melee_damage, melee_reach, mob_attack_range, strike_npc, HitEvent,
-    Strike, Striker, Struck, DAMAGE_CRITICAL, DAMAGE_DODGE, DAMAGE_NORMAL, DAMAGE_PENETRATE,
-    DAMAGE_POISON, FLY_EXP, FLY_HP_SMALL, FLY_SP_SMALL, SE_CRITICAL, SE_EFFECT_HEALER,
-    SE_PENETRATE,
+    battle_damage_floor, calc_arrow_damage, calc_arrow_skill_atk, calc_melee_damage,
+    calc_melee_skill_atk, damage_magic, damage_melee, damage_normal_range, damage_range,
+    damage_special, melee_reach, mob_attack_range, normal_attack_affect, skill_magic_attr,
+    skill_melee_attr, skill_range_attr, strike_npc, HitEvent, NpcAttackAffect, Strike, Striker,
+    Struck, DAMAGE_CRITICAL, DAMAGE_DODGE, DAMAGE_NORMAL, DAMAGE_PENETRATE, DAMAGE_POISON, FLY_EXP,
+    FLY_HP_SMALL, FLY_SP_SMALL, SE_CRITICAL, SE_EFFECT_HEALER, SE_PENETRATE,
 };
 pub use mob_melee::{
-    mob_att_bonus_self, mob_calc_attack, mob_reach, pc_hp_pct, pc_poison_rate, shoot_pc,
-    skill_damage_pc, strike_npc_by_npc, strike_pc, MobAttackAffect, MobStriker, NpcVictim,
-    PcHitEnd, PcStrike, PcVictim,
+    mob_att_bonus_self, mob_calc_attack, mob_reach, pc_hp_pct, pc_poison_rate, reflect_damage,
+    shoot_pc, skill_damage_pc, strike_npc_by_npc, strike_pc, MobAttackAffect, MobStriker,
+    NpcVictim, PcHitEnd, PcStrike, PcVictim, IMMUNE_REFLECT,
 };
 pub use pk::{pk_eligibility, PkActor, PkDenial, PkEligibility, PkMode};
 

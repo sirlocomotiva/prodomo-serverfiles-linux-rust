@@ -85,6 +85,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use common::cfloat::{f32_to_i32, i32_to_f32};
+use common::point_slot as point;
 use common::vid::Vid;
 use gamedata::mob_proto::{
     AIFLAG_COWARD, AIFLAG_NOMOVE, CHAR_TYPE_GOTO, CHAR_TYPE_HORSE, CHAR_TYPE_MONSTER,
@@ -99,7 +100,7 @@ use super::motion::{move_duration, rotation_to_xy, Motion, MOTION_SPEED_FALLBACK
 use super::view::{EntityKey, Wake};
 use super::view_encode::walk_mode;
 use super::GameState;
-use crate::movement::FUNC_WAIT;
+use crate::movement::{FUNC_ATTACK, FUNC_WAIT};
 use crate::save::PASSES_PER_SEC;
 
 /// `WALKMODE_WALK` (`G/packet.h:2377-2381`).
@@ -124,6 +125,22 @@ const HORSE_RACES: std::ops::RangeInclusive<u16> = 20101..=20109;
 /// `CowardEscape`'s distances (`G/char_state.cpp:284`): a try at index `i` walks from
 /// `COWARD_DISTANCES[i]` to `COWARD_DISTANCES[i + 1]`.
 const COWARD_DISTANCES: [i32; 4] = [500, 1000, 3000, 5000];
+
+/// One arm of `__StateIdle_Stone`'s ladder (`G/char_state.cpp:402-498`): at or below `ceiling`
+/// percent hit points with `MaxSP` below `floor`, set `MaxSP` to `floor` and spawn one group
+/// per half-width. The 30% arm's third box is 1000, not 1500 — the arms are literal data.
+const STONE_SPAWNS: [(i32, i32, &[i32]); 10] = [
+    (10, 10, &[500, 1000, 1500]),
+    (20, 9, &[500, 1000, 1500]),
+    (30, 8, &[500, 1000, 1000]),
+    (40, 7, &[1000, 1000, 1000]),
+    (50, 6, &[1000, 1000]),
+    (60, 5, &[1000, 500]),
+    (70, 4, &[500, 1000]),
+    (80, 3, &[1000, 1000]),
+    (90, 2, &[500]),
+    (99, 1, &[1000]),
+];
 
 /// `PASSES_PER_SEC(seconds)`.
 pub(super) fn pulses(seconds: i32) -> u64 {
@@ -267,6 +284,8 @@ pub(super) struct Who {
     pub(super) aggressive: bool,
     /// `IsStun()`: a player's hit left it no hit points (see [`super::fight`]).
     pub(super) stunned: bool,
+    /// The stone that spawned it, or none.
+    pub(super) stone: Option<u32>,
 }
 
 /// `GetDeltaByDegree` (`G/vector.cpp:54-60`): the step of `distance` toward `degree`, clockwise
@@ -373,6 +392,7 @@ impl GameState {
             map,
             aggressive: npc.is_aggressive(),
             stunned: npc.stunned,
+            stone: npc.stone,
         })
     }
 
@@ -392,9 +412,7 @@ impl GameState {
             return;
         }
         match who.char_type {
-            // `__StateIdle_Stone` (`:389-505`): the spawns at each tenth wait for damage, and a
-            // stone at full hit points spawns nothing.
-            CHAR_TYPE_STONE => self.set_duration(vid, pulses(1)),
+            CHAR_TYPE_STONE => self.idle_stone(vid),
             // A warp or goto would wait 60 seconds (`:369-374`), but none is ever started.
             CHAR_TYPE_MONSTER => self.idle_monster(vid, who),
             _ => self.idle_npc(vid, who),
@@ -454,6 +472,10 @@ impl GameState {
         if who.stunned {
             return;
         }
+        // `if (!CanMove()) return;` (`:631-632`): no search and no draws under `AFF_STUN`.
+        if self.npc_affect_words(vid)[0] & super::fight::AFF_STUN_WORD != 0 {
+            return;
+        }
         if who.ai_flags & AIFLAG_COWARD != 0 {
             self.coward_escape(vid, who.map);
             return;
@@ -463,8 +485,15 @@ impl GameState {
             mind.berserk = false;
         }
         // Steps 4-6: the held victim is dropped when it is gone, dead or on BANPK, and an
-        // aggressive wanderer looks for one.
+        // aggressive wanderer looks for one. A son with no victim takes its stone's
+        // nearest damage-map attacker (`:670-674`).
         let victim = self.idle_victim(vid, who);
+        let victim = match (victim, who.stone) {
+            (None, Some(stone)) if self.npc_by_vid(stone).is_some_and(|stone| !stone.dead) => {
+                self.nearest_victim(stone)
+            }
+            (held, _) => held,
+        };
         // Step 7: a live victim starts the fight at once; `BeginFight`'s next Pulse is
         // overwritten by the post-Execute line, so Battle starts 25 Pulses later (2.2).
         if let Some(found) = victim {
@@ -500,6 +529,74 @@ impl GameState {
             return;
         }
         self.monster_chat_wait(vid, who);
+    }
+
+    /// `__StateIdle_Stone` (`G/char_state.cpp:389-505`): the stone spawns its group at each
+    /// tenth of its hit points, once per tenth. The duration is 1 second every path; the
+    /// group draw runs even at full hit points. A firing arm sends the stone's swing and
+    /// its `UpdatePacket`, then one `SpawnGroup` per half-width. No stun or `CanMove`
+    /// guard: a flag-stunned stone still swings and spawns (`:389-505` has none).
+    fn idle_stone(&mut self, vid: u32) {
+        self.set_duration(vid, pulses(1));
+        let Some(npc) = self.npc_by_vid(vid) else {
+            return;
+        };
+        let (hp, max_hp) = (npc.hp, npc.max_hp);
+        let (x, y) = (npc.x, npc.y);
+        let [attack_speed, moving_speed] = npc.fight.group_speeds;
+        let (low, high) = (
+            i32::from(attack_speed.min(moving_speed)),
+            i32::from(attack_speed.max(moving_speed)),
+        );
+        let group = u32::try_from(number(&mut self.dice, low, high)).unwrap_or(0);
+        // `iPercent = HP * 100 / MaxHP` (`:393-395`); legacy SIGFPEs on MaxHP 0, the
+        // Rewrite reads 0 and fires the 10% arm (Divergence, §1: no hosted stone has
+        // MaxHP 0).
+        let percent = if max_hp > 0 {
+            hp.saturating_mul(100) / max_hp
+        } else {
+            0
+        };
+        let armed = self.npc_combat.get(&vid).map_or(0, |combat| combat.max_sp);
+        let Some((floor, widths)) = STONE_SPAWNS
+            .iter()
+            .find(|(ceiling, floor, _)| percent <= *ceiling && armed < *floor)
+            .map(|(_, floor, widths)| (*floor, *widths))
+        else {
+            return;
+        };
+        self.npc_combat.entry(vid).or_default().max_sp = floor;
+        self.send_stone_attack(vid, x, y);
+        let Some(&(channel, map, _)) = self.npc_of.get(&vid) else {
+            return;
+        };
+        let key = (channel, map);
+        for width in widths {
+            self.spawn_stone_group(key, group, vid, (x, y), *width);
+        }
+        self.send_stone_update(vid);
+    }
+
+    /// `SendMovePacket(FUNC_ATTACK, 0, x, y, 0)` of the stone under `vid`: at its own point,
+    /// facing its own rotation (`G/char.cpp:3624-3636` with `iRot == -1`).
+    fn send_stone_attack(&mut self, vid: u32, x: i32, y: i32) {
+        let rotation = self
+            .npc_by_vid(vid)
+            .map_or(0, |npc| f32_to_i32(f32::from(npc.rotation)) / 5)
+            .to_le_bytes()[0];
+        let record =
+            GcCharacterMove::new(FUNC_ATTACK, 0, rotation, vid, x, y, self.clock.now(), 0).encode();
+        let me = EntityKey::Npc(vid);
+        self.packet_around(me, &record, Some(me));
+    }
+
+    /// `UpdatePacket` of the stone under `vid` (`G/char.cpp:1277-1340`): its speeds, its
+    /// affect words, and 0 for every worn part, guild, mount, premium and alignment — a
+    /// stone wears and owns nothing. The speeds and words are live, as `GetLimitPoint`
+    /// and `m_afAffectFlag` read them.
+    fn send_stone_update(&mut self, vid: u32) {
+        let words = self.npc_affect_words(vid);
+        self.send_npc_update(vid, words);
     }
 
     /// Idle steps 4-6 (`G/char_state.cpp:653-686`): the victim held, or found for an
@@ -649,9 +746,9 @@ impl GameState {
         let Some(spot) = self.npc_spot(vid) else {
             return false;
         };
-        let move_speed = self
-            .npc_by_vid(vid)
-            .map_or(0, |npc| i32::from(npc.moving_speed));
+        let move_speed = self.npc_by_vid(vid).map_or(0, |npc| {
+            super::mob_battle::npc_limit_speed(npc.fight.point(point::POINT_MOV_SPEED))
+        });
         let now = self.clock.now();
         let Some(mind) = self.minds.machines.get_mut(&vid) else {
             return false;
@@ -878,10 +975,12 @@ mod tests {
     use common::vid::Vid;
     use gamedata::mob_group::MobGroups;
     use gamedata::mob_locale_names::{MobLocaleNames, MobNamesByLanguage};
-    use gamedata::mob_proto::{MobProtos, AIFLAG_AGGRESSIVE, CHAR_TYPE_NPC};
+    use gamedata::mob_proto::{MobProto, MobProtos, AIFLAG_AGGRESSIVE, CHAR_TYPE_NPC};
+    use gamedata::records::MobTableRecord;
     use gamedata::server_attr::{
         CellBlock, SectreeGrid, ServerAttr, ATTR_BLOCK, CELL_SIZE, SECTREE_CELLS,
     };
+    use protocol::cg_attack::CgAttack;
     use quest::manager::Manager;
     use tokio::sync::mpsc::UnboundedReceiver;
     use world::cells::{HostedCells, MapCells};
@@ -913,7 +1012,7 @@ mod tests {
     /// An NPC of `char_type` and race `race` at [`SPOT`] with `ai_flags`, at a moving speed
     /// of 100.
     fn an_npc(vid: u32, char_type: u8, race: u16, ai_flags: u32) -> Npc {
-        Npc {
+        let mut npc = Npc {
             vid,
             vnum: u32::from(race),
             race,
@@ -927,7 +1026,9 @@ mod tests {
             hp: 100,
             max_hp: 100,
             ..Npc::default()
-        }
+        };
+        npc.fight.add(common::point_slot::POINT_MOV_SPEED, 100);
+        npc
     }
 
     /// A world on `clock` with `npcs` stood on [`PLACE`] and its cells open, nobody on it yet.
@@ -1370,6 +1471,32 @@ mod tests {
         assert_ne!(world.dice, Pcg32::new(1, 0));
     }
 
+    /// The flag twin: `AFF_STUN` idles with no draw and keeps the wait (`:631-632`).
+    #[test]
+    fn a_flag_stunned_monster_idles_with_no_draw() {
+        use super::super::affect::Affect;
+        use crate::loading_phase::{AFFECT_STUN, AFF_STUN, STUN_TICKS_NPC};
+        let (mut world, mut inbox, _) = first_idle(an_npc(ME, CHAR_TYPE_MONSTER, 101, 0), 1);
+        world.add_npc_affect(
+            ME,
+            Affect {
+                kind: AFFECT_STUN,
+                apply_on: 0,
+                value: 0,
+                flag: AFF_STUN,
+                remaining: STUN_TICKS_NPC,
+            },
+        );
+        drained(&mut inbox);
+        let dice_at_add = world.dice.clone();
+        let (duration, next) = (mind(&world).duration, mind(&world).next_pulse);
+        world.process_pulse(next);
+        assert_eq!(world.dice, dice_at_add, "no draw under the flag");
+        assert_eq!(mind(&world).duration, duration, "the wait stays");
+        assert_eq!(mind(&world).next_pulse, next + duration);
+        assert_eq!(drained(&mut inbox), Vec::<Vec<u8>>::new());
+    }
+
     /// A dead NPC's `UpdateStateMachine` returns before the state runs, and its next update
     /// stays on the Pulse it was (`G/char.cpp:5343-5344`).
     #[test]
@@ -1384,6 +1511,38 @@ mod tests {
         let mind = mind(&world);
         assert_eq!((mind.next_pulse, mind.state), (1, Fsm::Initial));
         assert_eq!(drained(&mut inbox), Vec::<Vec<u8>>::new());
+    }
+
+    /// The flag twin: `AFF_STUN` lands through `AddAffect`, which stops a mind whose
+    /// destination is not its spot — but a mind whose stun arrives after the walk's last
+    /// step still arrives, as `StateMove` guards nothing.
+    #[test]
+    fn a_flag_stun_at_the_hit_stops_the_walk() {
+        use crate::loading_phase::{AFFECT_STUN, AFF_STUN, STUN_TICKS_NPC};
+        let seed = a_seed(|dice| {
+            let _wait = number(dice, 3, 5);
+            number(dice, 0, 6) == 0
+        });
+        let monster = an_npc(ME, CHAR_TYPE_MONSTER, 101, 0);
+        let (mut world, _, _) = first_idle(monster, seed);
+        let walk = mind(&world);
+        assert_eq!(walk.asked, Some(Fsm::Move));
+        assert_ne!(walk.motion.dest, SPOT);
+        world.add_npc_affect(
+            ME,
+            super::super::affect::Affect {
+                kind: AFFECT_STUN,
+                apply_on: 0,
+                value: 0,
+                flag: AFF_STUN,
+                remaining: STUN_TICKS_NPC,
+            },
+        );
+        let stopped = mind(&world);
+        assert_eq!(stopped.motion.dest, SPOT);
+        assert_eq!(stopped.motion.start, SPOT);
+        assert!(!stopped.fighting);
+        assert!(!world.can_begin_fight(ME));
     }
 
     /// `StateMove` has no stun guard: a monster stunned mid-walk still reaches its point, and
@@ -1432,7 +1591,8 @@ mod tests {
         clock.set(now);
         world.clock = super::super::motion::WorldClock::new(Box::new(clock.clone()));
         let (_, shown) = enter_seeing(&mut world, PLACE, 2, (3100, 3100), 12_345);
-        let insert = encode_npc_insert(world.npc_by_vid(ME).unwrap(), Some(&walk), now);
+        let words = world.npc_affect_words(ME);
+        let insert = encode_npc_insert(world.npc_by_vid(ME).unwrap(), Some(&walk), now, words);
         assert_eq!(insert.len(), 3, "the add, the move and the walk mode");
         let added = protocol::gc_actors::GcCharacterAdd::decode(&insert[0]).expect("an add");
         assert_eq!(
@@ -1459,6 +1619,7 @@ mod tests {
             world.npc_by_vid(ME).unwrap(),
             Some(&walk),
             T0 + walk.motion.duration_ms + 1,
+            words,
         );
         assert_eq!(late.len(), 1, "an ended move sends the add alone");
         let added = protocol::gc_actors::GcCharacterAdd::decode(&late[0]).expect("an add");
@@ -1862,5 +2023,241 @@ mod tests {
         assert_eq!(mind.duration, pulses(5));
         assert!(mind.victim_npc.is_none());
         assert!(!mind.fighting);
+    }
+
+    /// A stone at full hit points draws its group and spawns nothing: the duration is a
+    /// second, the dice move, and no son stands.
+    #[test]
+    fn a_whole_stone_draws_its_group_and_spawns_nothing() {
+        let mut stone = an_npc(ME, CHAR_TYPE_STONE, 8001, 0);
+        stone.fight.group_speeds = [100, 100];
+        let (world, _, dice) = first_idle(stone, 7);
+        let mind = world.minds.get(ME).expect("the stone idles");
+        assert_eq!(mind.duration, pulses(1));
+        assert_ne!(world.dice, dice, "the group draw ran");
+        assert_eq!(world.npcs_on(PLACE.0, PLACE.1).npcs.len(), 1);
+    }
+
+    /// A slowed `Goto` stretches the leg: MOV 100 → 70 lengthens the duration, and the
+    /// expiry re-anchors it short again.
+    #[test]
+    fn a_slowed_goto_stretches_the_leg() {
+        use crate::game_state::affect::Affect;
+        use crate::loading_phase::{AFFECT_SLOW, AFF_SLOW, SLOW_MOV_SPEED, SLOW_TICKS};
+        use common::point_slot as point;
+        let (mut world, _, _) = first_idle(an_npc(ME, CHAR_TYPE_MONSTER, 101, 0), 1);
+        world.npc_goto(ME, SPOT.0 + 1000, SPOT.1);
+        let full = mind(&world).motion.duration_ms;
+        assert!(full > 0);
+        world.add_npc_affect(
+            ME,
+            Affect {
+                kind: AFFECT_SLOW,
+                apply_on: u8::try_from(point::POINT_MOV_SPEED).unwrap(),
+                value: SLOW_MOV_SPEED,
+                flag: AFF_SLOW,
+                remaining: SLOW_TICKS,
+            },
+        );
+        let slowed = mind(&world).motion.duration_ms;
+        assert!(
+            slowed > full,
+            "70 moves slower than 100: {slowed} vs {full}"
+        );
+        assert_eq!(mind(&world).motion.start, SPOT, "re-anchored at the spot");
+    }
+
+    /// `idle_stone` has no stun or `CanMove` guard (the absence is the port): a flagged
+    /// stone still draws its group and fires its arm.
+    #[test]
+    fn a_flagged_stone_still_draws_and_fires() {
+        use crate::game_state::affect::Affect;
+        use crate::loading_phase::{AFFECT_STUN, AFF_STUN, STUN_TICKS_NPC};
+        let (mut world, _) = stone_idle(40, 6);
+        world.add_npc_affect(
+            ME,
+            Affect {
+                kind: AFFECT_STUN,
+                apply_on: 0,
+                value: 0,
+                flag: AFF_STUN,
+                remaining: STUN_TICKS_NPC,
+            },
+        );
+        world.dice = Pcg32::new(7, 0);
+        world.npc_combat.entry(ME).or_default().max_sp = 6;
+        let next = world.minds.get(ME).map_or(0, |mind| mind.next_pulse);
+        world.process_pulse(next);
+        let mind = world.minds.get(ME).expect("the stone idles");
+        assert_eq!(mind.duration, pulses(1));
+        assert_ne!(world.dice, Pcg32::new(7, 0), "the group draw ran");
+        assert_eq!(world.npc_combat[&ME].max_sp, 7, "the 40% arm fired");
+    }
+
+    /// A respawner whose group 100 is one 101, for the stone-spawn tests.
+    fn stone_respawner(first: u32) -> Respawner {
+        let row = MobProto {
+            line: 2,
+            table: MobTableRecord {
+                vnum: 101,
+                mob_type: CHAR_TYPE_MONSTER,
+                max_hp: 100,
+                ..MobTableRecord::default()
+            },
+        };
+        let groups = MobGroups::parse(
+            b"Group sons\n{\n\tVnum\t100\n\tLeader\tx\t101\n}\n",
+            b"Group gg\n{\n\tVnum\t600\n}\n",
+        )
+        .unwrap();
+        Respawner::new(
+            Arc::new(MobProtos::from_rows(vec![row])),
+            Arc::new(groups),
+            Arc::new(MobLocaleNames::parse(b"VNUM\tNAME\n").unwrap()),
+            NpcVids::starting_at(first),
+        )
+    }
+
+    /// A stone of `hp` at `SPOT`, group 100 both speeds, `MaxSP` `armed`, on a world whose
+    /// spawns stand; after Pulse 1 at `T0` with a player near.
+    fn stone_idle(hp: i32, armed: i32) -> (GameState, UnboundedReceiver<Vec<u8>>) {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut stone = an_npc(ME, CHAR_TYPE_STONE, 8001, 0);
+        stone.hp = hp;
+        stone.fight.group_speeds = [100, 100];
+        let mut world = a_map(&clock, vec![stone]);
+        world.install_respawner(stone_respawner(ME + 100), open_cells());
+        let inbox = a_player(&mut world);
+        // The higher arms already fired on the way down.
+        world.npc_combat.entry(ME).or_default().max_sp = armed;
+        world.dice = Pcg32::new(7, 0);
+        world.process_pulse(1);
+        (world, inbox)
+    }
+
+    /// A stone at 45% with `MaxSP` 6 spawns nothing; at 40% it fires the 40% arm: `MaxSP` 7,
+    /// its swing at its point, three sons in 1000-boxes, then its update.
+    #[test]
+    fn a_forty_percent_stone_fires_its_arm() {
+        let (world, _) = stone_idle(45, 6);
+        assert_eq!(world.npcs_on(PLACE.0, PLACE.1).npcs.len(), 1);
+        let (world, mut inbox) = stone_idle(40, 6);
+        let npcs = world.npcs_on(PLACE.0, PLACE.1);
+        assert_eq!(npcs.npcs.len(), 4);
+        assert!(npcs.npcs[1..].iter().all(|n| n.stone == Some(ME)));
+        let combat = world.npc_combat.get(&ME).expect("the stone fights");
+        assert_eq!(combat.max_sp, 7);
+        let frames = drained(&mut inbox);
+        // The swing, each son's insert, then the stone's update.
+        assert!(frames.len() >= 5, "swing + 3 sons + update");
+    }
+
+    /// Each tenth fires its own arm: the floor `MaxSP` and one son per half-width. The
+    /// 30% arm's third box is 1000 — the widths assert per son, not per arm.
+    #[test]
+    fn each_tenth_fires_its_own_arm() {
+        for (hp, floor, sons) in [
+            (99, 1, 1),
+            (90, 2, 1),
+            (80, 3, 2),
+            (70, 4, 2),
+            (60, 5, 2),
+            (50, 6, 2),
+            (40, 7, 3),
+            (30, 8, 3),
+            (20, 9, 3),
+            (10, 10, 3),
+        ] {
+            let (world, _) = stone_idle(hp, floor - 1);
+            let npcs = world.npcs_on(PLACE.0, PLACE.1);
+            assert_eq!(npcs.npcs.len(), 1 + sons, "{hp}%");
+            let combat = world.npc_combat.get(&ME).expect("the stone fights");
+            assert_eq!(combat.max_sp, floor, "{hp}%");
+        }
+        // The 30% arm's boxes: two of 500/1000, the third of 1000, not 1500. Each
+        // son lands within its box of the stone.
+        let (world, _) = stone_idle(30, 7);
+        let npcs = world.npcs_on(PLACE.0, PLACE.1);
+        let [a, b, c] = [
+            npcs.npcs[1].clone(),
+            npcs.npcs[2].clone(),
+            npcs.npcs[3].clone(),
+        ];
+        for (son, width) in [(&a, 500), (&b, 1000), (&c, 1000)] {
+            assert!(
+                (son.x - SPOT.0).abs() <= width && (son.y - SPOT.1).abs() <= width,
+                "son at ({}, {}) past {width}",
+                son.x,
+                son.y
+            );
+        }
+    }
+
+    /// A son with no victim takes its stone's nearest damage-map attacker — the nearer
+    /// of two, ties to the lower VID — and begins the fight on it.
+    #[test]
+    fn a_son_takes_its_stones_nearest_attacker() {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let stone = an_npc(ME, CHAR_TYPE_STONE, 8001, 0);
+        let mut son = an_npc(ME + 1, CHAR_TYPE_MONSTER, 101, 0);
+        son.stone = Some(ME);
+        son.x = SPOT.0 + 2000;
+        let mut world = a_map(&clock, vec![stone, son]).with_no_wander(true);
+        let _alpha = a_player(&mut world);
+        let mut beta = enter(&mut world, 2, (SPOT.0 + 100, SPOT.1), 12_345);
+        drained(&mut beta);
+        // Both hit the stone; 2 stands nearer to it than 1.
+        world.attack(Vid::new(1), CgAttack::new(0, ME, 0, 0));
+        world.attack(Vid::new(2), CgAttack::new(0, ME, 0, 0));
+        world.dice = Pcg32::new(11, 0);
+        world.process_pulse(1);
+        assert_eq!(world.victim_of(ME + 1), Some(Vid::new(2)));
+        assert!(world.minds.get(ME + 1).is_some_and(|mind| mind.fighting));
+    }
+
+    /// Idle's protege follow reads the stone: a son past 1000 of its stone walks back
+    /// toward it, with no party anywhere.
+    #[test]
+    fn an_idle_son_past_its_stone_walks_back_to_it() {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let stone = an_npc(ME, CHAR_TYPE_STONE, 8001, 0);
+        let mut son = an_npc(ME + 1, CHAR_TYPE_MONSTER, 101, 0);
+        son.stone = Some(ME);
+        son.x = SPOT.0 + 2000;
+        let mut world = a_map_on(&clock, vec![stone, son], open_cells());
+        let mut inbox = a_player(&mut world);
+        world.dice = Pcg32::new(7, 0);
+        world.process_pulse(1);
+        let mind = world.minds.get(ME + 1).expect("the son walks");
+        assert_eq!(mind.asked, Some(Fsm::Move));
+        let dest = mind.motion.dest;
+        assert!(
+            dest.0 < SPOT.0 + 2000 && dest.1 == SPOT.1,
+            "the walk closes on the stone: {dest:?}"
+        );
+        assert!(!drained(&mut inbox).is_empty(), "the walk tells the view");
+    }
+
+    /// A dead stone's son fights on as a lone monster: no nearest victim, no protege,
+    /// and its Idle runs without panic.
+    #[test]
+    fn a_dead_stones_son_fights_on_alone() {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut stone = an_npc(ME, CHAR_TYPE_STONE, 8001, 0);
+        stone.dead = true;
+        let mut son = an_npc(ME + 1, CHAR_TYPE_MONSTER, 101, 0);
+        son.stone = Some(ME);
+        let mut world = a_map(&clock, vec![stone, son]).with_no_wander(true);
+        let _inbox = a_player(&mut world);
+        assert!(world.nearest_victim(ME).is_none());
+        assert!(world.protege(ME + 1).is_none());
+        world.dice = Pcg32::new(7, 0);
+        world.process_pulse(1);
+        assert!(world.victim_of(ME + 1).is_none());
+        assert!(world.minds.get(ME + 1).is_some_and(|mind| !mind.fighting));
     }
 }

@@ -63,6 +63,11 @@ pub struct MobFight {
     pub berserk_point: u8,
     /// `bDeathBlowPoint`: the death-blow chance.
     pub death_blow_point: u8,
+    /// `bRevivePoint`: the reviver search's pass line (`G/char.cpp:8518`).
+    pub revive_point: u8,
+    /// `GetMobTable().sAttackSpeed/sMovingSpeed`: the raw proto speeds, which a stone's
+    /// group draw reads unlimited (`G/char_state.cpp:396`).
+    pub group_speeds: [i16; 2],
     /// `GetMobDamageMin` and `GetMobDamageMax`: the proto's `dwDamageRange`.
     pub damage_range: [u32; 2],
     /// The proto's `bRegenCycle`: the seconds between two recoveries.
@@ -101,6 +106,8 @@ impl MobFight {
             dam_multiply_bits: proto.dam_multiply.to_bits(),
             berserk_point: proto.berserk_point,
             death_blow_point: proto.death_blow_point,
+            revive_point: proto.revive_point,
+            group_speeds: [proto.attack_speed, proto.moving_speed],
             damage_range: proto.damage_range,
             regen_cycle: proto.regen_cycle,
             regen_percent: proto.regen_percent,
@@ -196,22 +203,23 @@ mod tests {
         }
     }
 
-    /// `MobFight` keeps the sight, multiplier, berserk and death-blow points (U17).
+    /// `MobFight` keeps the sight, multiplier, berserk, death-blow and revive points (U17).
     #[test]
     fn mob_fight_keeps_the_sight_multiplier_berserk_and_death_blow_points() {
         let root =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/proto");
         let protos = gamedata::mob_proto::MobProtos::load(&root).expect("the owner's protos");
-        for (vnum, sight, multiply, berserk, death_blow) in [
-            (115_u32, 2000_u16, 1.0_f32, 0_u8, 0_u8),
-            (406_u32, 2000_u16, 1.0_f32, 0_u8, 0_u8),
-            (6311_u32, 2000_u16, 3.0_f32, 20_u8, 30_u8),
+        for (vnum, sight, multiply, berserk, death_blow, revive) in [
+            (115_u32, 2000_u16, 1.0_f32, 0_u8, 0_u8, 0_u8),
+            (406_u32, 2000_u16, 1.0_f32, 0_u8, 0_u8, 0_u8),
+            (6311_u32, 2000_u16, 3.0_f32, 20_u8, 30_u8, 40_u8),
         ] {
             let fight = MobFight::of(protos.get(vnum).expect("the row is in the file"));
             assert_eq!(fight.aggressive_sight, sight, "{vnum}");
             assert_eq!(fight.dam_multiply().to_bits(), multiply.to_bits(), "{vnum}");
             assert_eq!(fight.berserk_point, berserk, "{vnum}");
             assert_eq!(fight.death_blow_point, death_blow, "{vnum}");
+            assert_eq!(fight.revive_point, revive, "{vnum}");
         }
     }
 

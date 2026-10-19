@@ -31269,3 +31269,795 @@ the marriage/monarch/`mob_dam` terms, and the monster-victim side stay in V19(i)
 No crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
 
 No ADR changed. No owner question added. V20 stays free.
+
+## 229w. The guard fights: its Idle search past `noguard`, its Battle on the NPC slot, its swing's `NO_REWARD` + stun with no hit-point change
+
+`G/` = `server/server/game/`. All legacy cites re-verified 2026-10-18 against the frozen
+source. V19(d) closes here: a guard searches its Idle for the nearest monster past the
+`noguard` event flag (`G/char_state.cpp:522-538`), battles it on a second victim slot,
+and its swing stuns with `NO_REWARD` and takes no hit points, so the victim dies
+unrewarded. Proved in-memory only — no scripted scenario forces the guard's draws.
+
+### 229w.1 The swing's damage (`world/src/character/combat/mob_melee.rs`)
+
+- **Port** of the NPC-arm `CalcMeleeDamage` (`G/battle.cpp:489-663`) as
+  `strike_npc_by_npc`: the `GetMobDamageMin/Max` roll ×2, the attack grade with the
+  level taken out before the rating and put back after it, the party and `ATT_BONUS`
+  percent, the NPC-victim `CalcAttBonus` (race-flag and `ENCHANT_*` shares, the
+  `ATTBONUS_MONSTER_PCT` arm, the metin/boss share; no PC arm runs), the victim's
+  grade with its bonus, the berserk-doubled damage multiply, and `CalcBattleDamage`'s
+  `<3` floor. The marriage terms take their defaults (0). A 11000 guard's multiply is
+  0, so its floor's `number(1, 5)` always fires — but the guard arm drops the damage
+  with it (next).
+- **Port** of `NormalAttackAffect`'s draws on a monster victim: each arm gates on
+  `!= 0` before drawing (a guard's PCTs are 0, so nothing is spent), and the outcomes
+  are dropped — V19i keeps the monster-victim side.
+- **Port** of `Damage`'s critical and penetrate chances and its bonuses up to the
+  guard arm (`G/char_battle.cpp:1995-2218`): the marriage bonuses are 0, the
+  `SKILL_RESIST_PENETRATE` poly gives 0, the steals/recoveries/mana burn draw nothing
+  at 0 points, and the empire tenth and drain run for a player attacker only.
+- **Port** of the guard arm (`:2219-2223`): `SET_BIT(NO_REWARD); Stun(); return true`
+  preempts everything after the bonuses — the BANPK refusal, the chat, the stun and
+  dead checks, the stoneskin, the damage packet and the hit-point change — so the hit
+  always ends `StunnedByGuard` and takes no hit points. The world tests pin the order:
+  `a_guard_swing_stuns_and_takes_nothing` (the 0-to-0 roll, the floor at raw 3, no
+  effects, HP untouched) and `a_critical_guard_still_stuns` (the critical draw fires,
+  the effect shows, the doubled damage is dropped with it).
+
+### 229w.2 The swing's show (`prodomo/src/game_state/mob_strike.rs`)
+
+- **Port** of `CHARACTER::Attack` of a guard on a monster as `guard_attack`
+  (`G/char_battle.cpp:220-328`): `battle_is_attackable`'s NPC arm (alive victim,
+  neither cell BANPK, the guard neither stunned nor dead, `CanAttack`'s guard pass;
+  no castle/arena/ship map is hosted), the chat before the reach test, no shot arm
+  (guards are MELEE), the reach, the `NO_REWARD` flag before the stun, the victim's
+  `SetSyncOwner` and `BeginFight` past `CanBeginFight` (which the fresh stun refuses —
+  the victim holds no fight), and the `OnMove(true)` attack stamp. The victim's
+  `OnMove()` is a shop and mining cancel, both empty on a monster.
+- **Port** of the show: the critical and penetrate effects around the victim, in
+  order; no fly, no chat, no damage record. Proved by `a_guard_swing_stuns_the_monster`
+  (stun, flag, `GC_STUN`, `GC_OWNERSHIP`, no fight) and
+  `a_guard_swing_past_the_reach_blanks`.
+
+### 229w.3 The Battle (`prodomo/src/game_state/mob_battle.rs`)
+
+- **Port** of the NPC victim slot: `Mind.victim_npc` with a `begin_fight_npc` twin
+  (slot, `fighting`, Battle, next Pulse, the victim-set stamp); `set_victim` clears
+  both slots. `state_battle` dispatches on the held slot.
+- **Port** of `StateBattle` on the NPC slot: the head guards are dead (a guard is no
+  stone, no player, `CanMove` holds, the stun returns), the coward/summoner arms are
+  empty, and the loss/engage/swing run on `npc_victim_state` — which yields `None`
+  for a stunned victim, so the loss arm needs no fourth flag on `VictimState`.
+- **Port** of the loss (drops a stunned/dead/BANPK/gone victim, `Return()`s home,
+  1 second; no re-search since guards are not aggressive, no `KILL_AND_GO` since the
+  guard is NOMOVE), the engage (4000+ drops with the duration as it was, with the
+  protege follow; the past-reach chase ends at `GotoNearTarget`'s NOMOVE refusal),
+  and the swing (vacuous party send, the attack-speed timer, vacuous berserk, `Attack`,
+  `FUNC_ATTACK`, 50 Pulses). The `Follow` guard arm is subsumed: a NOMOVE guard never
+  leaves its last-hit point's 5000. Proved by `a_guards_battle_swings_and_stuns`,
+  `a_guards_battle_drops_a_stunned_victim`, `a_guards_battle_drops_a_distant_victim`
+  (`DISTANCE_APPROX` reads 0.96 of a straight line, so the guard stands 4200 out),
+  and `a_guard_stunned_monster_dies_unrewarded` (the stun event's `Dead` finds
+  `NO_REWARD`: `GC_DEAD` alone, no exp share, no gold or drops).
+- **Port** of `NO_REWARD` in `Dead` (`:1475`): `NpcCombat.no_reward`, set before the
+  stun, skips the whole `Reward`. `stun_npc` widens to `pub(super)` for the swing.
+
+### 229w.4 The search (`prodomo/src/game_state/mob_ai.rs`, `quest/src/manager.rs`)
+
+- **Port** of the Idle guard arm (`G/char_state.cpp:522-538`): past `noguard`, the
+  nearest monster within 50000 starts the fight at once, 12 Pulses out. `IsGuardNPC`
+  reads the race (11000/11002/11004) with `CHAR_TYPE_NPC`. Proved by
+  `an_idle_guard_finds_the_nearest_monster` and `noguard_holds_the_guard`.
+- **New API**: `Manager::set_event_flag` (which a GM command would call; no quest on
+  the owner's data sets `noguard`) and `Quests::manager_mut` for the test.
+
+### 229w.5 Rows and the receipt
+
+- `sys.mob.ai` note gains 229w (the search, the NPC slot, the Battle; the guard drops
+  out of "not yet"). `sys.combat.core` note gains 229w (the NPC-arm damage, the guard
+  arm, the unrewarded death).
+- `STATUS.md`: V19(d) closes; the header names 229w.
+
+| gate | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| build, workspace, locked, offline | clean |
+| clippy 1.85.1 (`/usr/bin`), `-p world -p prodomo -p quest`, all targets, `-D warnings` | clean |
+| `world` lib tests | 504 passed, 0 failed |
+| `gamedata` lib tests | 431 passed, 0 failed |
+| `common` lib tests | 107 passed, 0 failed |
+| `prodomo` lib tests | 951 passed, 0 failed |
+| `quest` lib tests | 69 passed, 0 failed |
+| doc (`-p world -p prodomo -p quest`, `-D warnings`) | green |
+
+Clippy notes: the 1.98 shim's workspace run reports pre-existing findings in
+`protocol`/`common`/`parity` (untouched by 229w); two 1.85 findings in the new code
+were fixed by refactor (`VictimState`'s fourth bool merged into `None`, the trivial
+`goto_near_target_npc` twin inlined with a `debug_assert`). No crate was added, and
+`Cargo.toml` and `Cargo.lock` are unchanged.
+
+No ADR changed. No owner question added. V20 stays free.
+
+## 229x. The stone fights back by spawning: `__StateIdle_Stone`'s ten-arm ladder, the runtime `SpawnGroup`, the son's Idle, and the half-exp feed
+
+### 229x.1 Fields (`world/src/npc/fight.rs`, `world/src/npc.rs`, `prodomo/src/game_state/fight.rs`)
+
+- **Port** of the three stone-link fields: `MobFight.group_speeds` (the attack and
+  moving speeds, whose box draws the stone's group vnum), `Npc.stone` (the stone that
+  spawned it, `m_pkChrStone`), and `NpcCombat.max_sp` (the Idle ladder's one-shot
+  memory — a stone never has MP; `STONE_MAXHP_THRESHOLD_VALUE` is a flat table, so no
+  proto flag is kept).
+- **Port** of the strike gate: `is_struck` widens to stones (race 5001 still refused),
+  and `Damage`'s empire arm (V17a: a nonzero-empire stone refuses a same-empire player
+  attacker after the rating/roll/affect draws ran) sends `DAMAGE_BLOCK` (`G/char.h:134`,
+  `1 << 3`) with 0 damage to the targeting attacker. `fights_back` stays
+  monster-only, so a stone gets sync ownership but no `BeginFight`.
+
+### 229x.2 The spawn path (`world/src/npc.rs`, `prodomo/src/game_state/regen.rs`)
+
+- **Port** of `SpawnGroup` as a stone (`G/char_manager.cpp:615-667`): `spawn_group`
+  gains a `stone` param; every son is shown with the spawn motion (`AFF_SPAWN`), linked
+  to the stone, and counted by no party. Index-0 failure returns nothing; a later
+  failure keeps the sons that stood. `Respawner::spawn_stone_group` is the runtime
+  entry (group 0 or unknown stands nothing, VIDs unspent).
+- **Port** of the stand: `stand_more`'s loop factors into `stand_runtime`, and
+  `stand_stone_group` stands the sons after the others with no regen counting them.
+
+### 229x.3 The Idle ladder (`prodomo/src/game_state/mob_ai.rs`)
+
+- **Port** of `__StateIdle_Stone` (`G/char_state.cpp:389-505`): the duration is 1 second
+  every path, the group draw runs even at full hit points, and each tenth fires once —
+  the swing (`FUNC_ATTACK` at its own point), one `SpawnGroup` per half-width, then the
+  stone's `UpdatePacket` (its speeds, its affect words, 0 for everything worn or
+  owned). The arms are literal data (`STONE_SPAWNS`); the 30% arm's third box is 1000.
+- **Divergence** (no hosted stone has MaxHP 0): legacy SIGFPEs dividing by MaxHP 0;
+  the Rewrite reads 0% and fires the 10% arm.
+
+### 229x.4 The son's Idle, the protege, the feed, the twins (`mob_ai.rs`, `mob_battle.rs`, `reward.rs`, `fight.rs`, `regen.rs`)
+
+- **Port** of the son's Idle arm (`:670-674`): with no victim a son takes
+  `GetNearestVictim(stone)` — over the stone's damage map in VID order, skipping
+  offline and hidden (`EUNHYUNG`/bit 19, `INVISIBILITY`/bit 2, `REVIVE_INVISIBLE`/bit
+  28) attackers, the nearest by `DISTANCE_APPROX`, ties to the first, no range cap —
+  then `BeginFight` past `CanBeginFight`. Even an aggressive son takes the stone's
+  victim, never its own search.
+- **Port** of `GetProtege`'s stone arm: a son answers its live stone, and Idle's
+  protege follow walks it back past 1000 away.
+- **Port** of the feed (`:2899-2906`): a son's death feeds `exp >> 1` to its live
+  stone (`saturating_add`; unreachable on hosted data) and splits the rest. Verified
+  against the source: the half is subtracted, not assigned, and the feed sits between
+  the `total == 0` and `rows.is_empty()` returns.
+- **Port** of the `ClearStone` twins: `dead_npc` kills a stone's live sons in map order
+  after the dead packet (V1: legacy iterates a pointer set) — each son's `Dead(NULL)`
+  pays its damage map and unlinks; `destroy_npc` dead-ends the same before the party
+  unlink. A son's own destroy drops its row from the derived set.
+- **Divergence D-new**: a dead or missing stone reads as none in all three readers
+  (protege, nearest-victim, feed) — the sons fight on as lone monsters. Legacy would
+  read freed memory; the Rewrite cannot reproduce a use-after-free, so this is
+  recorded as a Divergence, not a Defect fix.
+
+### 229x.5 Rows and the receipt
+
+- `sys.mob.ai` note gains 229x (the stone Idle, the son's Idle, the walk-back; the
+  stone's spawns drop out of "not yet"). `sys.combat.core` note gains 229x (the stone
+  as a victim, the feed, the death order). `sys.world.regen` note gains 229x (the
+  runtime `SpawnGroup`).
+- `STATUS.md`: V17(a) narrows (a stone is struck); V19 grows to twelve ways with (l)
+  closed, naming both Divergences.
+
+| gate | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| build, workspace, locked, offline | clean |
+| clippy 1.85.1 (`/usr/bin`), `-p world -p prodomo`, all targets, `-D warnings` | clean |
+| `world` lib tests | 506 passed, 0 failed |
+| `gamedata` lib tests | 431 passed, 0 failed |
+| `common` lib tests | 107 passed, 0 failed |
+| `prodomo` lib tests | 962 passed, 0 failed |
+| `quest` lib tests | 69 passed, 0 failed |
+| doc (`-p world -p prodomo`, `-D warnings`) | green |
+
+Clippy notes: four `doc_markdown` findings in the new test docs (bare `MaxSP`) and two
+loop-style findings in `nearest_victim` (`explicit_iter_loop`, then `for_kv_map`)
+were fixed by refactor; `distribute_exp`'s feed factored into `stone_feed` past the
+line limit. One test-setup correction during the work: the son's Idle arm first read
+as a sight search, but the source (`:670-674`) takes the stone's damage-map nearest,
+so the arm was rewritten. No crate was added, and `Cargo.toml` and `Cargo.lock` are
+unchanged.
+
+No ADR changed. No owner question added. V20 stays free.
+
+## 229y. The victim hits back: reflect, and the damage-term defaults (V19i)
+
+### 229y.1 The reflect arm and the pre-bonus share (`mob_melee.rs`)
+
+- **Port** of the reflect arm (`G/char_battle.cpp:1979-1988`): a monster's
+  `DAMAGE_TYPE_NORMAL` swing reflects off the player's `POINT_REFLECT_MELEE` (a
+  shield's `APPLY_REFLECT_MELEE`, 10 hosted rows at 13160-13169, +6..+15).
+- **Port** of the share: `base * reflect / 100` of the *pre-bonus* damage (the
+  `attMul` number, before the chances, the bonuses, the death blow and `damMul`),
+  thirded by `int(share / 3.0 + 0.5)` when the monster is immune to reflect
+  (`IMMUNE_REFLECT`, `length.h:721`). `reflect_damage` pins the float rounding
+  (99/100 immune show 33, 101 shows 34).
+- `PcStrike.reflected_base: Option<i32>` threads the pre-bonus number: `Some` on
+  every end (`Blocked` carries it; the `prodomo` side skips it, since `Damage`
+  returns before `:1979`), `None` for a shot or skill (only NORMAL reflects).
+  Hand-pinned: Alpha vs the dog shows `Some(25)`; rate 200 shows `Some(218)`.
+- `shoot_pc` and `skill_damage_pc` return `None`, each with the NORMAL-only cite.
+
+### 229y.2 The SPECIAL tail (`melee.rs`, `fight.rs`)
+
+- **Port** of `Damage`'s `DAMAGE_TYPE_SPECIAL` path on a monster victim
+  (`:2179-2433`) as `damage_special`: no chance arm, neither bonus switch (the
+  flag stays `DAMAGE_NORMAL`, no effect lands), then the monarch arm (off, §y.4),
+  the empire tenth, the SP drain (an `Attacker` record to the player), the chat
+  draw, the stun/dead checks, the user rate, the stoneskin halve, the `+0.5` of
+  `damMul` 1.0, the damage packet, and the hit-point change. A negative
+  (fixture-only: a negative reflect point) clamps at 0 at the packet and the HP
+  change, as 229s clamps a negative skill hit — legacy would heal, and the Rewrite
+  never ports a heal-by-damage. The zero runner still runs (chat draw, checks,
+  shown 0).
+- **Port** of the user rate (`:2263-2267`) on both sides: `Striker.user_rate`,
+  applied after the checks, before stoneskin, in `damage_normal` and
+  `damage_special`. The player's own hit at rate 200 doubles exactly.
+- `reflect_on_npc` runs the SPECIAL hit through the player-hit pipeline:
+  `show_strike` (attacker records, monster HP broadcast, attacked chat, the
+  target-gated damage info), `set_last_attacked`, `after_damage_typed` with the
+  SPECIAL aggro kind (x1, no party share), and `dead_npc` with the player as
+  killer on `Finished` — the reflected kill pays exp, gold and drops. No claim,
+  no `BeginFight`: the reflect is inside `Damage`, not an `Attack`.
+
+### 229y.3 The head/reflect/tail split (`mob_strike.rs`, `death.rs`)
+
+- **Port** of the reflect's position: legacy runs the reflected hit's whole block
+  (its damage info, HP change, death and reward) before the incoming hit's damage
+  info (`:1987` vs `:2338`). `damage_pc_typed` splits into `damage_pc_head`
+  (the stun/dead gates and the damage packet) and `damage_pc_tail` (the HP change,
+  the broadcast, the stun/killer); `damage_pc` and `damage_pc_poison` keep their
+  signatures. `show_mob_strike`'s `Landed` arm runs head, reflect, tail; its
+  `Down` arm runs the reflect, then `damage_pc(0, None)` whole (legacy reflects
+  before the stun-check `Dead`). No Divergence: the record order is faithful
+  (incoming info, reflected info, the target bar's refresh, the player's HP).
+- `Npc.immune_flag` fills from the proto's `IMMUNE_FLAG` at spawn; the smith
+  fixture pins a nonzero fill. A `Blocked` swing reflects nothing (no HP, no row,
+  the reflect's chat draw never runs — dice-pinned).
+
+### 229y.4 The live rates and the proven defaults (`reward.rs`, `mob_melee.rs`)
+
+- **Port** of `GetMobDamageRate` (`char_manager.cpp:980-983`) and
+  `GetUserDamageRate` (`:1060-1070`) as live event-flag reads (`mob_dam`,
+  `user_dam`), 100 while unset, copying `mob_exp_rate`. The mob rate threads
+  into `mob_calc_attack` and applies only to a player victim (`:311`); the
+  self-hit's identity multiply is dropped with the cite (an NPC victim never
+  takes the rate). The guard's swing and the player's own hit take no mob rate.
+- Defaults proved by sweep, no code: no hosted `IMMUNE_FLAG` names `REFLECT`
+  (the two `REFLECT` cells are AI-flag text the parser ignores — `REFLECT` is not
+  in its vocabulary); no quest sets `mob_dam`, `user_dam`, `mob_exp`, `mob_gold`
+  or `mob_item`; no quest body calls a monarch function (only the
+  `quest_functions` declarations); `SetAttMul`/`SetDamMul` are quest-only
+  (`questlua_npc.cpp:317,348`) with no hosted caller; vnum 2493 never spawns
+  (no map file names it); no wedding quest is hosted (the venue map stands,
+  venue NPCs only); `BONUS_PTC` is never defined (`battle.cpp:314`, with the
+  `BONUS_PCT` positive control in `prodomodefines.h:36`).
+
+### 229y.5 Rows and the receipt
+
+- `sys.combat.core` note gains 229y (the reflect, the SPECIAL tail, the rewarded
+  kill, the proved defaults).
+- `STATUS.md`: V19(i) closes (the reflect half ported, the terms at defaults).
+
+| gate | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| build, workspace, locked, offline | clean |
+| clippy 1.85.1 (`/usr/bin`), `-p world -p prodomo`, all targets, `-D warnings` | clean |
+| `world` lib tests | 516 passed, 0 failed |
+| `gamedata` lib tests | 431 passed, 0 failed |
+| `common` lib tests | 107 passed, 0 failed |
+| `prodomo` lib tests | 970 passed, 0 failed |
+| `quest` lib tests | 69 passed, 0 failed |
+| doc (`-p world -p prodomo`, `-D warnings`) | green |
+
+Clippy notes: one `doc_markdown` finding in a `damage_pc` doc touched by the
+head/tail split (a backtick pair split across two doc lines) was fixed by joining
+the cite. Two test-setup corrections during the work: the reflected share's empire
+tenth (player empire 1 vs map 41's 3) and the reflected hit's target-bar refresh
+(which lands between the reflected info and the player's HP change) were read off
+the implementation and pinned. No crate was added, and `Cargo.toml` and `Cargo.lock`
+are unchanged.
+
+Out of scope, recorded for a V17 section: a monster victim with a nonzero reflect
+point reflecting the player's hit back (victim-agnostic in legacy, dead on hosted
+rows — no proto column feeds a monster's point). No ADR changed. No owner question
+added. V20 stays free.
+## 229z. The player's hit lands its poison, stun and slow: `NormalAttackAffect` on a monster victim (V17d)
+
+Mirrors 229v (the monster-on-player side): `normal_attack_affect`'s draws become
+outcomes the caller applies through the shared NPC-affect machinery. Proved
+in-memory only (229v's precedent): no new parity scenario forces these draws.
+
+### 229z.1 The outcomes (`world/src/character/combat/melee.rs`)
+
+- **Port** of `NormalAttackAffect`'s monster-victim outcomes
+  (`G/battle.cpp:734-758`): `normal_attack_affect` gains the victim and returns
+  `NpcAttackAffect { poisoned, stunned, slowed }`. The poison reads the low byte,
+  halved by the SungMa will arm, then the level arm with `ADJUST =
+  [100, 90, 80, 70, 50, 30, 10, 5, 0]` against `victim.fight.level` vs the
+  attacker level (equal-or-higher draws nothing); the stun and slow run the
+  `AttackAffect` conjunction (point set, word lacks the flag, `number(1,100) <=
+  point`, no `IMMUNE_*`) so a failed roll spends exactly one draw.
+- `Strike` gains `affect: NpcAttackAffect`, default on the `damage <= 0` early
+  return (`NormalAttackAffect` never ran there).
+- The running-event and poisoned-once gates stay in the caller (they are
+  `GameState`, not `Npc`), as in 229v.
+
+### 229z.2 The NPC store (`prodomo/src/game_state/affect.rs`, `prodomo/src/loading_phase.rs`)
+
+- **Port** of `AddAffect` for a non-player as `add_npc_affect`: zero duration
+  becomes 1; the stun snap stops a mind whose destination is not its spot
+  (dest+start snap, `fighting = false`, the sync record); same-kind rows rewrite
+  in place with the point retired (no remove packet); the point lands through
+  `fight.add`; the update goes to the neighbourhood when a flag is set or either
+  speed moved. No add or GD packet: both are `GetDesc()` arms.
+- `npc_affect_words` ORs the timed flags over the spawn base at every read (holder
+  checks, update, insert); `Npc.affect_flags` keeps the base.
+- `run_npc_affect_events` ticks at 25 Pulses: the countdown, the expired points
+  taken back through `fight.add(slot, -value)`, one neighbourhood update when the
+  words or either speed moved, reschedule +25 while any affect is left. No
+  recovery, no stamina, no `CheckMaximumPoints`.
+- `send_npc_update` generalises the stone builder (same `GC_CHARACTER_UPDATE`,
+  live speeds and words); `send_stone_update` re-points at it with no byte
+  change. New constants: `STUN_TICKS_NPC = 4`, `POISON_DAMAGE_RATE =
+  [80, 50, 40, 30, 25, 1]`.
+
+### 229z.3 The apply and the poison event (`prodomo/src/game_state/fight.rs`, `prodomo/src/game_state/regen.rs`)
+
+- **Port** of the apply position: `apply_npc_affect` runs in `attack` right after
+  the strike, before `show_strike` — poison, then stun, then slow — so the affects
+  exist before the damage packet and the HP change, including on `Refused`,
+  `Finished` and `AlreadyDead` (legacy applies before `Damage`, unconditionally).
+- **Port** of `AttackedByPoison` past the draws as `poison_npc`: gated by the
+  running event and the once flag, else the flag sets, the 31-tick affect lands,
+  and `Due::Poison { count: 10 }` is due one Pulse on. The attacker PID is the
+  player's VID (`FindByPID`'s null arm: `None` when offline).
+- **Port** of `poison_event` as `npc_poison_event`: the slot guard, the
+  gone/dead/stunned cancel, `maxHP * rate / 1000` with the rank rate less
+  `POISON_REDUCE` floored at 0, the HP-1 floor, the target broadcast and the
+  target-gated `DAMAGE_POISON` packet, the damage-map row + recovery + NORMAL
+  aggro past 0 damage and an online attacker, the count falling with the next
+  tick 75 Pulses on.
+- **Defect guard**: a rank at or past the table's end reads the last per-mille —
+  legacy would read out of bounds (`bRank` is a byte, the table has 6 entries),
+  and there is no game rank past KING. Recorded as a Defect, not reproduced.
+- `dead_npc` clears the affects without an update before `GC_DEAD` and cancels
+  the poison slot; `forget_npc_fight` cancels the slot and clears for the
+  destroy path; the recovery head arm reschedules while poisoned.
+
+### 229z.4 The gates and the speeds (`mob_battle.rs`, `mob_ai.rs`, `mob_strike.rs`)
+
+- **Port** of `CannotMoveByAffect`'s `AFF_STUN` word into `can_begin_fight` (a
+  victim stunned by this very hit does not begin), `state_battle`'s head (return
+  with the duration kept, after the instant arm), `idle_monster`'s head (no
+  search, no draws), and `mob_attack`'s head through `npc_can_attack_pc` (no
+  swing, no chat draw — the one entry covers RANGE/MAGIC shots too).
+- **Port** of the two absences: `state_move` has no guard (a flagged walker
+  still arrives) and `idle_stone` has none (a flagged stone still draws and
+  fires).
+- **Port** of the live speeds: `npc_goto` reads
+  `npc_limit_speed(fight.point(POINT_MOV_SPEED))` instead of the base byte, and
+  the mid-walk slow re-anchors the leg (`SetPoint`'s arm: start snaps to the
+  spot, the duration is recomputed at the new limited speed, the start time is
+  now). The insert and update packets already read the live points.
+- The chase bleed reads the instant flag only (`:3838-3840`): a flagged chase
+  still bleeds.
+
+### 229z.5 Proofs
+
+- `melee` (4): the poison low byte + SungMa halving; the level arm (pass, draw,
+  table 0 at 8 over, clamp at 20 over); the holder (no draw) and immune
+  (one draw, refused) arms with the all-zero no-draw; a refused hit carries its
+  affect while a bow whiffs before any draw.
+- `fight` (6): a hit with every chance lands all three (words, once flag, event
+  due +1, −30, the updates, no `BeginFight`); the ten ticks with the rank rate,
+  the damage map and the aggro; the HP-1 floor with the double gate; the
+  recovery refusal and the silent death clear; the stun/slow expiry at 4/20
+  ticks; the rank/reduce/clamp rate table.
+- `mob_battle` (3): the flag G2 twin; the flagged Battle's kept duration with
+  the victim held and no swing; the bleed's instant-only stun check.
+- `mob_ai` (3): the flag-stun walk stop; the flagged Idle's no-draw with the
+  wait kept; the slowed `Goto`'s stretched leg; the flagged stone's draw and
+  fire.
+- `mob_strike` (2): a flagged attacker never swings (no chat draw, HP
+  untouched); a flagged RANGE monster never shoots.
+- `affect` (2): the NPC slow's tick-down with the point back and one update,
+  the event ending; the NPC stun's in-place rewrite with no add or remove.
+- The 229l–229y tests still pass.
+
+### 229z.6 Rows and the receipt
+
+- `sys.skill.affect` note gains 229z (the monster-victim side; still `partial`:
+  PC skills, `RemoveBadAffect` wait).
+- `STATUS.md`: V17(d) closes; the header names 229z.
+
+| gate | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| build, workspace, locked, offline | clean |
+| clippy 1.85.1 (`/usr/bin`), workspace, all targets, `-D warnings` | clean |
+| `world` lib tests | 519 passed, 0 failed |
+| `gamedata` lib tests | 431 passed, 0 failed |
+| `common` lib tests | 107 passed, 0 failed |
+| `prodomo` lib tests | 987 passed, 0 failed |
+| `quest` lib tests | 69 passed, 0 failed |
+| doc (`-p world -p prodomo`, `-D warnings`) | green |
+
+Clippy notes: three `map_unwrap_or` findings in the new tests were rewritten to
+`map_or`; two `get().is_none()` findings to `contains_key`; one unused `dice`
+binding dropped. Test-setup corrections during the work: the mind dispatch
+re-arms `next_pulse` after every run, so the flagged-Idle twin asserts the
+duration kept rather than the Pulse frozen; the stone twin runs at the mind's
+next Pulse, not Pulse 2; the swing-gate test compares HP before/after instead of
+assuming the fixture's maximum. No crate was added, and `Cargo.toml` and
+`Cargo.lock` are unchanged.
+
+No ADR changed. No owner question added. V20 stays free.
+## 230a. A gold steal pays the purse (V17e)
+
+Closes V17(e): a player's `DAMAGE_TYPE_NORMAL` hit on a monster applies the
+`POINT_STEAL_GOLD` arm past its draws. Proved in-memory only (229v/229z's
+precedent): no proto column, apply or quest sets the point on the owner's data
+— `POINT_STEAL_GOLD` has no writer anywhere in `server/` (only `G/char.h:249`
+declares it, only `G/char_battle.cpp:2080-2082` reads it) and no
+`APPLY_STEAL_GOLD` exists — so only a fixture reaches the apply.
+
+### 230a.1 The type-guard question, resolved from the source
+
+`battle_hit` calls `Damage(pkAttacker, iDam, DAMAGE_TYPE_NORMAL)`
+(`G/battle.cpp:816`). The `:1858` guard (`MELEE/RANGE/MAGIC`, the skill
+crit/penetrate with the halving arms) closes at `:1934`; the `:1936` arm is
+`else if (type == DAMAGE_TYPE_NORMAL || type == DAMAGE_TYPE_NORMAL_RANGE)`,
+and the steals at `:2039-2117` sit inside it, past the block/dodge, the
+JEONGWIHON/TERROR/HOSIN, the reflect, and the NORMAL crit/penetrate. So the
+steals DO run on a player's melee hit: `damage_steals` (`melee.rs:689`) is
+correctly placed, and the 229j draw order stands. No code moved for this; the
+resolution is recorded here so the question is never reopened.
+
+### 230a.2 The arm (`G/char_battle.cpp:2080-2092`, `G/char.cpp:3823-3850`)
+
+- `GetLevel()` is the victim's level; the amount is `number(1, victim level)`.
+  The draw already ran in `damage_steals` and was discarded; 230a returns it on
+  `Strike.stolen_gold` (`damage_normal` threads it; the empire/banned/stun/dead
+  early outs carry it — legacy draws the steal before those arms too).
+  `damage_special` takes none (SPECIAL skips both the `:1858` and `:1936` arms).
+- Apply is `ChangeGold` under `ENABLE_REMOVE_LIMIT_GOLD` (defined): `held +
+  amount >= GOLD_MAX_MAX` refuses with nothing changed and nothing sent (the
+  `OVERFLOW_GOLD` log has no port; the client sees nothing either way), else
+  the purse gains the amount and `GC_CHARACTER_GOLD_CHANGE {vid, amount, value}`
+  goes to the attacker. The cap check matches `pickup_gold`'s `held <
+  GOLD_MAX_MAX` pass. `SendMoneyLog` is log-only (no LogManager port; `Reward`'s
+  gold half already treats it so, 229p).
+- `POINT_STEAL_GOLD` joins `PLAIN` in `world::character::points` (119 → 120):
+  legacy's `POINT_*` slots all take the plain arm unless capped, counter or
+  `NONE`-style, and the slot was simply missing from the table. No behaviour
+  changes for any other slot.
+
+### 230a.3 The answer path
+
+- `GameState::attack` returns `AttackAnswer { gold: Option<i64> }` (the
+  `RestartAnswer` precedent): `steal_gold` runs right after `strike()`, before
+  the affect updates and `show_strike`. Record-order note: legacy's steal sits
+  inside `Damage`, after `NormalAttackAffect` ran in `battle_hit` — so the gold
+  record lands before the affect updates here where it lands after them in
+  legacy. Recorded, not fixed: moving it mid-pipeline would need the cap-held
+  purse inside `world`, and the order is unobservable on the owner's data (no
+  steal source) and on fixtures with either arm alone.
+- `GameCommand::Attack` gains `reply: oneshot::Sender<AttackAnswer>` (replacing
+  `settled`: the answer resolves once the hit has run, so the records are
+  queued); `game.attack()` waits for it; `attack_step` stores `Some` via
+  `db::items::apply_transfer(&store, vid, &[], gold)`, as the restart's does.
+- The module doc's "draw but change nothing" line is corrected.
+
+### 230a.4 Proofs
+
+- `melee` (2): a passed chance steals 1 from the level-1 dog (roll, chance,
+  amount, chat arm — 4 draws, none left); a missed chance draws once and steals
+  nothing, a 0 point draws nothing.
+- `fight` (2): a steal hit pays the purse 1, sends
+  `GC_CHARACTER_GOLD_CHANGE {1, 1, paid}` before the damage packet, and answers
+  `Some(1)`; at `GOLD_MAX_MAX - 1` the steal refuses with no change, no gold
+  record and `None`.
+- The 229j–229z tests still pass.
+
+### 230a.5 Rows and the receipt
+
+- `sys.combat.core` note gains 230a (V17e).
+- `STATUS.md`: V17(e) closes; the header names 230a.
+
+| gate | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| build, workspace, locked, offline | clean |
+| clippy 1.85.1 (`/usr/bin`), workspace, all targets, `-D warnings` | clean |
+| `world` lib tests | 521 passed, 0 failed |
+| `gamedata` lib tests | 431 passed, 0 failed |
+| `common` lib tests | 107 passed, 0 failed |
+| `prodomo` lib tests | 989 passed, 0 failed |
+| `quest` lib tests | 69 passed, 0 failed |
+| doc (`-p world -p prodomo`, `-D warnings`) | green |
+| parity inventory | 8 passed, 0 failed |
+
+Clippy notes: one `unnecessary_fallible_conversions` (`i64::try_from` on an
+`i32` → `i64::from`) and one `items_after_statements` (`use` after statements
+in the cap test) were fixed by refactoring. Test-setup corrections during the
+work: the steal point is set through the now-ported `point_change` PLAIN arm
+(no apply reaches the slot); the cap test asserts the gold header's absence by
+its `GcHeader` value, not a literal. No crate was added, and `Cargo.toml` and
+`Cargo.lock` are unchanged.
+
+No ADR changed. No owner question added. V20 stays free.
+## 230b. A party revives its dead (V17h)
+
+Closes V17(h)'s open half and corrects its stale half: 229t already sends
+`PM_ATTACKED_BY` from a hit or stunned member (`fight.rs:942`,
+`mob_battle.rs:657, :817`), so "no `PM_ATTACKED_BY` is sent" was wrong. What was
+genuinely missing is the reviver: `dead_event` destroyed where legacy stands a
+monster back up when its party holds a living reviver. Proved in-memory only
+(the mechanism needs no hosted party; 24 hosted group vnums do carry revive
+members, e.g. 20001-20004 and 3013-3023, so the arm is live on the owner's data).
+
+### 230b.1 Legacy behaviour
+
+- The dead wait (`G/char_battle.cpp:1599-1610`): `Dead` schedules `m_pkDeadEvent`
+  at `bImmediateDead ? 1 : PASSES_PER_SEC(3)` when `IsRevive() == false &&
+  HasReviverInParty() == true`, else `bImmediateDead ? 1 : PASSES_PER_SEC(1)`.
+  `IsRevive` is `CMobInstance::m_IsRevive`, false at spawn (`G/mob_manager.cpp:40`).
+- The search (`G/char.cpp:8501-8544`): false past a `NULL` party or a party of 1;
+  else each member in map (PID) order that is a monster (`IsMonster()` — a stone
+  is never searched), is not the caller, is not dead, carries `AIFLAG_REVIVE`
+  (bit 11, `C/length.h:699`) and draws `number(1, 100) <= bRevivePoint` marks
+  the party revived. The walk runs past a hit (later overwrites of `pChar` are
+  unobservable — only `HasReviver` is read).
+- The stand-up (`:529-541`): a monster only, once — `POS_STANDING`, full HP,
+  `ViewReencode()`, `SetAggressive()`, `SetRevive(true)` — returning without
+  destroying. A second death destroys.
+- `ViewReencode` (`G/entity_view.cpp:23-45`) is remove+insert on self and every
+  viewer; `SetAggressive` sets the bit (`G/char_state.cpp:242-245`).
+- The resurrection-vnum arm (`:1480-1483`, `SpawnMob` + `Reward(false)`) is NOT
+  ported: one proto carries it (8479 → 4305) and neither vnum spawns on a hosted
+  map. The stale `C17` comment in `dead_npc` now names the pair. `IsRevive() ==
+  true` in `Dead` is unreachable through the stand-up (the flag is set only after
+  `Dead` ran), so no `Reward(false)` arm is added.
+
+### 230b.2 The port
+
+- `gamedata::mob_proto`: `AIFLAG_GODSPEED` (bit 9) and `AIFLAG_REVIVE` (bit 11)
+  close the hole in the bit table (the `AI_FLAG` word table already named both,
+  so parsing is unchanged). God speed itself is untouched (V19e stands).
+- `world::npc::MobFight` gains `revive_point: u8` from row 70.
+- `NpcCombat` gains `revived: bool` (false at creation).
+- `GameState::has_reviver_in_party` (`mob_party.rs`): the `len() <= 1` guard,
+  then each member but self in map order (V1: legacy walks by PID), skipping
+  non-monsters, the dead and the unflagged, drawing `number(1, 100) <= point`
+  with no early stop.
+- `dead_npc`: the wait is 3 s past `!revived && has_reviver_in_party`, else 1 s
+  (`REVIVE_DEAD_SECONDS` beside `DEAD_SECONDS`).
+- `dead_event`: the monster arm (`!revived`, monster-typed, reviver found)
+  clears `dead`, refills HP, ORs `AIFLAG_AGGRESSIVE`, sets `revived` and calls
+  `reencode_npc` — a same-spot `show`, whose same-tree path is `view_reencode`
+  — then returns without destroying.
+- The FSM entry survives the stand-up (no `forget`), so the next update resumes
+  where it was, as legacy's does (Dead is not an FSM state). No re-targeting,
+  as legacy does none.
+
+### 230b.3 Proofs
+
+- `gamedata` (1 extended): the pin test now covers all twelve named AI bits.
+- `world` (1 extended): the fight table gains the revive column (6311: 40).
+- `mob_party` (2): point 100 passes / 0 fails; the lone, the dead reviver, the
+  unflagged member and a flagged stone all read none.
+- `fight` (3): the dead wait is P0+150 with a reviver; `dead_event` stands the
+  monster up (remove + `GC_CHARACTER_ADD` pair, full HP, aggressive bit,
+  `revived` set, not destroyed); the second death waits 1 s again (P0+250) and
+  destroys.
+- The 229j–230a tests still pass (989 → 994 in `prodomo`).
+
+### 230b.4 Rows and the receipt
+
+- `sys.combat.core` note gains 230b (V17h).
+- `STATUS.md`: V17(h) closes (with the 229t correction); the header names 230b.
+
+| gate | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| build, workspace, locked, offline | clean |
+| clippy 1.85.1 (`/usr/bin`), workspace, all targets, `-D warnings` | clean |
+| `world` lib tests | 521 passed, 0 failed |
+| `gamedata` lib tests | 431 passed, 0 failed |
+| `common` lib tests | 107 passed, 0 failed |
+| `prodomo` lib tests | 994 passed, 0 failed |
+| `quest` lib tests | 69 passed, 0 failed |
+| doc (`-p world -p prodomo`, `-D warnings`) | green |
+| parity inventory | 8 passed, 0 failed |
+
+Clippy notes: one `unused_mut` (a test's unmutated `master`) and one
+`items_after_statements` (a `use` after statements in the stand-up test) were
+fixed by refactoring. Test-setup correction during the work: the second-death
+test first waited one Pulse past the second death, but the wait is back to 1 s
+(25 Pulses) once `revived` is set, so it now asserts `dead_due` at P0+250 and
+processes that Pulse. No crate was added, and `Cargo.toml` and `Cargo.lock` are
+unchanged.
+
+No ADR changed. No owner question added. V20 stays free.
+## 230c. A swing holds the monster its clip's seconds (V19f, V2's swing)
+
+Closes V19(f) and the swing half of V2: Battle's hold after a swing is
+`(DWORD)(fDuration * 25)` of the monster's `MOTION_NORMAL_ATTACK` clip
+(`G/char_state.cpp:1179-1181`), in the player arm and the guard arm alike, with
+the skill scan's hold (`battle_skill`) already clip-read since 229u — so every
+Battle hold now reads a clip. A zero duration and a missing line, file or
+`MotionDuration` all hold 50 (`PASSES_PER_SEC(2)`).
+
+- **`MobSkillClips`** (`gamedata/src/mob_skill_data.rs`): every proto folder's
+  `NORMAL_ATTACK` duration beside the five `SPECIALn` slots, parsed from the
+  motlist's `GENERAL NORMAL_ATTACK` line through `LoadMotion`'s rule
+  (`G/motion.cpp:91-95`): the first line matching the field exactly (a
+  `NORMAL_ATTACK1` on its own is not the swing), all four cells required, the
+  clip's `MotionDuration` read like a skill duration. The loader now walks
+  every folder, not only the skilling ones; a malformed attack clip is skipped
+  and recorded like a bad skill clip. The skill slots keep their slot-vnum
+  gate, so no folder's slots changed. No i686 probe on this machine, so the
+  `(DWORD)` truncation is hand-checked against the skill precedent (3.6 s is 90
+  in `f32`, 89 in `f64`).
+- **`Npc.attack_bits`** (`world/src/npc.rs`, new): the folder's duration as its
+  IEEE-754 bits with an `attack_s` reader, filled by `NpcSpawner` when it holds
+  the clips. `Respawner` gains `with_clips`, which boot passes, so a respawned
+  monster and a stone's son stand with their clips too — closing the gap 229u
+  left, where only boot's spawner held them and every later spawn stood
+  clip-less.
+- **`swing_hold`** (`prodomo/src/game_state/mob_battle.rs`, new): the shared
+  arm both swings call after `FUNC_ATTACK`: `(DWORD)(seconds * 25)` in `f32`
+  through `f32_to_i32`, floored at 0, else 50. `SWING_PULSES` is now the
+  no-clip fallback only.
+
+Owner-data coverage (338 nonempty proto folders): 19 lack a motlist, 27 lack
+the line, none lacks the clip file, and every attack clip carries a
+`MotionDuration`; the dogs' `20.msa` is 0.933333 s (23 Pulses). 741 vnums have
+an empty folder and hold 50, as legacy's missing motion set does. The
+`GetRaceNum` keying needs no work: the key is `dwVnum` (`G/char.cpp:2177`), the
+`WORD` return truncates only above 65535, and the largest owner vnum is 60003
+(so the race field stays the low 16 bits). The polymorph min-duration map
+(`MOB_GetNormalAttackDuration`, `G/motion.cpp:36-75`) is deliberately out: only
+the PC combo path reads it (`G/input_main.cpp:1699`), and no PC polymorph
+exists yet.
+
+Tests, all in-memory (6 new):
+
+- `gamedata::mob_skill_data::attack_durations_load_from_owner_folders`: the dog
+  reads 0.933333 s, the skilling gorilla boss keeps its swing and slot 0,
+  `boar` (no line) and an unknown folder read none, nothing skipped.
+- `world::npc::a_spawned_dog_carries_its_swings_clip`: a clip-holding spawner
+  stands the dog with the swing and empty skill slots; a bare one stands
+  clip-less.
+- `world::npc::a_respawned_dog_carries_its_swings_clip_when_the_respawner_holds_it`:
+  the same through `respawn`, with and without `with_clips`.
+- `game_state::mob_battle::a_swings_hold_is_the_clips_seconds_times_25`: the
+  arithmetic, with the 3.6-pin facing the right way (90 in `f32`).
+- `game_state::mob_battle::a_swing_holds_battle_for_its_clip`: a stood clip
+  holds Battle 23; without one, 50.
+- `game_state::mob_battle::a_guards_swing_holds_for_its_clip`: the guard arm
+  reads the clip too.
+
+Drive-by (same run, one line): `fight.rs`'s `a_monster` fixture gains
+`fight.level = 1`. Its level 0 made the 230a steal-gold test draw
+`number(1, 0)` — `number(0, 1)` after the swap — so the purse gained 1 only on
+a lucky seed; the test failed about half its runs. The comment already said
+"the dog is level 1". The full `fight::tests` module passes 3/3 runs after.
+
+`sys.combat.core` row, STATUS header, V2 and V19(f) updated here. No crate was
+added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Gates: fmt clean; build with no warnings; clippy `-D warnings` (1.85.1) clean
+after replacing two redundant closures with `Npc::attack_s`; doc green;
+prodomo 997 · world 523 · gamedata 432 · common 107 · quest 69 · parity 8/8.
+
+No ADR changed. No owner question added. V20 stays free.
+
+## 230d. A player fights with its skills, first half (V17f narrowed)
+
+Narrows V17(f): the melee PC skills land on monsters. `CG_USE_SKILL` ports
+`UseSkill`'s entry gates, SP cost and cooldown stamp
+(`G/input_main.cpp:2173-2178`, `G/char_skill.cpp:2896-3112`); a `CG_ATTACK`
+of a skill's type ports `CheckSkillHitCount` + `Attack(bType)` +
+`ComputeSkill`'s `FuncSplashDamage` arm on the 10 castable melee rows
+(`1 2 6 16 17 21 31 32 36 61`). `CG_SHOOT`, `CG_FLY_TARGETING` and
+`CG_ADD_FLY_TARGETING` stay consumed (the arrow/magic skills wait); SPLASH
+rows, skill-up, buffs and grandmaster wait. The store starts every level at
+0, so nothing casts until a level is set.
+
+- **`gamedata::pc_skill_data`** (new): `PcSkills::from_dumps(player, common)`
+  — the 48 PC rows (type 1-4, vnum ≤ 111) with compiled point/point2/spcost/
+  cooldown/master/splash-adjust polys; the 14 `number(`/`floor(` rows
+  (`31 32 46 48 50 51 66 76 77 78 80 106 107 108`) are refused with their
+  vnum (kept out of the map, load still green — mirroring legacy's `sys_err`
+  + skip). The 8 power rows (`SKILL_POWER_BY_LEVEL` + `TYPE0..7`) with the
+  base-row fallback (`G/config.cpp:694-698`); `power(job, group, level)`,
+  `SkillList`, and `can_use` (`G/char_skill.cpp:4135-4183`: the 4x2x6 list,
+  the riding arms, the always list; group 0 reaches only the always list).
+  `is_castable_melee`: `ATTACK` + `USE_MELEE_DAMAGE`, MELEE-attr, no SPLASH,
+  off the 14-vnum shoot list (`G/input_main.cpp:1940-1963`).
+- **`world::character::combat::melee`**: `calc_melee_skill_atk` (the
+  functor's per-cast `atk`: `CalcMeleeDamage(pc, victim, true, false)` —
+  ignore-defence, rated, `G/char_skill.cpp:1424-1425`), `skill_melee_attr`
+  (the MELEE attr arm: the wielded weapon's kind resist, then
+  `- victim DEF_GRADE` unless PENETRATE drew, `G/char_skill.cpp:1549-1579`),
+  and `damage_melee` (`CHARACTER::Damage(attacker, dam, DAMAGE_TYPE_MELEE)`:
+  the quartered chances, the non-gold steals — the gold steal's
+  `type == DAMAGE_TYPE_NORMAL` arm skips a MELEE hit — the skill bonus
+  switch, the chat, the stun/dead checks, the user rate, the stoneskin, the
+  `+0.5`, the packet and the HP change; no `NormalAttackAffect`, which
+  `battle_hit` owns).
+- **`prodomo::game_state::pc_skill`** (new): per-PC `SkillUse` stamps
+  (`bUsed`, `next_usable` in Pulses, `hit_count`, `main_vid`,
+  `hits_per_victim`) and `last_skill`; `use_skill` (CanUseSkill, the stun
+  arm of `CanMove`, the row, level > 0, the revive-invisible removal, the
+  SP charge — `kSPCostPoly` on `POINT_SP`, the HP arm refused since no
+  owner row sets `USE_HP_AS_COST` — then the cooldown stamp, so a refused
+  re-cast still charges, as legacy's order charges-then-stamps does);
+  `skill_attack` (CanUseSkill, the shoot-list refusal, the 122/94/91/95
+  refusal, the per-victim hit count — 3 for `SAMYEON`/`CHARYUN`, else 1 —
+  the `used` gate, the 38-Pulse term gate, then `compute_skill_melee`:
+  the target-range arm (`DISTANCE_SQRT >= range + 50` refuses, `0` reaches
+  everywhere), the level, the PENETRATE/ignore-rating draws, `atk` and
+  `ar`, `-(kPointPoly)` through `CalcBattleDamage`'s floor, the MELEE attr
+  arm, `HitOnce`, and `Damage(pc, iDam, MELEE)` with the MELEE aggro row,
+  the stun at 0, the kill of a stunned victim, and the victim's
+  `BeginFight`). `k = power * bMaxLevel / 100` in `f64`.
+- **Clocks (Divergence, provisional, under V17f)**: legacy stamps wall ms
+  (`get_dword_time()`). The Rewrite stamps Pulses: the cooldown is
+  `ComputeCooltime(cool*1000)` ms rounded up to Pulses (40 ms a Pulse), and
+  the 1500 ms term gate fires past 37 Pulses (`1500*25/1000 = 37.5`, `>`).
+- **Wiring**: `CG_USE_SKILL` leaves `is_consumed` for a `use_skill_step`
+  (a `GameCommand::UseSkill` through `apply_pick`); `CG_ATTACK` with
+  `bType > 0` routes to `skill_attack` in the world (past the stun gate);
+  boot loads the PC rows (`load_pc_skills`, `GameData::pc_skills`,
+  `with_pc_skills`), stopping before any port opens on an unusable dump.
+
+Proofs (all in-memory, per the standing order):
+
+- `gamedata::pc_skill_data::{pc_rows_load_and_function_rows_are_refused,
+  power_rows_read_per_job_and_group, missing_type_row_falls_back_to_base,
+  can_use_pins_the_skill_list}`: 48 attempted, 14 refused naming the
+  `number(`/`floor(` rows, 34 kept (vnum 1 bare melee, 20 splash/crush and
+  shoot-listed, 61 PENETRATE castable, 3 SELFONLY not, 137/151 not PC
+  rows); TYPE0/TYPE7 read 5 at level 1 with the level-40 clamp, mobs read
+  row 0, group 0/3 and job 4 read 0; a synthetic missing TYPE3 falls back
+  to base; the SkillList + always list + group-0 + riding arms.
+- `world::character::combat::melee::{a_skill_blow_ignores_the_defence_a_punch_subtracts,
+  a_melee_skill_hit_keeps_the_chances_and_skips_the_gold_steal,
+  a_melee_skills_attr_arm_reads_the_kind_resist_then_the_defence}`: 322
+  vs 332 on the same draw; the quartered chances drawn and no gold steal
+  (`STEAL_GOLD` 100, four draws consumed, `VictimHp` to 106); the kind
+  resist then the defence, the PENETRATE skip, the unwielded arm.
+- `game_state::pc_skill::{a_cast_charges_the_sp_and_stamps_the_cooldown,
+  an_unlearned_skill_refuses, a_shoot_listed_vnum_refuses_through_cg_attack,
+  a_skill_hit_lands_melee_damage_and_the_dog_fights_back,
+  a_late_cg_attack_hits_the_skill_term_gate}`: vnum 1 charges 45
+  (`40+100*0.05`) and stamps P0+300 with hit count 5, a re-cast refuses
+  after charging again; level 0 refuses with no charge and no record;
+  vnum 20 stamps but its `CG_ATTACK` refuses; a cast + `CG_ATTACK` lands
+  MELEE damage with the MELEE damage-map row, positive aggro, and the
+  dog's `BeginFight`; a `CG_ATTACK` at P0+39 refuses with the dog whole.
+- The 229j consumed-frames parity scenario keeps its shape: its
+  `CG_USE_SKILL`/`CG_ATTACK`-typed records now refuse as unlearned skills
+  (the store starts every level at 0) rather than as consumed frames.
+
+`sys.skill.core` row, STATUS header and V17(f) updated here. No crate was
+added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+Gates: fmt clean; build with no warnings; clippy `-D warnings` (1.85.1)
+clean after the `f64_to_i32`/`f64_to_f32` conversions (no `as` casts), the
+`compute_skill_melee`/`apply` splits and the `Option<&T>` arg; doc green;
+prodomo 1002 · world 526 · gamedata 436 · common 107 · quest 69 ·
+protocol 1203 · parity 8/8.
+
+No ADR changed. No owner question added. V20 stays free.

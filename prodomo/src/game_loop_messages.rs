@@ -509,6 +509,17 @@ pub enum GameCommand {
         /// Dropped once the answer is sent, see [`Settled`].
         settled: oneshot::Sender<()>,
     },
+    /// `CInputMain::UseSkill`: the character online under `vid` casts the skill `record`
+    /// names on its target. The world sends nothing back to the caster on the wire for
+    /// the cast itself (only the SP point change); see `game_state::pc_skill`.
+    UseSkill {
+        /// The VID of the casting character.
+        vid: common::vid::Vid,
+        /// The `CG_USE_SKILL` the client sent.
+        record: protocol::cg_use_skill::CgUseSkill,
+        /// Dropped once the cast has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
     /// `CInputMain::Attack`: the character online under `vid` attacks the VID `record` names.
     /// The world sends what the hit shows; see `game_state::fight`.
     Attack {
@@ -516,8 +527,8 @@ pub enum GameCommand {
         vid: common::vid::Vid,
         /// The `CG_ATTACK` the client sent.
         record: protocol::cg_attack::CgAttack,
-        /// Dropped once what the hit shows is sent, see [`Settled`].
-        settled: oneshot::Sender<()>,
+        /// Where the game thread reports the gold the hit stole.
+        reply: oneshot::Sender<AttackAnswer>,
     },
     /// `do_restart` or `do_restart_now` of the player online under `vid`
     /// (`G/cmd_general.cpp:471-706`); see `game_state::death`.
@@ -560,6 +571,14 @@ pub enum RestartKind {
 pub struct RestartAnswer {
     /// The gold `/restart_now` took, as the signed change the store applies, or `None` when it
     /// took none.
+    pub gold: Option<i64>,
+}
+
+/// What a hit changed that the descriptor keeps.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AttackAnswer {
+    /// The gold the hit stole, as the signed change the store applies, or `None` when it
+    /// stole none.
     pub gold: Option<i64>,
 }
 
@@ -1532,19 +1551,19 @@ impl GameLoopController {
         Ok(settling)
     }
 
-    /// Hands the world a `CG_ATTACK` from the character online under `vid`, without waiting.
-    /// The [`Settled`] resolves once what the hit shows is sent.
+    /// Hands the world a `CG_USE_SKILL` from the character online under `vid`, without
+    /// waiting. The [`Settled`] resolves once the cast has run.
     ///
     /// # Errors
     ///
     /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
-    pub async fn attack(
+    pub async fn use_skill(
         &self,
         vid: common::vid::Vid,
-        record: protocol::cg_attack::CgAttack,
+        record: protocol::cg_use_skill::CgUseSkill,
     ) -> Result<Settled, MoveItemError> {
         let (settled, settling) = oneshot::channel();
-        self.send_command(GameCommand::Attack {
+        self.send_command(GameCommand::UseSkill {
             vid,
             record,
             settled,
@@ -1552,6 +1571,25 @@ impl GameLoopController {
         .await
         .map_err(|_| MoveItemError::NotSent)?;
         Ok(settling)
+    }
+
+    /// Asks the world to run one `CG_ATTACK` from the character online under `vid`, and waits
+    /// for the gold it stole. What the hit shows is written to the player's outbox before the
+    /// answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn attack(
+        &self,
+        vid: common::vid::Vid,
+        record: protocol::cg_attack::CgAttack,
+    ) -> Result<AttackAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Attack { vid, record, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 
     /// Asks the world to run one restart command of a player, and waits for the gold it took.

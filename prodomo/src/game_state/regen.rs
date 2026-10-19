@@ -97,6 +97,28 @@ pub(super) enum Due {
         /// The map key.
         key: u32,
     },
+    /// `poison_event` of the non-player under this VID, with the ticks it has left. It
+    /// sorts after [`Due::MobSkill`]: at an equal Pulse the tick runs after the skill
+    /// event (a Divergence — legacy's heap order at equal priority is heap-shape
+    /// dependent).
+    Poison {
+        /// The victim's VID.
+        vid: u32,
+        /// The ticks left, counting the one this run fires.
+        count: u32,
+    },
+    /// `fire_event` of the non-player under this VID, with the ticks it has left and the
+    /// per-tick amount. It sorts after [`Due::Poison`]: at an equal Pulse the tick runs
+    /// after the poison event (a Divergence — legacy's heap order at equal priority is
+    /// heap-shape dependent).
+    Fire {
+        /// The victim's VID.
+        vid: u32,
+        /// The ticks left, counting the one this run fires.
+        count: u32,
+        /// The per-tick amount.
+        amount: i32,
+    },
     /// `StunEvent` of the player under this VID. See [`super::death`].
     PcStun(u32),
     /// `dead_event` of the player under this VID.
@@ -245,6 +267,8 @@ impl GameState {
                 Due::Dead(vid) => self.dead_event(vid),
                 Due::Recovery(vid) => self.recovery_event(vid),
                 Due::MobSkill { vid, key } => self.mob_skill_event(vid, key),
+                Due::Poison { vid, count } => self.npc_poison_event(vid, count),
+                Due::Fire { vid, count, amount } => self.npc_fire_event(vid, count, amount),
                 Due::PcStun(vid) => self.pc_stun_event(vid),
                 Due::PcDead(vid) => self.pc_dead_event(vid),
                 Due::PcRecovery(vid) => self.pc_recovery_event(vid),
@@ -301,6 +325,57 @@ impl GameState {
         if let Some(regen) = list.regens.get_mut(at) {
             regen.count = regen.count.saturating_add(count);
         }
+        self.stand_runtime(key, stood, pulse);
+    }
+
+    /// Stands the sons a stone's `SpawnGroup` spawned on its map, after the others.
+    /// No regen counts them: the stone holds none (`pkRegen` never reaches them).
+    fn stand_stone_group(&mut self, key: (u8, i32), stood: Vec<Npc>, pulse: u64) {
+        if stood.is_empty() {
+            return;
+        }
+        self.stand_runtime(key, stood, pulse);
+    }
+
+    /// One `SpawnGroup` of the stone under `stone` in the box of half-`width` around
+    /// `(x, y)`, stood on its map (`G/char_state.cpp:406-410`). Empty when the group is 0
+    /// or unknown, or the map has no respawner data.
+    pub(super) fn spawn_stone_group(
+        &mut self,
+        key: (u8, i32),
+        group: u32,
+        stone: u32,
+        (x, y): (i32, i32),
+        width: i32,
+    ) {
+        let (Some(respawner), Some(region), Some(cells)) = (
+            self.regens.respawner.as_mut(),
+            self.regens.regions.get(&key),
+            self.regens.cells.get(key.1),
+        ) else {
+            return;
+        };
+        let area = (
+            x.saturating_sub(width),
+            y.saturating_sub(width),
+            x.saturating_add(width),
+            y.saturating_add(width),
+        );
+        let stood = respawner
+            .spawn_stone_group((region, cells), group, stone, area, &mut self.dice)
+            .unwrap_or_default();
+        let pulse = self.last_pulse;
+        self.stand_stone_group(key, stood, pulse);
+    }
+
+    /// Stands runtime-spawned characters on their map after the others: each enters the
+    /// map's view, which sends its insert to every player that now sees it; an ore vein's
+    /// end is scheduled; and a warp or goto NPC starts its event.
+    fn stand_runtime(&mut self, key: (u8, i32), stood: Vec<Npc>, pulse: u64) {
+        let Some(list) = self.npcs.get_mut(&key) else {
+            return;
+        };
+        let list = Arc::make_mut(list);
         let first = list.npcs.len();
         list.npcs.extend(stood);
         let now = self.clock.now();
@@ -353,6 +428,13 @@ impl GameState {
                 regen.count = regen.count.saturating_sub(1);
             }
         }
+        // `ClearStone` (`:652`): a stone's sons die with it, in map order; a son's own
+        // row goes with it, which drops it from the derived set.
+        self.kill_stone_sons(vid);
+        let Some(list) = self.npcs.get_mut(&key) else {
+            return;
+        };
+        let list = Arc::make_mut(list);
         // A master's party is deleted, which leaves each member following no one; a member
         // that quits changes nothing the Rewrite keeps.
         for npc in &mut list.npcs {

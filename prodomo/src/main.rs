@@ -132,6 +132,7 @@ use protocol::cg_quickslot_swap::CgQuickslotSwap;
 use protocol::cg_safebox::{CgSafeBoxItem, SafeBoxKind};
 use protocol::cg_safebox_move::CgSafeboxItemMove;
 use protocol::cg_shop::CgShop;
+use protocol::cg_use_skill::CgUseSkill;
 use protocol::cg_vid::CgOnClick;
 use protocol::cg_wire::ClientFrame;
 use protocol::gc::{GcAuthSuccess, GcLoginFailure};
@@ -1746,8 +1747,40 @@ async fn target_step(
     true
 }
 
+/// `CInputMain::UseSkill` (`G/input_main.cpp:2173-2177`): the world runs the character's
+/// cast and sends what it shows (see `game_state::pc_skill`). The cast answers nothing
+/// itself, as `CInputMain::UseSkill` ignores `UseSkill`'s answer.
+async fn use_skill_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    let record = match CgUseSkill::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed USE_SKILL; closing");
+            return false;
+        }
+    };
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "USE_SKILL from a character outside the world; ignoring");
+        return true;
+    };
+    match context.game.use_skill(world_vid, record).await {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not take the skill; closing");
+            return false;
+        }
+    }
+    debug!(%addr, skill = record.skill_vnum, "Skill handed to the world");
+    true
+}
+
 /// `CInputMain::Attack` (`G/input_main.cpp:1918-2008`): the world runs the character's hit on
-/// the VID the record names and sends what it shows (see `game_state::fight`).
+/// the VID the record names and sends what it shows (see `game_state::fight`). A hit that
+/// stole gold answers the signed delta, which the store applies with no row changes.
 async fn attack_step(
     addr: SocketAddr,
     context: &ConnectionContext,
@@ -1765,14 +1798,24 @@ async fn attack_step(
         warn!(%addr, "ATTACK from a character outside the world; ignoring");
         return true;
     };
-    match context.game.attack(world_vid, record).await {
-        Ok(settling) => held.settling = Some(settling),
+    let answer = match context.game.attack(world_vid, record).await {
+        Ok(answer) => answer,
         Err(error) => {
             warn!(%addr, %error, "The world could not take the attack; closing");
             return false;
         }
-    }
+    };
+    // Answered, so the world has run the hit and its records are queued: nothing to settle.
     debug!(%addr, target = record.target_vid, "Attack handed to the world");
+    let Some(gold) = answer.gold else {
+        return true;
+    };
+    if let Err(error) = db::items::apply_transfer(&context.store, world_vid.raw(), &[], gold).await
+    {
+        warn!(%addr, %error, gold, "The hit's stolen gold could not be stored; closing");
+        return false;
+    }
+    debug!(%addr, gold, "The hit's stolen gold was stored");
     true
 }
 
@@ -2062,9 +2105,10 @@ fn main_record(phase: ClientPhase, header: u8) -> Option<MainRecord> {
 /// - `CG_ENTER_GAME` (10) in the game and dead phases: the header is in the main table
 ///   (`G/packet_info.cpp:116`), and `CInputMain::Analyze` has no case for it, so its `default`
 ///   consumes the record (`G/input_main.cpp:4126-4127`);
-/// - `CG_FLY_TARGETING` (51), `CG_USE_SKILL` (52), `CG_ADD_FLY_TARGETING` (53) and `CG_SHOOT`
-///   (54) in the game and dead phases, which wait for the skills (V17f): legacy's analyzer runs
-///   them, and the Rewrite keeps the connection and does nothing.
+/// - `CG_FLY_TARGETING` (51), `CG_ADD_FLY_TARGETING` (53) and `CG_SHOOT` (54) in the game
+///   and dead phases, which wait for the arrow and magic skills (V17f): legacy's analyzer
+///   runs them, and the Rewrite keeps the connection and does nothing. `CG_USE_SKILL`
+///   (52) runs the melee casts (230d).
 fn is_consumed(phase: ClientPhase, header: u8) -> bool {
     match phase {
         ClientPhase::Login | ClientPhase::Select | ClientPhase::Loading => {
@@ -2073,7 +2117,6 @@ fn is_consumed(phase: ClientPhase, header: u8) -> bool {
         ClientPhase::Game | ClientPhase::Dead => [
             HEADER_CG_ENTERGAME,
             HEADER_CG_FLY_TARGETING,
-            HEADER_CG_USE_SKILL,
             HEADER_CG_ADD_FLY_TARGETING,
             HEADER_CG_SHOOT,
         ]
@@ -2095,10 +2138,11 @@ fn is_dead_refused(phase: ClientPhase, header: u8) -> bool {
 }
 
 /// Whether `header` is a record the world answers alone: one that moves a character,
-/// `CG_TARGET` or `CG_ATTACK`.
+/// `CG_TARGET`, `CG_USE_SKILL` or `CG_ATTACK`.
 fn is_world_step(header: u8) -> bool {
     is_motion_step(header)
         || header == HEADER_CG_TARGET.value()
+        || header == HEADER_CG_USE_SKILL.value()
         || header == HEADER_CG_ATTACK.value()
 }
 
@@ -2111,6 +2155,8 @@ async fn world_step(
 ) -> bool {
     if frame.header == HEADER_CG_TARGET.value() {
         target_step(addr, context, held, frame).await
+    } else if frame.header == HEADER_CG_USE_SKILL.value() {
+        use_skill_step(addr, context, held, frame).await
     } else if frame.header == HEADER_CG_ATTACK.value() {
         attack_step(addr, context, held, frame).await
     } else {
@@ -4041,6 +4087,25 @@ fn load_mob_skills(
     Ok(Arc::new(skills))
 }
 
+/// Load the PC skill rows: the `skill_proto` PC rows and the power rows
+/// (`CSkillManager::Initialize` lays them out, `G/skill.cpp`).
+///
+/// A row whose polys refuse (the `number(`/`floor(` rows) stays out of the map, as
+/// legacy's `sys_err` + skip leaves it uncastable; a dump that does not parse stops
+/// the server before any port opens.
+fn load_pc_skills(config: &ServerConfig) -> Result<Arc<gamedata::pc_skill_data::PcSkills>, String> {
+    let player_path = config.game_tables.join("player.sql");
+    let player = std::fs::read(&player_path)
+        .map_err(|error| format!("Failed to read {}: {error}", player_path.display()))?;
+    let common_path = config.game_tables.join("common.sql");
+    let common = std::fs::read(&common_path)
+        .map_err(|error| format!("Failed to read {}: {error}", common_path.display()))?;
+    let skills = gamedata::pc_skill_data::PcSkills::from_dumps(&player, &common)
+        .map_err(|error| format!("PC skills are unusable: {error}"))?;
+    info!("PC skill tables loaded");
+    Ok(Arc::new(skills))
+}
+
 /// Load the mob skill clips: each skilling folder's `SPECIALn` durations and splash
 /// entries (`CMotionManager::Build`, `G/motion.cpp:327-347`).
 ///
@@ -4167,6 +4232,8 @@ struct GameData {
     mob_skills: Arc<gamedata::mob_skill_data::MobSkills>,
     /// The mob skill clips, the same table the game thread holds.
     mob_clips: Arc<gamedata::mob_skill_data::MobSkillClips>,
+    /// The PC skill rows, the same table the game thread holds.
+    pc_skills: Arc<gamedata::pc_skill_data::PcSkills>,
 }
 
 /// What boot stands the NPCs and monsters up from: the mob prototypes, the mob groups, the names
@@ -4196,6 +4263,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let motions = load_pc_motions(config)?;
     let mob_skills = load_mob_skills(config)?;
     let mob_clips = load_mob_clips(config, &npcs.protos);
+    let pc_skills = load_pc_skills(config)?;
     let quests = load_quests(config, &npcs)?;
     let data = GameData {
         atlas: Arc::new(atlas),
@@ -4211,6 +4279,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         motions,
         mob_skills,
         mob_clips,
+        pc_skills,
     };
     Ok((data, quests))
 }
@@ -4488,7 +4557,8 @@ fn stand_up_npcs(
         Arc::clone(&data.groups),
         Arc::clone(&data.names),
         spawner.into_vids(),
-    );
+    )
+    .with_clips(Arc::clone(clips));
     state.install_respawner(respawner, Arc::clone(cells));
     Ok(())
 }
@@ -4617,6 +4687,7 @@ fn build_world(
         .with_motions(Arc::clone(&data.motions))
         .with_mob_skills(Arc::clone(&data.mob_skills))
         .with_mob_clips(Arc::clone(&data.mob_clips))
+        .with_pc_skills(Arc::clone(&data.pc_skills))
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
         .with_drop_lifetime(config.game.item_destroy_time_dropitem)
         .with_gold_lifetime(config.game.item_destroy_time_dropgold)
@@ -5249,9 +5320,11 @@ mod tests {
         ] {
             assert!(!in_main_input(phase), "{phase:?}");
         }
-        for header in [HEADER_CG_ENTERGAME, HEADER_CG_USE_SKILL, HEADER_CG_SHOOT] {
+        for header in [HEADER_CG_ENTERGAME, HEADER_CG_SHOOT] {
             assert!(is_consumed(ClientPhase::Dead, header.value()));
         }
+        // `CG_USE_SKILL` runs the melee casts (230d).
+        assert!(!is_consumed(ClientPhase::Dead, HEADER_CG_USE_SKILL.value()));
         assert!(!is_consumed(ClientPhase::Dead, HEADER_CG_ITEM_USE.value()));
 
         let position = HEADER_CG_CHARACTER_POSITION.value();

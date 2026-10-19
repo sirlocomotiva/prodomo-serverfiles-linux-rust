@@ -183,6 +183,9 @@ pub struct Npc {
     pub affect_flags: [u32; 2],
     /// The VID of its group's leader, the party master, when it is a follower.
     pub leader: Option<u32>,
+    /// `m_pkChrStone`: the VID of the stone that spawned it (`SetStone`, `G/char.cpp:6382`).
+    /// The stone's set is derived: the sons on its map naming it.
+    pub stone: Option<u32>,
     /// The regen it holds (`SetRegen`), by its place in [`MapNpcs::regens`]: a lone character's
     /// and a group leader's.
     pub regen: Option<usize>,
@@ -205,6 +208,15 @@ pub struct Npc {
     /// `SPECIALn` clip's duration and splash entries (empty when the motlist has no
     /// such line — 6418 slot 3). `UseMobSkill` refuses through an empty vector.
     pub skills: [MobSkillSlots; 5],
+    /// The `NORMAL_ATTACK` clip's `MotionDuration` as its IEEE-754 bits (`None`
+    /// when the motlist has no such line — the swing's `GetMotionDuration` miss),
+    /// because an `f32` would break `Eq`. A successful swing holds the state for
+    /// `(DWORD)(seconds * 25)`, else 50 (`G/char_state.cpp:1179-1181`).
+    pub attack_bits: Option<u32>,
+    /// `m_pointsInstant.dwImmuneFlag`: the proto's `IMMUNE_FLAG` bits, which the
+    /// reflect third reads (`IMMUNE_REFLECT`, `G/length.h:721`). The stun, slow,
+    /// poison, terror, fall and curse reads wait for their systems.
+    pub immune_flag: u32,
     /// `IsStun`: `INSTANT_FLAG_STUN`, which `Stun` sets when its hit points reach 0 and `Dead`
     /// clears (`G/char_battle.cpp:422-459`, `:1558`).
     pub stunned: bool,
@@ -219,8 +231,13 @@ impl Npc {
     pub fn is_aggressive(&self) -> bool {
         self.ai_flags & AIFLAG_AGGRESSIVE != 0
     }
-}
 
+    /// The swing clip's duration in seconds, or `None` without a clip.
+    #[must_use]
+    pub fn attack_s(&self) -> Option<f32> {
+        self.attack_bits.map(f32::from_bits)
+    }
+}
 /// A mini-map entry: `npc_info` of `InsertNPCPosition`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NpcPosition {
@@ -572,7 +589,7 @@ impl<'a> NpcSpawner<'a> {
             } else {
                 match entry.kind {
                     RegenKind::Group { aggressive } => {
-                        self.spawn_group(site, vnum, Area::of(entry), aggressive, dice)?
+                        self.spawn_group(site, vnum, Area::of(entry), aggressive, None, dice)?
                     }
                     RegenKind::GroupGroup => {
                         self.spawn_group_group(site, vnum, Area::of(entry), dice)?
@@ -645,17 +662,20 @@ impl<'a> NpcSpawner<'a> {
         }
         let picked = usize::try_from(number(dice, 1, last) - 1).unwrap_or_default();
         // A group-group is spawned with the regen's `is_aggressive`, which only `ga` sets.
-        self.spawn_group(site, members[picked], area, false, dice)
+        self.spawn_group(site, members[picked], area, false, None, dice)
     }
 
-    /// `SpawnGroup` at boot, where no stone is selected: the leader in the box, then each member
-    /// in a box drawn around the one before it.
+    /// `SpawnGroup`: the leader in the box, then each member in a box drawn around the one
+    /// before it. With `stone`, the stone-selected path: every son is shown with the spawn
+    /// motion and linked to the stone, and no party is made (`G/char_manager.cpp:615-667`).
+    /// At boot `stone` is `None` and the leader links its followers (`leader`).
     fn spawn_group(
         &mut self,
         site: &mut Site<'_>,
         vnum: u32,
         area: Area,
         aggressive: bool,
+        stone: Option<u32>,
         dice: &mut dyn Dice,
     ) -> Result<Option<usize>, NpcVidsExhausted> {
         let groups = self.groups;
@@ -666,7 +686,8 @@ impl<'a> NpcSpawner<'a> {
         let mut area = area;
         let mut leader: Option<usize> = None;
         for (i, &member) in group.members.iter().enumerate() {
-            let Some(at) = self.spawn_mob_range(site, member, area, false, dice)? else {
+            let motion = stone.is_some();
+            let Some(at) = self.spawn_mob_range(site, member, area, motion, dice)? else {
                 if i == 0 {
                     return Ok(None);
                 }
@@ -677,9 +698,16 @@ impl<'a> NpcSpawner<'a> {
             area.sy = y.saturating_sub(number(dice, GROUP_SPREAD.0, GROUP_SPREAD.1));
             area.ex = x.saturating_add(number(dice, GROUP_SPREAD.0, GROUP_SPREAD.1));
             area.ey = y.saturating_add(number(dice, GROUP_SPREAD.0, GROUP_SPREAD.1));
-            match leader {
-                Some(master) => site.npcs[at].leader = Some(site.npcs[master].vid),
-                None => leader = Some(at),
+            if let Some(stone) = stone {
+                site.npcs[at].stone = Some(stone);
+                if leader.is_none() {
+                    leader = Some(at);
+                }
+            } else {
+                match leader {
+                    Some(master) => site.npcs[at].leader = Some(site.npcs[master].vid),
+                    None => leader = Some(at),
+                }
             }
             if aggressive {
                 site.npcs[at].ai_flags |= AIFLAG_AGGRESSIVE;
@@ -803,6 +831,7 @@ impl<'a> NpcSpawner<'a> {
             ai_flags: proto.ai_flag,
             affect_flags,
             leader: None,
+            stone: None,
             regen: None,
             ore_lifetime,
             hp: max_hp(proto),
@@ -811,6 +840,8 @@ impl<'a> NpcSpawner<'a> {
             race_flag: proto.race_flag,
             fight: MobFight::of(proto),
             skills: self.skill_slots_of(proto),
+            attack_bits: self.attack_of(proto),
+            immune_flag: proto.immune_flag,
             stunned: false,
             dead: false,
         });
@@ -847,6 +878,16 @@ impl<'a> NpcSpawner<'a> {
             }
         })
     }
+
+    /// The proto folder's `NORMAL_ATTACK` duration as its bits, when the
+    /// spawner holds the clips.
+    fn attack_of(&self, proto: &MobTableRecord) -> Option<u32> {
+        let folder = String::from_utf8_lossy(&proto.folder);
+        let folder = folder.trim_end_matches('\0');
+        self.clips
+            .and_then(|clips| clips.attack_s(folder))
+            .map(f32::to_bits)
+    }
 }
 
 /// What a `regen_event` spawns from once boot is over: the spawner's tables, shared, and the
@@ -856,6 +897,7 @@ pub struct Respawner {
     protos: Arc<MobProtos>,
     groups: Arc<MobGroups>,
     names: Arc<MobLocaleNames>,
+    clips: Option<Arc<gamedata::mob_skill_data::MobSkillClips>>,
     vids: NpcVids,
 }
 
@@ -872,8 +914,17 @@ impl Respawner {
             protos,
             groups,
             names,
+            clips: None,
             vids,
         }
+    }
+
+    /// Share the skill clips, as the boot spawner holds them: respawned and stone
+    /// sons copy their clip data too, instead of standing clip-less.
+    #[must_use]
+    pub fn with_clips(mut self, clips: Arc<gamedata::mob_skill_data::MobSkillClips>) -> Self {
+        self.clips = Some(clips);
+        self
     }
 
     /// `regen_spawn(regen, false)` as `regen_event` runs it (`G/regen.cpp:582-599`): the
@@ -895,6 +946,9 @@ impl Respawner {
     ) -> Result<(Vec<Npc>, u32), NpcVidsExhausted> {
         let mut spawner =
             NpcSpawner::new(&self.protos, &self.groups, &self.names, self.vids.clone());
+        if let Some(clips) = &self.clips {
+            spawner = spawner.with_clips(clips);
+        }
         let mut site = Site {
             region,
             cells,
@@ -903,6 +957,38 @@ impl Respawner {
         let stood = spawner.regen_spawn(&mut site, &regen.entry, index, regen.missing(), dice);
         self.vids = spawner.into_vids();
         Ok((site.npcs, stood?))
+    }
+
+    /// `SpawnGroup` as a stone runs it (`G/char_manager.cpp:595-667`): the members of `group`
+    /// in the box, each shown with the spawn motion and linked to `stone`, in spawn order.
+    /// A group that is 0 or unknown stands nothing, and an index-0 failure keeps the sons
+    /// that stood (the stone ignores the return).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NpcVidsExhausted`] when the sons outnumber the VIDs left.
+    pub fn spawn_stone_group(
+        &mut self,
+        (region, cells): (&MapRegion, &MapCells),
+        group: u32,
+        stone: u32,
+        (sx, sy, ex, ey): (i32, i32, i32, i32),
+        dice: &mut dyn Dice,
+    ) -> Result<Vec<Npc>, NpcVidsExhausted> {
+        let mut spawner =
+            NpcSpawner::new(&self.protos, &self.groups, &self.names, self.vids.clone());
+        if let Some(clips) = &self.clips {
+            spawner = spawner.with_clips(clips);
+        }
+        let mut site = Site {
+            region,
+            cells,
+            npcs: Vec::new(),
+        };
+        let area = Area { sx, sy, ex, ey };
+        let _leader = spawner.spawn_group(&mut site, group, area, false, Some(stone), dice)?;
+        self.vids = spawner.into_vids();
+        Ok(site.npcs)
     }
 }
 
@@ -987,6 +1073,7 @@ mod tests {
 
     fn protos() -> MobProtos {
         let mut smith = proto(20_016, CHAR_TYPE_NPC, 0);
+        smith.table.immune_flag = 0b10_1011;
         smith.table.on_click_type = 2;
         smith.table.max_hp = 1_500;
         smith.table.race_flag = 1 << 3;
@@ -1161,6 +1248,7 @@ mod tests {
                 ai_flags: 0,
                 affect_flags: [0, 0],
                 leader: None,
+                stone: None,
                 regen: Some(0),
                 ore_lifetime: None,
                 hp: 1_500,
@@ -1169,6 +1257,9 @@ mod tests {
                 race_flag: 1 << 3,
                 fight: MobFight::of(protos().get(20_016).expect("the smith")),
                 skills: Default::default(),
+                attack_bits: None,
+                // The spawn fills the immune flag from the proto's `IMMUNE_FLAG`.
+                immune_flag: 0b10_1011,
                 stunned: false,
                 dead: false,
             }]
@@ -1784,6 +1875,84 @@ mod tests {
         }
     }
 
+    /// A spawner holding the owner's clips stands a dog with the stray dog's swing
+    /// clip (0.933333 s) and empty skill slots; without the clips it stands
+    /// clip-less.
+    #[test]
+    fn a_spawned_dog_carries_its_swings_clip() {
+        let root = owners();
+        let protos = MobProtos::load(&root.join("proto")).unwrap();
+        let names = MobLocaleNames::load(&root.join("locale/europe/country")).unwrap();
+        let clips =
+            gamedata::mob_skill_data::MobSkillClips::load(&root.join("data/monster"), &protos);
+        let groups = groups();
+        let entries = [point(101, 10_500, 20_700)];
+        let mut spawner =
+            NpcSpawner::new(&protos, &groups, &names, NpcVids::default()).with_clips(&clips);
+        let map = spawner
+            .spawn_map(&region(1), &cells(&[]), &entries, &mut Script::new(&[0]))
+            .unwrap();
+        let seconds = map.npcs[0].attack_s().unwrap();
+        assert!((seconds - 0.933_333).abs() < 1e-5, "{seconds}");
+        assert!(map.npcs[0].skills.iter().all(|slot| slot.vnum == 0));
+        let mut bare = NpcSpawner::new(&protos, &groups, &names, NpcVids::default());
+        let map = bare
+            .spawn_map(&region(1), &cells(&[]), &entries, &mut Script::new(&[0]))
+            .unwrap();
+        assert_eq!(map.npcs[0].attack_s(), None);
+    }
+
+    /// A respawner holding the owner's clips stands a dog with the swing clip;
+    /// without them the respawned dog stands clip-less (the 229u gap).
+    #[test]
+    fn a_respawned_dog_carries_its_swings_clip_when_the_respawner_holds_it() {
+        let root = owners();
+        let protos = MobProtos::load(&root.join("proto")).unwrap();
+        let names = MobLocaleNames::load(&root.join("locale/europe/country")).unwrap();
+        let clips =
+            gamedata::mob_skill_data::MobSkillClips::load(&root.join("data/monster"), &protos);
+        let entry = boxed(RegenKind::Mob, 101);
+        let regen = Regen {
+            entry,
+            count: 0,
+            first_fire: 0,
+        };
+        let cells = cells(&[]);
+        let mut respawner = Respawner::new(
+            Arc::new(protos.clone()),
+            Arc::new(groups()),
+            Arc::new(names.clone()),
+            NpcVids::default(),
+        )
+        .with_clips(Arc::new(clips));
+        let (stood, count) = respawner
+            .respawn(
+                (&region(1), &cells),
+                &regen,
+                0,
+                &mut Script::new(&[0, 0, 0]),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        let seconds = stood[0].attack_s().unwrap();
+        assert!((seconds - 0.933_333).abs() < 1e-5, "{seconds}");
+        let mut bare = Respawner::new(
+            Arc::new(protos),
+            Arc::new(groups()),
+            Arc::new(names),
+            NpcVids::default(),
+        );
+        let (stood, _) = bare
+            .respawn(
+                (&region(1), &cells),
+                &regen,
+                0,
+                &mut Script::new(&[0, 0, 0]),
+            )
+            .unwrap();
+        assert_eq!(stood[0].attack_s(), None);
+    }
+
     fn respawner(vids: NpcVids) -> Respawner {
         Respawner::new(
             Arc::new(protos()),
@@ -1874,5 +2043,74 @@ mod tests {
             respawner.respawn((&region(1), &cells), &one, 0, &mut dice),
             Err(NpcVidsExhausted)
         );
+    }
+
+    /// `spawn_stone_group` of group 500 stands its three sons around the stone, each
+    /// linked to it, shown with the spawn motion and following no one; an unknown group
+    /// stands nothing and spends no VID.
+    #[test]
+    fn a_stone_group_links_its_sons_to_the_stone() {
+        let cells = cells(&[]);
+        let mut respawner = respawner(NpcVids::starting_at(FIRST_NPC_VID + 3));
+        // Three sons: each draws its point (x, y), its facing, and the next box's
+        // spread (four draws), the last son's box unused.
+        let mut dice = Script::new(&[0; 21]);
+        let stone = 0x9000_0000;
+        let stood = respawner
+            .spawn_stone_group(
+                (&region(1), &cells),
+                500,
+                stone,
+                (10_100, 20_100, 10_300, 20_300),
+                &mut dice,
+            )
+            .unwrap();
+        assert_eq!(stood.len(), 3);
+        let vids: Vec<u32> = stood.iter().map(|n| n.vid).collect();
+        assert_eq!(
+            vids,
+            [FIRST_NPC_VID + 3, FIRST_NPC_VID + 4, FIRST_NPC_VID + 5]
+        );
+        assert!(stood.iter().all(|n| {
+            n.stone == Some(stone)
+                && n.leader.is_none()
+                && n.affect_flags[0] & (1 << (AFF_SPAWN - 1)) != 0
+        }));
+        let mut dice = Script::new(&[]);
+        let stood = respawner
+            .spawn_stone_group(
+                (&region(1), &cells),
+                999,
+                stone,
+                (10_100, 20_100, 10_300, 20_300),
+                &mut dice,
+            )
+            .unwrap();
+        assert!(stood.is_empty());
+        assert_eq!(dice.left(), 0);
+    }
+
+    /// A failed member keeps the sons that stood (`continue` past index 0): group 502's
+    /// middle member has no proto, and the two 102s still stand, linked to the stone.
+    #[test]
+    fn a_stone_group_keeps_the_sons_past_a_failed_member() {
+        let cells = cells(&[]);
+        let mut respawner = respawner(NpcVids::starting_at(FIRST_NPC_VID));
+        let mut dice = Script::new(&[0; 21]);
+        let stone = 0x9000_0000;
+        let stood = respawner
+            .spawn_stone_group(
+                (&region(1), &cells),
+                502,
+                stone,
+                (10_100, 20_100, 10_300, 20_300),
+                &mut dice,
+            )
+            .unwrap();
+        assert_eq!(stood.len(), 2);
+        assert!(stood
+            .iter()
+            .all(|n| n.vnum == 102 && n.stone == Some(stone)));
+        assert_eq!(dice.left(), 7);
     }
 }

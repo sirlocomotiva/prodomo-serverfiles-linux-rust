@@ -24,6 +24,7 @@
 //! Everything here runs on the game thread only (ADR-0002).
 
 use common::vid::Vid;
+use gamedata::mob_proto::{AIFLAG_REVIVE, CHAR_TYPE_MONSTER};
 use world::character::number;
 
 use super::GameState;
@@ -126,6 +127,35 @@ impl GameState {
                 self.update_aggr_point(*member, victim, super::fight::AggroDamage::Special, share);
             }
         }
+    }
+
+    /// `HasReviverInParty` of `mob` (`G/char.cpp:8530-8544`): false past no party or a
+    /// party of one; else each living monster member but itself that carries
+    /// `AIFLAG_REVIVE` draws `number(1, 100) <= bRevivePoint`, in map order (legacy
+    /// walks the member map by PID — V1). The walk runs past a hit, as legacy's does.
+    pub(super) fn has_reviver_in_party(&mut self, mob: u32) -> bool {
+        let party = self.party_of(mob);
+        if party.len() <= 1 {
+            return false;
+        }
+        let mut found = false;
+        for member in party {
+            if member == mob {
+                continue;
+            }
+            let Some(point) = self.npc_by_vid(member).and_then(|npc| {
+                (npc.char_type == CHAR_TYPE_MONSTER
+                    && !npc.dead
+                    && npc.ai_flags & AIFLAG_REVIVE != 0)
+                    .then_some(npc.fight.revive_point)
+            }) else {
+                continue;
+            };
+            if number(&mut self.dice, 1, 100) <= i32::from(point) {
+                found = true;
+            }
+        }
+        found
     }
 
     /// `Follow` of the NPC under `leader` to `min_distance`: the give-up never fires for
@@ -369,5 +399,52 @@ mod tests {
         );
         let lone = world.npc_by_vid(LONE).expect("the lone stands");
         assert_eq!((lone.x, lone.y), FAR, "the lone monster does not walk");
+    }
+
+    /// A living revive-flagged follower whose draw passes revives the master; a failing
+    /// draw finds none (`G/char.cpp:8501-8544`). Point 100 always passes, 0 never does.
+    #[test]
+    fn a_passing_revive_draw_finds_the_reviver_and_a_failing_one_finds_none() {
+        use gamedata::mob_proto::AIFLAG_REVIVE;
+        let (_clock, mut world, _inbox) = a_party(true);
+        let follower = world.npc_mut(FOLLOWER).expect("the follower stands");
+        follower.ai_flags |= AIFLAG_REVIVE;
+        follower.fight.revive_point = 100;
+        assert!(world.has_reviver_in_party(MASTER));
+        world
+            .npc_mut(FOLLOWER)
+            .expect("the follower stands")
+            .fight
+            .revive_point = 0;
+        assert!(!world.has_reviver_in_party(MASTER));
+    }
+
+    /// No reviver past no party, a dead reviver, an unflagged member or a stone: the lone
+    /// monster, the flagged-but-dead follower, the live-but-unflagged follower and a
+    /// flagged stone member all read none.
+    #[test]
+    fn the_search_skips_the_lone_the_dead_the_unflagged_and_a_stone() {
+        use gamedata::mob_proto::{AIFLAG_REVIVE, CHAR_TYPE_STONE};
+        let (_clock, mut world, _inbox) = a_party(true);
+        assert!(!world.has_reviver_in_party(LONE), "no party reads none");
+        let follower = world.npc_mut(FOLLOWER).expect("the follower stands");
+        follower.ai_flags |= AIFLAG_REVIVE;
+        follower.fight.revive_point = 100;
+        follower.dead = true;
+        assert!(
+            !world.has_reviver_in_party(MASTER),
+            "a dead reviver reads none"
+        );
+        let follower = world.npc_mut(FOLLOWER).expect("the follower stands");
+        follower.dead = false;
+        follower.ai_flags &= !AIFLAG_REVIVE;
+        assert!(
+            !world.has_reviver_in_party(MASTER),
+            "an unflagged member reads none"
+        );
+        let follower = world.npc_mut(FOLLOWER).expect("the follower stands");
+        follower.ai_flags |= AIFLAG_REVIVE;
+        follower.char_type = CHAR_TYPE_STONE;
+        assert!(!world.has_reviver_in_party(MASTER), "a stone reads none");
     }
 }
