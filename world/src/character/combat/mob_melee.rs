@@ -117,7 +117,7 @@ pub fn strike_pc(dice: &mut dyn Dice, striker: MobStriker<'_>, victim: PcVictim<
         };
     }
     let (damage, flag) = pc_chances(dice, striker.npc, victim.points, damage, &mut effects);
-    let damage = pc_bonuses(victim.points, damage);
+    let damage = pc_bonuses(striker.npc, victim.points, damage);
     if victim.down {
         return PcStrike {
             effects,
@@ -328,10 +328,16 @@ fn pc_chances(
 
 /// `Damage`'s bonuses on a player victim: the attacker's hit bonus, the victim's defend
 /// bonus with its combat resist at 90 % hit points, and the mall defence. Held at 0 (B28).
-fn pc_bonuses(victim: &Points, damage: i32) -> i32 {
+fn pc_bonuses(mob: &Npc, victim: &Points, damage: i32) -> i32 {
     let mut damage = damage;
-    // A monster's `POINT_NORMAL_HIT_DAMAGE_BONUS` is always 0: no proto column or apply
-    // gives it.
+    // `ApplyPoint` gives a monster 0: only a worn item's `NORMAL_HIT_DAMAGE_BONUS` could
+    // set it, and monsters wear nothing.
+    let hit = mob.fight.point(point::POINT_NORMAL_HIT_DAMAGE_BONUS);
+    if hit != 0 {
+        damage = damage
+            .wrapping_mul(100_i32.wrapping_add(hit))
+            .wrapping_div(100);
+    }
     let defend = victim
         .get_point(point::POINT_NORMAL_HIT_DEFEND_BONUS)
         .min(99);
@@ -1044,5 +1050,25 @@ mod tests {
             let mob = monster(&proto, 1 << 3, 0);
             assert_eq!(mob_reach(&mob), reach, "range {range}");
         }
+    }
+
+    #[test]
+    fn a_monsters_hit_bonus_scales_before_the_defend_bonus() {
+        // Roll 59 on 406 gives 193, less Alpha's 168 defence; a 10 % hit bonus scales
+        // the 25 first, then the defend bonus halves the scaled sum.
+        let proto = wind_proto();
+        let mut mob = monster(&proto, 1 << 3, 0);
+        mob.fight.add(point::POINT_NORMAL_HIT_DAMAGE_BONUS, 10);
+        let mut points = alpha();
+        points.set_point(point::POINT_NORMAL_HIT_DEFEND_BONUS, 50);
+        let mut dice = Script::new(&[0]);
+        let strike = hit(&mut dice, &mob, &points, false);
+        assert_eq!(
+            strike.end,
+            PcHitEnd::Landed {
+                damage: (193 - 168) * 110 / 100 * 50 / 100,
+                flag: 1
+            }
+        );
     }
 }

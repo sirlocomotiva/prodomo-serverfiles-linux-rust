@@ -7338,9 +7338,9 @@ fn read_tick_events(
 }
 
 /// Drop the heal ticks from a drained window: a lone `Point(hp, _)` is a tick and folds
-/// into `hp_now`; an HP point the recovery point follows is a potion pair and is kept, with a
-/// heal tick between the halves folded too (ledger 229l). A 700 ms window holds at most one
-/// pair (ticks are a second apart), and it is returned with the pool before it, so the caller
+/// into `hp_now`; an HP point the recovery point follows is a potion pair and is kept, with
+/// a heal tick ahead of the pair folded first. A 700 ms window holds at most one pair
+/// (ticks are a second apart), and it is returned with the pool before it, so the caller
 /// can tell the pair's step from the heals it builds on.
 fn without_heal_ticks(
     seen: &[Seen],
@@ -7358,18 +7358,20 @@ fn without_heal_ticks(
     };
     while at < seen.len() {
         match (point(at), point(at + 1), point(at + 2)) {
-            // A heal tick between the potion's halves: fold it, keep the pair.
-            (Some((kind, hp_value)), Some((hp2, heal)), Some((rec, _)))
+            // A heal tick, then the potion's pair: fold the tick, keep the pair on top of
+            // it. The heal pulse runs before the next potion pulse, so its HP record
+            // lands first; the pair's step builds on the healed pool.
+            (Some((kind, tick)), Some((hp2, hp_value)), Some((rec, _)))
                 if kind == hp && hp2 == hp && rec == recovery =>
             {
+                assert!(
+                    is_heal_step(*hp_now, tick, max_hp),
+                    "the tick before the pair: {tick} from {hp_now}"
+                );
+                *hp_now = tick;
                 assert!(pair_base.replace(*hp_now).is_none(), "one pair per window");
                 *hp_now = hp_value;
-                assert!(
-                    is_heal_step(*hp_now, heal, max_hp),
-                    "a heal tick between the halves: {heal} from {hp_now}"
-                );
-                *hp_now = heal;
-                kept.push(seen[at].clone());
+                kept.push(seen[at + 1].clone());
                 kept.push(seen[at + 2].clone());
                 at += 3;
             }
@@ -8669,10 +8671,13 @@ fn a_potion_drunk_inside_the_window_ticks_on_the_entry_phase() {
     );
 
     // Given: Alpha, at 500 hit points, enters, and the revive's five seconds run from the entry.
-    let entered_at = std::time::Instant::now();
+    let started_at = std::time::Instant::now();
     let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
     let add = enter_game_burst(&mut alpha);
     let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    // The revive's five seconds run from the entry's end, which is when the server started
+    // the event, not from the load's start: the clock starts here.
+    let entered_at = std::time::Instant::now();
     Server::write_console(&console, "item give Alpha 27001 2");
     server.wait_for("id 100000000; the client has it");
     assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 27_001, 2));
@@ -8683,7 +8688,7 @@ fn a_potion_drunk_inside_the_window_ticks_on_the_entry_phase() {
     // (`StartAffectEvent` returns when one runs, `G/char_affect.cpp:238`). The 1.2 s include
     // the load, so the drink lands just past the tick at 25 pulses on a fast machine and just
     // before it on a slow one: the first step may already be in this window (ledger 229l).
-    std::thread::sleep(Duration::from_millis(1200).saturating_sub(entered_at.elapsed()));
+    std::thread::sleep(Duration::from_millis(1200).saturating_sub(started_at.elapsed()));
     assert!(
         entered_at.elapsed() < Duration::from_millis(4_500),
         "the drink is inside the window"

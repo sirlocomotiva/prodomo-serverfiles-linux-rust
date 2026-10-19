@@ -115,13 +115,16 @@ pub const BATTLE_TYPE: &[&str] = &[
     "SUPER_TANKER",
 ];
 
-/// `BATTLE_TYPE_MELEE` (`common/length.h:484-493`): the melee family is 0, 3..=7; RANGE (1)
-/// and MAGIC (2) stay passive (V19a).
+/// `BATTLE_TYPE_MELEE` (`common/length.h:484-493`): the attack-melee set is 0, 4..=7;
+/// `SPECIAL` (3) chases but its `Attack` is `BATTLE_NONE`, and RANGE (1) and MAGIC (2) stay
+/// passive (V19a).
 pub const BATTLE_TYPE_MELEE: u8 = 0;
 /// `BATTLE_TYPE_RANGE`.
 pub const BATTLE_TYPE_RANGE: u8 = 1;
 /// `BATTLE_TYPE_MAGIC`.
 pub const BATTLE_TYPE_MAGIC: u8 = 2;
+/// `BATTLE_TYPE_SPECIAL`: chased and swung at, but never damaged (`G/char_battle.cpp:259-279`).
+pub const BATTLE_TYPE_SPECIAL: u8 = 3;
 
 /// `MOB_RANK_BOSS` (`common/length.h:455-463`): a chasing boss refollows one time in four.
 pub const MOB_RANK_BOSS: u8 = 4;

@@ -16,9 +16,9 @@
 //! # Divergences
 //!
 //! - **RANGE and MAGIC stay passive (V19a).** They never begin a fight and are never chased
-//!   after; only the melee family (`MELEE`, `SPECIAL`, `POWER`, `TANKER`, `SUPER_POWER`,
-//!   `SUPER_TANKER`)
-//!   fights back.
+//!   after; only the melee family (`MELEE`, `POWER`, `TANKER`, `SUPER_POWER`, `SUPER_TANKER`)
+//!   damages. `SPECIAL` begins and chases but its `Attack` is `BATTLE_NONE`, as legacy's
+//!   switch answers it.
 //! - **No aggro or damage map (V19b).**
 //! - **Every monster fights alone (V19c).** `SetLastAttacked` stamps the monster itself, and
 //!   the re-search has no party or leader arm.
@@ -108,7 +108,8 @@ pub(super) struct VictimState {
     move_speed: f32,
 }
 
-/// The melee family, on a monster: RANGE and MAGIC stay passive (V19a).
+/// The melee family, on a monster: RANGE and MAGIC stay passive (V19a). `SPECIAL` begins
+/// and chases here; its swing blanks in [`super::mob_strike`].
 pub(super) fn fights_back(npc: &world::npc::Npc) -> bool {
     npc.char_type == CHAR_TYPE_MONSTER
         && npc.fight.battle_type != BATTLE_TYPE_RANGE
@@ -913,6 +914,9 @@ mod tests {
         hit(&mut world, 1, ME);
         assert!(world.move_to(1, SPOT.0 + 1000, SPOT.1));
         drained(&mut alpha);
+        // The change of position draws its turns, and the world's dice is seeded per
+        // process: pin it so the chase lands in the same place every run.
+        world.dice = world::character::Pcg32::new(0, 0);
         world.process_pulse(P0 + 1);
         let records = drained(&mut alpha);
         let chase = records

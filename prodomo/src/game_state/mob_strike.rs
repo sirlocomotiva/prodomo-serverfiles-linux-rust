@@ -6,8 +6,10 @@
 use std::time::Duration;
 
 use common::vid::Vid;
+use gamedata::mob_proto::BATTLE_TYPE_SPECIAL;
 use protocol::gc_nested::GcDamageInfo;
 use protocol::gc_vid::GcSpecialEffect;
+use tracing::warn;
 use world::character::{mob_reach, strike_pc, MobStriker, PcHitEnd, PcStrike, PcVictim};
 
 use super::death::Attacker;
@@ -26,6 +28,15 @@ impl GameState {
         }
         // The chat is drawn before the reach test (`:310-316`).
         self.monster_chat_attack(mob);
+        // `SPECIAL` is not in `Attack`'s melee list: the switch's `default` logs and
+        // answers `BATTLE_NONE`, past the chat and before any reach test (`:259-279`).
+        if self
+            .npc_by_vid(mob)
+            .is_some_and(|npc| npc.fight.battle_type == BATTLE_TYPE_SPECIAL)
+        {
+            warn!(mob, "unhandled battle type 3");
+            return false;
+        }
         let Some(target) = self.victim_state(victim) else {
             return false;
         };
@@ -236,6 +247,7 @@ mod tests {
     use common::point_slot as point;
     use common::vid::Vid;
     use gamedata::mob_proto::BATTLE_TYPE_MELEE;
+    use gamedata::mob_proto::BATTLE_TYPE_SPECIAL;
     use gamedata::server_attr::{
         CellBlock, SectreeGrid, ServerAttr, ATTR_BANPK, CELL_SIZE, SECTREE_CELLS,
     };
@@ -467,6 +479,41 @@ mod tests {
                 .any(|record| record[0] == HEADER_GC_DAMAGE_INFO.value()),
             "no swing from a BANPK cell"
         );
+    }
+
+    /// A `SPECIAL` monster's swing blanks: the chat is drawn, then `Attack`'s switch
+    /// answers `BATTLE_NONE` with no claim, no hit and no stamps.
+    #[test]
+    fn a_special_monsters_swing_blanks() {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let npc = a_fighter(ME, 406, BATTLE_TYPE_SPECIAL, (175, 2000), 0, SPOT, 10_000);
+        let mut world = stand_field(&clock, vec![npc], open_cells(), true);
+        let mut alpha = enter(&mut world, 1, NEAR, 12_345);
+        world.start_pc_recovery(Vid::new(1));
+        world.process_pulse(P0);
+        drained(&mut alpha);
+        let seed = quiet_seed();
+        world.dice = Pcg32::new(seed, 0);
+        world.begin_fight(ME, Vid::new(1));
+        world.process_pulse(P0 + 1);
+        assert!(
+            drained(&mut alpha).is_empty(),
+            "no record from a blank swing"
+        );
+        let mut expect = Pcg32::new(seed, 0);
+        let _chat = number(&mut expect, 0, 60);
+        assert_eq!(world.dice, expect, "the chat draw only");
+        assert!(
+            world
+                .npc_combat
+                .get(&ME)
+                .and_then(|combat| combat.last_attack_ms)
+                .is_none(),
+            "no attack stamp"
+        );
+        let mind = world.minds.get(ME).unwrap();
+        assert_eq!((mind.state, mind.duration), (Fsm::Battle, 12));
     }
 
     /// The swing on a stunned player kills it with the monster as killer (G24).

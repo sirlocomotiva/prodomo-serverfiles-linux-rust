@@ -29953,3 +29953,116 @@ No crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
 All counts are out of 1645 rows.
 
 No ADR changed. No owner question added.
+
+## 229l-followup. The entry-phase clock, the healer's fold, the attacker's hit bonus, SPECIAL's blank swing, and the two carried mutants' kills
+
+Five fixes on the 229l tree, each re-derived from the legacy source rather than taken on an
+advisory's word, and the two 229k survivors killed under P3a/P3b per the mutation rules. `G/`
+below means `server/server/game/`.
+
+### 229l-followup.1 What changed
+
+- **The entry-phase clock starts at the entry's end.** `a_potion_drunk_inside_the_window_ticks_on_the_entry_phase`
+  started its 4.5 s window clock before `load_character`, but the server starts the revive event
+  when the entry burst is written, after the load. The drink's 1.2 s still counts from the load's
+  start (it must land near the tick at 25 pulses); only the window assertion moved to the entry's
+  end (`prodomo/tests/parity.rs`).
+- **The healer's fold reads tick-then-pair.** `without_heal_ticks`' triple arm treated
+  `[HP, HP, REC]` as the pair's halves with a heal between them, validating the pair's HP as a
+  heal step from the tick. The pulses order it the other way: `process_pulse` runs the affect
+  events before the regen events, so a heal tick's HP lands ahead of the next potion pulse's
+  pair, and the pair's step builds on the healed pool. The arm now folds the first HP as the
+  tick and keeps the other two as the pair. The arm is dead in practice (a 700 ms window never
+  holds a heal pulse and the potion pulse 25 pulses later; `read_tick_events` folds the
+  cross-window case), but the old arm would have panicked had it fired
+  (`prodomo/tests/parity.rs`).
+- **The attacker's hit bonus scales first.** `pc_bonuses` dropped the
+  `POINT_NORMAL_HIT_DAMAGE_BONUS` arm as always-0 for a monster. `ComputePoints` runs its wear
+  and set-bonus loops ungated, so a worn item's `APPLY_NORMAL_HIT_DAMAGE_BONUS` reaches a
+  monster's points (`G/char.cpp:2862-3120`, `:4977-5037`); monsters wear nothing today, but the
+  arm is one read and matches `Damage`'s order exactly
+  (`world/src/character/combat/mob_melee.rs`). Pinned by
+  `a_monsters_hit_bonus_scales_before_the_defend_bonus`.
+- **`SPECIAL` swings blank.** `Attack`'s `bType == 0` switch melees for `MELEE`, `POWER`,
+  `TANKER`, `SUPER_POWER` and `SUPER_TANKER`; `SPECIAL` falls into `default`, which logs
+  `sys_err` and answers `BATTLE_NONE` past the attack chat and before any reach test
+  (`G/char_battle.cpp:259-279`), so no claim, no victim `BeginFight` and no stamps follow
+  (`:299-328`). `mob_attack` now warns and returns false for `BATTLE_TYPE_SPECIAL` (new const
+  in `gamedata/src/mob_proto.rs`) right after the chat; `Battle` answers with the failed-attack
+  wait as legacy does (`G/char_state.cpp:1173-1174`). `fights_back` still begins and chases a
+  `SPECIAL` monster, since neither `BeginFight` nor `GotoNearTarget` gates on the type. No
+  `(SPECIAL, MONSTER)` proto exists, so nothing live changes; V19a's wording now names the
+  attack-melee set. Pinned by `a_special_monsters_swing_blanks`, which also asserts the chat is
+  the swing's only dice draw.
+- **The G9 chase test pins its dice.** `a_victim_beyond_the_reach_is_chased_with_a_wait_move_to_nine_tenths`
+  failed about one run in four on the 229l tree too: the world's dice is seeded per process
+  (`game_state.rs:502`) and the change of attack position draws its turns, so the chase target
+  lands up to a few pixels off. The test now pins the seed before the pulse
+  (`prodomo/src/game_state/mob_battle.rs`).
+
+### 229l-followup.2 Audited, no change
+
+- **The element arm's rounding.** The live `BONUS_PCT` line multiplies the wrapped `int`
+  product by the `float` percent, divides by the `int` 10000 and truncates
+  (`G/battle.cpp:417-424`); the Rewrite does the same three roundings through `i32_to_f32`
+  (exact single-rounding decomposition), `point_pct` and truncating `f32_to_i32`. The only gap
+  is `GetPointPct`'s double division narrowed to `float` (`G/char.cpp:3661-3663`) against the
+  Rewrite's `f32` division, a possible 1 ulp at gameplay magnitudes, and the saturate-vs-`UB`
+  corner past 2^31 the game cannot reach. B27's recorded scope decision stands.
+- **The melee `DEF_BONUS` is the victim's.** Both the Rewrite's arms read the victim's
+  `POINT_DEF_GRADE` and `POINT_DEF_BONUS`, matching `CalcMeleeDamage` (`G/battle.cpp:584-585`);
+  the attacker's-`DEF_BONUS` line belongs to the arrow function (`:709`), which 229l does not
+  port. The marriage defence beside it is 0 with no marriage system ported (`G/char.cpp:8063`).
+- **`race_to_job` and the bonus order.** Races 0..=7 mod 4 onto the four jobs exactly as
+  `RaceToJob` maps them (`G/input_login.cpp:354-395`), and the Rewrite adds the human share,
+  the job share, then the element, as `CalcAttBonus` does (`G/battle.cpp:340-456`).
+- **The stamps.** `battle_hit` never returns `BATTLE_NONE` past the damage roll, so every
+  swing through `Damage` stamps the attacker's attack time and the victim's move time
+  (`G/battle.cpp:757-817`; `G/char_battle.cpp:314-328`); blocked, down and zero-damage hits
+  stamp too. Both sides' `BATTLE_NONE` paths (attackable, reach, `SPECIAL`) return before the
+  stamps. The mob's own move time has no reader.
+- **`distances are exact.** `distance_approx` takes the absolute values itself, and the
+  `saturating_sub` callers pass `i32`, whose saturation keeps the sign; the octagonal form
+  matches the macro (`G/utils.h:17-40`).
+
+### 229l-followup.3 The carried mutants die
+
+Applied each to the pristine `prodomo/src/main.rs` (checksum `8231430f`), asserted the text
+changed in executable code, ran its scenario, and restored by checksum.
+
+- `dm_restart_gold_unstored` (the restart's `gold` replaced by 0) dies under P3a:
+  `a_player_a_monster_killed_restarts_now_and_the_gold_is_stored` fails on
+  `(SELECT gold FROM player WHERE name = 'Alpha') = 100000`, which never holds.
+- `dm_boot_recall_unwired` (`.with_recall(...)` dropped) dies under P3b:
+  `a_player_a_monster_killed_restarts_in_town_and_is_warped_to_the_recall_point` fails on `50
+  hit points in town`, reading the town record where the warp's point change should be.
+
+Both kills are semantic (assertion failures, not compile errors). The scratch query returns
+nothing after the runs.
+
+### 229l-followup.4 Receipt
+
+The checks below ran on the final tree, one at a time, with `/usr/bin` first on `PATH`.
+
+| check | result |
+|---|---|
+| fmt check (`/usr/bin/cargo-fmt`) | clean |
+| build, workspace, locked, offline | clean |
+| clippy, workspace, all targets, `-D warnings` | clean |
+| `common` lib tests | 99 passed, 0 failed |
+| `gamedata` lib tests | 408 passed, 0 failed |
+| `world` lib tests | 458 passed, 0 failed |
+| `prodomo` lib tests | 873 passed, 0 failed |
+| full `--all-targets` gate without `DATABASE_URL` | 3543 passed, 0 failed |
+| parity potion tests, `DATABASE_URL` set | 3 passed, 0 failed |
+| parity P3a/P3b, `DATABASE_URL` set | 2 passed, 0 failed |
+| doc tests, workspace | 1 passed, 0 failed |
+| `cargo doc`, workspace, `-D warnings` | clean |
+
+The tests grew by 2 over 229l: 1 in `world` (`mob_melee`), 1 in `prodomo` lib (`mob_strike`).
+The whole parity suite was not re-run; only the scenarios covering the touched helpers (the
+three potion tests for `without_heal_ticks`, P3a/P3b for the mutant kills) ran with the store.
+
+No crate was added, and `Cargo.toml` and `Cargo.lock` are unchanged.
+
+No ADR changed. No owner question added. B27 stays provisional.
