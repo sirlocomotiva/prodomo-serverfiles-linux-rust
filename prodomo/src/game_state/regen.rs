@@ -134,6 +134,9 @@ pub(super) enum Due {
         vid: u32,
         /// The ticks left, counting the one this run fires.
         count: u32,
+        /// The killer the poison carries (`info->attacker_pid`, `G/char_resist.cpp:211`),
+        /// 0 for a monster.
+        killer: u32,
     },
 }
 
@@ -272,7 +275,7 @@ impl GameState {
                 Due::PcStun(vid) => self.pc_stun_event(vid),
                 Due::PcDead(vid) => self.pc_dead_event(vid),
                 Due::PcRecovery(vid) => self.pc_recovery_event(vid),
-                Due::PcPoison { vid, count } => self.pc_poison_event(vid, count),
+                Due::PcPoison { vid, count, killer } => self.pc_poison_event(vid, count, killer),
             }
         }
     }

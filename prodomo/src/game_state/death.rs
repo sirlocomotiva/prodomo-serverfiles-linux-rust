@@ -154,8 +154,9 @@ pub(super) struct PcCombat {
     dead_due: Option<u64>,
     /// The Pulse `m_pkRecoveryEvent` is due on.
     recovery_due: Option<u64>,
-    /// The Pulse `m_pkPoisonEvent` is due on, with the ticks it has left.
-    pub(super) poison_due: Option<(u64, u32)>,
+    /// The Pulse `m_pkPoisonEvent` is due on, with the ticks it has left and the killer
+    /// the poison carries (`info->attacker_pid`, `G/char_resist.cpp:211`).
+    pub(super) poison_due: Option<(u64, u32, u32)>,
     /// `m_dwLastDeadTime` (`G/char.cpp:1126`), stamped by `Dead`: `CanSummon` reads it.
     /// `None` is the constructor seed (`now - 180000`), which fails the +180 check the
     /// same way an old stamp does.
@@ -464,9 +465,14 @@ impl GameState {
 
     /// The `DAMAGE_TYPE_POISON` path of [`GameState::damage_pc`] (`:2256-2261`): before
     /// anything else, a tick that would leave no hit points deals all but one. Poison never
-    /// kills by itself, and never stuns. A stunned victim still dies by `Dead` first.
-    pub(super) fn damage_pc_poison(&mut self, victim: Vid, damage: i32) -> bool {
-        self.damage_pc_typed(None, victim, damage, Some(DAMAGE_POISON), true)
+    /// kills by itself, and never stuns. A stunned victim still dies by `Dead` first. The
+    /// poison's killer is the attacker that poisoned it, which a monster has no PID for.
+    pub(super) fn damage_pc_poison(&mut self, victim: Vid, damage: i32, killer: u32) -> bool {
+        let attacker = (killer != 0).then_some(Attacker {
+            vid: Vid::new(killer),
+            pc: true,
+        });
+        self.damage_pc_typed(attacker, victim, damage, Some(DAMAGE_POISON), true)
     }
 
     /// [`GameState::damage_pc`], with `poison` picking the poison clamp.
@@ -523,7 +529,13 @@ impl GameState {
             damage
         };
         if let Some(flag) = shown {
-            self.send_pc_damage_info(victim, flag, damage);
+            // `SendDamagePacket` sends the record to the victim and to the attacker
+            // (`G/char_battle.cpp:1732-1740`); a monster has no desc, so the copy to it
+            // goes nowhere.
+            let attacker = attacker
+                .filter(|attacker| attacker.pc)
+                .map(|attacker| attacker.vid);
+            self.send_pc_damage_info_to(victim, attacker, flag, damage);
         }
         PcDamageHead::Open { hp, damage }
     }
@@ -1109,26 +1121,31 @@ impl GameState {
         let Some(combat) = self.pc_combat.get_mut(&raw) else {
             return;
         };
-        let Some((when, count)) = combat.poison_due.take() else {
+        let Some((when, count, killer)) = combat.poison_due.take() else {
             return;
         };
-        self.regens
-            .due
-            .remove(&(when, Due::PcPoison { vid: raw, count }));
+        self.regens.due.remove(&(
+            when,
+            Due::PcPoison {
+                vid: raw,
+                count,
+                killer,
+            },
+        ));
     }
 
     /// `poison_event` of the player under `vid` (`G/char_resist.cpp:42-76`): the victim's
     /// own slot must still hold this tick, else a re-poison cancelled it. The tick deals
     /// `maxHP * rate / 1000` through the poison path; on death the event ends, else the
-    /// count falls and while any is left the next tick is due 3 seconds on. The attacker
-    /// is `None`: the poison's PID is 0 for a monster, which `FindByPID` never maps
-    /// (`G/char_manager.cpp:109-119`).
-    pub(super) fn pc_poison_event(&mut self, vid: u32, count: u32) {
+    /// count falls and while any is left the next tick is due 3 seconds on. The poison
+    /// carries its attacker (`info->attacker_pid`, `:211`), which `FindByPID` maps only
+    /// while the player is online (`G/char_manager.cpp:109-119`); a monster's is 0.
+    pub(super) fn pc_poison_event(&mut self, vid: u32, count: u32, killer: u32) {
         let held = self
             .pc_combat
             .get(&vid)
             .and_then(|combat| combat.poison_due);
-        let Some((_, held_count)) = held else {
+        let Some((_, held_count, _)) = held else {
             return;
         };
         if held_count != count {
@@ -1147,7 +1164,7 @@ impl GameState {
             .max_hp()
             .saturating_mul(pc_poison_rate(&points))
             .wrapping_div(1000);
-        if self.damage_pc_poison(Vid::new(vid), damage) {
+        if self.damage_pc_poison(Vid::new(vid), damage, killer) {
             self.cancel_pc_poison(Vid::new(vid));
             return;
         }
@@ -1160,13 +1177,20 @@ impl GameState {
         let old = self
             .pc_combat
             .get_mut(&vid)
-            .and_then(|combat| combat.poison_due.replace((when, next)));
-        if let Some((at, _)) = old {
-            self.regens.due.remove(&(at, Due::PcPoison { vid, count }));
+            .and_then(|combat| combat.poison_due.replace((when, next, killer)));
+        if let Some((at, _, _)) = old {
+            self.regens
+                .due
+                .remove(&(at, Due::PcPoison { vid, count, killer }));
         }
-        self.regens
-            .due
-            .insert((when, Due::PcPoison { vid, count: next }));
+        self.regens.due.insert((
+            when,
+            Due::PcPoison {
+                vid,
+                count: next,
+                killer,
+            },
+        ));
     }
     /// `SendDamagePacket(ch, 0, DAMAGE_BLOCK)` of the player `victim` claimed by `actor`
     /// (`G/char_battle.cpp:1720-1742`): a player victim and a player claimer are both told.
@@ -3160,7 +3184,7 @@ mod tests {
         let max = field.points(ALPHA).max_hp();
         field.set_hp_sp(ALPHA, max, 100);
         field.quiet();
-        field.world.poison_pc(ALPHA);
+        field.world.poison_pc(ALPHA, None);
         let tick = max * 50 / 1000;
         let mut pulse = P0 + 1;
         for left in (1..=10).rev() {
@@ -3182,7 +3206,7 @@ mod tests {
             .is_some_and(|combat| combat.poison_due.is_none()));
         // The floor: one hit point left, a full tick deals nothing and still lives.
         field.set_hp_sp(ALPHA, 1, 100);
-        field.world.poison_pc(ALPHA);
+        field.world.poison_pc(ALPHA, None);
         field.pulse(field.world.last_pulse + 1);
         let heard = field.heard(ALPHA);
         let infos: Vec<(u8, i32)> = heard
@@ -3195,6 +3219,36 @@ mod tests {
         assert!(!field.world.is_dead(ALPHA.raw()));
     }
 
+    /// A poisoned player's poison carries its attacker (`info->attacker_pid`,
+    /// `G/char_resist.cpp:211`): the poisoner is the killer the tick names, and legacy's
+    /// `SendDamagePacket` tells the attacker of the tick's damage as well as the victim.
+    #[test]
+    fn a_players_poison_names_the_poisoner_and_tells_it_of_the_tick() {
+        use protocol::gc_nested::GcDamageInfo;
+        let mut field = a_field(true);
+        let _alpha = field.join(ALPHA, HERE);
+        let _bravo = field.join(BRAVO, BESIDE);
+        let max = field.points(ALPHA).max_hp();
+        field.set_hp_sp(ALPHA, max, 100);
+        field.quiet();
+        field.world.poison_pc(ALPHA, Some(BRAVO));
+        field.pulse(field.world.last_pulse + 1);
+        let tick = max * 50 / 1000;
+        for vid in [ALPHA, BRAVO] {
+            let heard = field.heard(vid);
+            let infos: Vec<(u8, i32)> = heard
+                .iter()
+                .filter_map(|record| GcDamageInfo::decode(record).ok())
+                .map(|info| (info.flag, info.damage))
+                .collect();
+            assert_eq!(
+                infos,
+                [(DAMAGE_POISON, tick)],
+                "the victim and the poisoner hear the tick"
+            );
+        }
+    }
+
     /// Poison blocks the heal: a poisoned player's recovery sends no point changes.
     #[test]
     fn a_poisoned_player_heals_nothing() {
@@ -3204,7 +3258,7 @@ mod tests {
         let max = field.points(ALPHA).max_hp();
         field.set_hp_sp(ALPHA, max - 50, 50);
         field.quiet();
-        field.world.poison_pc(ALPHA);
+        field.world.poison_pc(ALPHA, None);
         field.quiet();
         field.world.pc_recovery_event(ALPHA.raw());
         let heard = field.heard(ALPHA);

@@ -1,9 +1,8 @@
 # Rewrite status
 
-Last reviewed: 2026-10-21, after ledger section 231 (the PvP player victim takes the hit).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 231 onwards (combat: PvP
-player victims, which unblocks the war maps): 231 has ported `CalcMeleeDamage` on a player
-victim, and the strike path's wiring is next.
+Last reviewed: 2026-10-21, after ledger section 232 (a player's hit on a player).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 233 onwards (combat: the
+death's PvP steps, which unblocks the war maps).
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -34,7 +33,9 @@ not fight back yet. Since 229k a player can die and come back: a lethal hit stun
 seconds later, and it restarts where it lies, in its empire's town or at once for 300000 gold, or
 in town on its own after three minutes. Since 229l a monster fights back: a hit one turns on its attacker (every battle type, 229s), an aggressive one chases a player it sees, its party answers with it (229t), a guard fights its monsters (229w), a stone spawns its sons (229x), a skilling one casts (229u), and a player it kills restarts as 229k proved in memory. Since 229n a kill pays experience: the damage map, `DistributeExp`, the live `GiveExp`, the kill alignment, the quest `kill` dispatch and the kill recovery, with the exp record and the exp orb. Since 229p a kill pays gold (the chance, the multiplier and the branch draws run in legacy's order) and every drop table's draws run. Since 229q (D5) a hitting row creates its item and lays it with the legacy ownership; proved in-memory, since no hosted spawn drops on the owner's data. Since 229o a player can drop gold piles and pick them up. Since 229v/229z a hit lands its poison, stun and slow on either victim, and since 229y the victim's reflect answers. Since 230a a gold steal pays the purse, since 230b a dead monster with a living reviver in its party stands back up, and since 230c a swing holds the monster its clip's seconds. Since 230d/230e a player fights with its melee, arrow and magic skills with the SPLASH walk, and since 230f it ups its skills, holds its self buffs and pays the grandmaster cost. Since 230g it reads its books and trains to grandmaster; since 230h it toggles its combo, charges its dash and hides from monsters; since 230i-230m it parties (invite, roles, heal, warp, exp, unlink, chat); since 230n a guild is made, since 230o it opens its door (invite, accept, join, removal), since 230p it names its grades (rename, re-auth, re-grade, general), since 230q it takes money (offer, charge) and posts (post, refresh, delete), since 230r it ups and casts its skills, since 230s its quests' `guild.*` calls are backed (the bridge test names them, no wire scenario), and since 230t the select list names each slot's linked guild. Since 230w-230y a guild war is declared, refused and accepted, every PC hears the on-war list and an entrant its `WAR_LIST`, a field kill scores, and the end lands: `gwstop` forces the draw the ladder math takes while the over notice still names the score winner, `gwcancel` ends without the math and names the pair to every PC, and the GM level both commands need is read from `gm_grant` at character select. Since 230z a GM's
 `/gwlist` names each live pair and its age. Since 230aa a GM's `/notice` reaches every Channel,
-`/notice_map` its own Channel and map, and `/big_notice` the caller alone. The rest of combat, skills,
+`/notice_map` its own Channel and map, and `/big_notice` the caller alone. Since 232 a player hits a
+player of another empire: the swing takes the victim's hit points with legacy's damage, the claim
+follows the hit, and a hit on a player of his own empire is refused. The rest of combat, skills,
 parties, guilds and the rest of step 4 are not ported yet. The two-process layout (a `game-server` and a `db-server`
 talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177; sections 1-175
 record how it was built and stay as history. Since section 178 the one `prodomo` binary reads

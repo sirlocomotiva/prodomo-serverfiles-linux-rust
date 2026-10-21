@@ -77,6 +77,7 @@ mod motion;
 mod party;
 mod pc_heal;
 pub(crate) mod pc_skill;
+mod pvp;
 mod quests;
 mod regen;
 mod reward;

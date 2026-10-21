@@ -34,17 +34,13 @@ use common::cfloat::{f32_to_i32, i32_to_f32};
 use common::point_slot as point;
 use gamedata::mob_proto::{AIFLAG_DEATHBLOW, CHAR_TYPE_MONSTER};
 
-use super::melee::{DAMAGE_CRITICAL, DAMAGE_NORMAL, DAMAGE_PENETRATE, SE_CRITICAL, SE_PENETRATE};
+use super::melee::{
+    AttackAffect, AFF_POISON_WORD, AFF_SLOW_WORD, AFF_STUN_WORD, DAMAGE_CRITICAL, DAMAGE_NORMAL,
+    DAMAGE_PENETRATE, SE_CRITICAL, SE_PENETRATE,
+};
 use super::{attack_rating, AttackRatingInput};
 use crate::character::{number, race_to_job, Dice, Points};
 use crate::npc::Npc;
-
-/// `AFF_POISON` (`G/affect.h:214`): bit 4, the first word's `0x08`.
-const AFF_POISON_WORD: u32 = 1 << 3;
-/// `AFF_SLOW` (`G/affect.h:215`): bit 5.
-const AFF_SLOW_WORD: u32 = 1 << 4;
-/// `AFF_STUN` (`G/affect.h:216`): bit 6.
-const AFF_STUN_WORD: u32 = 1 << 5;
 
 /// The monster that swings, and whether `SetBerserk(true)` holds.
 #[derive(Debug, Clone, Copy)]
@@ -76,24 +72,11 @@ pub struct PcStrike {
     /// How the hit ended.
     pub end: PcHitEnd,
     /// What `NormalAttackAffect` landed: the poison, the stun and the slow.
-    pub affect: MobAttackAffect,
+    pub affect: AttackAffect,
     /// The pre-bonus damage `Damage` reflects a share of (`:1981-1983`):
     /// `CalcMeleeDamage` through `attMul`, before block. `None` on the
     /// paths that never reflect (shot, skill).
     pub reflected_base: Option<i32>,
-}
-
-/// What `NormalAttackAffect` (`G/battle.cpp:734-758`) landed on the player: each arm
-/// passed its draws, and the caller applies it. The poison still needs the poison
-/// event's gate (no running poison event), which the caller owns.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct MobAttackAffect {
-    /// `AttackedByPoison` passed the poison and level draws.
-    pub poisoned: bool,
-    /// The stun passed its draw and no `IMMUNE_STUN` refused it.
-    pub stunned: bool,
-    /// The slow passed its draw and no `IMMUNE_SLOW` refused it.
-    pub slowed: bool,
 }
 
 /// `GetPoisonDamageRate` of a player (`G/char_resist.cpp:16-29`): 50 per mille, less
@@ -199,7 +182,7 @@ pub fn strike_npc_by_npc(
     Strike {
         events,
         struck: Struck::StunnedByGuard,
-        affect: super::melee::NpcAttackAffect::default(),
+        affect: super::melee::AttackAffect::default(),
         // A guard's swing stuns with no hit-point change and no steal arm.
         stolen_gold: 0,
     }
@@ -332,7 +315,7 @@ pub fn skill_damage_pc(
         return PcStrike {
             effects,
             end: PcHitEnd::Down,
-            affect: MobAttackAffect::default(),
+            affect: AttackAffect::default(),
             reflected_base: None,
         };
     }
@@ -344,7 +327,7 @@ pub fn skill_damage_pc(
             damage: damage.max(0),
             flag,
         },
-        affect: MobAttackAffect::default(),
+        affect: AttackAffect::default(),
         reflected_base: None,
     }
 }
@@ -408,7 +391,7 @@ fn magic_damage(
     shot: &PcVictim<'_>,
     damage: i32,
     mut effects: Vec<u8>,
-    affect: MobAttackAffect,
+    affect: AttackAffect,
 ) -> PcStrike {
     let victim = shot.points;
     // `(int)((float)dam * (100 + per + melee) / 100.f + 0.5f)`: the multiply, then the
@@ -489,7 +472,7 @@ fn finish_shot(
     damage: i32,
     flag: u8,
     effects: Vec<u8>,
-    affect: MobAttackAffect,
+    affect: AttackAffect,
 ) -> PcStrike {
     if victim.down {
         return PcStrike {
@@ -764,8 +747,8 @@ fn element_resist_pairs(attack: i32, race_flag: u32, pairs: &[(i32, i32); 6]) ->
 /// and the slow. Each draws only when the monster has the point and the player lacks the
 /// affect; the stun and slow then need no immunity bit, and the poison needs the level
 /// draw. The caller applies what lands, and starts the poison event when the poison does.
-fn mob_attack_affect(dice: &mut dyn Dice, mob: &Npc, victim: &PcVictim<'_>) -> MobAttackAffect {
-    let mut landed = MobAttackAffect::default();
+fn mob_attack_affect(dice: &mut dyn Dice, mob: &Npc, victim: &PcVictim<'_>) -> AttackAffect {
+    let mut landed = AttackAffect::default();
     let poison = mob.fight.point(point::POINT_POISON_PCT);
     if poison != 0 && victim.affect_flags[0] & AFF_POISON_WORD == 0 {
         // `BYTE bPoisonPct`: the low byte; the SungMa halving never fires for a monster.

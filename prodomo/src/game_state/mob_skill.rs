@@ -36,7 +36,7 @@ use protocol::gc_inventory::HEADER_GC_SYNC_POSITION;
 use protocol::gc_position::GcSyncPositionElement;
 use protocol::gc_vid::GcSpecialEffect;
 use world::character::{
-    attack_rating, mob_calc_attack, number, skill_damage_pc, AttackRatingInput, MobAttackAffect,
+    attack_rating, mob_calc_attack, number, skill_damage_pc, AttackAffect, AttackRatingInput,
     MobStriker, PcHitEnd, PcStrike, PcVictim, SE_EFFECT_HEALER,
 };
 use world::npc::Npc;
@@ -796,7 +796,7 @@ impl GameState {
             return PcStrike {
                 effects: Vec::new(),
                 end: PcHitEnd::Blocked,
-                affect: MobAttackAffect::default(),
+                affect: AttackAffect::default(),
                 reflected_base: None,
             };
         };
@@ -804,7 +804,7 @@ impl GameState {
             return PcStrike {
                 effects: Vec::new(),
                 end: PcHitEnd::Blocked,
-                affect: MobAttackAffect::default(),
+                affect: AttackAffect::default(),
                 reflected_base: None,
             };
         };
@@ -812,7 +812,7 @@ impl GameState {
             return PcStrike {
                 effects: Vec::new(),
                 end: PcHitEnd::Blocked,
-                affect: MobAttackAffect::default(),
+                affect: AttackAffect::default(),
                 reflected_base: None,
             };
         };

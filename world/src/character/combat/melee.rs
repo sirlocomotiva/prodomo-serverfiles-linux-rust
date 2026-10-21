@@ -64,11 +64,11 @@ pub const DAMAGE_PENETRATE: u8 = 1 << 4;
 /// `DAMAGE_CRITICAL`.
 pub const DAMAGE_CRITICAL: u8 = 1 << 5;
 /// `AFF_POISON` (`G/affect.h:214`): bit 4, the first word's `0x08`.
-const AFF_POISON_WORD: u32 = 1 << 3;
+pub(super) const AFF_POISON_WORD: u32 = 1 << 3;
 /// `AFF_SLOW` (`G/affect.h:215`): bit 5.
-const AFF_SLOW_WORD: u32 = 1 << 4;
+pub(super) const AFF_SLOW_WORD: u32 = 1 << 4;
 /// `AFF_STUN` (`G/affect.h:216`): bit 6.
-const AFF_STUN_WORD: u32 = 1 << 5;
+pub(super) const AFF_STUN_WORD: u32 = 1 << 5;
 
 /// `MONSTER_CHAT_ATTACKED` (`G/constants.h:11`): the chat a monster may say when it is hit.
 const MONSTER_CHAT_ATTACKED: i32 = 3;
@@ -199,7 +199,7 @@ pub struct Strike {
     /// How it ended.
     pub struck: Struck,
     /// What `NormalAttackAffect` landed: the poison, the stun and the slow.
-    pub affect: NpcAttackAffect,
+    pub affect: AttackAffect,
     /// What the gold steal drew (`G/char_battle.cpp:2080-2092`): 0 when the chance
     /// missed or the point is 0, else `number(1, victim level)`. The caller applies
     /// `ChangeGold` (the cap refusal, the purse, the gold record); the dice order is
@@ -207,11 +207,11 @@ pub struct Strike {
     pub stolen_gold: i32,
 }
 
-/// What `NormalAttackAffect` (`G/battle.cpp:734-758`) landed on the non-player: each arm
+/// What `NormalAttackAffect` (`G/battle.cpp:734-758`) landed on the victim: each arm
 /// passed its draws, and the caller applies it. The poison still needs the poison
 /// event's gates (no running poison event, never poisoned before), which the caller owns.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct NpcAttackAffect {
+pub struct AttackAffect {
     /// `AttackedByPoison` passed the poison and level draws.
     pub poisoned: bool,
     /// The stun passed its draw and no `IMMUNE_STUN` refused it.
@@ -268,7 +268,7 @@ pub fn strike_npc(
         return Strike {
             events,
             struck: Struck::Whiffed,
-            affect: NpcAttackAffect::default(),
+            affect: AttackAffect::default(),
             stolen_gold: 0,
         };
     }
@@ -514,6 +514,25 @@ pub struct PlayerVictim {
     pub resists: [i32; 4],
     /// `GetJob()`, as the index into `JOB_ATTACK_BONUS`.
     pub job: usize,
+    /// The resists against the six weapon kinds, in the order
+    /// [`PlayerVictim::weapon_resists_of`] gives them.
+    pub weapon_resists: [i32; 6],
+}
+
+impl PlayerVictim {
+    /// The resists a player victim holds against the six weapon kinds
+    /// (`G/battle.cpp:775-800`), in the order `calc_melee_damage_on_player` reads them:
+    /// the sword, the two-handed, the dagger, the bell, the fan and the bow.
+    pub fn weapon_resists_of(victim: &Points) -> [i32; 6] {
+        [
+            victim.get_point(point::POINT_RESIST_SWORD),
+            victim.get_point(point::POINT_RESIST_TWOHAND),
+            victim.get_point(point::POINT_RESIST_DAGGER),
+            victim.get_point(point::POINT_RESIST_BELL),
+            victim.get_point(point::POINT_RESIST_FAN),
+            victim.get_point(point::POINT_RESIST_BOW),
+        ]
+    }
 }
 
 /// The attack bonus a player attacker takes from a player victim of each job
@@ -566,14 +585,31 @@ impl MeleeVictim for PlayerVictim {
 }
 
 /// `CalcMeleeDamage` of a player attacker on a player victim (`G/battle.cpp:489-666`):
-/// the same core, with the victim's job bonus and its own defence.
+/// the same core, with the victim's job bonus and its own defence, and then the wielded
+/// weapon's kind resist against the victim (`G/battle.cpp:775-800`).
 pub fn calc_melee_damage_on_player(
     dice: &mut dyn Dice,
     attacker: &Points,
     weapon: Option<&ItemProto>,
     victim: &PlayerVictim,
 ) -> i32 {
-    calc_melee_core(dice, attacker, weapon, victim, false, false)
+    let damage = calc_melee_core(dice, attacker, weapon, victim, false, false);
+    // `battle_hit`'s weapon resist runs after `CalcMeleeDamage`, so after its floor.
+    let Some(weapon) = weapon else {
+        return damage;
+    };
+    let index = match weapon.sub_type {
+        WEAPON_SWORD => 0,
+        WEAPON_TWO_HANDED => 1,
+        WEAPON_DAGGER => 2,
+        WEAPON_BELL => 3,
+        WEAPON_FAN => 4,
+        WEAPON_BOW => 5,
+        _ => return damage,
+    };
+    damage
+        .wrapping_mul(100_i32.wrapping_sub(victim.weapon_resists[index]))
+        .wrapping_div(100)
 }
 
 /// `CalcAttBonus` for a player attacker and a non-player victim.
@@ -625,12 +661,8 @@ pub(crate) fn monster_share(attack: i32, bonus: i32, bonus_pct: i32) -> i32 {
 /// lacks the flag. The plain bow shot runs it between `CalcArrowDamage` and the
 /// `RESIST_BOW` arm (`G/char_battle.cpp:3095-3098`), ahead of any damage.
 #[must_use]
-pub fn normal_attack_affect(
-    dice: &mut dyn Dice,
-    attacker: &Points,
-    victim: &Npc,
-) -> NpcAttackAffect {
-    let mut landed = NpcAttackAffect::default();
+pub fn normal_attack_affect(dice: &mut dyn Dice, attacker: &Points, victim: &Npc) -> AttackAffect {
+    let mut landed = AttackAffect::default();
     let poison = attacker.get_point(point::POINT_POISON_PCT);
     if poison != 0 && victim.affect_flags[0] & AFF_POISON_WORD == 0 {
         // `BYTE bPoisonPct`: the low byte, halved when the map's immune will exceeds the
@@ -1397,6 +1429,7 @@ mod tests {
             def_bonus: 0,
             resists,
             job: 0,
+            weapon_resists: [0; 6],
         };
         let plain = victim(0, [0; 4], 19);
         let bare = calc_melee_damage_on_player(&mut dice, &attacker, weapon, &plain);
@@ -2532,7 +2565,7 @@ mod tests {
         assert_eq!(dice.left(), 0);
         assert_eq!(
             landed,
-            NpcAttackAffect {
+            AttackAffect {
                 poisoned: false,
                 stunned: false,
                 slowed: false,
@@ -2549,7 +2582,7 @@ mod tests {
         let mut dice = Script::new(&[]);
         let landed = normal_attack_affect(&mut dice, &alpha(), &dog());
         assert_eq!(dice.left(), 0);
-        assert_eq!(landed, NpcAttackAffect::default());
+        assert_eq!(landed, AttackAffect::default());
     }
 
     #[test]
@@ -2583,7 +2616,7 @@ mod tests {
         let mut dice = Script::new(&[]);
         let hit = strike_npc(&mut dice, &mut striker, &mut victim, false);
         assert_eq!(hit.struck, Struck::Whiffed);
-        assert_eq!(hit.affect, NpcAttackAffect::default());
+        assert_eq!(hit.affect, AttackAffect::default());
     }
 
     #[test]

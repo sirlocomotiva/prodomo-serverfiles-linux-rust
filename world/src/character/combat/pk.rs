@@ -140,7 +140,14 @@ pub fn pk_eligibility(
     }
 
     let mode_result = match attacker.mode {
-        PkMode::Revenge if attacker.guild_id != target.guild_id => {
+        // `if (pkVictim->GetGuild() && pkVictim->GetGuild() == pkChr->GetGuild()) break;`
+        // (`G/pvp.cpp:472-475`): the same guild refuses the attack, so the revenge arm runs
+        // unless both name one guild.
+        PkMode::Revenge
+            if attacker.guild_id.is_none()
+                || target.guild_id.is_none()
+                || attacker.guild_id != target.guild_id =>
+        {
             if attacker.alignment < 0 && target.alignment >= 0 {
                 Some(allowed(true))
             } else if attacker.alignment >= 0 && target.alignment < 0 {

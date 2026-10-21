@@ -10419,6 +10419,18 @@ const PUNCH_ON_THE_DOG: i32 = 322;
 /// would stand again only after 1000 seconds.
 const DOG_AT_ALPHA: &str = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t101\n";
 
+/// The damage of Alpha's hit on Charlie (ledger 231). Alpha is a level-154 shaman with 17 in
+/// strength and 19 in dexterity, Charlie a level-154 warrior with nothing in his four
+/// attributes. `CalcMeleeDamage` (`G/battle.cpp:489-666`) has no weapon to draw from, so the
+/// damage is exact: the attack rating (`G/battle.cpp:272-297`) reads the attacker's 64 and the
+/// victim's 51 — the victim's level is the attacker's, the legacy's own line — which makes
+/// 0.6935, and the 36 above twice Alpha's level 24, so the attack is 332; Charlie's defence
+/// grade is 154 (`G/char.cpp:2850-2858`), and the difference is the damage.
+const PVP_DAMAGE: i32 = 178;
+/// Charlie's hit points after the hit (ledger 231): his `MAX_HP` of 650, the base of the
+/// warrior row at level 154, less [`PVP_DAMAGE`].
+const PVP_HP_AFTER: i64 = 472;
+
 /// `CG_ATTACK` of type 0 on `vid`, the magic-cube pieces 0.
 fn client_attack(vid: u32) -> Vec<u8> {
     client_attack_typed(0, vid)
@@ -10513,6 +10525,18 @@ impl Keyed {
             if record[0] != GC_PING && !self.timer_record(&record) && !is_stamina_refill(&record) {
                 return Some(record);
             }
+        }
+    }
+
+    /// The next record of a player's hit (ledger 231). The look updates of the arrival and of
+    /// the revive's affect say nothing about the swing and are passed over.
+    fn read_hit(&mut self) -> Vec<u8> {
+        loop {
+            let record = self.read_fight();
+            if record[0] == GC_CHARACTER_UPDATE {
+                continue;
+            }
+            return record;
         }
     }
 
@@ -11025,6 +11049,103 @@ fn an_untargeted_punch_shows_no_number_and_one_beyond_reach_does_nothing() {
 
     alpha.send_record(&client_target(far));
     assert_eq!(alpha.read_game(), target_of(far, 100, DOG_HP, DOG_HP, 0));
+}
+
+/// Ledger 231: a player's hit on a player (`G/battle.cpp:154-230`, `G/char_battle.cpp:1939-2267`).
+///
+/// Alpha of empire 1 hits Charlie of empire 0, who stands on him in the view of both. The
+/// swing is [`PVP_DAMAGE`]: the attack rating makes the attack 332 and Charlie's defence
+/// grade takes 154 of it, and Charlie's hit points fall from 650 to [`PVP_HP_AFTER`]. Alpha is
+/// shown the damage and Charlie's claim; Charlie is shown the damage, his hit points and the
+/// claim.
+#[test]
+fn a_players_hit_on_a_player_of_another_empire_takes_the_victims_hit_points() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "carol");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Charlie', \
+         1, 154, 470100, 950100 FROM account WHERE login = 'carol'",
+    );
+    // The stamina the other characters of the fixture carry: above zero, so Charlie enters
+    // standing and the view sends no walk mode for him.
+    sql(
+        &database,
+        "UPDATE player SET stamina = 12345 WHERE name = 'Charlie'",
+    );
+    let (mut alpha, alpha_listed, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut charlie, charlie_listed, _charlie_entered) = enter_world_seeing(&server, b"carol", 0);
+    alpha.sees_arrive(charlie_listed.id, false, None);
+
+    // When: Alpha hits Charlie. Then: the damage and the claim to Alpha, the damage, the hit
+    // points and the claim to Charlie.
+    alpha.send_record(&client_attack(charlie_listed.id));
+    assert_eq!(
+        alpha.read_hit(),
+        damage_info(charlie_listed.id, DAMAGE_NORMAL, PVP_DAMAGE)
+    );
+    assert_eq!(
+        alpha.read_hit(),
+        ownership_of(alpha_listed.id, charlie_listed.id)
+    );
+    assert_eq!(
+        charlie.read_hit(),
+        damage_info(charlie_listed.id, DAMAGE_NORMAL, PVP_DAMAGE)
+    );
+    assert_eq!(
+        charlie.read_hit(),
+        point_change(
+            charlie_listed.id,
+            u8::try_from(common::point_slot::POINT_HP).expect("a point byte"),
+            0,
+            PVP_HP_AFTER
+        )
+    );
+    assert_eq!(
+        charlie.read_hit(),
+        ownership_of(alpha_listed.id, charlie_listed.id)
+    );
+}
+
+/// Ledger 231: the PK policy (`G/pvp.cpp:378-529`) refuses a hit on a player of the attacker's
+/// own empire: the Rewrite has no PK mode, no consent duel and no alignment, so two players of
+/// one empire never fight. Dave of empire 1 hits Alpha of empire 1: neither is shown a damage,
+/// a hit point change or a claim.
+#[test]
+fn a_players_hit_on_a_player_of_his_own_empire_is_refused() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "dave");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'dave'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Dave', 1, \
+         154, 470100, 950100 FROM account WHERE login = 'dave'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET stamina = 12345 WHERE name = 'Dave'",
+    );
+    let (mut alpha, alpha_listed, _alpha_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut dave, dave_listed, _dave_entered) = enter_world_seeing(&server, b"dave", 0);
+    alpha.sees_arrive(dave_listed.id, false, None);
+
+    // When: Dave hits Alpha. Then: nothing at all.
+    dave.send_record(&client_attack(alpha_listed.id));
+    dave.quiet("a hit on a player of his own empire is refused");
+    alpha.quiet("a hit on a player of his own empire is refused");
 }
 
 /// The exp tail of a kill: the exp point change past the death's ownership releases, then

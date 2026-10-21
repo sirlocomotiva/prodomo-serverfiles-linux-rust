@@ -12,11 +12,11 @@ use common::point_slot as point;
 use common::vid::Vid;
 use gamedata::mob_proto::{BATTLE_TYPE_MAGIC, BATTLE_TYPE_RANGE, BATTLE_TYPE_SPECIAL};
 use protocol::gc::HEADER_GC_FLY_TARGETING;
-use protocol::gc_nested::{GcDamageInfo, GcFlyTargeting};
+use protocol::gc_nested::GcFlyTargeting;
 use protocol::gc_vid::GcSpecialEffect;
 use tracing::warn;
 use world::character::{
-    mob_reach, shoot_pc, strike_npc_by_npc, strike_pc, MobAttackAffect, MobStriker, NpcVictim,
+    mob_reach, shoot_pc, strike_npc_by_npc, strike_pc, AttackAffect, MobStriker, NpcVictim,
     PcHitEnd, PcStrike, PcVictim, DAMAGE_DODGE,
 };
 
@@ -378,7 +378,7 @@ impl GameState {
             .encode_into(&mut record);
             self.packet_around(around, &record, None);
         }
-        self.apply_mob_affect(victim, strike.affect);
+        self.apply_pc_affect(victim, strike.affect, None);
         let attacker = Attacker {
             vid: Vid::new(mob),
             pc: false,
@@ -434,10 +434,16 @@ impl GameState {
     }
 
     /// What `NormalAttackAffect` landed on the player `victim`: the poison, the stun and
-    /// the slow, in legacy's arm order (`G/battle.cpp:734-758`).
-    fn apply_mob_affect(&mut self, victim: Vid, landed: MobAttackAffect) {
+    /// the slow, in legacy's arm order (`G/battle.cpp:734-758`). The poison's killer is
+    /// the attacker, which a monster has no PID for (`G/char_resist.cpp:211`).
+    pub(super) fn apply_pc_affect(
+        &mut self,
+        victim: Vid,
+        landed: AttackAffect,
+        attacker: Option<Vid>,
+    ) {
         if landed.poisoned {
-            self.poison_pc(victim);
+            self.poison_pc(victim, attacker);
         }
         if landed.stunned {
             self.add_pc_affect(
@@ -473,8 +479,9 @@ impl GameState {
     /// the draws the strike already passed: nothing while a poison event runs; else the
     /// poison affect, and the poison event with 10 ticks, due 1 Pulse on. The
     /// poisoned-once arm is monster-victim-only, and the commented immunity arm never
-    /// runs. The attacker PID is 0 for a monster, which `FindByPID` never maps.
-    pub(super) fn poison_pc(&mut self, victim: Vid) {
+    /// runs. The poison carries its attacker (`info->attacker_pid`, `:211`), which a
+    /// monster has no PID for.
+    pub(super) fn poison_pc(&mut self, victim: Vid, attacker: Option<Vid>) {
         let raw = victim.raw();
         if self
             .pc_combat
@@ -496,18 +503,25 @@ impl GameState {
             true,
         );
         let when = self.last_pulse.saturating_add(1);
+        let killer = attacker.map_or(0, Vid::raw);
         let combat = self.pc_combat.entry(raw).or_default();
-        let old = combat.poison_due.replace((when, POISON_COUNT));
-        if let Some((at, count)) = old {
-            self.regens
-                .due
-                .remove(&(at, Due::PcPoison { vid: raw, count }));
+        let old = combat.poison_due.replace((when, POISON_COUNT, killer));
+        if let Some((at, count, killer)) = old {
+            self.regens.due.remove(&(
+                at,
+                Due::PcPoison {
+                    vid: raw,
+                    count,
+                    killer,
+                },
+            ));
         }
         self.regens.due.insert((
             when,
             Due::PcPoison {
                 vid: raw,
                 count: POISON_COUNT,
+                killer,
             },
         ));
     }
@@ -578,17 +592,9 @@ impl GameState {
     }
 
     /// `SendDamagePacket` to the player under `victim` (`G/char_battle.cpp:1720-1742`): its
-    /// own `GC_DAMAGE_INFO`.
+    /// own `GC_DAMAGE_INFO`. A monster's swing has no desc to send a second copy to.
     pub(super) fn send_pc_damage_info(&self, victim: Vid, flag: u8, damage: i32) {
-        let mut record = Vec::new();
-        GcDamageInfo {
-            header: GcDamageInfo::header(),
-            vid: victim.raw(),
-            flag,
-            damage,
-        }
-        .encode_into(&mut record);
-        let _sent = self.write_to_client(victim, record);
+        self.send_pc_damage_info_to(victim, None, flag, damage);
     }
 }
 
@@ -1188,7 +1194,7 @@ mod tests {
         let combat = world.pc_combat.get(&1).unwrap();
         assert!(combat
             .poison_due
-            .is_some_and(|(when, count)| when == P0 + 1 && count == 10));
+            .is_some_and(|(when, count, killer)| when == P0 + 1 && count == 10 && killer == 0));
     }
 
     /// A 11000 guard at `at`: NOMOVE, MELEE, range 175, as the proto gives it.

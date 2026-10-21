@@ -69,8 +69,9 @@ use protocol::gc_inventory::{HEADER_GC_DEAD, HEADER_GC_STUN};
 use protocol::gc_nested::GcDamageInfo;
 use protocol::gc_vid::{GcHeaderAndDword, GcSpecialEffect};
 use world::character::{
-    damage_special, melee_reach, strike_npc, Equipment, HitEvent, NpcAttackAffect, Strike, Striker,
-    Struck, DAMAGE_NORMAL, DAMAGE_POISON, GOLD_MAX_MAX,
+    calc_melee_damage_on_player, damage_special, melee_reach, pk_eligibility, race_to_job,
+    strike_npc, AttackAffect, CharacterKind, Equipment, HitEvent, PkActor, PkEligibility, PkMode,
+    PlayerVictim, Posture, Strike, Striker, Struck, DAMAGE_NORMAL, DAMAGE_POISON, GOLD_MAX_MAX,
 };
 use world::npc::Npc;
 
@@ -82,7 +83,7 @@ use super::{GameState, MarkUploadAnswer};
 use crate::game_loop_messages::{AttackAnswer, GameCommand, MARK_PIXELS};
 use crate::loading_phase::{
     point_changes, AFFECT_POISON, AFFECT_SLOW, AFFECT_STUN, AFF_POISON, AFF_SLOW, AFF_STUN,
-    POISON_DAMAGE_RATE, POISON_TICKS, SLOW_MOV_SPEED, SLOW_TICKS, STUN_TICKS_NPC,
+    PK_MODE_PROTECT, POISON_DAMAGE_RATE, POISON_TICKS, SLOW_MOV_SPEED, SLOW_TICKS, STUN_TICKS_NPC,
 };
 use crate::sync_position::{
     distance_approx, judge_sync_ownership, ownership_record, SyncOwnershipOutcome,
@@ -532,6 +533,14 @@ impl GameState {
         let (Some(place), Some(spot)) = (self.place_of(vid.raw()), self.spot_of(vid.raw())) else {
             return AttackAnswer::default();
         };
+        // A player victim: the PvP path (`G/battle.cpp:154-230`).
+        if self
+            .characters
+            .find_by_vid(Vid::new(record.target_vid))
+            .is_ok()
+        {
+            return self.attack_player(vid, record.target_vid);
+        }
         let Some(npc) = self
             .npc_on(record.target_vid, place)
             .filter(|npc| is_struck(npc))
@@ -665,6 +674,151 @@ impl GameState {
         Some(strike_npc(&mut self.dice, &mut striker, npc, false))
     }
 
+    /// The PvP path of `CInputMain::Attack`: a player attacker on a player victim
+    /// (`G/battle.cpp:154-230`) — the gate, the turn, the damage and the victim's own
+    /// `Damage` (`G/char_battle.cpp:2248-2433`).
+    ///
+    /// Two players have no reach check: legacy sets `MaxRange` false for a player against a
+    /// player (`G/battle.cpp:180-184`), so the gate alone refuses the swing. The Rewrite
+    /// keeps the map as well: a player on another map is out of reach.
+    ///
+    /// The swing itself is [`super::pvp`]: the affects, the victim's `Damage` and the
+    /// claim.
+    fn attack_player(&mut self, vid: Vid, target: u32) -> AttackAnswer {
+        let victim = Vid::new(target);
+        let (Some(place), Some(spot)) = (self.place_of(vid.raw()), self.spot_of(vid.raw())) else {
+            return AttackAnswer::default();
+        };
+        let (Some(victim_place), Some(victim_spot)) = (self.place_of(target), self.spot_of(target))
+        else {
+            return AttackAnswer::default();
+        };
+        if victim_place.1 != place.1 {
+            return AttackAnswer::default();
+        }
+        // `battle_is_attackable` (`G/battle.cpp:99-153`): the dead, the `ATTR_BANPK` cells
+        // and the PK policy.
+        if self.is_down(vid.raw())
+            || self.is_banpk(place.1, spot.x, spot.y)
+            || self.is_banpk(victim_place.1, victim_spot.x, victim_spot.y)
+        {
+            return AttackAnswer::default();
+        }
+        let Some(empire) = self.bodies.get(&vid).map(|body| body.card.empire) else {
+            return AttackAnswer::default();
+        };
+        let Some(victim_empire) = self.bodies.get(&victim).map(|body| body.card.empire) else {
+            return AttackAnswer::default();
+        };
+        let attacker = self.pk_actor(vid, empire, false);
+        let target_actor = self.pk_actor(
+            victim,
+            victim_empire,
+            self.pc_combat
+                .get(&target)
+                .is_some_and(|combat| combat.dead),
+        );
+        if !matches!(
+            pk_eligibility(attacker, Some(target_actor), false),
+            PkEligibility::Allowed { .. }
+        ) {
+            return AttackAnswer::default();
+        }
+        // `SetPosition(POS_FIGHTING)` and `SetRotationToXY` (`G/char_battle.cpp:219-223`).
+        if let Some(body) = self.bodies.get_mut(&vid) {
+            body.fighting = true;
+            body.rotation = rotation_to_xy(
+                victim_spot.x.saturating_sub(spot.x),
+                victim_spot.y.saturating_sub(spot.y),
+            );
+        }
+        // `battle_hit` (`G/battle.cpp:760-818`): the damage, then the victim's `Damage`.
+        let Some(damage) = self.player_damage(vid, victim) else {
+            return AttackAnswer::default();
+        };
+        if damage <= 0 {
+            return AttackAnswer::default();
+        }
+        // `attMul` is 1.0, so `iDam = attMul * tempIDam + 0.5f` truncates to the damage.
+        let gold = self.pvp_strike(vid, victim, damage);
+        // `SetSyncOwner` (`G/char.cpp:5469-5555`) and `OnMove(true)` (`:6148-6179`).
+        self.pvp_claim(vid, victim);
+        AttackAnswer { gold }
+    }
+
+    /// `CalcMeleeDamage` of a player attacker on a player victim (`G/battle.cpp:489-666`),
+    /// with the wielded weapon's kind resist against the victim (`:775-800`).
+    fn player_damage(&mut self, vid: Vid, victim: Vid) -> Option<i32> {
+        // The victim's facts first: the attacker's borrow of the characters comes after.
+        let victim_facts = {
+            let points = self.pc_points_mut(victim.raw())?;
+            PlayerVictim {
+                dexterity: points.get_point(point::POINT_DX),
+                def_grade: points.get_point(point::POINT_DEF_GRADE),
+                def_bonus: points.get_point(point::POINT_DEF_BONUS),
+                resists: [
+                    points.get_point(point::POINT_RESIST_WARRIOR),
+                    points.get_point(point::POINT_RESIST_ASSASSIN),
+                    points.get_point(point::POINT_RESIST_SURA),
+                    points.get_point(point::POINT_RESIST_SHAMAN),
+                ],
+                job: usize::from(race_to_job(points.race())),
+                weapon_resists: PlayerVictim::weapon_resists_of(points),
+            }
+        };
+        let character = self.characters.find_by_vid_mut(vid).ok()?;
+        let (items, points) = character.items_and_points_mut();
+        let points = points?;
+        let weapon = Equipment::of(items, &self.protos)
+            .wear(EWearPositions::Weapon as u16)
+            .map(|worn| worn.proto);
+        Some(calc_melee_damage_on_player(
+            &mut self.dice,
+            points,
+            weapon,
+            &victim_facts,
+        ))
+    }
+
+    /// The `PkActor` of a player (`world/src/character/combat/pk.rs`): the facts the PK
+    /// policy reads. The PK mode and the map's empire are read; the alignment, the party,
+    /// the guild and the duels are not ported, so the policy runs in its peaceful form: a
+    /// player may hit a player of another empire, and one of its own empire never, as a
+    /// duel does not exist here.
+    fn pk_actor(&self, vid: Vid, empire: u8, dead: bool) -> PkActor {
+        // `GetPKMode` (`G/char.h:348-356`): the mode the load gave the player, which is
+        // `PK_MODE_PROTECT` below the protect level and `PK_MODE_PEACE` above it.
+        let mode = if self.pk_mode_of(vid.raw()) == PK_MODE_PROTECT {
+            PkMode::Protect
+        } else {
+            PkMode::Peace
+        };
+        // `SECTREE_MANAGER::GetEmpireFromMapIndex` (`G/pvp.cpp:425`): the empire that owns
+        // the map the player stands on, 0 for a map no empire owns.
+        let map_empire = self
+            .place_of(vid.raw())
+            .map_or(0, |place| world::npc::map_empire(place.1));
+        PkActor {
+            id: vid.raw(),
+            kind: CharacterKind::Player,
+            posture: if dead {
+                Posture::Dead
+            } else {
+                Posture::Standing
+            },
+            observer: false,
+            ban_pk: false,
+            empire,
+            map_empire,
+            mode,
+            alignment: 0,
+            killer_mode: false,
+            party_id: None,
+            guild_id: None,
+            consensual_fight: false,
+        }
+    }
+
     /// `ChangeGold` for the `amount` the hit stole (`G/char.cpp:3823-3850`): nothing when
     /// the steal drew nothing; at `GOLD_MAX_MAX` the purse refuses with nothing sent, as
     /// the `OVERFLOW_GOLD` arm returns without changing or sending; else the purse gains
@@ -673,7 +827,7 @@ impl GameState {
     /// packet and the hit-point change, inside `Damage` (`:2080-2092`); `SendMoneyLog`
     /// is log-only. Ahead of `show_strike` here rather than mid-pipeline: the gold
     /// record lands before the affect updates where legacy's steal lands after them.
-    fn steal_gold(&mut self, vid: Vid, amount: i32) -> Option<i64> {
+    pub(super) fn steal_gold(&mut self, vid: Vid, amount: i32) -> Option<i64> {
         if amount <= 0 {
             return None;
         }
@@ -800,7 +954,7 @@ impl GameState {
     /// damage packet and the hit-point change, as `battle_hit` runs the affects before
     /// the resist arm and `Damage` — so a victim stunned by this very hit still takes
     /// the hit. A stone takes them too (its Idle guards nothing, ported as found).
-    pub(super) fn apply_npc_affect(&mut self, attacker: Vid, victim: u32, landed: NpcAttackAffect) {
+    pub(super) fn apply_npc_affect(&mut self, attacker: Vid, victim: u32, landed: AttackAffect) {
         if landed.poisoned {
             self.poison_npc(attacker, victim);
         }
@@ -1684,6 +1838,7 @@ mod tests {
     use super::super::view_encode::remove_record;
     use super::*;
     use crate::game_loop::PulseProcessor;
+    use crate::loading_phase::PK_MODE_PEACE;
     use crate::sync_position::SYNC_POSITION_PREFIX_SIZE;
 
     /// The monster every test hits.
@@ -1808,6 +1963,50 @@ mod tests {
     /// The player under `vid` hits `target` with a type 0 `CG_ATTACK`.
     fn hit(world: &mut GameState, vid: u32, target: u32) {
         world.attack(Vid::new(vid), CgAttack::new(0, target, 0, 0));
+    }
+
+    /// A player of another empire hits a player: the PvP path (`G/battle.cpp:154-230`)
+    /// takes the victim's hit points. A player of the same empire is refused by the
+    /// peaceful PK policy.
+    #[test]
+    fn a_player_hits_a_player_of_another_empire_and_the_victim_loses_hit_points() {
+        let (_clock, mut world, _inbox) = a_fight(a_monster(100), (0, 0));
+        let _attacker = a_player(&mut world, 101, (0, 0));
+        let _victim = a_player(&mut world, 102, (1, 0));
+        world.bodies.get_mut(&Vid::new(101)).unwrap().card.empire = 1;
+        world.bodies.get_mut(&Vid::new(102)).unwrap().card.empire = 2;
+        // `CanAttack` (`G/pvp.cpp:196-215`): a player in `PK_MODE_PROTECT` may not hit a
+        // player of another empire, so both are peaceful here.
+        world.bodies.get_mut(&Vid::new(101)).unwrap().card.pk_mode = PK_MODE_PEACE;
+        world.bodies.get_mut(&Vid::new(102)).unwrap().card.pk_mode = PK_MODE_PEACE;
+        world.start_pc_recovery(Vid::new(101));
+        world.start_pc_recovery(Vid::new(102));
+        let before = world.pc_points_mut(102).unwrap().hp();
+        hit(&mut world, 101, 102);
+        let after = world.pc_points_mut(102).unwrap().hp();
+        assert!(
+            after < before,
+            "the victim's hit points fall: {before} -> {after}"
+        );
+    }
+
+    /// `CanAttack` (`G/pvp.cpp:196-215`): a player in `PK_MODE_PROTECT` may not hit a
+    /// player of another empire, and the hit is refused before any damage.
+    #[test]
+    fn a_player_in_protect_mode_may_not_hit_a_player_of_another_empire() {
+        let (_clock, mut world, _inbox) = a_fight(a_monster(100), (0, 0));
+        let _attacker = a_player(&mut world, 101, (0, 0));
+        let _victim = a_player(&mut world, 102, (1, 0));
+        world.bodies.get_mut(&Vid::new(101)).unwrap().card.empire = 1;
+        world.bodies.get_mut(&Vid::new(102)).unwrap().card.empire = 2;
+        world.bodies.get_mut(&Vid::new(102)).unwrap().card.pk_mode = PK_MODE_PEACE;
+        // The attacker keeps the fixture's protect mode.
+        world.start_pc_recovery(Vid::new(101));
+        world.start_pc_recovery(Vid::new(102));
+        let before = world.pc_points_mut(102).unwrap().hp();
+        hit(&mut world, 101, 102);
+        let after = world.pc_points_mut(102).unwrap().hp();
+        assert_eq!(after, before, "the protected attacker lands nothing");
     }
 
     /// `npc` on open cells, entered and pulsed as [`a_fight`], with the monster's experience

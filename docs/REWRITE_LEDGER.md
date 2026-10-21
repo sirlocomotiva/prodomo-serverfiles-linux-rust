@@ -33405,3 +33405,84 @@ workspace all-targets DB run green, the parity target 121 of 121; the doc build 
 doc-tests green; no scratch database left.
 
 No ADR changed. No owner question added. V20 stays taken.
+
+## 232. A player hits a player (`sys.char.pk`, second part)
+
+Ledger 231 ported `CalcMeleeDamage` on a player victim; the strike path still resolved its
+target with `npc_on` and refused a player. It does not now: a swing can land on another
+player, the victim takes the hit, and the claim follows.
+
+**The target's kind.** `prodomo/src/game_state/fight.rs`'s `attack` asks the world whether
+the target is a character before it asks for an NPC: a player target goes to
+`attack_player`, a monster to the old path. `attack_player` walks legacy's gate in order
+(`battle_melee_attack`, `G/battle.cpp:154-230`):
+
+- the map: a victim on another map is out of reach. Legacy has no such check for two
+  players - `battle_melee_attack` sets `MaxRange` false for a player against a player
+  (`:178-184`), so the gate alone refuses the swing and the distance is computed and
+  thrown away - but the Rewrite keeps the map with the rest of the world's positions;
+- `battle_is_attackable` (`:99-153`): the dead victim, the `ATTR_BANPK` cells of both
+  sides and the PK policy. The policy is `world/src/character/combat/pk.rs`'s
+  `pk_eligibility`, with the two sides read as `PkActor`s: the empire, the PK mode the load
+  gave the character (`PK_MODE_PROTECT` below the protect level, `PK_MODE_PEACE` above it),
+  the map's empire and the posture;
+- the turn: `SetPosition(POS_FIGHTING)` and `SetRotationToXY` (`:219-223`). The rotation is
+  the body's own field, so no record goes out, as in legacy;
+- the damage: `CalcMeleeDamage` on the player victim (ledger 231), with the wielded
+  weapon's kind resist. A damage of 0 ends the swing before anything else runs;
+- the swing: `prodomo/src/game_state/pvp.rs`'s `pvp_strike` - `NormalAttackAffect`, the
+  victim's own `Damage` and what it shows;
+- the claim: `SetSyncOwner` (`G/char.cpp:5469-5555`) and `OnMove(true)` (`:6148-6179`).
+
+**The victim's `Damage`.** `world/src/character/combat/pvp.rs` is new: `strike_pc_by_pc` is
+`battle_hit` with a player victim and it takes every draw from the `Dice` in legacy's
+order. What the hit does comes back as `PvAction`s in the order legacy does it (the effect
+record, the fly record, the attacker's and the victim's point changes and the stolen gold),
+and the caller applies them. The block (`POINT_BLOCK`), the critical and the penetrate, the
+reflect (`POINT_REFLECT_MELEE`, which runs back at the attacker as a `DAMAGE_TYPE_SPECIAL`
+hit) and the steals are the arms of the victim's `Damage` (`G/char_battle.cpp:1939-2267`).
+The hit points the damage takes are the victim's own, so the module returns the damage and
+the flag and the game state moves the pool.
+
+**The claim.** `pvp_claim` is `SetSyncOwner`: the attacker becomes the victim's sync owner,
+`OnMove(true)` stamps the attack and ends the attacker's revive-invisible affect, and the
+victim's own `OnMove()` stamps its move. A dead victim or a downed attacker refuses the
+claim, and the refusal shows the block, as in legacy.
+
+**The poison carries its attacker.** A poisoned player's poison event
+(`G/char_resist.cpp:42-76`) took the killer as 0, which `FindByPID` never maps, so a
+monster's poison was the only poison the Rewrite had. The event now carries the attacker's
+PID (`info->attacker_pid`, `G/char_resist.cpp:211`), so a player who poisons another is
+the killer the victim's death names, and legacy's `SendDamagePacket` tells the poisoner of
+the tick's damage as well as the victim
+(`game_state::death::tests::a_players_poison_names_the_poisoner_and_tells_it_of_the_tick`).
+
+**The two live scenarios.** `a_players_hit_on_a_player_of_another_empire_takes_the_victims_hit_points`
+plays a level-154 shaman of empire 1 hitting a level-154 warrior of empire 0: the swing is
+178 - the attack rating makes the attack 332 and the victim's defence grade takes 154 of it
+- and the victim's hit points fall from 650 to 472. The attacker is shown the damage and
+the claim, the victim the damage, the hit points and the claim.
+`a_players_hit_on_a_player_of_his_own_empire_is_refused` plays a hit on a player of his own
+empire: nothing is shown to either.
+
+**The divergences.**
+
+- The PK policy is the peaceful form: the Rewrite has no PK mode (the five of `GetPKMode`,
+  `G/char.h:348-356`), no consent duel and no alignment to revenge, so two players of one
+  empire never fight and two of another empire always may. `sys.char.pk` stays partial.
+- The guild war's bypass of the policy (`battle_is_attackable`'s war arm, `:129-136`) is not
+  ported: the war's own kill score waits for the death's PvP steps.
+- The marriage shares the critical and the penetrate take never apply: the victim is a
+  player and the Rewrite holds no marriage item.
+- The death's PvP steps wait for the next slice: the consent duel's end
+  (`CPVPManager::Dead`, `G/pvp.cpp:335-376`), the quest kill and the war score
+  (`G/char_battle.cpp:1280-1311`), the item drop penalty (`:1343`) and the empire point
+  (`:1390`).
+- The attacker's battle victim (`SetVictim`, `:220`) is not tracked: nothing in the Rewrite
+  reads it yet, the killer mode being one of the unported arms.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; the full
+workspace all-targets DB run green, the parity target 123 of 123; the doc build and the
+doc-tests green; no scratch database left.
+
+No ADR changed. No owner question added. V20 stays taken.
