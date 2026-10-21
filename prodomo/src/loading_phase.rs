@@ -651,7 +651,7 @@ pub struct PcCard {
     pub pk_mode: u8,
     /// `GetSkillGroup()`: the heal and the shaman shares read it in the world.
     pub skill_group: u8,
-    /// `GetAlignment()`: the kills raise it, in memory until `sys.char.pk` stores it.
+    /// `GetAlignment()`: the stored alignment, which the kills raise.
     pub alignment: i32,
 }
 
@@ -669,7 +669,7 @@ impl PcCard {
             language,
             pk_mode: pk_mode(character.level, pk_protect_level),
             skill_group: character.skill_group,
-            alignment: 0,
+            alignment: character.alignment,
         }
     }
 }
@@ -760,11 +760,14 @@ fn speed_byte(speed: i32) -> u8 {
     u8::try_from(speed).unwrap_or(u8::MAX)
 }
 
-/// A player's `GC_CHAR_ADDITIONAL_INFO`, with no mount or alignment
+/// A player's `GC_CHAR_ADDITIONAL_INFO`, with no mount
 /// (`G/char.cpp:1111-1200`). `bPKMode` is `m_bPKMode` (`G/char.cpp:1128`). `guild` is the
 /// pair the world's `view_guild` computes (`dwGuildID` and `dwNewIsGuildName`,
 /// `G/char.cpp:1176-1199`): the guild id, and 3 for the master, 2 for a general, 1 for a
 /// plain member, 0 with no guild.
+///
+/// The alignment is `m_iAlignment / 10` (`G/char.cpp:1201`), the value the client is shown
+/// in tenths.
 ///
 /// The parts are the ones the last `ComputePoints` left (`GetPart`), which after the item load
 /// are the worn armour, weapon, hair costume and sash over the base part.
@@ -783,7 +786,7 @@ pub fn character_additional(
         guild.0,
         u32::from(card.level),
         u32::from(card.conqueror_level),
-        0,
+        i16::try_from(card.alignment / 10).unwrap_or(i16::MAX),
         card.pk_mode,
         0,
         0,
@@ -1196,6 +1199,7 @@ mod tests {
             y: -0x0012_3457,
             skill_group: 6,
             playtime_minutes: 0x0a0b_0c0d,
+            alignment: -43_210,
             change_name: false,
         }
     }
@@ -1789,7 +1793,11 @@ mod tests {
         );
         assert_eq!(&bytes[47..51], &9u32.to_le_bytes(), "dwLevel");
         assert_eq!(&bytes[51..55], &3u32.to_le_bytes(), "dwConquerorLevel");
-        assert_eq!(&bytes[55..57], &0i16.to_le_bytes(), "sAlignment");
+        assert_eq!(
+            &bytes[55..57],
+            &(-4321i16).to_le_bytes(),
+            "sAlignment: the alignment in tenths"
+        );
         assert_eq!(bytes[57], 3, "bPKMode: PROTECT, level 9 is below 15");
         assert_eq!(&bytes[58..62], &0u32.to_le_bytes(), "dwMountVnum");
         assert_eq!(bytes[62], 0, "bRefineElementType");

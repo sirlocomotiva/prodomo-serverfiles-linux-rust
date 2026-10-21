@@ -939,6 +939,9 @@ fn hold_kept(held: &mut Held, kept: Kept) {
     if let Some(points) = kept.points {
         hold_points(held, points);
     }
+    if let Some(held_character) = held.character.as_mut() {
+        held_character.alignment = kept.alignment;
+    }
     held.quickslots = kept.quickslots;
     if let (Some((map, x, y)), Some(avatar)) = (kept.place, held.avatar.as_mut()) {
         avatar.map = map;
@@ -8297,11 +8300,9 @@ mod tests {
         assert_eq!(caller_position(ClientPhase::Game, &held), POS_STANDING);
     }
 
-    /// The save writes the level, experience and counters the world holds, so a level-up is
-    /// kept rather than the values the character was loaded with.
-    #[test]
-    fn the_held_character_takes_the_experience_the_world_left() {
-        let character = db::players::Character {
+    /// A character row with a value in every column, as `load_character` returns one.
+    fn alice() -> db::players::Character {
+        db::players::Character {
             id: 1,
             slot: 0,
             name: "Alice".to_owned(),
@@ -8338,8 +8339,16 @@ mod tests {
             y: 2,
             skill_group: 0,
             playtime_minutes: 0,
+            alignment: 0,
             change_name: false,
-        };
+        }
+    }
+
+    /// The save writes the level, experience and counters the world holds, so a level-up is
+    /// kept rather than the values the character was loaded with.
+    #[test]
+    fn the_held_character_takes_the_experience_the_world_left() {
+        let character = alice();
         let mut points = load_points(&character, 41);
         assert!(points.lose_exp(100, 120).is_some(), "the death penalty");
         let mut held = Held {
@@ -8372,6 +8381,36 @@ mod tests {
         assert!(kept.random_sp >= 18 && kept.random_sp <= 22);
         assert_eq!(kept.stat_point, 3);
         assert_eq!(kept.level_step, 0);
+    }
+
+    /// The alignment the world holds is what the save writes: the row the descriptor holds
+    /// takes it from the world, not from the value it was loaded with. The kills raise the
+    /// world's alignment (`G/char_battle.cpp:794-807`) and the store keeps it
+    /// (`G/char.cpp:1546`), so a save that wrote the loaded value would lose the kills.
+    #[test]
+    fn the_held_character_takes_the_alignment_the_world_left() {
+        let character = db::players::Character {
+            alignment: 4321,
+            ..alice()
+        };
+        let mut held = Held {
+            character: Some(character),
+            ..Held::default()
+        };
+        hold_kept(
+            &mut held,
+            Kept {
+                points: None,
+                quickslots: world::character::Quickslots::default(),
+                place: None,
+                alignment: -250,
+            },
+        );
+        assert_eq!(
+            held.character.as_ref().map(|held| held.alignment),
+            Some(-250),
+            "the row takes the alignment the world holds"
+        );
     }
 
     /// Boot hands the world what its regens spawn from: an ore vein boot stood ends within 15

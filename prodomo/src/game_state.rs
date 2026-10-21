@@ -1100,6 +1100,7 @@ impl GameState {
             points: character.points().cloned(),
             quickslots: character.quickslots().clone(),
             place,
+            alignment: self.real_alignment_of(vid.raw()),
         });
         if reply.send(kept).is_err() {
             debug!(?vid, "nobody was left to hear a character's points");
@@ -1404,12 +1405,14 @@ impl GameState {
         self.close_storage(vid);
         self.end_quests(vid);
         self.forget_portal_times(vid);
+        let alignment = self.real_alignment_of(vid.raw());
         let place = self.remove_body(vid);
         let character = self.characters.find_by_vid(vid).ok()?;
         let kept = Kept {
             points: character.points().cloned(),
             quickslots: character.quickslots().clone(),
             place,
+            alignment,
         };
         self.characters.destroy(vid).ok()?;
         Some(kept)

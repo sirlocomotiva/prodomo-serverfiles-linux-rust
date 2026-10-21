@@ -64,9 +64,9 @@ async fn insert(store: &Store, account: AccountId, slot: i16, name: &str) -> sql
     sqlx::query_scalar(
         "INSERT INTO player (account_id, slot, name, job, level, playtime_minutes, st, ht, dx, \
          iq, conqueror_level, sungma_str, sungma_hp, sungma_move, sungma_immune, part_main, \
-         part_hair, part_sash, x, y, skill_group, change_name) VALUES ($1, $2, $3, 3, 0x9a, \
-         0x0102_0304, 0x11, 0x12, 0x13, 0x14, 0x21, 0x22, 0x23, 0x24, 0x25, 0xa1b2, 0xc3d4, \
-         0xe5f6, -469300, 964200, 0x31, true) RETURNING id",
+         part_hair, part_sash, x, y, skill_group, change_name, alignment) VALUES ($1, $2, $3, 3, \
+         0x9a, 0x0102_0304, 0x11, 0x12, 0x13, 0x14, 0x21, 0x22, 0x23, 0x24, 0x25, 0xa1b2, 0xc3d4, \
+         0xe5f6, -469300, 964200, 0x31, true, -4660) RETURNING id",
     )
     .bind(i32::try_from(account.get()).unwrap())
     .bind(slot)
@@ -163,6 +163,7 @@ async fn load_character_reads_every_field_and_never_another_accounts_character()
     assert_eq!(found.sash_part, 0xe5f6);
     assert_eq!((found.x, found.y), (-469_300, 964_200));
     assert_eq!(found.skill_group, 0x31);
+    assert_eq!(found.alignment, -4660, "the stored alignment");
     assert!(found.change_name);
     // The columns a fresh row leaves at their defaults come back as the column default, not as
     // stack garbage, which is what the points record needs to stay honest.
@@ -684,6 +685,7 @@ async fn a_whole_row_save_is_what_the_next_load_reads() {
         y: -953_877,
         skill_group: 9,
         playtime_minutes: 137,
+        alignment: -4321,
     };
     assert!(save_character(store, alice, hero, &save).await.unwrap());
     // The other account's row is untouched: the write names the account as well as the player.
@@ -719,6 +721,7 @@ async fn a_whole_row_save_is_what_the_next_load_reads() {
     assert_eq!((read.x, read.y), (save.x, save.y));
     assert_eq!(read.skill_group, save.skill_group);
     assert_eq!(read.playtime_minutes, save.playtime_minutes);
+    assert_eq!(read.alignment, save.alignment);
 }
 
 /// A save cannot reach a row of another account, and a player ID above the column's range is
@@ -762,6 +765,7 @@ async fn a_save_names_the_account_and_refuses_a_wide_player_id() {
         y: 1,
         skill_group: 1,
         playtime_minutes: 1,
+        alignment: 0,
     };
     // Bob's account naming Alice's character is a miss, not a write.
     assert!(!save_character(store, bob, hero, &save).await.unwrap());

@@ -1462,6 +1462,9 @@ pub struct Kept {
     /// Where its body stands, as (map, x, y), which a save writes. `None` for a character
     /// that entered with no body.
     pub place: Option<(i32, i32, i32)>,
+    /// The alignment the world holds, which a save writes. Legacy's `SaveReal` writes the
+    /// real alignment (`G/char.cpp:1546`), and the kills raise it.
+    pub alignment: i32,
 }
 
 /// Why installing the item id allocator did not succeed.

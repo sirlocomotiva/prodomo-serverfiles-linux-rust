@@ -33552,3 +33552,73 @@ workspace all-targets DB run green, the parity target 124 of 124; the doc build 
 doc-tests green; no scratch database left.
 
 No ADR changed. No owner question added. V20 stays taken.
+
+## 234. The character's alignment is stored, loaded and shown (`sys.char.pk`, third part)
+
+Ledger 229n ported the kill alignment against an in-memory field: the kills raised the
+alignment and a `/10` crossing sent the update, but nothing kept the value, so every
+session began at zero and every kill's gain was lost at the next save. The column lands
+now, and the value the client is shown comes from the store.
+
+**The column.** `db/migrations/0014_player_alignment.sql` adds `player.alignment`, the
+column legacy's `player` table has (`legacy/sql/schema/player.sql:847`), with the range
+`UpdateAlignment`'s clamp gives it: -200000..200000 (`G/char_battle.cpp:3486`). The
+check refuses a row a hand wrote past that. `db/src/players.rs`'s `Character` reads the
+column and `PlayerSave` writes it, and `save_character` binds it in the row's own update.
+
+**The load.** `SetPlayerProto` puts the stored value in both of legacy's alignment fields
+(`G/char.cpp:2244-2245`): the one the client is shown and the one the rules read. The
+Rewrite has one value, so `prodomo/src/loading_phase.rs`'s `PcCard::of` takes the stored
+number as the card's alignment, and the card is what the world holds from then on.
+
+**The wire.** The additional info carries the shown value in tenths
+(`addPacket.sAlignment = m_iAlignment / 10`, `G/char.cpp:1201`), and
+`character_additional` now writes the card's alignment divided by ten where it wrote a
+zero. The loading burst's own summary and the view's summary of another player carry it
+alike.
+
+**The save.** `SaveReal` writes the real alignment back (`G/char.cpp:1546`). The Rewrite's
+save takes the alignment from the world, not from the row it was loaded with:
+`prodomo/src/game_state.rs`'s `Kept` carries the alignment `real_alignment_of` reads
+(`GetRealAlignment`, `G/char_battle.cpp:3452-3455`), and `prodomo/src/main.rs`'s
+`hold_kept` puts it in the held row that the save writes.
+
+**The live scenario.** `the_stored_alignment_reaches_the_client` stores an alignment of
+4321 on Alpha and logs in: the client's summary carries 432, the value in tenths.
+
+**The unit tests.** `db/tests/players.rs`'s `a_whole_row_save_is_what_the_next_load_reads`
+pins the store's round trip; `prodomo/src/save.rs`'s
+`a_save_takes_the_position_from_the_avatar_and_the_rest_from_the_row` pins the save's
+copy; `prodomo/src/main.rs`'s `the_held_character_takes_the_alignment_the_world_left`
+pins the world's value in the held row; `prodomo/src/loading_phase.rs`'s
+`character_additional_is_70_bytes_over_byte_136` pins the wire's tenths.
+
+**The divergences.**
+
+- Legacy keeps two alignment values (`G/char.h:1444-1445`), and they differ only while the
+  hide-alignment unique (70048, `UNIQUE_ITEM_HIDE_ALIGNMENT_TITLE`,
+  `G/game/unique_item.h:28`) is worn: it calls `ShowAlignment(false)`, which shows a zero
+  alignment while the rules still read the real one (`G/char_battle.cpp:3457-3475`). The
+  Rewrite has one value, so a player wearing that item still shows their alignment.
+- The item drop penalty (`G/char_battle.cpp:1334-1347`) is still not ported: the victim's
+  real alignment picks the table row (`:1035-1054`, the table at `:1002-1012`), and the
+  Rewrite has no such table. The alignment it needs is stored now, so the table is what
+  waits.
+- The same-empire alignment penalty of a PvP death (`G/char_battle.cpp:1408+`) and the
+  alignment's revenge wait for their systems.
+- The items that move the alignment call `UpdateAlignment` (70102 and 70103,
+  `G/char_item.cpp:4792-4810`, and the mythical peach 71107, `:4835-4858`), and the
+  Rewrite's item use does not: the alignment moves with the kills (ledger 229n) and with
+  nothing else for now.
+- A correction to ledger 233: the empire point of a cross-empire kill
+  (`G/char_battle.cpp:1390-1394`) has nothing to port. `CHARACTER::PointChange`'s
+  `POINT_EMPIRE_POINT` arm returns the real value and changes nothing
+  (`G/char.cpp:4700-4703`), and the point is mentioned nowhere else in the legacy but in
+  the transfer itself, so the point is always zero and the transfer moves nothing in the
+  legacy either. The 233 section's "no column in the store yet" named the wrong reason.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; the full
+workspace all-targets DB run green, the parity target 125 of 125; the doc build and the
+doc-tests green; no scratch database left.
+
+No ADR changed. No owner question added. V20 stays taken.

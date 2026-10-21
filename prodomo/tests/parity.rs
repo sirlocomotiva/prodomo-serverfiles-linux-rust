@@ -14484,3 +14484,30 @@ fn a_guild_wars_kill_scores_the_war() {
         "the victim's level scores the war"
     );
 }
+
+/// Ledger 234: the alignment a character was stored with reaches the client.
+///
+/// The legacy keeps the alignment in the character row (`player.alignment`,
+/// `G/db/model/player.cpp:26`), `SetPlayerProto` puts it in the character
+/// (`G/char.cpp:2244-2245`), and the additional info shows it in tenths
+/// (`m_iAlignment / 10`, `G/char.cpp:1201`). Before this slice the column did not exist,
+/// so the client was shown a zero alignment whatever the row said.
+#[test]
+fn the_stored_alignment_reaches_the_client() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET alignment = 4321 WHERE name = 'Alpha'",
+    );
+    let (_alice, _alpha, entered) = enter_world_seeing(&server, b"alice", 0);
+    assert_eq!(
+        &entered.info[55..57],
+        &432i16.to_le_bytes(),
+        "sAlignment: the stored alignment in tenths"
+    );
+}

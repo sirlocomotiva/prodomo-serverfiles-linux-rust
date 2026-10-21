@@ -214,6 +214,7 @@ pub fn player_save(character: &Character, position: SavePosition, played: Playti
         y: position.y,
         skill_group: character.skill_group,
         playtime_minutes: played.minutes,
+        alignment: character.alignment,
     }
 }
 
@@ -260,6 +261,7 @@ mod tests {
             y: 964_200,
             skill_group: 5,
             playtime_minutes: 12,
+            alignment: -250,
             change_name: false,
         }
     }
@@ -300,6 +302,7 @@ mod tests {
         assert_eq!(save.hair_part, 1002);
         assert_eq!(save.sash_part, 1003);
         assert_eq!(save.skill_group, 5);
+        assert_eq!(save.alignment, -250, "the alignment is the row's own");
     }
 
     #[test]

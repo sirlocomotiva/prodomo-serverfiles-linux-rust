@@ -334,6 +334,15 @@ impl GameState {
         })
     }
 
+    /// `GetRealAlignment()` (`G/char_battle.cpp:3452-3455`): the alignment the rules read and
+    /// the store keeps, or 0 with no body. The value the client is shown is this one in
+    /// tenths, which is what [`GameState::alignment_of`] returns.
+    pub(super) fn real_alignment_of(&self, vid: u32) -> i32 {
+        self.bodies
+            .get(&Vid::new(vid))
+            .map_or(0, |body| body.card.alignment)
+    }
+
     /// Where the body under `vid` stands.
     pub(super) fn spot_of(&self, vid: u32) -> Option<Spot> {
         let place = self.place_of(vid)?;

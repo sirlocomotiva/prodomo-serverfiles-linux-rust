@@ -1,8 +1,9 @@
 # Rewrite status
 
-Last reviewed: 2026-10-21, after ledger section 233 (the war's own kill scores the war).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 234 onwards (combat: the
-death's PvP steps - the item drop penalty and the empire point - and the war maps).
+Last reviewed: 2026-10-21, after ledger section 234 (the character's alignment is stored,
+loaded and shown).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 235 onwards (the
+death's item drop penalty, which the stored alignment now feeds, and the war maps).
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -37,7 +38,9 @@ in town on its own after three minutes. Since 229l a monster fights back: a hit 
 player of another empire: the swing takes the victim's hit points with legacy's damage, the claim
 follows the hit, and a hit on a player of his own empire is refused. Since 233 a guild war's arm
 opens the fight between two guilds at war, whatever the PK policy says, and a kill in that war
-scores the war with the victim's level for both sides' masters. The rest of combat, skills,
+scores the war with the victim's level for both sides' masters. Since 234 a character's
+alignment is stored, loaded and shown: the client's summary carries the stored alignment in
+tenths, and a save writes the alignment the world holds. The rest of combat, skills,
 parties, guilds and the rest of step 4 are not ported yet. The two-process layout (a `game-server` and a `db-server`
 talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177; sections 1-175
 record how it was built and stay as history. Since section 178 the one `prodomo` binary reads

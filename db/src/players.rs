@@ -432,6 +432,8 @@ pub struct PlayerSave {
     pub skill_group: u8,
     /// Minutes played, `POINT_PLAYTIME` accumulated in `CreatePlayerProto`.
     pub playtime_minutes: i32,
+    /// `tab.lAlignment`, the character's alignment.
+    pub alignment: i32,
 }
 
 /// Write every mutable column of one character row.
@@ -462,7 +464,7 @@ pub async fn save_character(
          sub_skill_point = $11, level_step = $12, \
          st = $13, ht = $14, dx = $15, iq = $16, hp = $17, sp = $18, stamina = $19, \
          voice = $20, part_base = $21, part_main = $22, part_hair = $23, part_sash = $24, \
-         x = $25, y = $26, skill_group = $27, playtime_minutes = $28 \
+         x = $25, y = $26, skill_group = $27, playtime_minutes = $28, alignment = $29 \
          WHERE account_id = $1 AND id = $2",
     )
     .bind(account.to_column()?)
@@ -493,6 +495,7 @@ pub async fn save_character(
     .bind(save.y)
     .bind(i16::from(save.skill_group))
     .bind(save.playtime_minutes)
+    .bind(save.alignment)
     .execute(store.pool())
     .await?;
     Ok(updated.rows_affected() == 1)
@@ -615,6 +618,12 @@ pub struct Character {
     pub dx: u8,
     /// Intelligence.
     pub iq: u8,
+    /// `tab.lAlignment`: the character's alignment. Legacy's `CHARACTER` holds two values
+    /// (`G/char.h:1444-1445`), the one the client is shown and the one the rules read, and
+    /// the store holds the real one. The two differ only while the hide-alignment unique
+    /// (70048) is worn (`G/char_battle.cpp:3457-3475`), which the Rewrite does not port, so
+    /// they are one number here.
+    pub alignment: i32,
     /// Current hit points.
     pub hp: i32,
     /// Current spell points.
@@ -687,7 +696,7 @@ pub async fn load_character(
         "SELECT p.slot, p.id, p.name, p.job, p.level, p.exp, p.conqueror_level, p.conqueror_exp, p.st, p.ht, \
          p.dx, p.iq, p.sungma_str, p.sungma_hp, p.sungma_move, p.sungma_immune, \
          p.random_hp, p.random_sp, p.stat_point, p.skill_point, p.sub_skill_point, p.level_step, \
-         p.hp, p.sp, p.stamina, p.gold, p.voice, p.part_base, p.part_main, \
+         p.hp, p.sp, p.stamina, p.gold, p.voice, p.part_base, p.part_main, p.alignment, \
          p.part_hair, p.part_sash, p.x, p.y, p.skill_group, p.playtime_minutes, p.change_name, a.empire \
          FROM player AS p JOIN account AS a ON a.id = p.account_id \
          WHERE p.account_id = $1 AND p.id = $2",
@@ -721,6 +730,7 @@ pub async fn load_character(
         ht: narrow(row.try_get::<i16, _>("ht")?, "ht")?,
         dx: narrow(row.try_get::<i16, _>("dx")?, "dx")?,
         iq: narrow(row.try_get::<i16, _>("iq")?, "iq")?,
+        alignment: row.try_get("alignment")?,
         hp: row.try_get("hp")?,
         sp: row.try_get("sp")?,
         stamina: row.try_get("stamina")?,
