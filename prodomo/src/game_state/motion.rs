@@ -433,6 +433,9 @@ impl GameState {
                 now,
             ),
         );
+        // `CWarMapManager::Find(GetMapIndex())` (`G/input_login.cpp:780`): a character
+        // that enters a war map joins it.
+        self.join_war_map(vid, place.map);
         // `Show` starts the affect event of a PC below its maximum stamina (`G/char.cpp:1874-1875`).
         let below_max = self
             .characters

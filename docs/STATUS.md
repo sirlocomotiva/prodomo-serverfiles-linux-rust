@@ -1,9 +1,9 @@
 # Rewrite status
 
-Last reviewed: 2026-10-21, after ledger section 236 (the war map's information and the war's
-map).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 237 onwards (the war's
-members, the observers, the flags and the war map's own end).
+Last reviewed: 2026-10-21, after ledger section 238 (the archer's critical shot: the harness sizes
+the effect record and the scenario reads either).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 239 onwards (the entry
+that warps the members to the start positions, the flags and the war map's own end).
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -46,7 +46,7 @@ and their table, the two draws, the level and the GM level, the anti-flags, the 
 that skips the drop, and the worn item's points. Since 236 a guild war knows the map it is
 fought on: the three war types and the two war maps, the declare's map-index check (the
 atlas is legacy's map index) and the Channel's map set, and the private copy a started war
-takes of its map. The owner's index holds the battle map, so a battle war's declare lands
+takes of its map. Since 237 that map is a map of its own: it holds the two teams, the players that watch it and the counts it tells them, and a player that walks onto it joins it. The owner's index holds the battle map, so a battle war's declare lands
 and its accept starts the war on that type. The rest of combat, skills,
 parties, guilds and the rest of step 4 are not ported yet. The two-process layout (a `game-server` and a `db-server`
 talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177; sections 1-175

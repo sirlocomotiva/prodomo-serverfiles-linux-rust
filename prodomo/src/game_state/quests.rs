@@ -138,6 +138,12 @@ pub(super) struct Session<'s> {
     pub(super) locale: &'s LocaleStrings,
     /// The character's language and empire.
     pub(super) mover: Mover,
+    /// `GetMapIndex()` of the character the script runs for: the map it stands on, the
+    /// private index when it stands on a private map.
+    pub(super) map_index: i32,
+    /// The war map the character stands on, and 0 when it stands on none
+    /// (`CWarMapManager::Find(GetMapIndex())`, `G/input_login.cpp:780`).
+    pub(super) war_map: i32,
     /// The skill rows, for the GRAND read's gates.
     pub(super) tables: &'s gamedata::pc_skill_data::PcSkills,
     /// `number()`'s draw, and the GRAND read's.
@@ -482,6 +488,14 @@ impl Game for Session<'_> {
             .min(40)
     }
 
+    fn map_index(&self) -> i32 {
+        self.map_index
+    }
+
+    fn war_map(&self) -> i32 {
+        self.war_map
+    }
+
     fn guild_call(
         &mut self,
         name: &[u8],
@@ -682,6 +696,7 @@ impl GameState {
             locale,
             dice,
             bodies,
+            war_maps,
             pc_skills,
             affect_events,
             pc_skill_tables,
@@ -701,6 +716,11 @@ impl GameState {
             .find_by_vid(reader)
             .ok()
             .map(world::character::Character::player_id);
+        // `GetMapIndex()` and `GetWarMap()` (`G/input_login.cpp:780`): the map the
+        // character stands on, and the war map it stands on, which is the map the
+        // world holds a war for.
+        let map_index = bodies.get(&reader).map_or(0, |body| body.map);
+        let war_map = war_maps.get(&map_index).map_or(0, |war| war.map_index);
         let points = characters
             .find_by_vid_mut(reader)
             .ok()
@@ -712,6 +732,8 @@ impl GameState {
             names: &quests.names,
             locale,
             mover,
+            map_index,
+            war_map,
             tables: pc_skill_tables,
             dice,
             reader,
@@ -847,6 +869,8 @@ mod tests {
         let tables = gamedata::pc_skill_data::PcSkills::default();
         let mut slots = super::super::pc_skill::PcSkillState::default();
         let mut session = Session {
+            map_index: 0,
+            war_map: 0,
             level: 1,
             npcs: None,
             protos: &protos,

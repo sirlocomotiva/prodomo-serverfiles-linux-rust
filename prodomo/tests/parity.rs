@@ -1489,8 +1489,9 @@ const POINT_CHANGE_LEN: usize = 4 + 4 + 1 + 8 + 8;
 /// `POINT_STAMINA`, the points record's slot of the current stamina.
 const POINT_STAMINA: usize = 9;
 
-/// The length of each loading and enter-game record. A variable record reports `usize::MAX`, and
-/// the caller sizes it from its own `WORD wSize`.
+/// The length of each record the game sends to a client: the loading and enter-game bursts
+/// and the in-game ones. A variable record reports `usize::MAX`, and the caller sizes it from
+/// its own `WORD wSize`.
 fn game_len(header: u8) -> usize {
     match header {
         GC_PHASE => PHASE_LEN,
@@ -1531,13 +1532,17 @@ fn game_len(header: u8) -> usize {
         GC_DAMAGE_INFO => DAMAGE_INFO_LEN,
         GC_CREATE_FLY => CREATE_FLY_LEN,
         GC_FLY_TARGETING => FLY_TARGETING_LEN,
+        // The effect a critical or a penetrating hit shows around its victim
+        // (`CHARACTER::EffectPacket`, `G/char.cpp:7533`). It can arrive at any time in the
+        // game, so every in-game reader has to size it.
+        GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
         // The party walk: ADD (header + PID + name), LINK and UNLINK (header + two
         // VIDs), UPDATE (header + PID + role + percent + seven affect shorts). The
         // invite and REMOVE fold into the `1 + 4` arm above, the PARAMETER into `1 + 1`.
         GC_PARTY_ADD => 1 + 4 + 25,
         GC_PARTY_LINK | GC_PARTY_UNLINK => 1 + 4 + 4,
         GC_PARTY_UPDATE => 1 + 4 + 1 + 1 + 2 * 7,
-        other => panic!("unexpected loading or enter-game header {other}"),
+        other => panic!("unexpected game header {other}"),
     }
 }
 
@@ -2500,12 +2505,10 @@ impl Keyed {
     }
 
     /// [`Keyed::read_wire`], but it waits until `deadline` across 5 s read beats instead
-    /// of panicking on one quiet beat, and reports `None` when the window runs out. A
-    /// fight's critical or penetrate shows `GC_SPECIAL_EFFECT` (byte 114), which
-    /// [`game_len`] does not size, so the width comes from [`fight_len`].
+    /// of panicking on one quiet beat, and reports `None` when the window runs out.
     fn read_wire_until(&mut self, deadline: std::time::Instant) -> Option<Vec<u8>> {
         self.read_sized_until(
-            &|header, first| match fight_len(header) {
+            &|header, first| match game_len(header) {
                 usize::MAX => usize::from(first[1]) | (usize::from(first[2]) << 8),
                 fixed => fixed,
             },
@@ -7200,6 +7203,15 @@ const CHARACTER_UPDATE_LEN: usize = protocol::gc_actors::GC_CHARACTER_UPDATE_WIR
 /// `GC_SEPCIAL_EFFECT` (byte 114): a `BYTE` type and a `DWORD` VID.
 const GC_SPECIAL_EFFECT: u8 = 114;
 const SPECIAL_EFFECT_LEN: usize = 6;
+/// `SE_CRITICAL` (`C/length.h:856`): the effect a critical hit shows on its victim.
+const SE_CRITICAL: u8 = 5;
+
+/// Whether `record` is an effect record: a critical or a penetrating hit shows itself
+/// around its victim (`CHARACTER::EffectPacket`, `G/char.cpp:7533`), which includes the
+/// victim, so it reaches every client in the victim's view at any time in the game.
+fn is_effect(record: &[u8]) -> bool {
+    record.first() == Some(&GC_SPECIAL_EFFECT)
+}
 
 /// A plain body armour of the owner's data: `LEVEL 0`, `value1` 12, `value5` 18.
 const SWAPPED_ARMOUR: u32 = 11_806;
@@ -10405,6 +10417,8 @@ const GC_STUN: u8 = 0x0d;
 const GC_DEAD: u8 = 0x0e;
 /// `DAMAGE_NORMAL`, the flag of a plain melee hit (`G/char_battle.cpp:1984`).
 const DAMAGE_NORMAL: u8 = 1;
+/// `DAMAGE_CRITICAL`, the flag a critical hit adds (`G/char.h:136`).
+const DAMAGE_CRITICAL: u8 = 1 << 5;
 
 /// The stray dog's `MAX_HP` (vnum 101).
 const DOG_HP: i32 = 126;
@@ -10506,12 +10520,20 @@ impl Keyed {
     /// The next record past a ping, the revive timer's own and a stamina refill, with what an
     /// NPC does on its own skipped as [`Keyed::read_game_raw`] skips it.
     ///
+    /// An effect record is passed over as well: a critical or a penetrating hit shows
+    /// itself around its victim, and the victim's client sees it whether it waits for the
+    /// damage or not.
+    ///
     /// [`Keyed::read_game`] takes a noted monster's `GC_CHARACTER_DEL` for a walk's noise
     /// ([`Keyed::monster_record`]), and here the monster's removal is the answer.
     fn read_fight(&mut self) -> Vec<u8> {
         loop {
             let record = self.read_game_raw();
-            if record[0] != GC_PING && !self.timer_record(&record) && !is_stamina_refill(&record) {
+            if record[0] != GC_PING
+                && !self.timer_record(&record)
+                && !is_stamina_refill(&record)
+                && !is_effect(&record)
+            {
                 return record;
             }
         }
@@ -10522,7 +10544,11 @@ impl Keyed {
     fn read_fight_until(&mut self, deadline: std::time::Instant) -> Option<Vec<u8>> {
         loop {
             let record = self.read_game_raw_until(deadline)?;
-            if record[0] != GC_PING && !self.timer_record(&record) && !is_stamina_refill(&record) {
+            if record[0] != GC_PING
+                && !self.timer_record(&record)
+                && !is_stamina_refill(&record)
+                && !is_effect(&record)
+            {
                 return Some(record);
             }
         }
@@ -10642,6 +10668,9 @@ struct Swing {
     damage: i32,
     /// The `DAMAGE_INFO` flag.
     flag: u8,
+    /// The effect types shown on the victim around this swing: a critical or a penetrate
+    /// (`GC_SEPCIAL_EFFECT`, `G/char.cpp:7533`).
+    effects: Vec<u8>,
     /// The hit points after the swing's `POINT_CHANGE`, none at clamp 0.
     hp: Option<i64>,
     /// The owner of the swing's `GC_OWNERSHIP`, none past 250 (`Kept` sends nothing).
@@ -10668,20 +10697,27 @@ fn move_time(record: &[u8]) -> u32 {
 /// monster's `GC_TARGET` (its NPC recovery), and any NPC's own doing. The monster's own move is
 /// tested before the chatter filter, since [`is_npc_chatter`] would skip it.
 fn read_swing(keyed: &mut Keyed, mob: u32, victim: u32, deadline: std::time::Instant) -> Swing {
-    let (damage, flag) = read_swing_head(keyed, mob, victim, deadline);
-    swing_tail(keyed, mob, victim, damage, flag)
+    let (damage, flag, effects) = read_swing_head(keyed, mob, victim, deadline);
+    swing_tail(keyed, mob, victim, damage, flag, effects)
 }
 
 /// Skip by rule until a swing's `DAMAGE_INFO` on `victim`: pings, the revive timer's, stamina
 /// refills, the monster's own chat, heal ticks, the monster's `GC_TARGET` and any NPC's own.
+///
+/// The effect records are taken on the way: a critical or a penetrating hit shows itself
+/// around its victim, which includes the victim, and it arrives before the damage it belongs
+/// to (`CHARACTER::EffectPacket`, `G/char.cpp:7533`, inside `Damage` at
+/// `G/char_battle.cpp:2003`, before `SendDamagePacket` at `:2338`). An effect around another
+/// entity belongs to another fight and is passed over.
 fn read_swing_head(
     keyed: &mut Keyed,
     mob: u32,
     victim: u32,
     deadline: std::time::Instant,
-) -> (i32, u8) {
+) -> (i32, u8, Vec<u8>) {
     let hp_kind = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
     let mut first = true;
+    let mut effects = Vec::new();
     let (damage, flag) = loop {
         assert!(
             std::time::Instant::now() < deadline,
@@ -10695,6 +10731,15 @@ fn read_swing_head(
             let flag = record[5];
             let damage = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
             break (damage, flag);
+        }
+        if is_effect(&record) {
+            if record
+                .get(2..6)
+                .is_some_and(|vid| vid == victim.to_le_bytes())
+            {
+                effects.push(record[1]);
+            }
+            continue;
         }
         // The victim's own heal ticks and the monster's recovery target, between swings.
         let is_heal = record.first() == Some(&GC_POINT_CHANGE)
@@ -10711,16 +10756,27 @@ fn read_swing_head(
         );
         first = false;
     };
-    (damage, flag)
+    (damage, flag, effects)
 }
 
 /// Take a swing's ordered tail after its `DAMAGE_INFO`: the hit points, the stun triple, the
 /// claim and the closing move.
-fn swing_tail(keyed: &mut Keyed, mob: u32, victim: u32, damage: i32, flag: u8) -> Swing {
+///
+/// An effect record is taken on the way as well: legacy shows it before the damage it
+/// belongs to, but a swing that shows none after it still has to be read past.
+fn swing_tail(
+    keyed: &mut Keyed,
+    mob: u32,
+    victim: u32,
+    damage: i32,
+    flag: u8,
+    effects: Vec<u8>,
+) -> Swing {
     let hp_kind = u8::try_from(common::point_slot::POINT_HP).expect("a point byte");
     let mut swing = Swing {
         damage,
         flag,
+        effects,
         hp: None,
         owner: None,
         stunned: false,
@@ -10736,6 +10792,15 @@ fn swing_tail(keyed: &mut Keyed, mob: u32, victim: u32, damage: i32, flag: u8) -
         // Below the chatter filter: the closing move is the monster's own.
         let record = keyed.read_wire();
         if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+            continue;
+        }
+        if is_effect(&record) {
+            if record
+                .get(2..6)
+                .is_some_and(|vid| vid == victim.to_le_bytes())
+            {
+                swing.effects.push(record[1]);
+            }
             continue;
         }
         if record[0] == GC_MOVE && record[4..8] == mob.to_le_bytes() {
@@ -10804,13 +10869,17 @@ fn read_heal_tick(keyed: &mut Keyed, mob: u32, victim: u32, hp_now: i64, due: st
             "a heal tick within four seconds of the first swing"
         );
         let record = keyed.read_game_raw();
-        if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+        if record[0] == GC_PING
+            || keyed.timer_record(&record)
+            || is_stamina_refill(&record)
+            || is_effect(&record)
+        {
             continue;
         }
         if record[0] == GC_DAMAGE_INFO && record[1..5] == victim.to_le_bytes() {
             let flag = record[5];
             let damage = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
-            let swing = swing_tail(keyed, mob, victim, damage, flag);
+            let swing = swing_tail(keyed, mob, victim, damage, flag, Vec::new());
             hp_now = swing.hp.unwrap_or(hp_now);
             continue;
         }
@@ -10871,7 +10940,11 @@ fn npc_move_of(
         );
         // Below the chatter filter: the wanted move is the monster's own.
         let record = keyed.read_wire();
-        if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+        if record[0] == GC_PING
+            || keyed.timer_record(&record)
+            || is_stamina_refill(&record)
+            || is_effect(&record)
+        {
             continue;
         }
         if record[0] == GC_MOVE && record[4..8] == mob.to_le_bytes() {
@@ -10883,7 +10956,7 @@ fn npc_move_of(
         if record[0] == GC_DAMAGE_INFO && record[1..5] == victim.to_le_bytes() {
             let flag = record[5];
             let damage = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
-            *early = Some(swing_tail(keyed, mob, victim, damage, flag));
+            *early = Some(swing_tail(keyed, mob, victim, damage, flag, Vec::new()));
             // A move that never came: the caller takes the swing instead.
             return Vec::new();
         }
@@ -11429,7 +11502,7 @@ fn a_hit_monster_turns_on_its_attacker_and_swings_every_two_seconds() {
 }
 
 /// Read until the fixed-width record under `header` arrives, skipping pings, timer
-/// records and stamina refills by rule.
+/// records, stamina refills and effect records by rule.
 fn read_until(
     keyed: &mut Keyed,
     header: u8,
@@ -11442,7 +11515,11 @@ fn read_until(
             "a record {header} within the window"
         );
         let record = keyed.read_game_raw();
-        if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+        if record[0] == GC_PING
+            || keyed.timer_record(&record)
+            || is_stamina_refill(&record)
+            || is_effect(&record)
+        {
             continue;
         }
         assert_eq!(
@@ -11464,6 +11541,9 @@ const ARCHER_AT_ALPHA: &str = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t403\n";
 /// Alpha punches the 403 it targets, standing on it. The monster runs `BeginFight` and
 /// shoots: the `GC_FLY_TARGETING` around it names it and Alpha, then the `DAMAGE_INFO`
 /// lands and the claim and the closing `MOVE{2}` follow as for a swing.
+///
+/// The 403's five per cent critical draws are part of the shot: a critical shows itself
+/// around the victim and says so in the damage's flag, and the scenario reads either.
 #[test]
 fn a_hit_range_monster_answers_with_a_shot_and_its_fly_record() {
     let Some(database) = ScratchDatabase::create() else {
@@ -11509,9 +11589,26 @@ fn a_hit_range_monster_answers_with_a_shot_and_its_fly_record() {
         "the victim's point: {fly:02x?}"
     );
     let shot = read_swing(&mut alpha, archer, alpha_vid, first_due);
-    assert_eq!(shot.flag, DAMAGE_NORMAL, "no critical or penetrate");
+    // The 403 has a five per cent critical chance (`ENCHANT_CRITICAL`, `legacy/gamedata/proto/
+    // mob_proto.txt`) and no penetrate, so the shot is either plain or critical. A critical
+    // shows itself around the victim (`EffectPacket`, `G/char.cpp:7533`) and says so in the
+    // damage's flag (`G/char_battle.cpp:2300-2301`).
+    let critical = shot.effects.contains(&SE_CRITICAL);
+    assert_eq!(
+        shot.flag,
+        if critical {
+            DAMAGE_NORMAL | DAMAGE_CRITICAL
+        } else {
+            DAMAGE_NORMAL
+        },
+        "a critical shows itself on the victim: {:?}",
+        shot.effects
+    );
+    // A critical doubles the damage (`dam *= 2`, `G/char_battle.cpp:2001`), so its ceiling
+    // is twice the plain one.
+    let ceiling = if critical { 900 } else { 450 };
     assert!(
-        (1..=450).contains(&shot.damage),
+        (1..=ceiling).contains(&shot.damage),
         "the shot lands: {}",
         shot.damage
     );
@@ -12078,21 +12175,12 @@ fn read_party_swing_sized(
     victim: u32,
     deadline: std::time::Instant,
 ) -> PartySwing {
-    let sized = |header: u8, first: &[u8]| match fight_len(header) {
+    let sized = |header: u8, first: &[u8]| match game_len(header) {
         usize::MAX => usize::from(first[1]) | (usize::from(first[2]) << 8),
         fixed => fixed,
     };
     let (damage, _flag) = read_party_swing_head(keyed, members, victim, deadline, &sized);
     party_swing_tail(keyed, members, victim, damage, deadline, &sized)
-}
-
-/// [`game_len`] plus the fight's `GC_SPECIAL_EFFECT` (byte 114), which the general table
-/// does not size: a critical or penetrate shows it on the fight's victim.
-fn fight_len(header: u8) -> usize {
-    match header {
-        GC_SPECIAL_EFFECT => SPECIAL_EFFECT_LEN,
-        other => game_len(other),
-    }
 }
 
 /// Skip by rule until a swing's `DAMAGE_INFO` on `victim`: pings, the revive timer's,

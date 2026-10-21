@@ -155,6 +155,14 @@ pub trait Game {
     /// `GetSkillLevel(vnum)` of the character the script runs for (230g).
     fn skill_level(&self, vnum: u32) -> u8;
 
+    /// `GetMapIndex()` of the character the script runs for: the map it stands on, the
+    /// private index when it stands on a private map.
+    fn map_index(&self) -> i32;
+
+    /// `GetWarMap()` of the character the script runs for: the war map's private index,
+    /// and 0 when it stands on no war map.
+    fn war_map(&self) -> i32;
+
     /// One `guild.*` quest call (230s): the call's member name (`level`, `get_sp0`) and
     /// its arguments, dworded numbers or raw text. The world's guilds judge it now, while
     /// the script that asked still waits, and answer what legacy pushed.
@@ -389,6 +397,50 @@ impl Manager {
         }
     }
 
+    /// `CQuestManager::Letter` (`G/questmanager.cpp:502-514`): the named quest's letter
+    /// event at the given state.
+    ///
+    /// The letter is how the war's members are asked to join the war map: legacy's
+    /// `CGuild::GuildWarEntryAsk` sends the `guild_war_join` letter to every online
+    /// member of the two guilds (`G/guild_war.cpp:680-727`), and the quest's button
+    /// calls `guild.war_enter`.
+    pub fn letter(&mut self, pid: u32, quest: u32, state: i32, game: &mut dyn Game) -> bool {
+        self.operate(pid, game, |run, pc, npcs| {
+            let Some(npc) = npcs.get(&QUEST_NO_NPC) else {
+                return false;
+            };
+            run.event_script(pc, npc, "letter", quest, state)
+        })
+    }
+
+    /// `CQuestManager::QuestButton` (`G/questmanager.cpp:767-789`) and `NPC::OnButton`
+    /// (`G/questnpc.cpp:810-859`): the named quest's button event, at the character's
+    /// state of that quest or at its start.
+    ///
+    /// The client's quest button carries the quest's number (`makequestbutton`,
+    /// `quest/questlib.lua:117-122`), and the high bit asks for the quest's info
+    /// instead of its button (`CInputMain::ScriptButton`, `G/input_main.cpp:2179-2198`).
+    pub fn button(&mut self, pid: u32, quest: u32, game: &mut dyn Game) -> bool {
+        self.operate(pid, game, |run, pc, npcs| {
+            // A running script holds the character (`NPC::OnButton` refuses one).
+            if pc.running.is_some() {
+                return false;
+            }
+            let Some(npc) = npcs.get(&QUEST_NO_NPC) else {
+                return false;
+            };
+            let state = if let Some(state) = pc.quests.get(&quest) {
+                *state
+            } else {
+                if !run.can_start(quest) {
+                    return false;
+                }
+                0
+            };
+            run.event_script(pc, npc, "button", quest, state)
+        })
+    }
+
     /// `CQuestManager::Input`: the text a script's `input()` waits for.
     pub fn input(&mut self, pid: u32, msg: &[u8], game: &mut dyn Game) {
         let suspend = self
@@ -505,11 +557,14 @@ impl Manager {
         // waits. Swapped out and back — `execute` also writes `__status` there, but
         // never while a bridge call holds the `RefCell`.
         let mut loaned = std::mem::take(&mut pc.flags);
+        let host: &Host = host;
+        let quest_indices = host.quest_indices();
         let cx = RefCell::new(Cx {
             output: Output::default(),
             game,
             event_flags,
             npc_ids,
+            quest_indices,
             npc_vid: pc.npc_vid,
             quest: pc.current.clone(),
             pending_state: None,
@@ -999,6 +1054,9 @@ struct Cx<'g> {
     game: &'g mut dyn Game,
     event_flags: &'g BTreeMap<Vec<u8>, i32>,
     npc_ids: &'g BTreeMap<Vec<u8>, u32>,
+    /// The number of every quest, by name (`m_hmQuestName`,
+    /// `G/questmanager.cpp:1284-1289`), which `q.getcurrentquestindex` answers.
+    quest_indices: &'g BTreeMap<Vec<u8>, u32>,
     npc_vid: u32,
     /// The quest that runs, for error messages (`GetCurrentQuestName`).
     quest: Vec<u8>,
@@ -1134,6 +1192,25 @@ impl Run<'_, '_> {
         let code = host::load_chunk(self.lua(), &source, "QUEST_CHAT_TEMP_QUEST");
         let chat = avail.into_iter().cloned().collect();
         self.execute(pc, 0, CHAT_TEMP_QUEST.to_vec(), 0, code, chat);
+        true
+    }
+
+    /// `NPC::ExecuteEventScript` (`G/questnpc.cpp:966-988`): the named quest's script for
+    /// the event at the given state, and nothing else.
+    ///
+    /// The legacy's letter and button name one quest (`OnLetter`, `OnButton`), where the
+    /// generic [`Run::handle_event`] runs every quest of the NPC.
+    fn event_script(&self, pc: &mut Pc, npc: &Npc, event: &str, quest: u32, state: i32) -> bool {
+        let Some(code) = npc
+            .own
+            .get(event)
+            .and_then(|quests| quests.get(&quest))
+            .and_then(|states| states.get(&state))
+        else {
+            return false;
+        };
+        let name = self.quest_name(quest);
+        self.execute(pc, quest, name, state, code.clone(), Vec::new());
         true
     }
 
@@ -1454,6 +1531,8 @@ fn pc_api(
     let number = |value: u32| Some(Value::Number(f64::from(value)));
     let result = match name {
         b"pc.get_level" => number(u32::from(cx.game.level())),
+        b"pc.get_map_index" => Some(Value::Number(f64::from(cx.game.map_index()))),
+        b"pc.get_war_map" => Some(Value::Number(f64::from(cx.game.war_map()))),
         b"pc.is_gm" => Some(Value::Boolean(false)),
         b"pc.learn_grand_master_skill" => {
             // `pc_learn_grand_master_skill` (`questlua_pc.cpp:121-133`): a non-number
@@ -1511,6 +1590,8 @@ fn guild_api(
             | b"around_ranking_string"
             | b"name"
             | b"level"
+            | b"war_enter"
+            | b"get_any_war"
             | b"get_name"
             | b"get_member_count"
             | b"change_master"
@@ -1634,6 +1715,17 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
             Some(Value::Number(f64::from(value)))
         }
         b"npc.getrace" | b"npc.get_race" => number(cx.game.race_of(cx.npc_vid).unwrap_or(0)),
+        b"q.getcurrentquestindex" => {
+            // `CQuestManager::GetQuestIndexByName` (`G/questmanager.cpp:1282-1290`): the
+            // number of the quest that runs, and 0 for a name no quest has.
+            let index = cx
+                .quest_indices
+                .get(cx.quest.as_slice())
+                .copied()
+                .unwrap_or(0);
+            number(index)
+        }
+        b"q.getcurrentquestname" => Some(Value::String(lua.create_string(cx.quest.clone())?)),
         b"set_state" | b"q.setstate" | b"q.set_state" => {
             match host::c_string(lua, last)? {
                 Some(state) if !state.is_empty() => {
@@ -1681,6 +1773,9 @@ mod tests {
         draws: Vec<(i32, i32)>,
         learned: BTreeSet<u32>,
         guild_calls: Vec<(Vec<u8>, Vec<GuildArg>)>,
+        map_index: i32,
+        war_map: i32,
+        any_war: f64,
     }
 
     impl Fake {
@@ -1737,9 +1832,21 @@ mod tests {
             u8::from(self.learned.contains(&vnum)) * 40
         }
 
+        fn map_index(&self) -> i32 {
+            self.map_index
+        }
+
+        fn war_map(&self) -> i32 {
+            self.war_map
+        }
+
         fn guild_call(&mut self, name: &[u8], args: &[GuildArg]) -> GuildAnswer {
             self.guild_calls.push((name.to_vec(), args.to_vec()));
-            GuildAnswer::None
+            match name {
+                b"get_any_war" => GuildAnswer::Number(self.any_war),
+                b"name" => GuildAnswer::Text(b"Knights".to_vec()),
+                _ => GuildAnswer::None,
+            }
         }
     }
 
@@ -2090,6 +2197,7 @@ mod tests {
                 game: &mut self.game,
                 event_flags: &self.manager.event_flags,
                 npc_ids: &self.manager.npc_ids,
+                quest_indices: self.manager.host.quest_indices(),
                 npc_vid: VID,
                 quest: b"q".to_vec(),
                 pending_state: None,
@@ -2386,6 +2494,51 @@ mod tests {
         assert!(!manager.pcs.contains_key(&(PID + 2)));
         manager.logout(PID);
         manager.logout(PID + 1);
+    }
+
+    /// `CQuestManager::Letter` (`G/questmanager.cpp:502-514`) and
+    /// `CQuestManager::QuestButton` (`G/questmanager.cpp:767-789`): the war join quest's
+    /// letter asks the client for the join button, and its button asks the player
+    /// whether to join the war.
+    #[test]
+    fn the_war_join_letter_asks_for_the_button_and_the_button_asks_to_join() {
+        let mut manager = load();
+        let quest = manager
+            .host()
+            .quest_index(b"guild_war_join")
+            .expect("the war join quest");
+        let mut game = Fake {
+            map_index: 100,
+            any_war: 4.0,
+            ..Fake::default()
+        };
+        // The letter runs the named quest's start state, and the quest asks the client
+        // for a button that carries the quest's number.
+        assert!(manager.letter(PID, quest, 0, &mut game), "the letter runs");
+        let scripts = game.take();
+        assert!(
+            scripts
+                .iter()
+                .any(|(_, text)| text.contains(&format!("[QUESTBUTTON idx;{quest}|name;"))),
+            "the letter asks for the button: {scripts:?}"
+        );
+        // The button runs the same quest, which asks the player to confirm.
+        assert!(manager.button(PID, quest, &mut game), "the button runs");
+        let scripts = game.take();
+        assert!(
+            scripts.iter().any(|(_, text)| text.contains("Knights")),
+            "the button names the enemy guild: {scripts:?}"
+        );
+    }
+
+    /// The letter and the button name one quest, where the generic event handler runs
+    /// every quest of the NPC.
+    #[test]
+    fn a_letter_that_names_no_quest_runs_nothing() {
+        let mut manager = load();
+        let mut game = Fake::default();
+        assert!(!manager.letter(PID, 9999, 0, &mut game), "no such quest");
+        assert!(game.take().is_empty(), "nothing ran");
     }
 
     #[test]

@@ -511,6 +511,9 @@ pub struct GameState {
     protect_level: u8,
     /// The guilds and their member index. See [`guild`].
     guilds: guild::Guilds,
+    /// The war maps the live wars are fought on, keyed by the private map index
+    /// (`CWarMapManager::m_mapWarMap`, `G/war_map.cpp:166`). See [`war_map`].
+    war_maps: BTreeMap<i32, war_map::WarMap>,
     /// The guild mark images and their mark-id allocator. See [`guild_mark`].
     marks: guild_mark::MarkManager,
     /// The guild symbols by guild id (`m_mapSymbol`, `G/MarkManager.h`). See
@@ -619,6 +622,7 @@ impl GameState {
             recall: death::Recall::default(),
             protect_level: DEFAULT_PROTECT_LEVEL,
             guilds: guild::Guilds::default(),
+            war_maps: BTreeMap::new(),
             marks: guild_mark::MarkManager::default(),
             symbols: std::collections::BTreeMap::new(),
             name_rules: crate::select_phase::NameRules::default(),
@@ -1408,6 +1412,10 @@ impl GameState {
         self.end_quests(vid);
         self.forget_portal_times(vid);
         let alignment = self.real_alignment_of(vid.raw());
+        // `CWarMap::DecMember` (`G/war_map.cpp:400-451`): a player that leaves a war map
+        // leaves its team, or the watchers.
+        let war_map = self.bodies.get(&vid).map_or(0, |body| body.map);
+        self.leave_war_map(vid, war_map);
         let place = self.remove_body(vid);
         let character = self.characters.find_by_vid(vid).ok()?;
         let kept = Kept {

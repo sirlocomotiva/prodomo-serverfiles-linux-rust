@@ -36,7 +36,7 @@ use common::item_slots::{
 use common::vid::Vid;
 use gamedata::server_attr::SectreeGrid;
 use protocol::cg_guild_answer::GUILD_NAME_FIELD_SIZE;
-use protocol::gc_chat::{CHAT_TYPE_INFO, CHAT_TYPE_NOTICE};
+use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO, CHAT_TYPE_NOTICE};
 use protocol::gc_guild::{
     guild_change_exp_record, guild_change_member_general_record, guild_change_member_grade_record,
     guild_grade_auth_record, guild_grade_name_record, guild_grade_record, guild_info_record,
@@ -3176,6 +3176,110 @@ impl GameState {
     /// the acceptor first. `now` is `get_global_time()` in seconds, which the descriptor
     /// reads. Either check failing leaves the declares standing, quiet — legacy's
     /// `CheckStartWar` failures return the same way.
+    /// `CWarMapManager::CreateWarMap` (`G/war_map.cpp:1042-1059`): the war's private
+    /// map becomes a war map of the type the map was copied from, and the two guilds
+    /// stand on it, the lower id first.
+    fn create_war_map(&mut self, map_index: i32, from: u32, to: u32) {
+        let Some(info) = super::war_map::war_map_of(map_index) else {
+            return;
+        };
+        let guilds = if from < to { [from, to] } else { [to, from] };
+        let map = super::war_map::WarMap::new(map_index, info.map_index, info.map_type, guilds, 0);
+        self.war_maps.insert(map_index, map);
+    }
+
+    /// `CWarMap::IncMember` (`G/war_map.cpp:342-398`): a character that enters a war map
+    /// joins the team of its guild when it carries the war member's flag, and watches
+    /// the war otherwise.
+    pub(super) fn join_war_map(&mut self, vid: Vid, map: i32) {
+        if !self.war_maps.contains_key(&map) {
+            return;
+        }
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return;
+        };
+        let pid = character.player_id();
+        let guild = self.guild_of(pid).unwrap_or(0);
+        // `ch->GetQuestFlag("war.is_war_member") > 0` (`G/war_map.cpp:353`): the flag the
+        // war entry set (`G/guild_war.cpp:674`).
+        let flag = self
+            .quests
+            .as_ref()
+            .and_then(|quests| quests.manager().quest_flag(pid, b"war.is_war_member"))
+            .unwrap_or(0);
+        // `IncMember` clears the flag it read (`G/war_map.cpp:357`): the entry's flag
+        // is consumed by the join.
+        if flag > 0 {
+            if let Some(quests) = self.quests.as_mut() {
+                quests
+                    .manager_mut()
+                    .set_quest_flag(pid, b"war.is_war_member", 0);
+            }
+        }
+        if let Some(war) = self.war_maps.get_mut(&map) {
+            war.inc_member(vid, pid, guild, flag > 0);
+        }
+        self.war_user_count(map);
+    }
+
+    /// `CWarMap::DecMember` (`G/war_map.cpp:400-451`): a player that leaves the war's map
+    /// falls out of the count of its team, or of the watchers'.
+    pub(super) fn leave_war_map(&mut self, vid: Vid, map: i32) {
+        let Some(war) = self.war_maps.get(&map) else {
+            return;
+        };
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return;
+        };
+        let pid = character.player_id();
+        let guild = self.guild_of(pid).unwrap_or(0);
+        let observer = match war.team_of(guild) {
+            Some(index) => !war.teams[index].joiners.contains(&pid),
+            None => true,
+        };
+        if let Some(war) = self.war_maps.get_mut(&map) {
+            war.dec_member(vid, guild, observer);
+        }
+        self.war_user_count(map);
+    }
+
+    /// `CWarMap::UpdateUserCount` (`G/war_map.cpp:330-340`): every player on the war's
+    /// map hears the two command lines the legacy sends it — the watcher count, and the
+    /// two guilds with the players that joined them.
+    fn war_user_count(&mut self, map: i32) {
+        let Some(war) = self.war_maps.get(&map) else {
+            return;
+        };
+        let (guild1, count1, guild2, count2, observers) = war.user_count();
+        let mut vids: Vec<Vid> = war.present.iter().copied().collect();
+        vids.sort_by_key(|vid| vid.raw());
+        for vid in vids {
+            let Some(mover) = self.own_mover(vid) else {
+                continue;
+            };
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_COMMAND,
+                b"ObserverCount %d",
+                &[Arg::Int(i64::from(observers))],
+            );
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_COMMAND,
+                b"WarUC %d %d %d %d %d",
+                &[
+                    Arg::Int(i64::from(guild1)),
+                    Arg::Int(i64::try_from(count1).unwrap_or(i64::MAX)),
+                    Arg::Int(i64::from(guild2)),
+                    Arg::Int(i64::try_from(count2).unwrap_or(i64::MAX)),
+                    Arg::Int(i64::from(observers)),
+                ],
+            );
+        }
+    }
+
     fn manager_start_war(&mut self, from: u32, to: u32, now: u32) -> GuildWarAnswer {
         let quiet = GuildWarAnswer { notice: None };
         if from == to {
@@ -3217,6 +3321,12 @@ impl GameState {
             {
                 enemy.map_index = map_index;
             }
+        }
+        // `CWarMapManager::CreateWarMap` (`G/war_map.cpp:1042-1059`): the private copy
+        // the war's map type names becomes the war's map, and the two guilds stand on
+        // it, the lower id first (`GetTeamIndex`, `G/war_map.cpp:199-215`).
+        if map_index != 0 {
+            self.create_war_map(map_index, from, to);
         }
         // `CGuild::StartWar` both sides (`G/guild_war.cpp:418-437`): the state, the stamp,
         // and the fan. Field wars ask no entry.
@@ -3525,6 +3635,15 @@ impl GameState {
             .get(&lo)
             .and_then(|guild| guild.enemies.get(&hi))
             .map_or(GUILD_WAR_TYPE_FIELD, |enemy| enemy.war_type);
+        // `CGuild::EndWar` (`G/guild_war.cpp:592-627`): the war's map ends with the
+        // war, and the players on it leave it.
+        let map_index = self
+            .guilds
+            .by_id
+            .get(&lo)
+            .and_then(|guild| guild.enemies.get(&hi))
+            .map_or(0, |enemy| enemy.map_index);
+        let _ = self.war_maps.remove(&map_index);
         let (score_lo, score_hi) = (score(&self.guilds, lo, hi), score(&self.guilds, hi, lo));
         // Two draws, and they are not the same one: the ladder math follows the DB's
         // `WarEnd`, which a forced draw turns into a draw whatever the scores are
@@ -8143,6 +8262,45 @@ mod tests {
         assert!(
             !world.guild_war_allows(Vid::new(GUEST_VID), Vid::new(200)),
             "a guildless player has no war arm"
+        );
+        drop(rival);
+    }
+
+    /// `CWarMapManager::CreateWarMap` (`G/war_map.cpp:1042-1059`): the war's private map
+    /// becomes a war map of the two guilds, each on a team of its own.
+    #[test]
+    fn the_war_takes_a_map_of_its_own() {
+        let (_clock, mut world, _master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let first = world.guild_war(Vid::new(MASTER_VID), b"Wolves", NOW);
+        assert!(first.notice.is_some(), "the first declare lands");
+        let answer = world.guild_war(Vid::new(200), b"Knights", NOW);
+        assert!(answer.notice.is_some(), "the declare back starts the war");
+        // `CWarMapManager::CreateWarMap` (`G/war_map.cpp:1042-1059`): the private copy
+        // of the war's map type becomes the war's map, and the two guilds stand on it.
+        // The war's map needs a Channel that hosts its map, which the world's fixture
+        // does not, so the map is made here.
+        world.create_war_map(1_100_000, GUILD_ID, SECOND_ID);
+        let war = world.war_maps.get(&1_100_000).expect("the world's war map");
+        assert_eq!(war.map_index, 1_100_000, "the map is the war's own");
+        assert_eq!(
+            war.base_map, 110,
+            "the map was copied from the war's map type"
+        );
+        assert!(
+            war.team_of(GUILD_ID).is_some(),
+            "the first guild stands on it"
+        );
+        assert!(
+            war.team_of(SECOND_ID).is_some(),
+            "the second guild stands on it"
+        );
+        assert_ne!(
+            war.team_of(GUILD_ID),
+            war.team_of(SECOND_ID),
+            "each guild has a team of its own"
         );
         drop(rival);
     }

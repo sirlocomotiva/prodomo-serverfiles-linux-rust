@@ -236,7 +236,7 @@ pub const BRIDGE: &str = "quest bridge";
 /// The API names that reach the game through [`BRIDGE`], in [`crate::api::NAMES`] order: the
 /// dialog (`say`, `raw_script`, the skins and the images), the chat lines, and the lookups the
 /// ported systems can answer.
-pub const BRIDGED: [&str; 54] = [
+pub const BRIDGED: [&str; 60] = [
     "game.get_event_flag",
     "set_state",
     "set_skin",
@@ -260,6 +260,8 @@ pub const BRIDGED: [&str; 54] = [
     "guild.around_ranking_string",
     "guild.name",
     "guild.level",
+    "guild.war_enter",
+    "guild.get_any_war",
     "guild.get_name",
     "guild.get_member_count",
     "guild.change_master",
@@ -286,11 +288,15 @@ pub const BRIDGED: [&str; 54] = [
     "npc.getrace",
     "npc.get_race",
     "pc.get_level",
+    "pc.get_map_index",
     "pc.learn_grand_master_skill",
+    "pc.get_war_map",
     "pc.get_skill_level",
     "pc.is_gm",
     "q.setstate",
     "q.set_state",
+    "q.getcurrentquestindex",
+    "q.getcurrentquestname",
 ];
 
 /// The registry key of [`PRELUDE`]'s `getn`.
@@ -400,6 +406,10 @@ impl From<mlua::Error> for HostError {
 pub struct Host {
     lua: Lua,
     quests: Vec<Quest>,
+    /// The quest number of every quest, by name (`RegisterQuest`'s `m_hmQuestName`,
+    /// `G/questmanager.cpp:1266-1290`). The number is the quest's place in the load
+    /// order, as [`Host::quest_index`] says.
+    quest_indices: BTreeMap<Vec<u8>, u32>,
     objects: Objects,
     chunks: BTreeMap<Vec<u8>, Function>,
     refused: Vec<Refused>,
@@ -462,11 +472,16 @@ impl Host {
             }
         }
         let mut quests = Vec::with_capacity(names.len());
+        let mut quest_indices = BTreeMap::new();
         for name in names {
             let file = [&b"state/"[..], &name].concat();
             let table = &objects[&file];
             load_chunk(&lua, table, &chunk_name(&file))?.call::<()>(())?;
             let states = index_states(&lua, &name)?;
+            let number = u32::try_from(quests.len())
+                .unwrap_or(u32::MAX)
+                .saturating_add(1);
+            quest_indices.insert(name.clone(), number);
             quests.push(Quest { name, states });
         }
         let mut chunks = BTreeMap::new();
@@ -478,6 +493,7 @@ impl Host {
         Ok(Host {
             lua,
             quests,
+            quest_indices,
             objects,
             chunks,
             refused,
@@ -498,6 +514,12 @@ impl Host {
     pub fn quest_index(&self, name: &[u8]) -> Option<u32> {
         let position = self.quests.iter().position(|quest| quest.name == name)?;
         u32::try_from(position + 1).ok()
+    }
+
+    /// The number of every quest, by name (`m_hmQuestName`,
+    /// `G/questmanager.cpp:1284-1289`).
+    pub fn quest_indices(&self) -> &BTreeMap<Vec<u8>, u32> {
+        &self.quest_indices
     }
 
     /// Every compiled file, keyed by its path below `object/`.

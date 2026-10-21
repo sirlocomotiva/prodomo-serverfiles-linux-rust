@@ -33843,3 +33843,153 @@ workspace all-targets DB run green, the parity target green; the doc build and t
 doc-tests green; no scratch database left.
 
 No ADR changed. No owner question added. V21 stays taken.
+## 237. The war map's runtime, its members and its watchers (`sys.guild.war`, third part)
+
+A guild war of a map type had a map — ledger 236 gave the war its private copy — but the world
+held nothing of it: no team, no watcher, no count. Legacy's `CWarMap` (`G/war_map.h:48-143`) is
+the war's own map: the two teams that fight on it, the players that watch it, the players that
+joined each team, and the counts the map tells them. The Rewrite now holds that map while the
+war lives, and a player that walks onto it joins it.
+
+**The map.** `prodomo/src/game_state/war_map.rs` holds `WarMap`: the private map index the war
+is fought on, the map it was copied from, the map's type, the two guilds, the two teams, the
+watchers, and the players on the map.
+
+| legacy | here |
+|---|---|
+| `CWarMap::m_TeamData` (`G/war_map.h:114-133`) | `WarTeam` |
+| `CWarMap::m_iObserverCount` | `WarMap::observers` |
+| `CWarMap::m_set_pkChr` | `WarMap::present` |
+| `STeamData::set_pidJoiner` | `WarTeam::joiners` |
+| `CWarMap::GetTeamIndex` (`G/war_map.cpp:199-215`) | `WarMap::team_of` |
+| `CWarMap::IncMember` (`G/war_map.cpp:342-398`) | `WarMap::inc_member` |
+| `CWarMap::DecMember` (`G/war_map.cpp:400-451`) | `WarMap::dec_member` |
+| `CWarMap::UpdateUserCount` (`G/war_map.cpp:330-340`) | `WarMap::user_count` |
+
+The two guilds take a team each, and the lower id takes the first team — legacy's constructor
+sorts them (`G/war_map.cpp:120-198`) and `GetTeamIndex` reads them back (`:199-215`), so
+`WarMap::new` sorts them and `team_of` finds the team.
+
+**The creation.** `CWarMapManager::CreateWarMap` (`G/war_map.cpp:1042-1059`) makes the war's map
+when the war starts. The Rewrite's `GameState::create_war_map` does it in `manager_start_war`,
+before the on-war fan — the order legacy keeps (`G/guild_war.cpp:519-537`) — and both sides'
+entries carry the map's index (ledger 236). The field war takes no map, so it takes no war map.
+
+**The members.** A player that enters the war's map joins it: `CWarMap::IncMember`
+(`G/war_map.cpp:342-398`) puts the player in the team of its guild when the player carries the
+war member's flag, and counts it among the watchers otherwise. The flag is the quest flag
+`war.is_war_member`, which the war entry sets (`G/guild_war.cpp:674`) and which the join reads
+and clears (`G/war_map.cpp:353-357`). The Rewrite reads the flag from the quest manager and
+clears it there, and it joins the player in `GameState::join_war_map`, which the world's
+`place_body` calls when it puts a character on a map (`CWarMapManager::Find(GetMapIndex())`,
+`G/input_login.cpp:780`).
+
+A player that leaves the map falls out of the count of its team, or of the watchers'
+(`CWarMap::DecMember`, `G/war_map.cpp:400-451`): the world's `leave_world_by` calls
+`GameState::leave_war_map` before it takes the player's body off the map.
+
+**The counts.** Legacy tells the players on the map what the map holds: two command lines, one
+with the watcher count and one with the two guilds, their joiner counts and the watcher count
+(`FSendUserCount`, `G/war_map.cpp:312-340`). The Rewrite sends the same two lines, `ObserverCount
+%d` and `WarUC %d %d %d %d %d`, to every player on the map, on every join and on every leave.
+Legacy writes the two guild ids with `%u`; the Rewrite writes them with `%d`, which prints the
+same digits for a guild id and a count.
+
+**The quest bridge.** A quest script asks the map the character stands on and the war map it
+stands on: `GetMapIndex()` and `GetWarMap()` (`G/input_login.cpp:780`). The Rewrite's quest
+session carries the two (`prodomo/src/game_state/quests.rs`), the map index of the body and the
+war map of that index.
+
+**The quest's war join.** The war-join quest (`legacy/gamedata/locale/europe/quest/_basic/guild/
+guild_war_join.lua`) asks the game six things, and the quest crate now asks them: the enemy's
+guild id (`guild.get_any_war`), the join itself (`guild.war_enter`), the map the character
+stands on (`pc.get_map_index`), the war map it stands on (`pc.get_war_map`), and the quest's
+number and name (`q.getcurrentquestindex`, `q.getcurrentquestname`). The quest crate holds the
+letter that asks for the button and the button that asks to join (`quest/src/manager.rs`), and
+the quest's number by name (`RegisterQuest`'s `m_hmQuestName`, `G/questmanager.cpp:1266-1290`).
+The two map reads are answered by the game here; the two guild calls and the join that warps
+the member to the start position are the next section.
+
+**The divergences.**
+
+- The map's end is not legacy's. Legacy's `CGuild::EndWar` (`G/guild_war.cpp:592-627`) ends the
+  map, and the map's end event ends the war ten passes later (`CWarMap::SetEnded`,
+  `G/war_map.cpp:739-779`). The Rewrite's war ends first (ledger 230y) and the map goes with it.
+  The map's own end — its flags, its draw, its exit — is the next section.
+- The player that leaves the world leaves the war map with it. Legacy's `DecMember` is called by
+  the map's own end and by the death that takes a player off the map; the Rewrite calls it when
+  the character leaves the world, which covers both.
+- The war member's flag is a quest flag in both. Legacy sets it on the character that enters
+  the war (`G/guild_war.cpp:674`); the Rewrite has no entry yet (the next section), so no player
+  carries it and every player that walks onto a war map watches it.
+
+**The tests.** `prodomo/src/game_state/war_map.rs` holds five: the three war types at legacy's
+numbers, the two war maps, a private map naming the map it was copied from, a private map
+taking the first free instance of its base, and a war map holding two teams and the watchers —
+the teams in legacy's order, a member joining its team's guild, a player without the flag
+watching, the counts the map tells, and a member falling out of its team.
+`prodomo/src/game_state/guild.rs` holds the map's creation: the war's map is the private copy of
+the war's map type, and the two guilds stand on teams of their own.
+
+**The inventory.** The row `sys.guild.war` stays `partial`: the war's map, its teams, its
+members, its watchers and its counts are live now, but the entry that warps the members to the
+start positions, the flags and the war map's own end are not.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; the full workspace
+all-targets DB run green, the parity target green; the doc build and the doc-tests green; no
+scratch database left.
+
+No ADR changed. No owner question added. V21 stays taken.
+
+## 238. The archer's critical shot: the harness sizes the effect record and the scenario reads either
+
+The parity scenario `a_hit_range_monster_answers_with_a_shot_and_its_fly_record` failed about
+one run in twenty: the 403 it shoots from has a five per cent critical chance, and a critical
+sends a record the harness's width table did not know, so the read panicked with `unexpected
+loading or enter-game header 114`. The Rewrite was right and the harness was short.
+
+**What legacy sends.** A critical is drawn inside `Damage`, in the arm that takes
+`DAMAGE_TYPE_NORMAL` and `DAMAGE_TYPE_NORMAL_RANGE` (`G/char_battle.cpp:1936`): the attacker's
+critical percent, unhalved as this arm has it (`:1990`, less the victim's resist at `:1997`),
+and the draw (`:1999`) doubles the damage (`:2002`) and calls `EffectPacket(SE_CRITICAL)`
+(`:2003`). `CHARACTER::EffectPacket` (`G/char.cpp:7533-7542`) fills the record with the effect
+type and `GetVID()` — the victim's — and `CEntity::PacketAround` (`G/entity.cpp:88-105`) sends it
+to every entity in the victim's view and to the victim itself (`:104`). The damage's flag gets
+`DAMAGE_CRITICAL` (`G/char.h:136`, `G/char_battle.cpp:2307-2308`) and the damage goes out with
+it (`:2338`).
+
+So the effect record reaches every client in the victim's view, at any time in the game: a
+critical anywhere near a player is a record that player sees, whether it waits for a damage or
+not. The same is true of a penetrating hit (`SE_PENETRATE`, `:2035`).
+
+**What the Rewrite sends.** The same. `pc_chances`
+(`world/src/character/combat/mob_melee.rs:811-847`) draws the attacker's unhalved critical
+percent, doubles the damage and pushes `SE_CRITICAL` (`:824-828`); `shoot_pc` (`:339-390`) is the
+shot's arm, and the party's monsters' one per cent penetrate is the same draw.
+`show_mob_strike` (`prodomo/src/game_state/mob_strike.rs:370-380`) sends the effect around the
+victim, which includes the victim, and the damage after it.
+
+**The harness.** The width table `game_len` (`prodomo/tests/parity.rs`) now sizes the effect
+record (six bytes: a `BYTE` type and a `DWORD` VID), so every reader can read one; the separate
+`fight_len` table, which had held that one width, is gone and the deadline reader and the
+party's reader use the general table. The fight readers pass an effect record over by rule, the
+way they pass a ping over: `read_fight`, `read_fight_until`, `read_until`, `read_heal_tick` and
+`npc_move_of`. The swing readers take the one on the victim, for the scenario to read: a swing's
+`Swing` holds the effect types shown on its victim, and the head and the tail fill it.
+
+**The scenario.** The shot is either plain or critical, and the scenario says which: the flag
+and the effect agree, `DAMAGE_NORMAL` alone or `DAMAGE_NORMAL | DAMAGE_CRITICAL`, and the
+ceiling on the damage is the plain one's or twice it, since a critical doubles the damage. The
+403 has no penetrate, so the flag is never `DAMAGE_PENETRATE`.
+
+**How the path was proved.** The five per cent draw cannot be waited for, so the critical was
+forced: with `pc_chances` drawing a hundred per cent for the length of one run, the scenario
+read the effect (`[5]`, `SE_CRITICAL`) and the flag (`33`) and passed; with the flag pinned to
+the plain one, the same run failed on the flag. The force was reverted, and the world crate is
+as it was.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; the full workspace
+all-targets DB run green, the parity target 126 of 126; the doc build and the doc-tests green
+(1 passed, 19 ignored); no scratch database left.
+
+No ADR changed. No owner question added. V21 stays taken.

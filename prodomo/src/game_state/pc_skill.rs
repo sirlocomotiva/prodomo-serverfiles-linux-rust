@@ -4554,6 +4554,8 @@ mod tests {
             .ok()
             .and_then(|character| character.items_and_points_mut().1);
         let mut session = super::super::quests::Session {
+            map_index: 0,
+            war_map: 0,
             level: pc_level,
             npcs: None,
             protos: &gamedata::mob_proto::MobProtos::default(),
