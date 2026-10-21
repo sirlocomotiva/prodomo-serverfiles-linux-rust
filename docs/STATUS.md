@@ -1,8 +1,9 @@
 # Rewrite status
 
-Last reviewed: 2026-10-21, after ledger section 230aa (a GM's notice crosses Channels).
+Last reviewed: 2026-10-21, after ledger section 231 (the PvP player victim takes the hit).
 Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 231 onwards (combat: PvP
-player victims, which unblocks the war maps).
+player victims, which unblocks the war maps): 231 has ported `CalcMeleeDamage` on a player
+victim, and the strike path's wiring is next.
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page

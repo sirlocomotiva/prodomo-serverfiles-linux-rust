@@ -400,11 +400,11 @@ fn calc_arrow_core(
 /// `CalcMeleeDamage` (`G/battle.cpp:489-666`): a bow complains and gives 0, any other weapon
 /// the swing cannot use gives 0, else the attack minus the defence (`bIgnoreDefense` skips
 /// the subtraction), halved past the sung-ma will, through `CalcBattleDamage`.
-fn calc_melee_core(
+fn calc_melee_core<V: MeleeVictim + ?Sized>(
     dice: &mut dyn Dice,
     attacker: &Points,
     weapon: Option<&ItemProto>,
-    victim: &Npc,
+    victim: &V,
     ignore_defence: bool,
     ignore_target_rating: bool,
 ) -> i32 {
@@ -417,7 +417,7 @@ fn calc_melee_core(
     let rating = attack_rating(AttackRatingInput {
         attacker_dexterity: attacker.get_point(point::POINT_DX),
         attacker_level: level,
-        victim_dexterity: victim.fight.point(point::POINT_DX),
+        victim_dexterity: victim.dexterity(),
         ignore_target_rating,
     });
     // `Item_GetDamage`: the weapon's values 3 and 4; an unarmed player rolls 0 to 0.
@@ -436,16 +436,8 @@ fn calc_melee_core(
         party_bonus: attacker.get_point(point::POINT_PARTY_ATTACKER_BONUS),
         percent,
     });
-    let attack = att_bonus_on_npc(attack, attacker, victim);
-    let defence = if ignore_defence {
-        0
-    } else {
-        victim
-            .fight
-            .point(point::POINT_DEF_GRADE)
-            .wrapping_mul(100_i32.wrapping_add(victim.fight.point(point::POINT_DEF_BONUS)))
-            .wrapping_div(100)
-    };
+    let attack = victim.attack_bonus(attack, attacker);
+    let defence = if ignore_defence { 0 } else { victim.defence() };
     let mut damage = attack.wrapping_sub(defence).max(0);
     if i32::from(attacker.will().strength) > attacker.get_point(point::POINT_SUNGMA_STR)
         && damage > 0
@@ -495,6 +487,93 @@ fn melee_attack(input: &MeleeAttack) -> i32 {
         .wrapping_add(input.party_bonus)
         .wrapping_mul(100_i32.wrapping_add(input.percent))
         .wrapping_div(100)
+}
+
+/// The victim's facts `CalcMeleeDamage` reads (`G/battle.cpp:299-666`). A non-player
+/// victim and a player victim answer them differently, so the core asks the victim.
+pub trait MeleeVictim {
+    /// `GetPolymorphPoint(POINT_DX)`: the target rating's share.
+    fn dexterity(&self) -> i32;
+    /// `GetPoint(POINT_DEF_GRADE) * (100 + GetPoint(POINT_DEF_BONUS)) / 100`.
+    fn defence(&self) -> i32;
+    /// `CalcAttBonus` for a player attacker.
+    fn attack_bonus(&self, attack: i32, attacker: &Points) -> i32;
+}
+
+/// A player victim's facts (`G/battle.cpp:299-666`): the target rating's share, the
+/// defence it stands, and the resists its points hold.
+#[derive(Debug, Clone, Copy)]
+pub struct PlayerVictim {
+    /// `GetPoint(POINT_DX)`.
+    pub dexterity: i32,
+    /// `GetPoint(POINT_DEF_GRADE)`.
+    pub def_grade: i32,
+    /// `GetPoint(POINT_DEF_BONUS)`.
+    pub def_bonus: i32,
+    /// `GetPoint(POINT_RESIST_<job>)` for the four jobs, in the order of `JOB_RESISTS`.
+    pub resists: [i32; 4],
+    /// `GetJob()`, as the index into `JOB_ATTACK_BONUS`.
+    pub job: usize,
+}
+
+/// The attack bonus a player attacker takes from a player victim of each job
+/// (`G/battle.cpp:381-393`), in the order of `JOB_RESISTS`.
+const JOB_ATTACK_BONUS: [usize; 4] = [
+    point::POINT_ATTBONUS_WARRIOR,
+    point::POINT_ATTBONUS_ASSASSIN,
+    point::POINT_ATTBONUS_SURA,
+    point::POINT_ATTBONUS_SHAMAN,
+];
+
+impl MeleeVictim for Npc {
+    fn dexterity(&self) -> i32 {
+        self.fight.point(point::POINT_DX)
+    }
+
+    fn defence(&self) -> i32 {
+        self.fight
+            .point(point::POINT_DEF_GRADE)
+            .wrapping_mul(100_i32.wrapping_add(self.fight.point(point::POINT_DEF_BONUS)))
+            .wrapping_div(100)
+    }
+
+    fn attack_bonus(&self, attack: i32, attacker: &Points) -> i32 {
+        att_bonus_on_npc(attack, attacker, self)
+    }
+}
+
+impl MeleeVictim for PlayerVictim {
+    fn dexterity(&self) -> i32 {
+        self.dexterity
+    }
+
+    fn defence(&self) -> i32 {
+        self.def_grade
+            .wrapping_mul(100_i32.wrapping_add(self.def_bonus))
+            .wrapping_div(100)
+    }
+
+    /// `CalcAttBonus`'s player-victim arm (`G/battle.cpp:374-395`): the human share, the
+    /// victim's job's share, and the resist the victim's points hold against the
+    /// attacker's job. The marriage shares are absent: no marriage item exists here.
+    fn attack_bonus(&self, attack: i32, attacker: &Points) -> i32 {
+        let share = |attack: i32, slot: usize| attack.wrapping_mul(attacker.get_point(slot)) / 100;
+        let mut attack = attack.wrapping_add(share(attack, point::POINT_ATTBONUS_HUMAN));
+        attack = attack.wrapping_add(share(attack, JOB_ATTACK_BONUS[self.job]));
+        let job = usize::from(race_to_job(attacker.race()));
+        attack.wrapping_sub(attack.wrapping_mul(self.resists[job]) / 100)
+    }
+}
+
+/// `CalcMeleeDamage` of a player attacker on a player victim (`G/battle.cpp:489-666`):
+/// the same core, with the victim's job bonus and its own defence.
+pub fn calc_melee_damage_on_player(
+    dice: &mut dyn Dice,
+    attacker: &Points,
+    weapon: Option<&ItemProto>,
+    victim: &PlayerVictim,
+) -> i32 {
+    calc_melee_core(dice, attacker, weapon, victim, false, false)
 }
 
 /// `CalcAttBonus` for a player attacker and a non-player victim.
@@ -1302,6 +1381,41 @@ mod tests {
         fn random31(&mut self) -> u32 {
             self.0.pop_front().expect("a draw the test scripted")
         }
+    }
+
+    /// `CalcMeleeDamage` on a player victim (`G/battle.cpp:489-666`): the victim's defence
+    /// comes off the attack, the resists its points hold against the attacker's job take
+    /// their share, and its dexterity moves the target rating.
+    #[test]
+    fn a_player_victim_loses_its_defence_and_its_resists_take_the_attackers_share() {
+        let attacker = alpha();
+        let weapon: Option<&ItemProto> = None;
+        let mut dice = Script::new(&[1; 40]);
+        let victim = |defence: i32, resists: [i32; 4], dexterity: i32| PlayerVictim {
+            dexterity,
+            def_grade: defence,
+            def_bonus: 0,
+            resists,
+            job: 0,
+        };
+        let plain = victim(0, [0; 4], 19);
+        let bare = calc_melee_damage_on_player(&mut dice, &attacker, weapon, &plain);
+        // `iDam = MAX(0, iAtk - iDef)`: the defence comes off the attack.
+        let defended =
+            calc_melee_damage_on_player(&mut dice, &attacker, weapon, &victim(10, [0; 4], 19));
+        assert_eq!(bare - defended, 10);
+        // `iAtk -= (iAtk * victim->GetPoint(POINT_RESIST_<job>)) / 100`: the shaman's resist.
+        let resisted = calc_melee_damage_on_player(
+            &mut dice,
+            &attacker,
+            weapon,
+            &victim(0, [0, 0, 0, 50], 19),
+        );
+        assert!(resisted < bare);
+        // `CalcAttackRating`: the victim's dexterity moves the target rating down.
+        let nimble =
+            calc_melee_damage_on_player(&mut dice, &attacker, weapon, &victim(0, [0; 4], 0));
+        assert!(nimble > bare);
     }
 
     /// The parity scenarios' Alpha: a level-154 shaman with ST 17, HT 18, DX 19 and IQ 20 on

@@ -33360,3 +33360,48 @@ same empty body; they are merged), and the wander scenario, which read every
 it now reads the idle walks (`FUNC_WAIT`) alone, which is what it is about.
 
 No ADR changed. No owner question added. V20 stays taken.
+
+## 231. The PvP player victim takes the hit (`sys.char.pk`, first part)
+
+`CalcMeleeDamage` (`G/battle.cpp:489-666`) is one function for both kinds of victim, and the
+Rewrite had only the non-player one: `world/src/character/combat/melee.rs`'s `calc_melee_core`
+read the victim's rating, its defence and its attack bonus off an `Npc`. A player victim
+answers them differently, so the core now asks the victim:
+
+- `MeleeVictim` is the victim's side of `CalcMeleeDamage`: its dexterity
+  (`GetPolymorphPoint(POINT_DX)`), its defence (`GetPoint(POINT_DEF_GRADE) * (100 +
+  GetPoint(POINT_DEF_BONUS)) / 100`) and its `CalcAttBonus` share.
+- `PlayerVictim` holds a player victim's facts: the dexterity, the two defence points, the four
+  `POINT_RESIST_<job>` points and the job.
+- `calc_melee_damage_on_player` is `CalcMeleeDamage` on that victim.
+
+**The attack bonus a player victim takes** (`G/battle.cpp:374-395`): the human share
+(`POINT_ATTBONUS_HUMAN`), the victim's job's share (`POINT_ATTBONUS_WARRIOR`, `_ASSASSIN`,
+`_SURA`, `_SHAMAN`), and the resist the victim's points hold against the attacker's job
+(`POINT_RESIST_<job>`). The non-player arm keeps the race shares, the monster share, the
+metin and the boss share, and the same job resist. The marriage shares are absent: no
+marriage item exists in the Rewrite.
+
+**The rest of the formula is the shared core**: the target rating (`CalcAttackRating`, whose
+victim level is the *attacker's* level — legacy's own line, `G/battle.cpp:280`), the weapon's
+damage roll, the attack grade, the party bonus, the sung-ma halving and `CalcBattleDamage`
+(whose level delta is commented out in legacy, `G/battle.cpp:249`).
+
+The unit test `a_player_victim_loses_its_defence_and_its_resists_take_the_attackers_share`
+(`world/src/character/combat/melee.rs`) pins the three victim-dependent parts: the defence
+comes off the attack (`iDam = MAX(0, iAtk - iDef)`), the resist against the attacker's job
+takes its share, and the victim's dexterity moves the target rating.
+
+**What is not here yet.** The strike path still knows only a non-player victim:
+`prodomo/src/game_state/fight.rs`'s `attack` resolves the target with `npc_on` and refuses a
+player, and `strike` reads `npc_of`. The wiring — the target's kind, `battle_is_attackable`
+through `world/src/character/combat/pk.rs`'s `pk_eligibility`, the reach of 300, the claim,
+`NormalAttackAffect` on a player, the gold steal, the victim's own `Damage`
+(`prodomo/src/game_state/death.rs`'s `damage_pc`, which exists) and the live scenario — is
+the next slice. `sys.char.pk` stays partial.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; the full
+workspace all-targets DB run green, the parity target 121 of 121; the doc build and the
+doc-tests green; no scratch database left.
+
+No ADR changed. No owner question added. V20 stays taken.
