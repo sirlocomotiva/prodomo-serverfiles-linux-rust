@@ -3308,6 +3308,24 @@ impl GameState {
                 .is_some_and(|enemy| enemy.state == GUILD_WAR_ON_WAR)
     }
 
+    /// The war arm of `battle_is_attackable` (`G/battle.cpp:125-138`): two players whose
+    /// guilds are under a war may fight whatever the PK policy says. The legacy's arm
+    /// reads the two guilds and `UnderWar` (`G/guild_war.cpp:155-162`), which answers for
+    /// a war begun.
+    pub(super) fn guild_war_allows(&self, attacker: Vid, victim: Vid) -> bool {
+        let guild_of = |vid: Vid| {
+            self.characters
+                .find_by_vid(vid)
+                .ok()
+                .and_then(|character| self.guild_of(character.player_id()))
+        };
+        let (Some(attacker_guild), Some(victim_guild)) = (guild_of(attacker), guild_of(victim))
+        else {
+            return false;
+        };
+        self.guild_under_war(attacker_guild, victim_guild)
+    }
+
     /// The forwarded refuse (`CGuildManager::RefuseWar`, `G/guild_manager.cpp:564-580`):
     /// the declarer's master hears `[LS;476]` naming the refuser, then both entries
     /// leave with their end fans.
@@ -7882,5 +7900,78 @@ mod tests {
             "the strip sent its remove records: {held:?}"
         );
         drop(rival);
+    }
+
+    /// The war arm of `battle_is_attackable` (`G/battle.cpp:125-138`): two players whose
+    /// guilds are under a war may fight whatever the PK policy says. A player of no guild
+    /// has no war arm, and the arm answers before the castle, the arena and the policy.
+    #[test]
+    fn the_war_arm_opens_the_fight_between_two_guilds_at_war() {
+        let (_clock, mut world, _master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        // Before the war, the arm is shut: the two guilds are not at war.
+        assert!(
+            !world.guild_war_allows(Vid::new(MASTER_VID), Vid::new(200)),
+            "no war, no arm"
+        );
+        let first = world.guild_war(Vid::new(MASTER_VID), b"Wolves", NOW);
+        assert!(first.notice.is_some(), "the first declare lands");
+        let answer = world.guild_war(Vid::new(200), b"Knights", NOW);
+        assert!(answer.notice.is_some(), "the declare back starts the war");
+        assert!(
+            world.guild_war_allows(Vid::new(MASTER_VID), Vid::new(200)),
+            "the war arm lets the two fight"
+        );
+        assert!(
+            world.guild_war_allows(Vid::new(200), Vid::new(MASTER_VID)),
+            "the arm answers for the other side too"
+        );
+        assert!(
+            !world.guild_war_allows(Vid::new(GUEST_VID), Vid::new(200)),
+            "a guildless player has no war arm"
+        );
+        drop(rival);
+    }
+
+    /// `CGuildManager::Kill` (`G/char_battle.cpp:1310-1311`): the kill scores the war with
+    /// the victim's level, and the score reaches the gainer's members and the opp's
+    /// (`SetWarScoreAgainstTo`'s field fan, `G/guild_war.cpp:198-218`).
+    #[test]
+    fn a_kill_scores_the_war_with_the_victims_level() {
+        let (_clock, mut world, mut master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let mut rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let first = world.guild_war(Vid::new(MASTER_VID), b"Wolves", NOW);
+        assert!(first.notice.is_some(), "the first declare lands");
+        let answer = world.guild_war(Vid::new(200), b"Knights", NOW);
+        assert!(answer.notice.is_some(), "the declare back starts the war");
+        let _ = heard(&mut master);
+        let _ = heard(&mut rival);
+        world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
+        // The score is the victim's level (10), and both sides' masters hear it.
+        let score = world
+            .guilds
+            .by_id
+            .get(&GUILD_ID)
+            .and_then(|guild| guild.enemies.get(&SECOND_ID))
+            .expect("the enemy entry")
+            .score;
+        assert_eq!(score, 10, "the victim's level scores the war");
+        for (inbox, who) in [(&mut master, "the gainer"), (&mut rival, "the opp")] {
+            let held = heard(inbox);
+            let record = held
+                .iter()
+                .find(|record| {
+                    record[0] == protocol::gc_inventory::HEADER_GC_GUILD.value()
+                        && record[3] == protocol::gc_guild::GUILD_SUBHEADER_GC_WAR_SCORE
+                })
+                .unwrap_or_else(|| panic!("{who} hears the war's score: {held:?}"));
+            assert_eq!(&record[4..8], &GUILD_ID.to_le_bytes(), "the gainer");
+            assert_eq!(&record[8..12], &SECOND_ID.to_le_bytes(), "the opp");
+            assert_eq!(&record[12..16], &10u32.to_le_bytes(), "the score");
+        }
     }
 }

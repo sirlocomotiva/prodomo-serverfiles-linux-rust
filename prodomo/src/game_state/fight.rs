@@ -710,19 +710,24 @@ impl GameState {
         let Some(victim_empire) = self.bodies.get(&victim).map(|body| body.card.empire) else {
             return AttackAnswer::default();
         };
-        let attacker = self.pk_actor(vid, empire, false);
-        let target_actor = self.pk_actor(
-            victim,
-            victim_empire,
-            self.pc_combat
-                .get(&target)
-                .is_some_and(|combat| combat.dead),
-        );
-        if !matches!(
-            pk_eligibility(attacker, Some(target_actor), false),
-            PkEligibility::Allowed { .. }
-        ) {
-            return AttackAnswer::default();
+        // The war arm (`G/battle.cpp:125-138`): two players whose guilds are under a war
+        // may fight whatever the PK policy says, and the arm answers before the castle,
+        // the arena and the policy do.
+        if !self.guild_war_allows(vid, victim) {
+            let attacker = self.pk_actor(vid, empire, false);
+            let target_actor = self.pk_actor(
+                victim,
+                victim_empire,
+                self.pc_combat
+                    .get(&target)
+                    .is_some_and(|combat| combat.dead),
+            );
+            if !matches!(
+                pk_eligibility(attacker, Some(target_actor), false),
+                PkEligibility::Allowed { .. }
+            ) {
+                return AttackAnswer::default();
+            }
         }
         // `SetPosition(POS_FIGHTING)` and `SetRotationToXY` (`G/char_battle.cpp:219-223`).
         if let Some(body) = self.bodies.get_mut(&vid) {

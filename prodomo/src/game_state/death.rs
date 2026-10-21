@@ -644,7 +644,12 @@ impl GameState {
             if self.targets.of(killer.vid.raw()) == Some(raw) {
                 self.target(killer.vid, 0);
             }
-            // `CGuildManager::Kill` (`:1308-1311`): the war score, when the two guilds
+            // `SetQuestNPCID(GetVID())` and `CQuestManager::Kill(pkKiller->GetPlayerID(),
+            // quest::QUEST_NO_NPC)` (`G/char_battle.cpp:1308-1309`): the killer's `kill`
+            // scripts run, and the no-NPC map's are the ones that run — the victim's
+            // race never reaches the map index here.
+            self.raise_quest_kill(raw, killer.vid, 0);
+            // `CGuildManager::Kill` (`:1310-1311`): the war score, when the two guilds
             // fight. The alignment skip (`isUnderGuildWar`, `:1413`) waits with the PvP
             // slice's killer-alignment arm — the port's alignment runs only on monster
             // kills (`raise_alignment`), where legacy never checks the war.

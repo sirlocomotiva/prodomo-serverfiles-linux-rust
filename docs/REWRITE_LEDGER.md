@@ -33486,3 +33486,69 @@ workspace all-targets DB run green, the parity target 123 of 123; the doc build 
 doc-tests green; no scratch database left.
 
 No ADR changed. No owner question added. V20 stays taken.
+
+## 233. The war's own kill scores the war (`sys.guild.war`, `sys.char.pk`, third part)
+
+Ledger 232 left the guild war's bypass of the PK policy unported, because nothing could
+reach the war's own kill score: the death's PvP steps were missing. The war's arm is
+ported now, and the two steps of the death that the war needs run.
+
+**The war arm of `battle_is_attackable`.** `G/battle.cpp:125-135` answers before the
+castle, the arena and the policy: two players whose guilds are under a war may fight
+whatever the policy says. `prodomo/src/game_state/guild.rs`'s `guild_war_allows` reads
+the two guilds and `UnderWar` (`G/guild_war.cpp:155-162`, which answers for a war begun),
+and `prodomo/src/game_state/fight.rs`'s `attack_player` asks it before it asks the
+policy. A player of no guild has no arm, and a guild whose war is not begun has none
+either.
+
+**The death's PvP steps.** `prodomo/src/game_state/death.rs`'s `dead_pc` runs the two
+steps the war needs, in legacy's order (`G/char_battle.cpp:1301-1309`):
+
+- `SetQuestNPCID(GetVID())` and `CQuestManager::Kill(pkKiller->GetPlayerID(),
+  quest::QUEST_NO_NPC)` (`:1307-1308`): the killer's `kill` scripts run, and the no-NPC
+  map's are the ones that run - the victim's race never reaches the map index here. The
+  Rewrite's `raise_quest_kill` takes the victim's VID as the quest NPC id, as legacy does.
+- `CGuildManager::Kill(pkKiller, this)` (`:1309`): the war score.
+
+**The war score.** `CGuildManager::Kill` (`G/guild_manager.cpp:838-865`) asks that the
+killer and the victim are players, skips the war map (there is none), asks that both
+have guilds, that the war type is FIELD and that the war is begun, and then calls
+`SendGuildWarScore(gA, gB, victim->GetLevel())` (`:825-836`). The delta goes to the
+store, whose accumulated total comes back as `HEADER_DG_GUILD_WAR_SCORE` and reaches the
+game as `CInputDB::GuildWarScore` (`G/input_db.cpp:1375-1380`), which calls
+`SetWarScoreAgainstTo` (`G/guild_war.cpp:179-220`): the score lands, and the WAR_SCORE
+record goes to the gainer's online members and to the opp's, the same record to both.
+The DB-peer protocol that carried the delta out and the total back is retired
+(ADR-0001), so the Rewrite keeps the score in the war's enemy entry:
+`prodomo/src/game_state/guild.rs`'s `guild_war_kill` accumulates the victim's level into
+the score and fans the same record to both sides' online members, and the end's math
+(ledger 230y) reads the score from there.
+
+**The live scenario.** `a_guild_wars_kill_scores_the_war` plays the fixture's war pair:
+MyGuild's master (Alpha) and Wolves' master (Yankee) declare and accept a war, and
+Yankee hits Alpha, who stands with one hit point. The war's arm lets the swing land
+though the two are of one empire, the hit stuns Alpha, and three seconds on the death
+runs: the WAR_SCORE record (the gainer 2, the opp 1, the victim's level 154) reaches
+both masters, the claim's release follows, and the dead record comes.
+
+**The unit tests.** `game_state::guild::tests::the_war_arm_opens_the_fight_between_two_guilds_at_war`
+and `game_state::guild::tests::a_kill_scores_the_war_with_the_victims_level` pin the arm
+and the score in memory.
+
+**The divergences.**
+
+- The item drop penalty (`G/char_battle.cpp:1334-1347`) is not ported: the victim's real
+  alignment picks the table row (`:1035-1054`, the table at `:1002-1012`), and the
+  Rewrite has no alignment, so the penalty would always take the neutral row - all
+  zeros - and drop nothing. It waits for the alignment.
+- The empire point of a cross-empire kill (`:1390`) is not ported: it is a character
+  point with no column in the store yet.
+- The consent duel's end (`CPVPManager::Dead`, `G/pvp.cpp:335-376`), the same-empire
+  alignment penalty (`:1408+`), the three-way war and the castle map's branches wait for
+  their systems: the Rewrite has no duel, no alignment, no three-way war and no castle.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; the full
+workspace all-targets DB run green, the parity target 124 of 124; the doc build and the
+doc-tests green; no scratch database left.
+
+No ADR changed. No owner question added. V20 stays taken.

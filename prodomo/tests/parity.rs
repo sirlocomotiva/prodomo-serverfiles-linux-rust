@@ -32,7 +32,7 @@ use protocol::gc_guild::{
     GUILD_SUBHEADER_GC_GUILD_NAME, GUILD_SUBHEADER_GC_GUILD_WAR_LIST, GUILD_SUBHEADER_GC_INFO,
     GUILD_SUBHEADER_GC_LIST, GUILD_SUBHEADER_GC_LOGIN, GUILD_SUBHEADER_GC_LOGOUT,
     GUILD_SUBHEADER_GC_REMOVE, GUILD_SUBHEADER_GC_SKILL_INFO, GUILD_SUBHEADER_GC_WAR,
-    GUILD_SUBHEADER_GC_WAR_END_LIST,
+    GUILD_SUBHEADER_GC_WAR_END_LIST, GUILD_SUBHEADER_GC_WAR_SCORE,
 };
 use protocol::gc_mark::{HEADER_GC_MARK_BLOCK, HEADER_GC_MARK_IDXLIST, HEADER_GC_SYMBOL_DATA};
 use protocol::tea::{decrypt_padded, encrypt_padded, TeaKey};
@@ -14156,6 +14156,16 @@ fn a_guild_war_is_accepted_and_every_pc_hears_the_list() {
 /// (`G/input_db.cpp:1931-1955`), so a later insert would be too late. `None` without a
 /// store.
 fn a_war_pair_ready() -> Option<(ScratchDatabase, Server, Keyed, Keyed)> {
+    let (database, server, alice, _alpha, yankee, _yankee) = a_war_pair_ready_at(None)?;
+    Some((database, server, alice, yankee))
+}
+
+/// As [`a_war_pair_ready`], with Alpha's stored hit points set to `hp` before the boot - the
+/// load takes them, so a hit takes it - and both masters' listed characters returned, so a
+/// scenario can address them.
+fn a_war_pair_ready_at(
+    hp: Option<i32>,
+) -> Option<(ScratchDatabase, Server, Keyed, Listed, Keyed, Listed)> {
     let database = ScratchDatabase::create()?;
     create_account_before_boot(&database, "alice");
     create_account_before_boot(&database, "bob");
@@ -14166,6 +14176,12 @@ fn a_war_pair_ready() -> Option<(ScratchDatabase, Server, Keyed, Keyed)> {
         "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
          154, 470000, 950000 FROM account WHERE login = 'bob'",
     );
+    if let Some(hp) = hp {
+        sql(
+            &database,
+            &format!("UPDATE player SET hp = {hp} WHERE name = 'Alpha'"),
+        );
+    }
     // Before the boot: the stored guilds install once, while the gate is closed.
     seed_war_pair(&database);
     sql(
@@ -14174,11 +14190,12 @@ fn a_war_pair_ready() -> Option<(ScratchDatabase, Server, Keyed, Keyed)> {
          FROM account WHERE login = 'alice'",
     );
     let server = Server::start(binary(), database.url());
-    let (mut alice, _alpha, _alice_entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
+    let (mut alice, alpha_listed, _alice_entered) =
+        enter_world_seeing_guilded(&server, b"alice", 0, 1);
     let (yankee, yankee_listed, _yankee_entered) =
         enter_world_seeing_guilded(&server, b"bob", 0, 1);
     alice.sees_arrive(yankee_listed.id, true, Some(b"Wolves"));
-    Some((database, server, alice, yankee))
+    Some((database, server, alice, alpha_listed, yankee, yankee_listed))
 }
 
 /// The declare and the accept between the fixture pair, as
@@ -14376,4 +14393,94 @@ fn a_gm_stops_and_cancels_the_war_and_a_player_cannot() {
     yankee.quiet("the cancel settled");
     // The cancel skips the math: the stop's draw tallies stay the only ones.
     assert_guild_tallies(&database, "the cancel writes no ladder and no tally");
+}
+
+/// The next record of a player's fight, read within `deadline`: a record that never comes
+/// fails the scenario instead of hanging it.
+fn read_fight_before(client: &mut Keyed, deadline: std::time::Instant, note: &str) -> Vec<u8> {
+    client
+        .read_fight_until(deadline)
+        .unwrap_or_else(|| panic!("{note} never came"))
+}
+
+/// The war's score record (`GUILD_SUBHEADER_GC_WAR_SCORE`), read past the other records
+/// the connection sees.
+fn read_war_score(client: &mut Keyed, deadline: std::time::Instant) -> Vec<u8> {
+    while let Some(record) = client.read_fight_until(deadline) {
+        if record[0] == GC_GUILD && guild_subheader(&record) == GUILD_SUBHEADER_GC_WAR_SCORE {
+            return record;
+        }
+    }
+    panic!("the war's score never came")
+}
+
+/// Ledger 233: a guild war's kill scores the war (`CGuildManager::Kill`,
+/// `G/char_battle.cpp:1310-1311`). Two guilds under a war, both masters in the world: the
+/// war arm of `battle_is_attackable` (`G/battle.cpp:125-138`) lets the two fight whatever
+/// the PK policy says - they are of one empire, and the policy would refuse - and the
+/// kill scores the war with the victim's level. The score reaches the gainer's members
+/// and the opp's (`SetWarScoreAgainstTo`'s field fan, `G/guild_war.cpp:198-218`).
+#[test]
+fn a_guild_wars_kill_scores_the_war() {
+    let Some((_database, _server, mut alice, alpha_listed, mut yankee, yankee_listed)) =
+        a_war_pair_ready_at(Some(1))
+    else {
+        return;
+    };
+    declare_and_accept_war(&mut alice, &mut yankee);
+    alice.quiet("the war started");
+    yankee.quiet("the war started");
+    // When: Yankee hits Alpha, who stands with one hit point. Then: the damage, the stun
+    // and the claim.
+    yankee.send_record(&client_attack(alpha_listed.id));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let damage = read_fight_before(&mut yankee, deadline, "the damage");
+    assert_eq!(damage[0], GC_DAMAGE_INFO, "the damage: {damage:02x?}");
+    assert_eq!(
+        &damage[1..5],
+        &alpha_listed.id.to_le_bytes(),
+        "the victim's vid"
+    );
+    assert_eq!(damage[5], DAMAGE_NORMAL, "the damage's flag");
+    assert!(
+        i32::from_le_bytes(damage[6..10].try_into().expect("the damage")) > 0,
+        "the damage lands: {damage:02x?}"
+    );
+    assert_eq!(
+        read_fight_before(&mut yankee, deadline, "the stun"),
+        stun_of(alpha_listed.id)
+    );
+    assert_eq!(
+        read_fight_before(&mut yankee, deadline, "the claim"),
+        ownership_of(yankee_listed.id, alpha_listed.id)
+    );
+    // Then, three seconds on: the war's score with the victim's level, and the death.
+    let score = read_fight_before(&mut yankee, deadline, "the war's score");
+    assert_eq!(score[0], GC_GUILD, "the war's score: {score:02x?}");
+    assert_eq!(guild_subheader(&score), GUILD_SUBHEADER_GC_WAR_SCORE);
+    assert_eq!(&score[4..8], &2u32.to_le_bytes(), "the gainer's guild");
+    assert_eq!(&score[8..12], &1u32.to_le_bytes(), "the opp's guild");
+    assert_eq!(
+        &score[12..16],
+        &154u32.to_le_bytes(),
+        "the victim's level scores the war"
+    );
+    // Then the claim's release (`ClearSync`, `G/char_battle.cpp:1461`) and the death.
+    assert_eq!(
+        read_fight_before(&mut yankee, deadline, "the claim's release"),
+        ownership_of(0, alpha_listed.id)
+    );
+    assert_eq!(
+        read_fight_before(&mut yankee, deadline, "the death"),
+        dead_of(alpha_listed.id)
+    );
+    // The other side's master hears the same score.
+    let score = read_war_score(&mut alice, deadline);
+    assert_eq!(&score[4..8], &2u32.to_le_bytes(), "the gainer's guild");
+    assert_eq!(&score[8..12], &1u32.to_le_bytes(), "the opp's guild");
+    assert_eq!(
+        &score[12..16],
+        &154u32.to_le_bytes(),
+        "the victim's level scores the war"
+    );
 }

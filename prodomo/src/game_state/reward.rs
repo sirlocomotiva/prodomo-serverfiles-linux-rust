@@ -501,7 +501,7 @@ impl GameState {
 
     /// The quest kill (`G/char_battle.cpp:810-811`): `SetQuestNPCID` then
     /// `CQuestManager::Kill` (`G/questmanager.cpp:574-611`). The kill log is log-only.
-    fn raise_quest_kill(&mut self, victim: u32, attacker: Vid, race: u32) {
+    pub(super) fn raise_quest_kill(&mut self, victim: u32, attacker: Vid, race: u32) {
         let Some(mover) = self.own_mover(attacker) else {
             return;
         };
