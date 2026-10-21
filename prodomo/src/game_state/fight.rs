@@ -303,6 +303,9 @@ impl GameState {
         match command {
             command @ (GameCommand::PartyInvite { .. }
             | GameCommand::PartyInviteAnswer { .. }
+            | GameCommand::PartyRequest { .. }
+            | GameCommand::PartyRequestAccept { .. }
+            | GameCommand::PartyRequestDeny { .. }
             | GameCommand::PartyRemove { .. }
             | GameCommand::PartySetState { .. }
             | GameCommand::PartyParameter { .. }
@@ -407,6 +410,18 @@ impl GameState {
                 settled,
             } => {
                 self.party_invite_answer(vid, common::vid::Vid::new(inviter), accept);
+                drop(settled);
+            }
+            GameCommand::PartyRequest { vid, rest, settled } => {
+                self.party_request(vid, &rest);
+                drop(settled);
+            }
+            GameCommand::PartyRequestAccept { vid, rest, settled } => {
+                self.party_request_accept(vid, &rest);
+                drop(settled);
+            }
+            GameCommand::PartyRequestDeny { vid, rest, settled } => {
+                self.party_request_deny(vid, &rest);
                 drop(settled);
             }
             GameCommand::PartyRemove { vid, pid, settled } => {
@@ -1310,15 +1325,24 @@ impl GameState {
         self.release_owned(Vid::new(vid));
         let combat = self.npc_combat.entry(vid).or_default();
         self.regens.cancel(&mut combat.stun_due, Due::Stun(vid));
-        // `Reward` (`:1476-1498`): no field war (no guilds) and no resurrection — only vnum
-        // 8479 carries one (4305), and neither spawns on a hosted map — so the exp, gold
-        // and item halves run, unless a guard's swing set `NO_REWARD` (`:1475`), which
-        // skips them all.
+        // `Reward` (`:1476-1498`): no resurrection — only vnum 8479 carries one (4305),
+        // and neither spawns on a hosted map — so the exp, gold and item halves run, unless
+        // a guard's swing set `NO_REWARD` (`:1475`), which skips them all, or the killer is
+        // a PC whose guild fights a field war (`:1477`), which skips them with a throttled
+        // line (`:1501-1507`).
         let no_reward = self
             .npc_combat
             .get(&vid)
             .is_some_and(|combat| combat.no_reward);
-        if !no_reward {
+        // The war gate reads the killer `Dead` was given (`pkKiller`), before any half
+        // runs: legacy skips the whole `Reward` — exp included — and chats the line.
+        let war_blocked = killer.is_some_and(|killer| self.guild_blocks_monster_reward(killer));
+        if war_blocked {
+            if let Some(killer) = killer {
+                self.tell_war_reward_line(killer);
+            }
+        }
+        if !no_reward && !war_blocked {
             if let Some(attacker) = self.reward_exp(vid) {
                 self.reward_gold(vid, attacker);
                 self.reward_drops(vid, attacker);
@@ -1680,6 +1704,9 @@ mod tests {
     /// The tests' first Pulse, which every due counts from.
     const P0: u64 = 1;
 
+    /// The tests' epoch-second stamp for war starts.
+    const NOW: u32 = 10_000_000;
+
     /// The monster's maximum hit points.
     const MAX_HP: i32 = 1_000;
 
@@ -1990,6 +2017,110 @@ mod tests {
         assert!(world.npc_by_vid(ME).is_none());
         assert!(world.minds.get(ME).is_none());
         assert!(!world.npc_combat.contains_key(&ME));
+    }
+
+    /// A PC killer whose guild fights a field war takes no monster reward, and hears
+    /// `[LS;558]` — once a minute (`char_battle.cpp:1477,1501-1507`).
+    #[test]
+    fn a_warring_killer_takes_no_reward_and_hears_the_line_once() {
+        use protocol::gc_guild::GUILD_SKILL_COUNT;
+        let (clock, mut world, mut alpha) = a_reward_fight(a_monster(1), 75, 10, NEAR);
+        let grades: Vec<db::guilds::StoredGrade> = [7, 9]
+            .iter()
+            .flat_map(|id| {
+                (1..=15).map(|grade| db::guilds::StoredGrade {
+                    guild_id: *id,
+                    grade,
+                    name: "Leader".to_owned(),
+                    auth: 15,
+                })
+            })
+            .collect();
+        let members = |id: u32, master: u32| {
+            (0..8)
+                .map(|seat| db::guilds::StoredMember {
+                    pid: master + seat,
+                    guild_id: id,
+                    grade: 1,
+                    is_general: false,
+                    offer: 0,
+                    name: format!("P{}", master + seat),
+                    level: 10,
+                    job: 0,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut all = members(7, 1);
+        all.extend(members(9, 200));
+        world.install_guilds(
+            &db::guilds::StoredGuilds {
+                guilds: vec![
+                    db::guilds::StoredGuild {
+                        id: 7,
+                        name: "Knights".to_owned(),
+                        master_pid: 1,
+                        sp: 400,
+                        level: 5,
+                        exp: 0,
+                        skill_point: 0,
+                        skills: vec![0; GUILD_SKILL_COUNT],
+                        ladder_point: 1000,
+                        win: 0,
+                        draw: 0,
+                        loss: 0,
+                        gold: 0,
+                    },
+                    db::guilds::StoredGuild {
+                        id: 9,
+                        name: "Wolves".to_owned(),
+                        master_pid: 200,
+                        sp: 400,
+                        level: 5,
+                        exp: 0,
+                        skill_point: 0,
+                        skills: vec![0; GUILD_SKILL_COUNT],
+                        ladder_point: 1000,
+                        win: 0,
+                        draw: 0,
+                        loss: 0,
+                        gold: 0,
+                    },
+                ],
+                grades,
+                members: all,
+            },
+            &[],
+            &[],
+        );
+        world.link_guild(Vid::new(1));
+        // The rival master enters before the declare: the judge needs both masters
+        // online.
+        let mut rival = a_player(&mut world, 200, EAST);
+        world.link_guild(Vid::new(200));
+        drained(&mut alpha);
+        let _ = drained(&mut rival);
+        // A bare declare blocks nothing; the accept starts the war.
+        let _ = world.guild_war(Vid::new(1), b"Wolves", NOW);
+        assert!(!world.guild_blocks_monster_reward(Vid::new(1)));
+        let accept = world.guild_war(Vid::new(200), b"Knights", NOW);
+        assert!(accept.notice.is_some(), "the accept starts the war");
+        assert!(world.guild_blocks_monster_reward(Vid::new(1)));
+        world.target(Vid::new(1), ME);
+        hit(&mut world, 1, ME);
+        world.process_pulse(P0 + 75);
+        let held = drained(&mut alpha);
+        assert!(
+            held.iter()
+                .any(|record| record.windows(8).any(|window| window == b"[LS;558]")),
+            "the killer hears [LS;558]: {held:?}"
+        );
+        // No exp orb flew: the war ate the whole reward, exp half included.
+        assert!(
+            !held.iter().any(|record| record == &fly(1)),
+            "no exp orb flies: {held:?}"
+        );
+        drop(clock);
+        drop(rival);
     }
 
     /// A dead monster with a passing reviver waits 3 s, not 1 s (`G/char_battle.cpp:1601`).

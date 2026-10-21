@@ -160,6 +160,10 @@ pub(super) struct PcCombat {
     /// `None` is the constructor seed (`now - 180000`), which fails the +180 check the
     /// same way an old stamp does.
     pub(super) last_dead_ms: Option<u32>,
+    /// `m_dwUnderGuildWarInfoMessageTime` (`G/char.h:1147`): the boot-millisecond clock
+    /// before which the war-reward line stays silent. `None` is the constructor 0, which
+    /// speaks at once.
+    pub(super) war_reward_mute_until_ms: Option<u32>,
 }
 
 impl PcCombat {
@@ -623,11 +627,16 @@ impl GameState {
             })
         });
         // A player killer drops its target when it is this player (`:1275-1276`). The PvP,
-        // guild, battle-pass and quest-kill steps wait for PvP.
+        // battle-pass and quest-kill steps wait for PvP; the guild step scores the war.
         if let Some(killer) = killer.filter(|killer| killer.pc) {
             if self.targets.of(killer.vid.raw()) == Some(raw) {
                 self.target(killer.vid, 0);
             }
+            // `CGuildManager::Kill` (`:1308-1311`): the war score, when the two guilds
+            // fight. The alignment skip (`isUnderGuildWar`, `:1413`) waits with the PvP
+            // slice's killer-alignment arm — the port's alignment runs only on monster
+            // kills (`raise_alignment`), where legacy never checks the war.
+            self.guild_war_kill(killer.vid, vid);
         }
         // `SetPosition(POS_DEAD)`. `ClearAffect(true)` uncomputes every affect but the
         // no-save and no-clear ones (`G/char_affect.cpp:259-337`): of the affects a player

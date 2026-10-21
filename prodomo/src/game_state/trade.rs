@@ -949,6 +949,11 @@ mod tests {
             let _own = state.place_body(vid, standing_on(map), a_card(name, empire));
             leases.push(lease);
         }
+        // Drain the enter WAR_LIST each admission sent, so the tests read only what
+        // their steps send.
+        for lease in &mut leases {
+            let _list = lease.try_next().expect("the enter WAR_LIST is queued");
+        }
         let mut square = Square {
             state,
             clock,

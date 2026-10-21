@@ -175,11 +175,14 @@ pub(super) fn enter_seeing_with(
     stamina: i32,
     items: &[(ItemPos, Item)],
 ) -> (UnboundedReceiver<Vec<u8>>, Vec<Vec<u8>>) {
-    let (tx, inbox) = unbounded_channel();
+    let (tx, mut inbox) = unbounded_channel();
     let name = format!("P{vid}");
     world
         .enter_world_with_items(Vid::new(vid), vid, &name, items, ClientOutbox::new(tx))
         .expect("the player enters");
+    // The enter walk sent the WAR_LIST before the body was placed; drain it so the
+    // tests read only what placing and their steps send.
+    let _list = inbox.try_recv().expect("the enter WAR_LIST is queued");
     world
         .characters
         .find_by_vid_mut(Vid::new(vid))

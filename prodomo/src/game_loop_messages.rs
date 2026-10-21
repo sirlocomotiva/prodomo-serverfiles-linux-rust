@@ -709,6 +709,66 @@ pub enum GameCommand {
         /// Where the game thread reports the climbed skill, when the up lands.
         reply: oneshot::Sender<crate::game_state::GuildSkillUpAnswer>,
     },
+    /// Runs one `/war` line (`do_war`, `G/cmd_general.cpp:2028-2210`); see
+    /// `game_state::guild`.
+    GuildWar {
+        /// The VID of the declaring player.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// `get_global_time()` in seconds, which stamps an accept's start.
+        now: u32,
+        /// Where the game thread reports the declare notice, when one lands.
+        reply: oneshot::Sender<crate::game_state::GuildWarAnswer>,
+    },
+    /// Runs one `/nowar` line (`do_nowar`, `G/cmd_general.cpp:2211-2243`); see
+    /// `game_state::guild`.
+    GuildNoWar {
+        /// The VID of the refusing player.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the refusal ran.
+        reply: oneshot::Sender<()>,
+    },
+    /// Runs one `gwstop` line (`do_stop_guild_war`, `G/cmd_gm.cpp:2766-2790`); see
+    /// `game_state::guild`.
+    GuildWarStop {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// `get_global_time()` in seconds, which stamps the end.
+        now: u32,
+        /// Where the game thread reports the ended rows, when the pair was a live war.
+        reply: oneshot::Sender<Option<crate::game_state::WarEndOutcome>>,
+    },
+    /// Runs one `gwcancel` line (`do_cancel_guild_war`, `G/cmd_gm.cpp:2791-2805`); see
+    /// `game_state::guild`.
+    GuildWarCancel {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// `get_global_time()` in seconds, which stamps the end.
+        now: u32,
+        /// Where the game thread reports the cancel ran, when the pair was a live war.
+        reply: oneshot::Sender<bool>,
+    },
+    /// Runs one `gwlist` line (`do_gwlist`, `G/cmd_gm.cpp:2760-2764`, plus
+    /// `ShowGuildWarList`, `G/guild_manager.cpp:785-800`); see `game_state::guild`.
+    GuildWarList {
+        /// `get_global_time()` in seconds, which ages each war.
+        now: u32,
+        /// Where the game thread reports the pairs, in set order.
+        reply: oneshot::Sender<Vec<crate::game_state::GuildWarListLine>>,
+    },
+    /// Drains the war ends the guild tick queued: the tick has no descriptor, so the
+    /// outcomes wait in the world until a poller asks. See `game_state::guild`.
+    TakeWarEnds {
+        /// Where the game thread reports the queued outcomes, in tick order.
+        reply: oneshot::Sender<Vec<crate::game_state::WarEndOutcome>>,
+    },
     /// or a cancel.
     Trade {
         /// The VID of the character whose client sent the step.
@@ -799,6 +859,36 @@ pub enum GameCommand {
         /// The answer byte the client sent; non-zero accepts.
         accept: u8,
         /// Dropped once the answer has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// `/party_request`: the character online under `vid` asks the VID `rest` names to
+    /// take it into that player's party. See `game_state::party`.
+    PartyRequest {
+        /// The VID of the requesting character.
+        vid: common::vid::Vid,
+        /// The command line after the command word.
+        rest: Vec<u8>,
+        /// Dropped once the request has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// `/party_request_accept`: the leader online under `vid` accepts the request from the
+    /// guest `rest` names. See `game_state::party`.
+    PartyRequestAccept {
+        /// The VID of the accepting leader.
+        vid: common::vid::Vid,
+        /// The command line after the command word.
+        rest: Vec<u8>,
+        /// Dropped once the accept has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// `/party_request_deny`: the leader online under `vid` denies the request from the
+    /// guest `rest` names. See `game_state::party`.
+    PartyRequestDeny {
+        /// The VID of the denying leader.
+        vid: common::vid::Vid,
+        /// The command line after the command word.
+        rest: Vec<u8>,
+        /// Dropped once the deny has run, see [`Settled`].
         settled: oneshot::Sender<()>,
     },
     /// `CInputMain::PartyRemove`: the character online under `vid` removes the PID
@@ -2344,6 +2434,122 @@ impl GameLoopController {
             .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
+    /// Asks the world to run one `/war` line, and waits for the declare notice.
+    /// What the line shows is written to the players' outboxes before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn guild_war(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        now: u32,
+    ) -> Result<crate::game_state::GuildWarAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GuildWar {
+            vid,
+            rest,
+            now,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `/nowar` line, and waits for the refusal to run.
+    /// What the line shows is written to the players' outboxes before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn guild_nowar(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<(), MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GuildNoWar { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `gwstop` line, and waits for the ended rows. What the
+    /// line shows is written to the players' outboxes before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn guild_war_stop(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        now: u32,
+    ) -> Result<Option<crate::game_state::WarEndOutcome>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GuildWarStop {
+            vid,
+            rest,
+            now,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world to run one `gwcancel` line, and waits for whether the pair was a
+    /// live war. What the line shows is written to the players' outboxes before the
+    /// answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn guild_war_cancel(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+        now: u32,
+    ) -> Result<bool, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GuildWarCancel {
+            vid,
+            rest,
+            now,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world for its live wars, in pair order, with each pair's age at `now`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn guild_war_list(
+        &self,
+        now: u32,
+    ) -> Result<Vec<crate::game_state::GuildWarListLine>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::GuildWarList { now, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+    /// Asks the world for the war ends its guild tick queued, draining them.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn take_war_ends(
+        &self,
+    ) -> Result<Vec<crate::game_state::WarEndOutcome>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::TakeWarEnds { reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
     /// Asks the world to run one trade step, and waits for what it did.
     ///
     /// # Errors
@@ -2521,6 +2727,60 @@ impl GameLoopController {
         })
         .await
         .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Hands the world a `/party_request` line from the character online under `vid`,
+    /// without waiting. The [`Settled`] resolves once the line has run.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn party_request(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::PartyRequest { vid, rest, settled })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Hands the world a `/party_request_accept` line from the character online under
+    /// `vid`, without waiting. The [`Settled`] resolves once the line has run.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn party_request_accept(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::PartyRequestAccept { vid, rest, settled })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Hands the world a `/party_request_deny` line from the character online under
+    /// `vid`, without waiting. The [`Settled`] resolves once the line has run.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn party_request_deny(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::PartyRequestDeny { vid, rest, settled })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
         Ok(settling)
     }
 

@@ -29,7 +29,7 @@ use common::config::{load_server_config, ItemIdSpan, ServerConfig, DEFAULT_CONFI
 use common::enums::EParts;
 use common::logging::{init_from_env, init_logging, LogConfig};
 use common::point_slot;
-use db::accounts::{find_auth_account, record_login, AccountError};
+use db::accounts::{find_auth_account, record_login, AccountError, AccountId};
 use db::players::{
     change_name, create_player, delete_player, load_character, lobby, select_empire, Created,
     PlayerDelete, PLAYER_SLOTS,
@@ -92,7 +92,8 @@ use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::loading_phase::{
     enter_game_burst, entering_position, item_load_points, judge_enter_game, judge_select,
     load_points, loading_burst, map_is_allowed, public_map_index, EnterGameBurst, EnterGameVerdict,
-    EnteringPosition, Neighbourhood, PcCard, SelectVerdict, PHASE_DEAD, PHASE_GAME, PK_MODE_PEACE,
+    EnteringPosition, LoadingBurst, Neighbourhood, PcCard, SelectVerdict, PHASE_DEAD, PHASE_GAME,
+    PK_MODE_PEACE,
 };
 use prodomo::movement::{judge_pose, PoseOutcome};
 use prodomo::operator::{prepare, read_new_password, AccountCommand, GmCommand, OperatorCommand};
@@ -156,7 +157,9 @@ use protocol::cg_variable::GuildSymbolUpload;
 use protocol::cg_vid::CgOnClick;
 use protocol::cg_wire::ClientFrame;
 use protocol::gc::{GcAuthSuccess, GcLoginFailure};
-use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO};
+use protocol::gc_chat::{
+    CHAT_TYPE_BIG_NOTICE, CHAT_TYPE_COMMAND, CHAT_TYPE_INFO, CHAT_TYPE_NOTICE,
+};
 use protocol::gc_inventory::{HEADER_GC_EMPIRE, HEADER_GC_PHASE};
 use protocol::gc_mark::{mark_block_record, mark_idxlist_record, symbol_data_record};
 use protocol::gc_small::GcHeaderAndByte;
@@ -369,6 +372,11 @@ struct Held {
     chat: ChatState,
     /// `m_pulseCommandFlood` and `m_iCommandFloodCount` of the interpreter.
     command_flood: CommandFlood,
+    /// The character's GM level (`m_pointsInstant.gm_level`), read once at the
+    /// character load (`SetPlayerProto`, `G/input_db.cpp:1931-1955`) and held for the
+    /// descriptor's life. It gates the GM commands and lifts the flood limit
+    /// (`interpret_command`, `G/cmd.cpp:611-616`).
+    gm_level: u8,
     /// The registry entry this descriptor occupies on its map, taken when the game phase is
     /// entered and released when the descriptor ends.
     presence: Option<Lease>,
@@ -4553,6 +4561,7 @@ where
         return true;
     };
     let slots = account.lobby.slot_ids();
+    let account_id = account.id;
     let player = match judge_select(record.index, Some(&slots)) {
         SelectVerdict::Ignore => return true,
         SelectVerdict::Close => {
@@ -4563,10 +4572,10 @@ where
         }
         SelectVerdict::Load { player } => player,
     };
-    let character = match load_character(&context.store, account.id, player).await {
+    let character = match load_character(&context.store, account_id, player).await {
         Ok(character) => character,
         Err(error) => {
-            warn!(%addr, account = account.id.get(), player, %error, "Character load failed; closing");
+            warn!(%addr, account = account_id.get(), player, %error, "Character load failed; closing");
             return false;
         }
     };
@@ -4589,30 +4598,28 @@ where
     // answer, so the loaded row is held here and kept for the descriptor's life.
     let mut burst = loading_burst(&character, &points, vid, &view);
     // `PlayerLoad` sets each stored quickslot right after the map test and before the points
-    // packet (`G/input_db.cpp:439-440`).
-    let stored = match db::quickslots::load_quickslots(&context.store, player).await {
-        Ok(stored) => stored,
-        Err(error) => {
-            warn!(%addr, player, %error, "Quickslot load failed; closing");
-            return false;
-        }
+    // packet (`G/input_db.cpp:439-440`), and `TPlayerTable::skills` rides the player row.
+    let Some((quickslots, skills)) =
+        load_select_rows(&context.store, addr, player, &mut burst).await
+    else {
+        return false;
     };
-    let (quickslots, quickslot_records) = prodomo::quickslot::load(&stored);
-    burst.after_map_test.splice(0..0, quickslot_records);
     held.quickslots = quickslots;
-    // `TPlayerTable::skills` rides the player row; here the slots are their own
-    // table, loaded with the quickslots and burst before the map test.
-    let skills = match db::player_skills::load_skills(&context.store, player).await {
-        Ok(skills) => skills,
-        Err(error) => {
-            warn!(%addr, player, %error, "Skill load failed; closing");
-            return false;
-        }
-    };
-    prodomo::loading_phase::fill_skill_levels(&mut burst, &skills);
     held.skills = skills;
     held.character = Some(character.clone());
     held.channel = seat.number;
+    // `SetPlayerProto`'s GM level (`G/input_db.cpp:1931-1955`): the character's own
+    // grant, matched on the account and the name (`gm_get_level`,
+    // `G/input_db.cpp:1806-1830`). The Rewrite keeps the grant in the store's
+    // `gm_grant` table (ledger 179) and asks for it with the account and the name, so
+    // a grant never reaches another account's character.
+    held.gm_level = match read_gm_level(&context.store, account_id, character.name.as_str()).await {
+        Ok(level) => level,
+        Err(error) => {
+            warn!(%addr, player, %error, "GM grant load failed; closing");
+            return false;
+        }
+    };
     info!(
         %addr,
         player,
@@ -4662,6 +4669,54 @@ where
     // first thing the game phase does with it is join the client set.
     held.map = map_index;
     true
+}
+
+/// The character's GM level at select: `SetPlayerProto`'s read (`G/input_db.cpp:1931-1955`),
+/// the character's own grant matched on the account and the name (`gm_get_level`,
+/// `G/input_db.cpp:1806-1830`). The Rewrite keeps the grant in the store's `gm_grant` table
+/// (ledger 179), so a grant never reaches another account's character.
+///
+/// # Errors
+///
+/// Returns [`AccountError`] when the grant read fails.
+async fn read_gm_level(store: &Store, account: AccountId, name: &str) -> Result<u8, AccountError> {
+    match db::accounts::gm_authority(store, account, name).await? {
+        Some(authority) => Ok(u8::try_from(authority.as_i32()).unwrap_or(GM_PLAYER)),
+        None => Ok(GM_PLAYER),
+    }
+}
+
+/// The rows `PlayerLoad` reads after its map test and before its points packet: the stored
+/// quickslots (`G/input_db.cpp:439-440`, spliced to the front of `after_map_test`) and the
+/// skill levels, which ride the player row here. Answers the loaded rows, or `None` when a
+/// load failed — which closes the descriptor.
+async fn load_select_rows(
+    store: &Store,
+    addr: SocketAddr,
+    player: u32,
+    burst: &mut LoadingBurst,
+) -> Option<(
+    world::character::Quickslots,
+    Vec<db::player_skills::StoredSkill>,
+)> {
+    let stored = match db::quickslots::load_quickslots(store, player).await {
+        Ok(stored) => stored,
+        Err(error) => {
+            warn!(%addr, player, %error, "Quickslot load failed; closing");
+            return None;
+        }
+    };
+    let (quickslots, quickslot_records) = prodomo::quickslot::load(&stored);
+    burst.after_map_test.splice(0..0, quickslot_records);
+    let skills = match db::player_skills::load_skills(store, player).await {
+        Ok(skills) => skills,
+        Err(error) => {
+            warn!(%addr, player, %error, "Skill load failed; closing");
+            return None;
+        }
+    };
+    prodomo::loading_phase::fill_skill_levels(burst, &skills);
+    Some((quickslots, skills))
 }
 
 /// The item load at character select, the way `CInputDB::ItemLoad` places a character's
@@ -6024,89 +6079,98 @@ async fn run_accept_loop(
     // Background tasks started by this loop, so the console is shut down with the
     // server rather than left reading a pipe nobody owns.
     let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // The war-end poll: the guild tick queues its outcomes in the world (it has no
+    // descriptor), and this timer drains them once a second for the store. Pinned once
+    // like the others: recreating it each pass would restart the second.
+    let mut war_ends = Box::pin(tokio::time::interval(std::time::Duration::from_secs(1)));
+    // The first tick fires at once; the queue is empty until a war ends, so skip it.
+    war_ends.tick().await;
 
     let exit = 'run: loop {
         tokio::select! {
-            signal_result = &mut shutdown => {
-                signal_result?;
-                break 'run AcceptLoopExit::Signal;
-            }
-            terminal = game_loop.wait_for_terminal() => {
-                break 'run AcceptLoopExit::GameLoop(terminal?);
-            }
-            prepared = &mut store_ready, if !ready => {
-                prepared?;
-                 // The world's item id allocator is installed before the gate opens,
-                 // and not before: its start id is a fact about the stored items, so
-                 // it cannot be known until the schema is up and the table is
-                 // readable. Opening the gate without it would admit clients onto a
-                 // world that refuses every grant, which is the failure this ordering
-                 // exists to prevent.
-                 install_item_ids(game_loop, store, startup.item_id_span).await?;
-                 // The stored guilds ride the same ordering: they are only readable
-                 // once the schema is up, and a world without them judges a name a
-                 // concurrent boot would see as taken free.
-                 install_guilds(game_loop, store).await?;
-                ready = true;
-                ready_gate.open();
-                info!("Accepting clients");
-
-                // The Operator console starts HERE, and not earlier, for the same
-                // reason the gate does not open earlier: the world's item id allocator
-                // is installed one line above, and a console that accepted a grant
-                // before it would refuse every one of them with `IdsExhausted` or a
-                // missing allocator. A console that is up but refuses everything is
-                // worse than one that is not up, because it looks like the grant failed.
-                if let Some(console_path) = &startup.console_path {
-                    if let Some(task) =
-                        start_operator_console(console_path, store, game_loop, context).await
-                    {
-                        info!(
-                            path = %console_path.display(),
-                            "Operator console task started; write a command with \
-                             `echo 'item give <name> <vnum> [count]' > <path>` and read \
-                             its answer in this log"
-                        );
-                        tasks.push(task);
-                    }
-                }
-            }
-            (role, result) = listeners.accept() => match result {
-                Ok((stream, addr)) if !context.state.should_accept_connections() => {
-                    warn!(%addr, %role, "Rejecting new connection while shutting down");
-                    drop(stream);
-                }
-                // The ready gate is checked before the handler is spawned, not
-                // inside it, so an unready server does not allocate a
-                // per-connection task for every client that arrives.
-                Ok((stream, addr)) if !ready_gate.admit() => {
-                    warn!(
-                        %addr,
-                        %role,
-                        refused = ready_gate.refused(),
-                        "Refusing client connection before startup has finished"
-                    );
-                    drop(stream);
-                }
-                Ok((stream, addr)) => {
-                    let connection_shutdown = context.shutdown_tx.clone();
-                    let connection = context.connection.clone();
-                    // A connection's state is larger than a future is kept on the stack for,
-                    // so it lives on the heap from the start.
-                    tokio::spawn(async move {
-                        Box::pin(handle_connection(
-                            stream,
-                            addr,
-                            role,
-                            connection,
-                            &connection_shutdown,
-                        ))
-                        .await;
-                    });
-                }
-                Err(error) => error!(%error, %role, "Failed to accept connection"),
-            }
+                   signal_result = &mut shutdown => {
+                       signal_result?;
+                       break 'run AcceptLoopExit::Signal;
+                   }
+                   terminal = game_loop.wait_for_terminal() => {
+                       break 'run AcceptLoopExit::GameLoop(terminal?);
+                   }
+        _ = war_ends.tick(), if ready => {
+        drain_war_ends(game_loop, store).await;
         }
+                   prepared = &mut store_ready, if !ready => {
+                       prepared?;
+                        // The world's item id allocator is installed before the gate opens,
+                        // and not before: its start id is a fact about the stored items, so
+                        // it cannot be known until the schema is up and the table is
+                        // readable. Opening the gate without it would admit clients onto a
+                        // world that refuses every grant, which is the failure this ordering
+                        // exists to prevent.
+                        install_item_ids(game_loop, store, startup.item_id_span).await?;
+                        // The stored guilds ride the same ordering: they are only readable
+                        // once the schema is up, and a world without them judges a name a
+                        // concurrent boot would see as taken free.
+                        install_guilds(game_loop, store).await?;
+                       ready = true;
+                       ready_gate.open();
+                       info!("Accepting clients");
+
+                       // The Operator console starts HERE, and not earlier, for the same
+                       // reason the gate does not open earlier: the world's item id allocator
+                       // is installed one line above, and a console that accepted a grant
+                       // before it would refuse every one of them with `IdsExhausted` or a
+                       // missing allocator. A console that is up but refuses everything is
+                       // worse than one that is not up, because it looks like the grant failed.
+                       if let Some(console_path) = &startup.console_path {
+                           if let Some(task) =
+                               start_operator_console(console_path, store, game_loop, context).await
+                           {
+                               info!(
+                                   path = %console_path.display(),
+                                   "Operator console task started; write a command with \
+                                    `echo 'item give <name> <vnum> [count]' > <path>` and read \
+                                    its answer in this log"
+                               );
+                               tasks.push(task);
+                           }
+                       }
+                   }
+                   (role, result) = listeners.accept() => match result {
+                       Ok((stream, addr)) if !context.state.should_accept_connections() => {
+                           warn!(%addr, %role, "Rejecting new connection while shutting down");
+                           drop(stream);
+                       }
+                       // The ready gate is checked before the handler is spawned, not
+                       // inside it, so an unready server does not allocate a
+                       // per-connection task for every client that arrives.
+                       Ok((stream, addr)) if !ready_gate.admit() => {
+                           warn!(
+                               %addr,
+                               %role,
+                               refused = ready_gate.refused(),
+                               "Refusing client connection before startup has finished"
+                           );
+                           drop(stream);
+                       }
+                       Ok((stream, addr)) => {
+                           let connection_shutdown = context.shutdown_tx.clone();
+                           let connection = context.connection.clone();
+                           // A connection's state is larger than a future is kept on the stack for,
+                           // so it lives on the heap from the start.
+                           tokio::spawn(async move {
+                               Box::pin(handle_connection(
+                                   stream,
+                                   addr,
+                                   role,
+                                   connection,
+                                   &connection_shutdown,
+                               ))
+                               .await;
+                           });
+                       }
+                       Err(error) => error!(%error, %role, "Failed to accept connection"),
+                   }
+               }
     };
 
     // The console is a background task, and dropping its `JoinHandle` would leave it
@@ -6124,6 +6188,36 @@ async fn run_accept_loop(
         }
     }
     Ok(exit)
+}
+/// Drain the war ends the guild tick queued: each outcome's two rows land in the
+/// store. A failed poll or write is logged, not fatal — the memory already ended
+/// the war, and the next second's poll retries whatever the queue still holds
+/// (a failed write's rows stay queued only when the poll itself failed; a write
+/// that failed after the drain is lost, as a crashed descriptor's commit is).
+async fn drain_war_ends(game_loop: &mut GameLoopHandle, store: &Store) {
+    let outcomes = match game_loop.controller().take_war_ends().await {
+        Ok(outcomes) => outcomes,
+        Err(error) => {
+            warn!(%error, "War ends could not be drained; retrying next second");
+            return;
+        }
+    };
+    for outcome in outcomes {
+        for row in [outcome.lo, outcome.hi] {
+            if let Err(error) = db::guilds::set_war_tallies(
+                store,
+                row.guild_id,
+                row.ladder,
+                row.wins,
+                row.draws,
+                row.losses,
+            )
+            .await
+            {
+                warn!(guild_id = row.guild_id, %error, "A war-end row could not be stored");
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -7072,10 +7166,12 @@ async fn run_command<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    // GM levels are not wired yet, so every caller is `GM_PLAYER`.
+    // The character's GM level, read at the character load and held for the
+    // descriptor's life: it gates the GM commands and lifts the flood limit
+    // (`interpret_command`, `G/cmd.cpp:611-616`).
     let caller = Caller {
         pulse: context.game.pulse(),
-        gm_level: GM_PLAYER,
+        gm_level: held.gm_level,
         position: caller_position(session.phase(), held),
     };
     let (entry, rest) = match interpret(line, &mut held.command_flood, caller) {
@@ -7123,6 +7219,19 @@ where
         LineCommand::Restart(kind) => restart(addr, context, held, kind).await,
         LineCommand::SkillUp => skill_up(addr, context, held, rest).await,
         LineCommand::GuildSkillUp => guild_skill_up_step(addr, context, held, rest).await,
+        LineCommand::GuildWar => guild_war_step(addr, context, held, rest).await,
+        LineCommand::GuildNoWar => guild_nowar_step(addr, context, held, rest).await,
+        LineCommand::GuildWarStop => guild_war_stop_step(addr, context, held, rest).await,
+        LineCommand::GuildWarCancel => guild_war_cancel_step(addr, context, held, rest).await,
+        LineCommand::GuildWarList => guild_war_list_step(session, addr, context, held).await,
+        LineCommand::PartyRequest => party_request_step(addr, context, held, rest).await,
+        LineCommand::PartyRequestAccept => {
+            party_request_accept_step(addr, context, held, rest).await
+        }
+        LineCommand::PartyRequestDeny => party_request_deny_step(addr, context, held, rest).await,
+        LineCommand::GlobalNotice => global_notice_step(addr, context, held, &rest),
+        LineCommand::MapNotice => map_notice_step(addr, context, held, &rest),
+        LineCommand::BigNotice => big_notice_step(session, addr, context, held, &rest).await,
         LineCommand::NotPorted(handler) => {
             info!(%addr, handler, "Command not ported; ignoring");
             true
@@ -7250,6 +7359,378 @@ async fn guild_skill_up_step(
     true
 }
 
+/// `do_war`: the world runs the `/war` line and may answer a declare to announce — the
+/// two guild names for the `[LS;475;%s;%s]` notice (`SendNotice`, `G/cmd_gm.cpp:1389`,
+/// via `BroadcastNotice`'s relay, `G/cmd_general.cpp:2828`). The notice leaves after
+/// the world's fans reached the outboxes, so every client hears the WAR records
+/// before what they mean; there is no row to store, declares living only in memory.
+/// A refused line is quiet on the descriptor: every line rode the outbox already.
+async fn guild_war_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Guild war without a character in the world; ignoring");
+        return true;
+    };
+    let answer = match context.game.guild_war(vid, rest, global_time()).await {
+        Ok(answer) => answer,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a guild war; closing");
+            return false;
+        }
+    };
+    let Some(notice) = answer.notice else {
+        return true;
+    };
+    let (key, first, second) = match &notice {
+        prodomo::game_state::GuildWarNotice::Declare { from_name, to_name } => {
+            (&b"[LS;475;%s;%s]"[..], from_name, to_name)
+        }
+        prodomo::game_state::GuildWarNotice::Accept { from_name, to_name } => {
+            (&b"[LS;477;%s;%s]"[..], from_name, to_name)
+        }
+    };
+    let sent = context.clients.deliver_everywhere(|entry| {
+        let to = prodomo::chat_line::Recipient {
+            strings: &context.locale,
+            language: entry.language,
+            empire: entry.empire,
+        };
+        Some(prodomo::chat_line::chat_packet(
+            to,
+            protocol::gc_chat::CHAT_TYPE_NOTICE,
+            key,
+            &[
+                prodomo::chat_line::Arg::Text(first),
+                prodomo::chat_line::Arg::Text(second),
+            ],
+        ))
+    });
+    info!(%addr, recipients = sent, "Guild war declared");
+    true
+}
+
+/// `do_nowar`: the world runs the `/nowar` line; the refuse's lines all rode the
+/// outbox already, so the descriptor only logs.
+async fn guild_nowar_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Guild nowar without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context.game.guild_nowar(vid, rest).await {
+        warn!(%addr, %error, "The world could not be asked for a guild nowar; closing");
+        return false;
+    }
+    info!(%addr, "Guild war refused");
+    true
+}
+/// `gwstop`: the world ends the pair in a forced draw; the descriptor writes both rows.
+/// Every fan rode the outbox already, so a live war only stores, and a non-war is
+/// quiet past the echo. Answers whether the session stays open.
+async fn guild_war_stop_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Guild war-stop without a character in the world; ignoring");
+        return true;
+    };
+    let outcome = match context.game.guild_war_stop(vid, rest, global_time()).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a guild war-stop; closing");
+            return false;
+        }
+    };
+    let Some(outcome) = outcome else {
+        return true;
+    };
+    for row in [outcome.lo, outcome.hi] {
+        if let Err(error) = db::guilds::set_war_tallies(
+            &context.store,
+            row.guild_id,
+            row.ladder,
+            row.wins,
+            row.draws,
+            row.losses,
+        )
+        .await
+        {
+            warn!(%addr, %error, "A war-end row could not be stored; closing");
+            return false;
+        }
+    }
+    info!(%addr, "Guild war stopped");
+    true
+}
+
+/// `gwcancel`: the world cancels the pair with no ladder math; nothing is stored.
+/// Every fan rode the outbox already, so the descriptor only logs.
+async fn guild_war_cancel_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Guild war-cancel without a character in the world; ignoring");
+        return true;
+    };
+    if let Err(error) = context
+        .game
+        .guild_war_cancel(vid, rest, global_time())
+        .await
+    {
+        warn!(%addr, %error, "The world could not be asked for a guild war-cancel; closing");
+        return false;
+    }
+    info!(%addr, "Guild war cancelled");
+    true
+}
+
+/// `do_party_request` (`G/cmd_general.cpp:2428-2455`): the world runs the line; the
+/// gates' info lines and the leader's `PartyRequest <VID>` command ride the outbox, so
+/// the descriptor only logs.
+async fn party_request_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Party request without a character in the world; ignoring");
+        return true;
+    };
+    match context.game.party_request(vid, rest).await {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a party request; closing");
+            return false;
+        }
+    }
+    info!(%addr, "Party request");
+    true
+}
+
+/// `do_party_request_accept` (`G/cmd_general.cpp:2457-2472`): the world runs the line;
+/// the guest's join walk and the denial lines ride the outbox.
+async fn party_request_accept_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Party accept without a character in the world; ignoring");
+        return true;
+    };
+    match context.game.party_request_accept(vid, rest).await {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a party accept; closing");
+            return false;
+        }
+    }
+    info!(%addr, "Party request accepted");
+    true
+}
+
+/// `do_party_request_deny` (`G/cmd_general.cpp:2475-2487`): the world runs the line; the
+/// guest's `PartyRequestDenied` command rides the outbox.
+async fn party_request_deny_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Party deny without a character in the world; ignoring");
+        return true;
+    };
+    match context.game.party_request_deny(vid, rest).await {
+        Ok(settling) => held.settling = Some(settling),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a party deny; closing");
+            return false;
+        }
+    }
+    info!(%addr, "Party request denied");
+    true
+}
+
+/// `gwlist`: the GM hears the fixed line (`do_gwlist`, `G/cmd_gm.cpp:2760-2764`) and one
+/// line per live war (`ShowGuildWarList`, `G/guild_manager.cpp:785-800`).
+async fn guild_war_list_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if held.world.is_none() {
+        info!(%addr, "Guild war-list without a character in the world; ignoring");
+        return true;
+    }
+    let lines = match context.game.guild_war_list(global_time()).await {
+        Ok(lines) => lines,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for the guild war list; closing");
+            return false;
+        }
+    };
+    if !send_line(
+        session,
+        addr,
+        context,
+        held,
+        protocol::gc_chat::CHAT_TYPE_NOTICE,
+        "This is a guild that is currently at war.",
+    )
+    .await
+    {
+        return false;
+    }
+    for line in lines {
+        let args = [
+            prodomo::chat_line::Arg::Text(&line.lo_name),
+            prodomo::chat_line::Arg::Int(i64::from(line.lo_id)),
+            prodomo::chat_line::Arg::Text(&line.hi_name),
+            prodomo::chat_line::Arg::Int(i64::from(line.hi_id)),
+            prodomo::chat_line::Arg::Int(i64::from(line.seconds)),
+        ];
+        if !send_line_args(
+            session,
+            addr,
+            context,
+            held,
+            protocol::gc_chat::CHAT_TYPE_NOTICE,
+            b"%s[%d] vs %s[%d] time %u sec.",
+            &args,
+        )
+        .await
+        {
+            return false;
+        }
+    }
+    info!(%addr, "Guild war list sent");
+    true
+}
+
+/// `do_notice` (`G/cmd_gm.cpp:1628-1637`): `__GM_PE_N__` is defined
+/// (`common/prodomodefines.h:152`), so the line is `"<GM Name> :<argument>"`, the
+/// argument keeping the spaces after the command word. `SendNotice` (`:1389-1425`)
+/// looks the composed line up in every recipient's language. Every Channel is this
+/// one process, so the registry walks them all; legacy relayed the line to another
+/// Core as `HEADER_GG_NOTICE` (`:1513-1536`), and that protocol is retired (ADR-0001).
+fn global_notice_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    rest: &[u8],
+) -> bool {
+    let Some(character) = held.character.as_ref() else {
+        info!(%addr, "Notice without a loaded character; ignoring");
+        return true;
+    };
+    let mut text = Vec::with_capacity(character.name.len() + 3 + rest.len());
+    text.extend_from_slice(character.name.as_bytes());
+    text.extend_from_slice(b" :");
+    text.extend_from_slice(rest);
+    let sent = context.clients.deliver_everywhere(|entry| {
+        Some(prodomo::chat_line::chat_packet(
+            Recipient {
+                strings: &context.locale,
+                language: entry.language,
+                empire: entry.empire,
+            },
+            CHAT_TYPE_NOTICE,
+            &text,
+            &[],
+        ))
+    });
+    info!(%addr, recipients = sent, "Notice sent");
+    true
+}
+
+/// `do_map_notice` (`G/cmd_gm.cpp:1639-1642`): `SendNoticeMap(argument, GetMapIndex(),
+/// false)` (`:1453-1489`) says `CHAT_TYPE_NOTICE` to every character on the map.
+///
+/// Legacy walks one process's descriptors, and a process is one Channel, so the
+/// registry's `channel` and `map` must both equal the caller's. Hosting every Channel
+/// in one process makes that filter explicit; without it a Channel-99 client standing
+/// on a map index another Channel also hosts would hear a line legacy could not send.
+fn map_notice_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    rest: &[u8],
+) -> bool {
+    let Some(map) = held.map else {
+        info!(%addr, "Map notice without a loaded map; ignoring");
+        return true;
+    };
+    let channel = held.channel;
+    let sent = context.clients.deliver_everywhere(|entry| {
+        (entry.channel == channel && entry.map == map).then(|| {
+            prodomo::chat_line::chat_packet(
+                Recipient {
+                    strings: &context.locale,
+                    language: entry.language,
+                    empire: entry.empire,
+                },
+                CHAT_TYPE_NOTICE,
+                rest,
+                &[],
+            )
+        })
+    });
+    info!(%addr, channel, map, recipients = sent, "Map notice sent");
+    true
+}
+
+/// `do_big_notice` (`G/cmd_gm.cpp:1644-1651`): `ENABLE_FULL_NOTICE` is not defined in
+/// this tree, so only the caller hears its argument, in the big font. Legacy's
+/// `ChatPacket(..., "%s", argument)` does not translate the argument, so it is the
+/// `%s` argument here too; a `%` in it stays literal.
+async fn big_notice_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: &[u8],
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let args = [prodomo::chat_line::Arg::Text(rest)];
+    let sent = send_line_args(
+        session,
+        addr,
+        context,
+        held,
+        CHAT_TYPE_BIG_NOTICE,
+        b"%s",
+        &args,
+    )
+    .await;
+    if sent {
+        info!(%addr, "Big notice sent");
+    }
+    sent
+}
+
 /// One server line to this descriptor, in its language.
 async fn send_line<S>(
     session: &mut LiveClientSession<S>,
@@ -7262,8 +7743,33 @@ async fn send_line<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    send_line_args(
+        session,
+        addr,
+        context,
+        held,
+        chat_type,
+        text.as_bytes(),
+        &[],
+    )
+    .await
+}
+
+/// One server line to this descriptor, in its language, with its format arguments.
+async fn send_line_args<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    chat_type: u8,
+    text: &[u8],
+    args: &[prodomo::chat_line::Arg<'_>],
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let to = item_actor(held).recipient(&context.locale);
-    let line = prodomo::chat_line::chat_packet(to, chat_type, text.as_bytes(), &[]);
+    let line = prodomo::chat_line::chat_packet(to, chat_type, text, args);
     send_shop_records(session, addr, &[line]).await
 }
 

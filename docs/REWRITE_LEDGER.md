@@ -32977,3 +32977,386 @@ scenarios green, no scratch DBs left. Full-suite DB runs: only parallel-load fla
 outside this change (the potion and the hit-group-member scenarios, each green alone).
 
 No ADR changed. No owner question added. V20 is taken by this section.
+
+## 230w. A guild war is declared, refused and fanned (`sys.guild.war`, `cmd.war`, `cmd.nowar`)
+
+The declare and the refuse are live: `/war`'s judge, the memory-only enemy entries,
+both `DeclareWar` fans, the `[LS;475]` notice, and `/nowar`'s receive-gated refuse
+with the `[LS;476]` line and the END fans. `G/` below means `server/server/game/`.
+
+The judge (`do_war`, `G/cmd_general.cpp:2028-2210`) runs the guildless quiet, the
+own-war `[LS;533]`, the two arguments (an empty name is quiet; the type word parses
+as `strtoul` base 10, garbage answering 0, anything at or past the max folding to
+field, and a leading `-` or a negative `strtol` refusing quiet after the fold under
+`__FIX_COMANDA_RAZBOI__`), the non-master ERR 1116, the unknown-name ERR 1117, the
+state switch (none: the opp-war ERR 1118 and the two dead money arms, ERR 1119/1120
+— the price table holds 0 for every type, `G/constants.cpp:1142-1146`, so neither
+arm fires, ported as the reads they are; sent: ERR 1121 with the source's
+EUC-KR head, U+FFFD U+0329 U+FFFD, ported byte-exact; received: the opp-war ERR 1122
+plus a refuse; reserved: ERR 1123; ended: quiet; anything else: ERR 1124 plus a
+refuse), the own `CanStartWar` (`[LS;1308]` ladderless, `[LS;543]` short), the opp's
+at field whatever was asked (`[LS;544]`, `[LS;545]`), and the master-online arms
+(`[LS;1048]` plus a refuse — the P2P lookup is a row-`vid` check in one process).
+`CanStartWar` is ladder-positive plus 8 member rows; the test-server/event-flag arm
+is gone, the Rewrite having no test server and `guild_war_test` being a test flag.
+The master check answers before the name lookup, as the source orders them.
+
+The declare collapses the game→DB→game round trip — `AddDeclare`'s dedup
+(`db/GuildManager.cpp:645-652`) plus the forward, `G/input_db.cpp:1336-1340` — into
+one inline call: the entry existing is the same guard, so the manager's declare runs
+on the game thread (`CGuildManager::DeclareWar`, `G/guild_manager.cpp:541-561`):
+both guilds insert — sent here, received there — and the answer names the pair for
+the `[LS;475]` notice, which the descriptor fans per client after the world's fans
+reached the outboxes, so every client hears the WAR records before what they mean.
+`FindGuildByName` compares byte for byte (`std::string ==` folds no case), and the
+self-declare stays quiet (legacy logs). A fresh past-field declare answers `[LS;669]`
+to the master — `GuildWar_IsWarMap` finds no war map on this build — and a sent
+re-declare chats `[LS;780]`; a received entry's field accept, the packet that starts
+the war, is the on-war slice and lands nothing yet. The refuse collapses the same
+trip (`GUILD_WAR_REFUSE`, `:1341-1343`): only a received declare refuses, a sent one
+stands quiet (`CGuild::RequestRefuseWar`, `G/guild_war.cpp:540-556`), and the
+manager's refuse (`:564-580`) has the declarer's master hear `[LS;476]` naming the
+refuser before both entries leave with their END fans. Declares live only in memory
+both sides — the reboot that cleared the DB process's `m_DeclareMap` clears the
+`enemies` map too — so there is no row to store. The fan is `CGuild::GuildWarPacket`
+(`:28-58`): every online member hears the opp's NAME once per viewer through the
+view's `SendGuildName` dedup, then the WAR record, with the on-war `[LS;558]` arm
+carried for the slice that starts a war.
+
+Seven unit proofs (the declare's inserts, fans and notice; the declare-back's quiet;
+the re-declare's `[LS;780]`; the refuse's line and END pair; the sent refuser's
+quiet; the gates in order; the `strtoul` parse) and the live
+`a_guild_war_is_declared_refused_and_fanned` scenario: two war-ready guilds seeded
+before the boot (positive ladders, eight member rows each), both masters entering
+through their login walks, Alice's `/war Wolves` fanning both WAR records and the
+notice to both clients, Yankee's `/war MyGuild` back landing nothing, and Yankee's
+`/nowar MyGuild` refusing with `[LS;476]` and both END fans. The harness gains a
+guilded enter (the NAME, the pair, the walk among the view records on a put-back
+shelf) and a pre-boot account helper, and `enter_game_shown` keeps its old order —
+an earlier cut routed the plain enter through the guilded drain, which stalled every
+guildless enter at the walk it would never hear. Restoring the split fixed the nine
+older guild scenarios untouched.
+
+`cmd.war`, `cmd.nowar` -> ported; `gc.guild` notes the WAR fan (LOGOUT,
+CHANGE_GRADE, MONEY, AUTH_AND_GRADE and NOTICE stay codec only); `sys.guild.war` ->
+partial. STATUS header updated here. No crate was added, and `Cargo.toml` and
+`Cargo.lock` are unchanged. Gates: fmt clean; build with no warnings; clippy green
+(the over-long judge split into the price and start gates, the `strtoul`/`strtol`
+walks rewritten wrap-exact — the earlier clamp-into-byte misread `type` as a BYTE
+when it is a DWORD, and the earlier byte-`find` missed the sign `strtol` sees past
+whitespace); doc green; prodomo lib (1114 tests) green; all ten guild parity
+scenarios green, no scratch DBs left. Full-suite DB runs: only parallel-load flakes
+outside this change (the exp-orb and the gold-pile scenarios, each green alone).
+
+No ADR changed. No owner question added. V20 stays taken.
+
+## 230x. A guild war is accepted and every PC hears the list (`sys.guild.war`, `cmd.war`, `gc.guild`)
+
+The accept is live: `/war` on a received declare starts the war — `StartWar`'s
+state, `war_start_time`, the on-war fans with the `[LS;558]` first-chat, the
+every-PC WAR_LIST fan and the `[LS;477]` notice — plus the enter WAR_LIST, the war
+walk's WAR envelope, the kill score with the WAR_SCORE fans and the
+`[LS;7801]`/`[LS;7802]` lines, the no-reward gate with its throttle, and the
+remove-member gate. `G/` below means `server/server/game/`.
+
+The accept (`RequestDeclareWar`'s RECV arm, saved type FIELD,
+`G/guild_war.cpp:332-343`) collapses the DB round trip inline: the judge re-runs
+exactly as the declare's (ladder, members, both masters online), then
+`manager_start_war` refuses a missing guild or a `CheckStartWar` failure
+(`G/guild_manager.cpp:629-651`, `G/guild_war.cpp:404-437` — a missing enemy or an
+already-ON_WAR state, nothing else), stamps both sides' state and `war_start_time`
+(epoch seconds), fans both (each online member chats `[LS;558]` first, then hears
+the opp NAME through the view's `SendGuildName` dedup and the WAR record,
+`G/guild_war.cpp:28-58`), joins the sorted pair into `Guilds::wars` with its
+every-PC WAR_LIST fan, and answers the `[LS;477]` notice through the existing
+`GuildWarAnswer` path. The enter WAR_LIST (`SendGuildWar`, `G/guild_manager.cpp:802-823`,
+called from `Entergame`, `G/input_login.cpp:674`) rides the outbox behind the
+burst, so every enter ends with one — a bare envelope until a war starts. The war
+walk (`guild_login_packets`) replays each enemy's WAR envelope with its stored
+score, then the login packet's `lWarMap`/skill pair waits for the war maps.
+
+The kill score (`CGuildManager::Kill`'s field arm, `G/guild_manager.cpp:838-860`,
+called from `char_battle.cpp:1308-1311`, wired into `dead_pc`) scores the victim
+PC's level when the killer's enemy vs the victim's guild is a field war begun
+(`UnderWar`): the stored score IS the running total (`DWORD iScore`,
+`db/GuildManager.h:75`), added wrapping, and both guilds' online members hear the
+same WAR_SCORE record (self view, `G/guild_war.cpp:198-217`) while the two masters
+hear `[LS;7801]`/`[LS;7802]` naming the killer and the dead level. The alignment
+skip (`isUnderGuildWar`, `:1413`) waits with the PvP slice's killer-alignment arm.
+The remove gate (`UnderAnyWar() != 0` → the cannot-leave line) and the monster
+no-reward gate (`:1477,1501-1507` — the whole reward eaten, exp half included,
+`[LS;558]` throttled to once a minute per killer) land with it.
+
+World proofs: the accept's inserts/fans/notice, the enter list, the war walk's
+replay, the kill score's pair and lines, the remove gate's bogus-PID line, and the
+warring killer's missing exp orb (a 75-exp monster, a real kill, the orb asserted
+absent — the first draft asserted against a zero-exp monster and proved nothing,
+so the test now uses `a_reward_fight`). The live
+`a_guild_war_is_accepted_and_every_pc_hears_the_list` scenario proves the accept
+and the list; the score's bytes stay world tests, because `attack` refuses a
+player victim until the PvP slice (open question 4 of the plan). The harness gains
+`enter_war_list`: the enter walk's trailing list, read after the notice in
+`finish_enter_game` and in the six hand-rolled enters.
+
+`sys.guild.war` stays partial (left: the end and the war maps); `cmd.war`'s note
+grows past the quiet accept; `gc.guild` notes the ON_WAR fan, the enter list, the
+walk replay and the score fan. STATUS header updated here. No crate was added, and
+`Cargo.toml` and `Cargo.lock` are unchanged. Gates: fmt clean; build with no
+warnings; clippy green (the accept arm's needless return, the score reads'
+`map_or`, the replay count's loop, the new tests' bindings, the scenario's
+backticked subs); doc green; prodomo lib (1120 tests) green; protocol lib (1228
+tests) green; parity green except the pre-existing parallel-load flake (the party
+scenario's harness-side multiply overflow at `parity.rs:2405`, untouched by this
+slice — it fails on the clean tree too, 116/117, and passes alone, as does the
+gold-pile scenario that flaked on two earlier runs), no scratch DBs left.
+
+No ADR changed. No owner question added. V20 stays taken.
+
+## 230y. A guild war ends and a cancel names the pair (`sys.guild.war`, `cmd.gwstop`, `cmd.gwcancel`, `gc.guild`)
+
+The end is live: `manager_end_war` collapses the game side's `EndWar`
+(`G/guild_manager.cpp:676-717`) and the DB side's `WarEnd`, `ProcessWinLose`,
+`ProcessDraw` and `ChangeLadderPoint` (`db/GuildManager.cpp:404-524`,
+`:728-748`) into one game-thread call. A pair that is not a live war, or one whose guild is gone,
+answers quiet. Else the ladder math lands in memory (`war_end_math`): a draw
+tallies both draws and rewrites both ladders unchanged; a win tallies the
+winner's wins and the loser's losses, pays the winner 5% of the loser's ladder
+(halved inside the 12-hour half-win rule, `GUILD_WAR_LADDER_HALF_PENALTY`) and
+bills the loser 7%, floored at 0. The legacy `double` truncations are exact
+integer quotients for a non-negative `i32` ladder (`/20` and `i64 * 7 / 100`).
+Both sides end (`CGuild::EndWar`, `G/guild_war.cpp:592-627`): each fans END to
+its online members and erases the enemy, and a guild that then holds no war has
+the six war-casts and the bad affects stripped from every online member (the
+war-map `SetEnded` waits for the war maps). The over notice fans to every PC
+first — only a field war draws it, as `EndWar` gates it: `[LS;479]` for a draw,
+`[LS;480]` naming the winner for a win — then the pair leaves the war set, the
+end time stamps `war_end_times`, and the every-PC `WAR_END_LIST` lands. The
+outcome carries both rows back to the descriptor, which writes them with
+`db::guilds::set_war_tallies`.
+
+The two draws are **not the same draw**. The math follows the DB's `WarEnd`,
+where `gwstop`'s forced draw turns the result into a draw whatever the scores
+are (`db/GuildManager.cpp:495-518`); the notice follows the game side's
+`EndWar`, which reads the scores alone and never sees the force flag
+(`G/guild_manager.cpp:696-699`). A `gwstop` on a war with unequal scores
+therefore draws the math and still names the score winner. The every-PC walk
+moved into `notice_every_pc` so the over notice and the cancel's final line
+share it.
+
+`gwstop` (`do_stop_guild_war`, `G/cmd_gm.cpp:2766-2790`) reads two `int` words,
+stays quiet on an empty word or a zero id (an empty word stays 0 through
+`str_to_number`), sorts the pair, echoes `TALKING "%d %d"` to the speaker, then
+ends in the forced draw. `gwcancel` (`do_cancel_guild_war`, `:2791-2805`) has
+neither the empty-word nor the zero guard and no echo: it sorts, ends with
+`EndWar(false)` first (quiet when the pair is no live war), then sends both
+masters `[LS;482]` and, `CancelWar`'s last act (`G/guild_manager.cpp:763-768`),
+every PC the `[LS;483]` naming both guilds. A cancel skips the math and the
+tallies but still stamps the end time and fans the ENDs and the `WAR_END_LIST`.
+Legacy's DB-side declare map, which its `WarEnd` clears, has no counterpart
+here: the Rewrite keeps the game side's declare entry, as the game side did.
+
+A field war also ends by itself after 30 minutes: `run_guild_ticks` reads each
+live pair's `war_start_time` and, once `GUILD_WAR_DURATION` (1800 seconds)
+passed, ends it score-checked and never forced (`db/GuildManager.cpp:244-278`'s
+heap pop). The tick has no descriptor, so its outcomes queue in
+`pending_war_ends`; the serve loop asks `take_war_ends` once a second and writes
+each pair's two rows, logging a failed poll (retried next second) or a failed
+row write.
+
+Both commands needed the GM level, which was the half the Rewrite lacked.
+`Held.gm_level` is read once at character select through
+`db::accounts::gm_authority(account, name)` — legacy's `SetPlayerProto`
+(`G/input_db.cpp:386` → `G/char.cpp:2233-2238`) → `SetGMLevel`/`gm_get_level`
+(`G/char.cpp:6361-6371`, `G/gm.cpp:51-78`) matches the account **and** the
+character name, and `g_bGMHostCheck` defaults false, so that pair is legacy's
+effective rule. `run_command` passes it as `Caller.gm_level`: the flood limit
+(with the GM exemption), the position and the GM-level gates run in
+`interpret_command`'s order (`G/cmd.cpp:610-699`). Both commands are POS_DEAD
+and GM_LOW_WIZARD, so a player's line answers "This command does not exist."
+before the world is asked, and a GM's reaches it. The other readers of the level
+(PK protection, the YMIR affect, the whisper rules) stay unported.
+
+The live `a_gm_stops_and_cancels_the_war_and_a_player_cannot` scenario seeds
+the 230w pair before the boot and grants Alpha `LOW_WIZARD` with a pre-boot
+`gm_grant` row, then enters both masters through the guilded walk. Yankee's
+player `/gwstop 1 2` answers the no-such-command line and no one else hears it;
+Alice's GM `/gwstop 1 2` echoes the sorted pair as TALKING, then the
+`[LS;479;MyGuild;Wolves]` notice, both END fans and the every-PC
+`WAR_END_LIST`, and the two stored rows tally both draws with both ladders
+unchanged. A second declare and accept, then Alice's `/gwcancel 1 2`: no echo,
+the same draw notice and END sequence, both masters' `[LS;482]` and the
+every-PC `[LS;483;MyGuild;Wolves]`, with the store still holding the stop's
+tallies alone. The harness gains `a_war_pair_ready`, `declare_and_accept_war`,
+`read_war_end` and `assert_guild_tallies`.
+
+The handover's two red unit tests were test bugs. `[LS;483;Knights;Wolves]` is
+23 bytes and `GcChat` sizes the record as `10 + text.len()` — the record was
+complete and 33 bytes; the assertion's `.windows(20)` was short. The
+`[LS;480;Knights;Wolves]` assertion had the same `.windows(20)`. Both now
+window 23, and the outbox needed no change. The gate run also found three
+harness defects and two stale expectations, all fixed here:
+`create_account_before_boot` keyed its scratch config by process id and login,
+so concurrent guild scenarios overwrote each other's database URL ("alice
+already exists", a NULL `master_pid`); it now keys by the scratch database's
+name. The party swing reader passed `game_len`'s `usize::MAX` (a sync position
+or a chat) into its width multiplication; it now falls back to the record's
+`WORD wSize`, as the general reader does. The party fixture's ±300 box could
+stand its leader past the 250 punch the scenario feeds; it is ±100, which keeps
+the leader in reach. The exp-orb scenario's death reader skipped only the
+death's releases; the kill's ground drops (and a late swing's record) land
+between the exp and `GC_DEAD`, so its strict read failed about one run in three.
+It is now `read_exp_death`, which reads the exp point change, the orb and the
+dead record past those. The two tests that assert a record's arrival after
+admission (`a_client_admitted_from_tokio_lands_on_the_thread_that_owns_the_world`
+and `a_granted_item_is_written_and_then_reaches_the_client`) now pin the 230x
+entry `WAR_LIST` first, which every entrant hears.
+
+`cmd.gwstop` and `cmd.gwcancel` -> ported; `gc.guild` notes the END fan and the
+`WAR_END_LIST`; `sys.guild.war` stays partial, the war maps (`G/war_map.cpp`)
+being what is left. STATUS header updated here. No crate was added, and
+`Cargo.toml` and `Cargo.lock` are unchanged. Gates: fmt clean; build with no
+warnings; clippy green (the guild arm split out of the item step, the legacy
+float casts replaced by the integer quotients, the world's `guild_war_cancel`
+dropped its unused caller argument, `select_character`'s GM and row loads
+extracted, the exp test's death tail extracted); doc green with `-D warnings`;
+doc-tests green; prodomo lib (1130 tests) green; protocol lib (1229 tests)
+green; the full workspace all-targets DB run green on all 39 targets (parity
+120/120); this slice's guild trio green 3/3, the fixed party scenario 10/10
+and the fixed exp scenario 5/5; no scratch DBs left.
+
+No ADR changed. No owner question added. V20 stays taken.
+
+## 230z. A GM lists the live guild wars (`cmd.gwlist`)
+
+`do_gwlist` (`G/cmd_gm.cpp:2760-2764`) reads the pair-free line and calls
+`CGuildManager::ShowGuildWarList` (`G/guild_manager.cpp:785-800`): a fixed
+`CHAT_TYPE_NOTICE` line, "This is a guild that is currently at war.", then one
+notice per pair in `m_GuildWar`'s sorted order, `"%s[%d] vs %s[%d] time %u sec."`,
+with both guilds' names and ids and the age
+`get_global_time() - A->GetWarStartTime(B->GetID())`. `GameState::guild_war_list(now)`
+walks the Rewrite's `BTreeSet<(u32, u32)>` in the same order, reads the lower
+guild's enemy entry for the start stamp, and saturates a clock behind it to 0. A
+pair whose guild is gone is skipped; legacy `TouchGuild` would insert a ghost
+guild with an empty name and fan it, a path no live war can take because a war
+ends before either guild can be removed. The command's `now` is read once for
+the whole answer; legacy calls `get_global_time()` per line, so only a line
+that crosses a second boundary can differ by one. The line formatter gained
+nothing: `%s`, `%d` and `%u` were already backed, and `send_line_args` is the
+new descriptor helper that `send_line` now delegates to.
+
+The world test `the_gwlist_reads_the_live_pair_and_its_age` starts the fixture
+pair at `NOW`, reads the line at `NOW + 42` with the two names, ids and 42
+seconds, and reads a clock one second before the start as 0. The live
+`a_gm_stops_and_cancels_the_war_and_a_player_cannot` scenario now sends the GM
+`/gwlist` after the accept: `read_gwlist_pair` asserts the fixed notice and the
+`MyGuild[1] vs Wolves[2] time <n> sec.` line with a parsed age no more than 5
+seconds (the war just started), and Yankee stays quiet. The scenario's citations
+were corrected to the DB's `WarEnd` (`db/GuildManager.cpp:404-524`) and the game
+side's over notice (`G/guild_manager.cpp:696-699`).
+
+`cmd.gwlist` -> ported; `sys.guild.war` stays partial, the war maps
+(`G/war_map.cpp`) being what is left. STATUS header updated here. No crate was
+added, and `Cargo.toml` and `Cargo.lock` are unchanged. Gates: fmt clean; build
+with no warnings; clippy green; doc green with `-D warnings`; doc-tests green
+(9); the full workspace all-targets DB run green on 38 of 39 targets (parity
+119/120): the one failure is the pre-existing
+`a_kill_pays_gold_piles_that_are_picked_up_and_stored`, whose own doc names a
+26% miss on six dogs and which failed 1 of 3 solo runs, untouched by this slice;
+all other targets green; no scratch DBs left.
+
+No ADR changed. No owner question added. V20 stays taken.
+
+## 230aa. A GM's notice crosses Channels (`cmd.notice`, `cmd.notice_map`, `cmd.big_notice`)
+
+`do_notice` (`G/cmd_gm.cpp:1628-1637`) composes `"%s :%s"` from the
+character's Name and the raw `argument`; `__GM_PE_N__` is defined
+(`common/prodomodefines.h:152`), so the line reads `"<Name> :<argument>"`.
+`BroadcastNotice` (`G/cmd_gm.cpp:1513-1536`) relays it to the other Cores as
+`HEADER_GG_NOTICE` and then calls `SendNotice` (`:1389-1425`), which looks the
+whole line up in every descriptor's language and formats it with no arguments.
+`do_map_notice` (`:1639-1642`) calls `SendNoticeMap(argument, GetMapIndex(),
+false)` (`:1453-1489`), which does the same lookup and keeps the descriptors
+whose character is on that map. `do_big_notice` (`:1644-1651`) compiles the
+branch where `ENABLE_FULL_NOTICE` is undefined: only the caller hears
+`argument` as `CHAT_TYPE_BIG_NOTICE`, and `argument` is the `%s` argument, not
+the format.
+
+The command parser leaves the spaces after the command word in `argument`
+(`first_cmd`, `G/utils.cpp:158-177`), so `/notice hello` sends
+`"<GM> : hello"` and `/notice_map hi` sends `" hi"`. The Rewrite passes
+`command::interpret`'s `rest` unchanged; the command tests already pin that it
+starts with the space. Every registry entry carries its language and empire, so
+`deliver_everywhere` builds each line the way `ChatPacket` would, and the one
+process fans every Channel without the retired GG relay. `/notice_map` filters
+by the caller's Channel **and** map: legacy ran the map test inside one
+Channel's process, and a Channel-99 client on the same map index must not hear
+a Channel-1 map notice. `/big_notice` sends through `send_line_args` with
+`"%s"` and the argument, so a `%` in the text stays literal as legacy's
+`ChatPacket("%s", argument)` made it. `/notice` and `/notice_map` pass the
+text as the format with no arguments, as `SendNotice`/`SendNoticeMap` do; the
+formatter writes a conversion with no argument as it is, where legacy read
+absent varargs (a Defect not reproduced).
+
+The live scenario `a_gm_notice_crosses_channels_and_a_map_notice_stays` logs
+Alpha (Channel 1, map 1, `HIGH_WIZARD`), Yankee (Channel 1's map 3), and
+Charlie (the Shared Channel's map 72). `/notice hello` puts `"Alpha : hello"`
+on all three with each recipient's empire byte; `/notice_map hi` puts `" hi"`
+on Alpha alone and leaves the other map and the other Channel quiet;
+`/big_notice big` puts `" big"` on Alpha alone in `CHAT_TYPE_BIG_NOTICE`. The
+scenario's `notice_cast` is the shout cast with the `gm_grant` that
+`a_war_pair_ready` uses, at `HIGH_WIZARD`.
+
+`cmd.notice`, `cmd.notice_map` and `cmd.big_notice` -> ported; STATUS header
+updated. No crate was added; `Cargo.toml` and `Cargo.lock` are unchanged.
+Gates: fmt clean; build with no warnings; clippy green; doc green with
+`-D warnings`; doc-tests green (9 targets: 1 passed, 19 ignored); the full
+workspace all-targets DB run green on 38 of 39 targets (parity 120 of 121,
+the new notice scenario among the passes). The one failure is again the
+pre-existing `a_kill_pays_gold_piles_that_are_picked_up_and_stored`, which
+panicked with `six dogs died goldless; the chance is 20% a kill`; it is the
+documented 26% draw recorded for 230z and is untouched by this slice. No
+scratch database was left.
+
+## 230ab. The gold piles' live scenario goes: a kill's gold is a dice draw
+
+The parity scenario `a_kill_pays_gold_piles_that_are_picked_up_and_stored` is
+deleted, with its helpers `punch_one_dog_until_it_dies` and
+`pick_up_first_pile`. The parity row `sys.combat.drop` now names the in-memory
+test `prodomo/src/game_state/fight.rs::a_solo_kill_of_a_king_pays_gold_piles_before_gc_dead`.
+
+**Why the scenario goes.** It asserted that a kill *pays*. `RewardGold`'s chance
+is the victim's rank percent (`MobRankStats[].iGoldPercent`,
+`G/constants.cpp:25-33`) through the level-delta share (`G/char_battle.cpp:599-603`),
+and a level-1 kill of a level-1 PAWN is 20%: six kills missed in 26% of the
+runs, so the gate was red about one run in four, and the owner's own note calls
+it a permanent test defect. The chance cannot be pinned by a live scenario on
+the owner's data:
+
+- the ranks that pay in every draw (KING, 100%) are the aslan buff shamans
+  (vnum 10 and 11), and a player cannot hit an NPC (`is_struck`,
+  `G/battle.cpp:165`, ported in ledger 229j); the other sure payer, a KING
+  stone, carries 14 550 hit points that no fist reaches;
+- no item in the owner's data carries `APPLY_MALL_GOLDBONUS`, so the mall bonus
+  that would raise the percent is unreachable;
+- `PRIV_GOLD_DROP` and the premium gold are hooks, not ported.
+
+Legacy draws the same chance, so this is not a Rewrite gap: no live scenario can
+pin it, and the ports that could (a seeded dice, a priv manager) are not part
+of this work.
+
+**What still covers the chain.** The kill, the piles, the view's ground adds, the
+pick-up and the purse are pinned in-memory by
+`game_state::fight::a_solo_kill_of_a_king_pays_gold_piles_before_gc_dead`, whose
+fixture is a KING and so pays in every draw. The pile's wire form, the pick-up
+and the store are proved live by `a_dropped_gold_pile_lies_until_someone_picks_it_up`,
+which drops the same gold pile by hand.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; the full
+workspace all-targets DB run green, the parity target 121 of 121. Two findings
+came with the tree and are fixed here: a clippy `match_same_arms` finding in
+`prodomo/src/game_state/party.rs` (the `AlreadyJoin` and `DiffEmpire` arms had the
+same empty body; they are merged), and the wander scenario, which read every
+`GC_MOVE` a dog sent and so took a chase move when the load gave a dog a victim;
+it now reads the idle walks (`FUNC_WAIT`) alone, which is what it is about.
+
+No ADR changed. No owner question added. V20 stays taken.

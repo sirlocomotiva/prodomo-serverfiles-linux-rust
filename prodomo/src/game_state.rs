@@ -93,7 +93,8 @@ pub use guild::{
     GuildCommentAnswer, GuildCommentCommit, GuildCommentLine, GuildGradeAnswer, GuildGradeCommit,
     GuildGradeSet, GuildJoinAnswer, GuildJoinCommit, GuildMakeAnswer, GuildMakeCommit,
     GuildQuestStore, GuildRemoveAnswer, GuildRemoveCommit, GuildSkillUp, GuildSkillUpAnswer,
-    GuildSkillUseAnswer, GuildSkillUseCommit, MarkUploadAnswer, GUILD_COMMENT_MAX_COUNT,
+    GuildSkillUseAnswer, GuildSkillUseCommit, GuildWarAnswer, GuildWarListLine, GuildWarNotice,
+    MarkUploadAnswer, WarEndOutcome, WarEndRow, GUILD_COMMENT_MAX_COUNT,
 };
 pub use quests::{QuestStep, QuestStepOutcome, Quests};
 pub use safebox::{
@@ -916,7 +917,11 @@ impl GameState {
             | GameCommand::Safebox { .. }
             | GameCommand::AnswerMakeGuild { .. }
             | GameCommand::CommitMakeGuild { .. }
-            | GameCommand::GuildAddMember { .. }
+            | GameCommand::Quest { .. }) => {
+                self.apply_item_step(command);
+                None
+            }
+            command @ (GameCommand::GuildAddMember { .. }
             | GameCommand::AnswerGuildInvite { .. }
             | GameCommand::CommitGuildJoin { .. }
             | GameCommand::AnswerGuildRemove { .. }
@@ -936,8 +941,13 @@ impl GameState {
             | GameCommand::AnswerGuildUseSkill { .. }
             | GameCommand::CommitGuildUseSkill { .. }
             | GameCommand::GuildSkillUp { .. }
-            | GameCommand::Quest { .. }) => {
-                self.apply_item_step(command);
+            | GameCommand::GuildWar { .. }
+            | GameCommand::GuildNoWar { .. }
+            | GameCommand::GuildWarStop { .. }
+            | GameCommand::GuildWarCancel { .. }
+            | GameCommand::GuildWarList { .. }
+            | GameCommand::TakeWarEnds { .. }) => {
+                self.apply_guild_step(command);
                 None
             }
             command @ (GameCommand::DropItem { .. }
@@ -960,6 +970,9 @@ impl GameState {
             | GameCommand::Shoot { .. }
             | GameCommand::PartyInvite { .. }
             | GameCommand::PartyInviteAnswer { .. }
+            | GameCommand::PartyRequest { .. }
+            | GameCommand::PartyRequestAccept { .. }
+            | GameCommand::PartyRequestDeny { .. }
             | GameCommand::PartyRemove { .. }
             | GameCommand::PartySetState { .. }
             | GameCommand::PartyParameter { .. }
@@ -1321,6 +1334,11 @@ impl GameState {
         let _previous = self.outboxes.insert(vid, outbox);
         self.link_party(vid);
         self.link_guild(vid);
+        // `CGuildManager::SendGuildWar` (`G/guild_manager.cpp:803-823`, called from
+        // `Entergame`, `G/input_login.cpp:674`): the WAR_LIST envelope with every live
+        // pair, which every entrant hears — guildless too.
+        let pairs: Vec<(u32, u32)> = self.guilds.wars.iter().copied().collect();
+        let _sent = self.write_to_client(vid, protocol::gc_guild::guild_war_list_record(&pairs));
         Ok(())
     }
 
@@ -1598,8 +1616,6 @@ impl GameState {
         })
     }
 
-    /// Apply one of the steps a character takes with its own items or an NPC: a move, a use, a
-    /// shop, trade or safebox step, or a quest step.
     /// Run one guild step's handler. Every arm answers its reply, if it holds one; the
     /// caller drains the fans. Split out of `apply_item_step` so neither function runs
     /// past the line limit.
@@ -1661,6 +1677,12 @@ impl GameState {
             | GameCommand::AnswerGuildUseSkill { .. }
             | GameCommand::CommitGuildUseSkill { .. }
             | GameCommand::GuildSkillUp { .. }
+            | GameCommand::GuildWar { .. }
+            | GameCommand::GuildNoWar { .. }
+            | GameCommand::GuildWarStop { .. }
+            | GameCommand::GuildWarCancel { .. }
+            | GameCommand::GuildWarList { .. }
+            | GameCommand::TakeWarEnds { .. }
             | GameCommand::AnswerGuildPostComment { .. }
             | GameCommand::CommitGuildPostComment { .. }
             | GameCommand::AnswerGuildRefreshComment { .. }
@@ -1748,7 +1770,13 @@ impl GameState {
             }
             command @ (GameCommand::AnswerGuildUseSkill { .. }
             | GameCommand::CommitGuildUseSkill { .. }
-            | GameCommand::GuildSkillUp { .. }) => {
+            | GameCommand::GuildSkillUp { .. }
+            | GameCommand::GuildWar { .. }
+            | GameCommand::GuildNoWar { .. }
+            | GameCommand::GuildWarStop { .. }
+            | GameCommand::GuildWarCancel { .. }
+            | GameCommand::GuildWarList { .. }
+            | GameCommand::TakeWarEnds { .. }) => {
                 self.apply_guild_skill_step(command);
             }
             command @ (GameCommand::AnswerGuildPostComment { .. }
@@ -1797,6 +1825,55 @@ impl GameState {
             GameCommand::GuildSkillUp { vid, rest, reply } => {
                 if reply.send(self.guild_skill_up(vid, &rest)).is_err() {
                     warn!(?vid, "a guild skill-up ran and nobody was left to store it");
+                }
+            }
+            GameCommand::GuildWar {
+                vid,
+                rest,
+                now,
+                reply,
+            } => {
+                if reply.send(self.guild_war(vid, &rest, now)).is_err() {
+                    warn!(?vid, "a guild war ran and nobody was left to send it");
+                }
+            }
+            GameCommand::GuildNoWar { vid, rest, reply } => {
+                self.guild_nowar(vid, &rest);
+                if reply.send(()).is_err() {
+                    warn!(?vid, "a guild nowar ran and nobody was left to send it");
+                }
+            }
+            GameCommand::GuildWarStop {
+                vid,
+                rest,
+                now,
+                reply,
+            } => {
+                if reply.send(self.guild_war_stop(vid, &rest, now)).is_err() {
+                    warn!(?vid, "a guild war-stop ran and nobody was left to store it");
+                }
+            }
+            GameCommand::GuildWarCancel {
+                vid,
+                rest,
+                now,
+                reply,
+            } => {
+                if reply.send(self.guild_war_cancel(&rest, now)).is_err() {
+                    warn!(
+                        ?vid,
+                        "a guild war-cancel ran and nobody was left to store it"
+                    );
+                }
+            }
+            GameCommand::TakeWarEnds { reply } => {
+                if reply.send(self.take_war_ends()).is_err() {
+                    warn!("war ends drained and nobody was left to store them");
+                }
+            }
+            GameCommand::GuildWarList { now, reply } => {
+                if reply.send(self.guild_war_list(now)).is_err() {
+                    warn!("a guild war list ran and nobody was left to send it");
                 }
             }
             _ => {
@@ -1849,6 +1926,9 @@ impl GameState {
         }
     }
 
+    /// Apply one of the steps a character takes with its own items or an NPC: a move, a use, a
+    /// shop, trade or safebox step, the make-guild pair, or a quest step. The guild steps go
+    /// straight to [`Self::apply_guild_step`] from [`Self::apply_delegated`].
     fn apply_item_step(&mut self, command: GameCommand) {
         match command {
             GameCommand::MoveItem {
@@ -1919,26 +1999,6 @@ impl GameState {
                 mover,
                 reply,
             } => self.commit_make_guild_step(vid, &commit, mover, reply),
-            command @ (GameCommand::GuildAddMember { .. }
-            | GameCommand::AnswerGuildInvite { .. }
-            | GameCommand::CommitGuildJoin { .. }
-            | GameCommand::AnswerGuildRemove { .. }
-            | GameCommand::CommitGuildRemove { .. }
-            | GameCommand::AnswerGuildGradeName { .. }
-            | GameCommand::AnswerGuildGradeAuth { .. }
-            | GameCommand::AnswerGuildMemberGrade { .. }
-            | GameCommand::AnswerGuildMemberGeneral { .. }
-            | GameCommand::AnswerGuildOffer { .. }
-            | GameCommand::AnswerGuildCharge { .. }
-            | GameCommand::AnswerGuildPostComment { .. }
-            | GameCommand::CommitGuildPostComment { .. }
-            | GameCommand::AnswerGuildRefreshComment { .. }
-            | GameCommand::AnswerGuildDeleteComment { .. }
-            | GameCommand::CommitGuildDeleteComment { .. }
-            | GameCommand::CommitGuildGrade { .. }
-            | GameCommand::AnswerGuildUseSkill { .. }
-            | GameCommand::CommitGuildUseSkill { .. }
-            | GameCommand::GuildSkillUp { .. }) => self.apply_guild_step(command),
             GameCommand::Quest {
                 vid,
                 step,
@@ -2822,6 +2882,8 @@ mod tests {
         state
             .enter_world(Vid::new(7), 7, "Shaman", outbox)
             .expect("the character is admitted");
+        // The enter walk sent the empty WAR_LIST first; drain it.
+        let _list = inbox.try_recv().expect("the enter WAR_LIST is queued");
         assert!(state.write_to_client(Vid::new(7), vec![0x2B, 0x01, 0x02]));
         // Read it back, because a `true` from `write_to_client` only proves the
         // channel accepted the record; what the client sees is the point.
@@ -2840,6 +2902,8 @@ mod tests {
             .expect("the character is admitted");
         state.leave_world(Vid::new(7));
         assert!(!state.write_to_client(Vid::new(7), vec![0x2B]));
+        // The enter WAR_LIST rode before the leave; drain it, then nothing is left.
+        let _list = inbox.try_recv().expect("the enter WAR_LIST is queued");
         assert!(inbox.try_recv().is_err());
     }
 
@@ -5030,6 +5094,8 @@ mod tests {
         );
         assert_eq!(state.npc_of[&903], (1, 41, 2));
         assert_eq!(state.npcs_on(1, 41).npcs.len(), 3);
+        // The enter WAR_LIST rode at admission; the stand delivered nothing more.
+        let _list = inbox.try_recv().expect("the enter WAR_LIST is queued");
         assert!(inbox.try_recv().is_err(), "nothing was delivered");
     }
 

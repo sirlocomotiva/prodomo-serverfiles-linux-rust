@@ -130,6 +130,17 @@ impl CommandEntry {
             "do_restart_now" => Command::Restart(RestartKind::Now),
             "do_skillup" => Command::SkillUp,
             "do_guildskillup" => Command::GuildSkillUp,
+            "do_war" => Command::GuildWar,
+            "do_nowar" => Command::GuildNoWar,
+            "do_stop_guild_war" => Command::GuildWarStop,
+            "do_cancel_guild_war" => Command::GuildWarCancel,
+            "do_gwlist" => Command::GuildWarList,
+            "do_party_request" => Command::PartyRequest,
+            "do_party_request_accept" => Command::PartyRequestAccept,
+            "do_party_request_deny" => Command::PartyRequestDeny,
+            "do_notice" => Command::GlobalNotice,
+            "do_map_notice" => Command::MapNotice,
+            "do_big_notice" => Command::BigNotice,
             _ => Command::NotPorted(self.name),
         }
     }
@@ -162,6 +173,28 @@ pub enum Command {
     /// `do_guildskillup`: the `/gskillup` line's vnum climbs a level when every gate
     /// passes.
     GuildSkillUp,
+    /// `do_war`: the `/war` line's guild is declared on when every gate passes.
+    GuildWar,
+    /// `do_nowar`: the `/nowar` line's guild is refused when a received declare holds.
+    GuildNoWar,
+    /// `do_stop_guild_war`: the `gwstop` line's pair ends in a forced draw.
+    GuildWarStop,
+    /// `do_cancel_guild_war`: the `gwcancel` line's pair ends with no ladder math.
+    GuildWarCancel,
+    /// `do_gwlist`: the GM hears each live guild war's pair and age.
+    GuildWarList,
+    /// `do_party_request`: the requester asks the VID's party leader to take it in.
+    PartyRequest,
+    /// `do_party_request_accept`: the leader accepts the guest's request.
+    PartyRequestAccept,
+    /// `do_party_request_deny`: the leader denies the guest's request.
+    PartyRequestDeny,
+    /// `do_notice`: every client on every Channel hears the GM's line.
+    GlobalNotice,
+    /// `do_map_notice`: every client on the GM's Channel and map hears the line.
+    MapNotice,
+    /// `do_big_notice`: the GM hears its own line in the big font.
+    BigNotice,
     /// An entry this build does not port, by name.
     NotPorted(&'static str),
 }

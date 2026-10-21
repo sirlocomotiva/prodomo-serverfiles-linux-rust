@@ -24,14 +24,15 @@ use prodomo::descriptor_crypto::derive_legacy_descriptor_keys;
 use protocol::cg_inventory::{resolve_cg_base_size, CG_KEEP_ALIVE, HEADER_CG_PONG};
 use protocol::cg_mark::{CgMarkCRCList, CgMarkIdxList, CgMarkLogin, CgMarkUpload, CgSymbolCrc};
 use protocol::cg_variable::encode_guild_symbol_upload;
-use protocol::gc_chat::CHAT_TYPE_TALKING;
+use protocol::gc_chat::{CHAT_TYPE_BIG_NOTICE, CHAT_TYPE_NOTICE, CHAT_TYPE_TALKING};
 use protocol::gc_guild::{
     GUILD_NAME_FIELD_SIZE, GUILD_SUBHEADER_GC_CHANGE_EXP, GUILD_SUBHEADER_GC_CHANGE_MEMBER_GENERAL,
     GUILD_SUBHEADER_GC_CHANGE_MEMBER_GRADE, GUILD_SUBHEADER_GC_COMMENTS, GUILD_SUBHEADER_GC_GRADE,
     GUILD_SUBHEADER_GC_GRADE_AUTH, GUILD_SUBHEADER_GC_GRADE_NAME, GUILD_SUBHEADER_GC_GUILD_INVITE,
-    GUILD_SUBHEADER_GC_GUILD_NAME, GUILD_SUBHEADER_GC_INFO, GUILD_SUBHEADER_GC_LIST,
-    GUILD_SUBHEADER_GC_LOGIN, GUILD_SUBHEADER_GC_LOGOUT, GUILD_SUBHEADER_GC_REMOVE,
-    GUILD_SUBHEADER_GC_SKILL_INFO,
+    GUILD_SUBHEADER_GC_GUILD_NAME, GUILD_SUBHEADER_GC_GUILD_WAR_LIST, GUILD_SUBHEADER_GC_INFO,
+    GUILD_SUBHEADER_GC_LIST, GUILD_SUBHEADER_GC_LOGIN, GUILD_SUBHEADER_GC_LOGOUT,
+    GUILD_SUBHEADER_GC_REMOVE, GUILD_SUBHEADER_GC_SKILL_INFO, GUILD_SUBHEADER_GC_WAR,
+    GUILD_SUBHEADER_GC_WAR_END_LIST,
 };
 use protocol::gc_mark::{HEADER_GC_MARK_BLOCK, HEADER_GC_MARK_IDXLIST, HEADER_GC_SYMBOL_DATA};
 use protocol::tea::{decrypt_padded, encrypt_padded, TeaKey};
@@ -603,6 +604,49 @@ fn create_account(server: &Server, login: &str) {
     );
 }
 
+/// Create `login` with [`ACCOUNT_PASSWORD`] before the server boots: the Operator
+/// command against a scratch config naming the database, so the guild seed that
+/// needs the player rows can land before the boot installs the stored guilds.
+fn create_account_before_boot(database: &ScratchDatabase, login: &str) {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    // Per database, not per process: the tests run in threads of one binary, so a
+    // PID-and-login name made two concurrent pre-boot commands share one config and
+    // race their database URLs (the guild war scenarios all make `alice`).
+    let dir = std::env::temp_dir().join(format!("prodomo-preboot-{}", database.name()));
+    std::fs::create_dir_all(&dir).expect("a scratch dir");
+    std::fs::write(
+        dir.join("prodomo.toml"),
+        format!(
+            "bind_ip = \"127.0.0.1\"\n[store]\nurl = \"{}\"\n\n[auth]\nport = 0\n\n[[channel]]\nnumber \
+             = 1\nports = [0, 0]\nmaps = [1, 3]\n",
+            database.url()
+        ),
+    )
+    .expect("a scratch config");
+    let password = std::str::from_utf8(ACCOUNT_PASSWORD).expect("ASCII");
+    let mut child = Command::new(binary())
+        .arg("--config")
+        .arg(dir.join("prodomo.toml"))
+        .args(["account", "create", login])
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("prodomo should start");
+    let mut input = child.stdin.take().expect("stdin is piped");
+    drop(input.write_all(format!("{password}\n").as_bytes()));
+    drop(input);
+    let output = child.wait_with_output().expect("the command ends");
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(
+        output.status.success(),
+        "account create failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// The 69 bytes the client sends: the fields laid out by hand, the language as a little-endian
 /// `DWORD`. `login` and `password` are copied into their fields as given, so a scenario can fill a
 /// field to the last byte.
@@ -855,6 +899,8 @@ struct Keyed {
     /// The VIDs of the monsters and stones in this connection's view, which
     /// [`Keyed::monster_record`] keeps.
     monsters: Vec<[u8; 4]>,
+    /// Records read ahead and put back, which the next read takes first.
+    pushed: Vec<Vec<u8>>,
 }
 
 impl Keyed {
@@ -871,6 +917,7 @@ impl Keyed {
             walking: true,
             timers: Vec::new(),
             monsters: Vec::new(),
+            pushed: Vec::new(),
         }
     }
 
@@ -1629,6 +1676,21 @@ fn enter_world_seeing_on(
     (keyed, character, entered)
 }
 
+/// [`enter_world_seeing`] for a master whose login walk carries `members` member
+/// LOGINs before its own view pair.
+fn enter_world_seeing_guilded(
+    server: &Server,
+    login: &[u8],
+    slot: u8,
+    members: usize,
+) -> (Keyed, Listed, Entered) {
+    let (mut keyed, character, quickslots, _items) =
+        load_with_quickslots_on(server, 1, login, slot, ENGLISH);
+    assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
+    let entered = enter_game_view_guilded(&mut keyed, members);
+    (keyed, character, entered)
+}
+
 /// Log `login` in and select slot `slot`, reading the loading burst and the item load behind
 /// it, and answer with the `GC_ITEM_SET` records in the order they arrived. The connection is
 /// left in the loading phase.
@@ -1749,6 +1811,14 @@ fn enter_game_view(keyed: &mut Keyed) -> Entered {
     entered
 }
 
+/// [`enter_game_view`] for a master whose login walk carries `members` member LOGINs
+/// before its own view pair.
+fn enter_game_view_guilded(keyed: &mut Keyed, members: usize) -> Entered {
+    let entered = enter_game_guilded(keyed, members);
+    keyed.still("nothing follows");
+    entered
+}
+
 /// [`enter_game_burst`] without the final quiet check, for a burst that more records follow.
 fn enter_game_records(keyed: &mut Keyed) -> Vec<u8> {
     enter_game_shown(keyed).add
@@ -1773,6 +1843,64 @@ fn enter_game_shown(keyed: &mut Keyed) -> Entered {
     assert_eq!(add[0], GC_CHARACTER_ADD);
     let info = keyed.read_game();
     assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
+    finish_enter_game(keyed, add, info)
+}
+
+/// [`enter_game_shown`] for a master whose login walk carries `members` member LOGINs:
+/// the walk (GRADE, INFO, LIST, one LOGIN per online member including itself, the
+/// skills) lands through the outbox behind the burst's own pair; the pair is read
+/// first, the walk's records in order around the view records `read_shown` keeps.
+fn enter_game_guilded(keyed: &mut Keyed, members: usize) -> Entered {
+    keyed.send_record(&client_enter_game());
+    // The NAME leads (the Show's own insert names the guild, through the view's
+    // `SendGuildName`), then the burst's own pair, and the link's walk lands
+    // through the outbox among the burst's view records: GRADE, INFO, LIST, one
+    // LOGIN per online member including itself, the skills. Every record that is
+    // not one of the walk's is pushed back for the burst below.
+    let named = keyed.read_game();
+    assert_eq!(named[0], GC_GUILD, "the own NAME leads: {named:02x?}");
+    assert_eq!(
+        guild_subheader(&named),
+        GUILD_SUBHEADER_GC_GUILD_NAME,
+        "the own NAME leads: {named:02x?}"
+    );
+    let add = keyed.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD);
+    let info = keyed.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
+    let mut want = vec![
+        GUILD_SUBHEADER_GC_GRADE,
+        GUILD_SUBHEADER_GC_INFO,
+        GUILD_SUBHEADER_GC_LIST,
+    ];
+    want.extend(std::iter::repeat_n(GUILD_SUBHEADER_GC_LOGIN, members));
+    want.push(GUILD_SUBHEADER_GC_SKILL_INFO);
+    let mut kept: Vec<Vec<u8>> = Vec::new();
+    let mut subs = want.iter();
+    let mut sub = subs.next();
+    while sub.is_some() {
+        let record = keyed.read_game_raw();
+        if record[0] != GC_GUILD {
+            kept.push(record);
+            continue;
+        }
+        let got = guild_subheader(&record);
+        if got == GUILD_SUBHEADER_GC_GUILD_NAME {
+            kept.push(record);
+            continue;
+        }
+        assert_eq!(Some(&got), sub, "want sub {sub:?}: {record:02x?}");
+        sub = subs.next();
+    }
+    // The enter walk's WAR_LIST (`SendGuildWar`): with no wars it is the bare envelope,
+    // read here so the burst below sees only what it knows.
+    keyed.unread(kept);
+    finish_enter_game(keyed, add, info)
+}
+
+/// The enter-game burst after its own pair: the walk mode, the shown, the update,
+/// the affect, the phase, time, Channel and notice.
+fn finish_enter_game(keyed: &mut Keyed, add: Vec<u8>, info: Vec<u8>) -> Entered {
     assert_eq!(
         info[69], keyed.language,
         "bLanguage from the descriptor: the language the auth login chose"
@@ -1807,12 +1935,28 @@ fn enter_game_shown(keyed: &mut Keyed) -> Entered {
     assert_eq!(keyed.read_game(), [GC_CHANNEL, keyed.channel_number]);
     let notice = keyed.read_game();
     assert_eq!(notice[0], GC_CHAT);
+    enter_war_list(keyed);
     Entered {
         add,
         info,
         shown,
         affect,
     }
+}
+
+/// The `WAR_LIST` every enter ends with: the descriptor flushes the outbox's
+/// `SendGuildWar` after the burst, so it lands behind the notice. No scenario has
+/// started a war at enter time yet, so it is the bare envelope; answers it.
+fn enter_war_list(keyed: &mut Keyed) -> Vec<u8> {
+    let list = keyed.read_game();
+    assert_eq!(list[0], GC_GUILD, "the enter WAR_LIST: {list:02x?}");
+    assert_eq!(
+        guild_subheader(&list),
+        GUILD_SUBHEADER_GC_GUILD_WAR_LIST,
+        "the enter WAR_LIST: {list:02x?}"
+    );
+    assert_eq!(list.len(), 4, "no wars yet: the bare envelope");
+    list
 }
 
 /// What `Show` and `SendNPCPosition` send after the own-character pair: every character in view,
@@ -2325,12 +2469,23 @@ impl Keyed {
         }
     }
 
-    /// Read the next record as it comes, an NPC's own included.
+    /// Read the next record as it comes, an NPC's own included — or the earliest
+    /// pushed-back record, when one waits.
     fn read_wire(&mut self) -> Vec<u8> {
+        if !self.pushed.is_empty() {
+            return self.pushed.remove(0);
+        }
         self.read_sized(|header, first| match game_len(header) {
             usize::MAX => usize::from(first[1]) | (usize::from(first[2]) << 8),
             fixed => fixed,
         })
+    }
+
+    /// Put `records` back, in order, for the next reads to take first.
+    fn unread(&mut self, records: Vec<Vec<u8>>) {
+        let mut records = records;
+        records.extend(std::mem::take(&mut self.pushed));
+        self.pushed = records;
     }
     /// [`Keyed::read_game_raw`], but it waits until `deadline` across 5 s read beats
     /// instead of panicking on one quiet beat, and reports `None` when the window runs
@@ -3013,6 +3168,7 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
     assert_eq!(chat[8], 1, "bEmpire");
     assert_eq!(chat[9], 1, "bCanFormat");
     assert_eq!(&chat[10..], b"letters_event 0");
+    enter_war_list(&mut keyed);
     keyed.still("nothing follows");
 }
 
@@ -3337,6 +3493,7 @@ fn entering_a_map_shows_its_npcs_and_a_click_keeps_the_connection() {
     assert_eq!(alice.read_game()[0], GC_TIME);
     assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(alice.read_game()[0], GC_CHAT);
+    enter_war_list(&mut alice);
     alice.still("nothing follows");
 
     alice.send_record(&client_click(base));
@@ -3751,6 +3908,7 @@ fn a_warp_to_no_map_sends_nothing_and_the_character_stays() {
     assert_eq!(alice.read_game()[0], GC_TIME);
     assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(alice.read_game()[0], GC_CHAT);
+    enter_war_list(&mut alice);
 
     // Four quiet windows are 1.2 seconds, at least two fires.
     for _ in 0..4 {
@@ -4046,6 +4204,7 @@ fn a_quest_npc_answers_a_click_with_its_dialog_and_runs_it() {
     assert_eq!(alice.read_game()[0], GC_TIME);
     assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(alice.read_game()[0], GC_CHAT);
+    enter_war_list(&mut alice);
     alice.quiet("the enter-game burst is over");
 
     alice.send_record(&client_click(ox));
@@ -4099,17 +4258,6 @@ const GOLD_CHANGE_LEN: usize = 4 + 4 + 8 + 8;
 /// A `GC_SHOP` that carries its subheader alone.
 fn shop_answer(subheader: u8) -> Vec<u8> {
     vec![GC_SHOP, 4, 0, subheader]
-}
-
-/// The amount and value fields of a `GC_CHARACTER_GOLD_CHANGE`: the header is four bytes,
-/// then the VID, the signed amount and the purse.
-fn purse_amount(purse: &[u8]) -> i64 {
-    i64::from_le_bytes(purse[8..16].try_into().expect("eight bytes"))
-}
-
-/// [`purse_amount`]'s value half.
-fn purse_value(purse: &[u8]) -> u64 {
-    u64::from_le_bytes(purse[16..24].try_into().expect("eight bytes"))
 }
 
 /// A `GC_CHARACTER_GOLD_CHANGE` in `TPacketGCGoldChange` field order.
@@ -4178,6 +4326,7 @@ fn a_keeper_opens_its_shop_and_a_buy_and_a_sale_are_stored() {
     assert_eq!(alice.read_game()[0], GC_TIME);
     assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(alice.read_game()[0], GC_CHAT);
+    enter_war_list(&mut alice);
     alice.quiet("the burst is over");
 
     // When: nobody's window is open, a buy and a close are ignored.
@@ -4722,9 +4871,9 @@ fn chat_packet(chat_type: u8, empire: u8, text: &[u8]) -> Vec<u8> {
 /// the type-3 line, and Charlie (same map, no party) hears nothing
 /// (`G/input_main.cpp:957-975`, `G/party.h:277-285`).
 /// The party link's walk: read from `who` until the link's shape has arrived — `adds`
-/// ADDs, two LINKs, an UPDATE, and a PARAMETER. The periodic state UPDATE may sit
-/// anywhere, so the walk gates on shape, not on count.
-fn drain_party_walk(who: &mut Keyed, note: &str, adds: usize) {
+/// ADDs, `links` LINKs, an UPDATE, and, when `parameter` is set, a PARAMETER. The
+/// periodic state UPDATE may sit anywhere, so the walk gates on shape, not on count.
+fn drain_party_walk(who: &mut Keyed, note: &str, adds: usize, links: usize, parameter: bool) {
     let mut headers = Vec::new();
     let mut seen_adds = 0;
     let mut seen_links = 0;
@@ -4734,20 +4883,46 @@ fn drain_party_walk(who: &mut Keyed, note: &str, adds: usize) {
         seen_adds += usize::from(header == GC_PARTY_ADD);
         seen_links += usize::from(header == GC_PARTY_LINK);
         if seen_adds >= adds
-            && seen_links >= 2
+            && seen_links >= links
             && headers.contains(&GC_PARTY_UPDATE)
-            && headers.contains(&GC_PARTY_PARAMETER)
+            && (!parameter || headers.contains(&GC_PARTY_PARAMETER))
         {
             break;
         }
     }
     assert!(
         seen_adds >= adds
-            && seen_links >= 2
+            && seen_links >= links
             && headers.contains(&GC_PARTY_UPDATE)
-            && headers.contains(&GC_PARTY_PARAMETER),
+            && (!parameter || headers.contains(&GC_PARTY_PARAMETER)),
         "{note} walked: {headers:02x?}"
     );
+}
+
+/// Read until a `GC_CHAT` line, allowing the party walk's trailing records ahead of it.
+/// [`drain_party_walk`] gates on the walk's shape, which a later send can follow; a
+/// scenario waiting for a command's answer therefore skips those records rather than
+/// asserting an exact walk length.
+fn read_told_line(who: &mut Keyed, note: &str) -> Vec<u8> {
+    for _ in 0..32 {
+        let record = who.read_game();
+        if record[0] == GC_CHAT {
+            return record;
+        }
+        assert!(
+            matches!(
+                record[0],
+                GC_PARTY_ADD
+                    | GC_PARTY_LINK
+                    | GC_PARTY_UPDATE
+                    | GC_PARTY_PARAMETER
+                    | GC_PARTY_UNLINK
+                    | GC_PARTY_REMOVE
+            ),
+            "{note}: a non-party record ahead of the chat line: {record:02x?}"
+        );
+    }
+    panic!("{note}: no chat line within 32 records");
 }
 /// Read from `who` until the party line arrives; an undrained party record may still
 /// sit ahead of it.
@@ -4819,8 +4994,8 @@ fn a_party_line_reaches_the_members_and_no_outsider() {
     // `Link`), so the guest hears its link's own ADD + every ADD (2), and the
     // leader its link's own ADD + every ADD plus the guest's join ADD and the
     // guest link's one-to-all ADD.
-    drain_party_walk(&mut yankee, "the guest", 3);
-    drain_party_walk(&mut alice, "the leader", 4);
+    drain_party_walk(&mut yankee, "the guest", 3, 2, true);
+    drain_party_walk(&mut alice, "the leader", 4, 2, true);
     // Alice speaks to the party. Both members hear the same type-3 bytes.
     alice.send_record(&client_chat(prodomo::chat::CHAT_PARTY, b"hello"));
     let own = read_party_line(&mut alice);
@@ -4835,6 +5010,122 @@ fn a_party_line_reaches_the_members_and_no_outsider() {
         "the member hears the same bytes"
     );
     charlie.quiet("the outsider hears nothing");
+}
+
+/// `cmd.party_request`, `cmd.party_request_accept` and `cmd.party_request_deny`
+/// (`G/cmd_general.cpp:2428-2487` over `CHARACTER::RequestToParty`, `DenyToParty` and
+/// `AcceptToParty`, `G/char.cpp:5656-5812`): the requester (Yankee) names a **member**
+/// (Charlie), the world retargets to the leader (Alpha), Alpha hears
+/// `PartyRequest <Yankee VID>` and Yankee hears `[LS;829;Alpha]`; the deny tells Yankee
+/// `PartyRequestDenied`, the denied request cannot later be accepted, a fresh request is
+/// accepted into the existing party, and a member's own request is refused with `[LS;549]`.
+#[test]
+fn a_party_request_retargets_to_the_leader_and_is_denied_then_accepted() {
+    use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO};
+
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    for login in ["alice", "bob", "carol"] {
+        create_account(&server, login);
+    }
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', \
+         1, 154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Charlie', \
+         2, 154, 470100, 950100 FROM account WHERE login = 'carol'",
+    );
+    // Charlie is seeded, so it does not walk into the world; Yankee keeps the column's 0.
+    stamina(&database, "Charlie", 12_345);
+    let (mut alice, _alpha, alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
+    let alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
+    let yankee_vid = u32::from_le_bytes(yankee_entered.add[1..5].try_into().unwrap());
+    alice.sees_arrive(yankee_listed.id, true, None);
+    let (mut charlie, charlie_listed, charlie_entered) = enter_world_seeing(&server, b"carol", 0);
+    let charlie_vid = u32::from_le_bytes(charlie_entered.add[1..5].try_into().unwrap());
+    alice.sees_arrive(charlie_listed.id, false, None);
+    yankee.sees_arrive(charlie_listed.id, false, None);
+
+    // Alpha forms a party with Charlie, so an accepted request has somewhere to join.
+    let mut invite = vec![CG_PARTY_INVITE];
+    invite.extend_from_slice(&charlie_vid.to_le_bytes());
+    alice.send_record(&invite);
+    let asked = charlie.read_game();
+    assert_eq!(asked[0], GC_PARTY_INVITE, "{asked:02x?}");
+    let mut answer = vec![CG_PARTY_INVITE_ANSWER];
+    answer.extend_from_slice(&alpha_vid.to_le_bytes());
+    answer.push(1);
+    charlie.send_record(&answer);
+    drain_party_walk(&mut charlie, "the guest", 3, 2, true);
+    drain_party_walk(&mut alice, "the leader", 4, 2, true);
+    yankee.quiet("an outsider hears no party record");
+
+    // When: Yankee asks to join Charlie. Then: the leader is asked, and the line names it.
+    yankee.send_record(&slash(format!("/party_request {charlie_vid}").as_bytes()));
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;829;Alpha]"),
+        "the requester hears the leader's name, not the named member's"
+    );
+    let command = format!("PartyRequest {yankee_vid}");
+    assert_eq!(
+        read_told_line(&mut alice, "the leader's request line"),
+        chat_packet(CHAT_TYPE_COMMAND, 1, command.as_bytes()),
+        "the leader is asked with the requester's VID"
+    );
+
+    // When: Alpha denies. Then: Yankee hears the command, and the request is consumed.
+    alice.send_record(&slash(
+        format!("/party_request_deny {yankee_vid}").as_bytes(),
+    ));
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"PartyRequestDenied")
+    );
+    alice.quiet("the denier hears nothing");
+    alice.send_record(&slash(
+        format!("/party_request_accept {yankee_vid}").as_bytes(),
+    ));
+    yankee.quiet("a denied request cannot be accepted");
+
+    // When: a fresh request is accepted. Then: both join lines and the join walk arrive.
+    yankee.send_record(&slash(format!("/party_request {alpha_vid}").as_bytes()));
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;829;Alpha]")
+    );
+    assert_eq!(
+        read_told_line(&mut alice, "the leader's second request line"),
+        chat_packet(CHAT_TYPE_COMMAND, 1, command.as_bytes())
+    );
+    alice.send_record(&slash(
+        format!("/party_request_accept {yankee_vid}").as_bytes(),
+    ));
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;839;Alpha]")
+    );
+    drain_party_walk(&mut yankee, "the requested guest", 4, 2, true);
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;839;Yankee]")
+    );
+    drain_party_walk(&mut alice, "the accepting leader", 2, 1, false);
+
+    // When: the new member asks again. Then: legacy's own-party gate refuses quietly.
+    yankee.send_record(&slash(format!("/party_request {alpha_vid}").as_bytes()));
+    assert_eq!(
+        read_told_line(&mut yankee, "the member's own-party gate"),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;549]")
+    );
 }
 
 /// Three clients in the world for a shout: alice's Alpha, level 154 in empire 1 on map 1 of
@@ -4903,6 +5194,93 @@ fn a_shout_reaches_its_empire_on_every_channel() {
     alice.quiet("the cooldown refuses without a line");
     charlie.quiet("and nobody hears the refused shout");
     yankee.quiet("not even the other empire");
+}
+
+/// The three worlds a notice scenario needs: Alpha (Channel 1, map 1) is a `HIGH_WIZARD`;
+/// Yankee is on Channel 1's other map, map 3; Charlie is on the Shared Channel's map 72.
+fn notice_cast(server: &Server, database: &ScratchDatabase) -> (Keyed, Keyed, Keyed) {
+    for login in ["alice", "bob", "carol"] {
+        create_account(server, login);
+    }
+    add_characters(database);
+    sql(
+        database,
+        "UPDATE account SET empire = 2 WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         350000, 870000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        database,
+        "UPDATE account SET empire = 1 WHERE login = 'carol'",
+    );
+    sql(
+        database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         10000, 1210000 FROM account WHERE login = 'carol'",
+    );
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (alice, _) = enter_world(server, b"alice", 0);
+    let (yankee, _) = enter_world_in(server, b"bob", 0, GERMAN);
+    let (charlie, _) = enter_world_on(server, 99, b"carol", 0, ENGLISH);
+    (alice, yankee, charlie)
+}
+
+/// `cmd.notice`, `cmd.notice_map` and `cmd.big_notice` (`G/cmd_gm.cpp:1628-1651`):
+/// `/notice` says `<GM Name> :<argument>` to every character on every Channel, the
+/// argument keeping the space after the command word; `/notice_map` says the argument to
+/// the caller's map only, and because legacy sends it from one Channel's process, a
+/// client on another Channel does not hear it even on the same map index; `/big_notice`
+/// says the argument to the caller alone, in the big font (`ENABLE_FULL_NOTICE` is not
+/// defined in this tree).
+#[test]
+fn a_gm_notice_crosses_channels_and_a_map_notice_stays() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    let (mut alice, mut yankee, mut charlie) = notice_cast(&server, &database);
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/notice hello"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"Alpha : hello"),
+        "the GM hears its own notice"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 2, b"Alpha : hello"),
+        "the other Channel 1 map hears the notice, with its own empire"
+    );
+    assert_eq!(
+        charlie.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b"Alpha : hello"),
+        "the Shared Channel hears the notice"
+    );
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/notice_map hi"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_NOTICE, 1, b" hi"),
+        "the argument keeps the leading space the command parser leaves"
+    );
+    yankee.quiet("the other map of the same Channel hears no map notice");
+    charlie.quiet("no other Channel hears the map notice");
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/big_notice big"));
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_BIG_NOTICE, 1, b" big"),
+        "without ENABLE_FULL_NOTICE only the caller hears the big notice"
+    );
+    yankee.quiet("the big notice does not leave the caller");
+    charlie.quiet("not even to the Shared Channel");
 }
 
 /// `sys.char.chat` (shout), with `shout_limit_level` at 1 and global shouting off: a shout from
@@ -8155,6 +8533,7 @@ fn enter_game_with_parts(keyed: &mut Keyed) -> (Vec<u8>, [u16; 6]) {
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(keyed.read_game()[0], GC_CHAT);
+    enter_war_list(keyed);
     keyed.still("nothing follows");
     (add, parts)
 }
@@ -9866,7 +10245,9 @@ fn an_npc_near_a_player_wanders_and_tells_its_view() {
     for record in alice.wire_for(Duration::from_secs(20)) {
         let vid = record_vid(&record);
         match record.first() {
-            Some(&GC_MOVE) if dogs.contains_key(&vid) => {
+            // Only the idle walk is this scenario's subject: a dog that chases another
+            // dog sends a move of its own, and the load decides whether one does.
+            Some(&GC_MOVE) if dogs.contains_key(&vid) && record[1] == FUNC_WAIT => {
                 walks.entry(vid).or_insert(record);
             }
             Some(&GC_WALK_MODE) => {
@@ -10646,6 +11027,34 @@ fn an_untargeted_punch_shows_no_number_and_one_beyond_reach_does_nothing() {
     assert_eq!(alpha.read_game(), target_of(far, 100, DOG_HP, DOG_HP, 0));
 }
 
+/// The exp tail of a kill: the exp point change past the death's ownership releases, then
+/// the exp orb from the victim to the killer, then `GC_DEAD` past the death's drops
+/// (`GROUND_ADD`) and any late swing's record. The kill's drop table rolls after the exp and
+/// before the dead record (`G/char_battle.cpp`'s `Dead`), so the drops are timing noise.
+fn read_exp_death(alpha: &mut Keyed, killer: u32, victim: u32, exp: i64) {
+    loop {
+        let record = alpha.read_fight();
+        if record[0] == GC_OWNERSHIP {
+            continue;
+        }
+        assert_eq!(
+            record,
+            point_change(killer, POINT_EXP, exp, exp),
+            "the death's exp record after the ownership"
+        );
+        break;
+    }
+    assert_eq!(alpha.read_fight(), fly_of(FLY_EXP, victim, killer));
+    let mut dead = alpha.read_fight();
+    while matches!(
+        dead[0],
+        GROUND_ADD | GC_CHARACTER_UPDATE | GC_OWNERSHIP | GC_POINT_CHANGE
+    ) {
+        dead = alpha.read_fight();
+    }
+    assert_eq!(dead, dead_of(victim), "the dead record after the drops");
+}
+
 /// Ledger 229n (P1): a kill pays the killer the monster's experience with an exp orb.
 ///
 /// Alpha at level 1 with no exp punches the stray dog until a swing stuns it, then punches
@@ -10754,20 +11163,7 @@ fn a_kill_pays_the_killer_the_monsters_exp_with_an_exp_orb() {
     // Ownership records are skipped until the death's own exp record arrives: the death's
     // clear, the dog's late releases of Alpha, and the stun's own death (if the stun event
     // won the race, its dead_event releases too — but then no second death follows).
-    loop {
-        let record = alpha.read_fight();
-        if record[0] == GC_OWNERSHIP {
-            continue;
-        }
-        assert_eq!(
-            record,
-            point_change(alpha_vid, POINT_EXP, 15, 15),
-            "the death's exp record after the ownership"
-        );
-        break;
-    }
-    assert_eq!(alpha.read_fight(), fly_of(FLY_EXP, dog, alpha_vid));
-    assert_eq!(alpha.read_fight(), dead_of(dog));
+    read_exp_death(&mut alpha, alpha_vid, dog, 15);
 }
 
 /// Ledger 229j: what waits for the skills is consumed, and an attack on what is no monster is
@@ -11345,260 +11741,12 @@ fn a_player_a_monster_killed_restarts_in_town_and_is_warped_to_the_recall_point(
     );
 }
 
-/// Ledger 229p (P1): punch one stacked dog until it dies, past the pack's own swings, and
-/// read its death's ground adds (the piles a paying kill lays).
-///
-/// Returns the kill's piles: empty when the kill paid no gold. Each kill pays its gold
-/// chance at 20% (level 1 vs level 1 is the delta table's middle row, 100%).
-fn punch_one_dog_until_it_dies(alpha: &mut Keyed, alpha_vid: u32, dog: u32) -> Vec<Vec<u8>> {
-    alpha.send_record(&client_target(dog));
-    assert_eq!(alpha.read_game(), target_of(dog, 100, DOG_HP, DOG_HP, 0));
-    alpha.send_record(&client_attack(dog));
-    // The first swing's halves, past the dog's own swings and the pack's chatter.
-    loop {
-        let record = alpha.read_fight();
-        if record[0] == GC_DAMAGE_INFO {
-            break;
-        }
-    }
-    loop {
-        let record = alpha.read_fight();
-        if record[0] == GC_TARGET {
-            break;
-        }
-    }
-    loop {
-        let record = alpha.read_fight();
-        if record[0] == GC_OWNERSHIP {
-            break;
-        }
-    }
-    // Punch until the dog stuns, reading past its swings, its heals, and the pack.
-    loop {
-        alpha.send_record(&client_attack(dog));
-        loop {
-            let record = alpha.read_fight();
-            if record[0] == GC_DAMAGE_INFO {
-                break;
-            }
-            assert!(
-                record[0] == GC_POINT_CHANGE || record[0] == GC_OWNERSHIP,
-                "a heal tick or a late claim at most: {record:02x?}"
-            );
-        }
-        let mut shown = loop {
-            let record = alpha.read_fight();
-            if record[0] != GC_POINT_CHANGE {
-                break record;
-            }
-        };
-        while shown[0] == GC_OWNERSHIP
-            || shown[0] == GC_DAMAGE_INFO
-            || shown[0] == GC_CHARACTER_ADD
-            || shown[0] == GC_CHARACTER_DEL
-            || shown[0] == GC_CHAR_ADDITIONAL_INFO
-        {
-            shown = alpha.read_fight();
-            while shown[0] == GC_POINT_CHANGE {
-                shown = alpha.read_fight();
-            }
-        }
-        assert_eq!(shown[0], GC_TARGET, "{shown:02x?}");
-        if shown == target_of(dog, 0, 0, DOG_HP, 0) {
-            assert_eq!(alpha.read_fight(), stun_of(dog));
-            assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, dog));
-            break;
-        }
-    }
-    // The punch on the stunned dog kills it at once. Its swings may still be in flight:
-    // their HP point changes and releases are skipped while the death's own sequence is
-    // awaited.
-    alpha.send_record(&client_attack(dog));
-    assert_eq!(alpha.read_fight(), target_of(0, 0, 0, 0, 0));
-    let mut adds = Vec::new();
-    let mut orbs = Vec::new();
-    loop {
-        let record = alpha.read_fight();
-        if record[0] == GC_OWNERSHIP {
-            continue;
-        }
-        if record[0] == GC_POINT_CHANGE {
-            continue;
-        }
-        if record[0] == GROUND_ADD {
-            adds.push(record);
-            continue;
-        }
-        if record[0] == GC_CREATE_FLY {
-            orbs.push(record);
-            continue;
-        }
-        if record[0] == GC_CHARACTER_UPDATE {
-            continue;
-        }
-        if record[0] == GC_DEAD {
-            assert_eq!(record, dead_of(dog), "the stunned dog's death");
-            assert!(
-                orbs.contains(&fly_of(FLY_EXP, dog, alpha_vid)),
-                "this death's orb arrived first: {orbs:02x?}"
-            );
-            break;
-        }
-        panic!("the death's sequence holds no {record:02x?}");
-    }
-    // The release after the death, past the other dogs' late swings landing.
-    loop {
-        let record = alpha.read_fight();
-        if record[0] == GC_POINT_CHANGE {
-            continue;
-        }
-        assert_eq!(record, ownership_of(0, dog));
-        break;
-    }
-    assert_eq!(alpha.read_fight(), removal_of(dog));
-    adds
-}
-
-/// Ledger 229p (P1): walk to the first pile of `adds`, pick it up, and return the purse
-/// change: the paid amount and the purse's new value.
-fn pick_up_first_pile(alpha: &mut Keyed, alpha_vid: u32, adds: &[Vec<u8>]) -> (i64, u64) {
-    let at = |add: &[u8]| {
-        (
-            i32::from_le_bytes(add[1..5].try_into().expect("four bytes")),
-            i32::from_le_bytes(add[5..9].try_into().expect("four bytes")),
-        )
-    };
-    let pile = u32::from_le_bytes(adds[0][13..17].try_into().expect("a VID"));
-    let (x, y) = at(&adds[0]);
-    alpha.send_record(&client_move(FUNC_MOVE, 0, 0, x, y, 0x5eee));
-    alpha.quiet("the walk is not relayed to the walker");
-    std::thread::sleep(Duration::from_millis(1500));
-    alpha.send_record(&protocol::cg_item_pickup::CgItemPickup::new(pile).encode());
-    let purse = loop {
-        let record = alpha.read_game();
-        if record[0] != GC_POINT_CHANGE {
-            break record;
-        }
-    };
-    assert_eq!(
-        purse,
-        gold_change(alpha_vid, purse_amount(&purse), purse_value(&purse))
-    );
-    let amount = purse_amount(&purse);
-    let value = purse_value(&purse);
-    assert!(
-        amount > 0 && value == u64::try_from(amount).unwrap_or(0),
-        "the pile paid {amount}"
-    );
-    assert_eq!(alpha.read_game(), a_ground_del(pile));
-    (amount, value)
-}
-
-/// Ledger 229p (P1): a kill pays gold piles that are picked up and stored.
-///
-/// Level-1 Alpha lowers six stacked stray dogs (the regen row's x/y put each where it is
-/// stood). The dogs fight back (229l), so anything but the stun's own zero-HP target is read
-/// past while punching: a late swing's claim or damage, a HP point change, another dog's
-/// insert or removal, a heal tick. Level 1 vs level 1 is the delta table's middle row
-/// (100%), so each kill pays its gold chance at 20%; six dogs miss all 26% of the time, and
-/// the death's own damage claims this kill as its sync owner (which the scenario reads
-/// past) even when the 3 s stun event fires first (229f), so a slow run still pays. The
-/// first kill that pays lays its `GC_ITEM_GROUND_ADD` piles between the death's release
-/// (`SetSyncOwner(NULL)` in `Dead`) and `GC_DEAD`; Alpha walks to the first pile, picks it
-/// up, and the purse change is in the store at once. A relog then finds the purse.
-#[test]
-fn a_kill_pays_gold_piles_that_are_picked_up_and_stored() {
-    let Some(database) = ScratchDatabase::create() else {
-        return;
-    };
-    let lines = std::iter::repeat_n(DOG_AT_ALPHA, 6).collect::<String>();
-    let server = Server::start_with_npcs_configured(
-        binary(),
-        database.url(),
-        "metin2_map_a1",
-        &lines,
-        "no_wander = true",
-    );
-    create_account(&server, "alice");
-    add_characters(&database);
-    sql(
-        &database,
-        "UPDATE player SET level = 1, exp = 0, gold = 0 WHERE name = 'Alpha'",
-    );
-    let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
-    let alpha_vid = listed.id;
-    let entered = enter_game_shown(&mut alpha);
-    let mut dogs: Vec<u32> = entered
-        .shown
-        .monsters
-        .iter()
-        .map(Vec::as_slice)
-        .filter(|insert| u16::from_le_bytes(insert[22..24].try_into().expect("two bytes")) == 101)
-        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("a VID")))
-        .collect();
-    dogs.sort_unstable();
-    assert_eq!(dogs.len(), 6, "six dogs stand on Alpha");
-    alpha.send_record(&client_move(
-        FUNC_ATTACK,
-        7,
-        40,
-        ALPHA_ENTERS_AT.0,
-        ALPHA_ENTERS_AT.1,
-        0x5eed,
-    ));
-    let update = read_past_pings(&mut alpha);
-    assert_eq!(update[0], GC_CHARACTER_UPDATE, "{update:02x?}");
-    assert!(alpha.timer_record(&update), "the swing ends the revive");
-    assert_eq!(
-        read_past_pings(&mut alpha),
-        [GC_AFFECT_REMOVE, 215, 0, 0, 0, 0]
-    );
-    alpha.quiet("the swing is not relayed to the swinger");
-    // Punch each dog until it stuns, then punch the stunned dog: it dies at once. A kill
-    // that pays gold lays its piles' adds after the death's ownership clear; the first
-    // such kill stops the loop with its piles read.
-    let mut paid: Option<(u32, Vec<Vec<u8>>)> = None;
-    let mut kills = 0;
-    'dogs: for &dog in &dogs {
-        let adds = punch_one_dog_until_it_dies(&mut alpha, alpha_vid, dog);
-        kills += 1;
-        if !adds.is_empty() {
-            paid = Some((dog, adds));
-            break 'dogs;
-        }
-        assert!(
-            kills != 6,
-            "six dogs died goldless; the chance is 20% a kill"
-        );
-    }
-    let (_dog, adds) = paid.expect("a kill paid");
-    // The first pile: walk to it and pick it up. Its position is the add's x/y.
-    let (_amount, value) = pick_up_first_pile(&mut alpha, alpha_vid, &adds);
-    check(
-        &database,
-        &format!("(SELECT gold FROM player WHERE name = 'Alpha') = {value}"),
-    );
-    drop(alpha);
-    wait_for(
-        &database,
-        &format!("(SELECT gold FROM player WHERE name = 'Alpha') = {value}"),
-    );
-    let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
-    let entered = enter_game_shown(&mut alpha);
-    let _ = entered;
-    let _ = listed;
-    check(
-        &database,
-        &format!("(SELECT gold FROM player WHERE name = 'Alpha') = {value}"),
-    );
-    drop(alpha);
-    drop(server);
-}
-
 /// A group 701 (leader 702 HP 1950, two 701s HP 1447, all MELEE) at regen point
 /// (605, 540), where Alpha enters: the leader in the point's box, each member in a box
-/// 300-500 around the one before it.
-const GROUP_AT_ALPHA: &str = "g\t605\t540\t3\t3\t0\t1\t1000s\t100\t1\t701\n";
+/// 300-500 around the one before it. The point's half width is one metre (±100), not
+/// legacy's usual three: a ±300 draw can stand the leader past the punch's 250 and the
+/// scenario would then depend on the dice.
+const GROUP_AT_ALPHA: &str = "g\t605\t540\t1\t1\t0\t1\t1000s\t100\t1\t701\n";
 
 /// Ledger 229t (P5): a hit group member tells its party, and the party swings back.
 ///
@@ -11809,7 +11957,10 @@ fn read_party_swing_sized(
     victim: u32,
     deadline: std::time::Instant,
 ) -> PartySwing {
-    let sized = |header: u8, _first: &[u8]| fight_len(header);
+    let sized = |header: u8, first: &[u8]| match fight_len(header) {
+        usize::MAX => usize::from(first[1]) | (usize::from(first[2]) << 8),
+        fixed => fixed,
+    };
     let (damage, _flag) = read_party_swing_head(keyed, members, victim, deadline, &sized);
     party_swing_tail(keyed, members, victim, damage, deadline, &sized)
 }
@@ -13621,4 +13772,487 @@ fn a_guild_symbol_is_uploaded_and_served() {
     assert_eq!(quiet, Quiet::Open);
     let symbols = support::rows(database.url(), "SELECT COUNT(*) FROM guild_symbol", 1);
     assert_eq!(symbols[0][0], 1, "only guild 1's row");
+}
+
+/// Seed two war-ready guilds: `MyGuild` (id 1, Alpha master) and `Wolves` (id 2,
+/// Yankee master), each with a positive ladder and eight member rows — the master
+/// plus seven offline fillers.
+fn seed_war_pair(database: &ScratchDatabase) {
+    for seat in 0..14 {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO account (login, password_hash, delete_code) VALUES ('filler{seat}', \
+                 '$argon2id$v=19$m=16,t=2,p=1$c2FsdA$c3VwZXJzZWNyZXRwYXNzd29yZA', 'ABCDEFG') ON \
+                 CONFLICT DO NOTHING"
+            ),
+        );
+        sql(
+            database,
+            &format!(
+                "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, \
+                 'Filler{seat}', 1, 10, 470000, 950000 FROM account WHERE login = 'filler{seat}'"
+            ),
+        );
+    }
+    sql(
+        database,
+        "INSERT INTO guild (id, name, master_pid, ladder_point) VALUES (1, 'MyGuild', \
+         (SELECT id FROM player WHERE name = 'Alpha'), 1000), (2, 'Wolves', (SELECT id \
+         FROM player WHERE name = 'Yankee'), 1000)",
+    );
+    sql(
+        database,
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT g, grade, CASE WHEN \
+         grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
+         FROM (VALUES (1), (2)) guilds(g) CROSS JOIN generate_series(1, 15) grade",
+    );
+    sql(
+        database,
+        "INSERT INTO guild_member (pid, guild_id, grade) SELECT id, 1, CASE WHEN name = \
+         'Alpha' THEN 1 ELSE 2 END FROM player WHERE name IN ('Alpha', 'Filler0', \
+         'Filler1', 'Filler2', 'Filler3', 'Filler4', 'Filler5', 'Filler6')",
+    );
+    sql(
+        database,
+        "INSERT INTO guild_member (pid, guild_id, grade) SELECT id, 2, CASE WHEN name = \
+         'Yankee' THEN 1 ELSE 2 END FROM player WHERE name IN ('Yankee', 'Filler7', \
+         'Filler8', 'Filler9', 'Filler10', 'Filler11', 'Filler12', 'Filler13')",
+    );
+}
+
+/// A `CHAT_TYPE_NOTICE` line to a character of empire 1.
+fn a_notice_line(text: &[u8]) -> Vec<u8> {
+    let size = u8::try_from(10 + text.len()).expect("a short line");
+    let mut record = vec![GC_CHAT, size, 0, 2, 0, 0, 0, 0, 1, 1];
+    record.extend_from_slice(text);
+    record
+}
+
+/// `sys.guild.war`: Alpha's `/war Wolves` declares — both masters hear the opp's
+/// NAME then the WAR record, and every client hears the `[LS;475]` notice naming
+/// the pair. Yankee's `/nowar MyGuild` refuses: Alpha hears `[LS;476]` naming the
+/// refuser, and both ends fan WAR END. Yankee's `/war MyGuild` back is the accept,
+/// which starts the war (`a_guild_war_is_accepted_scored_and_listed`).
+#[test]
+fn a_guild_war_is_declared_refused_and_fanned() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+         154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    // Before the boot: the stored guilds install once, while the gate is closed.
+    seed_war_pair(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _alpha, alice_entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
+    let (mut yankee, yankee_listed, yankee_entered) =
+        enter_world_seeing_guilded(&server, b"bob", 0, 1);
+    let _alpha_vid = u32::from_le_bytes(alice_entered.add[1..5].try_into().unwrap());
+    alice.sees_arrive(yankee_listed.id, true, Some(b"Wolves"));
+    // Yankee's burst already showed Alpha — its insert, its summary and MyGuild's
+    // NAME (consumed by the guilded enter's walk drain) — so nothing is left to
+    // arrive on its side.
+    let burst = &yankee_entered.shown.records;
+    assert!(
+        burst
+            .iter()
+            .any(|record| record[0] == GC_CHARACTER_ADD && record[1..5] == alice_entered.add[1..5]),
+        "the burst shows Alpha: {burst:02x?}"
+    );
+    // The declare: Alice hears the WAR record (the NAME rode the spawn view), and
+    // both hear the notice.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/war Wolves"));
+    let war = alice.read_game();
+    assert_eq!(
+        guild_subheader(&war),
+        GUILD_SUBHEADER_GC_WAR,
+        "the fan: {war:02x?}"
+    );
+    assert_eq!(
+        u32::from_le_bytes(war[4..8].try_into().unwrap()),
+        1,
+        "dwGuildSelf"
+    );
+    assert_eq!(
+        u32::from_le_bytes(war[8..12].try_into().unwrap()),
+        2,
+        "dwGuildOpp"
+    );
+    assert_eq!(war[12], 0, "bType is field");
+    assert_eq!(war[13], 1, "bWarState is SEND_DECLARE");
+    let war = yankee.read_game();
+    assert_eq!(
+        guild_subheader(&war),
+        GUILD_SUBHEADER_GC_WAR,
+        "the fan: {war:02x?}"
+    );
+    assert_eq!(
+        u32::from_le_bytes(war[4..8].try_into().unwrap()),
+        2,
+        "dwGuildSelf"
+    );
+    assert_eq!(
+        u32::from_le_bytes(war[8..12].try_into().unwrap()),
+        1,
+        "dwGuildOpp"
+    );
+    assert_eq!(war[12], 0, "bType is field");
+    assert_eq!(war[13], 3, "bWarState is RECV_DECLARE");
+    assert_eq!(
+        alice.read_game(),
+        a_notice_line(b"[LS;475;MyGuild;Wolves]"),
+        "Alice hears the declare"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        a_notice_line(b"[LS;475;MyGuild;Wolves]"),
+        "Yankee hears the declare"
+    );
+    alice.quiet("the declare settled");
+    yankee.quiet("the declare settled");
+    // The refuse: Alpha hears who refused, then both ends fan WAR END.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/nowar MyGuild"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;476;Wolves]"),
+        "the declarer hears who refused"
+    );
+    let end = alice.read_game();
+    assert_eq!(
+        guild_subheader(&end),
+        GUILD_SUBHEADER_GC_WAR,
+        "the END: {end:02x?}"
+    );
+    assert_eq!(end[13], 7, "bWarState is END");
+    let end = yankee.read_game();
+    assert_eq!(
+        guild_subheader(&end),
+        GUILD_SUBHEADER_GC_WAR,
+        "the END: {end:02x?}"
+    );
+    assert_eq!(end[13], 7, "bWarState is END");
+    alice.quiet("the refuse settled");
+    yankee.quiet("the refuse settled");
+}
+/// `sys.guild.war`: Yankee's `/war MyGuild` back accepts — both masters hear the WAR
+/// fan with `bWarState` `ON_WAR`, every PC hears the `WAR_LIST` naming the pair, and
+/// both hear the `[LS;558]` notice. A kill across the war scores (world tests pin the
+/// bytes: the `WAR_SCORE` fans and the `[LS;7801]`/`[LS;7802]` lines); the live
+/// scenario proves the accept and the list, because `attack` refuses a player victim
+/// until the `PvP` slice.
+#[test]
+fn a_guild_war_is_accepted_and_every_pc_hears_the_list() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+         154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    // Before the boot: the stored guilds install once, while the gate is closed.
+    seed_war_pair(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _alpha, _alice_entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
+    let (mut yankee, yankee_listed, _yankee_entered) =
+        enter_world_seeing_guilded(&server, b"bob", 0, 1);
+    alice.sees_arrive(yankee_listed.id, true, Some(b"Wolves"));
+    // The declare, as in the refused scenario: Alpha's WAR fan, then Yankee's.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/war Wolves"));
+    let war = alice.read_game();
+    assert_eq!(war[13], 1, "bWarState is SEND_DECLARE");
+    let war = yankee.read_game();
+    assert_eq!(war[13], 3, "bWarState is RECV_DECLARE");
+    assert_eq!(
+        alice.read_game(),
+        a_notice_line(b"[LS;475;MyGuild;Wolves]"),
+        "Alice hears the declare"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        a_notice_line(b"[LS;475;MyGuild;Wolves]"),
+        "Yankee hears the declare"
+    );
+    // The accept: Yankee's `/war MyGuild` back starts the war. Each master hears
+    // its fan's `[LS;558]` first, then the WAR record with ON_WAR, and the
+    // every-PC WAR_LIST naming the pair lands after both fans.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/war MyGuild"));
+    for (side, client) in [("Alice", &mut alice), ("Yankee", &mut yankee)] {
+        assert_eq!(
+            client.read_game(),
+            an_info_line(b"[LS;558]"),
+            "{side} hears the start"
+        );
+        let war = client.read_game();
+        assert_eq!(
+            guild_subheader(&war),
+            GUILD_SUBHEADER_GC_WAR,
+            "{side}'s fan: {war:02x?}"
+        );
+        assert_eq!(war[12], 0, "{side}'s bType is field");
+        assert_eq!(war[13], 6, "{side}'s bWarState is ON_WAR");
+        let list = client.read_game();
+        assert_eq!(
+            guild_subheader(&list),
+            GUILD_SUBHEADER_GC_GUILD_WAR_LIST,
+            "{side}'s list: {list:02x?}"
+        );
+        assert_eq!(
+            &list[4..12],
+            &[1, 0, 0, 0, 2, 0, 0, 0],
+            "{side}'s list names the pair"
+        );
+    }
+    // The accept's notice fans last: the war declaration line naming the pair.
+    assert_eq!(
+        alice.read_game(),
+        a_notice_line(b"[LS;477;Wolves;MyGuild]"),
+        "Alice hears the declaration"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        a_notice_line(b"[LS;477;Wolves;MyGuild]"),
+        "Yankee hears the declaration"
+    );
+    alice.quiet("the start settled");
+    yankee.quiet("the start settled");
+}
+
+/// The war scenario's opening: two war-ready guilds (`MyGuild` under Alpha, Wolves under
+/// Yankee), both masters in the world and seeing each other, with Alpha granted
+/// `LOW_WIZARD` before the boot — the character select reads the grant
+/// (`G/input_db.cpp:1931-1955`), so a later insert would be too late. `None` without a
+/// store.
+fn a_war_pair_ready() -> Option<(ScratchDatabase, Server, Keyed, Keyed)> {
+    let database = ScratchDatabase::create()?;
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+         154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    // Before the boot: the stored guilds install once, while the gate is closed.
+    seed_war_pair(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _alpha, _alice_entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
+    let (yankee, yankee_listed, _yankee_entered) =
+        enter_world_seeing_guilded(&server, b"bob", 0, 1);
+    alice.sees_arrive(yankee_listed.id, true, Some(b"Wolves"));
+    Some((database, server, alice, yankee))
+}
+
+/// The declare and the accept between the fixture pair, as
+/// `a_guild_war_is_accepted_and_every_pc_hears_the_list` reads them: both masters' WAR
+/// fans, the accept's `[LS;558]` lines, the every-PC `WAR_LIST`, and the
+/// `[LS;475]`/`[LS;477]` notices.
+fn declare_and_accept_war(alice: &mut Keyed, yankee: &mut Keyed) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/war Wolves"));
+    assert_eq!(alice.read_game()[13], 1, "bWarState is SEND_DECLARE");
+    assert_eq!(yankee.read_game()[13], 3, "bWarState is RECV_DECLARE");
+    assert_eq!(
+        alice.read_game(),
+        a_notice_line(b"[LS;475;MyGuild;Wolves]"),
+        "Alice hears the declare"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        a_notice_line(b"[LS;475;MyGuild;Wolves]"),
+        "Yankee hears the declare"
+    );
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/war MyGuild"));
+    for (side, client) in [("Alice", &mut *alice), ("Yankee", &mut *yankee)] {
+        assert_eq!(
+            client.read_game(),
+            an_info_line(b"[LS;558]"),
+            "{side} hears the start"
+        );
+        let war = client.read_game();
+        assert_eq!(
+            guild_subheader(&war),
+            GUILD_SUBHEADER_GC_WAR,
+            "{side}'s fan: {war:02x?}"
+        );
+        assert_eq!(war[13], 6, "{side}'s bWarState is ON_WAR");
+        let list = client.read_game();
+        assert_eq!(
+            guild_subheader(&list),
+            GUILD_SUBHEADER_GC_GUILD_WAR_LIST,
+            "{side}'s list: {list:02x?}"
+        );
+    }
+    assert_eq!(
+        alice.read_game(),
+        a_notice_line(b"[LS;477;Wolves;MyGuild]"),
+        "Alice hears the declaration"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        a_notice_line(b"[LS;477;Wolves;MyGuild]"),
+        "Yankee hears the declaration"
+    );
+}
+
+/// Read one war end's records for `client`: the over notice `over`, then the END fan
+/// naming `(self_id, opp_id)` — the field byte and `GUILD_WAR_END` — and the every-PC
+/// `WAR_END_LIST` naming the sorted pair. A TALKING echo would be read here first and
+/// fail the notice, which is how the cancel's quiet is asserted.
+fn read_war_end(client: &mut Keyed, self_id: u32, opp_id: u32, over: &[u8]) {
+    assert_eq!(client.read_game(), a_notice_line(over), "the over notice");
+    let end = client.read_game();
+    assert_eq!(
+        guild_subheader(&end),
+        GUILD_SUBHEADER_GC_WAR,
+        "the END fan: {end:02x?}"
+    );
+    assert_eq!(&end[4..8], &self_id.to_le_bytes(), "the END self id");
+    assert_eq!(&end[8..12], &opp_id.to_le_bytes(), "the END opp id");
+    assert_eq!((end[12], end[13]), (0, 7), "field, END");
+    let list = client.read_game();
+    assert_eq!(
+        guild_subheader(&list),
+        GUILD_SUBHEADER_GC_WAR_END_LIST,
+        "the END_LIST: {list:02x?}"
+    );
+    assert_eq!(
+        &list[4..12],
+        &[1, 0, 0, 0, 2, 0, 0, 0],
+        "the list names the sorted pair"
+    );
+}
+
+/// Assert both fixture guilds' war columns: one draw tallied each and the ladders the
+/// seed left (1000), with no wins and no losses.
+fn assert_guild_tallies(database: &ScratchDatabase, note: &str) {
+    let tallies = support::rows(
+        database.url(),
+        "SELECT win, draw, loss, ladder_point FROM guild ORDER BY id",
+        4,
+    );
+    assert_eq!(
+        tallies,
+        vec![vec![0, 1, 0, 1000], vec![0, 1, 0, 1000]],
+        "{note}"
+    );
+}
+
+/// Read `/gwlist`'s fixed line and one pair line, asserting the pair's text with a
+/// numeric age: `MyGuild[1] vs Wolves[2] time <n> sec.`. Returns the age.
+fn read_gwlist_pair(client: &mut Keyed) -> u32 {
+    assert_eq!(
+        client.read_game(),
+        a_notice_line(b"This is a guild that is currently at war."),
+        "the gwlist header"
+    );
+    let line = client.read_game();
+    assert_eq!(line[0], GC_CHAT, "the pair line: {line:02x?}");
+    assert_eq!(line[3], 2, "CHAT_TYPE_NOTICE");
+    let text = &line[10..];
+    let prefix = b"MyGuild[1] vs Wolves[2] time ";
+    let suffix = b" sec.";
+    assert!(
+        text.starts_with(prefix) && text.ends_with(suffix),
+        "the pair line: {:?}",
+        String::from_utf8_lossy(text)
+    );
+    std::str::from_utf8(&text[prefix.len()..text.len() - suffix.len()])
+        .expect("the age is ASCII")
+        .parse()
+        .expect("the age is a number")
+}
+
+/// `sys.guild.war`'s end: a GM-granted master's `/gwstop` ends the pair in a forced
+/// draw — the TALKING echo, the draw over notice (`G/guild_manager.cpp:696-699`), both
+/// END fans, the every-PC `WAR_END_LIST`, and the `draw` tallies in the store
+/// (`db/GuildManager.cpp:404-524`). A second war's `/gwcancel` ends quiet, with both
+/// masters' `[LS;482]` and the every-PC `[LS;483]`, and touches no ladder or tally
+/// (`CancelWar`, `G/guild_manager.cpp:739-770`). The GM's `/gwlist` names the live pair
+/// and its age (`ShowGuildWarList`, `G/guild_manager.cpp:785-800`). A non-GM typing
+/// `/gwstop` is told the command does not exist (`G/cmd.cpp:610-699`), and the war
+/// stays live.
+#[test]
+fn a_gm_stops_and_cancels_the_war_and_a_player_cannot() {
+    let Some((database, _server, mut alice, mut yankee)) = a_war_pair_ready() else {
+        return;
+    };
+    declare_and_accept_war(&mut alice, &mut yankee);
+    // The GM's `/gwlist`: the fixed line, then the pair with its age. The war just
+    // started, so the age is a small number of seconds.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/gwlist"));
+    let age = read_gwlist_pair(&mut alice);
+    assert!(age <= 5, "the war just started: {age} sec");
+    yankee.quiet("the gwlist reaches only the GM");
+    // A player's line is refused before the world is asked: Yankee hears the
+    // no-such-command line, and Alice hears nothing, so the war is still live.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/gwstop 1 2"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+        "a player cannot stop a war"
+    );
+    alice.quiet("the player's line reaches no one else");
+    yankee.quiet("the player's line echoes nothing");
+    // The GM's stop: the TALKING echo sorts the pair, the scores (0-0) draw the over
+    // notice, then the pair's END fans and the every-PC END_LIST land.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/gwstop 1 2"));
+    let echo = alice.read_game();
+    assert_eq!(echo[0], GC_CHAT, "the echo: {echo:02x?}");
+    assert_eq!(echo[3], 0, "CHAT_TYPE_TALKING");
+    assert_eq!(&echo[10..], b"1 2", "the echo sorts the pair");
+    read_war_end(&mut alice, 1, 2, b"[LS;479;MyGuild;Wolves]");
+    read_war_end(&mut yankee, 2, 1, b"[LS;479;MyGuild;Wolves]");
+    alice.quiet("the stop settled");
+    yankee.quiet("the stop settled");
+    // The forced draw's rows: both draws tallied, both ladders unchanged.
+    wait_for(&database, "(SELECT count(*) FROM guild WHERE draw = 1) = 2");
+    assert_guild_tallies(&database, "the forced draw tallies both draws");
+    // A second war: declare and accept again, then the GM's `/gwcancel`.
+    declare_and_accept_war(&mut alice, &mut yankee);
+    // The cancel: no echo, then the draw notice, the END fans, the END_LIST, both
+    // masters' `[LS;482]` and the every-PC `[LS;483]`.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/gwcancel 1 2"));
+    read_war_end(&mut alice, 1, 2, b"[LS;479;MyGuild;Wolves]");
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;482]"),
+        "Alice hears [LS;482]"
+    );
+    assert_eq!(
+        alice.read_game(),
+        a_notice_line(b"[LS;483;MyGuild;Wolves]"),
+        "Alice hears the every-PC [LS;483]"
+    );
+    read_war_end(&mut yankee, 2, 1, b"[LS;479;MyGuild;Wolves]");
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(b"[LS;482]"),
+        "Yankee hears [LS;482]"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        a_notice_line(b"[LS;483;MyGuild;Wolves]"),
+        "Yankee hears the every-PC [LS;483]"
+    );
+    alice.quiet("the cancel settled");
+    yankee.quiet("the cancel settled");
+    // The cancel skips the math: the stop's draw tallies stay the only ones.
+    assert_guild_tallies(&database, "the cancel writes no ladder and no tally");
 }

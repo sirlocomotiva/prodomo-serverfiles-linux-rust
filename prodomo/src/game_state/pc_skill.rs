@@ -1526,7 +1526,7 @@ impl GameState {
     /// (with its event, `RemovePoison`), the fire, the stun, the slow, and 80 go
     /// — in that order. No player fire event is ported, so the fire's cancel is
     /// vacuous.
-    fn remove_bad_affect(&mut self, vid: Vid) {
+    pub(super) fn remove_bad_affect(&mut self, vid: Vid) {
         use crate::loading_phase::{AFFECT_SLOW, AFFECT_STUN};
         self.remove_pc_poison(vid);
         let _fire = self.remove_pc_affect(vid, AFFECT_FIRE);

@@ -54,6 +54,11 @@ impl ScratchDatabase {
         &self.url
     }
 
+    /// The database's own name, unique to this scratch instance.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Create an empty database from inside an async test, or `None` when
     /// `DATABASE_URL` is unset.
     ///

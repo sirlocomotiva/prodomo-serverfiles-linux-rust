@@ -25,7 +25,9 @@
 //!   the world answers nothing yet; the money pair stays quiet because legacy's arms
 //!   return before their bodies (`G/input_main.cpp:2826-2878`).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use tracing::warn;
 
 use common::cfloat::f64_to_i32;
 use common::item_slots::{
@@ -33,12 +35,13 @@ use common::item_slots::{
 };
 use common::vid::Vid;
 use protocol::cg_guild_answer::GUILD_NAME_FIELD_SIZE;
-use protocol::gc_chat::CHAT_TYPE_INFO;
+use protocol::gc_chat::{CHAT_TYPE_INFO, CHAT_TYPE_NOTICE};
 use protocol::gc_guild::{
     guild_change_exp_record, guild_change_member_general_record, guild_change_member_grade_record,
     guild_grade_auth_record, guild_grade_name_record, guild_grade_record, guild_info_record,
     guild_invite_record, guild_list_one_record, guild_list_record, guild_login_record,
     guild_logout_record, guild_name_record, guild_remove_record, guild_skill_info_record,
+    guild_war_end_list_record, guild_war_list_record, guild_war_record, guild_war_score_record,
     pad_grade_name, pad_guild_name, pad_member_name, GcGuildGrade, GcGuildInfo, GcGuildMember,
     GcGuildSkillInfo, GUILD_COMMENT_MAX_LEN, GUILD_GRADE_COUNT, GUILD_GRADE_NAME_MAX_LEN,
     GUILD_NAME_MAX_LEN, GUILD_SKILL_COUNT,
@@ -112,6 +115,33 @@ const GUILD_LEVELUP_EXP: [u32; 21] = [
 /// `GUILD_LADDER_POINT_PER_LEVEL` (`G/guild.h:20`): 1000, the ladder step each guild
 /// level adds (`GuildPointChange`, `G/guild.cpp:1616-1617`).
 const GUILD_LADDER_POINT_PER_LEVEL: i32 = 1000;
+/// `GUILD_WAR_TYPE_FIELD` (`common/length.h:769`): 0, the open-field war — the only type
+/// a declare can reach in this slice.
+const GUILD_WAR_TYPE_FIELD: u8 = 0;
+/// `GUILD_WAR_TYPE_MAX_NUM` (`common/length.h:772`): 3. A `/war` type at or past it
+/// folds to field (`G/cmd_general.cpp:2055-2056`).
+const GUILD_WAR_TYPE_MAX_NUM: u8 = 3;
+/// `EGuildWarState` (`common/length.h:776-785`): none, sent-declare, refused,
+/// received-declare, wait-start, cancelled, on-war, ended, over, reserved.
+const GUILD_WAR_NONE: u8 = 0;
+const GUILD_WAR_SEND_DECLARE: u8 = 1;
+const GUILD_WAR_RECV_DECLARE: u8 = 3;
+/// `GUILD_WAR_ON_WAR` (`common/length.h:782`): 6. The accept lands it (230x); the fan's
+/// `[LS;558]` arm and `UnderAnyWar` read it.
+const GUILD_WAR_ON_WAR: u8 = 6;
+const GUILD_WAR_END: u8 = 7;
+const GUILD_WAR_RESERVE: u8 = 9;
+/// `GUILD_WAR_MIN_MEMBER_COUNT` (`G/guild.h:19`): 8. Both guilds need this many member
+/// rows to start a war (`CGuild::CanStartWar`, `G/guild_war.cpp:143-152`).
+const GUILD_WAR_MIN_MEMBER_COUNT: usize = 8;
+/// `KOR_aGuildWarInfo[type].iWarPrice` (`G/constants.cpp:1142-1146`): 0 for every type,
+/// so `/war`'s money arms never fire — ported as the table read they are.
+const GUILD_WAR_PRICE: [i32; GUILD_WAR_TYPE_MAX_NUM as usize] = [0, 0, 0];
+/// `GUILD_WAR_DURATION` (`common/length.h:787`): 1800, the field war's seconds.
+const GUILD_WAR_DURATION: u32 = 1800;
+/// `GUILD_WAR_LADDER_HALF_PENALTY_TIME` (`common/length.h:789`): 43200, the seconds an
+/// ended pair halves the next win's gain.
+const GUILD_WAR_LADDER_HALF_PENALTY: u32 = 43_200;
 /// `GUILD_COMMENT_MAX_COUNT` (`G/guild.h:12`): 12, the board's read limit.
 pub const GUILD_COMMENT_MAX_COUNT: i64 = 12;
 /// The comment gate's minute (`PASSES_PER_SEC(60)` at the post, `G/guild.cpp:1071` — the
@@ -144,6 +174,40 @@ struct GuildMember {
     /// The VID the member is online under, when it is (`m_memberOnline`,
     /// `G/guild.h:386`).
     vid: Option<Vid>,
+}
+
+/// `TGuildWar` (`G/guild.h:137-158`): one enemy entry — the start time, the score
+/// against it, its state, its type, and its war-map index.
+#[derive(Debug, Clone, Copy)]
+// The start time, the score and the map land with the entry; the on-war slice reads
+// them (`sys.guild.war`).
+#[allow(dead_code)]
+struct GuildWar {
+    /// `war_start_time`.
+    war_start_time: u32,
+    /// `score`: this guild's score against the enemy.
+    score: u32,
+    /// `state`: one of the `GUILD_WAR_*` states.
+    state: u8,
+    /// `type`: one of the `GUILD_WAR_TYPE_*` types.
+    war_type: u8,
+    /// `map_index`: the war map, 0 for a field war.
+    map_index: u32,
+}
+
+impl GuildWar {
+    /// A fresh entry of `war_type` (`SGuildWar(type)`, `G/guild.h:143-152`): the score
+    /// and the map at 0, the state received-declare — the manager's declare overwrites
+    /// it with the sent or received arm.
+    fn new(war_type: u8) -> Self {
+        Self {
+            war_start_time: 0,
+            score: 0,
+            state: GUILD_WAR_RECV_DECLARE,
+            war_type,
+            map_index: 0,
+        }
+    }
 }
 
 /// `TGuildData` (`G/guild.h:102-130`) with its members: the row plus the member map.
@@ -198,6 +262,10 @@ struct Guild {
     /// queue compares `time_t` seconds, `db/GuildManager.cpp:764`). `None` while
     /// usable.
     usable_due: [Option<u64>; GUILD_SKILL_COUNT],
+    /// `m_EnemyGuild` (`G/guild.h:384-385`): the enemies by guild id, in id order
+    /// (`std::map`). Memory-only: a reboot clears every declare, as the DB process's
+    /// `m_DeclareMap` dying does.
+    enemies: BTreeMap<u32, GuildWar>,
 }
 
 /// The `guild.*` quest calls' shadow (230s): the guilds as the world holds them at a quest
@@ -229,6 +297,17 @@ pub(super) struct Guilds {
     /// Whether the boot install ran. A second install is refused, as a second
     /// allocator install is.
     pub(super) installed: bool,
+    /// `m_GuildWar` (`G/guild_manager.h`): the live wars as sorted `(lo, hi)` pairs, in
+    /// pair order (`std::set`). Memory-only, as the declares are.
+    pub(super) wars: BTreeSet<(u32, u32)>,
+    /// The DB-side end-time map (`m_mapGuildWarEndTime`, `db/GuildManager.h`): the sorted
+    /// pair each ended war stamped, in epoch seconds. `IsHalfWinLadderPoint` reads it
+    /// (`db/GuildManager.cpp:389-401`); the game side's same-named map is write-only and
+    /// stays unported. Memory-only, as the wars are.
+    war_end_times: BTreeMap<(u32, u32), u32>,
+    /// The war ends the tick judged but no descriptor stored yet: the tick has no
+    /// session, so it queues the outcomes here and a poll command drains them.
+    pending_war_ends: Vec<WarEndOutcome>,
 }
 
 /// What one `CG_ANSWER_MAKE_GUILD` step judged.
@@ -739,6 +818,90 @@ pub struct GuildSkillUp {
     pub skills: [u8; GUILD_SKILL_COUNT],
 }
 
+/// What one `/war` line did (`do_war`, `G/cmd_general.cpp:2028-2210`). The world fans
+/// every record but the start notice itself; the descriptor fans that, per client.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GuildWarAnswer {
+    /// The start notice's two guild names when a declare or an accept landed — declarer
+    /// then declaree for `[LS;475]` (`CGuildManager::DeclareWar`,
+    /// `G/guild_manager.cpp:552-561`), acceptor then declarer for `[LS;477]`
+    /// (`CGuildManager::StartWar`, `:629-651`, which names `from, to` as the accept sent
+    /// them).
+    pub notice: Option<GuildWarNotice>,
+}
+
+/// Which notice a `/war` line's names ride: the declare's `[LS;475]` or the accept's
+/// `[LS;477]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuildWarNotice {
+    /// A declare landed: declarer, declaree.
+    Declare {
+        /// The declaring guild's name.
+        from_name: Vec<u8>,
+        /// The declared-on guild's name.
+        to_name: Vec<u8>,
+    },
+    /// An accept started the war: acceptor, declarer.
+    Accept {
+        /// The accepting guild's name.
+        from_name: Vec<u8>,
+        /// The declaring guild's name.
+        to_name: Vec<u8>,
+    },
+}
+/// What one war end judged: both rows for the descriptor's store write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarEndOutcome {
+    /// The lower guild's row.
+    pub lo: WarEndRow,
+    /// The higher guild's row.
+    pub hi: WarEndRow,
+}
+
+/// One guild's judged end row: the ladder and the tallies `set_war_tallies` writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WarEndRow {
+    /// The guild id.
+    pub guild_id: u32,
+    /// The judged ladder.
+    pub ladder: i32,
+    /// The judged wins.
+    pub wins: i32,
+    /// The judged draws.
+    pub draws: i32,
+    /// The judged losses.
+    pub losses: i32,
+}
+
+/// One `/gwlist` line (`CGuildManager::ShowGuildWarList`, `G/guild_manager.cpp:785-800`):
+/// a live pair with both guilds' names and ids and the war's age in seconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuildWarListLine {
+    /// The lower id's guild name.
+    pub lo_name: Vec<u8>,
+    /// The lower guild id.
+    pub lo_id: u32,
+    /// The higher id's guild name.
+    pub hi_name: Vec<u8>,
+    /// The higher guild id.
+    pub hi_id: u32,
+    /// `get_global_time() - A->GetWarStartTime(B->GetID())`.
+    pub seconds: u32,
+}
+
+/// Fill `outcome`'s row for `id` from the live `guild`.
+fn outcome_row(outcome: &mut WarEndOutcome, id: u32, guild: &Guild) {
+    let row = if id == outcome.lo.guild_id {
+        &mut outcome.lo
+    } else {
+        &mut outcome.hi
+    };
+    row.ladder = guild.ladder_point;
+    row.wins = guild.war_wins;
+    row.draws = guild.war_draws;
+    row.losses = guild.war_losses;
+}
+
 impl GameState {
     /// The guild id of `pid`'s guild, if any (`CGuildManager::GetLinkedGuild`,
     /// `G/guild_manager.cpp:126-134`).
@@ -886,6 +1049,7 @@ impl GameState {
                     post_comment_due: 0,
                     usable: [true; GUILD_SKILL_COUNT],
                     usable_due: [None; GUILD_SKILL_COUNT],
+                    enemies: BTreeMap::new(),
                 },
             );
         }
@@ -1364,9 +1528,10 @@ impl GameState {
     /// packet to every member already online, then the five self sends — grades, INFO,
     /// LIST, skills — plus the LOGIN packets for every online member, which `SendListPacket`
     /// sends after the rows (`G/guild.cpp:474-484`): the entrant hears itself too, because it
-    /// joined the online set first. The war send sends nothing with no wars
-    /// (`SendEnemyGuild`, `G/guild_war.cpp:60-109`).
-    fn guild_login_packets(&self, vid: Vid, pid: u32, id: u32) {
+    /// joined the online set first. Then the war send (`SendEnemyGuild`,
+    /// `G/guild_war.cpp:60-109`): each enemy's NAME plus its WAR record, and each on-war
+    /// enemy's score pair — own score, then the opp's score against self.
+    fn guild_login_packets(&mut self, vid: Vid, pid: u32, id: u32) {
         let Some(guild) = self.guilds.by_id.get(&id) else {
             return;
         };
@@ -1396,6 +1561,29 @@ impl GameState {
             let _sent = self.write_to_client(vid, guild_login_record(*other_pid));
         }
         let _sent = self.write_to_client(vid, guild_skill_info_record(&guild.skill_info()));
+        let enemies: Vec<(u32, u8, u8, u32)> = guild
+            .enemies
+            .iter()
+            .map(|(opp, enemy)| (*opp, enemy.war_type, enemy.state, enemy.score))
+            .collect();
+        for (opp, war_type, state, score) in enemies {
+            if let Some(name) = self.send_guild_name(vid.raw(), opp) {
+                let _sent = self.write_to_client(vid, name);
+            }
+            let _sent = self.write_to_client(vid, guild_war_record(id, opp, war_type, state));
+            if state == GUILD_WAR_ON_WAR {
+                let _sent = self.write_to_client(vid, guild_war_score_record(id, opp, score));
+                // The opp's score against self; a guild the world lost reads 0 (legacy's
+                // `TouchGuild` always answers, so this arm is unreachable there).
+                let back = self
+                    .guilds
+                    .by_id
+                    .get(&opp)
+                    .and_then(|other| other.enemies.get(&id))
+                    .map_or(0, |enemy| enemy.score);
+                let _sent = self.write_to_client(vid, guild_war_score_record(opp, id, back));
+            }
+        }
     }
 
     /// `LogoutMember`'s sends for `pid` (`G/guild.cpp:316-334`).
@@ -1439,6 +1627,17 @@ impl GameState {
         let Some(guild) = self.guilds.by_id.get(&id) else {
             return no_guild;
         };
+        // The war arm (`G/input_main.cpp:2901-2905`): a guild under any war removes
+        // nobody — before the row lookup, so a bogus PID chats the line too.
+        if self.guild_under_any_war(id) {
+            return GuildRemoveAnswer::Refused {
+                line: self.guild_line(
+                    vid,
+                    b"<Guild> You cannot leave a guild member during a Guild War.",
+                    &[],
+                ),
+            };
+        }
         let Some(row) = guild.members.get(&pid) else {
             return GuildRemoveAnswer::Refused {
                 line: self.guild_line(vid, b"<Guild> Couldn't find such a person.", &[]),
@@ -1459,7 +1658,6 @@ impl GameState {
             .and_then(|guild| guild.grade_auth_of(speaker))
             .is_some_and(|auth| (auth & GUILD_AUTH_REMOVE_MEMBER) != 0);
         let online = row.vid.is_some();
-        // The war arm is vacuous (`UnderAnyWar` is always 0 with no wars).
         if online {
             // `FindByPID`'s foreign-guild arm (`G/input_main.cpp:2926-2932`): the victim
             // is online but holds another guild. A victim online in this guild holds
@@ -2496,6 +2694,940 @@ impl GameState {
         }
     }
 
+    /// Run one `/war` line (`do_war`, `G/cmd_general.cpp:2028-2210`): the guildless
+    /// quiet, the own-war `[LS;533]`, the two arguments (an empty name is quiet; the
+    /// type defaults to field, folds past the max to field, and refuses a negative
+    /// quiet under `__FIX_COMANDA_RAZBOI__`), the master-only ERR 1116, the unknown-name
+    /// ERR 1117, the state switch (none: the opp-war ERR 1118 and the two dead money
+    /// arms, ERR 1119/1120; sent: ERR 1121; received: the opp-war ERR 1122 plus a
+    /// refuse; reserved: ERR 1123; ended: quiet; anything else: ERR 1124 plus a
+    /// refuse), the own `CanStartWar` (`[LS;1308]` ladderless, `[LS;543]` short), the
+    /// opp's (`[LS;544]` ladderless, `[LS;545]` short), the master-online arms
+    /// (`[LS;1048]` plus a refuse — the P2P lookup is a row-`vid` check in one
+    /// process), and the declare.
+    ///
+    /// The declare collapses the game→DB→game round trip (`AddDeclare`'s dedup plus the
+    /// forward, `db/ClientManagerGuild.cpp:145-148`, `G/input_db.cpp:1336-1340`): the
+    /// entry existing is the same guard, and the manager's declare runs inline — both
+    /// `DeclareWar` fans, then the `[LS;475]` notice the descriptor fans. An accept on a
+    /// received field declare starts the war inline the same way, stamping `now`. A type past
+    /// field answers `[LS;669]` to the master (`GuildWar_IsWarMap` finds no war map on
+    /// this build). Nothing is stored: declares are memory-only both sides.
+    pub(super) fn guild_war(&mut self, vid: Vid, rest: &[u8], now: u32) -> GuildWarAnswer {
+        let quiet = GuildWarAnswer { notice: None };
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return quiet;
+        };
+        let speaker = character.player_id();
+        let Some(id) = self.guild_of(speaker) else {
+            return quiet;
+        };
+        if self.guild_under_any_war(id) {
+            self.tell_guild(vid, b"[LS;533]", &[]);
+            return quiet;
+        }
+        let (arg1, after) = crate::command::one_argument(rest);
+        if arg1.is_empty() {
+            return quiet;
+        }
+        let (arg2, _) = crate::command::one_argument(after);
+        let war_type = parse_war_type_or_field(&arg2);
+        // `__FIX_COMANDA_RAZBOI__` (`G/cmd_general.cpp:2057-2062`): a leading `-` or
+        // a negative `strtol` refuses quiet, after the fold.
+        if !arg2.is_empty() && (arg2.first() == Some(&b'-') || parse_war_long(&arg2) < 0) {
+            return quiet;
+        }
+        let Some(guild) = self.guilds.by_id.get(&id) else {
+            return quiet;
+        };
+        if guild.master_pid != speaker {
+            self.tell_guild(vid, b"#ERR_CODE: 1116030623 Send this to a GM.", &[]);
+            return quiet;
+        }
+        let Some(opp) = self.guild_named_id(&arg1) else {
+            self.tell_guild(vid, b"#ERR_CODE: 1117030623 Send this to a GM.", &[]);
+            return quiet;
+        };
+        if opp == id {
+            // `RequestDeclareWar`'s self arm (`G/guild_war.cpp:281-286`): logged, quiet.
+            // The state switch below would read the guild's entry against itself, which
+            // no declare ever inserts, so `NONE` with `UnderAnyWar` on the other side —
+            // legacy never names itself either way.
+            return quiet;
+        }
+        let state = self.guild_war_state(id, opp);
+        match state {
+            GUILD_WAR_NONE => {
+                if !self.guild_war_price_passes(vid, id, opp, war_type) {
+                    return quiet;
+                }
+            }
+            GUILD_WAR_SEND_DECLARE => {
+                // The source's EUC-KR head did not survive (`cmd_general.cpp:2114`):
+                // U+FFFD U+0329 U+FFFD, ported byte-exact.
+                self.tell_guild(
+                    vid,
+                    b"\xEF\xBF\xBD\xCC\xA9\xEF\xBF\xBD#ERR_CODE: 1121030623 Send this to a GM.",
+                    &[],
+                );
+                return quiet;
+            }
+            GUILD_WAR_RECV_DECLARE => {
+                if self.guild_under_any_war(opp) {
+                    self.tell_guild(vid, b"#ERR_CODE: 1122030623 Send this to a GM.", &[]);
+                    self.request_refuse_war(id, opp);
+                    return quiet;
+                }
+            }
+            GUILD_WAR_RESERVE => {
+                self.tell_guild(vid, b"#ERR_CODE: 1123030623 Send this to a GM.", &[]);
+                return quiet;
+            }
+            GUILD_WAR_END => return quiet,
+            _ => {
+                self.tell_guild(vid, b"#ERR_CODE: 1124030623 Send this to a GM.", &[]);
+                self.request_refuse_war(id, opp);
+                return quiet;
+            }
+        }
+        if !self.guild_war_starts_pass(vid, id, opp, war_type) {
+            return quiet;
+        }
+        if !self.guild_master_online(id) {
+            self.tell_guild(vid, b"[LS;1048]", &[]);
+            self.request_refuse_war(id, opp);
+            return quiet;
+        }
+        if !self.guild_master_online(opp) {
+            self.tell_guild(vid, b"[LS;1048]", &[]);
+            self.request_refuse_war(id, opp);
+            return quiet;
+        }
+        self.request_declare_war(id, opp, war_type, now)
+    }
+
+    /// `/war`'s none-state gate (`G/cmd_general.cpp:2101-2112`): the opp must hold no
+    /// begun war, and both sides must hold the type's price. True to continue.
+    fn guild_war_price_passes(&mut self, vid: Vid, id: u32, opp: u32, war_type: u8) -> bool {
+        if self.guild_under_any_war(opp) {
+            self.tell_guild(vid, b"#ERR_CODE: 1118030623 Send this to a GM.", &[]);
+            return false;
+        }
+        let price = GUILD_WAR_PRICE[usize::from(war_type)];
+        let own_gold = self.guilds.by_id.get(&id).map_or(0, |guild| guild.gold);
+        // `GetGuildMoney` is a signed `int` (`G/guild.h:283`); the table holds 0 for
+        // every type, so neither arm fires — ported as the reads they are.
+        if i64::from(own_gold) < i64::from(price) {
+            self.tell_guild(vid, b"#ERR_CODE: 1119030623 Send this to a GM.", &[]);
+            return false;
+        }
+        let opp_gold = self.guilds.by_id.get(&opp).map_or(0, |guild| guild.gold);
+        if i64::from(opp_gold) < i64::from(price) {
+            self.tell_guild(vid, b"#ERR_CODE: 1120030623 Send this to a GM.", &[]);
+            return false;
+        }
+        true
+    }
+
+    /// `/war`'s start gates (`G/cmd_general.cpp:2126-2162`): both sides must pass
+    /// `CanStartWar` — the own side at the asked type, the opp always at field
+    /// (`:2156`) — each with its own chat. True to continue.
+    fn guild_war_starts_pass(&mut self, vid: Vid, id: u32, opp: u32, war_type: u8) -> bool {
+        if !self.guild_can_start_war(id, war_type) {
+            let guild = self.guilds.by_id.get(&id);
+            if guild.is_some_and(|guild| guild.ladder_point == 0) {
+                self.tell_guild(vid, b"[LS;1308]", &[]);
+            } else if guild.is_some_and(|guild| guild.members.len() < GUILD_WAR_MIN_MEMBER_COUNT) {
+                self.tell_guild(
+                    vid,
+                    b"[LS;543;%d]",
+                    &[Arg::Int(
+                        i64::try_from(GUILD_WAR_MIN_MEMBER_COUNT).unwrap_or(i64::MAX),
+                    )],
+                );
+            }
+            return false;
+        }
+        if !self.guild_can_start_war(opp, GUILD_WAR_TYPE_FIELD) {
+            let guild = self.guilds.by_id.get(&opp);
+            if guild.is_some_and(|guild| guild.ladder_point == 0) {
+                self.tell_guild(vid, b"[LS;544]", &[]);
+            } else if guild.is_some_and(|guild| guild.members.len() < GUILD_WAR_MIN_MEMBER_COUNT) {
+                self.tell_guild(vid, b"[LS;545]", &[]);
+            }
+            return false;
+        }
+        true
+    }
+
+    /// Run one `/nowar` line (`do_nowar`, `G/cmd_general.cpp:2211-2243`): the guildless
+    /// quiet, the empty-name quiet, the non-master `[LS;534]`, the unknown-name `[LS;535]`,
+    /// and the refuse — which only lands when this guild holds a received declare
+    /// (`CGuild::RequestRefuseWar`, `G/guild_war.cpp:540-556`); a sent declare stands.
+    pub(super) fn guild_nowar(&mut self, vid: Vid, rest: &[u8]) {
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return;
+        };
+        let speaker = character.player_id();
+        let Some(id) = self.guild_of(speaker) else {
+            return;
+        };
+        let (arg1, _) = crate::command::one_argument(rest);
+        if arg1.is_empty() {
+            return;
+        }
+        let Some(guild) = self.guilds.by_id.get(&id) else {
+            return;
+        };
+        if guild.master_pid != speaker {
+            self.tell_guild(vid, b"[LS;534]", &[]);
+            return;
+        }
+        let Some(opp) = self.guild_named_id(&arg1) else {
+            self.tell_guild(vid, b"[LS;535]", &[]);
+            return;
+        };
+        self.request_refuse_war(id, opp);
+    }
+    /// One `gwstop` line (`do_stop_guild_war`, `G/cmd_gm.cpp:2766-2790`): two `int` words
+    /// (`two_arguments` + `str_to_number`, where an empty word stays 0 — hence the two
+    /// guards), either 0 → quiet, sorted, the speaker echoes `TALKING "%d %d"`, and the
+    /// pair ends in a forced draw with the full ladder math (`RequestEndWar` → DB
+    /// `WarEnd(force=true)`). Answers the ended rows for the descriptor's store write,
+    /// or `None` when the pair was no live war (the echo already left: it goes before
+    /// the end is attempted).
+    pub(super) fn guild_war_stop(
+        &mut self,
+        vid: Vid,
+        rest: &[u8],
+        now: u32,
+    ) -> Option<WarEndOutcome> {
+        let (arg1, after) = crate::command::one_argument(rest);
+        let (arg2, _) = crate::command::one_argument(after);
+        if arg1.is_empty() || arg2.is_empty() {
+            return None;
+        }
+        let (mut id1, mut id2) = (parse_gm_guild_id(&arg1), parse_gm_guild_id(&arg2));
+        if id1 == 0 || id2 == 0 {
+            return None;
+        }
+        if id1 > id2 {
+            std::mem::swap(&mut id1, &mut id2);
+        }
+        if let Some(mover) = self.own_mover(vid) {
+            self.tell(
+                vid,
+                mover,
+                protocol::gc_chat::CHAT_TYPE_TALKING,
+                b"%d %d",
+                &[Arg::Int(i64::from(id1)), Arg::Int(i64::from(id2))],
+            );
+        }
+        let (lo, hi) = (
+            u32::try_from(id1).unwrap_or(u32::MAX),
+            u32::try_from(id2).unwrap_or(u32::MAX),
+        );
+        self.manager_end_war(lo, hi, true, true, now)
+    }
+
+    /// One `gwcancel` line (`do_cancel_guild_war`, `G/cmd_gm.cpp:2791-2805`): the same
+    /// parse with NO empty-word and NO zero guards (a 0 runs, and misses the war set),
+    /// no echo, sorted, and the pair cancels: the over notice, the END fans, the
+    /// `WAR_END_LIST`, both masters' `[LS;482]` and every PC's `[LS;483]` — but no
+    /// ladder math and no tally writes (`CancelWar` → `RemoveWar` + game `EndWar`).
+    /// Answers whether the pair was a live war.
+    pub(super) fn guild_war_cancel(&mut self, rest: &[u8], now: u32) -> bool {
+        let (arg1, after) = crate::command::one_argument(rest);
+        let (arg2, _) = crate::command::one_argument(after);
+        let (mut id1, mut id2) = (parse_gm_guild_id(&arg1), parse_gm_guild_id(&arg2));
+        if id1 > id2 {
+            std::mem::swap(&mut id1, &mut id2);
+        }
+        let (lo, hi) = (
+            u32::try_from(id1).unwrap_or(u32::MAX),
+            u32::try_from(id2).unwrap_or(u32::MAX),
+        );
+        let Some(_) = self.manager_end_war(lo, hi, false, false, now) else {
+            return false;
+        };
+        self.notify_guild_master(lo, b"[LS;482]", &[]);
+        self.notify_guild_master(hi, b"[LS;482]", &[]);
+        // `CancelWar`'s last act (`G/guild_manager.cpp:763-768`): both guilds' names
+        // to every PC, as a notice.
+        let lo_name = self.guild_name_of(lo);
+        let hi_name = self.guild_name_of(hi);
+        self.notice_every_pc(
+            b"[LS;483;%s;%s]",
+            &[Arg::Text(&lo_name), Arg::Text(&hi_name)],
+        );
+        true
+    }
+
+    /// The id of the guild named `name` (`CGuildManager::FindGuildByName`,
+    /// `G/guild_manager.cpp:198-207`): the first in id order whose name compares equal,
+    /// byte for byte — `std::string ==` folds no case, so neither does this.
+    fn guild_named_id(&self, name: &[u8]) -> Option<u32> {
+        self.guilds
+            .by_id
+            .iter()
+            .find(|(_, guild)| guild.name == name)
+            .map(|(id, _)| *id)
+    }
+
+    /// `id`'s war state against `opp` (`CGuild::GetGuildWarState`,
+    /// `G/guild_war.cpp:112-121`): none against itself or an unknown guild.
+    fn guild_war_state(&self, id: u32, opp: u32) -> u8 {
+        if opp == id {
+            return GUILD_WAR_NONE;
+        }
+        self.guilds
+            .by_id
+            .get(&id)
+            .and_then(|guild| guild.enemies.get(&opp))
+            .map_or(GUILD_WAR_NONE, |enemy| enemy.state)
+    }
+
+    /// Whether `id` holds any begun war (`CGuild::UnderAnyWar` with no type,
+    /// `G/guild_war.cpp:163-179`): an enemy in on-war. Declares do not count.
+    pub(super) fn guild_under_any_war(&self, id: u32) -> bool {
+        self.guilds.by_id.get(&id).is_some_and(|guild| {
+            guild
+                .enemies
+                .values()
+                .any(|enemy| enemy.state == GUILD_WAR_ON_WAR)
+        })
+    }
+
+    /// Whether `id` may start a war of `war_type` (`CGuild::CanStartWar`,
+    /// `G/guild_war.cpp:143-152`): the type below the max, a positive ladder, and 8
+    /// member rows. The test-server/event-flag arm is gone: the Rewrite has no test
+    /// server, and `guild_war_test` is a test flag.
+    fn guild_can_start_war(&self, id: u32, war_type: u8) -> bool {
+        if war_type >= GUILD_WAR_TYPE_MAX_NUM {
+            return false;
+        }
+        self.guilds.by_id.get(&id).is_some_and(|guild| {
+            guild.ladder_point > 0 && guild.members.len() >= GUILD_WAR_MIN_MEMBER_COUNT
+        })
+    }
+
+    /// Whether `id`'s master is online: its member row holds a VID. Legacy asks the
+    /// local character plus the P2P map (`G/cmd_general.cpp:2164-2207`); one process
+    /// holds every client, so the row answers both.
+    fn guild_master_online(&self, id: u32) -> bool {
+        self.guilds.by_id.get(&id).is_some_and(|guild| {
+            guild
+                .members
+                .get(&guild.master_pid)
+                .is_some_and(|master| master.vid.is_some())
+        })
+    }
+
+    /// `id`'s declare against `opp` (`CGuild::RequestDeclareWar`,
+    /// `G/guild_war.cpp:279-370`, with the DB forward collapsed): the self and
+    /// unknown-type quiets, then the entry's arm. No entry: a field declare lands
+    /// through the manager; a past-field type answers `[LS;669]` to the master — no
+    /// war map serves it on this build (`GuildWar_IsWarMap`, `:255-266`). A received
+    /// entry would accept: field accepts are the on-war slice (`sys.guild.war`), and a
+    /// past-field accept answers `[LS;669]` the same way. A sent entry chats `[LS;780]`
+    /// to the master; anything else logs, quiet.
+    fn request_declare_war(&mut self, id: u32, opp: u32, war_type: u8, now: u32) -> GuildWarAnswer {
+        let quiet = GuildWarAnswer { notice: None };
+        if opp == id || war_type >= GUILD_WAR_TYPE_MAX_NUM {
+            return quiet;
+        }
+        let state = self.guild_war_state(id, opp);
+        let fresh = self
+            .guilds
+            .by_id
+            .get(&id)
+            .is_some_and(|guild| !guild.enemies.contains_key(&opp));
+        if fresh {
+            if war_type != GUILD_WAR_TYPE_FIELD {
+                self.notify_guild_master(id, b"[LS;669]", &[]);
+                return quiet;
+            }
+            return self.manager_declare_war(id, opp, war_type);
+        }
+        match state {
+            GUILD_WAR_RECV_DECLARE => {
+                let saved = self
+                    .guilds
+                    .by_id
+                    .get(&id)
+                    .and_then(|guild| guild.enemies.get(&opp))
+                    .map_or(GUILD_WAR_TYPE_FIELD, |enemy| enemy.war_type);
+                if saved != GUILD_WAR_TYPE_FIELD {
+                    self.notify_guild_master(id, b"[LS;669]", &[]);
+                    return quiet;
+                }
+                // A field accept starts the war (`G/guild_war.cpp:332-343`, with the DB
+                // round trip collapsed): the manager's start runs inline.
+                self.manager_start_war(id, opp, now)
+            }
+            GUILD_WAR_SEND_DECLARE => {
+                self.notify_guild_master(id, b"[LS;780]", &[]);
+                quiet
+            }
+            _ => {
+                warn!(id, opp, state, "a declare met an enemy in an unknown state");
+                quiet
+            }
+        }
+    }
+
+    /// `id`'s refuse against `opp` (`CGuild::RequestRefuseWar`,
+    /// `G/guild_war.cpp:540-556`, with the DB forward collapsed): only a received
+    /// declare refuses; every other state — including a sent one — stands, quiet.
+    fn request_refuse_war(&mut self, id: u32, opp: u32) {
+        if opp == id {
+            return;
+        }
+        if self.guild_war_state(id, opp) != GUILD_WAR_RECV_DECLARE {
+            return;
+        }
+        self.manager_refuse_war(id, opp);
+    }
+
+    /// The forwarded accept (`CGuildManager::StartWar`, `G/guild_manager.cpp:629-651`, with
+    /// the DB round trip collapsed): both enemies move to `ON_WAR` with `now` as their start
+    /// time, both sides hear their on-war fan (each chats `[LS;558]` first), the sorted pair
+    /// joins the war set with its every-PC `WAR_LIST` fan, and the `[LS;477]` notice names
+    /// the acceptor first. `now` is `get_global_time()` in seconds, which the descriptor
+    /// reads. Either check failing leaves the declares standing, quiet — legacy's
+    /// `CheckStartWar` failures return the same way.
+    fn manager_start_war(&mut self, from: u32, to: u32, now: u32) -> GuildWarAnswer {
+        let quiet = GuildWarAnswer { notice: None };
+        if from == to {
+            return quiet;
+        }
+        if !self.guilds.by_id.contains_key(&from) || !self.guilds.by_id.contains_key(&to) {
+            return quiet;
+        }
+        // `CheckStartWar` both sides (`G/guild_war.cpp:404-416`): the enemy exists and is
+        // not already on-war.
+        for (id, opp) in [(from, to), (to, from)] {
+            let starts = self
+                .guilds
+                .by_id
+                .get(&id)
+                .and_then(|guild| guild.enemies.get(&opp))
+                .is_some_and(|enemy| enemy.state != GUILD_WAR_ON_WAR);
+            if !starts {
+                return quiet;
+            }
+        }
+        // `CGuild::StartWar` both sides (`G/guild_war.cpp:418-437`): the state, the stamp,
+        // and the fan. Field wars ask no entry.
+        for (id, opp) in [(from, to), (to, from)] {
+            if let Some(enemy) = self
+                .guilds
+                .by_id
+                .get_mut(&id)
+                .and_then(|guild| guild.enemies.get_mut(&opp))
+            {
+                enemy.state = GUILD_WAR_ON_WAR;
+                enemy.war_start_time = now;
+            }
+            self.guild_war_fan(id, opp, GUILD_WAR_TYPE_FIELD, GUILD_WAR_ON_WAR);
+        }
+        let (lo, hi) = if from < to { (from, to) } else { (to, from) };
+        self.guilds.wars.insert((lo, hi));
+        // `FSendWarList` to every PC (`:649-650`): the world's outbox keys are its only
+        // all-PC handle, sorted for determinism.
+        let record = guild_war_list_record(&[(lo, hi)]);
+        let mut vids: Vec<Vid> = self.outboxes.keys().copied().collect();
+        vids.sort_by_key(|vid| vid.raw());
+        for vid in vids {
+            let _sent = self.write_to_client(vid, record.clone());
+        }
+        let from_name = self
+            .guilds
+            .by_id
+            .get(&from)
+            .map_or(Vec::new(), |guild| guild.name.clone());
+        let to_name = self
+            .guilds
+            .by_id
+            .get(&to)
+            .map_or(Vec::new(), |guild| guild.name.clone());
+        GuildWarAnswer {
+            notice: Some(GuildWarNotice::Accept { from_name, to_name }),
+        }
+    }
+
+    /// The forwarded declare (`CGuildManager::DeclareWar`, `G/guild_manager.cpp:541-561`):
+    /// both guilds insert — sent here, received there — and the notice names them.
+    /// A side that already holds the enemy refuses the pair: with the round trip
+    /// collapsed, the caller already checked, so the `false` is unreachable — but the
+    /// guard stays, as legacy's does.
+    fn manager_declare_war(&mut self, from: u32, to: u32, war_type: u8) -> GuildWarAnswer {
+        let quiet = GuildWarAnswer { notice: None };
+        if from == to {
+            return quiet;
+        }
+        if !self.guilds.by_id.contains_key(&from) || !self.guilds.by_id.contains_key(&to) {
+            return quiet;
+        }
+        let sent = self.declare_war(from, to, war_type, GUILD_WAR_SEND_DECLARE);
+        let received = self.declare_war(to, from, war_type, GUILD_WAR_RECV_DECLARE);
+        if !(sent && received) {
+            return quiet;
+        }
+        let from_name = self
+            .guilds
+            .by_id
+            .get(&from)
+            .map_or(Vec::new(), |guild| guild.name.clone());
+        let to_name = self
+            .guilds
+            .by_id
+            .get(&to)
+            .map_or(Vec::new(), |guild| guild.name.clone());
+        GuildWarAnswer {
+            notice: Some(GuildWarNotice::Declare { from_name, to_name }),
+        }
+    }
+
+    /// `CGuildManager::Kill`'s field arm (`G/guild_manager.cpp:838-860`, called from
+    /// `char_battle.cpp:1308-1311`): the killer PC's guild scores the victim PC's level
+    /// against the victim's guild when the killer's enemy vs the victim's guild is a field
+    /// war begun (`UnderWar`), and both guilds' online members hear the new total. The
+    /// DB server's accumulate-and-fan collapses inline: the stored score IS the running
+    /// total (`DWORD iScore`, `db/GuildManager.h:75`). A war-map killer, a guildless side,
+    /// or a past-field enemy scores nothing; no war maps exist, so `GetWarMap()` is
+    /// always null.
+    pub(super) fn guild_war_kill(&mut self, killer: Vid, victim: Vid) {
+        let (Ok(killer_character), Ok(victim_character)) = (
+            self.characters.find_by_vid(killer),
+            self.characters.find_by_vid(victim),
+        ) else {
+            return;
+        };
+        let (killer_pid, victim_pid) = (killer_character.player_id(), victim_character.player_id());
+        let (Some(attack), Some(defend)) = (self.guild_of(killer_pid), self.guild_of(victim_pid))
+        else {
+            return;
+        };
+        let field = self
+            .guilds
+            .by_id
+            .get(&attack)
+            .and_then(|guild| guild.enemies.get(&defend))
+            .is_some_and(|enemy| enemy.war_type == GUILD_WAR_TYPE_FIELD);
+        if !field || !self.guild_under_war(attack, defend) {
+            return;
+        }
+        let level = self
+            .pc_points_mut(victim.raw())
+            .map_or(0, |points| points.level());
+        // `u32`: the DB's `iScore` is a `DWORD`, and the fan writes its 4 bytes.
+        let total = self
+            .guilds
+            .by_id
+            .get(&attack)
+            .and_then(|guild| guild.enemies.get(&defend))
+            .map_or(0, |enemy| enemy.score)
+            .wrapping_add(u32::from(level));
+        if let Some(enemy) = self
+            .guilds
+            .by_id
+            .get_mut(&attack)
+            .and_then(|guild| guild.enemies.get_mut(&defend))
+        {
+            enemy.score = total;
+        }
+        // `SetWarScoreAgainstTo`'s field fan (`G/guild_war.cpp:198-217`): the same record
+        // to the gainer's online members, then the opp's (`Packet` each, `:217-218`).
+        let record = guild_war_score_record(attack, defend, total);
+        for id in [attack, defend] {
+            let members: Vec<Vid> = self
+                .guilds
+                .by_id
+                .get(&id)
+                .map(|guild| {
+                    guild
+                        .members
+                        .values()
+                        .filter_map(|member| member.vid)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for member in members {
+                let _sent = self.write_to_client(member, record.clone());
+            }
+        }
+    }
+
+    /// Whether a PC killer under `killer` loses its monster reward to a field war
+    /// (`char_battle.cpp:1477`): it is a player, its guild holds a begun FIELD enemy, and
+    /// the victim is not a player. The caller passes the victim kind it already knows.
+    pub(super) fn guild_blocks_monster_reward(&self, killer: Vid) -> bool {
+        let Ok(character) = self.characters.find_by_vid(killer) else {
+            return false;
+        };
+        let Some(id) = self.guild_of(character.player_id()) else {
+            return false;
+        };
+        self.guilds.by_id.get(&id).is_some_and(|guild| {
+            guild.enemies.values().any(|enemy| {
+                enemy.war_type == GUILD_WAR_TYPE_FIELD && enemy.state == GUILD_WAR_ON_WAR
+            })
+        })
+    }
+
+    /// The war-reward line (`char_battle.cpp:1501-1507`): `[LS;558]` to the PC killer
+    /// whose guild's field war ate its monster reward, at most once a minute. The stamp
+    /// is boot milliseconds (`get_dword_time()`), which the world's clock keeps.
+    pub(super) fn tell_war_reward_line(&mut self, killer: Vid) {
+        let now = self.clock.now();
+        let muted = self
+            .pc_combat
+            .get(&killer.raw())
+            .and_then(|combat| combat.war_reward_mute_until_ms)
+            .is_some_and(|until| now < until);
+        if muted {
+            return;
+        }
+        self.pc_combat
+            .entry(killer.raw())
+            .or_default()
+            .war_reward_mute_until_ms = Some(now.wrapping_add(60_000));
+        self.tell_guild(killer, b"[LS;558]", &[]);
+    }
+
+    /// Whether `id`'s enemy `opp` is a war begun (`CGuild::UnderWar`,
+    /// `G/guild_war.cpp:155-162`): the entry exists and its state is `ON_WAR`.
+    pub(super) fn guild_under_war(&self, id: u32, opp: u32) -> bool {
+        id != opp
+            && self
+                .guilds
+                .by_id
+                .get(&id)
+                .and_then(|guild| guild.enemies.get(&opp))
+                .is_some_and(|enemy| enemy.state == GUILD_WAR_ON_WAR)
+    }
+
+    /// The forwarded refuse (`CGuildManager::RefuseWar`, `G/guild_manager.cpp:564-580`):
+    /// the declarer's master hears `[LS;476]` naming the refuser, then both entries
+    /// leave with their end fans.
+    fn manager_refuse_war(&mut self, from: u32, to: u32) {
+        let from_name = self
+            .guilds
+            .by_id
+            .get(&from)
+            .map_or(Vec::new(), |guild| guild.name.clone());
+        // `g2` is the declaree the packet names `To`: the refuse packet's `From` is the
+        // refuser, so the declarer hears who refused it.
+        self.notify_guild_master(to, b"[LS;476;%s]", &[Arg::Text(&from_name)]);
+        self.refuse_war(from, to);
+        self.refuse_war(to, from);
+    }
+    /// One side's end (`CGuild::EndWar`, `G/guild_war.cpp:592-627`): a missing enemy is
+    /// quiet, else the END fan, the erase, and — when the guild then holds no war — the
+    /// strip: the six war-casts (BLOOD 152, BLESS 153, SEONGHWI 154, ACCEL 155, BUNNO 156,
+    /// JUMUN 157, `G/skill.h:164-170`) plus `RemoveBadAffect` from every online member.
+    /// (The war-map `SetEnded` is unported: no maps.)
+    fn end_war_side(&mut self, id: u32, opp: u32, war_type: u8) {
+        let present = self
+            .guilds
+            .by_id
+            .get(&id)
+            .is_some_and(|guild| guild.enemies.contains_key(&opp));
+        if !present {
+            return;
+        }
+        self.guild_war_fan(id, opp, war_type, GUILD_WAR_END);
+        if let Some(guild) = self.guilds.by_id.get_mut(&id) {
+            guild.enemies.remove(&opp);
+        }
+        if self.guild_under_any_war(id) {
+            return;
+        }
+        let members: Vec<Vid> = self
+            .guilds
+            .by_id
+            .get(&id)
+            .map(|guild| {
+                guild
+                    .members
+                    .values()
+                    .filter_map(|member| member.vid)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for member in members {
+            for kind in [152, 153, 154, 155, 156, 157] {
+                let _stripped = self.remove_pc_affect(member, kind);
+            }
+            self.remove_bad_affect(member);
+        }
+    }
+
+    /// The war's end judged (`CGuildManager::EndWar`, `G/guild_manager.cpp:676-717`,
+    /// with the DB side's `WarEnd`/`ProcessWinLose`/`ProcessDraw`/`ChangeLadderPoint`
+    /// collapsed in, `db/GuildManager.cpp:407-526`): quiet (`None`) when the pair is
+    /// not a live war or a guild is gone. Else the ladder math lands in memory (a draw
+    /// tallies both draws and rewrites both ladders unchanged; a win tallies the
+    /// winner's wins and the loser's losses, pays `5%` of the loser's ladder halved
+    /// under the half-win rule, and bills the loser `7%`, floored at 0), the over
+    /// notice fans to every PC, both sides end, the pair stamps the end-time map and
+    /// leaves the war set, and the `WAR_END_LIST` fans to every PC. `force_draw` is
+    /// `gwstop`'s arm: it turns the math into a draw, as the DB's forced `WarEnd`
+    /// does, but leaves the over notice to the scores, as the game side's `EndWar`
+    /// does. `math` false is `gwcancel`'s (the math and tallies skip, the
+    /// stamp stays). The outcome carries both rows for the descriptor's store write.
+    fn manager_end_war(
+        &mut self,
+        lo: u32,
+        hi: u32,
+        force_draw: bool,
+        math: bool,
+        now: u32,
+    ) -> Option<WarEndOutcome> {
+        if !self.guilds.wars.contains(&(lo, hi)) {
+            return None;
+        }
+        if !self.guilds.by_id.contains_key(&lo) || !self.guilds.by_id.contains_key(&hi) {
+            return None;
+        }
+        let score = |guilds: &Guilds, id: u32, opp: u32| {
+            guilds
+                .by_id
+                .get(&id)
+                .and_then(|guild| guild.enemies.get(&opp))
+                .map_or(0, |enemy| enemy.score)
+        };
+        let war_type = self
+            .guilds
+            .by_id
+            .get(&lo)
+            .and_then(|guild| guild.enemies.get(&hi))
+            .map_or(GUILD_WAR_TYPE_FIELD, |enemy| enemy.war_type);
+        let (score_lo, score_hi) = (score(&self.guilds, lo, hi), score(&self.guilds, hi, lo));
+        // Two draws, and they are not the same one: the ladder math follows the DB's
+        // `WarEnd`, which a forced draw turns into a draw whatever the scores are
+        // (`db/GuildManager.cpp:485-500`), while the over notice follows the game
+        // side's `EndWar`, which judges the scores alone
+        // (`G/guild_manager.cpp:697-703`) — the force flag never reaches the game
+        // side, so a `gwstop` on a war with unequal scores still names a winner.
+        let notice_draw = score_lo == score_hi;
+        let (winner, loser) = if score_lo >= score_hi {
+            (lo, hi)
+        } else {
+            (hi, lo)
+        };
+        let mut outcome = WarEndOutcome {
+            lo: WarEndRow {
+                guild_id: lo,
+                ladder: 0,
+                wins: 0,
+                draws: 0,
+                losses: 0,
+            },
+            hi: WarEndRow {
+                guild_id: hi,
+                ladder: 0,
+                wins: 0,
+                draws: 0,
+                losses: 0,
+            },
+        };
+        if math {
+            self.war_end_math(
+                (lo, hi),
+                winner,
+                loser,
+                force_draw || notice_draw,
+                now,
+                &mut outcome,
+            );
+        }
+        if war_type == GUILD_WAR_TYPE_FIELD {
+            let (key, first, second) = if notice_draw {
+                let lo_name = self.guild_name_of(lo);
+                let hi_name = self.guild_name_of(hi);
+                (&b"[LS;479;%s;%s]"[..], lo_name, hi_name)
+            } else {
+                let winner_name = self.guild_name_of(winner);
+                let loser_name = self.guild_name_of(loser);
+                (&b"[LS;480;%s;%s]"[..], winner_name, loser_name)
+            };
+            self.notice_every_pc(key, &[Arg::Text(&first), Arg::Text(&second)]);
+        }
+        self.end_war_side(lo, hi, war_type);
+        self.end_war_side(hi, lo, war_type);
+        self.guilds.war_end_times.insert((lo, hi), now);
+        self.guilds.wars.remove(&(lo, hi));
+        let record = guild_war_end_list_record(lo, hi);
+        let mut vids: Vec<Vid> = self.outboxes.keys().copied().collect();
+        vids.sort_by_key(|vid| vid.raw());
+        for vid in vids {
+            let _sent = self.write_to_client(vid, record.clone());
+        }
+        Some(outcome)
+    }
+
+    /// The ladder math of one end (`WarEnd`/`ProcessWinLose`/`ProcessDraw`,
+    /// `db/GuildManager.cpp:470-526`), collapsed into `outcome`'s rows for the sorted
+    /// `pair`: `draw` tallies both sides and writes both ladders back unchanged; otherwise
+    /// the winner gains 5% of the loser's ladder, halved under the half-win rule, and the
+    /// loser loses 7% of its own, floored at 0. `winner`/`loser` come from the score
+    /// order, as the game side judges it (`lo` wins ties). The over notice is not this
+    /// function's.
+    fn war_end_math(
+        &mut self,
+        pair: (u32, u32),
+        winner: u32,
+        loser: u32,
+        draw: bool,
+        now: u32,
+        outcome: &mut WarEndOutcome,
+    ) {
+        let (lo, hi) = pair;
+        if draw {
+            for (id, row) in [(lo, &mut outcome.lo), (hi, &mut outcome.hi)] {
+                if let Some(guild) = self.guilds.by_id.get_mut(&id) {
+                    guild.war_draws = guild.war_draws.saturating_add(1);
+                    row.ladder = guild.ladder_point;
+                    row.wins = guild.war_wins;
+                    row.draws = guild.war_draws;
+                    row.losses = guild.war_losses;
+                }
+            }
+            return;
+        }
+        let loser_ladder = self
+            .guilds
+            .by_id
+            .get(&loser)
+            .map_or(0, |guild| guild.ladder_point.max(0));
+        // Legacy scales by 0.05 and 0.07 in `double` and truncates
+        // (`db/GuildManager.cpp:486-499`); for a non-negative `i32` ladder the quotients
+        // below are the same truncated ones.
+        let mut gain = loser_ladder / 20;
+        let loss = i32::try_from(i64::from(loser_ladder) * 7 / 100).unwrap_or(i32::MAX);
+        let half = self
+            .guilds
+            .war_end_times
+            .get(&(lo, hi))
+            .is_some_and(|ended| ended.saturating_add(GUILD_WAR_LADDER_HALF_PENALTY) > now);
+        if half {
+            gain /= 2;
+        }
+        if let Some(guild) = self.guilds.by_id.get_mut(&winner) {
+            guild.war_wins = guild.war_wins.saturating_add(1);
+            guild.ladder_point = guild.ladder_point.saturating_add(gain).max(0);
+            outcome_row(outcome, winner, guild);
+        }
+        if let Some(guild) = self.guilds.by_id.get_mut(&loser) {
+            guild.war_losses = guild.war_losses.saturating_add(1);
+            guild.ladder_point = guild.ladder_point.saturating_sub(loss).max(0);
+            outcome_row(outcome, loser, guild);
+        }
+    }
+
+    /// A `CHAT_TYPE_NOTICE` line to every PC (`SendNotice`,
+    /// `G/cmd_gm.cpp:1389-1425`): the client set, each descriptor's character, in
+    /// VID order.
+    fn notice_every_pc(&self, key: &[u8], args: &[Arg<'_>]) {
+        let mut vids: Vec<Vid> = self.outboxes.keys().copied().collect();
+        vids.sort_by_key(|vid| vid.raw());
+        for vid in vids {
+            if let Some(mover) = self.own_mover(vid) {
+                self.tell(vid, mover, CHAT_TYPE_NOTICE, key, args);
+            }
+        }
+    }
+
+    /// One side's `id` name for the over notice, empty when the guild is gone (the
+    /// caller already checked, but the notice reads after the math).
+    fn guild_name_of(&self, id: u32) -> Vec<u8> {
+        self.guilds
+            .by_id
+            .get(&id)
+            .map_or(Vec::new(), |guild| guild.name.clone())
+    }
+
+    /// One side's insert (`CGuild::DeclareWar`, `G/guild_war.cpp:372-384`): false when
+    /// the enemy is already there, else the entry plus its fan.
+    fn declare_war(&mut self, id: u32, opp: u32, war_type: u8, state: u8) -> bool {
+        let fresh = self
+            .guilds
+            .by_id
+            .get(&id)
+            .is_some_and(|guild| !guild.enemies.contains_key(&opp));
+        if !fresh {
+            return false;
+        }
+        let mut enemy = GuildWar::new(war_type);
+        enemy.state = state;
+        if let Some(guild) = self.guilds.by_id.get_mut(&id) {
+            guild.enemies.insert(opp, enemy);
+        }
+        self.guild_war_fan(id, opp, war_type, state);
+        true
+    }
+
+    /// One side's refuse (`CGuild::RefuseWar`, `G/guild_war.cpp:558-571`): a sent or
+    /// received entry leaves with its end fan.
+    fn refuse_war(&mut self, id: u32, opp: u32) {
+        let war_type = self
+            .guilds
+            .by_id
+            .get(&id)
+            .and_then(|guild| guild.enemies.get(&opp))
+            .filter(|enemy| {
+                enemy.state == GUILD_WAR_SEND_DECLARE || enemy.state == GUILD_WAR_RECV_DECLARE
+            })
+            .map(|enemy| enemy.war_type);
+        let Some(war_type) = war_type else {
+            return;
+        };
+        if let Some(guild) = self.guilds.by_id.get_mut(&id) {
+            guild.enemies.remove(&opp);
+        }
+        self.guild_war_fan(id, opp, war_type, GUILD_WAR_END);
+    }
+
+    /// `id`'s war fan against `opp` (`CGuild::GuildWarPacket`, `G/guild_war.cpp:28-58`):
+    /// every online member hears the opp's NAME — once per viewer, through the same
+    /// `SendGuildName` dedup the view uses — then the WAR record. An on-war fan chats
+    /// `[LS;558]` first.
+    fn guild_war_fan(&mut self, id: u32, opp: u32, war_type: u8, state: u8) {
+        let Some(guild) = self.guilds.by_id.get(&id) else {
+            return;
+        };
+        let members: Vec<Vid> = guild
+            .members
+            .values()
+            .filter_map(|member| member.vid)
+            .collect();
+        for member in members {
+            if state == GUILD_WAR_ON_WAR {
+                self.tell_guild(member, b"[LS;558]", &[]);
+            }
+            if let Some(name) = self.send_guild_name(member.raw(), opp) {
+                let _sent = self.write_to_client(member, name);
+            }
+            let _sent = self.write_to_client(member, guild_war_record(id, opp, war_type, state));
+        }
+    }
+
+    /// An info line to `id`'s master, when it is online (`CGuild::NotifyGuildMaster`,
+    /// `G/guild_war.cpp:268-274`).
+    fn notify_guild_master(&self, id: u32, format: &[u8], args: &[Arg<'_>]) {
+        let master = self.guilds.by_id.get(&id).and_then(|guild| {
+            guild
+                .members
+                .get(&guild.master_pid)
+                .and_then(|master| master.vid)
+        });
+        if let Some(master) = master {
+            self.tell_guild(master, format, args);
+        }
+    }
+
     /// Judge one `GUILD_SUBHEADER_CG_USE_SKILL` (`CGuild::UseSkill`,
     /// `G/guild.cpp:1267-1340`): the guildless `[LS;523]` (the shared gate,
     /// `G/input_main.cpp:2816-2824`), the member+auth quiet, the stun quiet (only
@@ -2705,8 +3837,11 @@ impl GameState {
     }
 
     /// Lapse the invites due on `pulse` (`GuildInviteEvent`, `G/guild.cpp:2013-2031`):
-    /// quiet, as legacy's handler is. `process_pulse` calls this after the regens, with
-    /// the other ticks.
+    /// quiet, as legacy's handler is. Then end the field wars whose 30 minutes passed
+    /// (the DB server's `Update` heap pop, `db/GuildManager.cpp:244-278`): score-checked,
+    /// never forced. The outcomes queue in `pending_war_ends` for the poll command —
+    /// the tick has no descriptor of its own. `process_pulse` calls this after the
+    /// regens, with the other ticks.
     pub(super) fn run_guild_ticks(&mut self, pulse: u64) {
         self.guilds.invites.retain(|_, due| *due > pulse);
         // The DB server's `m_pqSkill` pump (`db/GuildManager.cpp:280-286`): a due
@@ -2722,6 +3857,53 @@ impl GameState {
                 }
             }
         }
+        let now = super::quests::quest_now();
+        for &(lo, hi) in &self.guilds.wars.clone() {
+            let start = self
+                .guilds
+                .by_id
+                .get(&lo)
+                .and_then(|guild| guild.enemies.get(&hi))
+                .map_or(0, |enemy| enemy.war_start_time);
+            if start.saturating_add(GUILD_WAR_DURATION) > now {
+                continue;
+            }
+            if let Some(outcome) = self.manager_end_war(lo, hi, false, true, now) {
+                self.guilds.pending_war_ends.push(outcome);
+            }
+        }
+    }
+
+    /// Drain the war ends the tick queued: the poll command's answer.
+    pub(super) fn take_war_ends(&mut self) -> Vec<WarEndOutcome> {
+        std::mem::take(&mut self.guilds.pending_war_ends)
+    }
+
+    /// The live wars, in pair order (`CGuildManager::ShowGuildWarList`,
+    /// `G/guild_manager.cpp:785-800`): each pair's lower guild first, with its name and
+    /// id, then the higher, and the age from the lower side's start stamp. A pair whose
+    /// guilds are gone is skipped; legacy `TouchGuild` would ghost one, but a war's
+    /// guilds are not removed while it lives.
+    pub(super) fn guild_war_list(&self, now: u32) -> Vec<GuildWarListLine> {
+        self.guilds
+            .wars
+            .iter()
+            .filter_map(|&(lo, hi)| {
+                let lo_guild = self.guilds.by_id.get(&lo)?;
+                let hi_guild = self.guilds.by_id.get(&hi)?;
+                let start = lo_guild
+                    .enemies
+                    .get(&hi)
+                    .map_or(0, |enemy| enemy.war_start_time);
+                Some(GuildWarListLine {
+                    lo_name: lo_guild.name.clone(),
+                    lo_id: lo,
+                    hi_name: hi_guild.name.clone(),
+                    hi_id: hi,
+                    seconds: now.saturating_sub(start),
+                })
+            })
+            .collect()
     }
 
     /// Judge one `CG_ANSWER_MAKE_GUILD` (`CInputMain::AnswerMakeGuild`,
@@ -2901,6 +4083,7 @@ impl GameState {
                 post_comment_due: 0,
                 usable: [true; GUILD_SKILL_COUNT],
                 usable_due: [None; GUILD_SKILL_COUNT],
+                enemies: BTreeMap::new(),
             },
         );
         self.guilds.of.insert(pid, commit.id);
@@ -3871,6 +5054,107 @@ impl GameState {
                 ladder,
             }],
         }
+    }
+}
+
+/// `/war`'s type word judged to a type: empty is field, otherwise `strtoul` with
+/// anything at or past the max folded to field (`G/cmd_general.cpp:2060-2065`).
+fn parse_war_type_or_field(word: &[u8]) -> u8 {
+    if word.is_empty() {
+        return GUILD_WAR_TYPE_FIELD;
+    }
+    let parsed = parse_war_type(word);
+    if parsed >= u32::from(GUILD_WAR_TYPE_MAX_NUM) {
+        GUILD_WAR_TYPE_FIELD
+    } else {
+        u8::try_from(parsed).unwrap_or(GUILD_WAR_TYPE_FIELD)
+    }
+}
+
+/// `/war`'s type word as legacy's `strtoul` base 10 reads it (`str_to_number` on a
+/// DWORD, `common/utils.h:44-50`): leading spaces skipped, an optional `+`/`-` taken
+/// (a `-` negates into the unsigned wrap), digits read until the first non-digit,
+/// garbage answering 0. The running answer is a `u32`, so the arithmetic wraps as
+/// the C multiply does on every overflow; the judge folds anything past the max to
+/// field. A word past the byte folds the same way below, so no clamp belongs here.
+fn parse_war_type(word: &[u8]) -> u32 {
+    let Some(offset) = word.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return 0;
+    };
+    let rest = &word[offset..];
+    let (digits, negative) = match rest.first() {
+        Some(b'-') => (&rest[1..], true),
+        Some(b'+') => (&rest[1..], false),
+        _ => (rest, false),
+    };
+    let mut value: u32 = 0;
+    for byte in digits {
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        value = value.wrapping_mul(10).wrapping_add(u32::from(byte - b'0'));
+    }
+    if negative {
+        value.wrapping_neg()
+    } else {
+        value
+    }
+}
+/// A `gwstop`/`gwcancel` id word as `str_to_number` on an `int` reads it
+/// (`common/utils.h:38-43`): an empty word never reaches here (the caller guards —
+/// `str_to_number` would leave the 0), else `strtol` base 10 cast to `int`. Leading
+/// spaces skip, an optional sign takes, digits read until the first non-digit, and
+/// the running answer wraps as the C multiply does — matching `parse_war_type`'s
+/// wrap, signed.
+fn parse_gm_guild_id(word: &[u8]) -> i32 {
+    let Some(offset) = word.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return 0;
+    };
+    let rest = &word[offset..];
+    let (digits, negative) = match rest.first() {
+        Some(b'-') => (&rest[1..], true),
+        Some(b'+') => (&rest[1..], false),
+        _ => (rest, false),
+    };
+    let mut value: i32 = 0;
+    for byte in digits {
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        value = value.wrapping_mul(10).wrapping_add(i32::from(byte - b'0'));
+    }
+    if negative {
+        value.wrapping_neg()
+    } else {
+        value
+    }
+}
+
+/// `/war`'s type word as `strtol` base 10 reads it (`G/cmd_general.cpp:2058`): only the
+/// sign matters — the FIX arm asks whether it is negative. A leading run of zeros
+/// still signs it, as `strtol` returns `-0` is 0 — so a `-` followed only by zeros
+/// answers non-negative, and only a nonzero digit past it answers negative.
+fn parse_war_long(word: &[u8]) -> i64 {
+    let Some(offset) = word.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return 0;
+    };
+    let rest = &word[offset..];
+    let (digits, negative) = match rest.first() {
+        Some(b'-') => (&rest[1..], true),
+        Some(b'+') => (&rest[1..], false),
+        _ => (rest, false),
+    };
+    if !negative {
+        return 0;
+    }
+    if digits
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .any(|byte| *byte != b'0')
+    {
+        -1
+    } else {
+        0
     }
 }
 
@@ -5728,5 +7012,875 @@ mod tests {
         assert_eq!(frame.len(), 55, "the update's packed width");
         assert_eq!(&frame[28..32], &GUILD_ID.to_le_bytes(), "dwGuildID");
         assert_eq!(frame[48], 3, "dwNewIsGuildName names the master");
+    }
+    /// A second guild that can start a war: 8 member rows (the master by pid
+    /// `SECOND_ID`, which the test enters and links), a positive ladder, and the
+    /// leader grade.
+    const SECOND_ID: u32 = 9;
+
+    /// Install the second guild beside the fixture's, whose ladder and rows pass
+    /// `CanStartWar`; the fixture's own guild gains the ladder and rows too.
+    fn install_war_pair(world: &mut GameState) {
+        let grades_for = |id: u32| {
+            (1..=15)
+                .map(|grade| db::guilds::StoredGrade {
+                    guild_id: id,
+                    grade,
+                    name: if grade == 1 {
+                        "Leader".to_owned()
+                    } else {
+                        "...".to_owned()
+                    },
+                    auth: if grade == 1 { 15 } else { 0 },
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut grades = grades_for(SECOND_ID);
+        grades.extend(grades_for(GUILD_ID));
+        // The guest (vid 101) stays guildless for the gates test, so the rows skip
+        // it; the seat past 7 keeps the eight `CanStartWar` needs.
+        let members_for = |id: u32, master: u32| {
+            (0..9)
+                .filter(move |seat| {
+                    *seat < 8 && master + seat != GUEST_VID || *seat == 8 && id == GUILD_ID
+                })
+                .map(|seat| db::guilds::StoredMember {
+                    pid: master + seat,
+                    guild_id: id,
+                    grade: 1,
+                    is_general: false,
+                    offer: 0,
+                    level: 10,
+                    job: 0,
+                    name: format!("P{}", master + seat),
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut members = members_for(GUILD_ID, MASTER_VID);
+        members.extend(members_for(SECOND_ID, 200));
+        world.install_guilds(
+            &db::guilds::StoredGuilds {
+                guilds: vec![
+                    db::guilds::StoredGuild {
+                        id: GUILD_ID,
+                        name: "Knights".to_owned(),
+                        master_pid: MASTER_VID,
+                        sp: 400,
+                        level: 5,
+                        exp: 0,
+                        skill_point: 0,
+                        skills: vec![0; GUILD_SKILL_COUNT],
+                        ladder_point: 1000,
+                        win: 0,
+                        draw: 0,
+                        loss: 0,
+                        gold: 0,
+                    },
+                    db::guilds::StoredGuild {
+                        id: SECOND_ID,
+                        name: "Wolves".to_owned(),
+                        master_pid: 200,
+                        sp: 400,
+                        level: 5,
+                        exp: 0,
+                        skill_point: 0,
+                        skills: vec![0; GUILD_SKILL_COUNT],
+                        ladder_point: 1000,
+                        win: 0,
+                        draw: 0,
+                        loss: 0,
+                        gold: 0,
+                    },
+                ],
+                grades,
+                members,
+            },
+            &[],
+            &[],
+        );
+        world.link_guild(Vid::new(MASTER_VID));
+    }
+
+    /// The chat text of the first CHAT record in `records`.
+    fn first_chat(records: &[Vec<u8>]) -> &[u8] {
+        let line = records
+            .iter()
+            .find(|record| record[0] == protocol::gc_inventory::HEADER_GC_CHAT.value())
+            .expect("a chat line");
+        &line[protocol::gc_chat::GC_CHAT_WIRE_SIZE..]
+    }
+
+    /// A `/war` landing: both enemies insert, each online member hears the opp's
+    /// NAME then the WAR record, and the answer names the pair for the notice.
+    #[test]
+    fn a_declare_lands_names_and_fans() {
+        let (_clock, mut world, mut master, mut guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let _ = heard(&mut master);
+        let _ = heard(&mut guest);
+        let answer = world.guild_war(Vid::new(MASTER_VID), b"Wolves", NOW);
+        assert_eq!(
+            answer.notice,
+            Some(GuildWarNotice::Declare {
+                from_name: b"Knights".to_vec(),
+                to_name: b"Wolves".to_vec(),
+            }),
+            "the notice names declarer then declaree"
+        );
+        assert_eq!(
+            world.guild_war_state(GUILD_ID, SECOND_ID),
+            GUILD_WAR_SEND_DECLARE
+        );
+        assert_eq!(
+            world.guild_war_state(SECOND_ID, GUILD_ID),
+            GUILD_WAR_RECV_DECLARE
+        );
+        let held = heard(&mut master);
+        // The NAME rode the spawn view already, so the fan is the WAR alone.
+        assert_eq!(
+            subheaders(&held),
+            [protocol::gc_guild::GUILD_SUBHEADER_GC_WAR],
+            "the fan is the WAR: {held:?}"
+        );
+        let war = &held[0];
+        assert_eq!(&war[4..8], &GUILD_ID.to_le_bytes(), "dwGuildSelf");
+        assert_eq!(&war[8..12], &SECOND_ID.to_le_bytes(), "dwGuildOpp");
+        assert_eq!(war[12], GUILD_WAR_TYPE_FIELD, "bType");
+        assert_eq!(war[13], GUILD_WAR_SEND_DECLARE, "bWarState");
+        drop(rival);
+    }
+
+    /// The declaree's `/war` back lands nothing yet (`sys.guild.war` starts it): the
+    /// entries move to on-war, and the answer names the acceptor first.
+    #[test]
+    fn a_declare_back_starts_the_war() {
+        let (_clock, mut world, mut master, mut guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let first = world.guild_war(Vid::new(MASTER_VID), b"Wolves", NOW);
+        assert!(first.notice.is_some(), "the first declare lands");
+        let _ = heard(&mut master);
+        let _ = heard(&mut guest);
+        let answer = world.guild_war(Vid::new(200), b"Knights", NOW);
+        assert_eq!(
+            answer.notice,
+            Some(GuildWarNotice::Accept {
+                from_name: b"Wolves".to_vec(),
+                to_name: b"Knights".to_vec(),
+            }),
+            "the notice names acceptor then declarer"
+        );
+        assert_eq!(world.guild_war_state(GUILD_ID, SECOND_ID), GUILD_WAR_ON_WAR);
+        assert_eq!(world.guild_war_state(SECOND_ID, GUILD_ID), GUILD_WAR_ON_WAR);
+        assert!(
+            world.guilds.wars.contains(&(GUILD_ID, SECOND_ID))
+                || world.guilds.wars.contains(&(SECOND_ID, GUILD_ID)),
+            "the pair joins the war set"
+        );
+        let held = heard(&mut master);
+        assert!(
+            first_chat(&held)
+                .windows(8)
+                .any(|window| window == b"[LS;558]"),
+            "the on-war fan chats [LS;558] first: {held:?}"
+        );
+        drop(rival);
+    }
+
+    /// A started war is listed on enter: the entrant hears the `WAR_LIST` envelope with
+    /// the pair.
+    #[test]
+    fn a_started_war_is_listed_on_enter() {
+        let (_clock, mut world, mut master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let _ = world.guild_war(Vid::new(MASTER_VID), b"Wolves", NOW);
+        let accept = world.guild_war(Vid::new(200), b"Knights", NOW);
+        assert!(accept.notice.is_some(), "the accept starts the war");
+        let _ = heard(&mut master);
+        // A raw enter: the shared fixture drains the enter WAR_LIST, so read it
+        // straight from the admission.
+        let (tx, mut late) = tokio::sync::mpsc::unbounded_channel();
+        world
+            .enter_world(
+                Vid::new(300),
+                300,
+                "P300",
+                crate::client_registry::ClientOutbox::new(tx),
+            )
+            .expect("the late player enters");
+        let held = heard(&mut late);
+        assert_eq!(
+            subheaders(&held),
+            [protocol::gc_guild::GUILD_SUBHEADER_GC_GUILD_WAR_LIST],
+            "the entrant hears the WAR_LIST: {held:?}"
+        );
+        drop(rival);
+    }
+
+    /// `/gwlist` reads the live pair in set order, with both names and ids and the age.
+    #[test]
+    fn the_gwlist_reads_the_live_pair_and_its_age() {
+        let (_clock, mut world, _master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        start_war_pair(&mut world);
+        assert_eq!(
+            world.guild_war_list(NOW + 42),
+            vec![GuildWarListLine {
+                lo_name: b"Knights".to_vec(),
+                lo_id: GUILD_ID,
+                hi_name: b"Wolves".to_vec(),
+                hi_id: SECOND_ID,
+                seconds: 42,
+            }]
+        );
+        assert_eq!(
+            world.guild_war_list(NOW - 1)[0].seconds,
+            0,
+            "a clock behind the start clamps to zero"
+        );
+        drop(rival);
+    }
+
+    /// A kill across a begun field war scores the victim's level, and both guilds' online
+    /// members hear the new total.
+    #[test]
+    fn a_kill_across_the_war_scores_the_level() {
+        let (_clock, mut world, mut master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let mut rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let _ = world.guild_war(Vid::new(MASTER_VID), b"Wolves", NOW);
+        let _ = world.guild_war(Vid::new(200), b"Knights", NOW);
+        let _ = heard(&mut master);
+        let _ = heard(&mut rival);
+        // The fixture enters at level 10.
+        world.guild_war_kill(Vid::new(200), Vid::new(MASTER_VID));
+        let score = world
+            .guilds
+            .by_id
+            .get(&SECOND_ID)
+            .and_then(|guild| guild.enemies.get(&GUILD_ID))
+            .map_or(u32::MAX, |enemy| enemy.score);
+        assert_eq!(score, 10, "the victim's level scores");
+        for (held, side) in [
+            (heard(&mut master), "declarer"),
+            (heard(&mut rival), "gainer"),
+        ] {
+            assert_eq!(
+                subheaders(&held),
+                [protocol::gc_guild::GUILD_SUBHEADER_GC_WAR_SCORE],
+                "the {side} hears the WAR_SCORE: {held:?}"
+            );
+        }
+    }
+
+    /// A kill across a mere declare scores nothing.
+    #[test]
+    fn a_kill_across_a_declare_scores_nothing() {
+        let (_clock, mut world, mut master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let mut rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let _ = world.guild_war(Vid::new(MASTER_VID), b"Wolves", NOW);
+        let _ = heard(&mut master);
+        let _ = heard(&mut rival);
+        world.guild_war_kill(Vid::new(200), Vid::new(MASTER_VID));
+        let score = world
+            .guilds
+            .by_id
+            .get(&SECOND_ID)
+            .and_then(|guild| guild.enemies.get(&GUILD_ID))
+            .map_or(u32::MAX, |enemy| enemy.score);
+        assert_eq!(score, 0, "a declare scores nothing");
+        assert!(heard(&mut master).is_empty(), "the declarer hears nothing");
+        assert!(heard(&mut rival).is_empty(), "the rival hears nothing");
+    }
+
+    /// A remove during a war chats the cannot-leave line even for a bogus PID.
+    #[test]
+    fn a_remove_during_a_war_chats_the_line_for_a_bogus_pid() {
+        let (_clock, mut world, _master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let _ = world.guild_war(Vid::new(MASTER_VID), b"Wolves", NOW);
+        let _ = world.guild_war(Vid::new(200), b"Knights", NOW);
+        let answer = world.answer_guild_remove(Vid::new(MASTER_VID), 4242, NOW);
+        let GuildRemoveAnswer::Refused { line } = answer else {
+            panic!("a war-time remove refuses");
+        };
+        let line = line.expect("the line chats");
+        assert!(
+            line.windows(17)
+                .any(|window| window == b"You cannot leave "),
+            "the cannot-leave line chats: {line:?}"
+        );
+        drop(rival);
+    }
+
+    /// A relog mid-war hears the WAR record plus the score pair.
+    #[test]
+    fn a_relog_mid_war_hears_the_war_and_its_scores() {
+        let (_clock, mut world, mut master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let _ = world.guild_war(Vid::new(MASTER_VID), b"Wolves", NOW);
+        let _ = world.guild_war(Vid::new(200), b"Knights", NOW);
+        world.guild_war_kill(Vid::new(200), Vid::new(MASTER_VID));
+        world.unlink_guild(Vid::new(MASTER_VID));
+        let _ = heard(&mut master);
+        world.link_guild(Vid::new(MASTER_VID));
+        let held = heard(&mut master);
+        let subs = subheaders(&held);
+        assert!(
+            subs.contains(&protocol::gc_guild::GUILD_SUBHEADER_GC_WAR),
+            "the WAR record replays: {subs:?}"
+        );
+        let mut scores = 0;
+        for sub in &subs {
+            if *sub == protocol::gc_guild::GUILD_SUBHEADER_GC_WAR_SCORE {
+                scores += 1;
+            }
+        }
+        assert_eq!(scores, 2, "the score pair replays: {subs:?}");
+        drop(rival);
+    }
+
+    /// A sent declare re-declared chats `[LS;780]` to the master, through the
+    /// forwarded path (`RequestDeclareWar`'s `SEND_DECLARE` arm).
+    #[test]
+    fn a_second_declare_chats_the_master() {
+        let (_clock, mut world, mut master, mut guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let first = world.guild_war(Vid::new(MASTER_VID), b"Wolves", NOW);
+        assert!(first.notice.is_some(), "the first declare lands");
+        let _ = heard(&mut master);
+        let _ = heard(&mut guest);
+        // The re-declare must pass the judge's `SEND_DECLARE` return to reach the
+        // forwarded arm — so it goes straight to the request, as the DB forward
+        // would carry it.
+        let answer = world.request_declare_war(GUILD_ID, SECOND_ID, GUILD_WAR_TYPE_FIELD, NOW);
+        assert_eq!(answer.notice, None);
+        let held = heard(&mut master);
+        assert!(
+            first_chat(&held)
+                .windows(8)
+                .any(|window| window == b"[LS;780]"),
+            "the master hears [LS;780]: {held:?}"
+        );
+        drop(rival);
+    }
+
+    /// A `/nowar` against a received declare refuses the pair: the declarer's master
+    /// hears `[LS;476]` naming the refuser, and both ends fan WAR END.
+    #[test]
+    fn a_nowar_refuses_the_pair() {
+        let (_clock, mut world, mut master, mut guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let mut rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let first = world.guild_war(Vid::new(MASTER_VID), b"Wolves", NOW);
+        assert!(first.notice.is_some(), "the declare lands");
+        let _ = heard(&mut master);
+        let _ = heard(&mut guest);
+        let _ = heard(&mut rival);
+        world.guild_nowar(Vid::new(200), b"Knights");
+        assert_eq!(world.guild_war_state(GUILD_ID, SECOND_ID), GUILD_WAR_NONE);
+        assert_eq!(world.guild_war_state(SECOND_ID, GUILD_ID), GUILD_WAR_NONE);
+        let held = heard(&mut master);
+        assert!(
+            first_chat(&held)
+                .windows(15)
+                .any(|window| window == b"[LS;476;Wolves]"),
+            "the declarer hears who refused: {held:?}"
+        );
+        let end = held
+            .iter()
+            .find(|record| record[0] == protocol::gc_guild::HEADER_GC_GUILD)
+            .expect("the END fan");
+        assert_eq!(end[13], GUILD_WAR_END, "bWarState");
+        let refused = heard(&mut rival);
+        assert!(
+            refused
+                .iter()
+                .filter(|record| record[0] == protocol::gc_guild::HEADER_GC_GUILD)
+                .any(|record| record[13] == GUILD_WAR_END),
+            "the refuser's END fans too: {refused:?}"
+        );
+    }
+
+    /// A `/nowar` with no received declare stands quiet: a sent declare is not a
+    /// refuse (`RequestRefuseWar`'s state gate).
+    #[test]
+    fn a_nowar_without_a_received_declare_is_quiet() {
+        let (_clock, mut world, mut master, mut guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let first = world.guild_war(Vid::new(MASTER_VID), b"Wolves", NOW);
+        assert!(first.notice.is_some(), "the declare lands");
+        let _ = heard(&mut master);
+        let _ = heard(&mut guest);
+        // The declarer refuses its own sent declare: nothing holds, nothing fans.
+        world.guild_nowar(Vid::new(MASTER_VID), b"Wolves");
+        assert_eq!(
+            world.guild_war_state(GUILD_ID, SECOND_ID),
+            GUILD_WAR_SEND_DECLARE
+        );
+        assert_eq!(heard(&mut master), Vec::<Vec<u8>>::new(), "no line, no fan");
+        drop(rival);
+    }
+
+    /// `/war`'s type word parses as `strtoul` does: garbage is field, a past-max
+    /// number folds to field, and a `-` word refuses quiet after the fold.
+    #[test]
+    fn the_war_type_word_parses_as_strtoul() {
+        assert_eq!(parse_war_type(b""), 0);
+        assert_eq!(parse_war_type(b"garbage"), 0);
+        assert_eq!(parse_war_type(b"1"), 1);
+        assert_eq!(parse_war_type(b"1x"), 1);
+        assert_eq!(parse_war_type(b" 2"), 2);
+        assert_eq!(parse_war_type(b"+2"), 2);
+        assert_eq!(parse_war_type(b"299"), 299);
+        assert_eq!(parse_war_type_or_field(b""), GUILD_WAR_TYPE_FIELD);
+        assert_eq!(parse_war_type_or_field(b"garbage"), GUILD_WAR_TYPE_FIELD);
+        assert_eq!(parse_war_type_or_field(b"2"), 2);
+        assert_eq!(parse_war_type_or_field(b"3"), GUILD_WAR_TYPE_FIELD);
+        assert_eq!(parse_war_type_or_field(b"299"), GUILD_WAR_TYPE_FIELD);
+        assert_eq!(parse_war_long(b"1"), 0);
+        assert_eq!(parse_war_long(b"-1"), -1);
+        assert_eq!(parse_war_long(b"-0"), 0);
+        assert_eq!(parse_war_long(b"garbage"), 0);
+    }
+
+    /// The judge's gates in order: the guildless quiet, the empty-name quiet, the
+    /// non-master error, the unknown-name error, and the unknown-name `[LS;535]` on
+    /// the `/nowar` side.
+    #[test]
+    fn the_war_gates_judge_in_order() {
+        let (_clock, mut world, mut master, mut guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let _ = heard(&mut master);
+        let _ = heard(&mut guest);
+        // The guest holds no guild: quiet.
+        let answer = world.guild_war(Vid::new(GUEST_VID), b"Wolves", NOW);
+        assert_eq!(answer.notice, None);
+        assert_eq!(heard(&mut guest), Vec::<Vec<u8>>::new());
+        // The empty name: quiet.
+        let answer = world.guild_war(Vid::new(MASTER_VID), b"", NOW);
+        assert_eq!(answer.notice, None);
+        assert_eq!(heard(&mut master), Vec::<Vec<u8>>::new());
+        // A non-master member (the war pair's grade-2 row at 102, entered): the
+        // error.
+        let mut follower = enter(&mut world, MASTER_VID + 2, EAST, 0);
+        world.link_guild(Vid::new(MASTER_VID + 2));
+        let _ = heard(&mut follower);
+        let answer = world.guild_war(Vid::new(MASTER_VID + 2), b"Wolves", NOW);
+        assert_eq!(answer.notice, None);
+        assert!(
+            first_chat(&heard(&mut follower))
+                .windows(7)
+                .any(|window| window == b"1116030"),
+            "the non-master hears its error"
+        );
+        // The unknown name: the error.
+        let answer = world.guild_war(Vid::new(MASTER_VID), b"Nobody", NOW);
+        assert_eq!(answer.notice, None);
+        assert!(
+            first_chat(&heard(&mut master))
+                .windows(7)
+                .any(|window| window == b"1117030"),
+            "the unknown name hears its error"
+        );
+        // The `/nowar` unknown name: `[LS;535]`.
+        world.guild_nowar(Vid::new(MASTER_VID), b"Nobody");
+        assert!(
+            first_chat(&heard(&mut master))
+                .windows(8)
+                .any(|window| window == b"[LS;535]"),
+            "the nowar unknown name hears [LS;535]"
+        );
+        drop(rival);
+    }
+    /// Start a war between the fixture pair: declare then accept, both landed.
+    fn start_war_pair(world: &mut GameState) {
+        let first = world.guild_war(Vid::new(MASTER_VID), b"Wolves", NOW);
+        assert!(first.notice.is_some(), "the declare lands");
+        let accept = world.guild_war(Vid::new(200), b"Knights", NOW);
+        assert!(accept.notice.is_some(), "the accept starts the war");
+    }
+
+    /// The ended war's bytes: both END fans, the over notice, and the `END_LIST` — and
+    /// the pair leaves the war set with the end-time stamped.
+    #[test]
+    fn a_win_ends_with_notice_fans_and_end_list() {
+        let (_clock, mut world, mut master, mut guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        start_war_pair(&mut world);
+        // The kill scores the winner: level 10 pays 10.
+        world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
+        let _ = heard(&mut master);
+        let _ = heard(&mut guest);
+        let outcome = world
+            .manager_end_war(GUILD_ID, SECOND_ID, false, true, NOW)
+            .expect("a live war ends");
+        assert_eq!(outcome.lo.wins, 1, "the winner tallies a win");
+        assert_eq!(outcome.hi.losses, 1, "the loser tallies a loss");
+        assert_eq!(outcome.lo.ladder, 1050, "5% of the loser's 1000");
+        assert_eq!(outcome.hi.ladder, 930, "7% off the loser's 1000");
+        assert!(
+            !world.guilds.wars.contains(&(GUILD_ID, SECOND_ID)),
+            "the pair leaves the war set"
+        );
+        assert_eq!(
+            world.guilds.war_end_times.get(&(GUILD_ID, SECOND_ID)),
+            Some(&NOW),
+            "the end-time stamps"
+        );
+        let held = heard(&mut master);
+        assert!(
+            held.iter().any(
+                |record| record[0] == protocol::gc_inventory::HEADER_GC_CHAT.value()
+                    && record[protocol::gc_chat::GC_CHAT_WIRE_SIZE..]
+                        .windows(7)
+                        .any(|window| window == b"[LS;480")
+            ),
+            "the winner hears the over notice: {held:?}"
+        );
+        assert!(
+            held.iter().any(|record| record.len() == 12
+                && record[3] == protocol::gc_guild::GUILD_SUBHEADER_GC_WAR_END_LIST
+                && record[4..8] == GUILD_ID.to_le_bytes()
+                && record[8..12] == SECOND_ID.to_le_bytes()),
+            "the END_LIST names lo then hi: {held:?}"
+        );
+        let war = held
+            .iter()
+            .find(|record| {
+                record[3] == protocol::gc_guild::GUILD_SUBHEADER_GC_WAR && record.len() > 13
+            })
+            .expect("an END fan");
+        assert_eq!(war[13], GUILD_WAR_END, "the fan's state ends");
+        drop(rival);
+    }
+
+    /// A forced draw tallies both draws and rewrites both ladders unchanged.
+    #[test]
+    fn a_forced_draw_tallies_draws_and_keeps_ladder() {
+        let (_clock, mut world, _master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        start_war_pair(&mut world);
+        world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
+        let outcome = world
+            .manager_end_war(GUILD_ID, SECOND_ID, true, true, NOW)
+            .expect("a live war ends");
+        assert_eq!((outcome.lo.draws, outcome.hi.draws), (1, 1));
+        assert_eq!((outcome.lo.ladder, outcome.hi.ladder), (1000, 1000));
+        assert_eq!((outcome.lo.wins, outcome.hi.losses), (0, 0));
+        drop(rival);
+    }
+
+    /// A forced draw turns the ladder math into a draw, but the over notice still
+    /// follows the scores: the force flag is the DB's, and it never reaches the game
+    /// side's `EndWar` (`G/guild_manager.cpp:697-703`).
+    #[test]
+    fn a_forced_draw_still_names_the_winner_when_the_scores_differ() {
+        let (_clock, mut world, mut master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        start_war_pair(&mut world);
+        // The master's kill scores the master's guild: 10 against 0.
+        world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
+        let _ = heard(&mut master);
+        let outcome = world
+            .manager_end_war(GUILD_ID, SECOND_ID, true, true, NOW)
+            .expect("a live war ends");
+        assert_eq!(
+            (outcome.lo.draws, outcome.hi.draws),
+            (1, 1),
+            "the math draws"
+        );
+        let held = heard(&mut master);
+        let notice = first_chat(&held);
+        assert!(
+            notice
+                .windows(23)
+                .any(|window| window == b"[LS;480;Knights;Wolves]"),
+            "the notice names the winner first: {notice:?}"
+        );
+        assert!(
+            !notice.windows(7).any(|window| window == b"[LS;479"),
+            "the notice is not a draw: {notice:?}"
+        );
+        drop(rival);
+    }
+
+    /// The half-win rule: a pair that ended within 12 hours halves the next gain.
+    #[test]
+    fn a_recent_end_halves_the_next_gain() {
+        let (_clock, mut world, _master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        start_war_pair(&mut world);
+        world
+            .manager_end_war(GUILD_ID, SECOND_ID, true, true, NOW)
+            .expect("the first war ends");
+        start_war_pair(&mut world);
+        world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
+        let outcome = world
+            .manager_end_war(GUILD_ID, SECOND_ID, false, true, NOW + 100)
+            .expect("the second war ends");
+        assert_eq!(outcome.lo.ladder, 1025, "the 50 gain halves to 25");
+        assert_eq!(outcome.hi.ladder, 930, "the loss never halves");
+        drop(rival);
+    }
+
+    /// The ladder math floors at 0: a broke loser pays nothing and keeps 0.
+    #[test]
+    fn the_ladder_math_floors_at_zero() {
+        let (_clock, mut world, _master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        world
+            .guilds
+            .by_id
+            .get_mut(&SECOND_ID)
+            .expect("installed")
+            .ladder_point = 10;
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        start_war_pair(&mut world);
+        world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
+        // 10 * 0.05 truncates to 0, 10 * 0.07 truncates to 0.
+        let outcome = world
+            .manager_end_war(GUILD_ID, SECOND_ID, false, true, NOW)
+            .expect("a live war ends");
+        assert_eq!((outcome.lo.ladder, outcome.hi.ladder), (1000, 10));
+        world
+            .guilds
+            .by_id
+            .get_mut(&SECOND_ID)
+            .expect("installed")
+            .ladder_point = 19;
+        start_war_pair(&mut world);
+        world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
+        // 19 * 0.05 truncates to 0, 19 * 0.07 truncates to 1.
+        let outcome = world
+            .manager_end_war(GUILD_ID, SECOND_ID, false, true, NOW + 50_000)
+            .expect("a live war ends");
+        assert_eq!(outcome.lo.ladder, 1000, "no gain on 19");
+        assert_eq!(outcome.hi.ladder, 18, "one off on 19");
+        drop(rival);
+    }
+
+    /// `gwstop` echoes the sorted pair to the speaker and ends in a forced draw.
+    #[test]
+    fn gwstop_echoes_and_forces_a_draw() {
+        let (_clock, mut world, mut master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        start_war_pair(&mut world);
+        world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
+        let _ = heard(&mut master);
+        let outcome = world
+            .guild_war_stop(Vid::new(MASTER_VID), b"9 7", NOW)
+            .expect("a live war ends");
+        assert_eq!((outcome.lo.draws, outcome.hi.draws), (1, 1), "forced draw");
+        let held = heard(&mut master);
+        let echo = held
+            .iter()
+            .find(|record| {
+                record[0] == protocol::gc_inventory::HEADER_GC_CHAT.value()
+                    && record[3] == protocol::gc_chat::CHAT_TYPE_TALKING
+            })
+            .expect("the speaker hears its echo");
+        assert!(
+            echo[protocol::gc_chat::GC_CHAT_WIRE_SIZE..]
+                .windows(3)
+                .any(|window| window == b"7 9"),
+            "the echo sorts the pair: {echo:?}"
+        );
+        // A zero id is quiet past nothing: no echo, no end.
+        let _ = heard(&mut master);
+        assert!(world
+            .guild_war_stop(Vid::new(MASTER_VID), b"0 9", NOW)
+            .is_none());
+        assert!(heard(&mut master).is_empty(), "a zero id stays quiet");
+        drop(rival);
+    }
+
+    /// `gwcancel` skips the math but still stamps, fans, and chats both masters.
+    #[test]
+    fn gwcancel_skips_the_math_and_chats_the_masters() {
+        let (_clock, mut world, mut master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        start_war_pair(&mut world);
+        world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
+        let _ = heard(&mut master);
+        assert!(world.guild_war_cancel(b"7 9", NOW));
+        let knights = world.guilds.by_id.get(&GUILD_ID).expect("installed");
+        assert_eq!(
+            (knights.war_wins, knights.war_draws, knights.war_losses),
+            (0, 0, 0),
+            "no tallies on a cancel"
+        );
+        assert_eq!(knights.ladder_point, 1000, "no ladder move on a cancel");
+        assert!(
+            world
+                .guilds
+                .war_end_times
+                .contains_key(&(GUILD_ID, SECOND_ID)),
+            "the cancel still stamps the end-time map"
+        );
+        let held = heard(&mut master);
+        assert!(
+            held.iter().any(
+                |record| record[0] == protocol::gc_inventory::HEADER_GC_CHAT.value()
+                    && record[protocol::gc_chat::GC_CHAT_WIRE_SIZE..]
+                        .windows(8)
+                        .any(|window| window == b"[LS;482]")
+            ),
+            "the master hears [LS;482]: {held:?}"
+        );
+        assert!(
+            held.iter().any(|record| record.len() == 12
+                && record[3] == protocol::gc_guild::GUILD_SUBHEADER_GC_WAR_END_LIST),
+            "the END_LIST still fans: {held:?}"
+        );
+        // A non-war cancels quiet: no end, no chat.
+        let _ = heard(&mut master);
+        assert!(!world.guild_war_cancel(b"7 9", NOW));
+        assert!(heard(&mut master).is_empty(), "a non-war stays quiet");
+        drop(rival);
+    }
+
+    /// `gwcancel` ends with both names to every PC (`CancelWar`'s last act,
+    /// `G/guild_manager.cpp:763-768`), after the two masters' `[LS;482]`.
+    #[test]
+    fn gwcancel_names_the_pair_to_every_pc() {
+        let (_clock, mut world, mut master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        start_war_pair(&mut world);
+        let _ = heard(&mut master);
+        assert!(world.guild_war_cancel(b"7 9", NOW));
+        let held = heard(&mut master);
+        assert!(
+            held.iter().any(
+                |record| record[0] == protocol::gc_inventory::HEADER_GC_CHAT.value()
+                    && record[protocol::gc_chat::GC_CHAT_WIRE_SIZE..]
+                        .windows(23)
+                        .any(|window| window == b"[LS;483;Knights;Wolves]")
+            ),
+            "every PC hears the pair: {held:?}"
+        );
+        drop(rival);
+    }
+
+    /// The tick ends a war whose 30 minutes passed and queues its rows.
+    #[test]
+    fn the_tick_ends_an_expired_war() {
+        let (_clock, mut world, _master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        start_war_pair(&mut world);
+        // Backdate the start past the duration: the wall clock is `quest_now`.
+        let start = super::super::quests::quest_now().saturating_sub(GUILD_WAR_DURATION + 1);
+        for id in [GUILD_ID, SECOND_ID] {
+            let opp = if id == GUILD_ID { SECOND_ID } else { GUILD_ID };
+            world
+                .guilds
+                .by_id
+                .get_mut(&id)
+                .expect("installed")
+                .enemies
+                .get_mut(&opp)
+                .expect("on-war")
+                .war_start_time = start;
+        }
+        world.run_guild_ticks(world.last_pulse());
+        assert!(
+            !world.guilds.wars.contains(&(GUILD_ID, SECOND_ID)),
+            "the expired war leaves the set"
+        );
+        let queued = world.take_war_ends();
+        assert_eq!(queued.len(), 1, "the tick queues one outcome");
+        assert_eq!(queued[0].lo.draws, 1, "equal scores draw");
+        assert!(
+            world.take_war_ends().is_empty(),
+            "the drain empties the queue"
+        );
+        drop(rival);
+    }
+
+    /// The end strips the war-casts and the bad affects from every online member, but
+    /// only when the guild holds no more war.
+    #[test]
+    fn the_end_strips_the_war_casts_and_bad_affects() {
+        let (_clock, mut world, mut master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        start_war_pair(&mut world);
+        // The guild's war-casts on the master, and a poison beside them.
+        for kind in [152, 153, 154, 155, 156, 157] {
+            world.add_pc_affect(
+                Vid::new(MASTER_VID),
+                super::super::affect::Affect::buff(kind, 0, 10, 0, 100, 0),
+                false,
+            );
+        }
+        world.add_pc_affect(
+            Vid::new(MASTER_VID),
+            super::super::affect::Affect::buff(crate::loading_phase::AFFECT_STUN, 0, 0, 0, 100, 0),
+            false,
+        );
+        assert!(
+            world
+                .affect_events
+                .get(&Vid::new(MASTER_VID))
+                .is_some_and(|event| event.affects.len() == 7),
+            "the master holds the war-casts and the stun"
+        );
+        let _ = heard(&mut master);
+        let outcome = world
+            .manager_end_war(GUILD_ID, SECOND_ID, true, true, NOW)
+            .expect("a live war ends");
+        assert_eq!(outcome.lo.draws, 1);
+        let left = world
+            .affect_events
+            .get(&Vid::new(MASTER_VID))
+            .map_or(0, |event| event.affects.len());
+        assert_eq!(left, 0, "the strip took every affect");
+        let held = heard(&mut master);
+        assert!(
+            held.iter().any(|record| {
+                record[0] == protocol::gc_inventory::HEADER_GC_AFFECT_REMOVE.value()
+            }),
+            "the strip sent its remove records: {held:?}"
+        );
+        drop(rival);
     }
 }

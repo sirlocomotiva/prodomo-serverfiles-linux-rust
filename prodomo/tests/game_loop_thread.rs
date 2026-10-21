@@ -622,6 +622,16 @@ async fn a_client_admitted_from_tokio_lands_on_the_thread_that_owns_the_world() 
         written,
         "the world must be able to reach an admitted client"
     );
+    // The admission queued one record of its own: the WAR_LIST envelope every
+    // entrant hears (`SendGuildWar`, `G/guild_manager.cpp:803-823`, called from
+    // `Entergame`, `G/input_login.cpp:674`), empty with no live wars.
+    assert_eq!(
+        inbox
+            .try_recv()
+            .expect("the entry WAR_LIST reached the descriptor's queue"),
+        protocol::gc_guild::guild_war_list_record(&[]),
+        "the entry record is the empty WAR_LIST"
+    );
     assert_eq!(
         inbox
             .try_recv()

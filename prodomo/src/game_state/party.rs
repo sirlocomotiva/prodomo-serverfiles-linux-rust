@@ -36,6 +36,8 @@ use world::character::number;
 const PARTY_MAX_MEMBER: usize = 8;
 /// The invite's 10 s wait (`G/char.cpp:5896`): 250 Pulses.
 const INVITE_WAIT_PULSES: u64 = 250;
+/// The request's 10 s wait (`G/char.cpp:5710`): 250 Pulses.
+const REQUEST_WAIT_PULSES: u64 = 250;
 /// The Update's 3 s tick (`G/party.cpp:545`): 75 Pulses.
 const UPDATE_EVERY_PULSES: u64 = 75;
 /// The joinable level window (`G/char.cpp:6041`): 30.
@@ -136,7 +138,7 @@ struct Party {
 }
 
 /// `CPartyManager` (`G/party.h:37-75`) narrowed to PCs: parties by leader PID, the
-/// PID→leader index, and the pending invites.
+/// PID→leader index, the pending invites, and each guest's pending request.
 #[derive(Debug, Default)]
 pub(super) struct Parties {
     /// The live parties, by leader PID.
@@ -147,6 +149,10 @@ pub(super) struct Parties {
     /// Legacy holds one event map per inviter (`m_PartyInviteEventMap`); one map keyed
     /// by both PIDs answers the same questions.
     invites: HashMap<(CharacterId, CharacterId), u64>,
+    /// The pending join requests: guest PID → the requested leader's PID and the Pulse
+    /// the request lapses on. Legacy holds the one event on the guest
+    /// (`m_pkPartyRequestEvent`), so a guest can have one outgoing request at a time.
+    requests: HashMap<CharacterId, (CharacterId, u64)>,
 }
 
 /// `CHARACTER::PartyJoinErrCode` (`G/char.h:1106-1118`), without the separator and max.
@@ -458,6 +464,9 @@ impl GameState {
             return;
         };
         let pid = character.player_id();
+        // `m_pkPartyRequestEvent` is the character's, so logging out cancels its outgoing
+        // request. A party it was a member of survives as legacy's does.
+        self.parties.requests.remove(&pid);
         let Some(leader) = self.party_leader_of(pid) else {
             return;
         };
@@ -1199,6 +1208,191 @@ impl GameState {
         );
     }
 
+    /// `do_party_request` (`G/cmd_general.cpp:2428-2455`) over
+    /// `CHARACTER::RequestToParty` (`G/char.cpp:5656-5732`): the arena and PC-party-full
+    /// gates, the missing or garbage VID word, the request's own gates, the 250-Pulse
+    /// event on the guest, and the `PartyRequest <guest VID>` command to the leader.
+    pub(super) fn party_request(&mut self, guest: Vid, rest: &[u8]) {
+        let Some(guest_pid) = self.pid_of(guest) else {
+            return;
+        };
+        // `ch->GetArena()`: no arenas, so the gate passes.
+        if self.party_leader_of(guest_pid).is_some() {
+            self.info_to(guest, b"[LS;549]", &[]);
+            return;
+        }
+        let (arg, _) = crate::command::one_argument(rest);
+        if arg.is_empty() {
+            return;
+        }
+        // `CHARACTER_MANAGER::Find`: the manager holds online PCs only, so a VID that
+        // names no online player — including a mob — stays quiet. Legacy would find a
+        // mob and deny it.
+        let target = Vid::new(parse_vid(&arg));
+        if self.characters.find_by_vid(target).is_err() {
+            return;
+        }
+        if !self.request_to_party(guest_pid, guest, target) {
+            self.command_to(guest, b"PartyRequestDenied", &[]);
+        }
+    }
+
+    /// `CHARACTER::RequestToParty` (`G/char.cpp:5656-5732`): the leader retarget, the
+    /// one-request gate, the joinable lines, the event insert, the INVITE to the leader
+    /// and the `[LS;829;%s]` line to the guest. `false` makes the caller send
+    /// `PartyRequestDenied`.
+    fn request_to_party(&mut self, guest_pid: CharacterId, guest: Vid, target: Vid) -> bool {
+        let Some(mut leader_pid) = self.pid_of(target) else {
+            return false;
+        };
+        if let Some(held) = self.party_leader_of(leader_pid) {
+            leader_pid = held;
+        }
+        let Some(leader) = self.vid_of_pid(leader_pid) else {
+            self.info_to(guest, b"[LS;820]", &[]);
+            return false;
+        };
+        if self.parties.requests.contains_key(&guest_pid) {
+            return false;
+        }
+        // Both are PCs, and `BLOCK_PARTY_REQUEST` is unported (nobody blocks).
+        match self.joinable(leader_pid, guest_pid) {
+            JoinErr::None => {}
+            JoinErr::Server => {
+                self.info_to(guest, b"[LS;530]", &[]);
+                return false;
+            }
+            JoinErr::DiffEmpire => {
+                self.info_to(guest, b"[LS;821]", &[]);
+                return false;
+            }
+            JoinErr::LevelBoundary => {
+                self.info_to(guest, b"[LS;824]", &[]);
+                return false;
+            }
+            JoinErr::AlreadyJoin => {
+                return false;
+            }
+            JoinErr::Full => {
+                self.info_to(guest, b"[LS;828]", &[]);
+                return false;
+            }
+        }
+        let due = self.last_pulse.saturating_add(REQUEST_WAIT_PULSES);
+        self.parties.requests.insert(guest_pid, (leader_pid, due));
+        self.command_to(
+            leader,
+            b"PartyRequest %u",
+            &[crate::chat_line::Arg::Int(i64::from(guest.raw()))],
+        );
+        self.info_to(
+            guest,
+            b"[LS;829;%s]",
+            &[crate::chat_line::Arg::Text(&self.name_arg(leader_pid))],
+        );
+        true
+    }
+
+    /// `do_party_request_accept` (`G/cmd_general.cpp:2457-2472`) over
+    /// `CHARACTER::AcceptToParty` (`G/char.cpp:5761-5812`): the caller (the leader) is
+    /// named by its descriptor, and the command's VID word names the guest.
+    pub(super) fn party_request_accept(&mut self, leader: Vid, rest: &[u8]) {
+        let Some(leader_pid) = self.pid_of(leader) else {
+            return;
+        };
+        let (arg, _) = crate::command::one_argument(rest);
+        if arg.is_empty() {
+            return;
+        }
+        let member = Vid::new(parse_vid(&arg));
+        let Some(member_pid) = self.pid_of(member) else {
+            return;
+        };
+        self.accept_to_party(leader_pid, leader, member_pid, member);
+    }
+
+    /// `CHARACTER::AcceptToParty` (`G/char.cpp:5761-5812`): the guest's request must name
+    /// this leader, and the event cancels before every later gate (a non-leader's accept
+    /// still consumes it). No party chats `[LS;830]`; a non-leader stays quiet; the
+    /// joinable lines, then `PartyJoin`, or `PartyRequestDenied`.
+    fn accept_to_party(
+        &mut self,
+        leader_pid: CharacterId,
+        leader: Vid,
+        member_pid: CharacterId,
+        member: Vid,
+    ) {
+        let Some((request_leader, _due)) = self.parties.requests.get(&member_pid).copied() else {
+            return;
+        };
+        if request_leader != leader_pid {
+            return;
+        }
+        self.parties.requests.remove(&member_pid);
+        if self.party_leader_of(leader_pid).is_none() {
+            self.info_to(member, b"[LS;830]", &[]);
+            self.command_to(member, b"PartyRequestDenied", &[]);
+            return;
+        }
+        if self.party_leader_of(leader_pid) != Some(leader_pid) {
+            return;
+        }
+        match self.joinable(leader_pid, member_pid) {
+            JoinErr::None => {
+                self.character_party_join(leader, member);
+                return;
+            }
+            JoinErr::Server => self.info_to(member, b"[LS;530]", &[]),
+            JoinErr::LevelBoundary => self.info_to(member, b"[LS;824]", &[]),
+            // Legacy's switch has no `PERR_DIFFEMPIRE` arm: the default logs and falls
+            // through to the denial, with no info line.
+            JoinErr::AlreadyJoin | JoinErr::DiffEmpire => {}
+            JoinErr::Full => {
+                self.info_to(leader, b"[LS;828]", &[]);
+                self.info_to(member, b"[LS;831]", &[]);
+            }
+        }
+        self.command_to(member, b"PartyRequestDenied", &[]);
+    }
+
+    /// `do_party_request_deny` (`G/cmd_general.cpp:2475-2487`) over
+    /// `CHARACTER::DenyToParty` (`G/char.cpp:5738-5759`): the request must name this
+    /// leader, then it cancels and the guest hears `PartyRequestDenied`.
+    pub(super) fn party_request_deny(&mut self, leader: Vid, rest: &[u8]) {
+        let Some(leader_pid) = self.pid_of(leader) else {
+            return;
+        };
+        let (arg, _) = crate::command::one_argument(rest);
+        if arg.is_empty() {
+            return;
+        }
+        let member = Vid::new(parse_vid(&arg));
+        let Some(member_pid) = self.pid_of(member) else {
+            return;
+        };
+        let Some((request_leader, _due)) = self.parties.requests.get(&member_pid).copied() else {
+            return;
+        };
+        if request_leader != leader_pid {
+            return;
+        }
+        self.parties.requests.remove(&member_pid);
+        self.command_to(member, b"PartyRequestDenied", &[]);
+    }
+
+    /// `ChatPacket(CHAT_TYPE_COMMAND, format, args...)` to the player under `vid`.
+    fn command_to(&self, vid: Vid, format: &[u8], args: &[crate::chat_line::Arg<'_>]) {
+        if let Some(mover) = self.own_mover(vid) {
+            self.tell(
+                vid,
+                mover,
+                protocol::gc_chat::CHAT_TYPE_COMMAND,
+                format,
+                args,
+            );
+        }
+    }
+
     /// `CHARACTER::PartyJoin` (`G/char.cpp:6014-6021`): the two `[LS;839;%s]` lines,
     /// then the guest joins and links the inviter's live party.
     fn character_party_join(&mut self, inviter: Vid, guest: Vid) {
@@ -1355,10 +1549,11 @@ impl GameState {
         self.parties.by_leader.remove(&leader);
     }
 
-    /// The 3 s Update tick plus the invite-timeout tick, called from `process_pulse`:
-    /// every party whose `update_due` has come recomputes its near flags and waits
-    /// another 75 Pulses; every invite whose due has come denies silently through
-    /// `PartyInviteDeny` (so the inviter still hears `[LS;838;%s]`).
+    /// The 3 s Update tick plus the invite- and request-timeout ticks, called from
+    /// `process_pulse`: every party whose `update_due` has come recomputes its near
+    /// flags and waits another 75 Pulses; every invite whose due has come denies
+    /// silently through `PartyInviteDeny` (so the inviter still hears `[LS;838;%s]`);
+    /// every request whose due has come tells the guest `PartyRequestDenied`.
     pub(super) fn run_party_ticks(&mut self, pulse: u64) {
         let due_parties: Vec<CharacterId> = self
             .parties
@@ -1386,6 +1581,19 @@ impl GameState {
                 continue;
             };
             self.party_invite_deny(leader_vid, guest_vid);
+        }
+        let expired_requests: Vec<CharacterId> = self
+            .parties
+            .requests
+            .iter()
+            .filter_map(|(guest, (_, due))| (*due <= pulse).then_some(*guest))
+            .collect();
+        for guest in expired_requests {
+            if self.parties.requests.remove(&guest).is_some() {
+                if let Some(guest_vid) = self.vid_of_pid(guest) {
+                    self.command_to(guest_vid, b"PartyRequestDenied", &[]);
+                }
+            }
         }
     }
 }
@@ -1834,6 +2042,37 @@ impl GameState {
     }
 }
 
+/// A party command's VID word as legacy's `str_to_number (unsigned int&, const char *)`
+/// reads it (`common/utils.h:52-58`): an empty word never reaches here (the caller guards,
+/// because `str_to_number` would leave the 0), else `strtoul` base 10 cast to `u32`.
+/// Leading spaces skip, an optional `+`/`-` takes (a `-` negates into the unsigned wrap),
+/// digits read until the first non-digit, garbage answers 0, and the running answer wraps
+/// as the C multiply does. The parse is the same one `parse_war_type` uses for `/war`; it
+/// is repeated here so a party line's meaning does not depend on a guild module.
+fn parse_vid(word: &[u8]) -> u32 {
+    let Some(offset) = word.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return 0;
+    };
+    let rest = &word[offset..];
+    let (digits, negative) = match rest.first() {
+        Some(b'-') => (&rest[1..], true),
+        Some(b'+') => (&rest[1..], false),
+        _ => (rest, false),
+    };
+    let mut value: u32 = 0;
+    for byte in digits {
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        value = value.wrapping_mul(10).wrapping_add(u32::from(byte - b'0'));
+    }
+    if negative {
+        value.wrapping_neg()
+    } else {
+        value
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -1952,6 +2191,138 @@ mod tests {
         assert!(leader_headers.contains(&protocol::gc_inventory::HEADER_GC_CHAT.value()));
         heard(&mut guest);
         world.party_invite_answer(Vid::new(GUEST_VID), Vid::new(LEADER_VID), 1);
+        assert!(heard(&mut guest).is_empty());
+        assert!(world.party_leader_of(GUEST_VID).is_none());
+    }
+
+    /// The one chat line in `records`, decoded. Legacy sends one server line per step here.
+    fn one_line(records: &[Vec<u8>]) -> protocol::gc_chat::GcChat {
+        let mut lines = records
+            .iter()
+            .filter(|record| record[0] == protocol::gc_inventory::HEADER_GC_CHAT.value());
+        let line = lines.next().expect("a chat line");
+        assert!(lines.next().is_none(), "one chat line");
+        protocol::gc_chat::GcChat::decode(line).expect("the chat line decodes")
+    }
+
+    #[test]
+    fn a_request_names_the_leader_and_accept_joins_the_guest() {
+        use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO};
+        let (_clock, mut world, mut leader, mut member) = a_pair();
+        let mut requester = enter(&mut world, THIRD_VID, EAST, 0);
+        heard(&mut leader);
+        heard(&mut member);
+        heard(&mut requester);
+        // The leader forms a party with the second player; the third is partyless.
+        world.party_invite(Vid::new(LEADER_VID), Vid::new(GUEST_VID));
+        world.party_invite_answer(Vid::new(GUEST_VID), Vid::new(LEADER_VID), 1);
+        heard(&mut leader);
+        heard(&mut member);
+        heard(&mut requester);
+
+        world.party_request(Vid::new(THIRD_VID), b"100");
+        let told = one_line(&heard(&mut leader));
+        assert_eq!(told.chat_type, CHAT_TYPE_COMMAND);
+        assert_eq!(told.text, b"PartyRequest 102");
+        let asked = one_line(&heard(&mut requester));
+        assert_eq!(asked.chat_type, CHAT_TYPE_INFO);
+        assert_eq!(asked.text, b"[LS;829;P100]");
+        assert!(heard(&mut member).is_empty(), "an outsider hears nothing");
+
+        world.party_request_accept(Vid::new(LEADER_VID), b"102");
+        let guest_heard = heard(&mut requester);
+        assert_eq!(one_line(&guest_heard).text, b"[LS;839;P100]");
+        let leader_heard = heard(&mut leader);
+        assert_eq!(one_line(&leader_heard).text, b"[LS;839;P102]");
+        assert_eq!(world.party_leader_of(THIRD_VID), Some(LEADER_VID));
+        assert!(
+            !heard(&mut member).is_empty(),
+            "the member sees the join walk"
+        );
+    }
+
+    #[test]
+    fn a_second_request_waits_then_deny_tells_the_guest() {
+        use protocol::gc_chat::CHAT_TYPE_COMMAND;
+        let (_clock, mut world, mut leader, mut member) = a_pair();
+        let mut requester = enter(&mut world, THIRD_VID, EAST, 0);
+        world.party_invite(Vid::new(LEADER_VID), Vid::new(GUEST_VID));
+        world.party_invite_answer(Vid::new(GUEST_VID), Vid::new(LEADER_VID), 1);
+        heard(&mut leader);
+        heard(&mut member);
+        heard(&mut requester);
+
+        world.party_request(Vid::new(THIRD_VID), b"100");
+        assert_eq!(one_line(&heard(&mut leader)).text, b"PartyRequest 102");
+        heard(&mut requester);
+        // A second request from the same guest is refused, and the command still answers.
+        world.party_request(Vid::new(THIRD_VID), b"100");
+        assert!(heard(&mut leader).is_empty());
+        let refused = one_line(&heard(&mut requester));
+        assert_eq!(refused.chat_type, CHAT_TYPE_COMMAND);
+        assert_eq!(refused.text, b"PartyRequestDenied");
+
+        world.party_request_deny(Vid::new(LEADER_VID), b"102");
+        let denied = one_line(&heard(&mut requester));
+        assert_eq!(denied.chat_type, CHAT_TYPE_COMMAND);
+        assert_eq!(denied.text, b"PartyRequestDenied");
+        assert!(heard(&mut leader).is_empty());
+        assert!(world.party_leader_of(THIRD_VID).is_none());
+        // A later accept of the consumed request is quiet.
+        world.party_request_accept(Vid::new(LEADER_VID), b"102");
+        assert!(heard(&mut requester).is_empty());
+    }
+
+    #[test]
+    fn accept_without_a_party_denies_and_consumes_the_request() {
+        use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO};
+        let (_clock, mut world, mut leader, mut guest) = a_pair();
+        heard(&mut leader);
+        heard(&mut guest);
+        world.party_request(Vid::new(GUEST_VID), b"100");
+        assert_eq!(one_line(&heard(&mut leader)).text, b"PartyRequest 101");
+        heard(&mut guest);
+
+        world.party_request_accept(Vid::new(LEADER_VID), b"101");
+        let lines = heard(&mut guest);
+        let chat: Vec<_> = lines
+            .iter()
+            .filter(|record| record[0] == protocol::gc_inventory::HEADER_GC_CHAT.value())
+            .map(|record| protocol::gc_chat::GcChat::decode(record).expect("a chat line"))
+            .collect();
+        assert_eq!(chat.len(), 2, "the no-party info and the command");
+        assert_eq!(chat[0].chat_type, CHAT_TYPE_INFO);
+        assert_eq!(chat[0].text, b"[LS;830]");
+        assert_eq!(chat[1].chat_type, CHAT_TYPE_COMMAND);
+        assert_eq!(chat[1].text, b"PartyRequestDenied");
+        assert!(world.party_leader_of(GUEST_VID).is_none());
+        // The accept consumed the request even though no party joined.
+        world.party_request_accept(Vid::new(LEADER_VID), b"101");
+        assert!(heard(&mut guest).is_empty());
+    }
+
+    #[test]
+    fn a_request_expires_after_250_pulses() {
+        use protocol::gc_chat::CHAT_TYPE_COMMAND;
+        let (_clock, mut world, mut leader, mut guest) = a_pair();
+        heard(&mut leader);
+        heard(&mut guest);
+        world.party_request(Vid::new(GUEST_VID), b"100");
+        heard(&mut leader);
+        heard(&mut guest);
+        for pulse in 1..=250_u64 {
+            world.process_pulse(pulse);
+        }
+        let denied: Vec<_> = heard(&mut guest)
+            .into_iter()
+            .filter(|record| record[0] == protocol::gc_inventory::HEADER_GC_CHAT.value())
+            .map(|record| protocol::gc_chat::GcChat::decode(&record).expect("a chat line"))
+            .collect();
+        assert_eq!(denied.len(), 1);
+        assert_eq!(denied[0].chat_type, CHAT_TYPE_COMMAND);
+        assert_eq!(denied[0].text, b"PartyRequestDenied");
+        // The lapsed request can no longer be accepted.
+        world.party_request_accept(Vid::new(LEADER_VID), b"101");
         assert!(heard(&mut guest).is_empty());
         assert!(world.party_leader_of(GUEST_VID).is_none());
     }

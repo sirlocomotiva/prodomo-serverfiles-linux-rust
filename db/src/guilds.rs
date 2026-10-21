@@ -611,6 +611,35 @@ pub async fn set_ladder(store: &Store, guild_id: u32, ladder: i32) -> Result<boo
         .await?;
     Ok(done.rows_affected() > 0)
 }
+/// Set a guild's ladder and war tallies: `ProcessWinLose`/`ProcessDraw`'s row write
+/// (`db/GuildManager.cpp:407-431`) collapsed with `ChangeLadderPoint`'s (`:433-460`).
+/// Answers whether a row was there.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchPlayer`] for an id above `i32::MAX`, and
+/// [`AccountError::Database`] otherwise.
+pub async fn set_war_tallies(
+    store: &Store,
+    guild_id: u32,
+    ladder: i32,
+    win: i32,
+    draw: i32,
+    loss: i32,
+) -> Result<bool, AccountError> {
+    let id = i32::try_from(guild_id).map_err(|_| AccountError::NoSuchPlayer(guild_id))?;
+    let done = sqlx::query(
+        "UPDATE guild SET ladder_point = $1, win = $2, draw = $3, loss = $4 WHERE id = $5",
+    )
+    .bind(ladder)
+    .bind(win)
+    .bind(draw)
+    .bind(loss)
+    .bind(id)
+    .execute(store.pool())
+    .await?;
+    Ok(done.rows_affected() > 0)
+}
 
 /// Grant free experience: `give_exp0`'s loop answer (`G/guild.cpp:1582-1662`) — the guild
 /// row's exp, level and ladder, with no debit and no member row. Answers whether the

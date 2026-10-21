@@ -437,6 +437,17 @@ async fn a_granted_item_is_written_and_then_reaches_the_client() {
         ..
     } = a_world_with_a_client(&database, "Shaman").await;
 
+    // The admission queued one record of its own: the WAR_LIST envelope every entrant
+    // hears (`SendGuildWar`, `G/guild_manager.cpp:803-823`, called from `Entergame`,
+    // `G/input_login.cpp:674`), empty with no live wars.
+    assert_eq!(
+        inbox
+            .try_recv()
+            .expect("the entry WAR_LIST reached the client's queue"),
+        protocol::gc_guild::guild_war_list_record(&[]),
+        "the entry record is the empty WAR_LIST"
+    );
+
     // When: the whole grant runs, from the world to the socket queue.
     let granted = tokio::time::timeout(
         Duration::from_secs(15),

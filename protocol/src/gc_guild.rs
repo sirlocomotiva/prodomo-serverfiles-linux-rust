@@ -11,7 +11,7 @@
 //! starts at 0: `LOGIN` is 0, `LOGOUT` 1, `LIST` 2, `GRADE` 3, `ADD` 4, `REMOVE` 5,
 //! `GRADE_NAME` 6, `GRADE_AUTH` 7, `INFO` 8, `COMMENTS` 9, `CHANGE_EXP` 10,
 //! `CHANGE_MEMBER_GRADE` 11, `SKILL_INFO` 12, `CHANGE_MEMBER_GENERAL` 13, `GUILD_INVITE` 14,
-//! `WAR` 15, `GUILD_NAME` 16.
+//! `WAR` 15, `GUILD_NAME` 16, `GUILD_WAR_LIST` 17, `WAR_END_LIST` 18, `WAR_SCORE` 19.
 
 use std::fmt;
 
@@ -46,8 +46,16 @@ pub const GUILD_SUBHEADER_GC_SKILL_INFO: u8 = 12;
 pub const GUILD_SUBHEADER_GC_CHANGE_MEMBER_GENERAL: u8 = 13;
 /// `GUILD_SUBHEADER_GC_GUILD_INVITE` (`packet.h:2158`): 14.
 pub const GUILD_SUBHEADER_GC_GUILD_INVITE: u8 = 14;
+/// `GUILD_SUBHEADER_GC_WAR` (`packet.h:2159`): 15.
+pub const GUILD_SUBHEADER_GC_WAR: u8 = 15;
 /// `GUILD_SUBHEADER_GC_GUILD_NAME` (`packet.h:2160`): 16.
 pub const GUILD_SUBHEADER_GC_GUILD_NAME: u8 = 16;
+/// `GUILD_SUBHEADER_GC_GUILD_WAR_LIST` (`packet.h:2161`): 17.
+pub const GUILD_SUBHEADER_GC_GUILD_WAR_LIST: u8 = 17;
+/// `GUILD_SUBHEADER_GC_WAR_END_LIST` (`packet.h:2162`): 18.
+pub const GUILD_SUBHEADER_GC_WAR_END_LIST: u8 = 18;
+/// `GUILD_SUBHEADER_GC_WAR_SCORE` (`packet.h:2163`): 19.
+pub const GUILD_SUBHEADER_GC_WAR_SCORE: u8 = 19;
 
 /// `GUILD_NAME_MAX_LEN` (`server/server/common/length.h:42`): 12.
 ///
@@ -88,6 +96,9 @@ pub const GC_GUILD_COMMENT_WIRE_SIZE: usize =
     4 + GUILD_MEMBER_NAME_FIELD_SIZE + GUILD_COMMENT_FIELD_SIZE;
 /// `TGuildGrade`: 9 + 1 = 10 (`guild.h:74-77`).
 pub const GC_GUILD_GRADE_WIRE_SIZE: usize = 10;
+/// `TPacketGCGuildWar`: the envelope + DWORD self + DWORD opp + type + state = 14
+/// (`packet.h:2201-2208`).
+pub const GC_GUILD_WAR_WIRE_SIZE: usize = GC_GUILD_ENVELOPE_WIRE_SIZE + 10;
 
 /// One member row of a LIST packet (`TGuildMemberPacketData`, `guild.h:45-57`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -477,6 +488,62 @@ pub fn guild_change_member_general_record(pid: u32, is_general: u8) -> Vec<u8> {
     out
 }
 
+/// The war fan (`CGuild::GuildWarPacket`, `G/guild_war.cpp:28-58`): the envelope plus
+/// `TPacketGCGuildWar` — the DWORD self id, the DWORD opp id, the war type byte, and
+/// the war state byte (`packet.h:2201-2208`).
+#[must_use]
+pub fn guild_war_record(self_id: u32, opp_id: u32, war_type: u8, war_state: u8) -> Vec<u8> {
+    let mut out = Vec::with_capacity(GC_GUILD_WAR_WIRE_SIZE);
+    envelope(&mut out, GUILD_SUBHEADER_GC_WAR, GC_GUILD_WAR_WIRE_SIZE);
+    out.extend_from_slice(&self_id.to_le_bytes());
+    out.extend_from_slice(&opp_id.to_le_bytes());
+    out.push(war_type);
+    out.push(war_state);
+    out
+}
+
+/// The `GUILD_WAR_LIST` send (`FSendWarList` and `CGuildManager::SendGuildWar`,
+/// `G/guild_manager.cpp:597-823`): the envelope plus one (lo, hi) DWORD pair per war, in
+/// the pairs' ascending order. The enter send carries every live pair; the start fan
+/// carries one.
+#[must_use]
+pub fn guild_war_list_record(pairs: &[(u32, u32)]) -> Vec<u8> {
+    let size = GC_GUILD_ENVELOPE_WIRE_SIZE + pairs.len() * 8;
+    let mut out = Vec::with_capacity(size);
+    envelope(&mut out, GUILD_SUBHEADER_GC_GUILD_WAR_LIST, size);
+    for &(lo, hi) in pairs {
+        out.extend_from_slice(&lo.to_le_bytes());
+        out.extend_from_slice(&hi.to_le_bytes());
+    }
+    out
+}
+
+/// The `WAR_SCORE` send (`CGuild::SetWarScoreAgainstTo`'s field arm,
+/// `G/guild_war.cpp:198-217`): the envelope, the gaining guild's DWORD, the opp's DWORD,
+/// and the new total as a 4-byte `long`.
+#[must_use]
+pub fn guild_war_score_record(gain: u32, opp: u32, score: u32) -> Vec<u8> {
+    let size = GC_GUILD_ENVELOPE_WIRE_SIZE + 12;
+    let mut out = Vec::with_capacity(size);
+    envelope(&mut out, GUILD_SUBHEADER_GC_WAR_SCORE, size);
+    out.extend_from_slice(&gain.to_le_bytes());
+    out.extend_from_slice(&opp.to_le_bytes());
+    out.extend_from_slice(&score.to_le_bytes());
+    out
+}
+/// The `WAR_END_LIST` send (`FSendWarList` with the end subheader,
+/// `G/guild_manager.cpp:601-612,713`): the envelope plus exactly one `(lo, hi)` DWORD
+/// pair, to every PC after the over notice.
+#[must_use]
+pub fn guild_war_end_list_record(lo: u32, hi: u32) -> Vec<u8> {
+    let size = GC_GUILD_ENVELOPE_WIRE_SIZE + 8;
+    let mut out = Vec::with_capacity(size);
+    envelope(&mut out, GUILD_SUBHEADER_GC_WAR_END_LIST, size);
+    out.extend_from_slice(&lo.to_le_bytes());
+    out.extend_from_slice(&hi.to_le_bytes());
+    out
+}
+
 /// Pad a character name to the 25-byte LIST field.
 #[must_use]
 pub fn pad_member_name(name: &[u8]) -> [u8; GUILD_MEMBER_NAME_FIELD_SIZE] {
@@ -764,5 +831,63 @@ mod tests {
         assert_eq!(u32::from_le_bytes(record[4..8].try_into().unwrap()), 7);
         assert_eq!(&record[8..15], b"Knights");
         assert!(record[15..21].iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn war_packet_carries_self_opp_type_and_state() {
+        let record = guild_war_record(7, 9, 0, 1);
+        assert_eq!(record.len(), GC_GUILD_WAR_WIRE_SIZE);
+        assert_eq!(record.len(), 14);
+        assert_eq!(record[0], HEADER_GC_GUILD);
+        assert_eq!(u16::from_le_bytes([record[1], record[2]]), 14);
+        assert_eq!(record[3], GUILD_SUBHEADER_GC_WAR);
+        assert_eq!(u32::from_le_bytes(record[4..8].try_into().unwrap()), 7);
+        assert_eq!(u32::from_le_bytes(record[8..12].try_into().unwrap()), 9);
+        assert_eq!(record[12], 0);
+        assert_eq!(record[13], 1);
+    }
+
+    #[test]
+    fn war_list_carries_each_pair_lo_then_hi() {
+        let record = guild_war_list_record(&[(3, 11), (5, 7)]);
+        assert_eq!(record.len(), 4 + 16);
+        assert_eq!(record[0], HEADER_GC_GUILD);
+        assert_eq!(u16::from_le_bytes([record[1], record[2]]), 20);
+        assert_eq!(record[3], GUILD_SUBHEADER_GC_GUILD_WAR_LIST);
+        assert_eq!(u32::from_le_bytes(record[4..8].try_into().unwrap()), 3);
+        assert_eq!(u32::from_le_bytes(record[8..12].try_into().unwrap()), 11);
+        assert_eq!(u32::from_le_bytes(record[12..16].try_into().unwrap()), 5);
+        assert_eq!(u32::from_le_bytes(record[16..20].try_into().unwrap()), 7);
+    }
+
+    #[test]
+    fn war_list_with_no_wars_is_the_bare_envelope() {
+        let record = guild_war_list_record(&[]);
+        assert_eq!(record.len(), GC_GUILD_ENVELOPE_WIRE_SIZE);
+        assert_eq!(u16::from_le_bytes([record[1], record[2]]), 4);
+        assert_eq!(record[3], GUILD_SUBHEADER_GC_GUILD_WAR_LIST);
+    }
+
+    #[test]
+    fn war_score_carries_gain_opp_and_total() {
+        let record = guild_war_score_record(7, 9, 40);
+        assert_eq!(record.len(), 16);
+        assert_eq!(record[0], HEADER_GC_GUILD);
+        assert_eq!(u16::from_le_bytes([record[1], record[2]]), 16);
+        assert_eq!(record[3], GUILD_SUBHEADER_GC_WAR_SCORE);
+        assert_eq!(u32::from_le_bytes(record[4..8].try_into().unwrap()), 7);
+        assert_eq!(u32::from_le_bytes(record[8..12].try_into().unwrap()), 9);
+        assert_eq!(u32::from_le_bytes(record[12..16].try_into().unwrap()), 40);
+    }
+
+    #[test]
+    fn war_end_list_carries_one_pair_lo_then_hi() {
+        let record = guild_war_end_list_record(3, 11);
+        assert_eq!(record.len(), 4 + 8);
+        assert_eq!(record[0], HEADER_GC_GUILD);
+        assert_eq!(u16::from_le_bytes([record[1], record[2]]), 12);
+        assert_eq!(record[3], GUILD_SUBHEADER_GC_WAR_END_LIST);
+        assert_eq!(u32::from_le_bytes(record[4..8].try_into().unwrap()), 3);
+        assert_eq!(u32::from_le_bytes(record[8..12].try_into().unwrap()), 11);
     }
 }
