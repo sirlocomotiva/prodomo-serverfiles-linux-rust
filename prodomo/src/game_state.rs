@@ -89,6 +89,7 @@ mod target;
 mod trade;
 mod view;
 mod view_encode;
+mod war_map;
 mod warp_npc;
 
 pub use guild::{

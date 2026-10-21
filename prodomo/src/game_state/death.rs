@@ -224,6 +224,32 @@ impl Recall {
             .is_some_and(|maps| maps.contains(&index))
             || self.shared.contains(&index)
     }
+
+    /// Whether the Channel `channel` hosts the map `index` (`map_allow_find`,
+    /// `G/config.cpp:174-182`): the map is in that Channel's `MAP_ALLOW`, which is the union
+    /// of the legacy Cores' lists the Channel had.
+    pub(super) fn hosts(&self, channel: u8, index: i32) -> bool {
+        let Some(index) = u32::try_from(index).ok() else {
+            return false;
+        };
+        self.channel_maps
+            .get(&channel)
+            .is_some_and(|maps| maps.contains(&index))
+    }
+
+    /// Whether the map index lists the map `index` (`SECTREE_MANAGER::GetMapRegion`,
+    /// `G/sectree_manager.cpp:146-154`): the map's own files are there.
+    pub(super) fn in_atlas(&self, index: i32) -> bool {
+        self.atlas
+            .as_ref()
+            .is_some_and(|atlas| atlas.region(index).is_some())
+    }
+
+    /// The map atlas, which holds every map the owner ships (`SECTREE_MANAGER`'s map
+    /// index).
+    pub(super) fn atlas(&self) -> Option<&MapAtlas> {
+        self.atlas.as_deref()
+    }
 }
 
 impl GameState {

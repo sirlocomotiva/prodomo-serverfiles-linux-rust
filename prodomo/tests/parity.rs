@@ -14150,6 +14150,97 @@ fn a_guild_war_is_accepted_and_every_pc_hears_the_list() {
     yankee.quiet("the start settled");
 }
 
+/// `sys.guild.war`: a battle war's declare lands — the map index holds the battle map
+/// (`GuildWar_IsWarMap`, `G/guild_war.cpp:260-271`), so the master hears the WAR fan
+/// with `bType` 1 and not the `[LS;669]` refusal, and the accept starts the war on that
+/// type. The war's private copy of the map is not client-visible yet: the entry that
+/// warps the members into it is ledger 237's.
+#[test]
+fn a_battle_war_is_declared_and_accepted() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+         154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    // Before the boot: the stored guilds install once, while the gate is closed.
+    seed_war_pair(&database);
+    let server = Server::start(binary(), database.url());
+    let (mut alice, _alpha, _alice_entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
+    let (mut yankee, yankee_listed, _yankee_entered) =
+        enter_world_seeing_guilded(&server, b"bob", 0, 1);
+    alice.sees_arrive(yankee_listed.id, true, Some(b"Wolves"));
+    // The declare: the battle war lands, because the map index holds map 110.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/war Wolves 1"));
+    let war = alice.read_game();
+    assert_eq!(
+        guild_subheader(&war),
+        GUILD_SUBHEADER_GC_WAR,
+        "the fan: {war:02x?}"
+    );
+    assert_eq!(war[12], 1, "bType is battle");
+    assert_eq!(war[13], 1, "bWarState is SEND_DECLARE");
+    let war = yankee.read_game();
+    assert_eq!(war[12], 1, "bType is battle");
+    assert_eq!(war[13], 3, "bWarState is RECV_DECLARE");
+    assert_eq!(
+        alice.read_game(),
+        a_notice_line(b"[LS;475;MyGuild;Wolves]"),
+        "Alice hears the declare"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        a_notice_line(b"[LS;475;MyGuild;Wolves]"),
+        "Yankee hears the declare"
+    );
+    // The accept: the war starts on the battle type.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/war MyGuild 1"));
+    for (side, client) in [("Alice", &mut alice), ("Yankee", &mut yankee)] {
+        assert_eq!(
+            client.read_game(),
+            an_info_line(b"[LS;558]"),
+            "{side} hears the start"
+        );
+        let war = client.read_game();
+        assert_eq!(
+            guild_subheader(&war),
+            GUILD_SUBHEADER_GC_WAR,
+            "{side}'s fan: {war:02x?}"
+        );
+        assert_eq!(war[12], 1, "{side}'s bType is battle");
+        assert_eq!(war[13], 6, "{side}'s bWarState is ON_WAR");
+        let list = client.read_game();
+        assert_eq!(
+            guild_subheader(&list),
+            GUILD_SUBHEADER_GC_GUILD_WAR_LIST,
+            "{side}'s list: {list:02x?}"
+        );
+        assert_eq!(
+            &list[4..12],
+            &[1, 0, 0, 0, 2, 0, 0, 0],
+            "{side}'s list names the pair"
+        );
+    }
+    assert_eq!(
+        alice.read_game(),
+        a_notice_line(b"[LS;477;Wolves;MyGuild]"),
+        "Alice hears the declaration"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        a_notice_line(b"[LS;477;Wolves;MyGuild]"),
+        "Yankee hears the declaration"
+    );
+    alice.quiet("the battle war settled");
+    yankee.quiet("the battle war settled");
+}
+
 /// The war scenario's opening: two war-ready guilds (`MyGuild` under Alpha, Wolves under
 /// Yankee), both masters in the world and seeing each other, with Alpha granted
 /// `LOW_WIZARD` before the boot — the character select reads the grant

@@ -1,8 +1,9 @@
 # Rewrite status
 
-Last reviewed: 2026-10-21, after ledger section 235 (the death's item drop penalty).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 236 onwards (the war
-maps).
+Last reviewed: 2026-10-21, after ledger section 236 (the war map's information and the war's
+map).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 237 onwards (the war's
+members, the observers, the flags and the war map's own end).
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -42,7 +43,11 @@ alignment is stored, loaded and shown: the client's summary carries the stored a
 tenths, and a save writes the alignment the world holds. Since 235 a player that dies to
 another player loses the items its alignment and the draws choose: the nine alignment bands
 and their table, the two draws, the level and the GM level, the anti-flags, the unique item
-that skips the drop, and the worn item's points. The rest of combat, skills,
+that skips the drop, and the worn item's points. Since 236 a guild war knows the map it is
+fought on: the three war types and the two war maps, the declare's map-index check (the
+atlas is legacy's map index) and the Channel's map set, and the private copy a started war
+takes of its map. The owner's index holds the battle map, so a battle war's declare lands
+and its accept starts the war on that type. The rest of combat, skills,
 parties, guilds and the rest of step 4 are not ported yet. The two-process layout (a `game-server` and a `db-server`
 talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177; sections 1-175
 record how it was built and stay as history. Since section 178 the one `prodomo` binary reads

@@ -33734,3 +33734,112 @@ workspace all-targets DB run green, the parity target green; the doc build and t
 doc-tests green; no scratch database left.
 
 No ADR changed. No owner question added. V21 is taken.
+
+## 236. The war map's information and the war's map (`sys.guild.war`, second part)
+
+A guild war was fought where the players already stood: the Rewrite knew the field war and
+nothing else, so a declare of a battle or flag war was refused with `[LS;669]` — the
+approximation of legacy's rule that the build held no war map. The owner's map index holds
+both (`legacy/gamedata/locale/europe/map/index`: 110 is `metin2_map_t3`, 111 is
+`metin2_map_t4`), so that refusal was wrong on this deployment. Legacy knows three war
+types (`KOR_aGuildWarInfo`, `G/constants.cpp:1132-1145`), two war maps
+(`CWarMapManager::LoadWarMapInfo`, `G/war_map.cpp:974-1008`) and the private copy a war
+takes of the map it is fought on (`SECTREE_MANAGER::CreatePrivateMap`,
+`G/sectree_manager.cpp:943-1026`). The Rewrite knows the table, the two checks the war map
+passes, and the copy.
+
+**The tables.** `prodomo/src/game_state/war_map.rs` (new) holds them:
+
+| legacy | here |
+|---|---|
+| `KOR_aGuildWarInfo` (`G/constants.cpp:1132-1145`) | `WAR_TYPES` |
+| `CWarMapManager::LoadWarMapInfo` (`G/war_map.cpp:974-1008`) | `WAR_MAPS` |
+| `CWarMapManager::GetWarMapInfo` (`G/war_map.cpp:1061-1072`) | `war_map_of` |
+| `SECTREE_MANAGER::CreatePrivateMap` (`G/sectree_manager.cpp:943-1026`) | `private_index` |
+
+The war types are the field war (no map, no price, no score), the battle war (map 110, a
+hundred points to end) and the flag war (map 111, ten points). The two war maps are the
+battle map and the flag map. `private_index` gives the map's own index times 10,000 plus the
+first free instance under it, with legacy's cap of 10,000 for every map but 107, 108 and
+109, which take 51 (`G/sectree_manager.cpp:957-962`).
+
+**The two checks.** Legacy asks the map twice. The declare asks the map index
+(`CGuild::GuildWar_IsWarMap`, `G/guild_war.cpp:260-271`): the field war needs no map, and
+every other type needs its map in the map index, which is the map's own files. A declare
+that fails answers `[LS;669]` to the master (`:299-310`), and so does an accept whose saved
+type fails (`:344-355`). The Rewrite asks the atlas, which is the map index
+(`gamedata::map_atlas::MapAtlas`), through `Recall::in_atlas`.
+
+The wait-start asks the Channel's map set (`map_allow_find`, `G/config.cpp:174-182`): the
+map is in the process's `MAP_ALLOW` set, which in legacy is the union of the Cores' lists —
+one Channel's list. In the Rewrite the process holds every Channel (ADR-0002), so the set is
+the Channel's own (`Recall::hosts`, over the `game.channels` map sets the boot already
+hands the recall). A map the Channel does not host leaves the war without one
+(`G/guild_war.cpp:488-495`), which the Rewrite does too.
+
+**The private copy.** `CGuild::WaitStartWar` (`G/guild_war.cpp:440-530`) creates the war's
+map when the war starts: `CWarMapManager::CreateWarMap` (`G/war_map.cpp:1042-1059`) looks the
+war map's own information up (a type whose map is not a war map has none), takes a private
+copy of it, and both sides learn the index (`gw.map_index`, `SetGuildWarMapIndex` on the
+other side and on this one). The Rewrite does that in `guild_war_map`
+(`prodomo/src/game_state/guild.rs`): the copy's index comes from `private_index`, the copy
+stands on the base map's own grid (the private map is a copy of the base's sectrees), and
+both sides' entries carry the index. The field war takes no map.
+
+**The fan's type.** The start's fan carried the field type, because the field war was the
+only war there was. Legacy's `CGuild::StartWar` sends `GuildWarPacket(dwOppGID, gw.type,
+GUILD_WAR_ON_WAR)` (`G/guild_war.cpp:428`), so the fan carries the war's own type. The
+Rewrite reads it from the entry.
+
+**The tests.** `prodomo/src/game_state/war_map.rs` holds four: the three war types at
+legacy's numbers, the two war maps, a private map naming the map it was copied from, and a
+private map taking the first free instance of its base. `prodomo/src/game_state/guild.rs`
+holds three more: a battle war whose map the map index does not hold is refused with
+`[LS;669]` and lands nothing; the same declare lands when the index holds the map; and a
+battle war that starts takes the private copy (the index 110 times 10,000, the map hosted
+on the war's Channel, both sides carrying it). The parity scenario
+`a_battle_war_is_declared_and_accepted` proves the same thing on the wire: the declare
+lands with `bType` 1, and the accept starts the war on that type.
+
+**The divergences.**
+
+- The wait-start is a step of its own in legacy: the accept sends `GUILD_WAR_WAIT_START` to
+  the DB, the DB sends it back, and `WaitStartWar` creates the map; the start comes after
+  (`G/guild_war.cpp:332-343` and `:436-437`). The Rewrite's accept starts the war inline
+  (ledger 230x), so the map is created there. The order legacy keeps — the map before the
+  on-war fan — is kept.
+- Legacy creates the private copy in each side's process and tells the other side the index
+  with the P2P packet `HEADER_GG_GUILD_WAR_ZONE_MAP_INDEX` (`G/guild_war.cpp:519-529`). The
+  game-to-game protocol is retired (ADR-0001), so the Rewrite creates one copy and both
+  sides learn it.
+- The copy is hosted on the Channel the accepting master stands on. Legacy's process is one
+  Channel, so its copy is on that Channel; in the Rewrite the war's members may stand on
+  another Channel, and the entry (ledger 237) is where that is settled.
+- Legacy ends the war when the copy cannot be created (`G/guild_war.cpp:508-513`). The
+  Rewrite leaves the war without a map instead, because the copy is created at the start and
+  the end is a later step.
+- The copy holds no NPCs: the boot stands the NPCs on the base map, and the copy is made
+  after it. Legacy's private map is a copy of the base's sectrees, so it holds the base's
+  NPCs.
+- The instance number is the lowest free one under the base. Legacy keeps a counter per
+  map and takes the instance after the last one it gave out
+  (`G/sectree_manager.cpp:962-975`), wrapping at the cap. The two agree while no copy is
+  destroyed, and the Rewrite does not destroy one yet (the war map's own end is ledger
+  237's).
+- The start positions (the war's members are warped to them when they join) are ledger
+  237's, with the entry that reads them.
+
+**The inventory.** The row `sys.guild.war` stays `partial` — the field war is live (ledger
+230w, 230x, 233) and the war map's information and its map are live now, but the war's
+members, the observers, the flags and the war map's own end are not. The row `cmd.war`
+keeps its scenario and its note now names the map index as the rule that answers
+`[LS;669]`, and the scenario `a_battle_war_is_declared_and_accepted` proves the battle
+war's declare and accept on the wire. The private copy is still only a unit test: the
+index the members would be warped to is ledger 237's, so nothing client-visible yet shows
+it.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; the full
+workspace all-targets DB run green, the parity target green; the doc build and the
+doc-tests green; no scratch database left.
+
+No ADR changed. No owner question added. V21 stays taken.

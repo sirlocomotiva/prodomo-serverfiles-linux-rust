@@ -34,6 +34,7 @@ use common::item_slots::{
     usable_inventory_cells, EWindows, CUSTOM_INVENTORY_SLOT_END, CUSTOM_INVENTORY_SLOT_START,
 };
 use common::vid::Vid;
+use gamedata::server_attr::SectreeGrid;
 use protocol::cg_guild_answer::GUILD_NAME_FIELD_SIZE;
 use protocol::gc_chat::{CHAT_TYPE_INFO, CHAT_TYPE_NOTICE};
 use protocol::gc_guild::{
@@ -115,12 +116,16 @@ const GUILD_LEVELUP_EXP: [u32; 21] = [
 /// `GUILD_LADDER_POINT_PER_LEVEL` (`G/guild.h:20`): 1000, the ladder step each guild
 /// level adds (`GuildPointChange`, `G/guild.cpp:1616-1617`).
 const GUILD_LADDER_POINT_PER_LEVEL: i32 = 1000;
-/// `GUILD_WAR_TYPE_FIELD` (`common/length.h:769`): 0, the open-field war — the only type
-/// a declare can reach in this slice.
-const GUILD_WAR_TYPE_FIELD: u8 = 0;
+/// `GUILD_WAR_TYPE_FIELD` (`common/length.h:769`): 0, the open-field war — fought where
+/// the players already stand, so it needs no map.
+pub(super) const GUILD_WAR_TYPE_FIELD: u8 = 0;
+/// `GUILD_WAR_TYPE_BATTLE` (`common/length.h:770`): 1, the war fought on the battle map.
+pub(super) const GUILD_WAR_TYPE_BATTLE: u8 = 1;
+/// `GUILD_WAR_TYPE_FLAG` (`common/length.h:771`): 2, the war fought on the flag map.
+pub(super) const GUILD_WAR_TYPE_FLAG: u8 = 2;
 /// `GUILD_WAR_TYPE_MAX_NUM` (`common/length.h:772`): 3. A `/war` type at or past it
 /// folds to field (`G/cmd_general.cpp:2055-2056`).
-const GUILD_WAR_TYPE_MAX_NUM: u8 = 3;
+pub(super) const GUILD_WAR_TYPE_MAX_NUM: u8 = 3;
 /// `EGuildWarState` (`common/length.h:776-785`): none, sent-declare, refused,
 /// received-declare, wait-start, cancelled, on-war, ended, over, reserved.
 const GUILD_WAR_NONE: u8 = 0;
@@ -136,7 +141,12 @@ const GUILD_WAR_RESERVE: u8 = 9;
 const GUILD_WAR_MIN_MEMBER_COUNT: usize = 8;
 /// `KOR_aGuildWarInfo[type].iWarPrice` (`G/constants.cpp:1142-1146`): 0 for every type,
 /// so `/war`'s money arms never fire — ported as the table read they are.
-const GUILD_WAR_PRICE: [i32; GUILD_WAR_TYPE_MAX_NUM as usize] = [0, 0, 0];
+fn war_price(war_type: u8) -> i32 {
+    super::war_map::WAR_TYPES
+        .get(usize::from(war_type))
+        .map_or(0, |info| info.price)
+}
+
 /// `GUILD_WAR_DURATION` (`common/length.h:787`): 1800, the field war's seconds.
 const GUILD_WAR_DURATION: u32 = 1800;
 /// `GUILD_WAR_LADDER_HALF_PENALTY_TIME` (`common/length.h:789`): 43200, the seconds an
@@ -191,8 +201,9 @@ struct GuildWar {
     state: u8,
     /// `type`: one of the `GUILD_WAR_TYPE_*` types.
     war_type: u8,
-    /// `map_index`: the war map, 0 for a field war.
-    map_index: u32,
+    /// `map_index`: the war map, 0 for a field war. It is the private copy's index, which
+    /// names the map it was copied from (`SECTREE_MANAGER::CreatePrivateMap`).
+    map_index: i32,
 }
 
 impl GuildWar {
@@ -2813,7 +2824,7 @@ impl GameState {
             self.tell_guild(vid, b"#ERR_CODE: 1118030623 Send this to a GM.", &[]);
             return false;
         }
-        let price = GUILD_WAR_PRICE[usize::from(war_type)];
+        let price = war_price(war_type);
         let own_gold = self.guilds.by_id.get(&id).map_or(0, |guild| guild.gold);
         // `GetGuildMoney` is a signed `int` (`G/guild.h:283`); the table holds 0 for
         // every type, so neither arm fires — ported as the reads they are.
@@ -3026,11 +3037,12 @@ impl GameState {
     /// `id`'s declare against `opp` (`CGuild::RequestDeclareWar`,
     /// `G/guild_war.cpp:279-370`, with the DB forward collapsed): the self and
     /// unknown-type quiets, then the entry's arm. No entry: a field declare lands
-    /// through the manager; a past-field type answers `[LS;669]` to the master — no
-    /// war map serves it on this build (`GuildWar_IsWarMap`, `:255-266`). A received
-    /// entry would accept: field accepts are the on-war slice (`sys.guild.war`), and a
-    /// past-field accept answers `[LS;669]` the same way. A sent entry chats `[LS;780]`
-    /// to the master; anything else logs, quiet.
+    /// through the manager; a type whose war map the map index does not hold answers
+    /// `[LS;669]` to the master (`GuildWar_IsWarMap`, `G/guild_war.cpp:260-271`). A
+    /// received entry would accept: field accepts are the on-war slice
+    /// (`sys.guild.war`), and a type whose war map the map index does not hold answers
+    /// `[LS;669]` the same way. A sent entry chats `[LS;780]` to the master; anything
+    /// else logs, quiet.
     fn request_declare_war(&mut self, id: u32, opp: u32, war_type: u8, now: u32) -> GuildWarAnswer {
         let quiet = GuildWarAnswer { notice: None };
         if opp == id || war_type >= GUILD_WAR_TYPE_MAX_NUM {
@@ -3043,7 +3055,7 @@ impl GameState {
             .get(&id)
             .is_some_and(|guild| !guild.enemies.contains_key(&opp));
         if fresh {
-            if war_type != GUILD_WAR_TYPE_FIELD {
+            if war_type != GUILD_WAR_TYPE_FIELD && !self.guild_war_is_war_map(war_type) {
                 self.notify_guild_master(id, b"[LS;669]", &[]);
                 return quiet;
             }
@@ -3057,7 +3069,7 @@ impl GameState {
                     .get(&id)
                     .and_then(|guild| guild.enemies.get(&opp))
                     .map_or(GUILD_WAR_TYPE_FIELD, |enemy| enemy.war_type);
-                if saved != GUILD_WAR_TYPE_FIELD {
+                if saved != GUILD_WAR_TYPE_FIELD && !self.guild_war_is_war_map(saved) {
                     self.notify_guild_master(id, b"[LS;669]", &[]);
                     return quiet;
                 }
@@ -3074,6 +3086,74 @@ impl GameState {
                 quiet
             }
         }
+    }
+
+    /// `GuildWar_IsWarMap` (`G/guild_war.cpp:260-271`): the field war needs no map, and
+    /// every other type needs its map in the map index — the map's own files are there.
+    fn guild_war_is_war_map(&self, war_type: u8) -> bool {
+        match war_type {
+            GUILD_WAR_TYPE_FIELD => true,
+            GUILD_WAR_TYPE_BATTLE | GUILD_WAR_TYPE_FLAG => {
+                let map = super::war_map::WAR_TYPES
+                    .get(usize::from(war_type))
+                    .map_or(0, |info| info.map_index);
+                self.recall.in_atlas(map)
+            }
+            _ => false,
+        }
+    }
+
+    /// The war's map (`CGuild::WaitStartWar`, `G/guild_war.cpp:440-530`): a war of a map
+    /// type takes a private copy of the map it is fought on, hosted on the Channel that
+    /// runs the war. The field war needs no map, and a map the Channel does not host
+    /// (`map_allow_find`, `G/config.cpp:174-182`) leaves the war without one.
+    ///
+    /// The private map is a copy of the base map's own sectrees, so it stands on the base
+    /// map's grid (`SECTREE_MANAGER::CreatePrivateMap`,
+    /// `G/sectree_manager.cpp:943-1026`).
+    fn guild_war_map(&mut self, id: u32, war_type: u8) -> i32 {
+        if war_type == GUILD_WAR_TYPE_FIELD {
+            return 0;
+        }
+        let Some(info) = super::war_map::WAR_TYPES.get(usize::from(war_type)) else {
+            return 0;
+        };
+        let base = info.map_index;
+        // `CreateWarMap` (`G/war_map.cpp:1042-1049`): the type's map must be one of the
+        // war maps, or there is no map to copy.
+        if super::war_map::war_map_of(base).is_none() {
+            return 0;
+        }
+        // The Channel that runs the war is the one the accepting master stands on.
+        let Some(channel) = self.guild_master_channel(id) else {
+            return 0;
+        };
+        if !self.recall.hosts(channel, base) {
+            return 0;
+        }
+        let taken: Vec<i32> = self.maps.keys().map(|&(_, map)| map).collect();
+        let Some(private) = super::war_map::private_index(base, &taken) else {
+            return 0;
+        };
+        let Some(grid) = self
+            .recall
+            .atlas()
+            .and_then(|atlas| atlas.region(base))
+            .and_then(SectreeGrid::of)
+        else {
+            return 0;
+        };
+        self.host_map(channel, private, grid);
+        private
+    }
+
+    /// The Channel the master of the guild `id` stands on: the place of its member row's
+    /// character. A guild whose master is not in the world has no Channel.
+    fn guild_master_channel(&self, id: u32) -> Option<u8> {
+        let guild = self.guilds.by_id.get(&id)?;
+        let master = guild.members.get(&guild.master_pid)?;
+        let vid = master.vid?;
+        self.place_of(vid.into()).map(|(channel, _)| channel)
     }
 
     /// `id`'s refuse against `opp` (`CGuild::RequestRefuseWar`,
@@ -3117,6 +3197,27 @@ impl GameState {
                 return quiet;
             }
         }
+        // The war's map (`CGuild::WaitStartWar`, `G/guild_war.cpp:440-530`): a war of a map
+        // type takes a private copy of its map, and both sides learn its index. The field
+        // war needs no map, and a map the Channel does not host leaves the war without
+        // one.
+        let war_type = self
+            .guilds
+            .by_id
+            .get(&from)
+            .and_then(|guild| guild.enemies.get(&to))
+            .map_or(GUILD_WAR_TYPE_FIELD, |enemy| enemy.war_type);
+        let map_index = self.guild_war_map(from, war_type);
+        for (id, opp) in [(from, to), (to, from)] {
+            if let Some(enemy) = self
+                .guilds
+                .by_id
+                .get_mut(&id)
+                .and_then(|guild| guild.enemies.get_mut(&opp))
+            {
+                enemy.map_index = map_index;
+            }
+        }
         // `CGuild::StartWar` both sides (`G/guild_war.cpp:418-437`): the state, the stamp,
         // and the fan. Field wars ask no entry.
         for (id, opp) in [(from, to), (to, from)] {
@@ -3129,7 +3230,9 @@ impl GameState {
                 enemy.state = GUILD_WAR_ON_WAR;
                 enemy.war_start_time = now;
             }
-            self.guild_war_fan(id, opp, GUILD_WAR_TYPE_FIELD, GUILD_WAR_ON_WAR);
+            // `GuildWarPacket(dwOppGID, gw.type, GUILD_WAR_ON_WAR)`
+            // (`G/guild_war.cpp:428`): the fan carries the war's own type.
+            self.guild_war_fan(id, opp, war_type, GUILD_WAR_ON_WAR);
         }
         let (lo, hi) = if from < to { (from, to) } else { (to, from) };
         self.guilds.wars.insert((lo, hi));
@@ -5521,11 +5624,14 @@ impl Guilds {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::super::fixtures::{a_world, enter, TestClock};
     use super::*;
     use crate::game_loop::PulseProcessor;
+    use gamedata::map_atlas::{MapAtlas, MapRegion};
 
     /// The master, at the origin.
     const MASTER_VID: u32 = 100;
@@ -7456,6 +7562,112 @@ mod tests {
             GUILD_WAR_SEND_DECLARE
         );
         assert_eq!(heard(&mut master), Vec::<Vec<u8>>::new(), "no line, no fan");
+        drop(rival);
+    }
+
+    /// The battle map, `KOR_aGuildWarInfo[GUILD_WAR_TYPE_BATTLE].lMapIndex`
+    /// (`G/constants.cpp:1132-1145`).
+    const BATTLE_MAP: i32 = 110;
+
+    /// A world whose map index holds the battle map and whose Channel hosts it, so a
+    /// battle war has a map to be fought on: the map index
+    /// (`GuildWar_IsWarMap`, `G/guild_war.cpp:260-271`) and the Channel's map set
+    /// (`map_allow_find`, `G/config.cpp:174-182`) both answer for it.
+    fn with_the_battle_map(world: GameState) -> GameState {
+        let atlas = MapAtlas::from_regions(vec![MapRegion {
+            index: BATTLE_MAP,
+            name: b"battle".to_vec(),
+            sx: 0,
+            sy: 0,
+            ex: 6_400,
+            ey: 6_400,
+            spawn: (0, 0),
+            empire_spawns: None,
+        }]);
+        let channel_maps: HashMap<u8, Vec<u32>> =
+            HashMap::from([(super::super::fixtures::PLACE.0, vec![BATTLE_MAP as u32])]);
+        world.with_recall(Arc::new(atlas), &channel_maps, &[])
+    }
+
+    /// A battle war whose map the map index does not hold is refused: the master hears
+    /// `[LS;669]` and no declare lands (`GuildWar_IsWarMap`, `G/guild_war.cpp:260-271`).
+    #[test]
+    fn a_declare_of_a_battle_war_without_its_map_is_refused() {
+        let (_clock, mut world, mut master, _guest) = a_guilded_pair();
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let _ = heard(&mut master);
+        let answer = world.guild_war(Vid::new(MASTER_VID), b"Wolves 1", NOW);
+        assert!(answer.notice.is_none(), "the declare lands nothing");
+        assert_eq!(
+            world.guild_war_state(GUILD_ID, SECOND_ID),
+            GUILD_WAR_NONE,
+            "no entry is made"
+        );
+        let held = heard(&mut master);
+        assert!(
+            first_chat(&held)
+                .windows(8)
+                .any(|window| window == b"[LS;669]"),
+            "the master hears [LS;669]: {held:?}"
+        );
+        drop(rival);
+    }
+
+    /// The same declare lands when the map index holds the battle map: the entry is a
+    /// sent declare, and the rival holds the received one.
+    #[test]
+    fn a_declare_of_a_battle_war_with_its_map_lands() {
+        let (_clock, world, mut master, _guest) = a_guilded_pair();
+        let mut world = with_the_battle_map(world);
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let _ = heard(&mut master);
+        let answer = world.guild_war(Vid::new(MASTER_VID), b"Wolves 1", NOW);
+        assert!(answer.notice.is_some(), "the declare lands");
+        assert_eq!(
+            world.guild_war_state(GUILD_ID, SECOND_ID),
+            GUILD_WAR_SEND_DECLARE
+        );
+        assert_eq!(
+            world.guild_war_state(SECOND_ID, GUILD_ID),
+            GUILD_WAR_RECV_DECLARE
+        );
+        drop(rival);
+    }
+
+    /// A battle war that starts takes a private copy of its map: the war's index is the
+    /// map's own index times 10,000, the map is hosted, and both sides learn it
+    /// (`CGuild::WaitStartWar`, `G/guild_war.cpp:440-530`).
+    #[test]
+    fn a_started_battle_war_takes_a_private_copy_of_its_map() {
+        let (_clock, world, _master, _guest) = a_guilded_pair();
+        let mut world = with_the_battle_map(world);
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let _ = world.guild_war(Vid::new(MASTER_VID), b"Wolves 1", NOW);
+        let accept = world.guild_war(Vid::new(200), b"Knights 1", NOW);
+        assert!(accept.notice.is_some(), "the accept starts the war");
+        for (id, opp) in [(GUILD_ID, SECOND_ID), (SECOND_ID, GUILD_ID)] {
+            let enemy = world
+                .guilds
+                .by_id
+                .get(&id)
+                .expect("installed")
+                .enemies
+                .get(&opp)
+                .expect("the war's entry");
+            assert_eq!(enemy.map_index, 1_100_000, "the private copy's index");
+        }
+        assert!(
+            world
+                .maps
+                .contains_key(&(super::super::fixtures::PLACE.0, 1_100_000)),
+            "the private map is hosted on the war's Channel"
+        );
         drop(rival);
     }
 
