@@ -1,9 +1,8 @@
 # Rewrite status
 
-Last reviewed: 2026-10-21, after ledger section 238 (the archer's critical shot: the harness sizes
-the effect record and the scenario reads either).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 239 onwards (the entry
-that warps the members to the start positions, the flags and the war map's own end).
+Last reviewed: 2026-10-21, after ledger section 239 (the war asks its members to join it).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 240 onwards (the war's
+own end: the flags, the war map's end and the members' return).
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -47,7 +46,10 @@ that skips the drop, and the worn item's points. Since 236 a guild war knows the
 fought on: the three war types and the two war maps, the declare's map-index check (the
 atlas is legacy's map index) and the Channel's map set, and the private copy a started war
 takes of its map. Since 237 that map is a map of its own: it holds the two teams, the players that watch it and the counts it tells them, and a player that walks onto it joins it. The owner's index holds the battle map, so a battle war's declare lands
-and its accept starts the war on that type. The rest of combat, skills,
+and its accept starts the war on that type. Since 239 the war asks its members to join it: the
+quest's letter carries the button, the client presses it, the quest asks, the member's yes
+warps it to the war map's start position, and the row it comes back to names the map and the
+place it came from. The rest of combat, skills,
 parties, guilds and the rest of step 4 are not ported yet. The two-process layout (a `game-server` and a `db-server`
 talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177; sections 1-175
 record how it was built and stay as history. Since section 178 the one `prodomo` binary reads
@@ -361,6 +363,7 @@ owner should know about (178.5):
 | V20. A guild symbol upload is judged as if the guild held land (ledger 230v). | `test_server` opens the land gate (`G/input_login.cpp:1230`); the owner's files run `test_server` 1 and real guilds hold land, while no land system exists yet, so a literal port would close every symbol upload. |
 
 | V21. The death's item drop penalty differs from legacy in six ways (ledger 235). (a) The shuffle uses the game's one generator, where legacy uses a fresh `std::mt19937` seeded from `std::random_device` (`G/char_battle.cpp:1085-1087`), so which items a penalty drops is not legacy's set. (b) The dropped items' rows go at once, where legacy's go in the delayed-save queue's flush, up to 127 Pulses (about 5.1 seconds) after the drop, and they name the victim until then. (c) `AddToGround` finding no tree for the point loses the item in legacy (`G/item.cpp:569-574`, a Defect); the Rewrite keeps it. (d) The GM arm is narrower: legacy's `GetGMLevel() == GM_PLAYER || test_server` runs the penalty for a GM when `test_server` is on, and it is on in the owner's configuration; the Rewrite spares the GM. (e) Legacy's quickslot sync for a worn item names the wear index, which is an inventory cell, and deletes the wrong quickslot (`G/char_battle.cpp:1150`); the Rewrite syncs the flat cell and deletes nothing. (f) The private shop, the protected inventory, the agreed PvP, the arena duel and the forked road are not ported, so their refusals and their flags cannot happen. | `G/char_battle.cpp:1016-1199`; `G/item_manager.cpp:478-499`, `:546-564`; `G/main.cpp:284-288`; `G/item.cpp:569-574`; `G/unique_item.h:29`. |
+| V22. A guild war's member is sent to the war map before the quest that asked it closes, where legacy sends it after (ledger 239). The quest's end (`[DONE]`) is written first and the warp follows, because the quest step answers the descriptor and the warp goes through the order queue. | The `GC_WARP` is sent while the script runs, so the load comes first and the quest's end after it (`CHARACTER::WarpSet`, `G/char.cpp:6694-6792`). The two records are the same; only their order differs. |
 
 ## Legacy defects not to reproduce
 

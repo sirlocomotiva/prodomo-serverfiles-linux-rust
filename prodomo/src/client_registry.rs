@@ -75,6 +75,20 @@ pub enum ClientOrder {
         x: i32,
         /// The target y.
         y: i32,
+        /// `lPrivateMapIndex`, legacy's third argument (`G/char.cpp:6694`): the private
+        /// map the warp lands on, and 0 when the map comes from the position. A guild
+        /// war's member is warped onto the war's own copy of a map this way
+        /// (`G/guild_war.cpp:677`).
+        private_map_index: i32,
+        /// The Channel that serves the map, when it is not the client's own. A guild
+        /// war's private map stands on the Channel of the master that accepted the war
+        /// (`G/guild_war.cpp:507`), and a member of another Channel is sent there.
+        channel: Option<u8>,
+        /// The place the character came from, when the warp lands it on a private map
+        /// (`SaveExitLocation`, `G/char.cpp:6679-6683`): a guild war's member remembers
+        /// where it stood so that the war's end can send it back (`G/war_map.cpp:459`).
+        /// `None` for a warp that lands on a public map.
+        exit: Option<crate::save::ExitLocation>,
     },
     /// The rows the death penalty took from a victim (`CHARACTER::ItemDropPenalty`,
     /// `G/char_battle.cpp:1016-1200`).
@@ -491,6 +505,9 @@ mod tests {
         let warp = ClientOrder::Warp {
             x: 400_200,
             y: 899_500,
+            private_map_index: 0,
+            channel: None,
+            exit: None,
         };
 
         assert!(registry.order(1, named.id(), warp.clone()));
@@ -520,6 +537,9 @@ mod tests {
         let warp = ClientOrder::Warp {
             x: 162_500,
             y: 676_100,
+            private_map_index: 0,
+            channel: None,
+            exit: None,
         };
 
         assert!(!registry.order(1, departed_id, warp.clone()));

@@ -947,7 +947,19 @@ impl GameState {
             .members_on_map(channel, map)
             .into_iter()
             .find(|(_, entry)| entry.vid == raw)
-            .is_some_and(|(id, _)| clients.order(channel, id, ClientOrder::Warp { x, y }));
+            .is_some_and(|(id, _)| {
+                clients.order(
+                    channel,
+                    id,
+                    ClientOrder::Warp {
+                        x,
+                        y,
+                        private_map_index: 0,
+                        channel: None,
+                        exit: None,
+                    },
+                )
+            });
         if !ordered {
             warn!(vid = raw, x, y, "a restart warp found no client to order");
         }
@@ -1332,6 +1344,9 @@ mod tests {
     const TO_TOWN: ClientOrder = ClientOrder::Warp {
         x: TOWN.0,
         y: TOWN.1,
+        private_map_index: 0,
+        channel: None,
+        exit: None,
     };
 
     /// A world with its client registry, and each joined player's lease and inbox.
@@ -3095,7 +3110,16 @@ mod tests {
 
         field.pulse(P0 + 151);
         assert_eq!(field.restart(RestartKind::Town), RestartAnswer::default());
-        assert_eq!(field.ordered(ALPHA), vec![ClientOrder::Warp { x, y }]);
+        assert_eq!(
+            field.ordered(ALPHA),
+            vec![ClientOrder::Warp {
+                x,
+                y,
+                private_map_index: 0,
+                channel: None,
+                exit: None
+            }]
+        );
         assert!(!field.world.is_down(ALPHA.raw()));
     }
 

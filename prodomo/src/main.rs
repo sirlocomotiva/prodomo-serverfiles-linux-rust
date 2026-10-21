@@ -31,8 +31,8 @@ use common::logging::{init_from_env, init_logging, LogConfig};
 use common::point_slot;
 use db::accounts::{find_auth_account, record_login, AccountError, AccountId};
 use db::players::{
-    change_name, create_player, delete_player, load_character, lobby, select_empire, Created,
-    PlayerDelete, PLAYER_SLOTS,
+    change_name, create_player, delete_player, load_character, lobby, select_empire, Character,
+    Created, PlayerDelete, PLAYER_SLOTS,
 };
 use db::store::{schema_version, Store, StoreConfig};
 use gamedata::banword::banwords_from_dump;
@@ -124,9 +124,10 @@ use protocol::cg_inventory::{
     HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER,
     HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE,
     HEADER_CG_PARTY_USE_SKILL, HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD,
-    HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SHOOT,
-    HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION,
-    HEADER_CG_TARGET, HEADER_CG_USE_SKILL, HEADER_CG_WARP,
+    HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_SCRIPT_ANSWER,
+    HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER,
+    HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_USE_SKILL,
+    HEADER_CG_WARP,
 };
 use protocol::cg_item_drop::CgItemDrop;
 use protocol::cg_item_drop2::CgItemDrop2;
@@ -142,7 +143,7 @@ use protocol::cg_name::CgChangeName;
 use protocol::cg_party::{CgPartyInvite, CgPartyInviteAnswer, CgPartyRemove};
 use protocol::cg_party::{CgPartyParameter, CgPartySetState};
 use protocol::cg_party_skill::CgPartyUseSkill;
-use protocol::cg_pick::CgTarget;
+use protocol::cg_pick::{CgScriptButton, CgTarget};
 use protocol::cg_position::CgCharacterPosition;
 use protocol::cg_quest_text::CgQuestInputString;
 use protocol::cg_quickslot_add::CgQuickslotAdd;
@@ -406,6 +407,10 @@ struct Held {
     /// `m_lWarpMapIndex` and `m_posWarp`: the destination a `WarpSet` stored, which the save
     /// writes instead of the position (`G/char.cpp:1551-1565`).
     warp: Option<prodomo::warp::WarpTarget>,
+    /// `m_posExit` and `m_lExitMapIndex`: the place the character returns to when it leaves
+    /// a private map, which the save writes beside the position (`SaveExitLocation`,
+    /// `G/char.cpp:6679-6683`). A character that never left a public map has none.
+    exit: Option<prodomo::save::ExitLocation>,
     /// Whether this descriptor has sent `GC_WARP`. Its character is saved at the destination
     /// and released by then, so the descriptor only waits for the client to close, dropping
     /// whatever the client still sends.
@@ -1476,8 +1481,30 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     match order {
-        ClientOrder::Warp { x, y } => {
-            warp_set(session, addr, context, locations, held, (x, y)).await
+        ClientOrder::Warp {
+            x,
+            y,
+            private_map_index,
+            channel,
+            exit,
+        } => {
+            // `SaveExitLocation` (`G/char.cpp:6679-6683`): the place the character came
+            // from, which the save writes beside the position and which the war's end
+            // sends the character back to.
+            held.exit = exit;
+            warp_set(
+                session,
+                addr,
+                context,
+                locations,
+                held,
+                (x, y),
+                WarpDestination {
+                    private_map_index,
+                    channel,
+                },
+            )
+            .await
         }
         ClientOrder::ItemRows { changes, order } => {
             write_item_rows(addr, context, held, changes, order).await
@@ -1520,6 +1547,18 @@ async fn write_item_rows(
     }
 }
 
+/// The destination a warp names: the private map's copy and the Channel that serves it.
+///
+/// A warp NPC names neither, and a guild war's member names both: the war's own copy of the
+/// map, and the Channel of the master that accepted the war (`G/guild_war.cpp:507,677`).
+#[derive(Clone, Copy)]
+struct WarpDestination {
+    /// `lPrivateMapIndex`, legacy's third argument (`G/char.cpp:6694`), 0 for a public map.
+    private_map_index: i32,
+    /// The Channel that serves the map, when it is not the client's own.
+    channel: Option<u8>,
+}
+
 /// `CHARACTER::WarpSet(x, y)` for this descriptor's character (`G/char.cpp:6694-6792`);
 /// `false` when the connection must close.
 ///
@@ -1527,8 +1566,10 @@ async fn write_item_rows(
 /// `CMapLocation::Get` failing, which legacy logs as an error and the warp NPC then retries
 /// every 12 Pulses. The Rewrite logs it at debug level for the same reason it is retried:
 /// ten of the owner's warp NPCs name such a position, and a player standing by one would
-/// otherwise fill the log. The private map and the sort-inventory refusals cannot be reached:
-/// a warp NPC passes no private map, and the Rewrite has no inventory sort.
+/// otherwise fill the log. A private map that is not a child of the resolved map is refused
+/// too (`G/char.cpp:6727-6736`); a guild war's member names the war's own copy of a map, and
+/// the copy's index is a child of the map the position lies on. The sort-inventory refusal
+/// cannot be reached: the Rewrite has no inventory sort.
 ///
 /// # The departure
 ///
@@ -1552,10 +1593,15 @@ async fn warp_set<S>(
     locations: Option<&MapLocations>,
     held: &mut Held,
     (x, y): (i32, i32),
+    destination: WarpDestination,
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let WarpDestination {
+        private_map_index,
+        channel,
+    } = destination;
     if held.departed || held.world.is_none() {
         return true;
     }
@@ -1564,17 +1610,18 @@ where
         return true;
     };
     // `CMapLocation::Get`: the atlas says which map holds the position, and the map is a
-    // destination only when a Channel serves it.
+    // destination only when a Channel serves it. A warp that names the Channel itself is
+    // sent there, so the map needs no other Channel to serve it.
     let resolve = |x: i32, y: i32| {
         context
             .atlas
             .index_at(x, y)
-            .filter(|&index| locations.get(index).is_some())
+            .filter(|&index| channel.is_some() || locations.get(index).is_some())
     };
     let request = prodomo::warp::WarpSetRequest {
         x,
         y,
-        private_map_index: 0,
+        private_map_index,
         sort_inventory_pulse: 0,
         now_ms: 0,
     };
@@ -1588,7 +1635,18 @@ where
         debug!(%addr, x, y, map, ?outcome, "WarpSet refused");
         return true;
     };
-    let Some((address, port)) = locations.get(resolved_map_index) else {
+    // The destination: the Channel the map is served by. A warp that names a Channel goes
+    // to that one — a guild war's private map stands on the Channel of the master that
+    // accepted the war, and a member of another Channel is sent there.
+    let destination = match channel {
+        Some(number) => context
+            .routes
+            .channel_ports
+            .get(&number)
+            .map(|&port| (i32::from_le_bytes(context.public_ip.octets()), port)),
+        None => locations.get(resolved_map_index),
+    };
+    let Some((address, port)) = destination else {
         return true;
     };
     leave_the_world(context, addr, held, Departure::Warp).await;
@@ -3672,8 +3730,8 @@ enum MainRecord {
     /// `CG_ATTACK` (2), `CG_MOVE` (7), `CG_SYNC_POSITION` (8), `CG_CHARACTER_POSITION` (28) and
     /// `CG_TARGET` (61).
     World,
-    /// `CG_ON_CLICK` (26), `CG_SHOP` (50), `CG_SCRIPT_ANSWER` (29) and `CG_QUEST_INPUT_STRING`
-    /// (30).
+    /// `CG_ON_CLICK` (26), `CG_SHOP` (50), `CG_SCRIPT_ANSWER` (29), `CG_QUEST_INPUT_STRING`
+    /// (30) and `CG_SCRIPT_BUTTON` (66).
     Npc,
     /// `CG_ANSWER_MAKE_GUILD` (49): `CInputMain::AnswerMakeGuild`
     /// (`G/input_main.cpp:2672-2730`), read through the same main input
@@ -3944,10 +4002,12 @@ where
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
-/// Whether `header` is `CG_SCRIPT_ANSWER` or `CG_QUEST_INPUT_STRING`, the two records a quest's
-/// dialog is answered with.
+/// Whether `header` is `CG_SCRIPT_ANSWER`, `CG_QUEST_INPUT_STRING` or `CG_SCRIPT_BUTTON`,
+/// the three records a quest's dialog is answered with.
 fn is_quest_step(header: u8) -> bool {
-    header == HEADER_CG_SCRIPT_ANSWER.value() || header == HEADER_CG_QUEST_INPUT_STRING.value()
+    header == HEADER_CG_SCRIPT_ANSWER.value()
+        || header == HEADER_CG_QUEST_INPUT_STRING.value()
+        || header == HEADER_CG_SCRIPT_BUTTON.value()
 }
 
 /// `CG_SCRIPT_ANSWER` (29) and `CG_QUEST_INPUT_STRING` (30) in the game phase:
@@ -4151,6 +4211,13 @@ where
     true
 }
 
+/// `CG_SCRIPT_ANSWER` (29), `CG_QUEST_INPUT_STRING` (30) and `CG_SCRIPT_BUTTON` (66) in the
+/// game phase: `CInputMain::ScriptAnswer`, `QuestInputString` and `ScriptButton`
+/// (`G/input_main.cpp:2179-2234`), which no observer check guards (`:3780-3791`).
+///
+/// The world runs the character's quest step and answers the dialog and the chat lines its
+/// script sent; a malformed record closes the connection. A GRAND read that climbed is
+/// stored before the dialog is sent, as a book read's is.
 async fn quest_step<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
@@ -4164,6 +4231,10 @@ where
     let decoded = if frame.header == HEADER_CG_SCRIPT_ANSWER.value() {
         CgScriptAnswer::decode_frame(frame)
             .map(|record| QuestStep::Answer(record.answer))
+            .map_err(|error| error.to_string())
+    } else if frame.header == HEADER_CG_SCRIPT_BUTTON.value() {
+        CgScriptButton::decode_frame(frame)
+            .map(|record| QuestStep::Button(record.idx))
             .map_err(|error| error.to_string())
     } else {
         CgQuestInputString::decode_frame(frame)
@@ -4590,52 +4661,53 @@ async fn select_character<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let record = match CgPlayerSelect::decode_frame(frame) {
-        Ok(record) => record,
-        Err(error) => {
-            warn!(%addr, %error, "Client sent a malformed CHARACTER_SELECT; closing");
-            return false;
-        }
+    let Ok(selected) = the_selected_character(context, addr, held, frame).await else {
+        return false;
+    };
+    let Some((character, player)) = selected else {
+        // The selection was ignored, and the connection stays open.
+        return true;
     };
     let Some(account) = held.account.as_ref() else {
-        // No account table means the descriptor never completed a Channel login. Legacy's
-        // `CharacterSelect` reads `c_r.players[pinfo->index]` straight away, which a client
-        // that skipped the login can reach; there is nothing to select from here.
-        warn!(%addr, "CHARACTER_SELECT without an account table; ignoring");
-        return true;
+        // The account table was there when the character was selected.
+        return false;
     };
-    let slots = account.lobby.slot_ids();
     let account_id = account.id;
-    let player = match judge_select(record.index, Some(&slots)) {
-        SelectVerdict::Ignore => return true,
-        SelectVerdict::Close => {
-            // `SetPhase(PHASE_CLOSE)` writes no record, so the descriptor is simply
-            // dropped: `analyze` returns false and the read loop breaks.
-            info!(%addr, slot = record.index, "Empty character slot; closing");
-            return false;
-        }
-        SelectVerdict::Load { player } => player,
-    };
-    let character = match load_character(&context.store, account_id, player).await {
-        Ok(character) => character,
-        Err(error) => {
-            warn!(%addr, account = account_id.get(), player, %error, "Character load failed; closing");
-            return false;
-        }
-    };
-    if held.character.is_some() {
-        // `PlayerLoad` refuses a second character on one descriptor and logs it. The client is
-        // not asked to leave, so the descriptor stays in the loading phase with the character
-        // it already has.
-        error!(%addr, player, "Login state already has a character; ignoring the selection");
-        return true;
-    }
     let vid = character_vid(&character);
     let view = empty_view();
     // `PlayerLoad` leaves the character on the map its saved position belongs to, and
     // `SetPlayerProto` computes the points there, because the map's conqueror will is part of
     // them.
-    let map_index = context.atlas.index_at(character.x, character.y);
+    //
+    // The row's own map index comes first, as legacy's `PlayerLoad` reads it
+    // (`G/input_db.cpp:335-354`): a private map's index names the copy of a base map the
+    // character stands on, and the position lies in the base map's coordinates, so the atlas
+    // can only answer with the public map.
+    let named = if character.map_index != 0 {
+        Some(character.map_index)
+    } else {
+        context.atlas.index_at(character.x, character.y)
+    };
+    // `GetValidLocation` (`G/sectree_manager.cpp:816-842`): a private map the world does
+    // not host is the base map it was copied from, because the copy a guild war is fought
+    // on died with the process that held it. The world is asked, because only the world
+    // knows which private maps it holds.
+    let Ok(map_index) = resolved_map_index(context, seat, addr, named).await else {
+        return false;
+    };
+    // `SetPlayerProto` (`G/char.cpp:2289-2294`): a character whose row names a private map
+    // comes back to the place it came from, because the copy it stood on is gone with the
+    // process that held it. Legacy holds that place as the pending Warp, so the next save
+    // writes the row there and the war's end sends the character back.
+    if map_index.is_some_and(|index| index >= prodomo::loading_phase::INSTANCE_MAP_BASE)
+        && (character.exit_x != 0 || character.exit_y != 0)
+    {
+        held.warp = Some(prodomo::warp::WarpTarget {
+            map_index: character.exit_map_index,
+            x: character.exit_x,
+            y: character.exit_y,
+        });
+    }
     let mut points = load_points(&character, map_index.unwrap_or(0));
     // `d->BindCharacter(ch)` is the step that makes the character the descriptor's own, and it
     // is what `CInputLogin::Entergame` later reads. Without it `CG_ENTER_GAME` has nothing to
@@ -4657,12 +4729,17 @@ where
     // `G/input_db.cpp:1806-1830`). The Rewrite keeps the grant in the store's
     // `gm_grant` table (ledger 179) and asks for it with the account and the name, so
     // a grant never reaches another account's character.
-    held.gm_level = match read_gm_level(&context.store, account_id, character.name.as_str()).await {
+    held.gm_level = match gm_level_at_select(
+        &context.store,
+        addr,
+        account_id,
+        player,
+        character.name.as_str(),
+    )
+    .await
+    {
         Ok(level) => level,
-        Err(error) => {
-            warn!(%addr, player, %error, "GM grant load failed; closing");
-            return false;
-        }
+        Err(()) => return false,
     };
     info!(
         %addr,
@@ -4713,6 +4790,106 @@ where
     // first thing the game phase does with it is join the client set.
     held.map = map_index;
     true
+}
+
+/// The character the client selected, with the player's id.
+///
+/// `Ok(None)` when the selection was ignored and the connection stays open, `Err` when the
+/// descriptor must close.
+async fn the_selected_character(
+    context: &ConnectionContext,
+    addr: SocketAddr,
+    held: &Held,
+    frame: &ClientFrame,
+) -> Result<Option<(Character, u32)>, ()> {
+    let record = match CgPlayerSelect::decode_frame(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed CHARACTER_SELECT; closing");
+            return Err(());
+        }
+    };
+    let Some(account) = held.account.as_ref() else {
+        // No account table means the descriptor never completed a Channel login. Legacy's
+        // `CharacterSelect` reads `c_r.players[pinfo->index]` straight away, which a client
+        // that skipped the login can reach; there is nothing to select from here.
+        warn!(%addr, "CHARACTER_SELECT without an account table; ignoring");
+        return Ok(None);
+    };
+    let slots = account.lobby.slot_ids();
+    let account_id = account.id;
+    let player = match judge_select(record.index, Some(&slots)) {
+        SelectVerdict::Ignore => return Ok(None),
+        SelectVerdict::Close => {
+            // `SetPhase(PHASE_CLOSE)` writes no record, so the descriptor is simply
+            // dropped: `analyze` returns false and the read loop breaks.
+            info!(%addr, slot = record.index, "Empty character slot; closing");
+            return Err(());
+        }
+        SelectVerdict::Load { player } => player,
+    };
+    let character = match load_character(&context.store, account_id, player).await {
+        Ok(character) => character,
+        Err(error) => {
+            warn!(%addr, account = account_id.get(), player, %error, "Character load failed; closing");
+            return Err(());
+        }
+    };
+    if held.character.is_some() {
+        // `PlayerLoad` refuses a second character on one descriptor and logs it. The client is
+        // not asked to leave, so the descriptor stays in the loading phase with the character
+        // it already has.
+        error!(%addr, player, "Login state already has a character; ignoring the selection");
+        return Ok(None);
+    }
+    Ok(Some((character, player)))
+}
+
+/// The map the character comes back to, with a private map folded onto its base map.
+///
+/// `GetValidLocation` (`G/sectree_manager.cpp:816-842`): a private map the world does not
+/// host is the base map it was copied from, because the copy a guild war is fought on died
+/// with the process that held it. The world is asked, because only the world knows which
+/// private maps it holds.
+///
+/// `Err` when the world could not be asked, which closes the descriptor.
+async fn resolved_map_index(
+    context: &ConnectionContext,
+    seat: &ChannelSeat<'_>,
+    addr: SocketAddr,
+    named: Option<i32>,
+) -> Result<Option<i32>, ()> {
+    let Some(index) = named else {
+        return Ok(None);
+    };
+    if index < prodomo::loading_phase::INSTANCE_MAP_BASE {
+        return Ok(Some(index));
+    }
+    match context.game.map_of(seat.number, index).await {
+        Ok(resolved) => Ok(Some(resolved)),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for the map; closing");
+            Err(())
+        }
+    }
+}
+
+/// The character's GM level at the select, or `Err` when the grant could not be read, which
+/// closes the descriptor.
+async fn gm_level_at_select(
+    store: &Store,
+    addr: SocketAddr,
+    account: AccountId,
+    player: u32,
+    name: &str,
+) -> Result<u8, ()> {
+    match read_gm_level(store, account, name).await {
+        Ok(level) => Ok(level),
+        Err(error) => {
+            warn!(%addr, player, %error, "GM grant load failed; closing");
+            Err(())
+        }
+    }
 }
 
 /// The character's GM level at select: `SetPlayerProto`'s read (`G/input_db.cpp:1931-1955`),
@@ -4888,9 +5065,15 @@ where
     let player = character.id;
     match prodomo::warp::home_warp_location(account.lobby.empire) {
         Some(target) => {
-            if let Err(error) =
-                db::players::save_position(&context.store, account.id, player, target.x, target.y)
-                    .await
+            if let Err(error) = db::players::save_position(
+                &context.store,
+                account.id,
+                player,
+                target.x,
+                target.y,
+                target.map_index,
+            )
+            .await
             {
                 warn!(%addr, player, %error, "Could not store the Warp position");
             } else {
@@ -5245,25 +5428,27 @@ async fn save_held(context: &ConnectionContext, held: &Held, at: std::time::Inst
     let elapsed = u32::try_from(at.saturating_duration_since(event.play_start).as_millis())
         .unwrap_or(u32::MAX);
     // `CHARACTER::Save` writes the pending Warp destination, when there is one, instead of
-    // the position (`G/char.cpp:1551-1565`). The store keeps no map column, so the map of
-    // either is the one the atlas finds at the load.
+    // the position (`G/char.cpp:1551-1565`). The map rides with it, as legacy's
+    // `tab.lMapIndex` does (`G/char.cpp:1552-1564`): a private map's index names the copy
+    // of a base map the character is on, which its position cannot name.
     let live = prodomo::warp::LivePoint {
         x: avatar.x,
         y: avatar.y,
         z: 0,
         map_index: avatar.map,
     };
-    let (x, y) = match held
+    let (x, y, map_index) = match held
         .warp
         .map_or(prodomo::warp::SavePosition::Live(live), |warp| {
             prodomo::warp::save_position(&warp, &live)
         }) {
-        prodomo::warp::SavePosition::Warp(target) => (target.x, target.y),
-        prodomo::warp::SavePosition::Live(point) => (point.x, point.y),
+        prodomo::warp::SavePosition::Warp(target) => (target.x, target.y, target.map_index),
+        prodomo::warp::SavePosition::Live(point) => (point.x, point.y, point.map_index),
     };
     let save = prodomo::save::player_save(
         character,
-        prodomo::save::SavePosition { x, y },
+        prodomo::save::SavePosition { x, y, map_index },
+        held.exit.unwrap_or_default(),
         prodomo::save::playtime(character.playtime_minutes, elapsed),
     );
     match db::players::save_character(&context.store, account.id, character.id, &save).await {
@@ -6312,9 +6497,11 @@ async fn operate(config_path: &Path, command: &OperatorCommand) -> Result<(), Bo
     outcome
 }
 
-/// Each Channel's maps, and the Shared Channel's port and maps.
+/// Each Channel's maps, the port each Channel is reached on, and the Shared Channel's port
+/// and maps.
 struct MapRoutes {
     channel_maps: HashMap<u8, Vec<u32>>,
+    channel_ports: HashMap<u8, u16>,
     shared: Option<(u16, Vec<u32>)>,
 }
 
@@ -6509,6 +6696,20 @@ fn map_routes(config: &ServerConfig, listeners: &Listeners) -> MapRoutes {
         .iter()
         .map(|channel| (channel.number, channel.maps.clone()))
         .collect();
+    // The port each Channel is reached on. A legacy Channel had one port per Core, and the
+    // client list named one of them; the first bound port is that one.
+    let channel_ports: HashMap<u8, u16> = config
+        .channels
+        .iter()
+        .filter_map(|channel| {
+            let port = listeners
+                .iter()
+                .find(|listener| listener.role() == ListenerRole::Channel(channel.number))?
+                .local_addr()
+                .port();
+            Some((channel.number, port))
+        })
+        .collect();
     // The Shared Channel's maps are reached through its first port.
     let shared = config
         .channels
@@ -6524,6 +6725,7 @@ fn map_routes(config: &ServerConfig, listeners: &Listeners) -> MapRoutes {
         });
     MapRoutes {
         channel_maps,
+        channel_ports,
         shared,
     }
 }
@@ -8384,10 +8586,14 @@ mod tests {
             sash_part: 0,
             x: 1,
             y: 2,
+            map_index: 21,
             skill_group: 0,
             playtime_minutes: 0,
             alignment: 0,
             change_name: false,
+            exit_map_index: 0,
+            exit_x: 0,
+            exit_y: 0,
         }
     }
 

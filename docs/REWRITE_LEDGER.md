@@ -33993,3 +33993,123 @@ all-targets DB run green, the parity target 126 of 126; the doc build and the do
 (1 passed, 19 ignored); no scratch database left.
 
 No ADR changed. No owner question added. V21 stays taken.
+
+## 239. The war asks its members to join it (`sys.guild.war`, fourth part)
+
+The war's map was a map of its own — ledger 237 gave it the two teams, the watchers and the
+counts — but nobody could get on it. The war never asked its members, the client had no way
+to press the button the ask carries, and the join that carries a member to the start position
+was not there. Legacy's ask is three steps, and all three are live now.
+
+**The ask.** `CGuild::GuildWarEntryAsk` (`G/guild_war.cpp:680-727`) runs at the start of the
+war and sends the `guild_war_join` quest's letter (`CQuestManager::Letter`,
+`G/questmanager.cpp:502-514`) to every online member of the guild. A war with no map asks
+nothing: the field war is fought where the players stand, and legacy logs an error and
+returns when the map index is 0 (`:692-697`) or the start position cannot be read
+(`:699-704`). The Rewrite asks each side's members in the same loop that starts the war and
+fans it (`guild_war_entry_ask`, `prodomo/src/game_state/guild.rs`), and the letter's records
+go to each member's own client (`quest_letter`, `prodomo/src/game_state/quests.rs`).
+
+**The button.** The quest's letter event shows the button: `makequestbutton`
+(`quest/questlib.lua:117-122`) writes the marker `[QUESTBUTTON idx;<index>|name;<label>]`,
+where the index is the quest's own number (`q.getcurrentquestindex()`). The client presses it
+and sends `CG_SCRIPT_BUTTON` (66), which carries the header and the quest's number
+(`TPacketCGScriptButton`, `G/packet.h:752-756`); `CInputMain::ScriptButton`
+(`G/input_main.cpp:2179-2200`) runs the quest's button event (`CQuestManager::QuestButton`,
+`G/questmanager.cpp:767-783`). The Rewrite's `QuestStep::Button` carries the number into the
+world and the quest's `button` event runs (`prodomo/src/game_state/quests.rs`). Legacy's two
+other arms are not ported: a confirm waiting answers instead of the button, and the high bit
+asks for the quest's information. The codec's own note called the index "behaviourally inert"
+and said the handler only logged it; that was wrong, and the module's note now says what the
+handler does (`protocol/src/cg_pick.rs`, and `docs/PROTOCOL_NOTES.md`).
+
+**The join.** The button event asks the member (`select`), and the member's yes calls
+`guild.war_enter(e)` (`G/questlua_guild.cpp:134-149`), which is `CGuild::GuildWarEntryAccept`
+(`G/guild_war.cpp:639-678`): an enemy the guild does not hold is quiet, a field war is
+quiet, a war that is not on is the `[LS;891]` line to the member, and a war without a map is
+quiet. A member that passes is flagged `war.is_war_member`, and `SaveExitLocation` and
+`WarpSet(pos.x, pos.y, gw.map_index)` carry it to the war map's start position
+(`CWarMapManager::GetStartPosition`, `G/war_map.cpp:1019-1040`): the guild of the lower id
+takes the first position and the other the second. The Rewrite does the same
+(`quest_war_enter`, `prodomo/src/game_state/guild.rs`), and the flag is set on the quest's own
+player.
+
+**The war the quest asks for.** `guild.get_any_war` (`G/questlua_guild.cpp:151-161`) is
+`CGuild::UnderAnyWar` (`G/guild_war.cpp:164-177`) with its default argument: the enemy of a
+war that has begun, in id order, and 0 when there is none. The quest reads it before it shows
+the button and again before it joins, and the number it reads is the one `guild.war_enter`
+takes. The Rewrite answers it in the world and in the shadow that answers a script while it
+waits (`answer_guild_quest` and `Guilds::judge_shadow`, `prodomo/src/game_state/guild.rs`).
+
+**The start positions.** The table of ledger 236 held three wrong numbers per map. Legacy's
+`CWarMapManager::LoadWarMapInfo` (`G/war_map.cpp:974-1008`) builds the positions in the code:
+map 110's first is `48 * 100 + 32000`, `52 * 100 + 0`, which is 36800 and 5200, and the table
+said 3680 and 5200; the second is `183 * 100 + 32000`, `206 * 100 + 0`, which is 50300 and
+20600, and the table said 21500; the third is `141 * 100 + 32000`, `117 * 100 + 0`, which is
+46100 and 11700, and the table said 17300. The flag map's three are the same arithmetic with
+`68 * 100 + 57600` and so on. The table is now the code's own arithmetic
+(`prodomo/src/game_state/war_map.rs`), and `start_position` reads the side from the private
+map's index, which names the map the copy was taken from.
+
+**The store.** A member that stands on a private map must be saved with that map's index and
+with the place it returns to: `lMapIndex`, `lExitX`, `lExitY` and `lExitMapIndex`
+(`TPlayerTable`, `G/tables.h:594-597`). Legacy writes them beside the position
+(`CHARACTER::Save`, `G/char.cpp:1552-1578`) and reads the map index at the load
+(`G/input_db.cpp:335-354`). The Rewrite's row carries them now (migration
+`0015_player_map_index.sql`): the save writes the map the character stands on and the exit
+location, the load reads the map index first, and a character whose row names a private map
+comes back to its exit location, because the copy it stood on died with the process that held
+it (`SetPlayerProto`, `G/char.cpp:2289-2294`).
+
+**The warp.** The join's warp is the first warp that names a private map: `WarpSet` takes the
+private map's index as its third argument (`G/char.cpp:6694`), refuses a private map that is
+not a child of the map the position lies on (`:6727-6736`), and stores the destination. The
+order carries the three new fields (`ClientOrder::Warp`, `prodomo/src/client_registry.rs`),
+and the descriptor does the warp, the save and the `GC_WARP` (`warp_set`,
+`prodomo/src/main.rs`). A warp that names a Channel goes to that Channel's port, which is how
+a member of another Channel reaches the war's map.
+
+**The tests.** `prodomo/src/game_state/guild.rs` holds five: the war asks its members and the
+letter carries the button; a field war asks nothing; the quest's button asks the member and
+the member's yes joins the war; the join takes the member to the start position and remembers
+where it came from; the join refuses a field war and a war that is not on. The parity
+scenario `a_war_with_a_map_asks_its_member_and_the_member_joins_the_war_map` proves the same
+thing on the wire: the letter carries the button, the client presses it, the quest asks, the
+member says yes, and the member lands on the war map's start position with the `GC_WARP` that
+names the Channel's port. `the_other_side_of_the_war_takes_the_other_start_position` proves
+the other side's second position.
+
+**The divergences.**
+
+- **V22.** The order of the two records. Legacy's `WarpSet` sends the `GC_WARP` while the
+  script runs, so the member is sent to the war map before the quest's end (`[DONE]`) is
+  written; the Rewrite's quest step returns the end to the descriptor and the warp goes
+  through the order queue, so the end comes first and the warp after it. The client sees the
+  dialog close and then the load, where legacy sees the load and then the dialog close. The
+  two records are the same; only their order differs.
+- Legacy's `GuildWarEntryAsk` asks the members of one guild, and each side's process asks its
+  own members; the Rewrite holds both guilds and asks each side's members in the same loop
+  that starts the war (`G/guild_war.cpp:419-438`). The ask is the same.
+- The letter's button is shown when the quest's conditions hold, and they read the
+  character's map index and the war map it stands on (`pc.get_map_index`, `pc.get_war_map`);
+  the Rewrite answers both from the world, so the conditions are legacy's.
+- The private copy of the war's map is hosted on the Channel of the master that accepted the
+  war (ledger 236's Divergence); a member of another Channel is sent there, and the `GC_WARP`
+  names that Channel's port.
+
+**The inventory.** The row `sys.guild.war` stays `partial` — the ask and the join are live
+now, but the war map's own end and the war's own flags are not. The row
+`cg.game.script_button` goes from `missing` to `ported`, with the scenario. The rows
+`lua.guild.war_enter` and `lua.guild.get_any_war` go from `missing` to `ported`, and so do
+`lua.pc.get_map_index` and `lua.pc.get_war_map`, which the war-join quest reads. The row
+`quest.guild_war_join` keeps its `partial` status — the quest is loaded and its letter and
+its button are live, but its "no" branch and its "the war is over" branch are not — and its
+note names the live part. The row `cmd.war` keeps its scenario and its note names the battle
+type's entry. The row `sys.quest.runtime` keeps its `partial` status and its note names the
+letter and the button event.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; the full workspace
+all-targets DB run green, the parity target green; the doc build and the doc-tests green; no
+scratch database left.
+
+No ADR changed. No owner question added. V22 is taken.

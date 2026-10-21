@@ -585,32 +585,37 @@ async fn a_saved_position_is_the_one_the_next_load_reads() {
     let (before_x, before_y) = (459_812, -953_877);
 
     assert!(
-        save_position(store, alice, hero, 469_300, 964_200)
+        save_position(store, alice, hero, 469_300, 964_200, 1_100_000)
             .await
             .unwrap(),
         "the row belongs to the account"
     );
     let moved = load_character(store, alice, hero).await.unwrap();
     assert_eq!((moved.x, moved.y), (469_300, 964_200));
+    // The map rides with the position: a private map's index names the copy of a base map
+    // the character is on, which the position alone cannot name (`G/char.cpp:1552-1557`).
+    assert_eq!(moved.map_index, 1_100_000);
 
     // Another account's character keeps its position: the Warp names an account and an ID.
     let untouched = load_character(store, bob, other).await.unwrap();
     assert_eq!((untouched.x, untouched.y), (before_x, before_y));
 
     // A character ID the account does not hold moves nothing and says so.
-    assert!(!save_position(store, alice, other, 1, 2).await.unwrap());
+    assert!(!save_position(store, alice, other, 1, 2, 1).await.unwrap());
     assert_eq!(
         load_character(store, bob, other).await.unwrap().x,
         before_x,
         "another account's row is still where it was"
     );
     // An ID inside the column's range that names no row is a miss, not an error.
-    assert!(!save_position(store, alice, 1_000_000, 1, 2).await.unwrap());
+    assert!(!save_position(store, alice, 1_000_000, 1, 2, 1)
+        .await
+        .unwrap());
     // An ID above i32::MAX cannot name a row, and it is reported rather than wrapped: a cast
     // would turn it into a negative ID that could match a real character.
     for too_wide in [i32::MAX as u32 + 1, u32::MAX] {
         assert!(matches!(
-            save_position(store, alice, too_wide, 1, 2).await,
+            save_position(store, alice, too_wide, 1, 2, 1).await,
             Err(AccountError::NoSuchPlayer(missing)) if missing == too_wide
         ));
     }
@@ -629,11 +634,12 @@ async fn a_saved_position_takes_the_origin_and_negative_coordinates() {
 
     for (x, y) in [(0, 0), (-1, -1), (i32::MAX, i32::MIN)] {
         assert!(
-            save_position(store, alice, hero, x, y).await.unwrap(),
+            save_position(store, alice, hero, x, y, 1).await.unwrap(),
             "{x},{y}"
         );
         let moved = load_character(store, alice, hero).await.unwrap();
         assert_eq!((moved.x, moved.y), (x, y));
+        assert_eq!(moved.map_index, 1, "the map rides with the position");
     }
 }
 
@@ -683,6 +689,10 @@ async fn a_whole_row_save_is_what_the_next_load_reads() {
         sash_part: 0x5566,
         x: 459_812,
         y: -953_877,
+        map_index: 1_100_000,
+        exit_x: -120_001,
+        exit_y: 250_002,
+        exit_map_index: 1_100_001,
         skill_group: 9,
         playtime_minutes: 137,
         alignment: -4321,
@@ -719,6 +729,12 @@ async fn a_whole_row_save_is_what_the_next_load_reads() {
     assert_eq!(read.hair_part, save.hair_part);
     assert_eq!(read.sash_part, save.sash_part);
     assert_eq!((read.x, read.y), (save.x, save.y));
+    assert_eq!(read.map_index, save.map_index);
+    assert_eq!(
+        (read.exit_x, read.exit_y, read.exit_map_index),
+        (save.exit_x, save.exit_y, save.exit_map_index),
+        "the place the character returns to rides with the save"
+    );
     assert_eq!(read.skill_group, save.skill_group);
     assert_eq!(read.playtime_minutes, save.playtime_minutes);
     assert_eq!(read.alignment, save.alignment);
@@ -763,6 +779,10 @@ async fn a_save_names_the_account_and_refuses_a_wide_player_id() {
         sash_part: 1,
         x: 1,
         y: 1,
+        map_index: 1,
+        exit_x: 1,
+        exit_y: 1,
+        exit_map_index: 1,
         skill_group: 1,
         playtime_minutes: 1,
         alignment: 0,

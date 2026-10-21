@@ -1952,6 +1952,9 @@ mod tests {
         ClientOrder::Warp {
             x: 400_200,
             y: 899_500,
+            private_map_index: 0,
+            channel: None,
+            exit: None,
         }
     }
 

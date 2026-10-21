@@ -178,6 +178,27 @@ pub struct SavePosition {
     pub x: i32,
     /// `GetY()`.
     pub y: i32,
+    /// `tab.lMapIndex`: the map the position belongs to (`G/char.cpp:1552-1564`). A private
+    /// map's index names the copy of a base map a guild war is fought on, and the position
+    /// alone cannot name it.
+    pub map_index: i32,
+}
+
+/// The place a character returns to when it leaves a private map.
+///
+/// Legacy holds it in the character's memory (`m_posExit`, `m_lExitMapIndex`,
+/// `G/char.h:1020-1021`), writes it into the row beside the position (`tab.lExitX`,
+/// `tab.lExitY`, `tab.lExitMapIndex`, `G/char.cpp:1567-1577`), and reads it back when the
+/// row names a private map: the copy of a base map died with the process that held it, so
+/// the character comes back here instead (`G/char.cpp:2289-2294`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ExitLocation {
+    /// `tab.lExitX`.
+    pub x: i32,
+    /// `tab.lExitY`.
+    pub y: i32,
+    /// `tab.lExitMapIndex`: the map the place is on.
+    pub map_index: i32,
 }
 
 /// The row one save writes, built from what the loading phase read and where the avatar stands.
@@ -186,7 +207,25 @@ pub struct SavePosition {
 /// returned, because nothing in the Rewrite changes it yet: no inventory, no skill, no stat.
 /// A save therefore rewrites the row it read, which is what legacy does on an idle cycle, and
 /// the next slice that changes a column changes this function with it.
-pub fn player_save(character: &Character, position: SavePosition, played: Playtime) -> PlayerSave {
+///
+/// The exit location is the session's own, because a character that joined a private map
+/// remembered where it came from (`SaveExitLocation`, `G/char.cpp:6679-6683`). A character
+/// that never left a public map has none, and legacy writes the position it stands at as the
+/// exit location (`G/char.cpp:1567-1571`).
+pub fn player_save(
+    character: &Character,
+    position: SavePosition,
+    exit: ExitLocation,
+    played: Playtime,
+) -> PlayerSave {
+    // The exit location is the session's own when it has one, and the place the character
+    // stands at when it does not: legacy writes the position it stands at as the exit
+    // location while the character holds none (`G/char.cpp:1567-1571`).
+    let (exit_x, exit_y, exit_map_index) = if exit.map_index == 0 {
+        (position.x, position.y, position.map_index)
+    } else {
+        (exit.x, exit.y, exit.map_index)
+    };
     PlayerSave {
         level: character.level,
         exp: character.exp,
@@ -212,6 +251,10 @@ pub fn player_save(character: &Character, position: SavePosition, played: Playti
         sash_part: character.sash_part,
         x: position.x,
         y: position.y,
+        map_index: position.map_index,
+        exit_x,
+        exit_y,
+        exit_map_index,
         skill_group: character.skill_group,
         playtime_minutes: played.minutes,
         alignment: character.alignment,
@@ -259,6 +302,10 @@ mod tests {
             sash_part: 1003,
             x: 469_300,
             y: 964_200,
+            map_index: 21,
+            exit_x: 469_300,
+            exit_y: 964_200,
+            exit_map_index: 21,
             skill_group: 5,
             playtime_minutes: 12,
             alignment: -250,
@@ -273,6 +320,12 @@ mod tests {
             SavePosition {
                 x: 470_100,
                 y: 950_100,
+                map_index: 1_100_000,
+            },
+            ExitLocation {
+                x: 469_300,
+                y: 964_200,
+                map_index: 21,
             },
             Playtime {
                 minutes: 13,
@@ -283,6 +336,13 @@ mod tests {
         // the avatar: that is the whole point of a save.
         assert_eq!((save.x, save.y), (470_100, 950_100));
         assert_ne!((save.x, save.y), (469_300, 964_200));
+        // The map rides with the position (`G/char.cpp:1552-1564`): a private map's index
+        // names the copy of a base map the character is on.
+        assert_eq!(save.map_index, 1_100_000);
+        // The exit location is the session's own, not the row's: a character that joined a
+        // private map came from somewhere else (`G/char.cpp:1567-1577`).
+        assert_eq!((save.exit_x, save.exit_y), (469_300, 964_200));
+        assert_eq!(save.exit_map_index, 21);
         assert_eq!(save.playtime_minutes, 13);
         // Every other column is the row's own value, copied through.
         assert_eq!(save.level, 9);

@@ -134,6 +134,14 @@ impl MapIndex {
         })
     }
 
+    /// Whether the map stands on a grid of sectrees.
+    ///
+    /// A map the world was given no grid for ([`Self::treeless`]) has none, and neither has
+    /// the copy of a base map a private map takes before the war's map is hosted.
+    pub(super) fn has_cells(&self) -> bool {
+        self.grid.columns > 0 && self.grid.rows > 0
+    }
+
     /// The sectree holding a point, or `None` where the map built none.
     pub(super) fn tree_at(&self, x: i32, y: i32) -> Option<Tree> {
         self.grid

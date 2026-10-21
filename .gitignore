@@ -1,5 +1,6 @@
 # Agent/runtime state
 /.overlord/
+/.opencode/
 .omo
 .codegraph
 

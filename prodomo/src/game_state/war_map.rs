@@ -103,13 +103,15 @@ pub(super) const WAR_MAPS: [WarMapInfo; 2] = [
     WarMapInfo {
         map_index: 110,
         map_type: WAR_MAP_TYPE_NORMAL,
-        // 48 * 100 + 32000, 52 * 100 + 0, and so on: the code's own arithmetic.
-        start: [(3_680, 5_200), (21_500, 20_600), (17_300, 11_700)],
+        // 48 * 100 + 32000, 52 * 100 + 0, and so on: the code's own arithmetic
+        // (`G/war_map.cpp:990-995`).
+        start: [(36_800, 5_200), (50_300, 20_600), (46_100, 11_700)],
     },
     // Map 111, the flag war map.
     WarMapInfo {
         map_index: 111,
         map_type: WAR_MAP_TYPE_FLAG,
+        // 68 * 100 + 57600, 69 * 100 + 0, and so on (`G/war_map.cpp:1003-1008`).
         start: [(64_400, 6_900), (74_700, 18_200), (69_800, 13_100)],
     },
 ];
@@ -256,6 +258,16 @@ pub(super) fn war_map_of(map_index: i32) -> Option<&'static WarMapInfo> {
         map_index
     };
     WAR_MAPS.iter().find(|info| info.map_index == base)
+}
+
+/// The start position of one side of a war (`CWarMapManager::GetStartPosition`,
+/// `G/war_map.cpp:1019-1040`): the side 0 is the team of the lower guild id, the side 1
+/// the other team's, and the side 2 the watchers'. The private map's index names the map
+/// it was copied from, so the position is the base map's.
+#[must_use]
+pub(super) fn start_position(map_index: i32, side: usize) -> Option<(i32, i32)> {
+    let info = war_map_of(map_index)?;
+    info.start.get(side).copied()
 }
 
 /// The private map index a war takes of a map (`SECTREE_MANAGER::CreatePrivateMap`,

@@ -57,6 +57,7 @@ use super::fight::AFF_STUN_WORD;
 use super::guild_mark::{self, INVALID_MARK_ID, MARK_PIXELS};
 use super::GameState;
 use crate::chat_line::{chat_packet, Arg};
+use crate::client_registry::ClientOrder;
 use crate::item_move::{gold_delta, row_changes, Mover};
 
 /// `GUILD_CREATE_FEE`: the 200000 gold `CInputMain::AnswerMakeGuild` gates on and takes
@@ -3009,6 +3010,14 @@ impl GameState {
         })
     }
 
+    /// The enemy of `id` whose war has begun (`CGuild::UnderAnyWar`,
+    /// `G/guild_war.cpp:164-177`): the first enemy in id order whose state is on-war,
+    /// and none when there is no such enemy. Legacy returns the enemy's guild id, which
+    /// the war-join quest passes back to `guild.war_enter`.
+    fn guild_any_war(&self, id: u32) -> Option<u32> {
+        self.guilds.any_war(id)
+    }
+
     /// Whether `id` may start a war of `war_type` (`CGuild::CanStartWar`,
     /// `G/guild_war.cpp:143-152`): the type below the max, a positive ladder, and 8
     /// member rows. The test-server/event-flag arm is gone: the Rewrite has no test
@@ -3343,6 +3352,9 @@ impl GameState {
             // `GuildWarPacket(dwOppGID, gw.type, GUILD_WAR_ON_WAR)`
             // (`G/guild_war.cpp:428`): the fan carries the war's own type.
             self.guild_war_fan(id, opp, war_type, GUILD_WAR_ON_WAR);
+            // `GuildWarEntryAsk` (`G/guild_war.cpp:437`): the war asks the online
+            // members of this guild to join it, which the quest's letter does.
+            self.guild_war_entry_ask(id, opp);
         }
         let (lo, hi) = if from < to { (from, to) } else { (to, from) };
         self.guilds.wars.insert((lo, hi));
@@ -3366,6 +3378,49 @@ impl GameState {
             .map_or(Vec::new(), |guild| guild.name.clone());
         GuildWarAnswer {
             notice: Some(GuildWarNotice::Accept { from_name, to_name }),
+        }
+    }
+
+    /// `CGuild::GuildWarEntryAsk` (`G/guild_war.cpp:680-727`): the war asks every online
+    /// member of the guild to join it. The quest's letter shows the button that asks, and
+    /// the button runs the join (`guild.war_enter`).
+    ///
+    /// Legacy asks only a war with a map: the field war is fought where the players
+    /// already stand, and a war the Channel does not host a map for has none. The letter
+    /// is the `guild_war_join` quest's, named as legacy names it.
+    fn guild_war_entry_ask(&mut self, id: u32, opp: u32) {
+        let Some(entry) = self
+            .guilds
+            .by_id
+            .get(&id)
+            .and_then(|guild| guild.enemies.get(&opp))
+        else {
+            return;
+        };
+        if entry.map_index == 0 {
+            return;
+        }
+        let Some(quest) = self
+            .quests
+            .as_ref()
+            .and_then(|quests| quests.manager().host().quest_index(b"guild_war_join"))
+        else {
+            return;
+        };
+        let members: Vec<Vid> = self
+            .guilds
+            .by_id
+            .get(&id)
+            .map(|guild| {
+                guild
+                    .members
+                    .values()
+                    .filter_map(|member| member.vid)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for vid in members {
+            self.quest_letter(vid, quest);
         }
     }
 
@@ -4555,8 +4610,150 @@ impl GameState {
             b"set_skill_point0" => self.quest_set_skill_point(vid, own, first),
             b"offer_exp0" => self.quest_offer_exp(vid, caller, own, first),
             b"give_exp0" => self.quest_give_exp(vid, own, first),
+            b"get_any_war" => {
+                // `CGuild::UnderAnyWar` (`G/guild_war.cpp:164-177`): the enemy of a war
+                // that has begun, in id order, and 0 when there is none.
+                let enemy = own.and_then(|id| self.guild_any_war(id)).unwrap_or(0);
+                quiet(number(enemy))
+            }
+            b"war_enter" => self.quest_war_enter(vid, caller, own, first),
             _ => quiet(GuildAnswer::None),
         }
+    }
+
+    /// `CGuild::GuildWarEntryAccept` (`G/guild_war.cpp:639-678`): the member joins the
+    /// war its guild is in. The enemy is named by its guild id, which the war-join quest
+    /// read with `guild.get_any_war`.
+    ///
+    /// The refusals are legacy's, in legacy's order: an enemy the guild does not hold, a
+    /// field war (which is fought where the players stand) and a war without a map are
+    /// quiet; a war that is not on goes to the member as the `[LS;891]` line.
+    fn quest_war_enter(
+        &mut self,
+        vid: Vid,
+        caller: Option<u32>,
+        own: Option<u32>,
+        enemy: Option<&quest::manager::GuildArg>,
+    ) -> GuildQuestJudged {
+        use quest::manager::{GuildAnswer, GuildArg};
+        let quiet = GuildQuestJudged::silent(GuildAnswer::None);
+        let (Some(caller), Some(id)) = (caller, own) else {
+            return quiet;
+        };
+        // `lua_isnumber(L, 1)`: a number-like argument. A non-number logs and pushes
+        // nothing, so the join does not happen.
+        let Some(GuildArg::Number(enemy_id)) = enemy else {
+            return quiet;
+        };
+        let Some(guild) = self.guilds.by_id.get(&id) else {
+            return quiet;
+        };
+        let Some(entry) = guild.enemies.get(enemy_id) else {
+            return quiet;
+        };
+        let (war_type, state, map_index) = (entry.war_type, entry.state, entry.map_index);
+        if war_type == GUILD_WAR_TYPE_FIELD {
+            return quiet;
+        }
+        if state != GUILD_WAR_ON_WAR {
+            // `ch->ChatPacket(CHAT_TYPE_INFO, "[LS;891]")` (`G/guild_war.cpp:653`).
+            self.tell_guild(vid, b"[LS;891]", &[]);
+            return quiet;
+        }
+        if map_index == 0 {
+            // The war has no map: the Channel that runs it does not host the war's map
+            // (`map_allow_find`, `G/guild_war.cpp:493-497`).
+            return quiet;
+        }
+        // `GetStartPosition(gw.map_index, GetID() < dwOppGID ? 0 : 1, pos)`
+        // (`G/guild_war.cpp:662`): the guild of the lower id takes the first position.
+        let side = usize::from(id >= *enemy_id);
+        let Some((x, y)) = super::war_map::start_position(map_index, side) else {
+            return quiet;
+        };
+        // The flag the join reads (`G/guild_war.cpp:674`): the player joins the team of
+        // its guild when it carries it (`CWarMap::IncMember`, `G/war_map.cpp:353`).
+        if let Some(quests) = self.quests.as_mut() {
+            quests
+                .manager_mut()
+                .set_quest_flag(caller, b"war.is_war_member", 1);
+        }
+        // `ch->WarpSet(pos.x, pos.y, gw.map_index)` (`G/guild_war.cpp:677`): the member
+        // lands on the war's own copy of the map, on the Channel that holds it.
+        let Some(channel) = self.war_map_channel(map_index) else {
+            warn!(
+                vid = vid.raw(),
+                map = map_index,
+                "a war join found no Channel that holds the war's map"
+            );
+            return quiet;
+        };
+        self.order_war_warp(vid, x, y, map_index, Some(channel));
+        quiet
+    }
+
+    /// The Channel that holds a war's private map (`CWarMapManager::CreateWarMap`,
+    /// `G/war_map.cpp:1042-1059`): the copy stands on the Channel of the master that
+    /// accepted the war, and the world hosts it there.
+    fn war_map_channel(&self, map_index: i32) -> Option<u8> {
+        self.maps
+            .keys()
+            .find(|(_, map)| *map == map_index)
+            .map(|(channel, _)| *channel)
+    }
+
+    /// Order the client of `vid` the warp to (`x`, `y`) on the map `map_index`
+    /// (`CHARACTER::WarpSet`, `G/char.cpp:6694-6792`): the descriptor that holds the
+    /// character does the warp, the save and the `GC_WARP`.
+    fn order_war_warp(
+        &self,
+        vid: Vid,
+        x: i32,
+        y: i32,
+        map_index: i32,
+        channel: Option<u8>,
+    ) -> bool {
+        let raw = vid.raw();
+        let Some(clients) = self.clients.as_ref() else {
+            warn!(vid = raw, "a war join has no client registry to reach");
+            return false;
+        };
+        let Some((channel_now, map)) = self.place_of(raw) else {
+            warn!(vid = raw, "a war join found no place the member stands");
+            return false;
+        };
+        // `SaveExitLocation` (`G/char.cpp:6679-6683`): the place the member came from,
+        // which the save writes beside the position and which the war's end sends it
+        // back to.
+        let exit = self.spot_of(raw).map(|spot| crate::save::ExitLocation {
+            x: spot.x,
+            y: spot.y,
+            map_index: map,
+        });
+        let ordered = clients
+            .members_on_map(channel_now, map)
+            .into_iter()
+            .find(|(_, entry)| entry.vid == raw)
+            .is_some_and(|(id, _)| {
+                clients.order(
+                    channel_now,
+                    id,
+                    ClientOrder::Warp {
+                        x,
+                        y,
+                        private_map_index: map_index,
+                        channel,
+                        exit,
+                    },
+                )
+            });
+        if !ordered {
+            warn!(
+                vid = raw,
+                x, y, map_index, "a war join found no client to order"
+            );
+        }
+        ordered
     }
 
     /// `CGuildManager::GetRank` (`G/guild_manager.cpp:285-297`): one plus the guilds whose
@@ -5514,6 +5711,20 @@ impl Guild {
 }
 
 impl Guilds {
+    /// The enemy of `id` whose war has begun (`CGuild::UnderAnyWar`,
+    /// `G/guild_war.cpp:164-177`): the first enemy in id order whose state is on-war, and
+    /// none when there is no such enemy. Legacy returns the enemy's guild id, which the
+    /// war-join quest passes back to `guild.war_enter`.
+    pub(super) fn any_war(&self, id: u32) -> Option<u32> {
+        self.by_id.get(&id).and_then(|guild| {
+            guild
+                .enemies
+                .iter()
+                .find(|(_, enemy)| enemy.state == GUILD_WAR_ON_WAR)
+                .map(|(enemy, _)| *enemy)
+        })
+    }
+
     /// Answer one `guild.*` quest call's pushed value from the shadow (230s): what
     /// [`GameState::answer_guild_quest`] would push for the same call on the live guilds.
     /// The Session calls this while the script waits, so the script's control flow sees
@@ -5605,6 +5816,7 @@ impl Guilds {
                 let clamped = level.min(u32::from(GUILD_MAX_LEVEL));
                 number(GUILD_LEVELUP_EXP[usize::try_from(clamped).unwrap_or(0)])
             }
+            b"get_any_war" => number(own.and_then(|id| self.any_war(id)).unwrap_or(0)),
             // Writers push nothing; their judges land after the step.
             _ => GuildAnswer::None,
         }
@@ -5749,8 +5961,13 @@ mod tests {
 
     use super::super::fixtures::{a_world, enter, TestClock};
     use super::*;
+    use crate::client_registry::{ChannelClients, ClientEntry, Lease};
     use crate::game_loop::PulseProcessor;
     use gamedata::map_atlas::{MapAtlas, MapRegion};
+    use gamedata::mob_locale_names::MobNamesByLanguage;
+    use quest::manager::Manager;
+
+    use crate::game_state::QuestStep;
 
     /// The master, at the origin.
     const MASTER_VID: u32 = 100;
@@ -7788,6 +8005,272 @@ mod tests {
             "the private map is hosted on the war's Channel"
         );
         drop(rival);
+    }
+
+    /// A world with a war on, a client registry and the member's own client: the join's
+    /// order has somewhere to go. The type word is the one the declares carry: ` 1` is
+    /// the battle war, and no word at all is the field war.
+    fn a_war_on(
+        kind: &str,
+    ) -> (
+        GameState,
+        UnboundedReceiver<ClientOrder>,
+        Lease,
+        UnboundedReceiver<Vec<u8>>,
+    ) {
+        a_war_on_with(kind, false)
+    }
+
+    /// The same, with the quests loaded: the war's letter and the button that joins the
+    /// war are the `guild_war_join` quest's.
+    fn a_war_on_with_quests(
+        kind: &str,
+    ) -> (
+        GameState,
+        UnboundedReceiver<ClientOrder>,
+        Lease,
+        UnboundedReceiver<Vec<u8>>,
+    ) {
+        a_war_on_with(kind, true)
+    }
+
+    /// The war fixture, with or without the quests.
+    fn a_war_on_with(
+        kind: &str,
+        quests: bool,
+    ) -> (
+        GameState,
+        UnboundedReceiver<ClientOrder>,
+        Lease,
+        UnboundedReceiver<Vec<u8>>,
+    ) {
+        let (_clock, world, master, _guest) = a_guilded_pair();
+        let clients = Arc::new(ChannelClients::new());
+        let mut world = with_the_battle_map(world).with_clients(Arc::clone(&clients));
+        if quests {
+            world.quests = Some(a_quest_manager());
+        }
+        install_war_pair(&mut world);
+        let _rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let declare = format!("Wolves{kind}");
+        let accept = format!("Knights{kind}");
+        let _ = world.guild_war(Vid::new(MASTER_VID), declare.as_bytes(), NOW);
+        let answer = world.guild_war(Vid::new(200), accept.as_bytes(), NOW);
+        assert!(answer.notice.is_some(), "the accept starts the war");
+        let mut lease = clients.join(ClientEntry {
+            channel: super::super::fixtures::PLACE.0,
+            map: super::super::fixtures::PLACE.1,
+            name: format!("P{MASTER_VID}"),
+            vid: MASTER_VID,
+            empire: 1,
+            language: 0,
+        });
+        let orders = lease.take_orders().expect("the queue is home");
+        (world, orders, lease, master)
+    }
+
+    /// The quests of the legacy Locale: the war's letter and the button that joins the
+    /// war are the `guild_war_join` quest's.
+    fn a_quest_manager() -> super::super::quests::Quests {
+        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe");
+        let manager = Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
+        super::super::quests::Quests::new(manager, Arc::default(), MobNamesByLanguage::default())
+    }
+
+    /// `CGuild::GuildWarEntryAsk` (`G/guild_war.cpp:680-727`): a war with a map asks the
+    /// online members of both guilds to join it, and the quest's letter shows the button
+    /// that asks.
+    #[test]
+    fn the_war_asks_its_members_to_join_it() {
+        let (_world, _orders, _lease, mut master) = a_war_on_with_quests(" 1");
+        let asked = heard(&mut master);
+        assert!(
+            asked.iter().any(|record| record
+                .windows(16)
+                .any(|window| window.starts_with(b"[QUESTBUTTON"))),
+            "the master is asked to join the war: {asked:?}"
+        );
+    }
+
+    /// A field war is fought where the players stand, so it asks nothing
+    /// (`GuildWarEntryAsk`, `G/guild_war.cpp:694-697`): the war has no map.
+    #[test]
+    fn a_field_war_asks_nothing() {
+        let (_world, _orders, _lease, mut master) = a_war_on_with_quests("");
+        let asked = heard(&mut master);
+        assert!(
+            !asked.iter().any(|record| record
+                .windows(16)
+                .any(|window| window.starts_with(b"[QUESTBUTTON"))),
+            "a field war asks nothing: {asked:?}"
+        );
+    }
+
+    /// `CGuild::GuildWarEntryAccept` (`G/guild_war.cpp:639-678`) through the quest: the
+    /// letter asks, the button asks the player, and the player's yes joins the war.
+    #[test]
+    fn the_quest_button_joins_the_war() {
+        let (mut world, mut orders, _lease, _master) = a_war_on_with_quests(" 1");
+        let quest = world
+            .quests
+            .as_ref()
+            .and_then(|quests| quests.manager().host().quest_index(b"guild_war_join"))
+            .expect("the war join quest");
+        let place = crate::game_loop_messages::GroundPlace {
+            channel: super::super::fixtures::PLACE.0,
+            map: super::super::fixtures::PLACE.1,
+            x: HERE.0,
+            y: HERE.1,
+        };
+        let mover = world.own_mover(Vid::new(MASTER_VID)).expect("the master");
+        // The letter asks the client for the button.
+        world.quest_letter(Vid::new(MASTER_VID), quest);
+        // The button runs the quest's button event, which asks the player to confirm.
+        let (records, _climbs, _stores) = world
+            .quest(
+                Vid::new(MASTER_VID),
+                &QuestStep::Button(quest),
+                place,
+                mover,
+            )
+            .expect("the world holds the master");
+        assert!(
+            records
+                .iter()
+                .any(|record| record.windows(9).any(|window| window == b"[QUESTION")),
+            "the player is asked to confirm: {records:?}"
+        );
+        // The player's yes: the first entry of the menu.
+        let _ = world.quest(Vid::new(MASTER_VID), &QuestStep::Answer(0), place, mover);
+        let order = orders.try_recv().ok();
+        assert!(
+            matches!(order, Some(ClientOrder::Warp { .. })),
+            "the member is warped to the war: {order:?}"
+        );
+    }
+
+    /// `CGuild::GuildWarEntryAccept` (`G/guild_war.cpp:639-678`): the member of a guild at
+    /// war is warped to the war's start position on the war's own copy of the map, and the
+    /// place it came from is remembered as its exit location (`SaveExitLocation`).
+    #[test]
+    fn the_war_join_takes_the_member_to_the_wars_start_position() {
+        let (mut world, mut orders, _lease, _master) = a_war_on(" 1");
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"war_enter",
+            &[quest::manager::GuildArg::Number(SECOND_ID)],
+            NOW,
+        );
+        assert_eq!(
+            judged.answer,
+            quest::manager::GuildAnswer::None,
+            "the join pushes nothing"
+        );
+        assert_eq!(
+            orders.try_recv().ok(),
+            Some(ClientOrder::Warp {
+                // `GetStartPosition` (`G/war_map.cpp:990-995`): the guild of the lower id
+                // takes the first position of map 110.
+                x: 36_800,
+                y: 5_200,
+                private_map_index: 1_100_000,
+                channel: Some(super::super::fixtures::PLACE.0),
+                // `SaveExitLocation` (`G/char.cpp:6679-6683`): the place the member came
+                // from, which the save writes beside the position.
+                exit: Some(crate::save::ExitLocation {
+                    x: HERE.0,
+                    y: HERE.1,
+                    map_index: super::super::fixtures::PLACE.1,
+                }),
+            }),
+            "the member is warped to the war's start position"
+        );
+        assert!(orders.try_recv().is_err(), "exactly one order");
+    }
+
+    /// `CGuild::GuildWarEntryAccept` (`G/guild_war.cpp:648-660`): a field war is fought
+    /// where the players stand, a war that has not begun is refused with the `[LS;891]`
+    /// line, and a war without a map is refused quietly. None of them warps the member.
+    #[test]
+    fn the_war_join_refuses_a_field_war_and_a_war_that_is_not_on() {
+        // A field war is fought where the players stand: the join is quiet and no one
+        // is warped.
+        let (mut world, mut orders, _lease, mut master) = a_war_on("");
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"war_enter",
+            &[quest::manager::GuildArg::Number(SECOND_ID)],
+            NOW,
+        );
+        assert_eq!(judged.answer, quest::manager::GuildAnswer::None);
+        assert!(orders.try_recv().is_err(), "a field war warps no one");
+        assert!(
+            !heard(&mut master)
+                .iter()
+                .any(|record| record.windows(8).any(|window| window == b"[LS;891]")),
+            "a field war is quiet"
+        );
+        // A war that has not begun: the member is told so, and no one is warped.
+        let (_clock, world, mut master, _guest) = a_guilded_pair();
+        let clients = Arc::new(ChannelClients::new());
+        let mut world = with_the_battle_map(world).with_clients(Arc::clone(&clients));
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        let _ = world.guild_war(Vid::new(MASTER_VID), b"Wolves 1", NOW);
+        let mut lease = clients.join(ClientEntry {
+            channel: super::super::fixtures::PLACE.0,
+            map: super::super::fixtures::PLACE.1,
+            name: format!("P{MASTER_VID}"),
+            vid: MASTER_VID,
+            empire: 1,
+            language: 0,
+        });
+        let mut orders = lease.take_orders().expect("the queue is home");
+        let _ = heard(&mut master);
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"war_enter",
+            &[quest::manager::GuildArg::Number(SECOND_ID)],
+            NOW,
+        );
+        assert_eq!(judged.answer, quest::manager::GuildAnswer::None);
+        assert!(
+            orders.try_recv().is_err(),
+            "a war that is not on warps no one"
+        );
+        assert!(
+            heard(&mut master)
+                .iter()
+                .any(|record| record.windows(8).any(|window| window == b"[LS;891]")),
+            "the member is told the war is not on"
+        );
+        drop(rival);
+    }
+
+    /// `CGuild::UnderAnyWar` (`G/guild_war.cpp:164-177`): the enemy of a war that has
+    /// begun, in id order, and 0 when there is none. The quest reads it and passes the
+    /// answer back to `guild.war_enter`.
+    #[test]
+    fn get_any_war_answers_the_enemy_of_the_war_that_has_begun() {
+        let (mut world, _orders, _lease, _master) = a_war_on(" 1");
+        let judged = world.answer_guild_quest(Vid::new(MASTER_VID), b"get_any_war", &[], NOW);
+        assert_eq!(
+            judged.answer,
+            quest::manager::GuildAnswer::Number(f64::from(SECOND_ID)),
+            "the enemy of the war that has begun"
+        );
+        // The shadow answers the same, so the script sees the value before the step.
+        let shadow = world
+            .guilds
+            .judge_shadow(Some(MASTER_VID), b"get_any_war", &[]);
+        assert_eq!(
+            shadow,
+            quest::manager::GuildAnswer::Number(f64::from(SECOND_ID)),
+            "the shadow answers the same"
+        );
     }
 
     /// `/war`'s type word parses as `strtoul` does: garbage is field, a past-max

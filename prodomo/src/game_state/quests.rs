@@ -85,6 +85,11 @@ pub enum QuestStep {
     Answer(u8),
     /// `CG_QUEST_INPUT_STRING`: the text an `input()` waits for.
     Input(Vec<u8>),
+    /// `CG_SCRIPT_BUTTON`: the quest whose button the client pressed. The word is the
+    /// quest's number (`makequestbutton`, `quest/questlib.lua:117-122`), and the high bit
+    /// asks for the quest's information instead of its button
+    /// (`CInputMain::ScriptButton`, `G/input_main.cpp:2188-2196`).
+    Button(u32),
 }
 
 impl QuestStep {
@@ -552,6 +557,9 @@ impl GameState {
         let answered = self.run_quests(place, mover, level, pid, |manager, game| match step {
             QuestStep::Answer(answer) => manager.answer(pid, *answer, game),
             QuestStep::Input(text) => manager.input(pid, text, game),
+            QuestStep::Button(quest) => {
+                manager.button(pid, *quest, game);
+            }
         });
         let Some(((), (mut records, climbs, ops))) = answered else {
             return Ok(QuestStepOutcome::default());
@@ -564,6 +572,43 @@ impl GameState {
             stores.extend(judged.stores);
         }
         Ok((records, climbs, stores))
+    }
+
+    /// `CQuestManager::Letter` (`G/questmanager.cpp:502-514`) for the character under
+    /// `vid`: the named quest's letter event runs at its start state, and the records its
+    /// script sent go to that character's own client.
+    ///
+    /// The war asks its members to join it this way (`CGuild::GuildWarEntryAsk`,
+    /// `G/guild_war.cpp:680-727`), so the world runs the letter for a character that is
+    /// not the one that started it.
+    pub(super) fn quest_letter(&mut self, vid: Vid, quest: u32) {
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return;
+        };
+        let pid = character.player_id();
+        let level = character
+            .points()
+            .map_or(1, world::character::Points::level);
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        let Some((channel, map)) = self.place_of(vid.raw()) else {
+            return;
+        };
+        let (x, y) = self
+            .spot_of(vid.raw())
+            .map_or((0, 0), |spot| (spot.x, spot.y));
+        let place = GroundPlace { channel, map, x, y };
+        let Some(((), (records, _, _))) =
+            self.run_quests(place, mover, level, pid, |manager, game| {
+                manager.letter(pid, quest, 0, game);
+            })
+        else {
+            return;
+        };
+        for record in records {
+            let _sent = self.write_to_client(vid, record);
+        }
     }
 
     /// `CQuestManager::Click` for the character under `vid` clicking the NPC `target` of race

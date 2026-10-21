@@ -387,7 +387,17 @@ impl GameState {
                     match npc.order {
                         NpcOrder::Warp { x, y } => {
                             let _first = warped.insert(raw);
-                            warps.push((channel, *id, ClientOrder::Warp { x, y }));
+                            warps.push((
+                                channel,
+                                *id,
+                                ClientOrder::Warp {
+                                    x,
+                                    y,
+                                    private_map_index: 0,
+                                    channel: None,
+                                    exit: None,
+                                },
+                            ));
                         }
                         NpcOrder::Goto { x, y } => {
                             // `Show` changes nothing when no sectree holds the target; `Stop`

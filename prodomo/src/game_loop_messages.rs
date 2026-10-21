@@ -333,6 +333,21 @@ pub enum GameCommand {
         /// hold the character.
         reply: oneshot::Sender<Option<QuickslotAnswer>>,
     },
+    /// The map a character is placed on, as `GetValidLocation` resolves it
+    /// (`G/sectree_manager.cpp:816-842`): a private map the world does not host is the base
+    /// map it was copied from, because the copy of a base map a guild war is fought on died
+    /// with the process that held it.
+    ///
+    /// The world is asked, because only the world knows which private maps it holds: the
+    /// descriptor reads the row, and the row cannot say whether the copy is still there.
+    MapOf {
+        /// The Channel the character would stand on.
+        channel: u8,
+        /// The map the row named.
+        map_index: i32,
+        /// Where the game thread reports the map.
+        reply: oneshot::Sender<i32>,
+    },
     /// Answers the points and quickslots of the character online under `vid`, which the
     /// descriptor's save writes from: the world changes them on its own too (the potion
     /// recovery on its pulse, a trade the partner closes), so the copy the descriptor held
@@ -1798,6 +1813,24 @@ impl GameLoopController {
         self.send_command(GameCommand::Quickslot { vid, step, reply })
             .await
             .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world for the map a character is placed on, as `GetValidLocation` resolves
+    /// it (`G/sectree_manager.cpp:816-842`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn map_of(&self, channel: u8, map_index: i32) -> Result<i32, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::MapOf {
+            channel,
+            map_index,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 

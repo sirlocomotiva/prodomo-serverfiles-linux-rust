@@ -892,6 +892,11 @@ impl GameState {
             } => self.answer_leave(vid, departure, reply),
             GameCommand::Quickslot { vid, step, reply } => self.answer_quickslot(vid, step, reply),
             GameCommand::KeptOf { vid, reply } => self.answer_kept(vid, reply),
+            GameCommand::MapOf {
+                channel,
+                map_index,
+                reply,
+            } => self.answer_map_of(channel, map_index, reply),
             GameCommand::Restart {
                 vid,
                 kind,
@@ -1096,6 +1101,38 @@ impl GameState {
         if reply.send(answer).is_err() {
             debug!(?vid, "nobody was left to hear a restart's answer");
         }
+    }
+
+    /// Tell the caller which map a character is placed on, as `GetValidLocation` resolves
+    /// it (`G/sectree_manager.cpp:816-842`): a private map the world does not host is the
+    /// base map it was copied from, because the copy a guild war is fought on died with the
+    /// process that held it.
+    fn answer_map_of(&self, channel: u8, map_index: i32, reply: oneshot::Sender<i32>) {
+        let map = self.resolved_map(channel, map_index);
+        if reply.send(map).is_err() {
+            debug!(channel, map_index, "nobody was left to hear a map's answer");
+        }
+    }
+
+    /// The map a character stands on, as `GetValidLocation` resolves it
+    /// (`G/sectree_manager.cpp:816-842`): the map itself when the world holds it, and the
+    /// base map it was copied from when the world does not.
+    ///
+    /// A private map's index is its base map's index times 10,000 plus the instance
+    /// (`SECTREE_MANAGER::CreatePrivateMap`, `G/sectree_manager.cpp:943-1026`), and the copy
+    /// stands on the base map's grid, so the coordinates of a private map are the base map's.
+    fn resolved_map(&self, channel: u8, map_index: i32) -> i32 {
+        if self
+            .maps
+            .get(&(channel, map_index))
+            .is_some_and(view::MapIndex::has_cells)
+        {
+            return map_index;
+        }
+        if map_index >= crate::loading_phase::INSTANCE_MAP_BASE {
+            return map_index / crate::loading_phase::INSTANCE_MAP_BASE;
+        }
+        map_index
     }
 
     /// Tell the caller what a save of the character under `vid` writes: its points, its

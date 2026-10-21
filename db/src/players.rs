@@ -333,6 +333,10 @@ pub async fn delete_player(
 /// that transaction: the caller's Warp and this write are the same event, so a character that
 /// is refused a map is moved in the same statement that moves it.
 ///
+/// `map_index` is the map the position belongs to, which is the warp's own map index for a
+/// private map: legacy writes `tab.lMapIndex = m_lWarpMapIndex` beside the position
+/// (`G/char.cpp:1552-1557`).
+///
 /// Returns `false` when the account holds no such character, so a caller cannot report a Warp
 /// that did not reach a row.
 ///
@@ -348,15 +352,19 @@ pub async fn save_position(
     player: u32,
     x: i32,
     y: i32,
+    map_index: i32,
 ) -> Result<bool, AccountError> {
     let player_id = i32::try_from(player).map_err(|_| AccountError::NoSuchPlayer(player))?;
-    let updated = sqlx::query("UPDATE player SET x = $3, y = $4 WHERE account_id = $1 AND id = $2")
-        .bind(account.to_column()?)
-        .bind(player_id)
-        .bind(x)
-        .bind(y)
-        .execute(store.pool())
-        .await?;
+    let updated = sqlx::query(
+        "UPDATE player SET x = $3, y = $4, map_index = $5 WHERE account_id = $1 AND id = $2",
+    )
+    .bind(account.to_column()?)
+    .bind(player_id)
+    .bind(x)
+    .bind(y)
+    .bind(map_index)
+    .execute(store.pool())
+    .await?;
     Ok(updated.rows_affected() == 1)
 }
 
@@ -428,6 +436,16 @@ pub struct PlayerSave {
     pub x: i32,
     /// The saved y, in world units.
     pub y: i32,
+    /// `tab.lMapIndex`: the map the character was saved on, and 0 when the row does not say.
+    /// A private map's index names the copy of a base map a guild war is fought on.
+    pub map_index: i32,
+    /// `tab.lExitX`: the x of the place the character returns to when it leaves a private
+    /// map.
+    pub exit_x: i32,
+    /// `tab.lExitY`: the y of that place.
+    pub exit_y: i32,
+    /// `tab.lExitMapIndex`: the map of that place.
+    pub exit_map_index: i32,
     /// `tab.skill_group`.
     pub skill_group: u8,
     /// Minutes played, `POINT_PLAYTIME` accumulated in `CreatePlayerProto`.
@@ -464,7 +482,9 @@ pub async fn save_character(
          sub_skill_point = $11, level_step = $12, \
          st = $13, ht = $14, dx = $15, iq = $16, hp = $17, sp = $18, stamina = $19, \
          voice = $20, part_base = $21, part_main = $22, part_hair = $23, part_sash = $24, \
-         x = $25, y = $26, skill_group = $27, playtime_minutes = $28, alignment = $29 \
+         x = $25, y = $26, map_index = $27, exit_x = $28, exit_y = $29, exit_map_index = $30, \
+         skill_group = $31, playtime_minutes = $32, \
+         alignment = $33 \
          WHERE account_id = $1 AND id = $2",
     )
     .bind(account.to_column()?)
@@ -493,6 +513,10 @@ pub async fn save_character(
     .bind(i32::from(save.sash_part))
     .bind(save.x)
     .bind(save.y)
+    .bind(save.map_index)
+    .bind(save.exit_x)
+    .bind(save.exit_y)
+    .bind(save.exit_map_index)
     .bind(i16::from(save.skill_group))
     .bind(save.playtime_minutes)
     .bind(save.alignment)
@@ -669,6 +693,17 @@ pub struct Character {
     pub x: i32,
     /// The last saved y, in world units.
     pub y: i32,
+    /// `tab.lMapIndex`: the map the character was saved on, and 0 when the row does not say.
+    /// A private map's index names the copy of a base map a guild war is fought on, and the
+    /// position alone cannot name it (`G/input_db.cpp:335-354`).
+    pub map_index: i32,
+    /// `tab.lExitX`: the x of the place the character returns to when it leaves a private
+    /// map, and 0 when the row does not say (`G/char.cpp:1567-1578`).
+    pub exit_x: i32,
+    /// `tab.lExitY`: the y of that place.
+    pub exit_y: i32,
+    /// `tab.lExitMapIndex`: the map of that place.
+    pub exit_map_index: i32,
     /// The skill group.
     pub skill_group: u8,
     /// Whole minutes played (`POINT_PLAYTIME`, sent as a `DWORD` and stored as `tab.playtime`).
@@ -697,7 +732,9 @@ pub async fn load_character(
          p.dx, p.iq, p.sungma_str, p.sungma_hp, p.sungma_move, p.sungma_immune, \
          p.random_hp, p.random_sp, p.stat_point, p.skill_point, p.sub_skill_point, p.level_step, \
          p.hp, p.sp, p.stamina, p.gold, p.voice, p.part_base, p.part_main, p.alignment, \
-         p.part_hair, p.part_sash, p.x, p.y, p.skill_group, p.playtime_minutes, p.change_name, a.empire \
+         p.part_hair, p.part_sash, p.x, p.y, p.map_index, p.exit_x, p.exit_y, p.exit_map_index, \
+         p.skill_group, p.playtime_minutes, \
+         p.change_name, a.empire \
          FROM player AS p JOIN account AS a ON a.id = p.account_id \
          WHERE p.account_id = $1 AND p.id = $2",
     )
@@ -742,6 +779,10 @@ pub async fn load_character(
         sash_part: narrow(row.try_get::<i32, _>("part_sash")?, "part_sash")?,
         x: row.try_get("x")?,
         y: row.try_get("y")?,
+        map_index: row.try_get("map_index")?,
+        exit_x: row.try_get("exit_x")?,
+        exit_y: row.try_get("exit_y")?,
+        exit_map_index: row.try_get("exit_map_index")?,
         skill_group: narrow(row.try_get::<i16, _>("skill_group")?, "skill_group")?,
         playtime_minutes: row.try_get("playtime_minutes")?,
         change_name: row.try_get("change_name")?,

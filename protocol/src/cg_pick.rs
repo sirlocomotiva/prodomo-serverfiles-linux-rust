@@ -62,11 +62,13 @@
 //!   where `ch_wait` is a *different* character resolved from the wire. The
 //!   record therefore lets one client speak for another. That is an
 //!   admission-policy question and is recorded, not enforced here.
-//! - [`CgScriptButton::idx`] is **behaviourally inert**. `CInputMain::ScriptButton`
-//!   at `input_main.cpp:2179` logs `p->idx` at `:2182` and then calls
-//!   `Confirm(ch->GetPlayerID(), quest::CONFIRM_TIMEOUT)`, a call that takes no
-//!   index. The value reaches a log line and nothing else, so validating it
-//!   against a button count would invent a constraint the server does not have.
+//! - [`CgScriptButton::idx`] names the quest whose button the client pressed
+//!   (`CInputMain::ScriptButton`, `input_main.cpp:2179-2200`). A confirm
+//!   waiting answers instead of the button (`:2186-2188`), the high bit asks
+//!   for the quest's information (`:2189-2192`), and otherwise the quest's
+//!   button event runs (`:2193-2195`). The index is the quest's own number
+//!   (`makequestbutton`, `quest/questlib.lua:117-122`), so the codec must not
+//!   validate it against a button count: the server does not.
 //! - [`CgScriptSelectItem::selection`] and [`CgTarget::vid`] go straight to
 //!   `quest::CQuestManager::SelectItem` and `FindObjectByVID` with no validation
 //!   at all.
@@ -361,11 +363,15 @@ impl CgTarget {
 /// The transport-free `TPacketCGScriptButton` record, header 66.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct CgScriptButton {
-    /// The pressed button index. Opaque, and **behaviourally inert**:
-    /// `CInputMain::ScriptButton` at `input_main.cpp:2179` logs it at `:2182`
-    /// and then calls `Confirm(ch->GetPlayerID(), quest::CONFIRM_TIMEOUT)`,
-    /// which takes no index. Validating this against a button count would invent
-    /// a constraint the legacy server does not have.
+    /// The quest whose button the client pressed. The word is the quest's own
+    /// number (`makequestbutton`, `quest/questlib.lua:117-122`), and
+    /// `CInputMain::ScriptButton` at `input_main.cpp:2179-2200` runs that
+    /// quest's button event with it (`:2193-2195`). The high bit asks for the
+    /// quest's information instead (`:2189-2192`), and a confirm waiting
+    /// answers the record instead of the button (`:2186-2188`).
+    ///
+    /// The word is opaque to the codec: the server checks it against no button
+    /// count, so every value must survive.
     pub idx: u32,
 }
 
@@ -961,8 +967,9 @@ mod tests {
 
     #[test]
     fn script_button_applies_no_validation_to_its_index() {
-        // input_main.cpp:2182 logs idx and :2185 confirms with no argument, so
-        // there is no button count to check against. Every value must survive.
+        // The index names the quest whose button event runs
+        // (input_main.cpp:2193-2195), and the server checks it against no
+        // button count, so every value must survive.
         for value in [0x0000_0000, 0x0000_0001, 0xffff_ffff, 0xdead_beef] {
             let packet = CgScriptButton::new(value);
             assert_eq!(packet.encode().len(), CG_SCRIPT_BUTTON_WIRE_SIZE);

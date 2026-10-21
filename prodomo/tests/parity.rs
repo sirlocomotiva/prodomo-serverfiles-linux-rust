@@ -18,7 +18,7 @@ use common::cfloat::{f32_to_i32, i32_to_f32};
 use gamedata::mob_proto::{CHAR_TYPE_MONSTER, CHAR_TYPE_STONE};
 use parity::client::Quiet;
 use parity::inventory::{self, Status};
-use parity::server::default_channels;
+use parity::server::{default_channels, ChannelSpec};
 use parity::{Client, Server};
 use prodomo::descriptor_crypto::derive_legacy_descriptor_keys;
 use protocol::cg_inventory::{resolve_cg_base_size, CG_KEEP_ALIVE, HEADER_CG_PONG};
@@ -14329,6 +14329,192 @@ fn a_battle_war_is_declared_and_accepted() {
     yankee.quiet("the battle war settled");
 }
 
+/// The war map's start positions (`CWarMapManager::LoadWarMapInfo`,
+/// `G/war_map.cpp:988-995`): map 110's two teams, the lower guild id's first.
+const WAR_MAP_START: (i32, i32) = (36_800, 5_200);
+const WAR_MAP_START_OTHER: (i32, i32) = (50_300, 20_600);
+
+/// `CG_SCRIPT_BUTTON`: the header and the quest's index (`TPacketCGScriptButton`).
+const CG_SCRIPT_BUTTON: u8 = 0x42;
+
+/// `CG_SCRIPT_BUTTON`: the header and the index of the quest whose button was pressed.
+fn client_script_button(idx: u32) -> Vec<u8> {
+    let mut record = vec![CG_SCRIPT_BUTTON];
+    record.extend_from_slice(&idx.to_le_bytes());
+    record
+}
+
+/// The marker a letter's button carries (`makequestbutton`, `questlib.lua:117-122`).
+const QUEST_BUTTON_MARKER: &str = "[QUESTBUTTON idx;";
+
+/// The quest index a letter's button carries (`makequestbutton`, `questlib.lua:117-122`):
+/// the marker is `[QUESTBUTTON idx;<index>|name;<label>]`, and the index is the quest's
+/// own (`q.getcurrentquestindex()`).
+fn the_letter_button(letter: &[u8]) -> Option<u32> {
+    let text = String::from_utf8_lossy(letter);
+    let start = text.find(QUEST_BUTTON_MARKER)? + QUEST_BUTTON_MARKER.len();
+    let end = text[start..].find('|')? + start;
+    text[start..end].parse().ok()
+}
+
+/// The declare and the accept of a battle war, as `a_battle_war_is_declared_and_accepted`
+/// reads them, with the letter the war sends its members (`GuildWarEntryAsk`,
+/// `G/guild_war.cpp:680-727`) read between the fan and the list. The two quest indexes
+/// the letters carry are returned: the button a client presses names its quest.
+fn declare_and_accept_a_battle_war(alice: &mut Keyed, yankee: &mut Keyed) -> (u32, u32) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/war Wolves 1"));
+    let war = alice.read_game();
+    assert_eq!(war[12], 1, "bType is battle");
+    assert_eq!(war[13], 1, "bWarState is SEND_DECLARE");
+    let war = yankee.read_game();
+    assert_eq!(war[12], 1, "bType is battle");
+    assert_eq!(war[13], 3, "bWarState is RECV_DECLARE");
+    assert_eq!(
+        alice.read_game(),
+        a_notice_line(b"[LS;475;MyGuild;Wolves]"),
+        "Alice hears the declare"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        a_notice_line(b"[LS;475;MyGuild;Wolves]"),
+        "Yankee hears the declare"
+    );
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/war MyGuild 1"));
+    let mut indexes = [0, 0];
+    for (side, client) in [("Alice", &mut *alice), ("Yankee", &mut *yankee)] {
+        assert_eq!(
+            client.read_game(),
+            an_info_line(b"[LS;558]"),
+            "{side} hears the start"
+        );
+        let war = client.read_game();
+        assert_eq!(
+            guild_subheader(&war),
+            GUILD_SUBHEADER_GC_WAR,
+            "{side}'s fan: {war:02x?}"
+        );
+        assert_eq!(war[12], 1, "{side}'s bType is battle");
+        assert_eq!(war[13], 6, "{side}'s bWarState is ON_WAR");
+        // The war asks the member to join it: the letter with the button.
+        let letter = client.read_game();
+        assert_eq!(letter[0], GC_SCRIPT, "{side}'s letter: {letter:02x?}");
+        let index = the_letter_button(&letter)
+            .unwrap_or_else(|| panic!("{side}'s letter carries no button: {letter:02x?}"));
+        let list = client.read_game();
+        assert_eq!(
+            guild_subheader(&list),
+            GUILD_SUBHEADER_GC_GUILD_WAR_LIST,
+            "{side}'s list: {list:02x?}"
+        );
+        if side == "Alice" {
+            indexes[0] = index;
+        } else {
+            indexes[1] = index;
+        }
+    }
+    assert_eq!(
+        alice.read_game(),
+        a_notice_line(b"[LS;477;Wolves;MyGuild]"),
+        "Alice hears the declaration"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        a_notice_line(b"[LS;477;Wolves;MyGuild]"),
+        "Yankee hears the declaration"
+    );
+    (indexes[0], indexes[1])
+}
+
+/// `sys.guild.war`, `cg.game.script_button`, `sys.quest.runtime`, `gc.script`,
+/// `cg.game.script_answer`, `gc.warp`: a war of the battle type asks its members to join
+/// it (`CGuild::GuildWarEntryAsk`, `G/guild_war.cpp:680-727`) with the `guild_war_join`
+/// quest's letter. The member's client presses the button the letter carries
+/// (`CInputMain::ScriptButton`, `G/input_main.cpp:2179-2200`), the quest asks
+/// (`guild_war_join.lua`'s `select`), the member says yes, and the member lands on the
+/// war map's start position (`CGuild::GuildWarEntryAccept`, `G/guild_war.cpp:639-678`).
+///
+/// The other side's master is asked too, and does not join: the letter is his, and only
+/// his own press would move him.
+#[test]
+fn a_war_with_a_map_asks_its_member_and_the_member_joins_the_war_map() {
+    let Some((_database, server, mut alice, alpha_listed, mut yankee, _yankee)) =
+        a_war_pair_ready_on(None, &war_channels())
+    else {
+        return;
+    };
+    let (alice_index, _yankee_index) = declare_and_accept_a_battle_war(&mut alice, &mut yankee);
+    assert_ne!(
+        alice_index, 0,
+        "the letter names the quest the button belongs to"
+    );
+    // The member presses the button: the quest runs its button event and asks.
+    alice.send_record(&client_script_button(alice_index));
+    let question = alice.read_game();
+    assert_eq!(question[0], GC_SCRIPT, "the question: {question:02x?}");
+    let text = String::from_utf8_lossy(&question);
+    assert!(
+        text.contains("[QUESTION "),
+        "the quest asks the member: {question:02x?}"
+    );
+    // The member says yes: the first entry of the menu.
+    alice.send_record(&client_script_answer(0));
+    // The quest ends: the script that closes the dialog.
+    let done = alice.read_game();
+    assert_eq!(done[0], GC_SCRIPT, "the quest's end: {done:02x?}");
+    assert_eq!(&done[6..], b"[DONE]", "the quest's end script");
+    // The member leaves its map and is sent to the war map's start position: the guild of
+    // the lower id takes the first position (`GetStartPosition`, `G/guild_war.cpp:1019`).
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha_listed.id.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "the member leaves its map");
+    let port = server.channel(1).port();
+    assert_eq!(alice.read_game(), a_warp_record(WAR_MAP_START, port));
+    // The other master sees the member leave his map and nothing more: only the member's
+    // own press moves him.
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha_listed.id.to_le_bytes());
+    assert_eq!(
+        yankee.read_game(),
+        removed,
+        "the other master sees the member leave"
+    );
+    yankee.quiet("the other master does not join");
+}
+
+/// The war map's other start position: the guild of the higher id takes the second
+/// (`GetStartPosition(gw.map_index, GetID() < dwOppGID ? 0 : 1, pos)`,
+/// `G/guild_war.cpp:662`).
+#[test]
+fn the_other_side_of_the_war_takes_the_other_start_position() {
+    let Some((_database, server, mut alice, _alpha, mut yankee, yankee_listed)) =
+        a_war_pair_ready_on(None, &war_channels())
+    else {
+        return;
+    };
+    let (_alice_index, yankee_index) = declare_and_accept_a_battle_war(&mut alice, &mut yankee);
+    // Yankee's guild is the higher id, so his side stands at the second position.
+    yankee.send_record(&client_script_button(yankee_index));
+    let question = yankee.read_game();
+    assert_eq!(question[0], GC_SCRIPT, "the question: {question:02x?}");
+    yankee.send_record(&client_script_answer(0));
+    let done = yankee.read_game();
+    assert_eq!(done[0], GC_SCRIPT, "the quest's end: {done:02x?}");
+    assert_eq!(&done[6..], b"[DONE]", "the quest's end script");
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&yankee_listed.id.to_le_bytes());
+    assert_eq!(yankee.read_game(), removed, "the member leaves its map");
+    let port = server.channel(1).port();
+    assert_eq!(yankee.read_game(), a_warp_record(WAR_MAP_START_OTHER, port));
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&yankee_listed.id.to_le_bytes());
+    assert_eq!(
+        alice.read_game(),
+        removed,
+        "the other master sees the member leave"
+    );
+    alice.quiet("the other master does not join");
+}
+
 /// The war scenario's opening: two war-ready guilds (`MyGuild` under Alpha, Wolves under
 /// Yankee), both masters in the world and seeing each other, with Alpha granted
 /// `LOW_WIZARD` before the boot — the character select reads the grant
@@ -14344,6 +14530,32 @@ fn a_war_pair_ready() -> Option<(ScratchDatabase, Server, Keyed, Keyed)> {
 /// scenario can address them.
 fn a_war_pair_ready_at(
     hp: Option<i32>,
+) -> Option<(ScratchDatabase, Server, Keyed, Listed, Keyed, Listed)> {
+    a_war_pair_ready_on(hp, &default_channels())
+}
+
+/// The Channels a war of the battle type runs on: Channel 1 hosts the battle map (110)
+/// beside the maps every scenario has, so the war takes a private copy of it
+/// (`map_allow_find`, `G/guild_war.cpp:488-493`).
+fn war_channels() -> Vec<ChannelSpec> {
+    vec![
+        ChannelSpec {
+            number: 1,
+            listeners: 2,
+            maps: vec![1, 3, 110],
+        },
+        ChannelSpec {
+            number: 99,
+            listeners: 1,
+            maps: vec![72],
+        },
+    ]
+}
+
+/// As [`a_war_pair_ready_at`], with the Channels the scenario runs on.
+fn a_war_pair_ready_on(
+    hp: Option<i32>,
+    channels: &[ChannelSpec],
 ) -> Option<(ScratchDatabase, Server, Keyed, Listed, Keyed, Listed)> {
     let database = ScratchDatabase::create()?;
     create_account_before_boot(&database, "alice");
@@ -14368,7 +14580,7 @@ fn a_war_pair_ready_at(
         "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'LOW_WIZARD' \
          FROM account WHERE login = 'alice'",
     );
-    let server = Server::start(binary(), database.url());
+    let server = Server::start_configured(binary(), database.url(), channels, "");
     let (mut alice, alpha_listed, _alice_entered) =
         enter_world_seeing_guilded(&server, b"alice", 0, 1);
     let (yankee, yankee_listed, _yankee_entered) =

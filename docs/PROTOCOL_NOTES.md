@@ -487,6 +487,16 @@ sentinels such as `CG_REFINE_ELEMENT_CLOSE = 255`, and range checks are not fram
   and `dwVictimVID`, so 9 bytes, and `SetSyncOwner` writes it with a `PacketAround` that has
   **no** except, so the victim sees its own ownership.
 
+- The inbound `CgScriptButton` record is exactly five bytes: header `66` and an explicit
+  little-endian `u32`; the framed payload is four bytes. The word is **not** inert, and an
+  earlier note in `protocol/src/cg_pick.rs` said it was: `CInputMain::ScriptButton`
+  (`G/input_main.cpp:2179-2200`) runs the named quest's button event with it (`:2193-2195`),
+  so a quest's letter can ask its player for a decision and the answer comes back through
+  this record. The index is the quest's own number (`makequestbutton`,
+  `quest/questlib.lua:117-122`). Two arms of the handler are above the codec: a confirm
+  waiting answers the record instead of the button (`:2186-2188`), and the high bit asks for
+  the quest's information instead (`:2189-2192`). The server checks the index against no
+  button count, so every value must survive the codec.
 ## Game-to-client login-flow records
 
 - The outbound `GcTimeSync` acknowledgement is exactly `[0xfc]` and carries no timestamp or payload. It is separate from the 13-byte inbound `CG_TIME_SYNC` handshake record, the 5-byte header-106 `GC_TIME` record, the one-byte heartbeat ping, retry state, client phase dispatch, TEA, and sockets. The `protocol::gc` codec is transport-free.
