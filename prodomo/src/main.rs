@@ -1475,8 +1475,49 @@ async fn follow_order<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let ClientOrder::Warp { x, y } = order;
-    warp_set(session, addr, context, locations, held, (x, y)).await
+    match order {
+        ClientOrder::Warp { x, y } => {
+            warp_set(session, addr, context, locations, held, (x, y)).await
+        }
+        ClientOrder::ItemRows { changes, order } => {
+            write_item_rows(addr, context, held, changes, order).await
+        }
+    }
+}
+
+/// The rows the death penalty took from the victim (`CHARACTER::ItemDropPenalty`,
+/// `G/char_battle.cpp:1016-1200`); `false` when the connection must close.
+///
+/// The game thread cannot write the store (ADR-0002), so the descriptor that holds the
+/// victim writes the rows of the items that fell, and tells the pick-ups of those items that
+/// the rows are gone. A pick-up writes the item's own row, and the two rows would collide
+/// while the victim's row is still there.
+///
+/// The rows are written in one transaction, as every other row change is. A store that
+/// refuses them closes the descriptor, as a refused item step does: the pick-ups of the
+/// dropped items wait for the tell, and a tell that never comes would leave them waiting.
+async fn write_item_rows(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    changes: Vec<db::items::RowChange>,
+    order: prodomo::item_move::StoreOrder,
+) -> bool {
+    let Some(player) = held.character.as_ref().map(|character| character.id) else {
+        warn!(%addr, "The changed item rows have no character to write; closing");
+        return false;
+    };
+    match db::items::apply_row_changes(&context.store, player, &changes).await {
+        Ok(()) => {
+            order.stored();
+            info!(%addr, player, rows = changes.len(), "The changed item rows are written");
+            true
+        }
+        Err(error) => {
+            warn!(%addr, player, %error, "The changed item rows could not be stored; closing");
+            false
+        }
+    }
 }
 
 /// `CHARACTER::WarpSet(x, y)` for this descriptor's character (`G/char.cpp:6694-6792`);
@@ -5068,8 +5109,14 @@ fn loaded_state(
     held: &Held,
     show: Option<prodomo::game_loop_messages::Showing>,
 ) -> prodomo::game_loop_messages::Loaded {
+    let mut points = held.points.clone();
+    // `m_pointsInstant.gm_level` (`char.h:468`) rides the admission, so the world reads it
+    // where legacy reads it: the death penalty's `GetGMLevel()` (`G/char_battle.cpp:1341`).
+    if let Some(points) = points.as_mut() {
+        points.set_gm_level(held.gm_level);
+    }
     prodomo::game_loop_messages::Loaded {
-        points: held.points.clone(),
+        points,
         quickslots: held.quickslots.clone(),
         gold: held
             .character

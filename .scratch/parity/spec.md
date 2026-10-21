@@ -12,14 +12,14 @@ porting status. Build step 2 (`docs/STATUS.md`). The Rewrite reaches Parity when
 |---|---|---|---|
 | `client-packets.md` | 111 | generated | A client header handled in one phase, plus the two framing rules (`cg.any.*`) |
 | `sub-headers.md` | 113 | generated | One sub-command a game-phase handler dispatches on |
-| `server-records.md` | 134 | generated | A record the client decodes (from the client's registration table) |
+| `server-records.md` | 137 | generated | A record the client decodes (from the client's registration table) |
 | `commands.md` | 267 | generated | A chat command in the live `cmd_info` table |
 | `quest-api.md` | 699 | generated | A Lua function the quest runtime registers |
 | `timed-events.md` | 99 | generated | A timed event function |
 | `quests.md` | 62 | generated | A quest script (51) or a quest library (11) |
-| `systems.md` | 115 | by hand | A system: the behaviour behind the entry points above |
+| `systems.md` | 116 | by hand | A system: the behaviour behind the entry points above |
 | `gamedata.md` | 45 | by hand | A Game data file or table and its reader |
-| **total** | **1,645** | | |
+| **total** | **1,649** | | |
 
 The generated rows come from the **live** legacy source only: `tools/active.py` runs the C
 preprocessor over each file with the legacy build's defines (FreeBSD, clang, i386, `NDEBUG`,

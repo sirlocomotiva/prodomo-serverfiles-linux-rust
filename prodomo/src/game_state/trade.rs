@@ -1948,10 +1948,12 @@ mod tests {
     }
 
     /// Where [`a_warp_npc`] named `a3 4002 8995` sends a player.
-    const TO_A3: ClientOrder = ClientOrder::Warp {
-        x: 400_200,
-        y: 899_500,
-    };
+    fn to_a3() -> ClientOrder {
+        ClientOrder::Warp {
+            x: 400_200,
+            y: 899_500,
+        }
+    }
 
     impl Square {
         /// Stand `npcs` up beside the keeper on Channel 1's map 41, whose base is (1000, 2000).
@@ -1988,14 +1990,14 @@ mod tests {
             assert!(square.ordered(who).is_empty(), "not a twelfth Pulse");
         }
         square.state.process_pulse(12);
-        assert_eq!(square.ordered(A), vec![TO_A3]);
-        assert_eq!(square.ordered(Y), vec![TO_A3]);
-        assert_eq!(square.ordered(Z), vec![TO_A3], "313 east is 300 away");
+        assert_eq!(square.ordered(A), vec![to_a3()]);
+        assert_eq!(square.ordered(Y), vec![to_a3()]);
+        assert_eq!(square.ordered(Z), vec![to_a3()], "313 east is 300 away");
         assert!(square.ordered(3).is_empty(), "Faraway stands on map 42");
 
         square.stand(Z, 314);
         square.state.process_pulse(24);
-        assert_eq!(square.ordered(A), vec![TO_A3], "the event fires again");
+        assert_eq!(square.ordered(A), vec![to_a3()], "the event fires again");
         assert!(square.ordered(Z).is_empty(), "314 east is 301 away");
         assert!(square.heard(Z).is_empty(), "out of reach is silent");
         square.stand_at(Z, 0, 314);
@@ -2004,7 +2006,7 @@ mod tests {
         let _left = square.state.remove_body(ZULU);
         square.state.process_pulse(48);
         assert!(square.ordered(Z).is_empty(), "a player with no body");
-        assert_eq!(square.ordered(Y), vec![TO_A3, TO_A3, TO_A3]);
+        assert_eq!(square.ordered(Y), vec![to_a3(), to_a3(), to_a3()]);
     }
 
     /// A client whose character has not entered the world has no body, so no sectree holds it;
@@ -2045,8 +2047,8 @@ mod tests {
         );
         square.state.process_pulse(12);
 
-        assert_eq!(square.ordered(A), vec![TO_A3]);
-        assert_eq!(square.ordered(Y), vec![TO_A3]);
+        assert_eq!(square.ordered(A), vec![to_a3()]);
+        assert_eq!(square.ordered(Y), vec![to_a3()]);
         for (lease, why) in [
             (&mut entering, "a client with no body"),
             (&mut shown, "a body with no character"),
@@ -2094,8 +2096,8 @@ mod tests {
 
         square.state.process_pulse(12);
 
-        assert_eq!(square.ordered(A), vec![TO_A3]);
-        assert_eq!(square.ordered(Z), vec![TO_A3]);
+        assert_eq!(square.ordered(A), vec![to_a3()]);
+        assert_eq!(square.ordered(Z), vec![to_a3()]);
         assert!(square.ordered(Y).is_empty());
         assert!(square.heard(Y).is_empty(), "the empire is checked first");
     }
@@ -2137,7 +2139,7 @@ mod tests {
 
         for who in [A, Y, Z] {
             assert_eq!(square.spot(who), (35_500, 38_100, SHOW_Z), "player {who}");
-            assert_eq!(square.ordered(who), vec![TO_A3], "player {who}");
+            assert_eq!(square.ordered(who), vec![to_a3()], "player {who}");
         }
         assert!(
             !square.state.movers.contains(&YANKEE.raw()),
@@ -2155,11 +2157,11 @@ mod tests {
         square.stand_up(&[first, second]);
 
         square.state.process_pulse(12);
-        assert_eq!(square.ordered(A), vec![TO_A3], "one order a Pulse");
+        assert_eq!(square.ordered(A), vec![to_a3()], "one order a Pulse");
         square.state.process_pulse(24);
         assert_eq!(
             square.ordered(A),
-            vec![TO_A3],
+            vec![to_a3()],
             "and one again on the next fire"
         );
     }
@@ -2228,7 +2230,7 @@ mod tests {
             vec![hack_line(1, b"[LS;850;%d]", true)],
             "loaded 12 Pulses ago, and open"
         );
-        assert_eq!(square.ordered(Z), vec![TO_A3]);
+        assert_eq!(square.ordered(Z), vec![to_a3()]);
         square.state.process_pulse(252);
         assert!(square.ordered(A).is_empty());
         assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;851]", false)]);
@@ -2238,7 +2240,7 @@ mod tests {
         assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;850;%d]", true)]);
         square.state.process_pulse(504);
         assert!(square.heard(A).is_empty());
-        assert_eq!(square.ordered(A), vec![TO_A3], "closed 252 Pulses ago");
+        assert_eq!(square.ordered(A), vec![to_a3()], "closed 252 Pulses ago");
     }
 
     #[test]
@@ -2251,7 +2253,7 @@ mod tests {
         square.state.process_pulse(12);
 
         assert!(square.heard(A).is_empty());
-        assert_eq!(square.ordered(A), vec![TO_A3]);
+        assert_eq!(square.ordered(A), vec![to_a3()]);
     }
 
     #[test]
@@ -2264,15 +2266,15 @@ mod tests {
         assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;851]", false)]);
         assert_eq!(square.heard(Y), vec![hack_line(2, b"[LS;851]", false)]);
         assert!(square.ordered(A).is_empty() && square.ordered(Y).is_empty());
-        assert_eq!(square.ordered(Z), vec![TO_A3]);
+        assert_eq!(square.ordered(Z), vec![to_a3()]);
         let _ended = sent(square.step(Y, TradeStep::Cancel));
         let _told = square.heard(A);
         square.state.process_pulse(240);
         assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;852;%d]", true)]);
         assert_eq!(square.heard(Y), vec![hack_line(2, b"[LS;852;%d]", true)]);
         square.state.process_pulse(252);
-        assert_eq!(square.ordered(A), vec![TO_A3], "started 252 Pulses ago");
-        assert_eq!(square.ordered(Y), vec![TO_A3]);
+        assert_eq!(square.ordered(A), vec![to_a3()], "started 252 Pulses ago");
+        assert_eq!(square.ordered(Y), vec![to_a3()]);
 
         square.started();
         square.state.process_pulse(600);
@@ -2286,8 +2288,8 @@ mod tests {
         assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;852;%d]", true)]);
         assert_eq!(square.heard(Y), vec![hack_line(2, b"[LS;852;%d]", true)]);
         square.state.process_pulse(852);
-        assert_eq!(square.ordered(A), vec![TO_A3], "settled 252 Pulses ago");
-        assert_eq!(square.ordered(Y), vec![TO_A3]);
+        assert_eq!(square.ordered(A), vec![to_a3()], "settled 252 Pulses ago");
+        assert_eq!(square.ordered(Y), vec![to_a3()]);
 
         square.state.process_pulse(1_010);
         square.started();
@@ -2298,7 +2300,7 @@ mod tests {
         square.state.process_pulse(1_260);
         assert_eq!(
             square.ordered(A),
-            vec![TO_A3],
+            vec![to_a3()],
             "started exactly 250 Pulses ago"
         );
     }
@@ -2315,7 +2317,7 @@ mod tests {
         square.state.process_pulse(252);
         assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;852;%d]", true)]);
         square.state.process_pulse(264);
-        assert_eq!(square.ordered(A), vec![TO_A3], "closed 252 Pulses ago");
+        assert_eq!(square.ordered(A), vec![to_a3()], "closed 252 Pulses ago");
 
         let buy = ShopStep::Buy { pos: 200 };
         square.browse(A);
@@ -2327,7 +2329,7 @@ mod tests {
         square.state.process_pulse(612);
         assert_eq!(
             square.ordered(A),
-            vec![TO_A3],
+            vec![to_a3()],
             "a buy from afar stamps nothing"
         );
 
@@ -2338,7 +2340,7 @@ mod tests {
         square.state.stop_browsing(ALPHA);
         let _heard = square.heard(A);
         square.state.process_pulse(624);
-        assert_eq!(square.ordered(A), vec![TO_A3], "a sale stamps nothing");
+        assert_eq!(square.ordered(A), vec![to_a3()], "a sale stamps nothing");
 
         square.browse(A);
         let bought = square.state.shop(ALPHA, buy, at(0), of(1)).unwrap();
@@ -2348,7 +2350,7 @@ mod tests {
         square.state.process_pulse(864);
         assert_eq!(square.heard(A), vec![hack_line(1, b"[LS;852;%d]", true)]);
         square.state.process_pulse(876);
-        assert_eq!(square.ordered(A), vec![TO_A3], "bought 252 Pulses ago");
+        assert_eq!(square.ordered(A), vec![to_a3()], "bought 252 Pulses ago");
     }
 
     #[test]

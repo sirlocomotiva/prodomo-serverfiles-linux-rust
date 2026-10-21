@@ -23,7 +23,7 @@ use gamedata::item_proto::ItemProtos;
 use protocol::item_pos::ItemPos;
 
 use super::dice::Dice;
-use super::equip::roll_sash;
+use super::equip::{recompute_points, roll_sash, unequip_points, wear_of, Gear};
 use super::inventory::{is_equip_position, is_valid_item_position};
 use super::item_move::{
     is_flat_window, GroundRecord, ItemChange, ItemRecord, MoveDone, MoveKind, MoveRecord,
@@ -32,8 +32,8 @@ use super::item_move::{
 use super::items::CharacterItems;
 use super::quickslot::{QuickslotSync, SyncTo};
 use crate::item::{
-    gc_item_clear, Item, ItemIds, ITEM_ANTIFLAG_DROP, ITEM_ANTIFLAG_GIVE, ITEM_ANTIFLAG_STACK,
-    ITEM_FLAG_STACKABLE,
+    gc_item_clear, Item, ItemIds, ITEM_ANTIFLAG_DROP, ITEM_ANTIFLAG_GIVE, ITEM_ANTIFLAG_PKDROP,
+    ITEM_ANTIFLAG_STACK, ITEM_FLAG_STACKABLE,
 };
 
 /// `[LS;443]`: the item was dropped (`G/char_item.cpp:7536`).
@@ -270,6 +270,86 @@ pub fn drop_item(
             MoveRecord::Notice(DROPPED_NOTICE),
         ],
         changes: vec![change],
+    };
+    Ok((done, ground))
+}
+
+/// `ItemDropPenalty`'s drop (`G/char_battle.cpp:1074-1153`): the whole item leaves the
+/// character for the ground.
+///
+/// The player's own drop ([`drop_item`]) refuses the anti-flags `ITEM_ANTIFLAG_DROP` and
+/// `ITEM_ANTIFLAG_GIVE` and takes the inventory only. The penalty refuses
+/// `ITEM_ANTIFLAG_GIVE` and `ITEM_ANTIFLAG_PKDROP` (`:1098` and `:1142`), takes the
+/// equipment as well (`:1114-1153`), and never splits a stack: it removes the whole item
+/// (`RemoveFromCharacter`).
+///
+/// A worn item takes its points with it, as legacy's `RemoveFromCharacter` does when it
+/// calls `Unequip` (`G/item.cpp:369-377`): the points go first, then the item leaves its
+/// cell, then the points are computed again. `gear` is the character's points and
+/// prototypes, which those two steps need; `None` leaves the points as they are.
+///
+/// # Errors
+///
+/// [`MoveRefused::Empty`] when the cell holds no item, [`MoveRefused::Undroppable`] when
+/// the item's anti-flags forbid the drop, and [`MoveRefused::NoSectree`] when the item
+/// would not land. Nothing changes on any of them: the penalty keeps the item, where
+/// legacy loses it when `AddToGround` finds no tree for the point
+/// (`G/item.cpp:569-574`; the call is `G/char_battle.cpp:1189`), a Defect.
+pub fn drop_penalty_item(
+    items: &mut CharacterItems,
+    mut gear: Option<&mut Gear<'_>>,
+    at: ItemPos,
+    to: DropAt,
+) -> Result<(MoveDone, GroundItem), MoveRefused> {
+    if !is_valid_item_position(at) {
+        return Err(MoveRefused::InvalidSource);
+    }
+    if !is_flat_window(at.window_type) {
+        return Err(MoveRefused::NotPorted(Unported::SourceWindow(
+            at.window_type,
+        )));
+    }
+    let item = items.item_at(at).cloned().ok_or(MoveRefused::Empty)?;
+    if items.is_exchanging(item.id) {
+        return Err(MoveRefused::Exchanging);
+    }
+    if item.anti_flags & (ITEM_ANTIFLAG_GIVE | ITEM_ANTIFLAG_PKDROP) != 0 {
+        return Err(MoveRefused::Undroppable);
+    }
+    if !to.lands {
+        return Err(MoveRefused::NoSectree);
+    }
+    let mut records = Vec::new();
+    // `SyncQuickslot(QUICKSLOT_TYPE_ITEM, vec_bSlots[i], 255)` (`:1106`, `:1150`): the
+    // slot is deleted before the item goes.
+    records.push(MoveRecord::QuickslotSync(QuickslotSync {
+        from: at.cell,
+        to: SyncTo::Delete,
+    }));
+    let wear = wear_of(at);
+    if let (Some(gear), Some(wear)) = (gear.as_deref_mut(), wear) {
+        records.extend(unequip_points(gear, items, wear, &item)?);
+    }
+    let pos = items.release(item.id).map_err(MoveRefused::Storage)?;
+    let id = item.id;
+    let ground = GroundItem {
+        vid: to.vid,
+        item,
+        x: to.x,
+        y: to.y,
+        last_owner: to.owner_id,
+    };
+    records.push(MoveRecord::Item(ItemRecord::Set(gc_item_clear(pos))));
+    // The points are computed again (`ComputeBattlePoints` and `ComputePoints`,
+    // `G/item.cpp:1580-1587`), after the item left its cell, as legacy computes them.
+    if let (Some(gear), Some(_)) = (gear, wear) {
+        records.extend(recompute_points(gear, items, ground.item.vnum));
+    }
+    records.push(MoveRecord::Ground(ground.add_record()));
+    let done = MoveDone {
+        kind: MoveKind::Dropped,
+        records,
+        changes: vec![ItemChange::Destroyed { id }],
     };
     Ok((done, ground))
 }

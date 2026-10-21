@@ -400,7 +400,7 @@ impl GameState {
             }
         }
         for (channel, id, order) in warps {
-            if !clients.order(channel, id, order) {
+            if !clients.order(channel, id, order.clone()) {
                 warn!(
                     channel,
                     id,

@@ -534,6 +534,11 @@ pub struct Points {
     skill_damage_bonus: BTreeMap<u8, i32>,
     part_base: u8,
     parts: [u16; PARTS],
+    /// `m_pointsInstant.gm_level` (`char.h:468`): the character's GM level, which legacy
+    /// reads with `GetGMLevel()` (`char.h:771`) and which the death penalty checks
+    /// (`G/char_battle.cpp:1341`). The load reads it from the GM list, not from the player
+    /// row, so it is set after the load and is 0 (`GM_PLAYER`) until then.
+    gm_level: u8,
     /// The hit points and their maximum each time the `POINT_HP` arm ran, oldest first: what
     /// `BroadcastTargetPacket` sends the characters targeting this one (`char.cpp:4259`).
     target_broadcasts: Vec<(i32, i32)>,
@@ -588,6 +593,7 @@ impl Points {
             skill_damage_bonus: BTreeMap::new(),
             part_base: row.part_base,
             parts: [0; PARTS],
+            gm_level: 0,
             target_broadcasts: Vec::new(),
         };
         // `SetPlayerProto` sets the base part, the hair and the sash from the row before it
@@ -669,6 +675,19 @@ impl Points {
     /// `SetPart`: one part the client draws.
     pub fn set_part(&mut self, part: EParts, value: u16) {
         self.parts[part as usize] = value;
+    }
+
+    /// `GetGMLevel` (`char.h:771`): the character's GM level, which is `GM_PLAYER` (0) for
+    /// an ordinary player.
+    #[must_use]
+    pub const fn gm_level(&self) -> u8 {
+        self.gm_level
+    }
+
+    /// `SetPlayerProto`'s GM level (`G/input_db.cpp:1931-1955`): the character's own grant,
+    /// which the load reads from the GM list and not from the player row.
+    pub const fn set_gm_level(&mut self, level: u8) {
+        self.gm_level = level;
     }
 
     /// `GetPoint`: the instant slot, or 0 for a slot past the array, as legacy answers it.

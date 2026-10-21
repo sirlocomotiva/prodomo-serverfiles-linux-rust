@@ -32,7 +32,7 @@
 
 use common::enums::EWearPositions;
 use common::item_slots::{
-    EWindows, BELT_INVENTORY_SLOT_END, BELT_INVENTORY_SLOT_START, INVENTORY_MAX_NUM,
+    EWindows, BELT_INVENTORY_SLOT_END, BELT_INVENTORY_SLOT_START, INVENTORY_MAX_NUM, WEAR_MAX_NUM,
 };
 use common::point_slot as point;
 use gamedata::item_custom_category::{is_custom_category, CATEGORY_NUM};
@@ -272,6 +272,62 @@ pub fn wear_pos(wear: u16) -> ItemPos {
 /// The item a wear cell holds.
 fn worn_at(items: &CharacterItems, wear: u16) -> Option<Item> {
     items.item_at(wear_pos(wear)).cloned()
+}
+
+/// The wear cell a position names, or `None` when it names another cell.
+///
+/// The equipment is the flat cells from [`INVENTORY_MAX_NUM`] to
+/// `INVENTORY_MAX_NUM + WEAR_MAX_NUM` (`common/src/item_slots.rs`), which the load and the
+/// equip path both address through the inventory window (`prodomo/src/item_load.rs`).
+#[must_use]
+pub fn wear_of(pos: ItemPos) -> Option<u16> {
+    if pos.window_type != EWindows::Inventory as u8 && pos.window_type != EWindows::Equipment as u8
+    {
+        return None;
+    }
+    pos.cell
+        .checked_sub(INVENTORY_MAX_NUM)
+        .filter(|wear| *wear < WEAR_MAX_NUM)
+}
+
+/// The points a worn item gave go with it (`CItem::Unequip`, `G/item.cpp:1544`).
+///
+/// The death penalty takes a worn item for the ground without the equip path
+/// (`G/char_battle.cpp:1114-1153`), but the points go as they do in legacy's
+/// `RemoveFromCharacter`, which calls `Unequip` (`G/item.cpp:369-377`). The records are the
+/// point changes and the look, which the victim's client is sent.
+///
+/// The item itself is not released here: legacy's `Unequip` empties the wear cell before the
+/// computation that follows it, so the caller releases the item between this and
+/// [`recompute_points`].
+///
+/// # Errors
+///
+/// [`MoveRefused::UnknownVnum`] when the item has no prototype.
+pub fn unequip_points(
+    gear: &mut Gear<'_>,
+    items: &mut CharacterItems,
+    wear: u16,
+    item: &Item,
+) -> Result<Vec<MoveRecord>, MoveRefused> {
+    let mut equipper = Equipper::new(items, gear, 0);
+    let proto = equipper.proto(item.vnum)?;
+    equipper.modify_points(wear, item, proto, false);
+    Ok(std::mem::take(&mut equipper.trail.records))
+}
+
+/// The points are computed again after a worn item left (`ComputeBattlePoints` and
+/// `ComputePoints`, `G/item.cpp:1580-1587`).
+///
+/// The records are the point changes and the look, which the victim's client is sent.
+pub fn recompute_points(
+    gear: &mut Gear<'_>,
+    items: &mut CharacterItems,
+    vnum: u32,
+) -> Vec<MoveRecord> {
+    let mut equipper = Equipper::new(items, gear, 0);
+    equipper.recompute(vnum);
+    std::mem::take(&mut equipper.trail.records)
 }
 
 /// `CItem::FindEquipCell` with no candidate (`G/item.cpp:628-779`): the wear cell the item
@@ -1866,5 +1922,25 @@ mod tests {
         );
         assert!(done.changes.is_empty());
         assert_eq!(case.items, items);
+    }
+
+    /// The wear cell a position names: the equipment's flat cells, and nothing else.
+    #[test]
+    fn a_position_names_a_wear_cell_only_when_it_is_one() {
+        assert_eq!(wear_of(wear_pos(0)), Some(0));
+        assert_eq!(wear_of(wear_pos(WEAR_MAX_NUM - 1)), Some(WEAR_MAX_NUM - 1));
+        assert_eq!(wear_of(wear_pos(WEAR_MAX_NUM)), None);
+        // The base inventory and the belt are not wear cells.
+        assert_eq!(wear_of(inv(0)), None);
+        assert_eq!(wear_of(inv(INVENTORY_MAX_NUM - 1)), None);
+        // Another window is not the equipment either.
+        assert_eq!(
+            wear_of(ItemPos::new(EWindows::Equipment as u8, INVENTORY_MAX_NUM)),
+            Some(0)
+        );
+        assert_eq!(
+            wear_of(ItemPos::new(EWindows::DragonSoulInventory as u8, 0)),
+            None
+        );
     }
 }

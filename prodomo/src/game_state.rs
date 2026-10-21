@@ -68,6 +68,7 @@ mod fight;
 mod fixtures;
 mod guild;
 mod guild_mark;
+mod item_penalty;
 mod mob_ai;
 mod mob_battle;
 mod mob_party;

@@ -33622,3 +33622,115 @@ workspace all-targets DB run green, the parity target 125 of 125; the doc build 
 doc-tests green; no scratch database left.
 
 No ADR changed. No owner question added. V20 stays taken.
+
+## 235. The death's item drop penalty (`sys.combat.penalty`)
+
+Legacy's `CHARACTER::ItemDropPenalty` (`G/char_battle.cpp:1016-1199`) takes the items a
+player loses when it dies. The Rewrite had the table's input (the alignment is stored since
+ledger 234) but no rule, so a player that died to another player lost nothing. The penalty
+runs now.
+
+**The call.** `CHARACTER::Dead` calls it under seven conditions
+(`G/char_battle.cpp:1333-1345`): a killer, no agreed PvP, no guild war, a player victim, no
+duel, no forked road and no castle map, and a GM level of `GM_PLAYER` (or `test_server`).
+`prodomo/src/game_state/death.rs` calls `item_drop_penalty` from the same place, outside the
+player-killer arm, because legacy's call is outside it too: a monster's kill reaches the
+penalty as well, and only the war skips it.
+
+**The rules.** `prodomo/src/game_state/item_penalty.rs` (new) holds them:
+
+| legacy | here |
+|---|---|
+| `GetMyShop()` (`:1019-1021`) | not ported; the private shop does not exist |
+| `GetLevel() < 50` (`:1022-1024`) | the character's level |
+| `IsBattleArenaMap(GetMapIndex())` (`:1025-1029`) | `BATTLE_ARENA_MAPS` (`G/BattleArena.h:2`) |
+| `GetRealAlignment()`'s nine bands (`:1040-1058`) | `band` |
+| `aItemDropPenalty_kor` (`:1003-1014`) | `TABLE` |
+| `r.iInventoryPct >= number(1, 1000)` (`:1064`) | the inventory's draw |
+| `r.iEquipmentPct >= number(1, 100)` (`:1065`) | the equipment's draw |
+| `IsEquipUniqueItem(70049)` (`:1068-1072`) | `wears_the_skip_unique` |
+| the inventory's slots, the shuffle and the count (`:1078-1092`) | `slots_with_items`, `shuffle` |
+| the equipment's slots, the shuffle and the count (`:1117-1136`) | `worn_slots` |
+| `ITEM_ANTIFLAG_GIVE \| ITEM_ANTIFLAG_PKDROP` (`:1098`, `:1142`) | `may_drop` |
+| `SyncQuickslot(QUICKSLOT_TYPE_ITEM, cell, 255)` (`:1106`, `:1150`) | the drop's quickslot sync |
+| `RemoveFromCharacter` (`:1107`, `:1151`) | `world::character::drop_penalty_item` |
+| `AddToGround` and the scatter (`:1176-1198`) | `lay_the_dropped_items` |
+
+The inventory's cells are the base inventory's, and the equipment's are the wear cells,
+which the flat space keeps after the inventory (`INVENTORY_MAX_NUM + wear`,
+`G/char_item.cpp:647-656`); the load puts a worn item there, so the penalty reads it there
+too (`world::character::wear_of`). The band of the worst alignment drops every worn item
+when the inventory holds none (`:1110-1111`), and the unique item that skips the penalty is
+dropped instead of the rest (`:1155-1174`).
+
+**The worn item.** `RemoveFromCharacter` calls `Unequip` for a worn item
+(`G/item.cpp:370-378`), which takes the points the item gave with it (`ModifyPoints(false)`,
+`G/item.cpp:1544`), empties the wear cell (`:1562`) and computes the points again
+(`G/item.cpp:1580-1587`). `world::character::unequip_points` and
+`world::character::recompute_points` are those two halves, and `drop_penalty_item` takes the
+gear for them, in legacy's order: the points, then the item leaves its cell, then the
+computation. The other effects of legacy's `Unequip` (the unique's expire, the wear timers)
+are not ported, and the item's own attribute buffs are not either
+(`BuffOnAttr_AddBuffsFromItem` does nothing here), so nothing is left behind by the drop.
+
+**The rows.** Legacy deletes the row of a dropped item: `AddToGround` puts the item in the
+delayed-save queue (`G/item.cpp:582`), and the queue's flush finds that the item has no
+owner and deletes its row (`G/item_manager.cpp:485-495`). The flush runs every 127 Pulses
+(`G/main.cpp:284-288`, `G/item_manager.cpp:546-564`), so for about five seconds the rows
+still name the victim. The game thread cannot write to the store (ADR-0002), so the rows go
+to the descriptor that holds the victim, which writes them in one transaction
+(`prodomo/src/main.rs`'s `write_item_rows`, over the new `ClientOrder::ItemRows`) and tells
+the pick-ups of the dropped items that the rows are gone: a pick-up writes the item's own
+row, and the two rows would collide while the victim's row is still there.
+
+**The GM level.** The penalty spares every character whose GM level is not `GM_PLAYER`
+(`G/char_battle.cpp:1341`). The Rewrite's points carry the level (`Points::gm_level`), the
+load sets it from the GM list (`prodomo/src/main.rs`), and the penalty reads it.
+
+**The tests.** `prodomo/src/game_state/item_penalty.rs` holds nine: the nine bands at their
+boundaries, a victim under level 50, a GM, a death without a killer, a victim on a battle
+arena or a castle map, the worst band's drop of the inventory and the equipment, an item
+whose anti-flags forbid it, the unique item that stops the drop and is dropped itself, and
+a worn item's points going with it. `world/src/character/equip.rs`'s
+`a_position_names_a_wear_cell_only_when_it_is_one` pins the wear cell's numbers.
+
+**The divergences.**
+
+- Legacy shuffles the slots with a **fresh** `std::mt19937` seeded from
+  `std::random_device` (`:1085-1087` and `:1124-1126`), not with the process-wide
+  `number()`. The Rewrite uses the game's one generator for every draw, so which items a
+  penalty drops is not the set legacy's would drop. This is the same Divergence as the
+  generator's own.
+- The dropped items' rows go at once in the Rewrite. Legacy's go in the delayed-save
+  queue's flush, up to 127 Pulses (about 5.1 seconds) after the drop, and they name the
+  victim until then. The Rewrite's rows go when the victim's descriptor writes them, which
+  is as soon as its queue is drained.
+- `AddToGround` finding no tree for the point loses the item in legacy
+  (`G/item.cpp:569-574`, a Defect). The Rewrite keeps it.
+- The GM arm is narrower: legacy's `GetGMLevel() == GM_PLAYER || test_server` runs the
+  penalty for a GM when `test_server` is on, and it is on in the owner's configuration
+  (ledger 178.5). The Rewrite spares the GM.
+- Legacy's quickslot sync for a worn item names the wear index (0 to 63), which is an
+  inventory cell, and deletes whatever quickslot holds that cell: the wrong quickslot
+  (`G/char_battle.cpp:1150`). The Rewrite syncs the flat cell, which no quickslot names, and
+  deletes nothing. That Defect is not reproduced.
+- The private shop (`GetMyShop`, `:1019-1021`) and the protected inventory (`IsSecured`,
+  `:1101-1104` and `:1145-1148`) are not ported, so those two refusals cannot happen. The
+  agreed PvP, the arena duel and the forked road are not ported either, so their three
+  flags are always false, which is what keeps the penalty running. Legacy's `GetLevel() < 10`
+  check (`:1032`) is unreachable, because the level is already 50 or more.
+
+Ledger 234's note that the item drop penalty "is still not ported" is closed by this
+section.
+
+**The inventory.** The row `sys.combat.penalty` is `ported`, and its scenario is the unit
+test `prodomo/src/game_state/item_penalty.rs::the_worst_band_drops_the_inventory_and_the_equipment`;
+the note names the eight other tests and why no binary scenario proves the row. The spec's row
+counts are brought up to date with the tables: the server records are 137, not 134, the
+systems are 116, and the total is 1,649.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; the full
+workspace all-targets DB run green, the parity target green; the doc build and the
+doc-tests green; no scratch database left.
+
+No ADR changed. No owner question added. V21 is taken.

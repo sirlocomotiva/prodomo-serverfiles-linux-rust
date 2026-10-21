@@ -99,6 +99,10 @@ pub const ITEM_ANTIFLAG_SELL: u32 = 1 << 8;
 /// either (`char_item.cpp:7481`).
 pub const ITEM_ANTIFLAG_GIVE: u32 = 1 << 13;
 
+/// `ITEM_ANTIFLAG_PKDROP` (`item_length.h:392`): the item may not be dropped by the death
+/// penalty (`char_battle.cpp:1098` and `:1142`).
+pub const ITEM_ANTIFLAG_PKDROP: u32 = 1 << 14;
+
 /// `ITEM_ANTIFLAG_SAFEBOX` (`item_length.h:395`): the item may not go in a safebox
 /// (`input_main.cpp:2322`).
 pub const ITEM_ANTIFLAG_SAFEBOX: u32 = 1 << 17;
@@ -962,6 +966,7 @@ mod tests {
             (ITEM_ANTIFLAG_DROP, "ANTI_DROP"),
             (ITEM_ANTIFLAG_SELL, "ANTI_SELL"),
             (ITEM_ANTIFLAG_GIVE, "ANTI_GIVE"),
+            (ITEM_ANTIFLAG_PKDROP, "ANTI_PKDROP"),
             (ITEM_ANTIFLAG_STACK, "ANTI_STACK"),
             (ITEM_ANTIFLAG_SAFEBOX, "ANTI_SAFEBOX"),
         ] {

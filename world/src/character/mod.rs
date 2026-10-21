@@ -53,8 +53,9 @@ pub use drop_item::{
     DropRefused, Gauss, UnportedDrop,
 };
 pub use equip::{
-    find_equip_cell, is_equipable, is_female, is_skill_book, look_of, use_item, wear_pos,
-    worn_system_not_ported, CharacterLook, Gear, WornSystem,
+    find_equip_cell, is_equipable, is_female, is_skill_book, look_of, recompute_points,
+    unequip_points, use_item, wear_of, wear_pos, worn_system_not_ported, CharacterLook, Gear,
+    WornSystem,
 };
 pub use equipment::{
     accessory_socket_grade, is_set_item, item_applies, removal_applies, Equipment, PartChange,
@@ -62,8 +63,8 @@ pub use equipment::{
 };
 pub use grant::{grant, GrantRefused, Granted, GRANT_WINDOW};
 pub use ground::{
-    drop_gold, drop_item, pickup_gold, pickup_item, DropAt, GroundItem, Picker, DROPPED_NOTICE,
-    GOLD_DROPPED_NOTICE,
+    drop_gold, drop_item, drop_penalty_item, pickup_gold, pickup_item, DropAt, GroundItem, Picker,
+    DROPPED_NOTICE, GOLD_DROPPED_NOTICE,
 };
 pub use inventory::{
     character_cell_bound, custom_inventory_category_of, custom_inventory_position,

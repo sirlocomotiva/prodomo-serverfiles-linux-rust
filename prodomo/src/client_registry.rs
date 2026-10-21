@@ -35,7 +35,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use db::items::RowChange;
 use tokio::sync::mpsc;
+
+use crate::item_move::StoreOrder;
 
 /// One client as the registry knows it. The socket lives in the descriptor task; this is
 /// only the addressing a broadcast needs.
@@ -64,7 +67,7 @@ pub struct ClientEntry {
 /// an order, and the descriptor runs it on its next turn. A warp NPC's `WarpSet` saves the
 /// character and sends `GC_WARP`. A goto NPC's `Show` moves the body, which the world owns, so
 /// it is no order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientOrder {
     /// `WarpSet(x, y)` from a warp NPC (`FuncCheckWarp`, `G/char.cpp:7967-7968`).
     Warp {
@@ -72,6 +75,19 @@ pub enum ClientOrder {
         x: i32,
         /// The target y.
         y: i32,
+    },
+    /// The rows the death penalty took from a victim (`CHARACTER::ItemDropPenalty`,
+    /// `G/char_battle.cpp:1016-1200`).
+    ///
+    /// The game thread cannot write the store (ADR-0002), and the victim is dying, so the
+    /// descriptor that holds the victim writes the rows of the items that fell. It tells the
+    /// pick-ups of the dropped items when it has: a pick-up writes the item's own row, and
+    /// the two rows would collide while the victim's row is still there.
+    ItemRows {
+        /// The rows to write: the items the victim lost.
+        changes: Vec<RowChange>,
+        /// The order the pick-ups of the dropped items wait on.
+        order: StoreOrder,
     },
 }
 
@@ -477,8 +493,11 @@ mod tests {
             y: 899_500,
         };
 
-        assert!(registry.order(1, named.id(), warp));
-        assert!(!registry.order(2, named.id(), warp), "another Channel");
+        assert!(registry.order(1, named.id(), warp.clone()));
+        assert!(
+            !registry.order(2, named.id(), warp.clone()),
+            "another Channel"
+        );
 
         let mut orders = named.take_orders().expect("the queue is home");
         assert_eq!(orders.try_recv().ok(), Some(warp));
@@ -503,7 +522,7 @@ mod tests {
             y: 676_100,
         };
 
-        assert!(!registry.order(1, departed_id, warp));
+        assert!(!registry.order(1, departed_id, warp.clone()));
         assert!(!registry.order(1, deaf.id(), warp));
     }
 

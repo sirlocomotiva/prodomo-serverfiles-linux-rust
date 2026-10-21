@@ -655,6 +655,10 @@ impl GameState {
             // kills (`raise_alignment`), where legacy never checks the war.
             self.guild_war_kill(killer.vid, vid);
         }
+        // `ItemDropPenalty` (`:1338-1346`): the victim loses the items its own alignment
+        // and the draws choose. The call is outside the player-killer arm, because legacy's
+        // is: a monster's kill reaches it too, and only the war skips it.
+        self.item_drop_penalty(vid, killer);
         // `SetPosition(POS_DEAD)`. `ClearAffect(true)` uncomputes every affect but the
         // no-save and no-clear ones (`G/char_affect.cpp:259-337`): of the affects a player
         // can hold, the revive-invisible stays and the poison, stun, slow and 263's slow
