@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-10-22, after ledger section 240 (the war's map goes with the war).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 241 onwards (the war's
+Last reviewed: 2026-10-22, after ledger section 241 (the war's map judges the war).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 242 onwards (the war's
 own flags).
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
@@ -53,7 +53,11 @@ place it came from. Since 240 the war's map goes with the war: the war's end clo
 ten seconds later the map sends its members back to the place they came from, and five
 seconds after that the copy of the map is unhosted and the players still on it are
 disconnected; the member that joined hears the war's own record and the two scores, and the
-enemy's guild name reaches it with the enter, as the war's walk says. The rest of combat, skills,
+enemy's guild name reaches it with the enter, as the war's walk says. Since 241 the war's map
+judges the war: a kill on it scores the war by one point, a score that reaches the war's end
+score ends the war, a side with no member on it makes the map say so and wait a minute, a
+member that comes calls the wait off, a member that leaves asks at once and still hears it,
+and the wait's end judges a war younger than five minutes a draw. The rest of combat, skills,
 parties, guilds and the rest of step 4 are not ported yet. The two-process layout (a `game-server` and a `db-server`
 talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177; sections 1-175
 record how it was built and stay as history. Since section 178 the one `prodomo` binary reads

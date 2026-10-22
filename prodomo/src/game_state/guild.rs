@@ -59,6 +59,7 @@ use super::GameState;
 use crate::chat_line::{chat_packet, Arg};
 use crate::client_registry::ClientOrder;
 use crate::item_move::{gold_delta, row_changes, Mover};
+use crate::save::PASSES_PER_SEC;
 
 /// `GUILD_CREATE_FEE`: the 200000 gold `CInputMain::AnswerMakeGuild` gates on and takes
 /// (`G/input_main.cpp:2677,2719-2720`). The quest arm gates on the same 200000
@@ -861,6 +862,26 @@ pub enum GuildWarNotice {
         to_name: Vec<u8>,
     },
 }
+/// How one war end is judged: who won, and whether the war is a draw.
+///
+/// The ladder's math follows the DB's `WarEnd` (`db/GuildManager.cpp:470-526`), which
+/// the scores judge, and the over notice follows the game side's `EndWar`
+/// (`G/guild_manager.cpp:676-717`), which the scores judge too. A war's map that
+/// names the winner itself is the one arm where the two differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WarEndJudgement {
+    /// The scores judge (`CWarMap::GetWinnerGuild`, `G/war_map.cpp:249-263`): the side
+    /// with the higher score wins, and equal scores are a draw.
+    Scores,
+    /// A forced draw (`gwstop`, `G/cmd_gm.cpp:2766-2805`): the math is a draw whatever
+    /// the scores are, as the DB's forced `WarEnd` does, while the over notice still
+    /// follows the scores, as the game side's `EndWar` does.
+    ForcedDraw,
+    /// The war's map names the winner (`CWarMap::Timeout`, `G/war_map.cpp:533-560`):
+    /// the side that kept its members on the map wins, whatever the scores are.
+    NamedWinner(u32),
+}
+
 /// What one war end judged: both rows for the descriptor's store write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WarEndOutcome {
@@ -2945,7 +2966,7 @@ impl GameState {
             u32::try_from(id1).unwrap_or(u32::MAX),
             u32::try_from(id2).unwrap_or(u32::MAX),
         );
-        self.manager_end_war(lo, hi, true, true, now)
+        self.manager_end_war(lo, hi, WarEndJudgement::ForcedDraw, true, now)
     }
 
     /// One `gwcancel` line (`do_cancel_guild_war`, `G/cmd_gm.cpp:2791-2805`): the same
@@ -2965,7 +2986,7 @@ impl GameState {
             u32::try_from(id1).unwrap_or(u32::MAX),
             u32::try_from(id2).unwrap_or(u32::MAX),
         );
-        let Some(_) = self.manager_end_war(lo, hi, false, false, now) else {
+        let Some(_) = self.manager_end_war(lo, hi, WarEndJudgement::Scores, false, now) else {
             return false;
         };
         self.notify_guild_master(lo, b"[LS;482]", &[]);
@@ -3199,7 +3220,14 @@ impl GameState {
             return;
         };
         let guilds = if from < to { [from, to] } else { [to, from] };
-        let map = super::war_map::WarMap::new(map_index, info.map_index, info.map_type, guilds, 0);
+        let map = super::war_map::WarMap::new(
+            map_index,
+            info.map_index,
+            info.map_type,
+            guilds,
+            0,
+            self.last_pulse,
+        );
         self.war_maps.insert(map_index, map);
     }
 
@@ -3233,6 +3261,12 @@ impl GameState {
         }
         if let Some(war) = self.war_maps.get_mut(&map) {
             war.inc_member(vid, pid, guild, flag > 0);
+            if flag > 0 {
+                // `IncMember` cancels the timeout the map asked for
+                // (`event_cancel(&m_pkTimeoutEvent)`, `G/war_map.cpp:374`): a member
+                // that came ends the wait for the side that never came.
+                war.cancel_timeout();
+            }
         }
         // `IncMember` ends with the counts and then the war's own records
         // (`G/war_map.cpp:385-397`).
@@ -3270,7 +3304,9 @@ impl GameState {
     }
 
     /// `CWarMap::DecMember` (`G/war_map.cpp:400-451`): a player that leaves the war's map
-    /// falls out of the count of its team, or of the watchers'.
+    /// falls out of the count of its team, or of the watchers'. A member that leaves
+    /// asks the map whether the war is over, and the player that left still hears the
+    /// map's answer.
     pub(super) fn leave_war_map(&mut self, vid: Vid, map: i32) {
         let Some(war) = self.war_maps.get(&map) else {
             return;
@@ -3280,14 +3316,32 @@ impl GameState {
         };
         let pid = character.player_id();
         let guild = self.guild_of(pid).unwrap_or(0);
-        let observer = match war.team_of(guild) {
-            Some(index) => !war.teams[index].joiners.contains(&pid),
-            None => true,
-        };
+        // `DecMember` asks the character's observer mode (`ch->IsObserverMode()`,
+        // `G/war_map.cpp:410`): the map keeps the watchers, so a player that watched
+        // the war leaves it as a watcher.
+        let observer = war.watchers.contains(&pid);
         if let Some(war) = self.war_maps.get_mut(&map) {
-            war.dec_member(vid, guild, observer);
+            war.dec_member(pid, guild, observer);
+        }
+        if !observer {
+            // `DecMember` asks whether the war is over (`G/war_map.cpp:437`): a member
+            // that left may have left its side without one, and the map says so and
+            // asks for a timeout at once. The player that left still hears it: the
+            // map's set of players is left after the check (`G/war_map.cpp:450`).
+            self.war_map_check_end(map, self.last_pulse);
+            // `DecMember` clears the war member's flag (`ch->SetQuestFlag(
+            // "war.is_war_member", 0)`, `G/war_map.cpp:438`), so a member that left
+            // watches the war if it comes back to the map.
+            if let Some(quests) = self.quests.as_mut() {
+                quests
+                    .manager_mut()
+                    .set_quest_flag(pid, b"war.is_war_member", 0);
+            }
         }
         self.war_user_count(map);
+        if let Some(war) = self.war_maps.get_mut(&map) {
+            war.leave_present(vid);
+        }
     }
 
     /// `CWarMap::UpdateUserCount` (`G/war_map.cpp:330-340`): every player on the war's
@@ -3501,9 +3555,14 @@ impl GameState {
     /// war begun (`UnderWar`), and both guilds' online members hear the new total. The
     /// DB server's accumulate-and-fan collapses inline: the stored score IS the running
     /// total (`DWORD iScore`, `db/GuildManager.h:75`). A war-map killer, a guildless side,
-    /// or a past-field enemy scores nothing; no war maps exist, so `GetWarMap()` is
-    /// always null.
+    /// or a past-field enemy scores nothing.
+    ///
+    /// A killer that stands on a war map scores the war by the map's own rule and the
+    /// field arm does not run (`CGuildManager::Kill`, `G/guild_manager.cpp:846-850`).
     pub(super) fn guild_war_kill(&mut self, killer: Vid, victim: Vid) {
+        if self.war_map_kill(killer, victim) {
+            return;
+        }
         let (Ok(killer_character), Ok(victim_character)) = (
             self.characters.find_by_vid(killer),
             self.characters.find_by_vid(victim),
@@ -3561,6 +3620,246 @@ impl GameState {
                 .unwrap_or_default();
             for member in members {
                 let _sent = self.write_to_client(member, record.clone());
+            }
+        }
+    }
+
+    /// `CWarMap::OnKill` (`G/war_map.cpp:781-829`): a kill on the war's map scores the
+    /// war by the map's own rule.
+    ///
+    /// The battle map gives the killer's guild a point
+    /// (`SendGuildWarScore(dwKillerGuild, dwDeadGuild, 1, ch->GetLevel())`); the flag map
+    /// gives the flag back, which ledger 242 ports. Both guilds must be teams of the
+    /// map, and a map that has ended scores nothing.
+    ///
+    /// Reports whether the killer stood on a war map: the field war's own arm does not
+    /// run for such a killer (`CGuildManager::Kill`, `G/guild_manager.cpp:846-850`).
+    fn war_map_kill(&mut self, killer: Vid, victim: Vid) -> bool {
+        let Some((_, map)) = self.place_of(killer.raw()) else {
+            return false;
+        };
+        let Some(war) = self.war_maps.get(&map) else {
+            return false;
+        };
+        if war.ended {
+            return true;
+        }
+        let (Ok(killer_character), Ok(victim_character)) = (
+            self.characters.find_by_vid(killer),
+            self.characters.find_by_vid(victim),
+        ) else {
+            return true;
+        };
+        let (Some(killer_guild), Some(victim_guild)) = (
+            self.guild_of(killer_character.player_id()),
+            self.guild_of(victim_character.player_id()),
+        ) else {
+            return true;
+        };
+        if war.team_of(killer_guild).is_none() || war.team_of(victim_guild).is_none() {
+            return true;
+        }
+        // The battle map's own rule (`G/war_map.cpp:807-809`). The flag map's rule is
+        // the flag's return, which ledger 242 ports.
+        if war.map_type == super::war_map::WAR_MAP_TYPE_NORMAL {
+            self.war_map_score(map, killer_guild, victim_guild, 1);
+        }
+        true
+    }
+
+    /// The score of a war map (`CWarMap::UpdateScore`, `G/war_map.cpp:660-681`, with the
+    /// DB's round trip collapsed as the field war's score is): the pair's score changes,
+    /// the map's own score follows, the players on the map hear the new total, and the
+    /// war asks whether it is over.
+    ///
+    /// The record goes to the players on the war's map and to nobody else: the map's arm
+    /// of `SetWarScoreAgainstTo` (`G/guild_war.cpp:196-200`) sends it to the map, and
+    /// only the field war's arm sends it to the guilds' members (`:200-217`).
+    fn war_map_score(&mut self, map: i32, gain: u32, opp: u32, delta: i32) {
+        let Some(total) = self.pair_score_add(gain, opp, delta) else {
+            return;
+        };
+        let Ok(score) = i32::try_from(total) else {
+            return;
+        };
+        let changed = self
+            .war_maps
+            .get_mut(&map)
+            .is_some_and(|war| war.set_score(gain, score));
+        if !changed {
+            return;
+        }
+        let record = guild_war_score_record(gain, opp, total);
+        let Some(war) = self.war_maps.get(&map) else {
+            return;
+        };
+        let mut vids: Vec<Vid> = war.present.iter().copied().collect();
+        vids.sort_by_key(|vid| vid.raw());
+        for vid in vids {
+            let _sent = self.write_to_client(vid, record.clone());
+        }
+        // `UpdateScore` ends with `CheckScore` (`G/war_map.cpp:680`).
+        self.war_map_check_score(map, self.last_pulse);
+    }
+
+    /// The score a guild has against another (`CGuild::SetWarScoreAgainstTo`,
+    /// `G/guild_war.cpp:179-197`, with the DB's `UpdateScore`
+    /// (`db/GuildManager.cpp:598-641`) collapsed inline): the stored score is the
+    /// running total, and the delta is added to it.
+    fn pair_score_add(&mut self, gain: u32, opp: u32, delta: i32) -> Option<u32> {
+        let enemy = self.guilds.by_id.get_mut(&gain)?.enemies.get_mut(&opp)?;
+        let total = enemy.score.wrapping_add(u32::try_from(delta).unwrap_or(0));
+        enemy.score = total;
+        Some(total)
+    }
+
+    /// `CWarMap::CheckWarEnd` (`G/war_map.cpp:470-495`): a side with no members ends the
+    /// war a minute later, and else the score decides.
+    fn war_map_check_end(&mut self, index: i32, pulse: u64) {
+        let Some(war) = self.war_maps.get(&index) else {
+            return;
+        };
+        if war.ended {
+            return;
+        }
+        if war.teams[0].members == 0 || war.teams[1].members == 0 {
+            // The map says so once (`m_bTimeout`, `G/war_map.cpp:477-479`).
+            if war.timed_out || war.timeout_pulse.is_some() {
+                return;
+            }
+            self.notice_war_map(
+                index,
+                b"No other guild members have participated in the guild war.",
+            );
+            self.notice_war_map(
+                index,
+                b"If no one logs in within 1 minute, the Guild War will automatically end.",
+            );
+            if let Some(war) = self.war_maps.get_mut(&index) {
+                war.ask_timeout(pulse);
+            }
+            return;
+        }
+        self.war_map_check_score(index, pulse);
+    }
+
+    /// `CWarMap::CheckScore` (`G/war_map.cpp:683-735`): the war ends when one side's
+    /// score reaches the war's end score (`iEndScore`, `KOR_aGuildWarInfo`).
+    ///
+    /// The war must have run for thirty seconds, and equal scores end nothing: the war
+    /// waits for a GM then, as legacy's does.
+    fn war_map_check_score(&mut self, index: i32, pulse: u64) {
+        let Some(war) = self.war_maps.get(&index) else {
+            return;
+        };
+        if war.ended {
+            return;
+        }
+        if !war.score_can_end(pulse) {
+            return;
+        }
+        let [lo, hi] = war.guilds;
+        let (score_lo, score_hi) = (war.teams[0].score, war.teams[1].score);
+        if score_lo == score_hi {
+            return;
+        }
+        let Some(end_score) = self.war_end_score(lo, hi) else {
+            return;
+        };
+        if score_lo < end_score && score_hi < end_score {
+            return;
+        }
+        // `RequestWarOver(dwWinner, dwLoser, dwWinner, iRewardGold)`
+        // (`G/war_map.cpp:727-733`): the war ends, and the DB's `WarEnd` judges the
+        // scores, which the winner's side has.
+        let now = super::quests::quest_now();
+        if let Some(outcome) = self.manager_end_war(lo, hi, WarEndJudgement::Scores, true, now) {
+            // The war's map has no descriptor of its own, so the rows wait for the
+            // war-end poll, as the field war's own end does.
+            self.guilds.pending_war_ends.push(outcome);
+        }
+    }
+
+    /// The score that ends the war (`KOR_aGuildWarInfo`'s `iEndScore`,
+    /// `G/constants.cpp:1132-1145`): the battle war ends at a hundred points and the
+    /// flag war at ten.
+    fn war_end_score(&self, lo: u32, hi: u32) -> Option<i32> {
+        let war_type = self
+            .guilds
+            .by_id
+            .get(&lo)
+            .and_then(|guild| guild.enemies.get(&hi))
+            .map_or(0, |enemy| enemy.war_type);
+        super::war_map::WAR_TYPES
+            .get(usize::from(war_type))
+            .map(|info| info.end_score)
+    }
+
+    /// `CWarMap::Timeout` (`G/war_map.cpp:510-578`): the war that waited a minute for a
+    /// side that never came ends. A war that has run for less than five minutes is
+    /// judged to be a draw; else the side that kept its members on the map wins, and
+    /// the scores decide only when both sides kept members.
+    fn war_map_timeout(&mut self, index: i32, pulse: u64) {
+        let Some(war) = self.war_maps.get(&index) else {
+            return;
+        };
+        if war.ended {
+            return;
+        }
+        let [lo, hi] = war.guilds;
+        // `Timeout`'s early draw (`G/war_map.cpp:527-531`).
+        let early = pulse.saturating_sub(war.started_pulse) < 5 * 60 * u64::from(PASSES_PER_SEC);
+        let judgement = if early {
+            self.notice_war_map(
+                index,
+                b"The guild war ended early and was judged to be a draw. (less than 5 minutes)",
+            );
+            WarEndJudgement::ForcedDraw
+        } else {
+            self.war_map_timeout_winner(index)
+        };
+        let now = super::quests::quest_now();
+        if let Some(outcome) = self.manager_end_war(lo, hi, judgement, true, now) {
+            // The war's map has no descriptor of its own, so the rows wait for the
+            // war-end poll, as the field war's own end does.
+            self.guilds.pending_war_ends.push(outcome);
+        }
+        if let Some(war) = self.war_maps.get_mut(&index) {
+            war.mark_timed_out();
+        }
+    }
+
+    /// `CWarMap::Timeout`'s late arm (`G/war_map.cpp:533-560`): the side with no member
+    /// on the map loses, and the scores decide only when both sides kept members.
+    ///
+    /// The legacy names the winner itself and asks the DB to make it a win
+    /// (`RequestWarOver(dwWinner, dwLoser, dwWinner, iRewardGold)`, `:568-570`), so the
+    /// ladder follows the map and not the scores.
+    fn war_map_timeout_winner(&self, index: i32) -> WarEndJudgement {
+        let Some(war) = self.war_maps.get(&index) else {
+            return WarEndJudgement::Scores;
+        };
+        let [lo, hi] = war.guilds;
+        if war.teams[0].members == 0 {
+            return WarEndJudgement::NamedWinner(hi);
+        }
+        if war.teams[1].members == 0 {
+            return WarEndJudgement::NamedWinner(lo);
+        }
+        WarEndJudgement::Scores
+    }
+
+    /// `CWarMap::Notice` (`G/war_map.cpp:611-616`): a line to every player on the war's
+    /// map.
+    fn notice_war_map(&mut self, index: i32, line: &[u8]) {
+        let Some(war) = self.war_maps.get(&index) else {
+            return;
+        };
+        let mut vids: Vec<Vid> = war.present.iter().copied().collect();
+        vids.sort_by_key(|vid| vid.raw());
+        for vid in vids {
+            if let Some(mover) = self.own_mover(vid) {
+                self.tell(vid, mover, CHAT_TYPE_NOTICE, line, &[]);
             }
         }
     }
@@ -3696,16 +3995,15 @@ impl GameState {
     /// winner's wins and the loser's losses, pays `5%` of the loser's ladder halved
     /// under the half-win rule, and bills the loser `7%`, floored at 0), the over
     /// notice fans to every PC, both sides end, the pair stamps the end-time map and
-    /// leaves the war set, and the `WAR_END_LIST` fans to every PC. `force_draw` is
-    /// `gwstop`'s arm: it turns the math into a draw, as the DB's forced `WarEnd`
-    /// does, but leaves the over notice to the scores, as the game side's `EndWar`
-    /// does. `math` false is `gwcancel`'s (the math and tallies skip, the
+    /// leaves the war set, and the `WAR_END_LIST` fans to every PC. `judgement` says
+    /// who won: the scores, a forced draw (`gwstop`), or the war's map's own arm.
+    /// `math` false is `gwcancel`'s (the math and tallies skip, the
     /// stamp stays). The outcome carries both rows for the descriptor's store write.
     fn manager_end_war(
         &mut self,
         lo: u32,
         hi: u32,
-        force_draw: bool,
+        judgement: WarEndJudgement,
         math: bool,
         now: u32,
     ) -> Option<WarEndOutcome> {
@@ -3752,6 +4050,20 @@ impl GameState {
         } else {
             (hi, lo)
         };
+        // The ladder's own winner: the scores judge, except for a forced draw and for a
+        // war's map that names the winner itself (`CWarMap::Timeout`,
+        // `G/war_map.cpp:533-560`), where the side that kept its members wins whatever
+        // the scores are.
+        let (ladder_winner, ladder_loser, ladder_draw) = match judgement {
+            WarEndJudgement::ForcedDraw => (winner, loser, true),
+            WarEndJudgement::NamedWinner(named) if named == lo => (lo, hi, false),
+            WarEndJudgement::NamedWinner(named) if named == hi => (hi, lo, false),
+            // A name that is neither of the two sides falls back to the scores, as the
+            // scores judge.
+            WarEndJudgement::Scores | WarEndJudgement::NamedWinner(_) => {
+                (winner, loser, notice_draw)
+            }
+        };
         let mut outcome = WarEndOutcome {
             lo: WarEndRow {
                 guild_id: lo,
@@ -3771,9 +4083,9 @@ impl GameState {
         if math {
             self.war_end_math(
                 (lo, hi),
-                winner,
-                loser,
-                force_draw || notice_draw,
+                ladder_winner,
+                ladder_loser,
+                ladder_draw,
                 now,
                 &mut outcome,
             );
@@ -4203,7 +4515,8 @@ impl GameState {
             if start.saturating_add(GUILD_WAR_DURATION) > now {
                 continue;
             }
-            if let Some(outcome) = self.manager_end_war(lo, hi, false, true, now) {
+            if let Some(outcome) = self.manager_end_war(lo, hi, WarEndJudgement::Scores, true, now)
+            {
                 self.guilds.pending_war_ends.push(outcome);
             }
         }
@@ -4220,6 +4533,10 @@ impl GameState {
     ///
     /// The war's end set the map's end (`CWarMap::SetEnded`, `G/war_map.cpp:739-779`).
     /// A map that is not there is not destroyed twice.
+    ///
+    /// The map's own begin event (`war_begin_event`, `G/war_map.cpp:28-41`) asks whether
+    /// the war is over, and the timeout it asks for (`war_timeout_event`,
+    /// `G/war_map.cpp:70-84`) ends the war a minute later.
     pub(super) fn run_war_map_ticks(&mut self, pulse: u64) {
         let exiting: Vec<i32> = self
             .war_maps
@@ -4238,6 +4555,27 @@ impl GameState {
             .collect();
         for index in due {
             self.destroy_war_map(index);
+        }
+        let asking: Vec<i32> = self
+            .war_maps
+            .iter()
+            .filter(|(_, map)| map.check_due(pulse))
+            .map(|(index, _)| *index)
+            .collect();
+        for index in asking {
+            self.war_map_check_end(index, pulse);
+            if let Some(map) = self.war_maps.get_mut(&index) {
+                map.mark_checked();
+            }
+        }
+        let timing_out: Vec<i32> = self
+            .war_maps
+            .iter()
+            .filter(|(_, map)| map.timeout_due(pulse))
+            .map(|(index, _)| *index)
+            .collect();
+        for index in timing_out {
+            self.war_map_timeout(index, pulse);
         }
     }
 
@@ -8238,6 +8576,46 @@ mod tests {
         (world, orders, lease, master)
     }
 
+    /// The war's map with the master's member on it: the member joins the war its
+    /// guild is in (`guild.war_enter`) and stands on the war's own copy of the map.
+    fn the_master_on_the_wars_map(
+        world: &mut GameState,
+        orders: &mut UnboundedReceiver<ClientOrder>,
+    ) {
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"war_enter",
+            &[quest::manager::GuildArg::Number(SECOND_ID)],
+            NOW,
+        );
+        assert_eq!(judged.answer, quest::manager::GuildAnswer::None);
+        assert!(
+            matches!(orders.try_recv().ok(), Some(ClientOrder::Warp { .. })),
+            "the member is warped to the war's map"
+        );
+        world.place_body(
+            Vid::new(MASTER_VID),
+            crate::game_loop_messages::EnterPlace {
+                channel: super::super::fixtures::PLACE.0,
+                map: 1_100_000,
+                x: 36_800,
+                y: 5_200,
+                z: 0,
+            },
+            crate::loading_phase::PcCard {
+                name: format!("P{MASTER_VID}"),
+                job: 0,
+                empire: 1,
+                level: 10,
+                conqueror_level: 0,
+                language: 0,
+                pk_mode: crate::loading_phase::PK_MODE_PROTECT,
+                skill_group: 0,
+                alignment: 0,
+            },
+        );
+    }
+
     /// The quests of the legacy Locale: the war's letter and the button that joins the
     /// war are the `guild_war_join` quest's.
     fn a_quest_manager() -> super::super::quests::Quests {
@@ -8417,7 +8795,8 @@ mod tests {
             },
         );
         // The war ends: the map closes with it.
-        let outcome = world.manager_end_war(GUILD_ID, SECOND_ID, false, true, NOW);
+        let outcome =
+            world.manager_end_war(GUILD_ID, SECOND_ID, WarEndJudgement::Scores, true, NOW);
         assert!(outcome.is_some(), "the war ends");
         assert!(
             world.war_maps.contains_key(&map_index),
@@ -8514,7 +8893,8 @@ mod tests {
                 alignment: 0,
             },
         );
-        let outcome = world.manager_end_war(GUILD_ID, SECOND_ID, false, true, NOW);
+        let outcome =
+            world.manager_end_war(GUILD_ID, SECOND_ID, WarEndJudgement::Scores, true, NOW);
         assert!(outcome.is_some(), "the war ends");
         world.run_war_map_ticks(250);
         // The member is sent back, and stays on the map until its client follows.
@@ -8708,7 +9088,7 @@ mod tests {
         let _ = heard(&mut master);
         let _ = heard(&mut guest);
         let outcome = world
-            .manager_end_war(GUILD_ID, SECOND_ID, false, true, NOW)
+            .manager_end_war(GUILD_ID, SECOND_ID, WarEndJudgement::Scores, true, NOW)
             .expect("a live war ends");
         assert_eq!(outcome.lo.wins, 1, "the winner tallies a win");
         assert_eq!(outcome.hi.losses, 1, "the loser tallies a loss");
@@ -8760,7 +9140,7 @@ mod tests {
         start_war_pair(&mut world);
         world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
         let outcome = world
-            .manager_end_war(GUILD_ID, SECOND_ID, true, true, NOW)
+            .manager_end_war(GUILD_ID, SECOND_ID, WarEndJudgement::ForcedDraw, true, NOW)
             .expect("a live war ends");
         assert_eq!((outcome.lo.draws, outcome.hi.draws), (1, 1));
         assert_eq!((outcome.lo.ladder, outcome.hi.ladder), (1000, 1000));
@@ -8782,7 +9162,7 @@ mod tests {
         world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
         let _ = heard(&mut master);
         let outcome = world
-            .manager_end_war(GUILD_ID, SECOND_ID, true, true, NOW)
+            .manager_end_war(GUILD_ID, SECOND_ID, WarEndJudgement::ForcedDraw, true, NOW)
             .expect("a live war ends");
         assert_eq!(
             (outcome.lo.draws, outcome.hi.draws),
@@ -8813,12 +9193,18 @@ mod tests {
         world.link_guild(Vid::new(200));
         start_war_pair(&mut world);
         world
-            .manager_end_war(GUILD_ID, SECOND_ID, true, true, NOW)
+            .manager_end_war(GUILD_ID, SECOND_ID, WarEndJudgement::ForcedDraw, true, NOW)
             .expect("the first war ends");
         start_war_pair(&mut world);
         world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
         let outcome = world
-            .manager_end_war(GUILD_ID, SECOND_ID, false, true, NOW + 100)
+            .manager_end_war(
+                GUILD_ID,
+                SECOND_ID,
+                WarEndJudgement::Scores,
+                true,
+                NOW + 100,
+            )
             .expect("the second war ends");
         assert_eq!(outcome.lo.ladder, 1025, "the 50 gain halves to 25");
         assert_eq!(outcome.hi.ladder, 930, "the loss never halves");
@@ -8842,7 +9228,7 @@ mod tests {
         world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
         // 10 * 0.05 truncates to 0, 10 * 0.07 truncates to 0.
         let outcome = world
-            .manager_end_war(GUILD_ID, SECOND_ID, false, true, NOW)
+            .manager_end_war(GUILD_ID, SECOND_ID, WarEndJudgement::Scores, true, NOW)
             .expect("a live war ends");
         assert_eq!((outcome.lo.ladder, outcome.hi.ladder), (1000, 10));
         world
@@ -8855,7 +9241,13 @@ mod tests {
         world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
         // 19 * 0.05 truncates to 0, 19 * 0.07 truncates to 1.
         let outcome = world
-            .manager_end_war(GUILD_ID, SECOND_ID, false, true, NOW + 50_000)
+            .manager_end_war(
+                GUILD_ID,
+                SECOND_ID,
+                WarEndJudgement::Scores,
+                true,
+                NOW + 50_000,
+            )
             .expect("a live war ends");
         assert_eq!(outcome.lo.ladder, 1000, "no gain on 19");
         assert_eq!(outcome.hi.ladder, 18, "one off on 19");
@@ -9038,7 +9430,7 @@ mod tests {
         );
         let _ = heard(&mut master);
         let outcome = world
-            .manager_end_war(GUILD_ID, SECOND_ID, true, true, NOW)
+            .manager_end_war(GUILD_ID, SECOND_ID, WarEndJudgement::ForcedDraw, true, NOW)
             .expect("a live war ends");
         assert_eq!(outcome.lo.draws, 1);
         let left = world
@@ -9166,5 +9558,260 @@ mod tests {
             assert_eq!(&record[8..12], &SECOND_ID.to_le_bytes(), "the opp");
             assert_eq!(&record[12..16], &10u32.to_le_bytes(), "the score");
         }
+    }
+
+    /// `CWarMap::OnKill` (`G/war_map.cpp:781-829`): a kill on the war's own map scores
+    /// the war by the map's rule — the battle map gives the killer's guild a point —
+    /// and the field war's rule, the victim's level, does not run for such a kill
+    /// (`CGuildManager::Kill`, `G/guild_manager.cpp:846-850`).
+    #[test]
+    fn a_kill_on_the_wars_map_scores_the_war_by_one_point() {
+        let (mut world, mut orders, _lease, mut master) = a_war_on_with_quests(" 1");
+        let map_index = 1_100_000;
+        // The member joins the war: the map is made and the member stands on it.
+        the_master_on_the_wars_map(&mut world, &mut orders);
+        let _ = heard(&mut master);
+        // The kill lands on the war's map.
+        world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
+        let score = world
+            .guilds
+            .by_id
+            .get(&GUILD_ID)
+            .and_then(|guild| guild.enemies.get(&SECOND_ID))
+            .expect("the enemy entry")
+            .score;
+        assert_eq!(
+            score, 1,
+            "the battle map's rule gives a point, not the level"
+        );
+        let war = world.war_maps.get(&map_index).expect("the war's map");
+        let team = war.team_of(GUILD_ID).expect("the guild's team");
+        assert_eq!(war.teams[team].score, 1, "the map's own score follows");
+        // The map's players hear the new score, and nobody else does.
+        let held = heard(&mut master);
+        let record = held
+            .iter()
+            .find(|record| {
+                record[0] == protocol::gc_inventory::HEADER_GC_GUILD.value()
+                    && record[3] == protocol::gc_guild::GUILD_SUBHEADER_GC_WAR_SCORE
+            })
+            .unwrap_or_else(|| panic!("the map's player hears the score: {held:?}"));
+        assert_eq!(&record[4..8], &GUILD_ID.to_le_bytes(), "the gainer");
+        assert_eq!(&record[8..12], &SECOND_ID.to_le_bytes(), "the opp");
+        assert_eq!(&record[12..16], &1u32.to_le_bytes(), "the score");
+    }
+
+    /// `CWarMap::CheckScore` (`G/war_map.cpp:683-735`): the war ends when one side's
+    /// score reaches the war's end score — a hundred points for the battle war — and
+    /// the war must have run for thirty seconds before a score can end it.
+    #[test]
+    fn the_score_ends_the_war_when_it_reaches_the_end_score() {
+        let (mut world, mut orders, _lease, _master) = a_war_on_with_quests(" 1");
+        let map_index = 1_100_000;
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"war_enter",
+            &[quest::manager::GuildArg::Number(SECOND_ID)],
+            NOW,
+        );
+        assert_eq!(judged.answer, quest::manager::GuildAnswer::None);
+        assert!(matches!(
+            orders.try_recv().ok(),
+            Some(ClientOrder::Warp { .. })
+        ));
+        world.place_body(
+            Vid::new(MASTER_VID),
+            crate::game_loop_messages::EnterPlace {
+                channel: super::super::fixtures::PLACE.0,
+                map: map_index,
+                x: 36_800,
+                y: 5_200,
+                z: 0,
+            },
+            crate::loading_phase::PcCard {
+                name: format!("P{MASTER_VID}"),
+                job: 0,
+                empire: 1,
+                level: 10,
+                conqueror_level: 0,
+                language: 0,
+                pk_mode: crate::loading_phase::PK_MODE_PROTECT,
+                skill_group: 0,
+                alignment: 0,
+            },
+        );
+        // The war is a minute old, so a score may end it.
+        world.last_pulse = 1_000;
+        // One point short of the end score.
+        world
+            .guilds
+            .by_id
+            .get_mut(&GUILD_ID)
+            .and_then(|guild| guild.enemies.get_mut(&SECOND_ID))
+            .expect("the enemy entry")
+            .score = 99;
+        world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
+        // The score reached the end score, so the war ended and the pair's entry is
+        // gone with it.
+        let war = world.war_maps.get(&map_index).expect("the war's map");
+        let team = war.team_of(GUILD_ID).expect("the guild's team");
+        assert_eq!(
+            war.teams[team].score, 100,
+            "the score reached the end score"
+        );
+        assert!(
+            !world.guilds.wars.contains(&(GUILD_ID, SECOND_ID)),
+            "the war ended on the score"
+        );
+    }
+
+    /// `CWarMap::CheckWarEnd` (`G/war_map.cpp:470-495`) with `war_timeout_event`
+    /// (`G/war_map.cpp:70-84`) and `CWarMap::Timeout` (`G/war_map.cpp:510-578`): a side
+    /// with no members ends the war a minute later, and a war that is younger than
+    /// five minutes is judged to be a draw.
+    #[test]
+    fn a_side_without_members_ends_the_war_a_minute_later() {
+        let (mut world, mut orders, _lease, mut master) = a_war_on_with_quests(" 1");
+        the_master_on_the_wars_map(&mut world, &mut orders);
+        let _ = heard(&mut master);
+        // The map asks whether the war is over a minute after it was made: the other
+        // guild has no member on it, so the map says so and asks for a timeout.
+        world.run_war_map_ticks(1_500);
+        let held = heard(&mut master);
+        assert!(
+            held.iter()
+                .any(|record| record.windows(58).any(|window| window
+                    .starts_with(b"No other guild members have participated in the guild war."))),
+            "the map says that the other guild has no member: {held:?}"
+        );
+        assert!(
+            world.guilds.wars.contains(&(GUILD_ID, SECOND_ID)),
+            "the war waits for the minute"
+        );
+        // A minute later the timeout ends the war, and a war younger than five
+        // minutes is judged to be a draw.
+        world.run_war_map_ticks(3_000);
+        let held = heard(&mut master);
+        assert!(
+            held.iter()
+                .any(|record| record.windows(76).any(|window| window.starts_with(
+                    b"The guild war ended early and was judged to be a draw. (less than 5 minutes)"
+                ))),
+            "the map says that the war ended early: {held:?}"
+        );
+        assert!(
+            !world.guilds.wars.contains(&(GUILD_ID, SECOND_ID)),
+            "the timeout ended the war"
+        );
+        // The war's rows wait for the store: the war's map has no descriptor of its
+        // own, so the war-end poll writes them.
+        let queued = world.take_war_ends();
+        assert_eq!(
+            queued.len(),
+            1,
+            "the war's rows wait for the store: {queued:?}"
+        );
+        assert_eq!(queued[0].lo.draws, 1, "the draw is tallied");
+        assert_eq!(queued[0].hi.draws, 1, "the draw is tallied on both sides");
+        assert_eq!(queued[0].lo.wins, 0, "a draw is no win");
+        assert_eq!(queued[0].hi.losses, 0, "a draw is no loss");
+    }
+
+    /// `CWarMap::Timeout`'s late arm (`G/war_map.cpp:533-560`): a war that has run for
+    /// five minutes or more is not judged to be a draw, and the side that kept its
+    /// members on the map wins, whatever the scores say.
+    #[test]
+    fn a_war_that_ran_for_five_minutes_ends_with_the_side_that_stayed() {
+        let (mut world, mut orders, _lease, mut master) = a_war_on_with_quests(" 1");
+        the_master_on_the_wars_map(&mut world, &mut orders);
+        let _ = heard(&mut master);
+        // The map asks at pulse 1500 and the timeout it asks for is due at pulse 3000;
+        // the tick at 7500 runs the timeout, and by then the war is five minutes old.
+        world.run_war_map_ticks(1_500);
+        world.run_war_map_ticks(7_500);
+        let _ = heard(&mut master);
+        assert!(
+            !world.guilds.wars.contains(&(GUILD_ID, SECOND_ID)),
+            "the timeout ended the war"
+        );
+        // The side that kept its member on the map wins, and the war is no draw.
+        let queued = world.take_war_ends();
+        assert_eq!(
+            queued.len(),
+            1,
+            "the war's rows wait for the store: {queued:?}"
+        );
+        assert_eq!(queued[0].lo.wins, 1, "the side that stayed won");
+        assert_eq!(queued[0].lo.draws, 0, "the war is no draw");
+        assert_eq!(queued[0].hi.losses, 1, "the side that left lost");
+        assert_eq!(queued[0].hi.draws, 0, "the war is no draw");
+    }
+
+    /// `CWarMap::IncMember` (`G/war_map.cpp:342-398`) cancels the timeout the map asked
+    /// for (`event_cancel(&m_pkTimeoutEvent)`, `G/war_map.cpp:374`): a member that comes
+    /// ends the wait for the side that never came.
+    #[test]
+    fn a_member_that_joins_cancels_the_timeout_the_map_asked_for() {
+        let (mut world, mut orders, _lease, mut master) = a_war_on_with_quests(" 1");
+        the_master_on_the_wars_map(&mut world, &mut orders);
+        let _ = heard(&mut master);
+        // The other guild has no member on the map, so the map says so and asks for a
+        // timeout.
+        world.run_war_map_ticks(1_500);
+        let _ = heard(&mut master);
+        assert!(
+            world
+                .war_maps
+                .get(&1_100_000)
+                .expect("the war's map")
+                .timeout_pulse
+                .is_some(),
+            "the map asked for the timeout"
+        );
+        // The other guild's member joins the war: the wait is over.
+        let judged = world.answer_guild_quest(
+            Vid::new(200),
+            b"war_enter",
+            &[quest::manager::GuildArg::Number(GUILD_ID)],
+            NOW,
+        );
+        assert_eq!(judged.answer, quest::manager::GuildAnswer::None);
+        world.join_war_map(Vid::new(200), 1_100_000);
+        let war = world.war_maps.get(&1_100_000).expect("the war's map");
+        let team = war.team_of(SECOND_ID).expect("the other guild's team");
+        assert_eq!(war.teams[team].members, 1, "the member joined its team");
+        assert!(
+            war.timeout_pulse.is_none(),
+            "the member that came cancels the timeout"
+        );
+    }
+
+    /// `CWarMap::DecMember` (`G/war_map.cpp:400-451`) asks whether the war is over as
+    /// soon as a member leaves (`CheckWarEnd`, `G/war_map.cpp:437`): a side without a
+    /// member makes the map say so and ask for a timeout, without waiting for the
+    /// next ask. The member that left still hears it, because the map's set of players
+    /// is left after the check (`G/war_map.cpp:445`).
+    #[test]
+    fn a_member_that_leaves_makes_the_map_ask_whether_the_war_is_over() {
+        let (mut world, mut orders, _lease, mut master) = a_war_on_with_quests(" 1");
+        the_master_on_the_wars_map(&mut world, &mut orders);
+        let _ = heard(&mut master);
+        world.leave_war_map(Vid::new(MASTER_VID), 1_100_000);
+        let held = heard(&mut master);
+        assert!(
+            held.iter()
+                .any(|record| record.windows(58).any(|window| window
+                    .starts_with(b"No other guild members have participated in the guild war."))),
+            "the map says that the other guild has no member: {held:?}"
+        );
+        assert!(
+            world
+                .war_maps
+                .get(&1_100_000)
+                .expect("the war's map")
+                .timeout_pulse
+                .is_some(),
+            "the map asked for the timeout"
+        );
     }
 }

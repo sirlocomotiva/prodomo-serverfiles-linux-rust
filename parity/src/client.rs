@@ -80,31 +80,40 @@ impl Client {
             .unwrap_or_else(|error| panic!("expected {len} bytes from {}: {error}", self.address));
         buffer
     }
-    /// Read exactly `len` bytes, waiting until `deadline` rather than [`IO_TIMEOUT`].
+    /// Read into `buffer` until it holds `len` bytes, waiting until `deadline`.
     ///
-    /// A slow host can leave the wire quiet past one [`IO_TIMEOUT`] beat while a member
-    /// still walks into range; this retries each beat until `deadline` and returns `None`
-    /// then, and the caller decides what a late record means. Bytes of a frame the wire
-    /// had not finished wait on the wire for the next call.
+    /// The bytes that arrive stay in `buffer` when the wait ends, so a caller that
+    /// reads a record in pieces resumes it where it stopped: nothing that came off the
+    /// wire is lost. The wait ends when `deadline` says so: the socket's own timeout
+    /// is the time that is left, so a quiet wire does not hold the caller for a whole
+    /// [`IO_TIMEOUT`] beat past the deadline.
+    ///
+    /// At most `len` bytes are added, so a caller that reads a record's header first
+    /// and its body afterwards keeps the two apart.
     ///
     /// # Panics
     ///
     /// Panics when the connection closes or a read fails for another reason.
     #[must_use]
-    pub fn expect_bytes_until(&mut self, len: usize, deadline: Instant) -> Option<Vec<u8>> {
-        if len == 0 {
-            return Some(Vec::new());
-        }
-        loop {
-            if Instant::now() >= deadline {
-                return None;
+    pub fn read_bytes_until(
+        &mut self,
+        buffer: &mut Vec<u8>,
+        len: usize,
+        deadline: Instant,
+    ) -> bool {
+        let mut chunk = [0u8; 4096];
+        while buffer.len() < len {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
             }
             self.stream
-                .set_read_timeout(Some(IO_TIMEOUT))
+                .set_read_timeout(Some(left.min(IO_TIMEOUT).max(Duration::from_millis(1))))
                 .expect("a read timeout should be settable");
-            let mut buffer = vec![0; len];
-            match self.stream.read_exact(&mut buffer) {
-                Ok(()) => return Some(buffer),
+            let want = (len - buffer.len()).min(chunk.len());
+            match self.stream.read(&mut chunk[..want]) {
+                Ok(0) => panic!("the connection to {} closed", self.address),
+                Ok(n) => buffer.extend_from_slice(&chunk[..n]),
                 Err(error)
                     if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
                 {
@@ -113,6 +122,7 @@ impl Client {
                 Err(error) => panic!("expected {len} bytes from {}: {error}", self.address),
             }
         }
+        true
     }
 
     /// Read whatever the server sends within `window`, and say whether it then closed.

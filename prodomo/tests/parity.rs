@@ -74,6 +74,9 @@ const GC_PHASE: u8 = 0xfd;
 
 /// `HEADER_GC_HANDSHAKE` (`game/packet.h:100`) and `HEADER_CG_HANDSHAKE`.
 const HANDSHAKE: u8 = 0xff;
+/// The server's acknowledgement of the client's time sync
+/// (`HEADER_GC_TIME_SYNC`, `G/desc.cpp:88`).
+const TIME_SYNC_ACK: u8 = 0xfc;
 /// `HEADER_GC_TIME_SYNC` and `HEADER_CG_TIME_SYNC` (`game/packet.h:10`, `:97`).
 const TIME_SYNC: u8 = 0xfc;
 /// `HEADER_GC_PING` (`game/packet.h:142`).
@@ -901,6 +904,12 @@ struct Keyed {
     monsters: Vec<[u8; 4]>,
     /// Records read ahead and put back, which the next read takes first.
     pushed: Vec<Vec<u8>>,
+    /// The wire bytes of a record that has not fully arrived. A record the wire
+    /// delivers in pieces is resumed by the next read instead of being read twice.
+    pending: Vec<u8>,
+    /// The plaintext length of the record whose wire bytes wait in `pending`, once
+    /// its first TEA unit has said so.
+    pending_len: Option<usize>,
 }
 
 impl Keyed {
@@ -918,6 +927,8 @@ impl Keyed {
             timers: Vec::new(),
             monsters: Vec::new(),
             pushed: Vec::new(),
+            pending: Vec::new(),
+            pending_len: None,
         }
     }
 
@@ -1525,7 +1536,6 @@ fn game_len(header: u8) -> usize {
         GC_EXCHANGE => EXCHANGE_LEN,
         GC_SAFEBOX_DEL | GC_MALL_DEL | GC_CHARACTER_DEL | GC_STUN | GC_DEAD | GC_PARTY_INVITE
         | GC_PARTY_REMOVE => 1 + 4,
-        GC_SAFEBOX_WRONG_PASSWORD => 1,
         GC_WARP => WARP_LEN,
         GC_WALK_MODE => WALK_MODE_LEN,
         GC_TARGET => TARGET_LEN,
@@ -1542,6 +1552,13 @@ fn game_len(header: u8) -> usize {
         GC_PARTY_ADD => 1 + 4 + 25,
         GC_PARTY_LINK | GC_PARTY_UNLINK => 1 + 4 + 4,
         GC_PARTY_UPDATE => 1 + 4 + 1 + 1 + 2 * 7,
+        // The heartbeat (`ping_event`, `G/desc.cpp:163-197`): the one-byte ping, the
+        // handshake that follows it, and the one-byte acknowledgement of the client's
+        // answer. The server sends them once a cycle, so a scenario that waits more
+        // than a cycle has to read past them. The safebox's wrong password is a
+        // one-byte answer too.
+        HANDSHAKE => HANDSHAKE_LEN,
+        GC_SAFEBOX_WRONG_PASSWORD | GC_PING | TIME_SYNC_ACK => 1,
         other => panic!("unexpected game header {other}"),
     }
 }
@@ -2427,38 +2444,101 @@ impl Keyed {
     }
     /// Read one record whose length the first TEA unit already carries, which is how every
     /// `WORD wSize` record sizes itself on the wire.
+    ///
+    /// A record that a previous read left half on the wire is finished here: the bytes
+    /// that came are kept, so the record is read once and in one piece.
     fn read_sized(&mut self, len_of: impl Fn(u8, &[u8]) -> usize) -> Vec<u8> {
         let key = self.output;
-        let mut wire = self.client.expect_bytes(8);
-        let first = decrypt_padded(&wire, &key).expect("aligned");
-        let len = len_of(first[0], &first);
-        wire.extend(self.client.expect_bytes(len.div_ceil(8) * 8 - 8));
+        let mut wire = std::mem::take(&mut self.pending);
+        let len = if let Some(len) = self.pending_len {
+            len
+        } else {
+            wire.extend(self.client.expect_bytes(8));
+            let first = decrypt_padded(&wire, &key).expect("aligned");
+            let len = len_of(first[0], &first);
+            self.pending_len = Some(len);
+            len
+        };
+        let total = len.div_ceil(8) * 8;
+        wire.extend(self.client.expect_bytes(total - wire.len()));
+        self.pending_len = None;
         let mut record = decrypt_padded(&wire, &key).expect("aligned");
         assert!(record[len..].iter().all(|&byte| byte == 0), "{record:02x?}");
         record.truncate(len);
+        self.answer_heartbeat(&record);
         record
     }
-    /// [`Keyed::read_sized`], but it waits until `deadline` across 5 s read beats instead
-    /// of panicking on one quiet beat, and reports `None` when the window runs out. A
-    /// partial frame's bytes wait on the wire, so the caller's next call resumes the same
-    /// record.
+    /// [`Keyed::read_sized`], but it waits until `deadline` instead of panicking on one
+    /// quiet beat, and reports `None` when the window runs out.
+    ///
+    /// The bytes of a record that has not fully arrived stay in the connection, so the
+    /// caller's next call resumes the same record instead of reading the middle of it.
     fn read_sized_until(
         &mut self,
         len_of: &impl Fn(u8, &[u8]) -> usize,
         deadline: std::time::Instant,
     ) -> Option<Vec<u8>> {
         let key = self.output;
-        let mut wire = self.client.expect_bytes_until(8, deadline)?;
-        let first = decrypt_padded(&wire, &key).expect("aligned");
-        let len = len_of(first[0], &first);
-        wire.extend(
-            self.client
-                .expect_bytes_until(len.div_ceil(8) * 8 - 8, deadline)?,
-        );
+        let mut wire = std::mem::take(&mut self.pending);
+        let len = if let Some(len) = self.pending_len {
+            len
+        } else {
+            if !self.client.read_bytes_until(&mut wire, 8, deadline) {
+                self.pending = wire;
+                return None;
+            }
+            let first = decrypt_padded(&wire, &key).expect("aligned");
+            let len = len_of(first[0], &first);
+            self.pending_len = Some(len);
+            len
+        };
+        let total = len.div_ceil(8) * 8;
+        if !self.client.read_bytes_until(&mut wire, total, deadline) {
+            self.pending = wire;
+            return None;
+        }
+        self.pending_len = None;
         let mut record = decrypt_padded(&wire, &key).expect("aligned");
         assert!(record[len..].iter().all(|&byte| byte == 0), "{record:02x?}");
         record.truncate(len);
+        self.answer_heartbeat(&record);
         Some(record)
+    }
+
+    /// The records the server's ping cycle (`ping_event`, `G/desc.cpp:163-197`) sends
+    /// once a minute, and the answers a client gives them.
+    ///
+    /// The ping is answered with a pong (`CInputMain::Pong`, `G/input_main.cpp:3661-3663`):
+    /// the header alone. The server closes the descriptor when the pong of the last
+    /// cycle never came (`IsPong`, `G/desc.cpp:199-202`), so a scenario that waits more
+    /// than a cycle has to answer it.
+    ///
+    /// The handshake is answered with a time sync (`CInputMain::Handshake`,
+    /// `G/input_main.cpp:3664-3666`): it echoes the server's token and time, so the bias
+    /// the server measures is the time the record spent in flight
+    /// (`HandshakeProcess`, `G/input_handshake.cpp:139-152`). The server's
+    /// acknowledgement of that answer is a record of its own, which the client ignores.
+    fn answer_heartbeat(&mut self, record: &[u8]) {
+        // The client's send key: the server's decryption key, which is what
+        // [`Keyed::send_record`] seals its records on.
+        let key = self.input;
+        match record.first() {
+            Some(&GC_PING) => {
+                let wire = encrypt_padded(&[CG_PONG], &key)
+                    .expect("a short record encrypts")
+                    .into_bytes();
+                self.client.send(&wire);
+            }
+            Some(&HANDSHAKE) => {
+                let handshake = Handshake::parse(record);
+                let answer = handshake.answer(TIME_SYNC);
+                let wire = encrypt_padded(&answer.bytes(), &key)
+                    .expect("a short record encrypts")
+                    .into_bytes();
+                self.client.send(&wire);
+            }
+            _ => {}
+        }
     }
 
     /// Read the next loading or enter-game record that is not the revive timer's own, a
@@ -2469,11 +2549,37 @@ impl Keyed {
         loop {
             let record = self.read_game_raw();
             eprintln!("GAME {:02x?}", &record[..record.len().min(24)]);
+            // The heartbeat's own records: the ping, the handshake that was answered, and
+            // the server's acknowledgement of the answer.
+            if is_heartbeat_record(&record) {
+                continue;
+            }
             if !self.monster_record(&record)
                 && !self.timer_record(&record)
                 && !is_stamina_refill(&record)
             {
                 return record;
+            }
+        }
+    }
+
+    /// [`Keyed::read_game`], but it waits until `deadline` instead of panicking on one
+    /// quiet beat, and reports `None` when the window runs out.
+    ///
+    /// A scenario that waits out a cycle of the server's heartbeat, or a character
+    /// that stands still long enough for its stamina refill, needs this: the records
+    /// that say nothing about the wait are stepped over.
+    fn read_game_until(&mut self, deadline: std::time::Instant) -> Option<Vec<u8>> {
+        loop {
+            let record = self.read_game_raw_until(deadline)?;
+            if is_heartbeat_record(&record) {
+                continue;
+            }
+            if !self.monster_record(&record)
+                && !self.timer_record(&record)
+                && !is_stamina_refill(&record)
+            {
+                return Some(record);
             }
         }
     }
@@ -2536,9 +2642,8 @@ impl Keyed {
         records.extend(std::mem::take(&mut self.pushed));
         self.pushed = records;
     }
-    /// [`Keyed::read_game_raw`], but it waits until `deadline` across 5 s read beats
-    /// instead of panicking on one quiet beat, and reports `None` when the window runs
-    /// out.
+    /// [`Keyed::read_game_raw`], but it waits until `deadline` instead of panicking on
+    /// one quiet beat, and reports `None` when the window runs out.
     fn read_game_raw_until(&mut self, deadline: std::time::Instant) -> Option<Vec<u8>> {
         loop {
             let record = self.read_wire_until(deadline)?;
@@ -2548,9 +2653,12 @@ impl Keyed {
         }
     }
 
-    /// [`Keyed::read_wire`], but it waits until `deadline` across 5 s read beats instead
-    /// of panicking on one quiet beat, and reports `None` when the window runs out.
+    /// [`Keyed::read_wire`], but it waits until `deadline` instead of panicking on one
+    /// quiet beat, and reports `None` when the window runs out.
     fn read_wire_until(&mut self, deadline: std::time::Instant) -> Option<Vec<u8>> {
+        if !self.pushed.is_empty() {
+            return Some(self.pushed.remove(0));
+        }
         self.read_sized_until(
             &|header, first| match game_len(header) {
                 usize::MAX => usize::from(first[1]) | (usize::from(first[2]) << 8),
@@ -9544,10 +9652,16 @@ fn is_stamina_refill(record: &[u8]) -> bool {
 fn read_past_pings(keyed: &mut Keyed) -> Vec<u8> {
     loop {
         let record = keyed.read_game_raw();
-        if record[0] != GC_PING {
+        if !is_heartbeat_record(&record) {
             return record;
         }
     }
+}
+
+/// Whether `record` is one of the heartbeat's own: the ping, the handshake the server
+/// sends with it, or the acknowledgement of the client's answer.
+fn is_heartbeat_record(record: &[u8]) -> bool {
+    matches!(record.first(), Some(&GC_PING | &HANDSHAKE | &TIME_SYNC_ACK))
 }
 
 /// The records of a drain that are not pings.
@@ -10913,7 +11027,7 @@ fn read_heal_tick(keyed: &mut Keyed, mob: u32, victim: u32, hp_now: i64, due: st
             "a heal tick within four seconds of the first swing"
         );
         let record = keyed.read_game_raw();
-        if record[0] == GC_PING
+        if is_heartbeat_record(&record)
             || keyed.timer_record(&record)
             || is_stamina_refill(&record)
             || is_effect(&record)
@@ -14806,6 +14920,42 @@ fn read_until_record(client: &mut Keyed, wanted: &[u8], deadline: std::time::Ins
     }
 }
 
+/// Read from `client` until `wanted` arrives, and keep `other` answering its ping.
+///
+/// The server closes a descriptor whose client never answers the ping (`ping_event`,
+/// `G/desc.cpp:163-197`), and the answer only goes out when the client reads the ping.
+/// A connection the scenario does not read would therefore be closed while the
+/// scenario waits on the other one, so this reads the other connection's records as
+/// they come and puts them back for the scenario.
+fn read_until_record_pumping(
+    client: &mut Keyed,
+    other: &mut Keyed,
+    wanted: &[u8],
+    deadline: std::time::Instant,
+) -> Vec<u8> {
+    let mut kept: Vec<Vec<u8>> = Vec::new();
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the record the map's wait brings"
+        );
+        if let Some(record) =
+            other.read_game_raw_until(std::time::Instant::now() + Duration::from_millis(50))
+        {
+            kept.push(record);
+        }
+        let Some(record) =
+            client.read_game_raw_until(std::time::Instant::now() + Duration::from_millis(50))
+        else {
+            continue;
+        };
+        if record == wanted {
+            other.unread(kept);
+            return record;
+        }
+    }
+}
+
 /// Read one war end's records for `client`: the over notice `over`, then the END fan
 /// naming `(self_id, opp_id)` — the war's type byte and `GUILD_WAR_END` — and the
 /// every-PC `WAR_END_LIST` naming the sorted pair. A TALKING echo would be read here
@@ -14827,6 +14977,41 @@ fn read_war_end(client: &mut Keyed, self_id: u32, opp_id: u32, war_type: u8, ove
     assert_eq!(&end[8..12], &opp_id.to_le_bytes(), "the END opp id");
     assert_eq!((end[12], end[13]), (war_type, 7), "the war's type, END");
     let list = client.read_game();
+    assert_eq!(
+        guild_subheader(&list),
+        GUILD_SUBHEADER_GC_WAR_END_LIST,
+        "the END_LIST: {list:02x?}"
+    );
+    assert_eq!(
+        &list[4..12],
+        &[1, 0, 0, 0, 2, 0, 0, 0],
+        "the list names the sorted pair"
+    );
+}
+
+/// As [`read_war_end`], but it reads past the heartbeat's ping and gives up at
+/// `deadline` instead of failing the scenario.
+fn read_war_end_past_pings(
+    client: &mut Keyed,
+    self_id: u32,
+    opp_id: u32,
+    war_type: u8,
+    deadline: std::time::Instant,
+) {
+    let end = client
+        .read_game_until(deadline)
+        .expect("a record before the deadline ran out");
+    assert_eq!(
+        guild_subheader(&end),
+        GUILD_SUBHEADER_GC_WAR,
+        "the END fan: {end:02x?}"
+    );
+    assert_eq!(&end[4..8], &self_id.to_le_bytes(), "the END self id");
+    assert_eq!(&end[8..12], &opp_id.to_le_bytes(), "the END opp id");
+    assert_eq!((end[12], end[13]), (war_type, 7), "the war's type, END");
+    let list = client
+        .read_game_until(deadline)
+        .expect("a record before the deadline ran out");
     assert_eq!(
         guild_subheader(&list),
         GUILD_SUBHEADER_GC_WAR_END_LIST,
@@ -15161,4 +15346,94 @@ fn the_stored_alignment_reaches_the_client() {
         &432i16.to_le_bytes(),
         "sAlignment: the stored alignment in tenths"
     );
+}
+
+/// Ledger 241: a war's map asks whether the war is over (`CWarMap::CheckWarEnd`,
+/// `G/war_map.cpp:470-495`) and ends the war when a side has no member on it
+/// (`war_timeout_event`, `G/war_map.cpp:70-84`, and `CWarMap::Timeout`,
+/// `G/war_map.cpp:510-578`).
+///
+/// One master joins the war's map and the other does not, and the member that comes back
+/// watches the war instead of joining a team, so no side of the map has a member on it: a
+/// minute after the map was made the map says so, and a minute after that the war ends. A
+/// war younger than five minutes is judged to be a draw, so the pair's tallies are a draw
+/// each and the ladders do not move.
+///
+/// The war is of the battle type, so it has no over notice — legacy sends that notice
+/// for a field war alone (`CGuildManager::EndWar`, `G/guild_manager.cpp:698-704`).
+#[test]
+fn a_war_without_a_side_ends_when_the_map_times_out() {
+    let Some((database, server, mut alice, alpha_listed, mut yankee, _yankee)) =
+        a_war_pair_ready_on(None, &war_channels())
+    else {
+        return;
+    };
+    let (alice_index, _yankee_index) = declare_and_accept_a_battle_war(&mut alice, &mut yankee);
+    // One master joins the war's map; the other stays off it.
+    alice.send_record(&client_script_button(alice_index));
+    let question = alice.read_game();
+    assert_eq!(question[0], GC_SCRIPT, "the question: {question:02x?}");
+    alice.send_record(&client_script_answer(0));
+    let done = alice.read_game();
+    assert_eq!(&done[6..], b"[DONE]", "the quest's end script");
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha_listed.id.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "the member leaves its map");
+    let port = server.channel(1).port();
+    assert_eq!(alice.read_game(), a_warp_record(WAR_MAP_START, port));
+    // The client follows the warp: it reconnects to the Channel the war's map stands on
+    // and logs in again. The row it left behind names the war's own copy of the map, so
+    // the member comes back onto it.
+    //
+    // The member watches the war instead of joining a team: the flag the war entry set
+    // is a quest flag, and the quest flags live in memory (ledger 227.3), so the
+    // reconnect lost it. Either way his side has no member on the map, which is what
+    // the map asks about.
+    drop(alice);
+    let join = WarMapJoin {
+        guilds: [1, 2],
+        joiners: [0, 0],
+        observers: 1,
+        war_type: 1,
+        war_state: 6,
+        scores: [0, 0],
+    };
+    let (mut alice, _alpha, _entered) =
+        enter_world_seeing_guilded_on_war_map(&server, b"alice", 0, 1, &join);
+    // The master who stayed in the town still has the member's removal to read: the
+    // warp that took the member to the war's map took its body off the town, and the
+    // players that saw it were sent its removal (`G/char.cpp:786-789`).
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha_listed.id.to_le_bytes());
+    assert_eq!(
+        yankee.read_game(),
+        removed,
+        "the other master sees the member leave the town"
+    );
+    // A minute after the map was made, the map asks whether the war is over: the other
+    // side has no member on it, so the map says so.
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    let said = a_notice_line(b"No other guild members have participated in the guild war.");
+    let notice = read_until_record_pumping(&mut alice, &mut yankee, &said, deadline);
+    assert_eq!(
+        notice, said,
+        "the map says that the other guild has no member"
+    );
+    let said =
+        a_notice_line(b"If no one logs in within 1 minute, the Guild War will automatically end.");
+    let notice = read_until_record_pumping(&mut alice, &mut yankee, &said, deadline);
+    assert_eq!(notice, said, "the map says when the war will end");
+    // A minute later the timeout ends the war: the early-draw notice, the END fan and
+    // the every-PC WAR_END_LIST.
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    let said = a_notice_line(
+        b"The guild war ended early and was judged to be a draw. (less than 5 minutes)",
+    );
+    let notice = read_until_record_pumping(&mut alice, &mut yankee, &said, deadline);
+    assert_eq!(notice, said, "the map says that the war ended early");
+    read_war_end_past_pings(&mut alice, 1, 2, 1, deadline);
+    read_war_end_past_pings(&mut yankee, 2, 1, 1, deadline);
+    // The forced draw's rows: both draws tallied, both ladders unchanged.
+    wait_for(&database, "(SELECT count(*) FROM guild WHERE draw = 1) = 2");
+    assert_guild_tallies(&database, "the timeout's draw tallies both draws");
 }

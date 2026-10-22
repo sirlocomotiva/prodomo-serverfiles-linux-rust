@@ -72,24 +72,34 @@ impl ClientPhase {
         )
     }
 
-    /// Return whether the legacy game input analyzer has a PONG case.
+    /// Return whether the legacy analyzer for this phase carries a handshake
+    /// record case.
+    ///
+    /// `CInputLogin` (`G/input_login.cpp:1163-1180`) handles the time sync, and
+    /// `CInputMain` (`G/input_main.cpp:3659-3670`) handles it too, so the login,
+    /// select, loading, game and dead phases accept it. `CInputHandshake`
+    /// (`G/input.cpp:209-281`) handles the handshake itself, and `CInputAuth`
+    /// (`G/input_auth.cpp:208-236`) ignores it. The internal descriptor phases
+    /// carry no case at all.
+    #[must_use]
+    pub const fn accepts_handshake_record(self) -> bool {
+        matches!(
+            self,
+            Self::Handshake
+                | Self::Login
+                | Self::Select
+                | Self::Loading
+                | Self::Game
+                | Self::Dead
+                | Self::Auth
+        )
+    }
+
+    /// Return whether the legacy analyzer for this phase carries a PONG case.
     ///
     /// The base processor handles the zero keepalive before analyzer dispatch,
     /// but PONG is explicitly handled by the handshake, login, main/dead, and
     /// auth analyzers. Internal DB/P2P descriptors do not have that case.
-    /// Return whether the legacy `InputHandshake` analyzer family accepts a
-    /// packed handshake or time-sync record in this phase.
-    ///
-    /// `InputLogin` and `InputAuth` both derive from `InputHandshake` and reuse
-    /// the same internal handshake reducer, so all three phases accept the
-    /// record. The main/dead analyzer does not, and neither do the internal
-    /// descriptor phases.
-    #[must_use]
-    pub const fn accepts_handshake_record(self) -> bool {
-        matches!(self, Self::Handshake | Self::Login | Self::Auth)
-    }
-
-    /// Return whether the legacy analyzer for this phase carries a PONG case.
     #[must_use]
     pub const fn accepts_pong(self) -> bool {
         matches!(
@@ -657,6 +667,27 @@ mod tests {
 
     fn pong_frame() -> ClientFrame {
         ClientFrame::new(HEADER_CG_PONG.value(), Vec::new())
+    }
+
+    #[test]
+    fn every_phase_that_answers_a_handshake_accepts_its_record() {
+        // `CInputLogin` (`G/input_login.cpp:1173-1175`) and `CInputMain`
+        // (`G/input_main.cpp:3665-3667`) both answer the time sync, so the login,
+        // select, loading, game and dead phases accept it. The handshake phase takes
+        // the handshake itself (`G/input.cpp:237-238`), and the auth phase ignores it
+        // (`G/input_auth.cpp:219-220`).
+        for phase in [
+            ClientPhase::Handshake,
+            ClientPhase::Login,
+            ClientPhase::Select,
+            ClientPhase::Loading,
+            ClientPhase::Game,
+            ClientPhase::Dead,
+            ClientPhase::Auth,
+        ] {
+            assert!(phase.accepts_handshake_record(), "{phase:?}");
+        }
+        assert!(!ClientPhase::Close.accepts_handshake_record());
     }
 
     #[tokio::test]

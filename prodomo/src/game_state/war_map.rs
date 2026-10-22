@@ -165,8 +165,11 @@ pub(super) struct WarMap {
     pub guilds: [u32; 2],
     /// `m_TeamData`: the two teams.
     pub teams: [WarTeam; 2],
-    /// `m_iObserverCount`: the players on the map that watch instead of fight.
-    pub observers: i32,
+    /// `m_iObserverCount`: the players on the map that watch instead of fight. The
+    /// legacy keeps the count and the observer mode on the character
+    /// (`SetObserverMode`, `G/war_map.cpp:384`); the Rewrite keeps the players
+    /// themselves, so a player that watched the war is known to have watched it.
+    pub watchers: BTreeSet<u32>,
     /// `m_set_pkChr`: the players on the map.
     pub present: HashSet<Vid>,
     /// `m_bEnded`: the war is over and the map is closing.
@@ -185,18 +188,38 @@ pub(super) struct WarMap {
     /// the map's end sends its members back there (`ExitToSavedLocation`,
     /// `G/char.cpp:6687-6692`).
     pub exits: HashMap<Vid, ExitLocation>,
+    /// `m_dwStartTime`: the Pulse at which the map was created. A score may end the
+    /// war only after it has run for thirty seconds (`CWarMap::CheckScore`,
+    /// `G/war_map.cpp:695-697`).
+    pub started_pulse: u64,
+    /// `m_pkBeginEvent`: the Pulse at which the map asks whether the war is over
+    /// (`war_begin_event`, `G/war_map.cpp:28-41`). The first ask comes a minute after
+    /// the map was created, and then every ten seconds.
+    pub check_pulse: Option<u64>,
+    /// `m_pkTimeoutEvent`: the Pulse at which the war ends because one of the two
+    /// sides has no members (`war_timeout_event`, `G/war_map.cpp:70-84`). The map
+    /// asks for it a minute after it says so.
+    pub timeout_pulse: Option<u64>,
+    /// `m_bTimeout`: the map has asked for a timeout and the war is waiting for it
+    /// (`G/war_map.cpp:477-479`). The map says so once.
+    pub timed_out: bool,
 }
 
 impl WarMap {
     /// `CWarMap`'s constructor (`G/war_map.cpp:120-198`): the private map the war is
     /// fought on, the two guilds in the order `GetTeamIndex` sorts them in, and the
     /// score each side starts with.
+    ///
+    /// The constructor also sets the map's begin event (`war_begin_event`,
+    /// `G/war_map.cpp:124-127`): the map asks whether the war is over a minute after
+    /// it was created, and then every ten seconds.
     pub(super) fn new(
         map_index: i32,
         base_map: i32,
         map_type: u8,
         guilds: [u32; 2],
         initial_score: i32,
+        pulse: u64,
     ) -> Self {
         let mut teams = [WarTeam::default(), WarTeam::default()];
         for team in &mut teams {
@@ -215,13 +238,19 @@ impl WarMap {
             map_type,
             guilds,
             teams,
-            observers: 0,
+            watchers: BTreeSet::new(),
             present: HashSet::new(),
             ended: false,
             exited: false,
             exit_pulse: None,
             destroy_pulse: None,
             exits: HashMap::new(),
+            started_pulse: pulse,
+            // The map's begin event (`G/war_map.cpp:124-127`): the first ask comes a
+            // minute after the map was created.
+            check_pulse: Some(pulse + 60 * u64::from(PASSES_PER_SEC)),
+            timeout_pulse: None,
+            timed_out: false,
         }
     }
 
@@ -249,21 +278,30 @@ impl WarMap {
             team.joiners.insert(pid);
             team.members += 1;
         } else {
-            self.observers += 1;
+            self.watchers.insert(pid);
         }
         self.present.insert(vid);
         member
     }
 
-    /// `CWarMap::DecMember` (`G/war_map.cpp:400-451`): the player leaves the map. A
-    /// member of a team falls out of the count; a watcher falls out of the observer's.
-    pub(super) fn dec_member(&mut self, vid: Vid, guild: u32, is_observer: bool) {
+    /// `CWarMap::DecMember`'s count (`G/war_map.cpp:400-451`): the player falls out of
+    /// the count of its team, or of the watchers'.
+    ///
+    /// The player leaves the map's set of players after the map has asked whether the
+    /// war is over (`leave_present`), as legacy's `DecMember` does: the player that
+    /// left still hears the map's notice.
+    pub(super) fn dec_member(&mut self, pid: u32, guild: u32, is_observer: bool) {
         if is_observer {
-            self.observers -= 1;
+            self.watchers.remove(&pid);
         } else if let Some(index) = self.team_of(guild) {
             let team = &mut self.teams[index];
-            team.members -= 1;
+            team.members = team.members.saturating_sub(1);
         }
+    }
+
+    /// `CWarMap::DecMember`'s last step (`G/war_map.cpp:445`): the player leaves the
+    /// map's set of players, which the map's notices and records go to.
+    pub(super) fn leave_present(&mut self, vid: Vid) {
         self.present.remove(&vid);
     }
 
@@ -276,7 +314,7 @@ impl WarMap {
             self.teams[0].joiners.len(),
             self.guilds[1],
             self.teams[1].joiners.len(),
-            self.observers,
+            i32::try_from(self.watchers.len()).unwrap_or(i32::MAX),
         )
     }
 
@@ -314,6 +352,67 @@ impl WarMap {
     /// the event's second step, five seconds after it sent the players out.
     pub(super) fn destroy_due(&self, pulse: u64) -> bool {
         self.destroy_pulse.is_some_and(|due| due <= pulse)
+    }
+
+    /// `CWarMap::UpdateScore` (`G/war_map.cpp:660-681`): the side's own score changes,
+    /// and the map tells its players. Reports whether the score changed, as legacy's
+    /// comparison does.
+    pub(super) fn set_score(&mut self, guild: u32, score: i32) -> bool {
+        let Some(index) = self.team_of(guild) else {
+            return false;
+        };
+        if self.teams[index].score == score {
+            return false;
+        }
+        self.teams[index].score = score;
+        true
+    }
+
+    /// `CWarMap::CheckScore`'s first rule (`G/war_map.cpp:695-697`): the war must have
+    /// run for thirty seconds before a score can end it.
+    pub(super) fn score_can_end(&self, pulse: u64) -> bool {
+        pulse.saturating_sub(self.started_pulse) >= 30 * u64::from(PASSES_PER_SEC)
+    }
+
+    /// Whether the map is due to ask whether the war is over (`war_begin_event`,
+    /// `G/war_map.cpp:28-41`): the event runs a minute after the map was created and
+    /// then every ten seconds.
+    pub(super) fn check_due(&self, pulse: u64) -> bool {
+        self.check_pulse.is_some_and(|due| due <= pulse)
+    }
+
+    /// The next ask (`war_begin_event` returns `PASSES_PER_SEC(10)`,
+    /// `G/war_map.cpp:40`): ten seconds after the one that ran.
+    pub(super) fn mark_checked(&mut self) {
+        if let Some(due) = self.check_pulse {
+            self.check_pulse = Some(due + 10 * u64::from(PASSES_PER_SEC));
+        }
+    }
+
+    /// `CWarMap::CheckWarEnd`'s timeout arm (`G/war_map.cpp:474-491`): a side with no
+    /// members ends the war a minute later (`war_timeout_event`,
+    /// `G/war_map.cpp:70-84`).
+    pub(super) fn ask_timeout(&mut self, pulse: u64) {
+        self.timeout_pulse = Some(pulse + 60 * u64::from(PASSES_PER_SEC));
+    }
+
+    /// Whether the timeout is due (`war_timeout_event`, `G/war_map.cpp:70-84`).
+    pub(super) fn timeout_due(&self, pulse: u64) -> bool {
+        self.timeout_pulse.is_some_and(|due| due <= pulse)
+    }
+
+    /// `IncMember` cancels the timeout the map asked for (`event_cancel(&m_pkTimeoutEvent)`,
+    /// `G/war_map.cpp:374`): a member that joins the map ends the wait for the side
+    /// that never came, and the map may ask for another one.
+    pub(super) fn cancel_timeout(&mut self) {
+        self.timeout_pulse = None;
+    }
+
+    /// The timeout has run (`CWarMap::Timeout`, `G/war_map.cpp:576`): the war is over,
+    /// and the map says so once.
+    pub(super) fn mark_timed_out(&mut self) {
+        self.timed_out = true;
+        self.timeout_pulse = None;
     }
 }
 
@@ -414,7 +513,7 @@ mod tests {
     #[test]
     fn a_war_map_holds_two_teams_and_the_watchers() {
         use super::WarMap;
-        let mut map = WarMap::new(1_100_000, 110, 0, [7, 3], 0);
+        let mut map = WarMap::new(1_100_000, 110, 0, [7, 3], 0, 0);
         // `GetTeamIndex` (`G/war_map.cpp:199-215`): the guild of the lower id is the
         // first team.
         assert_eq!(map.team_of(3), Some(0));
@@ -425,19 +524,24 @@ mod tests {
         let fighter = common::vid::Vid::new(11);
         assert!(map.inc_member(fighter, 11, 3, true));
         assert_eq!(map.teams[0].members, 1);
-        assert_eq!(map.observers, 0);
+        assert_eq!(map.watchers.len(), 0);
         let watcher = common::vid::Vid::new(12);
         assert!(!map.inc_member(watcher, 12, 3, false));
         assert_eq!(map.teams[0].members, 1);
-        assert_eq!(map.observers, 1);
+        assert_eq!(map.watchers.len(), 1);
         // `UpdateUserCount` (`G/war_map.cpp:330-340`): the two guilds with the players
         // that joined them, and the watchers.
         assert_eq!(map.user_count(), (3, 1, 7, 0, 1));
         // `DecMember` (`G/war_map.cpp:400-451`): a member falls out of its team, and a
         // watcher out of the watchers.
-        map.dec_member(fighter, 3, false);
+        map.dec_member(11, 3, false);
+        map.leave_present(fighter);
         assert_eq!(map.teams[0].members, 0);
-        assert_eq!(map.observers, 1);
+        assert_eq!(map.watchers.len(), 1);
+        map.dec_member(12, 3, true);
+        map.leave_present(watcher);
+        assert_eq!(map.teams[0].members, 0);
+        assert_eq!(map.watchers.len(), 0);
     }
 
     #[test]

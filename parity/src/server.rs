@@ -375,7 +375,9 @@ impl Drop for Server {
     fn drop(&mut self) {
         drop(self.child.kill());
         drop(self.child.wait());
-        drop(fs::remove_dir_all(&self.root));
+        if std::env::var_os("PRODOMO_KEEP_SCENARIO_ROOT").is_none() {
+            drop(fs::remove_dir_all(&self.root));
+        }
     }
 }
 

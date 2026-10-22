@@ -34213,3 +34213,116 @@ on all 39 targets (parity 129/129); this slice's two unit tests green 2/2 and it
 scenario green 1/1; no scratch database left.
 
 No ADR changed. No owner question added. V23 is taken.
+
+## 241. The war's map judges the war (`sys.guild.war`, sixth part)
+
+The war's map had its teams, its members, its watchers and its end (ledgers 237 and 240),
+but the map judged nothing: a kill on the map scored the war by the field war's rule, the
+map never asked whether the war was over, and the wait the map keeps never came to
+anything. Legacy's map judges the war in four steps, and all four are live now.
+
+**The kill on the map.** `CWarMap::OnKill` (`G/war_map.cpp:781-829`) scores the war by the
+map's own rule: the battle map gives the killer's guild a point
+(`SendGuildWarScore(dwKillerGuild, dwDeadGuild, 1, ch->GetLevel())`, `:808`), and both
+guilds must be teams of the map (`:799-802`). The field war's own arm does not run for such
+a kill (`CGuildManager::Kill`, `G/guild_manager.cpp:846-850`). The Rewrite's
+`GameState::war_map_kill` does this and `GameState::guild_war_kill` steps aside for it.
+The flag map's arm gives the flag back, which ledger 242 ports.
+
+**The score.** `CWarMap::UpdateScore` (`G/war_map.cpp:660-681`) changes the pair's score,
+the map's own score follows, the players on the map hear the new total, and the war asks
+whether it is over. The Rewrite's `GameState::war_map_score` does this, and the record
+goes to the players on the map and to nobody else: the map's arm of `SetWarScoreAgainstTo`
+(`G/guild_war.cpp:196-200`) sends it to the map, and only the field war's arm sends it to
+the guilds' members (`:200-217`).
+
+**The check.** `CWarMap::CheckWarEnd` (`G/war_map.cpp:470-495`) says the two lines when a
+side has no member on the map and asks for the timeout a minute later; else the score
+decides (`CheckScore`, `G/war_map.cpp:686-735`): the war must have run for thirty seconds,
+equal scores end nothing, and a side's score that reaches the war's end score — a hundred
+for the battle war and ten for the flag war (`KOR_aGuildWarInfo`, `G/constants.cpp:1132-1145`)
+— ends the war. The map asks first a minute after it was made and then every ten seconds
+(`war_begin_event`, `G/war_map.cpp:29-43` and `:117`), and the Rewrite's
+`GameState::run_war_map_ticks` runs the asks on the game's Pulse.
+
+**The wait's end.** The timeout ends the war (`war_timeout_event`, `G/war_map.cpp:70-84` →
+`CWarMap::Timeout`, `G/war_map.cpp:510-578`): a war younger than five minutes is judged to
+be a draw (`:526`), else the side that kept its members wins (`:533-560`) — and the DB's
+`RecvWarOver` (`db/GuildManager.cpp:529-559`) follows the winner the map named, not the
+scores. The war's price is not paid: the game side sends it as zero
+(`p.lWarPrice = 0`, `G/guild_manager.cpp:523`), so the winner's deposit is nothing. The
+ladder's own winner is the judgement's (`WarEndJudgement`), so the map's arm and the
+scores' arm can differ. The rows the end writes wait for the war-end poll (ledger 230y).
+
+**The join calls the wait off.** `CWarMap::IncMember` (`G/war_map.cpp:342-398`) cancels the
+timeout the map asked for when a *member* joins (`event_cancel(&m_pkTimeoutEvent)`,
+`G/war_map.cpp:374`): the side that was waited for has come, so the map may ask for another
+wait. A watcher does not cancel it (`:380-386`), and the join asks nothing itself — the
+map's next ask (every ten seconds) is what notices a side that is still empty. The
+Rewrite's `GameState::join_war_map` calls `WarMap::cancel_timeout`
+(`prodomo/src/game_state/war_map.rs`) for a member and for no one else.
+
+**The leave asks.** `CWarMap::DecMember` (`G/war_map.cpp:400-451`) counts the player out of
+its team (or out of the watchers), asks whether the war is over (`CheckWarEnd`,
+`G/war_map.cpp:437`), clears the war member's flag (`:438`), tells the map's players the
+counts (`:448`), and only then takes the player out of the map's set of players (`:450`).
+The player that left therefore still hears the map's notice. The Rewrite's
+`GameState::leave_war_map` runs the steps in that order: `WarMap::dec_member` counts,
+`GameState::war_map_check_end` asks, the flag is cleared, the counts are told, and
+`WarMap::leave_present` takes the player out of the set.
+
+**The watchers.** Legacy keeps the observer mode on the character (`SetObserverMode`,
+`G/war_map.cpp:384` and `:445`), and `DecMember` reads it to know which count to lower
+(`ch->IsObserverMode()`, `G/war_map.cpp:410`). The Rewrite kept only the *number* of the
+watchers, so a player that watched the war and came back could not be told from a member,
+and its second leave took a member's count a second time. The map keeps the watchers'
+players now (`WarMap::watchers`), the count the map tells is their number, and the leave
+asks the set rather than the guild.
+
+**The tests.** `prodomo/src/game_state/guild.rs` holds the map's own judging: a kill on the
+war's map scores the war by one point, a score that reaches the end score ends the war, a
+side without members ends the war a minute later, a war that ran for five minutes ends with
+the side that stayed, a member that joins cancels the timeout the map asked for, and a
+member that leaves makes the map ask whether the war is over (the member that left still
+hears it). `prodomo/src/game_state/war_map.rs` holds the watchers: a member falls out of
+its team and a watcher out of the watchers'. The parity scenario
+`a_war_without_a_side_ends_when_the_map_times_out` proves the whole wait on the wire: one
+master joins the war's map and the other does not, so a side of the map has no member on
+it — a minute after the map was made the map says so and says when the war will end, a
+minute after that the map says the war ended early and was judged to be a draw, the pair's
+END fans and the every-PC `WAR_END_LIST` land, and the store's rows carry a draw for each
+side with the ladders unmoved.
+
+**The harness.** A record that arrives in pieces is the norm for a scenario that waits a
+minute for a line: the map's notice can land in the middle of the heartbeat's records, so
+the parity client reads into a buffer until it holds the record's bytes and keeps the rest
+for the next call (`Client::read_bytes_until`, `parity/src/client.rs`), and the connection
+remembers the length it already knows (`Keyed::read_sized`, `prodomo/tests/parity.rs`). The
+server's descriptor answers a handshake record in every phase that answers one:
+`CInputMain` (`G/input_main.cpp:3659-3670`) takes the time sync, so the select, loading,
+game and dead phases accept the record (`ClientPhase::accepts_handshake_record`,
+`prodomo/src/client_session.rs`), and the phase's own test names them.
+
+**The lints.** The uncommitted work had brought the `pedantic` lints back: the casts that
+`cast_lossless` and `cast_possible_wrap` refuse, the match arms with equal bodies, and the
+harness's `match` for a single pattern. They are fixed by refactoring, and the tree is
+clippy green again.
+
+**The divergences.**
+
+- The war's own flags are not ported: the flag mobs, the flag a member carries and the
+  flag's reset (`AddFlag`, `RemoveFlag` and the reset event, `G/war_map.cpp:840-890` and
+  `:739-779`) are the next section.
+
+**The inventory.** The row `sys.guild.war` stays `partial` — the map's own judging is live
+now, the kill's score, the score's end, the ask, the wait and the timeout — but the war's
+own flags are not — and its note names the new part.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; doc green with
+`-D warnings`; doc-tests green; the prodomo lib (1173 tests) green; the protocol lib (1229
+tests) green; the world lib (541 tests) green; the full workspace all-targets DB run green
+on all 39 targets (parity 130/130); this slice's six new unit tests green 6/6 and its
+parity scenario green 1/1; no scratch database left — the ones an interrupted earlier run
+had left were dropped by hand, and the run after that left none.
+
+No ADR changed. No owner question added. V23 is taken.
