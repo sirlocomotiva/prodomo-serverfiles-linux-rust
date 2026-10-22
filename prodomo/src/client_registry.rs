@@ -293,6 +293,27 @@ impl ChannelClients {
         sent
     }
 
+    /// The outbox of the client whose character's name matches, in every Channel.
+    ///
+    /// This is the whisper's other scope. The legacy found the character of another core by
+    /// name in its P2P manager (`P2P_MANAGER::Find`, `G/input_main.cpp:403`) and relayed
+    /// the line to the core that had it; every Channel is in this registry, so the lookup is
+    /// the same walk. The name is matched without regard to the case, as `FindPC` matches
+    /// (`G/char_manager.cpp:244-260`).
+    ///
+    /// The first match is the one: the names are unique, so a second match cannot be the
+    /// same character.
+    #[must_use]
+    pub fn outbox_of(&self, name: &str) -> Option<ClientOutbox> {
+        let channels = self.inner.lock().ok()?;
+        for member in channels.values().flatten() {
+            if member.entry.name.eq_ignore_ascii_case(name) {
+                return Some(member.outbox.clone());
+            }
+        }
+        None
+    }
+
     /// Remove one member. A missing entry is not an error: a double drop must not panic.
     fn leave(&self, channel: u8, id: u64) {
         if let Ok(mut channels) = self.inner.lock() {

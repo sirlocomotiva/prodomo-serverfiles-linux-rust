@@ -8,6 +8,9 @@
 # The tracked notes under .scratch/ stay in git.
 /.scratch/tmp/
 
+# The scratch commit-message drafts the session writes at the root: local only.
+/COMMIT_MSG_*.txt
+
 # Superseded planning state
 /.sisyphus/
 

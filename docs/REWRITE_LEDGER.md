@@ -34700,3 +34700,165 @@ targets, the 133 parity scenarios among them; this slice's unit tests green; no 
 database left.
 
 No ADR changed. No owner question added. V26 is taken.
+
+## 246. The whisper reaches the character it names (`sys.char.chat`, second part)
+
+Ledger 188 made the `Chat` handler live for the talking, party, guild and shout arms and
+left the `Whisper` arm out. This section ports it: the whole of `CInputMain::Whisper`
+(`G/input_main.cpp:340-649`), from the record the client sends to the line that lands, and
+the line that waits for a character that is not there.
+
+**The record.** `TPacketCGWhisper` (`G/packet.h:587-592`) is the header, the size word, a
+25-byte name field and the text. The codec (`protocol/src/cg_whisper.rs`) and the record
+the client receives (`protocol/src/gc_whisper.rs`) are new; the handler was not. The name
+is a C string, so it ends at the first NUL, and the size is a floor rather than an
+equality (`uiBytes < pinfo->wSize` is the only refused relation,
+`G/input_main.cpp:344-345`). A size under the fixed part is the legacy's close case
+(`iExtraLen < 0`, `:349-353`), and the Rewrite closes there too. The fixed parts are
+measured, not summed: 28 bytes for the request and 30 for the answer, from a 32-bit
+compile of the verbatim struct bodies under `#pragma pack(1)` with the repository's
+known-width controls (a packed two-`long` struct is 8 bytes).
+
+**Where the target is.** The legacy looks in two places: its own character manager
+(`CHARACTER_MANAGER::FindPC`, `G/char_manager.cpp:244-260`), which matches the name
+without regard to the case, and its P2P manager (`P2P_MANAGER::Find`,
+`G/input_main.cpp:403`), which knows the characters of the other cores. The Rewrite runs
+every Channel in one process (ADR-0002), so the first lookup is the world's character
+manager and the second is the process-wide client registry
+(`ChannelClients::outbox_of`). The registry's match ignores the case, as `FindPC` does.
+
+**What the line says.** The record the target receives is the sender's name and the text
+(`G/input_main.cpp:624-641`). The type is `WHISPER_TYPE_NORMAL`, or `WHISPER_TYPE_GM` when
+the sender is a game master (`G/input_main.cpp:619-620`). The game master is
+`CHARACTER::IsGM` (`G/char.cpp:6373-6380`), which is true when the sender's GM level is not
+`GM_PLAYER` **or** the test-server mode is on, and the mode is on by default
+(`G/config.cpp:72`, and the owner's `CONFIG` files never turn it off). So the Rewrite's
+type is the game master's in the default deployment, and the descriptor builds the record
+because it holds the sender's GM level and the mode.
+
+The type's high nibble carries an empire when the target is on another Channel
+(`G/input_main.cpp:556-566`), and the Channel that receives the line strips it again
+(`G/input_p2p.cpp:80-83`). The text conversion that nibble is for is `ConvertEmpireText`,
+whose body is empty in this tree (`G/empire_text_convert.cpp:47-55`), so the nibble changes
+nothing the client sees. The Rewrite sends the plain type, which is the byte the client
+sees in the legacy too.
+
+**The three drops.** The sender's own name drops the line (`if (pkChr == ch) return
+(iExtraLen);`, `G/input_main.cpp:372`), an empty line sends nothing (`if (buflen > 0)`,
+`:622`), and the sender is told nothing when the line lands. The Rewrite drops the same
+three, and the order is the legacy's: the target is found first, the emptiness is checked
+in the delivery branch, and the self-check comes before both.
+
+**A character that is not there.** The legacy leaves the line for the target when no
+character answers to the name (`G/input_main.cpp:404-505`). The line waits in the DB
+server's memory (`CClientManager::m_OfflineMessage`,
+`server/server/db/ClientManager.cpp:4631`) and is read back when the target next enters
+the game (`CHARACTER::ReadOfflineMessages`, `G/char.cpp:11438-11446`). The DB server is
+retired (ADR-0001), so the waiting lines live in the world's memory, which is the same
+store in one process. The sender is told with a `WHISPER_TYPE_SYSTEM` record
+(`G/input_main.cpp:482-493`): either that the line was left for the target, or that the
+sender has to wait, which is ten seconds per sender (`bDelay`,
+`G/input_main.cpp:426-428`). The waiting lines are dropped after five hours
+(`CClientManager::OfflineMessageGarbage`,
+`server/server/db/ClientManager.cpp:4637-4654`), once an hour.
+
+**The tests.**
+
+- `protocol/src/cg_whisper.rs`: the fixed part is 28 packed bytes, the header is 19, the
+  record decodes from golden bytes, the size word is little-endian, trailing bytes past the
+  declared size are ignored, a short declared size is its own refusal, a truncated prefix is
+  reported, the text and the name stop at the first NUL, and every name byte survives.
+- `protocol/src/gc_whisper.rs`: the fixed part is 30 packed bytes, the header is 34, a line
+  without text is 30 bytes, the record decodes from golden bytes, the size word is
+  little-endian, every type byte survives, the `bCanFormat` byte is the legacy's `bool`,
+  and a short size, a foreign header and a truncated record are refused.
+- `prodomo/src/game_state/whisper.rs`: `the_line_reaches_the_target_and_not_the_sender`,
+  `the_sender_hears_nothing_when_it_names_itself`,
+  `a_line_for_an_absent_name_waits_and_the_sender_is_told`,
+  `a_second_line_within_ten_seconds_is_refused`,
+  `an_empty_line_leaves_nothing_and_says_nothing`,
+  `the_lines_waiting_for_a_character_are_read_when_it_enters`,
+  `a_name_finds_its_character_whatever_the_case` and
+  `an_unknown_name_has_no_target`.
+- `prodomo/tests/parity.rs`: `a_whisper_reaches_the_character_it_names` — the line reaches
+  the character it names, the name is matched without regard to the case, the line crosses
+  a Channel, the sender's own name drops it, and an empty line sends nothing.
+- `prodomo/tests/parity.rs`: `a_whisper_for_a_character_that_is_not_there_is_left_for_it` —
+  the sender is told with the system's notice, and the target reads the waiting line when
+  it enters.
+
+The scenario's server has to be ten seconds old before the first line may be left, because
+the legacy's wait is measured from the sender's last line, and the sender's clock starts
+at zero when its character is created (`dwLastOfflinePMTime`, `G/char.cpp:271`) while
+`get_dword_time()` counts the process's uptime. The scenario reads the server's clock from
+a handshake and waits for it.
+
+**The inventory.** `cg.game.whisper` and `gc.whisper` are `ported`, with the first
+scenario. `sys.char.chat` keeps its `partial` row and gains this section's note: the
+banword conversion, `SpamBlockCheck`, the prism check and the whisper-block modes are
+absent. `sys.bus` moves from `missing` to `partial`: the whisper crosses Channels through
+the client registry, as the shout does, so the notices, find, warp, guild and messenger are
+what is left of the bus. The game-to-client coverage moves from 108 implemented rows to 109
+and from 26 missing ones to 25, and `AGENTS.md`'s table says so.
+
+**The divergences.**
+
+- The whisper-block modes (`BLOCK_WHISPER`) have no port, so the sender-blocked and
+  target-blocked answers are unreachable. The Rewrite has no block mode at all yet.
+- The prism's text tag (`ProcessTextTag`, `G/input_main.cpp:574-618`) and `SpamBlockCheck`
+  (`:540-553`) are absent, so a line that legacy would refuse or convert goes as it is.
+- The banword conversion is not a divergence: the legacy's own call to
+  `CBanwordManager::ConvertString` is commented out (`G/input_main.cpp:434`, `:554`), so no
+  legacy line is converted either.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; doc green with
+`-D warnings`; doc-tests green; the full workspace all-targets DB run green on all 39
+targets, the 135 parity scenarios among them; this slice's unit tests green; no scratch
+database left.
+
+No ADR changed. No owner question added. V26 is taken.
+
+## 247. The flag carrier sees the flag before the take (`sys.guild.war`, a follow-up)
+
+Ledger 245's scenario walked straight to the other team's flag and then read until the
+affect arrived, taking the flag's insert from the records it had already passed. That read
+is a race. The take is the distance alone (`FuncFindChrForFlag`,
+`G/char_state.cpp:33-97`); the flag comes into a walking player's view only when the walk's
+motion is sampled, which is every sixteenth Pulse (`UpdateSectree`,
+`G/char_state.cpp:795`). A walk whose last leg lands within the take can take the flag
+before a sample runs, and the flag's character dies with the flag, so the insert never
+reaches the carrier at all — on the legacy as on the Rewrite.
+
+The scenario now stages its walk a take short of the flag: a point 1200 units from it,
+beyond the take's 500 and inside the view's `VIEW_RANGE + VIEW_BONUS_RANGE`
+(`G/entity_view.cpp:94`). The walk there ends in a real walk (`FUNC_MOVE` is 1), whose
+motion samples the view, so the flag's insert does arrive, and the scenario reads until it
+does before it walks the rest. The take keeps its own place in the wire record: the
+affects, the flag's character's removal, the map's line, and the base's score. A failed run
+of the scenario before this section showed the race (`the other team's flag came into her
+view`, on a run whose `walk_to` landed within the take without a sample).
+
+Two comments in the scenario's helpers were corrected with it. `walk_to`'s refused move is
+750 units of `MOVE_DISTANCE_DIVISOR` (`G/input_main.cpp:1757-1891`), that is 75 000 map
+units, not 750; and the sampled view's citation is `G/char_state.cpp:795`, where the
+sixteenth-Pulse condition stands.
+
+**The test.** `prodomo/tests/parity.rs`:
+`the_flag_is_taken_and_the_base_scores_the_war` keeps every assertion it had and gains the
+staging walk, the read that waits for the flag's insert, and the take that no longer
+carries the insert's race. The scenario ran five times in a row without a variance
+besides the full run's green record below.
+
+No product code changed. `sys.guild.war` keeps its `partial` row and gains the note of
+this section.
+
+Gates: fmt clean; clippy green with `-D warnings`; the full workspace all-targets DB run
+green on all 39 targets, the 135 parity scenarios among them; no scratch database left. The
+same pass restored five rows the Parity inventory already carried as mojibake (the
+double-encoded em-dashes in `client-packets.md`'s `cg.game.item_use`, `cg.game.item_drop`
+and `cg.game.guild`, `commands.md`'s `cmd.gskillup` and `quest-api.md`'s
+`lua.pc.learn_grand_master_skill`): committed damage the table's own regeneration run
+showed, paid in the receipt rather than in silence. Byte repairs only; no cell's wording
+changed.
+
+No ADR changed. No owner question added. V26 is taken.

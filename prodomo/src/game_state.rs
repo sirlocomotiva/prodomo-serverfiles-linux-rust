@@ -91,6 +91,7 @@ mod view;
 mod view_encode;
 mod war_map;
 mod warp_npc;
+mod whisper;
 
 pub use guild::{
     GuildCommentAnswer, GuildCommentCommit, GuildCommentLine, GuildGradeAnswer, GuildGradeCommit,
@@ -422,6 +423,13 @@ pub struct GameState {
     gold_lifetime: u64,
     /// The Channel's client registry: who a trade or a warp NPC finds online.
     clients: Option<Arc<ChannelClients>>,
+    /// The lines left for a character that was not online when they were sent
+    /// (`CClientManager::m_OfflineMessage`, `server/server/db/ClientManager.cpp:4631`),
+    /// keyed by the name they wait for.
+    offline_messages: HashMap<Vec<u8>, Vec<whisper::OfflineMessage>>,
+    /// `get_dword_time()` when each character last left a line for an absent target
+    /// (`dwLastOfflinePMTime`, `G/char.h:2177`).
+    last_offline_pm: HashMap<common::vid::Vid, u32>,
     /// The affect event of each character that has one (`m_pkAffectEvent`): the potion
     /// recovery, the stamina refill and the timed affects. See [`affect`].
     affect_events: HashMap<common::vid::Vid, affect::AffectEvent>,
@@ -588,6 +596,8 @@ impl GameState {
             drop_lifetime: drop_lifetime_pulses(DEFAULT_DROP_LIFETIME_SECS),
             gold_lifetime: drop_lifetime_pulses(DEFAULT_GOLD_LIFETIME_SECS),
             clients: None,
+            offline_messages: HashMap::new(),
+            last_offline_pm: HashMap::new(),
             affect_events: HashMap::new(),
             affect_sequence: 0,
             npc_affects: HashMap::new(),
@@ -894,6 +904,13 @@ impl GameState {
             GameCommand::DeliverRecord { vid, record, reply } => {
                 self.answer_deliver(vid, record, reply);
             }
+            GameCommand::Whisper {
+                vid,
+                name,
+                text,
+                record,
+                reply,
+            } => self.answer_whisper(vid, &name, &text, record, reply),
             GameCommand::LeaveWorld {
                 vid,
                 departure,
@@ -1073,6 +1090,7 @@ impl GameState {
             );
         }
     }
+
     /// Admit one character and report its show, logging a caller that went away. A
     /// dropped admit answer means the descriptor is already closing, and a character
     /// nobody will play is not a state worth warning about: the close path runs the
@@ -1089,7 +1107,12 @@ impl GameState {
         reply: tokio::sync::oneshot::Sender<Result<Shown, EnterWorldRefused>>,
     ) {
         let answer = self.enter_world_with_items(vid, player_id, name, items, outbox);
-        let answer = answer.map(|()| self.shown_on_admit(vid, player_id, name, loaded));
+        let answer = answer.map(|()| {
+            // `ch->ReadOfflineMessages()` (`G/input_login.cpp:728-729`): the lines
+            // that waited for this character are read when it enters.
+            self.deliver_offline_messages(vid, name);
+            self.shown_on_admit(vid, player_id, name, loaded)
+        });
         if reply.send(answer).is_err() {
             debug!(
                 ?vid,
@@ -2690,6 +2713,11 @@ impl PulseProcessor for GameState {
         self.wake_minds();
         self.last_pulse = pulse;
         self.metrics.pulses.store(pulse, Ordering::SeqCst);
+        // `CClientManager::OfflineMessageGarbage` (`server/server/db/ClientManager.cpp:4637-4654`)
+        // drops the lines that have waited for five hours, once an hour.
+        if pulse % (60 * 60 * u64::from(PASSES_PER_SEC)) == 0 {
+            self.expire_offline_messages();
+        }
         self.destroy_expired(pulse);
         self.release_expired_ownership(pulse);
         self.run_affect_events(pulse);

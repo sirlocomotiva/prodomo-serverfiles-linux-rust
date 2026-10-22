@@ -55,6 +55,8 @@ Legacy client, game-to-client, game-to-game, and DB packet definitions/codecs.
 - `cg_safebox_move` covers header 77 `HEADER_CG_SAFEBOX_ITEM_MOVE` (0x4d), the safebox and mall in-container move, which reuses `sizeof(TPacketCGItemMove)` and so shares the exact nine-byte layout of `cg_item_move` while remaining a SEPARATE record type: the server's `CInputMain::SafeboxItemMove` handler reads only the two cell words and never reads either window byte, whereas the header-13 `CInputMain::ItemMove` handler passes both whole `TItemPos` values so the window is resolved, and the two trees do not even agree on the field names (`Cell`/`CellTo`/`count` against `pos`/`change_pos`/`num`). Because header 77 is a single encodable value it stores no header byte, matching the rule that a stored header is only needed when more than one value must round-trip. The 16-bit count is preserved at full width and is never truncated, which is the codec-level counterpart of the confirmed legacy defect at `input_main.cpp:2472`, where that `WORD` is narrowed into the `BYTE` count parameter of `CSafebox::MoveItem` and a transmitted 256 therefore becomes 0, which `safebox.cpp:211-212` then reads as "move the whole stack".
 - `cg_item_give` covers the exact nine-byte `TPacketCGGiveItem` request with an explicit little-endian target `u32` VID, one reusable packed 3-byte position, and an opaque count byte that the legacy server never reads, so the five Rust item records share one packed position layout.
 - `cg_variable` covers source-verified chat, whisper, SyncPosition, active-profile MyShop, FishEvent, Shop, and Messenger variable prefixes plus the typed SyncPosition element slice.
+- `cg_whisper` covers header 19 `HEADER_CG_WHISPER` (0x13), the whisper request: a header, an explicit little-endian size word that counts the whole record, the raw 25-byte name field, and the raw text that follows it. The size is a floor and not an equality, so trailing bytes past it are legal and ignored, and a size under the 28-byte fixed part is its own refusal because the legacy closes the descriptor for it (`G/input_main.cpp:344-353`). The name and the text are C strings, so each stops at its first NUL, and the text is bounded by `CHAT_MAX_LEN` (512) as the legacy's `char buf[CHAT_MAX_LEN + 1]` is.
+- `gc_whisper` covers header 34 `HEADER_GC_WHISPER` (0x22), the whisper answer: a header, an explicit little-endian size word that counts the whole record, the type byte, the raw 25-byte name field, the `bCanFormat` byte that `LOCALE_STRING_RENEWAL` adds (`G/input_main.cpp:631`), and the raw text that follows. The fixed part is 30 packed bytes, measured from a verbatim 32-bit compile under `#pragma pack(1)` with the repository's known-width controls; the `bool` is one byte, so the field is the legacy's own.
 - `cg_party_skill` covers the exact six-byte `TPacketCGPartyUseSkill` record.
 - `cg_party` covers the five fixed-width party records of headers 72, 73, 74, 75, and 78, with explicit little-endian words, one shared error type, and separately named record and frame-payload widths so a wrong-width frame is rejected rather than misread; `cg_quickslot_add`, `cg_quickslot_del`, and `cg_quickslot_swap` cover the three quickslot records of headers 16, 17, and 18, where the add record is a counted run and the del/swap pair differ only in their declared slot byte.
 - `cg_pick` covers the four fixed-width game-phase records that carry a single client choice and nothing else, at headers 31, 61, 66, and 114, where `CgQuestConfirm` is the only one with two fields and the only one whose `u8` precedes its `u32`, and where the three single-word records share one width and are therefore separated by their header rather than their length.
@@ -407,6 +409,18 @@ Sections 163 through 167 establish the honest baseline and correct three method 
   `ITEM_SOCKET_MAX_NUM` is 6 and the socket array is 24 bytes, not 12; `ITEM_ATTRIBUTE_MAX_NUM`
   is 7 and the attribute array is 21.
 
+- `protocol/src/gc_whisper.rs` (ledger 246) implements the whisper answer, byte 34. The record is
+  `{ BYTE bHeader; WORD wSize; BYTE bType; char szNameFrom[25]; bool bCanFormat; }` under
+  `pack(1)`, so the fixed part is **30 bytes**: 1 + 2 + 1 + 25 + 1. The `bool` is the legacy's
+  C++ `bool`, one byte on the 32-bit target, and it is stored as a raw `u8` and never as a Rust
+  `bool`. `LOCALE_STRING_RENEWAL` is defined (`prodomodefines.h:32`), so the byte is on the wire;
+  the legacy's constructor sets it to true and the only writer that changes it is behind
+  `__BL_CLIENT_LOCALE_STRING__`, which no file in the tree defines, so the byte is always true.
+  `wSize` counts the whole record, text included, and the text is raw: the legacy copies the
+  bytes with `strlcpy` and writes them as they are, so the Rewrite never transcodes them. The
+  text of the system's own lines carries its NUL, because those lengths are `strlen(msg) + 1`,
+  while a relayed line carries none.
+
 ## Shared record types
 
 Records that share a body keep their header. `CgFlyTarget` is one 13-byte record under
@@ -637,6 +651,7 @@ has none. Regenerate this list instead of editing it by hand.
 | `cg_use_skill.rs` | Explicit codec for the fixed legacy `TPacketCGUseSkill` record. |
 | `cg_variable.rs` | Incremental framing for source-verified variable-length client packets. |
 | `cg_vid.rs` | The two 5-byte records that are a header plus a 32-bit virtual id. |
+| `cg_whisper.rs` | Transport-free codec for the legacy `TPacketCGWhisper` record. |
 | `cg_wire.rs` | Safe framing for the legacy client-to-game stream. |
 | `db_boot.rs` | Safe parser for the legacy version-6 database boot payload. |
 | `db_market_price.rs` | Source-fixed premium-market item-price update codec. |
@@ -649,6 +664,7 @@ has none. Regenerate this list instead of editing it by hand.
 | `gc_nested.rs` | The game-to-client records that nest another record or carry a fixed array. |
 | `gc_small.rs` | The small fixed-width game-to-client records. |
 | `gc_vid.rs` | The game-to-client records that carry one 32-bit value. |
+| `gc_whisper.rs` | `HEADER_GC_WHISPER` (0x22): a private line, from one player to another. |
 | `gg.rs` | Explicit codecs for fixed game-to-game setup, lookup, warp, and map-index |
 | `gg_inventory.rs` | Machine-readable inventory of the legacy game-to-game packet headers. |
 | `item_pos.rs` | The legacy `TItemPos`, shared by every record that embeds one. |

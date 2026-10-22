@@ -147,7 +147,7 @@ Key every coverage metric on the **wire byte**, never on an identifier name.
 | direction | registered | implemented | missing |
 |---|---|---|---|
 | client to game | 92 | 91 | 1 (`KEY_AGREEMENT`, dead: `_IMPROVED_PACKET_ENCRYPTION_` is never defined) |
-| game to client | 134 | 108 | 26 (13 fixed-size, 13 dynamic) |
+| game to client | 134 | 109 | 25 (12 fixed-size, 13 dynamic) |
 
 - The game-to-client registration table was taken from the client's `PythonNetworkStream.cpp`
   while the client source was in the repository. It is recorded in `protocol/src/gc_inventory.rs`.

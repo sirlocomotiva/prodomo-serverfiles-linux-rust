@@ -72,7 +72,7 @@ use prodomo::command::{
 use prodomo::game_loop::{spawn_game_loop, GameLoopConfig, GameLoopHandle};
 use prodomo::game_loop_messages::{
     Departure, GameLoopController, GameLoopTerminal, GroundPlace, Kept, RelayScope, RestartKind,
-    Settled, Shown,
+    Settled, Shown, WhisperOutcome,
 };
 use prodomo::game_state::{
     world_item_id_range, GameState, ShopAnswer, ShopStep, TradeAnswer, TradeSettled, TradeStep,
@@ -91,9 +91,9 @@ use prodomo::lifecycle::{LifecycleError, PostHandshakePhase};
 use prodomo::listeners::{listener_plan, ListenerRole, Listeners};
 use prodomo::loading_phase::{
     enter_game_burst, entering_position, item_load_points, judge_enter_game, judge_select,
-    load_points, loading_burst, map_is_allowed, public_map_index, EnterGameBurst, EnterGameVerdict,
-    EnteringPosition, LoadingBurst, Neighbourhood, PcCard, SelectVerdict, PHASE_DEAD, PHASE_GAME,
-    PK_MODE_PEACE,
+    load_points, loading_burst, map_is_allowed, name_field, public_map_index, EnterGameBurst,
+    EnterGameVerdict, EnteringPosition, LoadingBurst, Neighbourhood, PcCard, SelectVerdict,
+    PHASE_DEAD, PHASE_GAME, PK_MODE_PEACE,
 };
 use prodomo::movement::{judge_pose, PoseOutcome};
 use prodomo::operator::{prepare, read_new_password, AccountCommand, GmCommand, OperatorCommand};
@@ -127,7 +127,7 @@ use protocol::cg_inventory::{
     HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_SCRIPT_ANSWER,
     HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER,
     HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_USE_SKILL,
-    HEADER_CG_WARP,
+    HEADER_CG_WARP, HEADER_CG_WHISPER,
 };
 use protocol::cg_item_drop::CgItemDrop;
 use protocol::cg_item_drop2::CgItemDrop2;
@@ -156,6 +156,7 @@ use protocol::cg_shop::CgShop;
 use protocol::cg_use_skill::CgUseSkill;
 use protocol::cg_variable::GuildSymbolUpload;
 use protocol::cg_vid::CgOnClick;
+use protocol::cg_whisper::{CgWhisper, CgWhisperError};
 use protocol::cg_wire::ClientFrame;
 use protocol::gc::{GcAuthSuccess, GcLoginFailure};
 use protocol::gc_chat::{
@@ -164,6 +165,7 @@ use protocol::gc_chat::{
 use protocol::gc_inventory::{HEADER_GC_EMPIRE, HEADER_GC_PHASE};
 use protocol::gc_mark::{mark_block_record, mark_idxlist_record, symbol_data_record};
 use protocol::gc_small::GcHeaderAndByte;
+use protocol::gc_whisper::{GcWhisper, WHISPER_TYPE_GM, WHISPER_TYPE_NORMAL};
 use protocol::item_pos::ItemPos;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::signal;
@@ -256,6 +258,25 @@ struct MarkServer {
     min_level: u8,
 }
 
+/// What the server refuses: the login and the character creation.
+#[derive(Clone, Copy)]
+struct Refusals {
+    /// `[game] shutdowned`: new logins are refused.
+    shutdowned: bool,
+    /// `[game] block_char_creation`: no new character may be created.
+    block_char_creation: bool,
+}
+
+/// How the server treats every character: how far a shout reaches and who is a game master.
+#[derive(Clone, Copy)]
+struct Modes {
+    /// `[game] enable_global_shout`: every empire hears a shout, not only the shouter's.
+    global_shout: bool,
+    /// `[game] test_server`: the test-server mode, which makes every character a game
+    /// master (`CHARACTER::IsGM`, `G/char.cpp:6373-6380`).
+    test_server: bool,
+}
+
 /// What a connection needs from the server: the descriptor clock, the ping cycle, the server
 /// state, the Channel status list, the store, the auth and logon registries, and where each map
 /// is served.
@@ -269,15 +290,17 @@ struct ConnectionContext {
     channels: Arc<ChannelStatusBoard>,
     store: Store,
     auth: Arc<AuthRegistry>,
-    /// `[game] shutdowned`: new logins are refused.
-    shutdowned: bool,
+    /// `[game] shutdowned`: new logins are refused, and `[game] block_char_creation`: no new
+    /// character may be created.
+    refusals: Refusals,
     /// `[game] block_login`.
     block_login: Arc<str>,
     /// `[game] user_limit`.
     user_limit: i32,
     /// `guild_mark_server` plus `[game] guild_mark_min_level` (`G/config.cpp:912`), one
-    /// field so the struct keeps three bools: the flag gates the handshake (`G/input.cpp:213`)
-    /// and the upload reads the level unconditionally (`G/input_login.cpp:1071-1073`).
+    /// field so the flag and the level cannot drift apart: the flag gates the handshake
+    /// (`G/input.cpp:213`) and the upload reads the level unconditionally
+    /// (`G/input_login.cpp:1071-1073`).
     mark_server: MarkServer,
     /// The logins held by Channel descriptors.
     logons: Arc<LogonRegistry>,
@@ -304,14 +327,14 @@ struct ConnectionContext {
     clients: Arc<ChannelClients>,
     /// When each account last created a character.
     creates: Arc<CreateCooldown>,
-    /// `[game] block_char_creation`.
-    block_char_creation: bool,
     /// `[game] player_delete_level_limit` and `player_delete_level_limit_lower`.
     delete_levels: (i32, i32),
     /// `[game] shout_limit_level`: the level a character needs to shout.
     shout_limit_level: i32,
-    /// `[game] enable_global_shout`: every empire hears a shout, not only the shouter's.
-    global_shout: bool,
+    /// `[game] enable_global_shout`: every empire hears a shout, not only the shouter's, and
+    /// `[game] test_server`: the test-server mode, which makes every character a game master
+    /// (`CHARACTER::IsGM`, `G/char.cpp:6373-6380`).
+    modes: Modes,
     /// `[game] pk_protect_level`: below it a character is in the protect PK mode.
     pk_protect_level: u8,
     /// The game thread that owns the world every live client is put into.
@@ -1973,8 +1996,90 @@ where
 /// with its own empire, as `ChatPacket` builds it from the recipient's descriptor.
 fn shout(context: &ConnectionContext, empire: u8, text: &[u8]) -> usize {
     context.clients.deliver_everywhere(|entry| {
-        prodomo::chat::shout_for(entry, &context.locale, context.global_shout, empire, text)
+        prodomo::chat::shout_for(
+            entry,
+            &context.locale,
+            context.modes.global_shout,
+            empire,
+            text,
+        )
     })
+}
+
+/// `CG_WHISPER` (19) in the game and dead phases: `CInputMain::Whisper`
+/// (`G/input_main.cpp:340-649`).
+///
+/// The line goes to the character the name finds, on this Channel or on another one, and the
+/// sender hears nothing when it lands. The record is the sender's name and the text, typed
+/// `WHISPER_TYPE_GM` when the sender is a game master.
+async fn whisper_line(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    let record = match CgWhisper::decode(frame) {
+        Ok(record) => record,
+        Err(CgWhisperError::DeclaredSizeTooSmall { declared_size }) => {
+            // `iExtraLen < 0`: the legacy logs the length and closes the descriptor
+            // (`G/input_main.cpp:349-353`).
+            info!(%addr, declared_size, "Whisper refused by size; closing");
+            return false;
+        }
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed whisper; closing");
+            return false;
+        }
+    };
+    let Some(character) = held.character.as_ref() else {
+        warn!(%addr, "Whisper without a character; ignoring");
+        return true;
+    };
+    // `if (ch->IsGM())` (`G/input_main.cpp:619-620`): the type is the game master's when the
+    // sender is one, and the test-server mode makes every character one
+    // (`G/char.cpp:6373-6380`).
+    let whisper_type = if held.gm_level > GM_PLAYER || context.modes.test_server {
+        WHISPER_TYPE_GM
+    } else {
+        WHISPER_TYPE_NORMAL
+    };
+    let line = GcWhisper {
+        whisper_type,
+        name_from: name_field(&character.name),
+        can_format: true,
+        text: record.text.clone(),
+    };
+    let Ok(bytes) = line.encode() else {
+        warn!(%addr, "Whisper did not fit its record; ignoring");
+        return true;
+    };
+    // The target's name, as the client sent it: a C string, so it ends at the first NUL.
+    let name = record.target_name();
+    match context
+        .game
+        .whisper(
+            common::vid::Vid::new(character.id),
+            name.to_vec(),
+            record.text.clone(),
+            bytes,
+        )
+        .await
+    {
+        Ok(WhisperOutcome::Delivered) => {
+            info!(%addr, "Whisper delivered to its target");
+        }
+        Ok(WhisperOutcome::Dropped) => {
+            info!(%addr, "Whisper dropped: the sender named itself, or the line was empty");
+        }
+        Ok(WhisperOutcome::Answered) => {
+            info!(%addr, "Whisper left for a target that is not there; the sender was told");
+        }
+        Err(error) => {
+            warn!(%addr, %error, "The world could not answer a whisper; closing");
+            return false;
+        }
+    }
+    true
 }
 
 /// `CG_MOVE` (7) in the game phase: `CInputMain::Move` (`input_main.cpp:1757-1915`).
@@ -3704,6 +3809,7 @@ where
             true
         }
         Some(MainRecord::Chat) => chat_line(session, addr, context, held, &frame).await,
+        Some(MainRecord::Whisper) => whisper_line(addr, context, held, &frame).await,
         Some(MainRecord::ItemMove) => move_an_item(session, addr, context, held, &frame).await,
         Some(MainRecord::Belongings) => belongings_step(session, addr, context, held, &frame).await,
         Some(MainRecord::World) => world_step(addr, context, held, &frame).await,
@@ -3734,6 +3840,10 @@ enum MainRecord {
     /// `PHASE_DEAD` installs the main input as `PHASE_GAME` does (`G/desc.cpp:526-531`);
     /// `CInputDead` is never installed (B14).
     Chat,
+    /// `CG_WHISPER` (19) in the game and dead phases: `CInputMain::Whisper`
+    /// (`G/input_main.cpp:340-649`). The main input reads it in the dead phase as it reads
+    /// the chat, because `PHASE_DEAD` installs the main input (B14).
+    Whisper,
     /// `CG_ITEM_MOVE` (13): `CInputMain::ItemMove` (`G/input_main.cpp:1060-1066`), reached when
     /// the character is not an observer (`:3707-3710`). The Rewrite has no observer mode, so
     /// every character is reached.
@@ -3769,6 +3879,8 @@ fn main_record(phase: ClientPhase, header: u8) -> Option<MainRecord> {
     }
     let record = if header == HEADER_CG_CHAT.value() {
         MainRecord::Chat
+    } else if header == HEADER_CG_WHISPER.value() {
+        MainRecord::Whisper
     } else if header == HEADER_CG_ITEM_MOVE.value() {
         MainRecord::ItemMove
     } else if is_belongings_step(header) {
@@ -4438,7 +4550,7 @@ where
             return false;
         }
     };
-    let no_more_clients = context.shutdowned || context.state.is_shutting_down();
+    let no_more_clients = context.refusals.shutdowned || context.state.is_shutting_down();
     if let Err(refusal) = admit(
         no_more_clients,
         context.user_limit,
@@ -5616,7 +5728,7 @@ async fn create_character(
     let offset = (create_offset(random_key()), create_offset(random_key()));
     let player = match judge_create(
         &context.names,
-        context.block_char_creation,
+        context.refusals.block_char_creation,
         account,
         &record,
         offset,
@@ -6097,7 +6209,7 @@ async fn authenticate(
     let Some(login) = login_from_field(&record.login) else {
         return Ok(Err(AuthRefusal::NoId));
     };
-    if context.shutdowned || context.state.is_shutting_down() {
+    if context.refusals.shutdowned || context.state.is_shutting_down() {
         return Ok(Err(AuthRefusal::Shutdown));
     }
     if context.auth.is_held(&login) {
@@ -7177,7 +7289,10 @@ fn connection_context(
         channels: Arc::new(ChannelStatusBoard::new(channel_ports, &config.game)),
         store: store.clone(),
         auth: AuthRegistry::new(),
-        shutdowned: config.game.shutdowned,
+        refusals: Refusals {
+            shutdowned: config.game.shutdowned,
+            block_char_creation: config.game.block_char_creation,
+        },
         block_login: Arc::from(config.game.block_login.as_str()),
         user_limit: config.game.user_limit,
         mark_server: MarkServer {
@@ -7198,13 +7313,15 @@ fn connection_context(
         names: Arc::new(data.names),
         clients,
         creates: Arc::new(CreateCooldown::default()),
-        block_char_creation: config.game.block_char_creation,
         delete_levels: (
             config.game.player_delete_level_limit,
             config.game.player_delete_level_limit_lower,
         ),
         shout_limit_level: config.game.shout_limit_level,
-        global_shout: config.game.enable_global_shout,
+        modes: Modes {
+            global_shout: config.game.enable_global_shout,
+            test_server: config.game.test_server,
+        },
         pk_protect_level: config.game.pk_protect_level,
         game,
     }

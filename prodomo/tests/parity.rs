@@ -35,6 +35,7 @@ use protocol::gc_guild::{
     GUILD_SUBHEADER_GC_WAR_END_LIST, GUILD_SUBHEADER_GC_WAR_SCORE,
 };
 use protocol::gc_mark::{HEADER_GC_MARK_BLOCK, HEADER_GC_MARK_IDXLIST, HEADER_GC_SYMBOL_DATA};
+use protocol::gc_whisper::{WHISPER_TYPE_GM, WHISPER_TYPE_OFFLINE, WHISPER_TYPE_SYSTEM};
 use protocol::tea::{decrypt_padded, encrypt_padded, TeaKey};
 use support::{execute, ScratchDatabase};
 
@@ -1408,7 +1409,8 @@ fn dynamic_len(header: u8) -> usize {
         | GC_NPC_POSITION
         | GC_SHOP
         | GC_SCRIPT
-        | GC_GUILD => usize::MAX,
+        | GC_GUILD
+        | GC_WHISPER => usize::MAX,
         other => panic!("{other} is a fixed-width loading or enter-game record"),
     }
 }
@@ -1419,7 +1421,7 @@ fn word_sized(record: &[u8]) -> Option<usize> {
     let header = record[0];
     if matches!(
         header,
-        GC_CHAT | GC_ENTITY | GC_SYNC_POSITION | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT
+        GC_CHAT | GC_ENTITY | GC_SYNC_POSITION | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT | GC_WHISPER
     ) {
         Some(usize::from(record[1]) | (usize::from(record[2]) << 8))
     } else {
@@ -1465,6 +1467,10 @@ const AFFECT_REVIVE_INVISIBLE: u32 = 215;
 const GC_TIME: u8 = 106;
 const GC_CHANNEL: u8 = 121;
 const GC_CHAT: u8 = 4;
+/// `HEADER_CG_WHISPER` (`protocol/src/cg_inventory.rs`).
+const CG_WHISPER: u8 = 0x13;
+/// `HEADER_GC_WHISPER` (`protocol/src/gc_inventory.rs`).
+const GC_WHISPER: u8 = 0x22;
 /// `PHASE_LOADING` and `PHASE_GAME` in `EPhase` (`G/desc.h`).
 const PHASE_LOADING: u8 = 4;
 const PHASE_GAME: u8 = 5;
@@ -1512,7 +1518,7 @@ fn game_len(header: u8) -> usize {
         GC_SKILL_LEVEL_NEW => SKILL_LEVEL_LEN,
         GC_CHARACTER_ADD => CHARACTER_ADD_LEN,
         GC_CHAR_ADDITIONAL_INFO => CHAR_ADDITIONAL_INFO_LEN,
-        GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT | GC_GUILD => {
+        GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT | GC_GUILD | GC_WHISPER => {
             dynamic_len(header)
         }
         GC_AFFECT_ADD => AFFECT_ADD_LEN,
@@ -1658,6 +1664,18 @@ fn client_sync_position(elements: &[(u32, i32, i32)]) -> Vec<u8> {
 /// phase with every loading and enter-game record already read.
 fn enter_world(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed) {
     enter_world_in(server, login, slot, ENGLISH)
+}
+
+/// [`enter_world`] without the quiet check that follows the enter burst.
+///
+/// A character that reads a line left for it hears it right behind its own burst
+/// (`CHARACTER::ReadOfflineMessages`, `G/input_login.cpp:728-729`), and the check that
+/// follows the burst accounts for no such record.
+fn enter_world_reading(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed) {
+    let (mut keyed, character, _quickslots, _items) =
+        load_with_quickslots_on(server, 1, login, slot, ENGLISH);
+    let _entered = enter_game_shown(&mut keyed);
+    (keyed, character)
 }
 
 /// [`enter_world`] for an auth login in `language`.
@@ -5020,6 +5038,180 @@ fn chat_packet(chat_type: u8, empire: u8, text: &[u8]) -> Vec<u8> {
     line.extend_from_slice(&[chat_type, 0, 0, 0, 0, empire, 1]);
     line.extend_from_slice(text);
     line
+}
+
+/// A client `WHISPER`: the header, the size, the 25-byte name field and the text.
+/// `size` counts the whole record, and the name is a C string, so it ends at the
+/// first NUL (`G/input_main.cpp:340-354`).
+fn client_whisper(to: &[u8], text: &[u8]) -> Vec<u8> {
+    let total = 28 + text.len();
+    let mut record = vec![CG_WHISPER];
+    record.extend_from_slice(&u16::try_from(total).expect("a short line").to_le_bytes());
+    record.extend_from_slice(&name_field(to));
+    record.extend_from_slice(text);
+    record
+}
+
+/// A `GC_WHISPER` as `CInputMain::Whisper` builds it
+/// (`G/input_main.cpp:624-641`): the header, the size, the type, the 25-byte name
+/// field, `bCanFormat` 1 and the text with no terminator.
+fn whisper_packet(whisper_type: u8, from: &[u8], text: &[u8]) -> Vec<u8> {
+    let mut record = vec![GC_WHISPER];
+    record.extend_from_slice(&u16::try_from(30 + text.len()).unwrap().to_le_bytes());
+    record.push(whisper_type);
+    record.extend_from_slice(&name_field(from));
+    record.push(1);
+    record.extend_from_slice(text);
+    record
+}
+
+/// The server's `get_dword_time()`, the milliseconds since it started, which the
+/// handshake carries (`TPacketGCHandshake`, `G/desc.cpp:603-610`).
+fn server_uptime_ms(server: &Server) -> u32 {
+    let (client, first) = accepted(server.channel(1));
+    drop(client);
+    first.time
+}
+
+/// Wait until the server has been up for the ten seconds the legacy's first offline
+/// message needs (`get_dword_time() - ch->GetLastOfflinePMTime() > bDelay * 1000`,
+/// `G/input_main.cpp:426-428`).
+fn wait_for_the_offline_message_delay(server: &Server) {
+    let uptime = server_uptime_ms(server);
+    if uptime < 10_000 {
+        std::thread::sleep(std::time::Duration::from_millis(
+            u64::from(10_000 - uptime) + 500,
+        ));
+    }
+}
+
+/// A whisper reaches the character it names, on this Channel or on another one, and the
+/// sender hears nothing when it lands.
+///
+/// `CInputMain::Whisper` (`G/input_main.cpp:340-649`): the line goes to the character the
+/// name finds, the sender's own name drops the line, an empty line sends nothing, and the
+/// type is the game master's because the test-server mode makes every character one
+/// (`CHARACTER::IsGM`, `G/char.cpp:6373-6380`).
+#[test]
+fn a_whisper_reaches_the_character_it_names() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    create_account(&server, "dave");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    // Dave's character stands on the Shared Channel, so his line has to cross a Channel.
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Eagle', 2, \
+         10000, 1210000 FROM account WHERE login = 'dave'",
+    );
+
+    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, true, None);
+    let (mut delta, _) = enter_world_on(&server, 99, b"dave", 0, ENGLISH);
+
+    alice.send_record(&client_whisper(b"Yankee", b"hello"));
+    assert_eq!(
+        yankee.read_game(),
+        whisper_packet(WHISPER_TYPE_GM, b"Alpha", b"hello"),
+        "the line reaches the character it names"
+    );
+    alice.quiet("the sender hears nothing");
+
+    // The name is matched without regard to the case (`FindPC`, `G/char_manager.cpp:244-260`).
+    alice.send_record(&client_whisper(b"yankee", b"again"));
+    assert_eq!(
+        yankee.read_game(),
+        whisper_packet(WHISPER_TYPE_GM, b"Alpha", b"again"),
+        "the name is matched without regard to the case"
+    );
+    alice.quiet("the sender hears nothing");
+
+    // The target on another Channel: the legacy's P2P manager found it and relayed the
+    // line to the core that had it (`G/input_main.cpp:403-415`).
+    alice.send_record(&client_whisper(b"Eagle", b"across"));
+    assert_eq!(
+        delta.read_game(),
+        whisper_packet(WHISPER_TYPE_GM, b"Alpha", b"across"),
+        "the line crosses the Channel"
+    );
+    alice.quiet("the sender hears nothing");
+
+    // `if (pkChr == ch) return (iExtraLen);` (`G/input_main.cpp:372`): the sender's own
+    // name drops the line.
+    alice.send_record(&client_whisper(b"Alpha", b"myself"));
+    alice.quiet("the sender hears nothing");
+    yankee.quiet("the neighbour hears nothing either");
+
+    // `if (buflen > 0)` (`G/input_main.cpp:622`): an empty line sends nothing.
+    alice.send_record(&client_whisper(b"Yankee", b""));
+    alice.quiet("the sender hears nothing");
+    yankee.quiet("the neighbour hears nothing either");
+}
+
+/// A whisper for a character that is not there is left for it, and the sender is told.
+///
+/// `G/input_main.cpp:404-505`: the line waits in the store for the target, the sender gets a
+/// `WHISPER_TYPE_SYSTEM` record, and the target reads the line when it next enters
+/// (`CInputDB::ReadOfflineMessages`, `G/input_db.cpp:2455-2476`).
+#[test]
+fn a_whisper_for_a_character_that_is_not_there_is_left_for_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "carol");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Charlie', 2, \
+         470000, 950000 FROM account WHERE login = 'carol'",
+    );
+    // The legacy leaves the first line for an absent target only when the server has
+    // been up for ten seconds (`G/input_main.cpp:426-428`).
+    wait_for_the_offline_message_delay(&server);
+
+    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    alice.send_record(&client_whisper(b"Charlie", b"waiting"));
+    let notice = alice.read_game();
+    assert_eq!(notice[0], GC_WHISPER);
+    assert_eq!(notice[3], WHISPER_TYPE_SYSTEM, "the notice is the system's");
+    assert_eq!(
+        &notice[4..29],
+        &name_field(b"Charlie")[..],
+        "the notice names the target"
+    );
+    assert_eq!(
+        &notice[30..],
+        b"An offline message has been sent.\0",
+        "the notice carries the legacy's words"
+    );
+
+    // Charlie enters and reads the line that waited for her.
+    let (mut charlie, _) = enter_world_reading(&server, b"carol", 0);
+    let line = charlie.read_game();
+    assert_eq!(line[0], GC_WHISPER);
+    assert_eq!(line[3], WHISPER_TYPE_OFFLINE, "the line is an offline one");
+    assert_eq!(
+        &line[4..29],
+        &name_field(b"Alpha")[..],
+        "the line names its sender"
+    );
+    assert_eq!(
+        &line[30..],
+        b"waiting\0",
+        "the line keeps its bytes and its NUL"
+    );
 }
 /// `sys.party`: a party line reaches every linked member, the speaker included, and no
 /// outsider on the same map. Alice invites Yankee; Yankee answers; Alice speaks; both hear
@@ -14858,6 +15050,16 @@ fn the_flag_war_stands_its_flags_up_and_the_member_sees_them() {
 /// (`GetStartPosition`, `G/guild_war.cpp:662`).
 const FLAG_MAP_START_OTHER: (i32, i32) = (74_700, 18_200);
 
+/// A point 1200 units short of the other team's flag, on the way to it.
+///
+/// The flag is taken from within 500 units (`FuncFindChrForFlag`, `G/char_state.cpp:64`)
+/// while the view is recomputed every sixteenth Pulse while a player moves
+/// (`G/char_state.cpp:797`). A stretched Pulse can therefore take the flag before the
+/// carrier's view has been recomputed, and the flag's insert would never reach her. The
+/// staging point is beyond the take and inside the view (`VIEW_RANGE` + `VIEW_BONUS_RANGE`,
+/// `G/entity_view.cpp:94`), so the flag can be seen before it is taken.
+const FLAG_MAP_STAGING: (i32, i32) = (73_892, 17_313);
+
 /// The race of the first team's flag character (`warmap::WAR_FLAG_VNUM0`,
 /// `G/war_map.h:26`): the client reads it from the insert (`GetRaceNum`,
 /// `G/char.cpp:1074`).
@@ -14880,7 +15082,7 @@ fn flag_vid_of<'a>(inserts: impl IntoIterator<Item = &'a [u8]>, race: u16) -> Op
 /// The steps `Sync` the body to the point (`FUNC_COMBO` is 3, `CHARACTER::Move`,
 /// `G/char.cpp:3610-3622`), and the last leg is a walk (`FUNC_MOVE` is 1), whose motion
 /// samples the view (`UpdateSectree`, `G/char_state.cpp:797`): a `Sync` changes the
-/// body's sectree but not its view. A move further than 750 units is refused
+/// body's sectree but not its view. A move further than 75 000 units is refused
 /// (`MOVE_DISTANCE_LIMIT`, `CInputMain::Move`, `G/input_main.cpp:1757-1891`), so the
 /// legs are shorter than that.
 fn walk_to(client: &mut Keyed, from: (i32, i32), to: (i32, i32)) {
@@ -14961,10 +15163,18 @@ fn the_flag_is_taken_and_the_base_scores_the_war() {
         enter_world_seeing_guilded_on_war_map(&server, b"alice", 0, 1, &join);
     let own_flag = flag_vid_of(entered.shown.inserts(), FLAG_RACE)
         .expect("the member sees its own guild's flag");
-    // She walks to the other team's flag, which stands on the other team's base, and
-    // takes it.
-    walk_to(&mut alice, FLAG_MAP_START, FLAG_MAP_START_OTHER);
-    let other_flag = the_flag_is_taken(&mut alice);
+    // She walks towards the other team's flag, which stands on the other team's base, and
+    // stops short of it: the flag's state hands it to the player nearest it
+    // (`StateFlag`, `G/char_state.cpp:1185-1215`), and a player within 500 of it takes it
+    // (`FuncFindChrForFlag`, `G/char_state.cpp:33-97`).
+    walk_to(&mut alice, FLAG_MAP_START, FLAG_MAP_STAGING);
+    // The walk's last leg is a walk (`FUNC_MOVE` is 1), and its motion samples the view
+    // every sixteenth Pulse (`UpdateSectree`, `G/char_state.cpp:797`): the flag comes
+    // into her view while she walks, before she can take it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let other_flag = read_until_the_flag_comes_into_view(&mut alice, deadline);
+    walk_to(&mut alice, FLAG_MAP_STAGING, FLAG_MAP_START_OTHER);
+    the_flag_is_taken(&mut alice, other_flag);
     assert_ne!(other_flag, own_flag, "the two flags are two characters");
     // She carries the flag back to her own guild's base, and the base scores the war.
     walk_to(&mut alice, FLAG_MAP_START_OTHER, FLAG_MAP_START);
@@ -14972,17 +15182,34 @@ fn the_flag_is_taken_and_the_base_scores_the_war() {
     yankee.quiet("the war's map is quiet");
 }
 
-/// The take, as the wire shows it, and the vid of the flag that was taken.
+/// Read from `client` until the other team's flag comes into its view, and return the
+/// flag's vid.
+///
+/// The view of a moving character is sampled every sixteenth Pulse (`UpdateSectree`,
+/// `G/char_state.cpp:797`), and the sample fills the view with what stands around the
+/// character, so a character that walks past a flag sees it.
+fn read_until_the_flag_comes_into_view(client: &mut Keyed, deadline: std::time::Instant) -> u32 {
+    loop {
+        let record = client
+            .read_game_raw_until(deadline)
+            .expect("the record the map's exit brings");
+        if record[0] == GC_CHARACTER_ADD && record.len() > 24 {
+            let race = u16::from_le_bytes([record[22], record[23]]);
+            if race == OTHER_FLAG_RACE {
+                return u32::from_le_bytes(record[1..5].try_into().expect("four bytes"));
+            }
+        }
+    }
+}
+
+/// The take, as the wire shows it.
 ///
 /// `CHARACTER::StateFlag` (`G/char_state.cpp:1185-1215`): the flag's state runs twice a
 /// second and hands the flag to the player nearest it. The carrier gets the flag's
 /// affects, the flag's character dies with the flag, and the map says who took it.
-fn the_flag_is_taken(alice: &mut Keyed) -> u32 {
+fn the_flag_is_taken(alice: &mut Keyed, other_flag: u32) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    let (seen, affect) = read_until_header(alice, GC_AFFECT_ADD, deadline);
-    // The other team's flag came into her view on the way.
-    let other_flag = flag_vid_of(seen.iter().map(Vec::as_slice), OTHER_FLAG_RACE)
-        .expect("the other team's flag came into her view");
+    let (_seen, affect) = read_until_header(alice, GC_AFFECT_ADD, deadline);
     // The carrier gets the flag's affects (`AddAffect`, `G/char_state.cpp:1209-1210`):
     // the flag's guild, the other team's flag bit, and no point of its own.
     assert_eq!(
@@ -15023,7 +15250,6 @@ fn the_flag_is_taken(alice: &mut Keyed) -> u32 {
         text.contains("Alpha"),
         "the line names the carrier: {text:?}"
     );
-    other_flag
 }
 
 /// The score, as the wire shows it.

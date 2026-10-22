@@ -854,6 +854,27 @@ pub enum GameCommand {
         /// Dropped once the records are sent, see [`Settled`].
         settled: oneshot::Sender<()>,
     },
+    /// `CInputMain::Whisper` (`G/input_main.cpp:340-649`): the character online under `vid`
+    /// sends a private line to the character `name` names.
+    ///
+    /// The record is the one the descriptor built, because the sender's name and the type are
+    /// the sender's own. The world finds the target in the Channel it owns and writes the
+    /// record to it; the answer says whether the target was there, because a target on
+    /// another Channel is found in the process-wide client registry instead, which is the
+    /// legacy's P2P manager.
+    Whisper {
+        /// The VID of the sending character.
+        vid: common::vid::Vid,
+        /// The target's name, as the client sent it.
+        name: Vec<u8>,
+        /// The line itself, which the world needs on its own when it has to leave
+        /// the line for a target that is not there.
+        text: Vec<u8>,
+        /// The line, as the descriptor built it.
+        record: Vec<u8>,
+        /// Where the game thread reports where the line went.
+        reply: oneshot::Sender<WhisperOutcome>,
+    },
     /// `CInputMain::PartyInvite`: the character online under `vid` invites the character
     /// `guest` names to its party. See `game_state::party`.
     PartyInvite {
@@ -1146,6 +1167,23 @@ pub struct AttackAnswer {
     /// The gold the hit stole, as the signed change the store applies, or `None` when it
     /// stole none.
     pub gold: Option<i64>,
+}
+
+/// Where a whisper went.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WhisperOutcome {
+    /// The line reached the target, on this Channel or on another one.
+    Delivered,
+    /// The line went nowhere: the sender named itself, or the line was empty and
+    /// nothing was left for the target.
+    ///
+    /// `if (pkChr == ch) return (iExtraLen);` (`G/input_main.cpp:372`) and
+    /// `else return (iExtraLen);` (`G/input_main.cpp:474`).
+    Dropped,
+    /// The server answered the sender instead of the target hearing the line: the
+    /// line was left for the target, or the sender must wait before it may leave
+    /// another one.
+    Answered,
 }
 
 /// Resolves, its sender dropped, once the world has run a command that answers nothing: every
@@ -2727,6 +2765,36 @@ impl GameLoopController {
         .await
         .map_err(|_| MoveItemError::NotSent)?;
         Ok(settling)
+    }
+
+    /// Hands the world a whisper from the character online under `vid`, and waits for where
+    /// the line went.
+    ///
+    /// The record is the one the caller built: the sender's name and the type are the
+    /// sender's own, and the world has no say in them.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver and
+    /// [`MoveItemError::NoAnswer`] when it closed the reply without sending.
+    pub async fn whisper(
+        &self,
+        vid: common::vid::Vid,
+        name: Vec<u8>,
+        text: Vec<u8>,
+        record: Vec<u8>,
+    ) -> Result<WhisperOutcome, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::Whisper {
+            vid,
+            name,
+            text,
+            record,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 
     /// Hands the world a `CG_PARTY_INVITE` from the character online under `vid`, without
