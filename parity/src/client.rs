@@ -156,7 +156,19 @@ impl Client {
     /// Panics when the connection is still open after [`IO_TIMEOUT`].
     #[must_use]
     pub fn expect_closed(&mut self) -> Vec<u8> {
-        let (received, quiet) = self.drain(IO_TIMEOUT);
+        self.expect_closed_within(IO_TIMEOUT)
+    }
+
+    /// [`expect_closed`](Self::expect_closed) with a wait of `timeout` rather than
+    /// [`IO_TIMEOUT`]: some legacy rules land minutes later, and the connection stays
+    /// open until they do.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the connection is still open after `timeout`.
+    #[must_use]
+    pub fn expect_closed_within(&mut self, timeout: Duration) -> Vec<u8> {
+        let (received, quiet) = self.drain(timeout);
         assert_eq!(
             quiet,
             Quiet::Closed,

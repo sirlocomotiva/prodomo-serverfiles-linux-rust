@@ -34113,3 +34113,103 @@ all-targets DB run green, the parity target green; the doc build and the doc-tes
 scratch database left.
 
 No ADR changed. No owner question added. V22 is taken.
+
+## 240. The war's map goes with the war (`sys.guild.war`, fifth part)
+
+The war's map was a map of its own (ledger 236) with a runtime of its own (ledger 237), and
+the war asked its members to join it (ledger 239), but the map never closed, a member that
+had joined it never came back, and the war's own records never reached the member that
+joined. Legacy's war map closes with its war, and the closing has three steps spread over
+fifteen seconds; the Rewrite now walks the same three.
+
+**The join's own records.** `CWarMap::IncMember` (`G/war_map.cpp:342-398`) ends with the
+war's own record and the two sides' scores, and only the member that joined hears them:
+`SendWarPacket` writes the two guild ids with the war's type and state
+(`G/war_map.cpp:626-643`), and `SendScorePacket` writes the two guild ids with that
+side's score (`:645-659`). The Rewrite sends them to the joining member alone
+(`war_map_join_records`, `prodomo/src/game_state/guild.rs`), after the counts the map
+tells its players, which is legacy's order.
+
+**The map's end.** `CGuild::EndWar` (`G/guild_war.cpp:592-627`) ends the war and calls
+`CWarMap::SetEnded` on the map it was fought on. `SetEnded` (`G/war_map.cpp:739-779`)
+destroys the flag mobs, cancels the flag reset, marks the map ended and creates the
+`war_end_event` ten seconds later. The Rewrite has no flag war, so the first two steps
+have nothing to do; the mark and the event's own delay are the map's `ended` and
+`exit_pulse` (`prodomo/src/game_state/war_map.rs`), and the tick that runs the event's two
+steps is `run_war_map_ticks` (`prodomo/src/game_state/guild.rs`), called on every Pulse
+from the game thread (`prodomo/src/game_state.rs`).
+
+**The members' return.** The event's first step (`war_end_event`, `G/war_map.cpp:44-68`)
+runs ten seconds after the war ended and calls `CWarMap::ExitAll` (`:455-468`), which
+sends every player on the map back with `CHARACTER::ExitToSavedLocation`
+(`G/char.cpp:6687-6692`). The place a member came from is the one its join remembered:
+`SaveExitLocation` (`G/char.cpp:6679-6683`) writes the position and the map beside the
+row, and the war map keeps it too (`order_war_warp`,
+`prodomo/src/game_state/guild.rs`). The Rewrite's exit orders the member's client the
+warp back to that place (`ClientOrder::Warp`, `prodomo/src/client_registry.rs`), and the
+descriptor does the warp, the save and the `GC_WARP` (`warp_set`, `prodomo/src/main.rs`),
+so the row the save writes names the town the member came from.
+
+**The map's going.** The event's second step runs five seconds after the first and
+destroys the copy of the map (`CWarMapManager::DestroyWarMap`, `G/war_map.cpp:1074-1084`):
+the map is unhosted and every player still standing on it is disconnected, because a
+client cannot stay on a map that is not there (`SECTREE_MANAGER::DestroyPrivateMap`,
+`G/sectree_manager.cpp:1028-1052`). The Rewrite's `ClientOrder::Close` closes the
+descriptor of every client on the map, and the departure saves the character, so its row
+names the map it stood on and the next login brings it back to the place it came from
+(`SetPlayerProto`, `G/char.cpp:2289-2294`).
+
+**The name a character is told once.** `ch->SendGuildName` (`G/char.cpp:8621-8642`) sends
+the guild's name to a character that has not been told it, and the set of the names a
+character has been told lives on the character (`m_known_guild`, `G/char.h:2049`), which
+`Initialize` clears (`G/char.cpp:419`). The Rewrite kept the set on the *body*, and a
+character that has not stood on a map yet has no body: the enemy's name in a war's walk
+(`SendEnemyGuild`, `G/guild_war.cpp:60-109`) was therefore dropped, and the name arrived
+with the end of the war instead of with the enter. The set is on the character now
+(`world/src/character/model.rs`), the body's field is gone
+(`prodomo/src/game_state/motion.rs`), and the enemy's name reaches the member with the
+enter, as ledger 230x claimed.
+
+**The tests.** `prodomo/src/game_state/guild.rs` holds two: the war's end sends its
+players back and then the map goes, and a player still on the map when it goes is
+disconnected with it. The parity scenario
+`the_wars_map_goes_with_the_war_and_its_member_comes_back` proves the same thing
+on the wire: the GM's `/gwstop` echoes, the war's END fans and the every-PC
+`WAR_END_LIST` land, ten seconds later the member is sent back to the place the war took
+it from with the `GC_WARP` that names the town, and the member that logs in again is
+back in the town. The war is of the battle type, so it has no over notice: legacy sends
+that notice for a field war alone (`CGuildManager::EndWar`, `G/guild_manager.cpp:698-704`),
+and the field war's notice is proved by
+`a_gm_stops_and_cancels_the_war_and_a_player_cannot` (ledger 230y).
+
+**The divergences.**
+
+- **V23.** The place the exit sends a member to. Legacy's `ExitToSavedLocation` warps to
+  the *pending* warp (`WarpSet(m_posWarp.x, m_posWarp.y, m_lWarpMapIndex)`,
+  `G/char.cpp:6690`), and the warp that took the member to the war map overwrote the
+  pending warp with the war map's own start position. So legacy sends the member back
+  onto the war map, where the map's own destruction disconnects it a few seconds later,
+  and the member is brought back to the town by its next login, because the row names the
+  map it stood on and the load reads the exit location beside it. The Rewrite sends the
+  member back to the place it came from, which is what the rule is for, and the member
+  stays connected. The end state is the same and the way there differs: legacy's client
+  reloads the war map and is then disconnected, the Rewrite's client is sent straight to
+  the town.
+- A member that watches the war is counted as one (`ObserverCount` and `WarUC`), but the
+  Rewrite does not put it in observer mode and does not tell it so (`SetObserverMode`,
+  `G/war_map.cpp:379-386`): the observer mode is a client state the Rewrite has not
+  ported, and the two lines that go with it promise a button the Rewrite cannot show.
+
+**The inventory.** The row `sys.guild.war` stays `partial` — the war map's end, the
+members' return and the map's going are live now, but the war's own flags are not — and
+its note names the new part. The row `gc.guild` keeps its status and its note names the
+join's own records, the war record and the two scores, which the member that joined the
+war's map hears alone.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; doc green with
+`-D warnings`; doc-tests green; the prodomo lib (1166 tests) green; the protocol lib (1229
+tests) green; the world lib (541 tests) green; the full workspace all-targets DB run green
+on all 39 targets (parity 129/129); this slice's two unit tests green 2/2 and its parity
+scenario green 1/1; no scratch database left.
+
+No ADR changed. No owner question added. V23 is taken.

@@ -1,8 +1,8 @@
 # Rewrite status
 
-Last reviewed: 2026-10-21, after ledger section 239 (the war asks its members to join it).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 240 onwards (the war's
-own end: the flags, the war map's end and the members' return).
+Last reviewed: 2026-10-22, after ledger section 240 (the war's map goes with the war).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 241 onwards (the war's
+own flags).
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -49,7 +49,11 @@ takes of its map. Since 237 that map is a map of its own: it holds the two teams
 and its accept starts the war on that type. Since 239 the war asks its members to join it: the
 quest's letter carries the button, the client presses it, the quest asks, the member's yes
 warps it to the war map's start position, and the row it comes back to names the map and the
-place it came from. The rest of combat, skills,
+place it came from. Since 240 the war's map goes with the war: the war's end closes the map,
+ten seconds later the map sends its members back to the place they came from, and five
+seconds after that the copy of the map is unhosted and the players still on it are
+disconnected; the member that joined hears the war's own record and the two scores, and the
+enemy's guild name reaches it with the enter, as the war's walk says. The rest of combat, skills,
 parties, guilds and the rest of step 4 are not ported yet. The two-process layout (a `game-server` and a `db-server`
 talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177; sections 1-175
 record how it was built and stay as history. Since section 178 the one `prodomo` binary reads
@@ -364,6 +368,7 @@ owner should know about (178.5):
 
 | V21. The death's item drop penalty differs from legacy in six ways (ledger 235). (a) The shuffle uses the game's one generator, where legacy uses a fresh `std::mt19937` seeded from `std::random_device` (`G/char_battle.cpp:1085-1087`), so which items a penalty drops is not legacy's set. (b) The dropped items' rows go at once, where legacy's go in the delayed-save queue's flush, up to 127 Pulses (about 5.1 seconds) after the drop, and they name the victim until then. (c) `AddToGround` finding no tree for the point loses the item in legacy (`G/item.cpp:569-574`, a Defect); the Rewrite keeps it. (d) The GM arm is narrower: legacy's `GetGMLevel() == GM_PLAYER || test_server` runs the penalty for a GM when `test_server` is on, and it is on in the owner's configuration; the Rewrite spares the GM. (e) Legacy's quickslot sync for a worn item names the wear index, which is an inventory cell, and deletes the wrong quickslot (`G/char_battle.cpp:1150`); the Rewrite syncs the flat cell and deletes nothing. (f) The private shop, the protected inventory, the agreed PvP, the arena duel and the forked road are not ported, so their refusals and their flags cannot happen. | `G/char_battle.cpp:1016-1199`; `G/item_manager.cpp:478-499`, `:546-564`; `G/main.cpp:284-288`; `G/item.cpp:569-574`; `G/unique_item.h:29`. |
 | V22. A guild war's member is sent to the war map before the quest that asked it closes, where legacy sends it after (ledger 239). The quest's end (`[DONE]`) is written first and the warp follows, because the quest step answers the descriptor and the warp goes through the order queue. | The `GC_WARP` is sent while the script runs, so the load comes first and the quest's end after it (`CHARACTER::WarpSet`, `G/char.cpp:6694-6792`). The two records are the same; only their order differs. |
+| V23. A guild war's map sends its members back to the place they came from, where legacy sends them back onto the war map (ledger 240). The exit's warp names the town the member came from, and the member stays connected; legacy warps to the pending warp, which the warp to the war map overwrote with the war map's own start position, so the member is sent back onto the war map and is disconnected with it a few seconds later. | The rule is `CHARACTER::ExitToSavedLocation` (`G/char.cpp:6687-6692`), which warps to `m_posWarp` and `m_lWarpMapIndex` (`G/char.cpp:6690`); the place the member came from is `m_posExit` and `m_lExitMapIndex` (`G/char.cpp:6679-6683`), which legacy forgets without reading. The end state is the same: the member is back in the town, by its next login in legacy and by the warp in the Rewrite. |
 
 ## Legacy defects not to reproduce
 

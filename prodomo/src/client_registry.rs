@@ -103,6 +103,16 @@ pub enum ClientOrder {
         /// The order the pick-ups of the dropped items wait on.
         order: StoreOrder,
     },
+    /// The connection closes.
+    ///
+    /// Legacy destroys the descriptor of every player standing on a private map when the
+    /// map goes (`SECTREE_MANAGER::DestroyPrivateMap`,
+    /// `G/sectree_manager.cpp:1028-1052`): the copy of the map a guild war is fought on
+    /// is gone, and a client cannot stay on a map that is not there. The character is
+    /// saved on the way out, so its row names the map it stood on, and the next login
+    /// brings it back to the place it came from (`SetPlayerProto`,
+    /// `G/char.cpp:2289-2294`).
+    Close,
 }
 
 #[derive(Debug)]

@@ -1696,6 +1696,25 @@ fn enter_world_seeing_guilded(
     (keyed, character, entered)
 }
 
+/// [`enter_world_seeing_guilded`] for a member that comes back onto a war's map: the
+/// map's own records land behind the enter burst, so they are read here before the
+/// quiet check.
+fn enter_world_seeing_guilded_on_war_map(
+    server: &Server,
+    login: &[u8],
+    slot: u8,
+    members: usize,
+    join: &WarMapJoin,
+) -> (Keyed, Listed, Entered) {
+    let (mut keyed, character, quickslots, _items) =
+        load_with_quickslots_on(server, 1, login, slot, ENGLISH);
+    assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
+    let entered = enter_game_guilded(&mut keyed, members);
+    read_war_map_join(&mut keyed, join);
+    keyed.still("nothing follows");
+    (keyed, character, entered)
+}
+
 /// Log `login` in and select slot `slot`, reading the loading burst and the item load behind
 /// it, and answer with the `GC_ITEM_SET` records in the order they arrived. The connection is
 /// left in the loading phase.
@@ -1950,17 +1969,35 @@ fn finish_enter_game(keyed: &mut Keyed, add: Vec<u8>, info: Vec<u8>) -> Entered 
 }
 
 /// The `WAR_LIST` every enter ends with: the descriptor flushes the outbox's
-/// `SendGuildWar` after the burst, so it lands behind the notice. No scenario has
-/// started a war at enter time yet, so it is the bare envelope; answers it.
+/// `SendGuildWar` after the burst, so it lands behind the notice.
+///
+/// A guild that is at war hears its own war first: the walk's enemy fan
+/// (`SendEnemyGuild`, `G/guild_war.cpp:60-95`) sends the war record and the two scores,
+/// and they land ahead of the list. With no war the list is the bare envelope.
 fn enter_war_list(keyed: &mut Keyed) -> Vec<u8> {
-    let list = keyed.read_game();
-    assert_eq!(list[0], GC_GUILD, "the enter WAR_LIST: {list:02x?}");
-    assert_eq!(
-        guild_subheader(&list),
-        GUILD_SUBHEADER_GC_GUILD_WAR_LIST,
-        "the enter WAR_LIST: {list:02x?}"
+    let mut wars = 0;
+    let list = loop {
+        let record = keyed.read_game();
+        assert_eq!(record[0], GC_GUILD, "the enter WAR_LIST: {record:02x?}");
+        let sub = guild_subheader(&record);
+        if sub == GUILD_SUBHEADER_GC_GUILD_WAR_LIST {
+            break record;
+        }
+        if sub == GUILD_SUBHEADER_GC_GUILD_NAME {
+            // The enemy's NAME leads its war record (`SendEnemyGuild`,
+            // `G/guild_war.cpp:60-95`).
+            continue;
+        }
+        assert!(
+            sub == GUILD_SUBHEADER_GC_WAR || sub == GUILD_SUBHEADER_GC_WAR_SCORE,
+            "the enter WAR_LIST: {record:02x?}"
+        );
+        wars += 1;
+    };
+    assert!(
+        list.len() == 4 || wars > 0,
+        "no wars yet: the bare envelope"
     );
-    assert_eq!(list.len(), 4, "no wars yet: the bare envelope");
     list
 }
 
@@ -2360,7 +2397,13 @@ impl Keyed {
     /// does on its own ([`is_npc_chatter`]): a nearby NPC may walk or speak before the close
     /// lands.
     fn closes(&mut self, note: &str) {
-        let bytes = self.client.expect_closed();
+        self.closes_within(note, parity::client::IO_TIMEOUT);
+    }
+
+    /// [`closes`](Self::closes) with a wait of `timeout`: some legacy rules close the
+    /// connection minutes later, and it stays open until they do.
+    fn closes_within(&mut self, note: &str, timeout: std::time::Duration) {
+        let bytes = self.client.expect_closed_within(timeout);
         assert_eq!(
             bytes.len() % 8,
             0,
@@ -2425,6 +2468,7 @@ impl Keyed {
     fn read_game(&mut self) -> Vec<u8> {
         loop {
             let record = self.read_game_raw();
+            eprintln!("GAME {:02x?}", &record[..record.len().min(24)]);
             if !self.monster_record(&record)
                 && !self.timer_record(&record)
                 && !is_stamina_refill(&record)
@@ -14038,6 +14082,15 @@ fn a_notice_line(text: &[u8]) -> Vec<u8> {
     record
 }
 
+/// A `CHAT_TYPE_COMMAND` line to a character of empire 1 — the shape the war's map
+/// counts take (`ChatPacket(CHAT_TYPE_COMMAND, ...)`, `G/war_map.cpp:319-321`).
+fn a_command_line(text: &[u8]) -> Vec<u8> {
+    let size = u8::try_from(10 + text.len()).expect("a short line");
+    let mut record = vec![GC_CHAT, size, 0, 5, 0, 0, 0, 0, 1, 1];
+    record.extend_from_slice(text);
+    record
+}
+
 /// `sys.guild.war`: Alpha's `/war Wolves` declares — both masters hear the opp's
 /// NAME then the WAR record, and every client hears the `[LS;475]` notice naming
 /// the pair. Yankee's `/nowar MyGuild` refuses: Alpha hears `[LS;476]` naming the
@@ -14515,6 +14568,105 @@ fn the_other_side_of_the_war_takes_the_other_start_position() {
     alice.quiet("the other master does not join");
 }
 
+/// The war's map goes with the war (`sys.guild.war`, `sys.char.pk`): the war's end closes
+/// the map (`CGuild::EndWar`, `G/guild_war.cpp:592-627`, and `CWarMap::SetEnded`,
+/// `G/war_map.cpp:739-779`). Ten seconds later the map sends its players back to the place
+/// the war took them from (`CWarMap::ExitAll`, `G/war_map.cpp:455-468`), and five seconds
+/// after that the copy of the map is unhosted and the players still on it are
+/// disconnected (`SECTREE_MANAGER::DestroyPrivateMap`, `G/sectree_manager.cpp:1028-1052`).
+/// The member that left the map is not among them, and it comes back to the place the
+/// war took it from, which the warp wrote to the row.
+///
+/// The war is stopped by the GM (`cmd.gwstop`, ledger 230y): the echo, both sides' END
+/// fans and the every-PC `WAR_END_LIST` land first.
+///
+/// The war is of the battle type, so it has no over notice: legacy sends that notice for
+/// a field war alone (`CGuildManager::EndWar`, `G/guild_manager.cpp:698-704`).
+#[test]
+fn the_wars_map_goes_with_the_war_and_its_member_comes_back() {
+    let Some((_database, server, mut alice, alpha_listed, mut yankee, _yankee)) =
+        a_war_pair_ready_on(None, &war_channels())
+    else {
+        return;
+    };
+    let (alice_index, _yankee_index) = declare_and_accept_a_battle_war(&mut alice, &mut yankee);
+    // The member presses the button and says yes: she is sent to the war's map.
+    alice.send_record(&client_script_button(alice_index));
+    let question = alice.read_game();
+    assert_eq!(question[0], GC_SCRIPT, "the question: {question:02x?}");
+    alice.send_record(&client_script_answer(0));
+    let done = alice.read_game();
+    assert_eq!(&done[6..], b"[DONE]", "the quest's end script");
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha_listed.id.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "the member leaves its map");
+    let port = server.channel(1).port();
+    assert_eq!(alice.read_game(), a_warp_record(WAR_MAP_START, port));
+    // The client follows the warp: it reconnects to the Channel the war's map stands on
+    // and logs in again. The row it left behind names the war's own copy of the map, so
+    // the member comes back onto it. Its guild's name leads the burst, as it did the
+    // first time.
+    //
+    // The map tells its players the two counts and the joining member the war's own
+    // records (`CWarMap::IncMember`, `G/war_map.cpp:342-398`). The member watches the
+    // war instead of joining a team: the flag the war entry set is a quest flag, and
+    // the quest flags live in memory (ledger 227.3), so the reconnect lost it.
+    drop(alice);
+    let join = WarMapJoin {
+        guilds: [1, 2],
+        joiners: [0, 0],
+        observers: 1,
+        war_type: 1,
+        war_state: 6,
+        scores: [0, 0],
+    };
+    let (mut alice, _alpha, _entered) =
+        enter_world_seeing_guilded_on_war_map(&server, b"alice", 0, 1, &join);
+    // The master who stayed in the town still has the member's removal to read: the
+    // warp that took the member to the war's map took its body off the town, and the
+    // players that saw it were sent its removal (`G/char.cpp:786-789`).
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha_listed.id.to_le_bytes());
+    assert_eq!(
+        yankee.read_game(),
+        removed,
+        "the other master sees the member leave the town"
+    );
+    // The GM stops the war: the echo, then each side's END fan and the every-PC
+    // `WAR_END_LIST`.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/gwstop 1 2"));
+    let echo = alice.read_game();
+    assert_eq!(echo[0], GC_CHAT, "the echo: {echo:02x?}");
+    read_war_end(&mut alice, 1, 2, 1, None);
+    read_war_end(&mut yankee, 2, 1, 1, None);
+    yankee.quiet("the stop settled");
+    // Ten seconds after the war ended, the map sends its players out: the member is
+    // sent back to the place the war took it from (`CWarMap::ExitAll`,
+    // `G/war_map.cpp:455-468`, and `CHARACTER::ExitToSavedLocation`,
+    // `G/char.cpp:6687-6692`). The warp leaves the map with the remove record of its
+    // own VID and the `GC_WARP` that names the place and the Channel that serves it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha_listed.id.to_le_bytes());
+    assert_eq!(
+        read_until_record(&mut alice, &removed, deadline),
+        removed,
+        "the member leaves the war's map"
+    );
+    let port = server.channel(1).port();
+    assert_eq!(
+        read_until_record(&mut alice, &a_warp_record(ALPHA_ENTERS_AT, port), deadline),
+        a_warp_record(ALPHA_ENTERS_AT, port),
+        "the member is sent back to the place the war took it from"
+    );
+    // The client follows the warp: it closes the connection and logs in again. The row
+    // the warp wrote names the place the member came from, so the member comes back to
+    // the town.
+    drop(alice);
+    let (mut alice, _alpha, _entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1);
+    alice.quiet("the member is back in the town");
+}
+
 /// The war scenario's opening: two war-ready guilds (`MyGuild` under Alpha, Wolves under
 /// Yankee), both masters in the world and seeing each other, with Alpha granted
 /// `LOW_WIZARD` before the boot — the character select reads the grant
@@ -14640,12 +14792,31 @@ fn declare_and_accept_war(alice: &mut Keyed, yankee: &mut Keyed) {
     );
 }
 
+/// Read until the record `wanted` arrives, skipping the records the war's map's life
+/// brings between the war's end and the map's exit: a monster's move, a death, the
+/// affects that go with it. The wanted record ends the wait.
+fn read_until_record(client: &mut Keyed, wanted: &[u8], deadline: std::time::Instant) -> Vec<u8> {
+    loop {
+        let record = client
+            .read_game_raw_until(deadline)
+            .expect("the record the map's exit brings");
+        if record == wanted {
+            return record;
+        }
+    }
+}
+
 /// Read one war end's records for `client`: the over notice `over`, then the END fan
-/// naming `(self_id, opp_id)` — the field byte and `GUILD_WAR_END` — and the every-PC
-/// `WAR_END_LIST` naming the sorted pair. A TALKING echo would be read here first and
-/// fail the notice, which is how the cancel's quiet is asserted.
-fn read_war_end(client: &mut Keyed, self_id: u32, opp_id: u32, over: &[u8]) {
-    assert_eq!(client.read_game(), a_notice_line(over), "the over notice");
+/// naming `(self_id, opp_id)` — the war's type byte and `GUILD_WAR_END` — and the
+/// every-PC `WAR_END_LIST` naming the sorted pair. A TALKING echo would be read here
+/// first and fail the notice, which is how the cancel's quiet is asserted.
+///
+/// `over` is `None` for a war of a map type: legacy sends the over notice for a field
+/// war alone (`CGuildManager::EndWar`, `G/guild_manager.cpp:698-704`).
+fn read_war_end(client: &mut Keyed, self_id: u32, opp_id: u32, war_type: u8, over: Option<&[u8]>) {
+    if let Some(over) = over {
+        assert_eq!(client.read_game(), a_notice_line(over), "the over notice");
+    }
     let end = client.read_game();
     assert_eq!(
         guild_subheader(&end),
@@ -14654,7 +14825,7 @@ fn read_war_end(client: &mut Keyed, self_id: u32, opp_id: u32, over: &[u8]) {
     );
     assert_eq!(&end[4..8], &self_id.to_le_bytes(), "the END self id");
     assert_eq!(&end[8..12], &opp_id.to_le_bytes(), "the END opp id");
-    assert_eq!((end[12], end[13]), (0, 7), "field, END");
+    assert_eq!((end[12], end[13]), (war_type, 7), "the war's type, END");
     let list = client.read_game();
     assert_eq!(
         guild_subheader(&list),
@@ -14666,6 +14837,95 @@ fn read_war_end(client: &mut Keyed, self_id: u32, opp_id: u32, over: &[u8]) {
         &[1, 0, 0, 0, 2, 0, 0, 0],
         "the list names the sorted pair"
     );
+}
+
+/// What the war's map tells the world when a member joins it (`CWarMap::IncMember`,
+/// `G/war_map.cpp:342-398`).
+struct WarMapJoin {
+    /// The two guilds, the lower id first (`GetTeamIndex`, `G/war_map.cpp:199-215`).
+    guilds: [u32; 2],
+    /// The joiner count of each side (`GetAccumulatedJoinerCount`, `G/war_map.cpp:289-292`).
+    joiners: [u32; 2],
+    /// The watcher count (`m_iObserverCount`, `G/war_map.cpp:344-395`).
+    observers: u32,
+    /// The war's type (`GUILD_WAR_TYPE_*`).
+    war_type: u8,
+    /// The war's state (`GUILD_WAR_*`).
+    war_state: u8,
+    /// The two sides' scores (`m_TeamData[bIdx].iScore`).
+    scores: [u32; 2],
+}
+
+/// Read the records the war's map sends when a member joins it (`CWarMap::IncMember`,
+/// `G/war_map.cpp:342-398`).
+///
+/// The two count lines come first and every player on the map hears them
+/// (`UpdateUserCount`, `G/war_map.cpp:330-340`): the watcher count, and the two guilds
+/// with their joiner counts and the watcher count again. Then the joining member alone
+/// hears the war's own record (`SendWarPacket`, `G/war_map.cpp:626-644`) — the map's
+/// teams, the lower guild id first, with the war's type and state — and the two scores
+/// (`SendScorePacket`, `G/war_map.cpp:646-659`), one for each side.
+fn read_war_map_join(keyed: &mut Keyed, join: &WarMapJoin) {
+    assert_eq!(
+        keyed.read_game(),
+        a_command_line(format!("ObserverCount {}", join.observers).as_bytes()),
+        "the watcher count"
+    );
+    assert_eq!(
+        keyed.read_game(),
+        a_command_line(
+            format!(
+                "WarUC {} {} {} {} {}",
+                join.guilds[0], join.joiners[0], join.guilds[1], join.joiners[1], join.observers
+            )
+            .as_bytes()
+        ),
+        "the two guilds and their joiners"
+    );
+    let war = keyed.read_game();
+    assert_eq!(
+        guild_subheader(&war),
+        GUILD_SUBHEADER_GC_WAR,
+        "the war's own record: {war:02x?}"
+    );
+    assert_eq!(
+        &war[4..8],
+        &join.guilds[0].to_le_bytes(),
+        "the war's own guild"
+    );
+    assert_eq!(
+        &war[8..12],
+        &join.guilds[1].to_le_bytes(),
+        "the war's opponent"
+    );
+    assert_eq!(
+        (war[12], war[13]),
+        (join.war_type, join.war_state),
+        "the war's type and state"
+    );
+    for index in 0..2 {
+        let score = keyed.read_game();
+        assert_eq!(
+            guild_subheader(&score),
+            GUILD_SUBHEADER_GC_WAR_SCORE,
+            "the score: {score:02x?}"
+        );
+        assert_eq!(
+            &score[4..8],
+            &join.guilds[index].to_le_bytes(),
+            "the score's guild"
+        );
+        assert_eq!(
+            &score[8..12],
+            &join.guilds[1 - index].to_le_bytes(),
+            "the score's opponent"
+        );
+        assert_eq!(
+            &score[12..16],
+            &join.scores[index].to_le_bytes(),
+            "the score"
+        );
+    }
 }
 
 /// Assert both fixture guilds' war columns: one draw tallied each and the ladders the
@@ -14746,8 +15006,8 @@ fn a_gm_stops_and_cancels_the_war_and_a_player_cannot() {
     assert_eq!(echo[0], GC_CHAT, "the echo: {echo:02x?}");
     assert_eq!(echo[3], 0, "CHAT_TYPE_TALKING");
     assert_eq!(&echo[10..], b"1 2", "the echo sorts the pair");
-    read_war_end(&mut alice, 1, 2, b"[LS;479;MyGuild;Wolves]");
-    read_war_end(&mut yankee, 2, 1, b"[LS;479;MyGuild;Wolves]");
+    read_war_end(&mut alice, 1, 2, 0, Some(b"[LS;479;MyGuild;Wolves]"));
+    read_war_end(&mut yankee, 2, 1, 0, Some(b"[LS;479;MyGuild;Wolves]"));
     alice.quiet("the stop settled");
     yankee.quiet("the stop settled");
     // The forced draw's rows: both draws tallied, both ladders unchanged.
@@ -14758,7 +15018,7 @@ fn a_gm_stops_and_cancels_the_war_and_a_player_cannot() {
     // The cancel: no echo, then the draw notice, the END fans, the END_LIST, both
     // masters' `[LS;482]` and the every-PC `[LS;483]`.
     alice.send_record(&client_chat(CHAT_TALKING, b"/gwcancel 1 2"));
-    read_war_end(&mut alice, 1, 2, b"[LS;479;MyGuild;Wolves]");
+    read_war_end(&mut alice, 1, 2, 0, Some(b"[LS;479;MyGuild;Wolves]"));
     assert_eq!(
         alice.read_game(),
         an_info_line(b"[LS;482]"),
@@ -14769,7 +15029,7 @@ fn a_gm_stops_and_cancels_the_war_and_a_player_cannot() {
         a_notice_line(b"[LS;483;MyGuild;Wolves]"),
         "Alice hears the every-PC [LS;483]"
     );
-    read_war_end(&mut yankee, 2, 1, b"[LS;479;MyGuild;Wolves]");
+    read_war_end(&mut yankee, 2, 1, 0, Some(b"[LS;479;MyGuild;Wolves]"));
     assert_eq!(
         yankee.read_game(),
         an_info_line(b"[LS;482]"),

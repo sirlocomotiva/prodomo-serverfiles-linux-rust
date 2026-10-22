@@ -1509,6 +1509,15 @@ where
         ClientOrder::ItemRows { changes, order } => {
             write_item_rows(addr, context, held, changes, order).await
         }
+        ClientOrder::Close => {
+            // `SECTREE_MANAGER::DestroyPrivateMap` (`G/sectree_manager.cpp:1035-1039`):
+            // the descriptor of every player on the private map is destroyed with it.
+            // The departure saves the character, so its row names the map it stood on,
+            // and the next login brings it back to the place it came from
+            // (`SetPlayerProto`, `G/char.cpp:2289-2294`).
+            leave_the_world(context, addr, held, Departure::Disconnect).await;
+            false
+        }
     }
 }
 

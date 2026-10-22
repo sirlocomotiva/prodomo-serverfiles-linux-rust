@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use common::item_slots::INVENTORY_MAX_EXTENDED;
 use common::{vid::Vid, CharacterId};
 
@@ -32,6 +34,7 @@ pub struct Character {
     points: Option<Points>,
     quickslots: Quickslots,
     gold: u64,
+    known_guild: BTreeSet<u32>,
 }
 
 impl Character {
@@ -52,6 +55,7 @@ impl Character {
             points: None,
             quickslots: Quickslots::default(),
             gold: 0,
+            known_guild: BTreeSet::new(),
         }
     }
 
@@ -71,6 +75,7 @@ impl Character {
             points: None,
             quickslots: Quickslots::default(),
             gold: 0,
+            known_guild: BTreeSet::new(),
         }
     }
 
@@ -117,6 +122,16 @@ impl Character {
     /// Changes the independent runtime activity.
     pub const fn set_activity(&mut self, activity: Activity) {
         self.activity = activity;
+    }
+
+    /// Notes that this character has been told the name of the guild `id`, and reports
+    /// whether this is the first time (`m_known_guild`, `G/char.h:2049`).
+    ///
+    /// The set lives on the character, as in legacy, and a fresh character starts empty
+    /// (`Initialize` clears it, `G/char.cpp:419`): a character is told a guild's name
+    /// once, whether that happens in a view or in its guild's walk at the enter.
+    pub fn note_known_guild(&mut self, id: u32) -> bool {
+        self.known_guild.insert(id)
     }
 
     /// Changes the liveness posture independently from the core FSM.

@@ -951,12 +951,18 @@ impl GameState {
     }
 
     /// `ch->SendGuildName(guild)` for the viewer `to` (`G/char.cpp:8621-8642`): the NAME
-    /// record, once per guild per viewer — a known id sends nothing. `None` when the viewer
-    /// has no body, when no guild holds `id`, or when id 0 names the guildless.
+    /// record, once per guild per viewer — a known id sends nothing. `None` when the
+    /// viewer is not in the world, when no guild holds `id`, or when id 0 names the
+    /// guildless.
+    ///
+    /// The set that remembers the names a character has been told lives on the character
+    /// (`m_known_guild`, `G/char.h:2049`), as in legacy, and not on its body: a character
+    /// is told its enemy's guild name in its guild's walk, which the enter sends before
+    /// the body stands on the map (`G/guild_war.cpp:60-109`).
     pub(super) fn send_guild_name(&mut self, to: u32, id: u32) -> Option<Vec<u8>> {
         let name = self.guild_named(id);
-        let body = self.bodies.get_mut(&Vid::new(to))?;
-        if !body.known_guild.insert(id) || name.is_empty() {
+        let character = self.characters.find_by_vid_mut(Vid::new(to)).ok()?;
+        if !character.note_known_guild(id) || name.is_empty() {
             return None;
         }
         Some(guild_name_record(id, &name))
@@ -3228,7 +3234,39 @@ impl GameState {
         if let Some(war) = self.war_maps.get_mut(&map) {
             war.inc_member(vid, pid, guild, flag > 0);
         }
+        // `IncMember` ends with the counts and then the war's own records
+        // (`G/war_map.cpp:385-397`).
         self.war_user_count(map);
+        self.war_map_join_records(vid, map);
+    }
+
+    /// `CWarMap::SendWarPacket` and `CWarMap::SendScorePacket`
+    /// (`G/war_map.cpp:626-659`): the member that joins the war's map hears the war's
+    /// own record and the two sides' scores, and only that member hears them.
+    ///
+    /// The war record names the map's own teams - the lower guild id first - and the
+    /// war's type and state come from the guild (`TouchGuild(team)->GetGuildWarType` and
+    /// `GetGuildWarState`, `G/war_map.cpp:634-635`). The two scores are the map's own
+    /// (`m_TeamData[bIdx].iScore`), one for each side.
+    fn war_map_join_records(&mut self, vid: Vid, map: i32) {
+        let Some(war) = self.war_maps.get(&map) else {
+            return;
+        };
+        let [self_id, opp_id] = war.guilds;
+        let enemy = self
+            .guilds
+            .by_id
+            .get(&self_id)
+            .and_then(|guild| guild.enemies.get(&opp_id));
+        let war_type = enemy.map_or(0, |enemy| enemy.war_type);
+        let war_state = enemy.map_or(GUILD_WAR_NONE, |enemy| enemy.state);
+        let record = guild_war_record(self_id, opp_id, war_type, war_state);
+        let _sent = self.write_to_client(vid, record);
+        for index in 0..2 {
+            let score = u32::try_from(war.teams[index].score).unwrap_or(0);
+            let record = guild_war_score_record(war.guilds[index], war.guilds[1 - index], score);
+            let _sent = self.write_to_client(vid, record);
+        }
     }
 
     /// `CWarMap::DecMember` (`G/war_map.cpp:400-451`): a player that leaves the war's map
@@ -3698,7 +3736,9 @@ impl GameState {
             .get(&lo)
             .and_then(|guild| guild.enemies.get(&hi))
             .map_or(0, |enemy| enemy.map_index);
-        let _ = self.war_maps.remove(&map_index);
+        if let Some(map) = self.war_maps.get_mut(&map_index) {
+            map.end(self.last_pulse);
+        }
         let (score_lo, score_hi) = (score(&self.guilds, lo, hi), score(&self.guilds, hi, lo));
         // Two draws, and they are not the same one: the ladder math follows the DB's
         // `WarEnd`, which a forced draw turns into a draw whatever the scores are
@@ -4172,6 +4212,127 @@ impl GameState {
     /// Drain the war ends the tick queued: the poll command's answer.
     pub(super) fn take_war_ends(&mut self) -> Vec<WarEndOutcome> {
         std::mem::take(&mut self.guilds.pending_war_ends)
+    }
+
+    /// `war_end_event` (`G/war_map.cpp:44-68`) and `CWarMapManager::DestroyWarMap`
+    /// (`G/war_map.cpp:1074-1084`): the war's end event runs ten seconds after the war
+    /// ends and sends the players out, and five seconds after that the map goes.
+    ///
+    /// The war's end set the map's end (`CWarMap::SetEnded`, `G/war_map.cpp:739-779`).
+    /// A map that is not there is not destroyed twice.
+    pub(super) fn run_war_map_ticks(&mut self, pulse: u64) {
+        let exiting: Vec<i32> = self
+            .war_maps
+            .iter()
+            .filter(|(_, map)| map.exit_due(pulse))
+            .map(|(index, _)| *index)
+            .collect();
+        for index in exiting {
+            self.exit_war_map(index);
+        }
+        let due: Vec<i32> = self
+            .war_maps
+            .iter()
+            .filter(|(_, map)| map.destroy_due(pulse))
+            .map(|(index, _)| *index)
+            .collect();
+        for index in due {
+            self.destroy_war_map(index);
+        }
+    }
+
+    /// `CWarMap::ExitAll` (`G/war_map.cpp:455-468`): every player on the map is sent
+    /// back to the place it came from (`ExitToSavedLocation`, `G/char.cpp:6687-6692`),
+    /// which is the exit location the join remembered (`SaveExitLocation`,
+    /// `G/char.cpp:6679-6683`).
+    ///
+    /// Legacy's `ExitToSavedLocation` warps to the pending Warp, which the warp to the
+    /// war map overwrote with the map's own start position, so the player it sends back
+    /// lands on the war map again. The Rewrite sends the player to the place it came
+    /// from, which is what the rule is for.
+    fn exit_war_map(&mut self, index: i32) {
+        let Some(map) = self.war_maps.get(&index) else {
+            return;
+        };
+        let mut vids: Vec<Vid> = map.present.iter().copied().collect();
+        vids.sort_by_key(|vid| vid.raw());
+        for vid in vids {
+            let Some(exit) = self
+                .war_maps
+                .get(&index)
+                .and_then(|map| map.exits.get(&vid))
+            else {
+                continue;
+            };
+            self.order_war_exit(vid, *exit);
+        }
+        // The event's first step runs once (`G/war_map.cpp:57-60`).
+        if let Some(map) = self.war_maps.get_mut(&index) {
+            map.mark_exited();
+        }
+    }
+
+    /// Order the client of `vid` the warp back to the place it came from
+    /// (`CHARACTER::ExitToSavedLocation`, `G/char.cpp:6687-6692`): the warp takes the
+    /// character off the war map and to the exit location, and the exit location is
+    /// forgotten (`m_lExitMapIndex = 0`), so the row the save writes names the place the
+    /// character stands at.
+    fn order_war_exit(&mut self, vid: Vid, exit: crate::save::ExitLocation) {
+        let raw = vid.raw();
+        let Some(clients) = self.clients.as_ref() else {
+            warn!(vid = raw, "a war map's end has no client registry to reach");
+            return;
+        };
+        let Some((channel, map)) = self.place_of(raw) else {
+            warn!(
+                vid = raw,
+                "a war map's end found no place the member stands"
+            );
+            return;
+        };
+        let ordered = clients
+            .members_on_map(channel, map)
+            .into_iter()
+            .find(|(_, entry)| entry.vid == raw)
+            .is_some_and(|(id, _)| {
+                clients.order(
+                    channel,
+                    id,
+                    ClientOrder::Warp {
+                        x: exit.x,
+                        y: exit.y,
+                        private_map_index: 0,
+                        channel: None,
+                        exit: None,
+                    },
+                )
+            });
+        if !ordered {
+            warn!(vid = raw, "a war map's end found no client to order");
+        }
+    }
+
+    /// The map goes: the players on it are disconnected, and the copy of the map is
+    /// unhosted.
+    ///
+    /// Legacy destroys the descriptor of every player on the private map and the map
+    /// with it (`FDestroyPrivateMapEntity`, `G/sectree_manager.cpp:1028-1052`). The
+    /// character is saved on the way out, so its row names the map it stood on, and the
+    /// next login brings it back to the place it came from (`SetPlayerProto`,
+    /// `G/char.cpp:2289-2294`).
+    fn destroy_war_map(&mut self, index: i32) {
+        if self.war_maps.remove(&index).is_none() {
+            return;
+        }
+        let Some(channel) = self.war_map_channel(index) else {
+            return;
+        };
+        if let Some(clients) = self.clients.as_ref() {
+            for (id, _entry) in clients.members_on_map(channel, index) {
+                let _sent = clients.order(channel, id, ClientOrder::Close);
+            }
+        }
+        self.maps.remove(&(channel, index));
     }
 
     /// The live wars, in pair order (`CGuildManager::ShowGuildWarList`,
@@ -4706,7 +4867,7 @@ impl GameState {
     /// (`CHARACTER::WarpSet`, `G/char.cpp:6694-6792`): the descriptor that holds the
     /// character does the warp, the save and the `GC_WARP`.
     fn order_war_warp(
-        &self,
+        &mut self,
         vid: Vid,
         x: i32,
         y: i32,
@@ -4730,6 +4891,13 @@ impl GameState {
             y: spot.y,
             map_index: map,
         });
+        // The war's map keeps it too, because the map's end is what sends the member
+        // back (`CWarMap::ExitAll`, `G/war_map.cpp:455-468`).
+        if let Some(exit) = exit {
+            if let Some(war) = self.war_maps.get_mut(&map_index) {
+                war.exits.insert(vid, exit);
+            }
+        }
         let ordered = clients
             .members_on_map(channel_now, map)
             .into_iter()
@@ -8188,6 +8356,178 @@ mod tests {
             "the member is warped to the war's start position"
         );
         assert!(orders.try_recv().is_err(), "exactly one order");
+    }
+
+    /// `CGuild::EndWar` (`G/guild_war.cpp:592-627`) with `CWarMap::SetEnded`
+    /// (`G/war_map.cpp:739-779`) and `war_end_event` (`G/war_map.cpp:44-68`): the war's
+    /// map closes with the war. Ten seconds later the map sends its players back to the
+    /// place they came from (`CWarMap::ExitAll`, `G/war_map.cpp:455-468`), and five
+    /// seconds after that the copy of the map is unhosted
+    /// (`CWarMapManager::DestroyWarMap`, `G/war_map.cpp:1074-1084`). A player that is
+    /// still on the map when it goes is disconnected with it
+    /// (`SECTREE_MANAGER::DestroyPrivateMap`, `G/sectree_manager.cpp:1028-1052`).
+    #[test]
+    fn the_wars_end_sends_its_players_back_and_then_the_map_goes() {
+        let (mut world, mut orders, _lease, _master) = a_war_on(" 1");
+        let channel = super::super::fixtures::PLACE.0;
+        let map_index = 1_100_000;
+        // The member joins the war: the warp carries it to the war's map and the join
+        // remembers where it came from (`SaveExitLocation`, `G/char.cpp:6679-6683`).
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"war_enter",
+            &[quest::manager::GuildArg::Number(SECOND_ID)],
+            NOW,
+        );
+        assert_eq!(judged.answer, quest::manager::GuildAnswer::None);
+        assert!(
+            matches!(orders.try_recv().ok(), Some(ClientOrder::Warp { .. })),
+            "the member is warped to the war's map"
+        );
+        // The member stands on the war's map, with its client there too.
+        let clients = world.clients.as_ref().expect("the registry").clone();
+        let mut on_the_map = clients.join(ClientEntry {
+            channel,
+            map: map_index,
+            name: format!("P{MASTER_VID}"),
+            vid: MASTER_VID,
+            empire: 1,
+            language: 0,
+        });
+        let mut map_orders = on_the_map.take_orders().expect("the queue is home");
+        world.place_body(
+            Vid::new(MASTER_VID),
+            crate::game_loop_messages::EnterPlace {
+                channel,
+                map: map_index,
+                x: 36_800,
+                y: 5_200,
+                z: 0,
+            },
+            crate::loading_phase::PcCard {
+                name: format!("P{MASTER_VID}"),
+                job: 0,
+                empire: 1,
+                level: 10,
+                conqueror_level: 0,
+                language: 0,
+                pk_mode: crate::loading_phase::PK_MODE_PROTECT,
+                skill_group: 0,
+                alignment: 0,
+            },
+        );
+        // The war ends: the map closes with it.
+        let outcome = world.manager_end_war(GUILD_ID, SECOND_ID, false, true, NOW);
+        assert!(outcome.is_some(), "the war ends");
+        assert!(
+            world.war_maps.contains_key(&map_index),
+            "the map is still there"
+        );
+        // Ten seconds later the map sends its players back.
+        world.run_war_map_ticks(249);
+        assert!(
+            map_orders.try_recv().is_err(),
+            "the map waits for its end event"
+        );
+        world.run_war_map_ticks(250);
+        assert_eq!(
+            map_orders.try_recv().ok(),
+            Some(ClientOrder::Warp {
+                // The place the member came from, which the join remembered.
+                x: HERE.0,
+                y: HERE.1,
+                private_map_index: 0,
+                channel: None,
+                // `ExitToSavedLocation` (`G/char.cpp:6692`) forgets the exit location.
+                exit: None,
+            }),
+            "the member is sent back to the place it came from"
+        );
+        // The member leaves the map, as the warp makes it: the descriptor goes with it,
+        // and the client is no longer on the war's map.
+        world.leave_war_map(Vid::new(MASTER_VID), map_index);
+        drop(on_the_map);
+        // Five seconds later the map goes.
+        world.run_war_map_ticks(374);
+        assert!(
+            world.war_maps.contains_key(&map_index),
+            "the map waits for its destruction"
+        );
+        world.run_war_map_ticks(375);
+        assert!(!world.war_maps.contains_key(&map_index), "the map is gone");
+        assert!(
+            !world.maps.contains_key(&(channel, map_index)),
+            "the copy of the map is unhosted"
+        );
+        assert!(
+            map_orders.try_recv().is_err(),
+            "the member that left is not disconnected"
+        );
+    }
+
+    /// `SECTREE_MANAGER::DestroyPrivateMap` (`G/sectree_manager.cpp:1028-1052`): a
+    /// player that is still on the map when it goes is disconnected with it.
+    #[test]
+    fn a_player_still_on_the_map_when_it_goes_is_disconnected() {
+        let (mut world, mut orders, _lease, _master) = a_war_on(" 1");
+        let channel = super::super::fixtures::PLACE.0;
+        let map_index = 1_100_000;
+        let judged = world.answer_guild_quest(
+            Vid::new(MASTER_VID),
+            b"war_enter",
+            &[quest::manager::GuildArg::Number(SECOND_ID)],
+            NOW,
+        );
+        assert_eq!(judged.answer, quest::manager::GuildAnswer::None);
+        assert!(matches!(
+            orders.try_recv().ok(),
+            Some(ClientOrder::Warp { .. })
+        ));
+        let clients = world.clients.as_ref().expect("the registry").clone();
+        let mut on_the_map = clients.join(ClientEntry {
+            channel,
+            map: map_index,
+            name: format!("P{MASTER_VID}"),
+            vid: MASTER_VID,
+            empire: 1,
+            language: 0,
+        });
+        let mut map_orders = on_the_map.take_orders().expect("the queue is home");
+        world.place_body(
+            Vid::new(MASTER_VID),
+            crate::game_loop_messages::EnterPlace {
+                channel,
+                map: map_index,
+                x: 36_800,
+                y: 5_200,
+                z: 0,
+            },
+            crate::loading_phase::PcCard {
+                name: format!("P{MASTER_VID}"),
+                job: 0,
+                empire: 1,
+                level: 10,
+                conqueror_level: 0,
+                language: 0,
+                pk_mode: crate::loading_phase::PK_MODE_PROTECT,
+                skill_group: 0,
+                alignment: 0,
+            },
+        );
+        let outcome = world.manager_end_war(GUILD_ID, SECOND_ID, false, true, NOW);
+        assert!(outcome.is_some(), "the war ends");
+        world.run_war_map_ticks(250);
+        // The member is sent back, and stays on the map until its client follows.
+        assert!(matches!(
+            map_orders.try_recv().ok(),
+            Some(ClientOrder::Warp { .. })
+        ));
+        world.run_war_map_ticks(375);
+        assert_eq!(
+            map_orders.try_recv().ok(),
+            Some(ClientOrder::Close),
+            "the player still on the map is disconnected with it"
+        );
     }
 
     /// `CGuild::GuildWarEntryAccept` (`G/guild_war.cpp:648-660`): a field war is fought

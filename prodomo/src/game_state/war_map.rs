@@ -23,9 +23,11 @@
 //!   Rewrite keeps the two checks apart: the atlas's indices are the map index, and the
 //!   hosted maps are the `MAP_ALLOW`.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use common::vid::Vid;
+
+use crate::save::{ExitLocation, PASSES_PER_SEC};
 
 use super::guild::GUILD_WAR_TYPE_MAX_NUM;
 
@@ -121,6 +123,17 @@ pub(super) const WAR_MAPS: [WarMapInfo; 2] = [
 /// is 10,000 for every map but 107, 108 and 109, which take 51.
 const PRIVATE_INDEX_CAP: i32 = 10_000;
 
+/// The Pulses between the war's end and the map's destruction (`CWarMap::SetEnded`,
+/// `G/war_map.cpp:777` and `war_end_event`, `G/war_map.cpp:44-68`): the war's end event
+/// runs ten seconds after the war ends and sends the players out, and the map goes five
+/// seconds after that.
+const WAR_MAP_END_DELAY: u64 = (10 + 5) * PASSES_PER_SEC as u64;
+
+/// The Pulses between the war's end and the map's end event (`CWarMap::SetEnded`,
+/// `G/war_map.cpp:777`): ten seconds, the delay the event waits before it sends the
+/// players out.
+const WAR_MAP_EXIT_DELAY: u64 = 10 * PASSES_PER_SEC as u64;
+
 /// `CWarMap::STeamData` (`G/war_map.h:114-133`): one side of a war.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct WarTeam {
@@ -156,6 +169,22 @@ pub(super) struct WarMap {
     pub observers: i32,
     /// `m_set_pkChr`: the players on the map.
     pub present: HashSet<Vid>,
+    /// `m_bEnded`: the war is over and the map is closing.
+    pub ended: bool,
+    /// Whether the map has already sent its players out (`war_end_event`,
+    /// `G/war_map.cpp:44-68`): the event's first step runs once.
+    pub exited: bool,
+    /// The Pulse at which the map sends its players out (`war_end_event`,
+    /// `G/war_map.cpp:44-68`): ten seconds after the war ended.
+    pub exit_pulse: Option<u64>,
+    /// The Pulse at which the map is destroyed (`CWarMap::SetEnded`,
+    /// `G/war_map.cpp:739-779`): the war's end event runs ten seconds later and sends
+    /// the players out, and the map goes five seconds after that.
+    pub destroy_pulse: Option<u64>,
+    /// The place each member came from (`SaveExitLocation`, `G/char.cpp:6679-6683`):
+    /// the map's end sends its members back there (`ExitToSavedLocation`,
+    /// `G/char.cpp:6687-6692`).
+    pub exits: HashMap<Vid, ExitLocation>,
 }
 
 impl WarMap {
@@ -188,6 +217,11 @@ impl WarMap {
             teams,
             observers: 0,
             present: HashSet::new(),
+            ended: false,
+            exited: false,
+            exit_pulse: None,
+            destroy_pulse: None,
+            exits: HashMap::new(),
         }
     }
 
@@ -244,6 +278,42 @@ impl WarMap {
             self.teams[1].joiners.len(),
             self.observers,
         )
+    }
+
+    /// `CWarMap::SetEnded` (`G/war_map.cpp:739-779`): the war is over, so the map closes.
+    ///
+    /// Legacy destroys the flag mobs, cancels the flag reset and then waits: the war's
+    /// end event runs ten seconds later and sends the players out, and the map goes five
+    /// seconds after that. The Rewrite has no flag war, so the first two steps have
+    /// nothing to do; the wait is the same.
+    ///
+    /// A map that is already closing is not closed twice.
+    pub(super) fn end(&mut self, pulse: u64) {
+        if self.ended {
+            return;
+        }
+        self.ended = true;
+        self.exit_pulse = Some(pulse + WAR_MAP_EXIT_DELAY);
+        self.destroy_pulse = Some(pulse + WAR_MAP_END_DELAY);
+    }
+
+    /// Whether the map is due to send its players out (`war_end_event`,
+    /// `G/war_map.cpp:44-68`): the event's first step, ten seconds after the war ended.
+    /// The event's step runs once.
+    pub(super) fn exit_due(&self, pulse: u64) -> bool {
+        !self.exited && self.exit_pulse.is_some_and(|due| due <= pulse)
+    }
+
+    /// The map has sent its players out (`war_end_event`, `G/war_map.cpp:57-60`): the
+    /// event's first step, which runs once.
+    pub(super) fn mark_exited(&mut self) {
+        self.exited = true;
+    }
+
+    /// Whether the map is due to be destroyed (`war_end_event`, `G/war_map.cpp:44-68`):
+    /// the event's second step, five seconds after it sent the players out.
+    pub(super) fn destroy_due(&self, pulse: u64) -> bool {
+        self.destroy_pulse.is_some_and(|due| due <= pulse)
     }
 }
 

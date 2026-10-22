@@ -2651,6 +2651,7 @@ impl PulseProcessor for GameState {
         self.run_regens(pulse);
         self.step_motion(pulse);
         self.run_guild_ticks(pulse);
+        self.run_war_map_ticks(pulse);
         self.run_party_ticks(pulse);
         self.run_minds(pulse);
         self.broadcast_targets();
