@@ -34465,3 +34465,150 @@ lib 1229, the world lib 542; parity 131/131); this slice's seven new unit tests 
 and its parity scenario green 1/1; no scratch database left.
 
 No ADR changed. No owner question added. V24 is taken.
+
+## 244. The quest flags live in the store, and the war's member survives the warp (`sys.quest.runtime`, `sys.guild.war`, ninth part)
+
+A quest's flags were the one thing the quest runtime kept that no other system could see:
+they lived in memory while the character was logged in and ended with it (ledger 227.3's
+Divergence, and ADR-0006's promise that the table would land with the first system that
+needed it). The war's member rule needs one of them. That Divergence is retired by this
+section: the flags live in the store with the character.
+
+**The flag.** `CGuild::GuildWarEntryAccept` (`G/guild_war.cpp:639-678`) sets
+`war.is_war_member` on the member (`pPC->SetFlag("war.is_war_member", 1)`, `:674`) and then
+warps the member to the war's map (`:677`). The war's map reads the flag when the member
+lands (`CWarMap::IncMember`, `G/war_map.cpp:342-398`): a player that carries it joins the
+team of its guild, and a player that does not watches the war.
+
+The war's map stands on another Channel (ledger 236), so that warp is a reconnect: the
+member leaves the world, comes back on the war's Channel and lands on the map. The flag was
+lost in that gap, so the member watched the war it had come to fight.
+
+**The store.** Legacy's quest flags are the quest manager's own per-character record
+(`quest::PC`, `G/questpc.h:98-149`): a map from a name to a value. `SetFlag` with the value
+zero deletes the flag (`G/questpc.cpp:52-90`), `Save` writes the flags that changed with the
+character (`G/questpc.cpp:519-590`, called by `CHARACTER::Save`, `G/char.cpp:1670-1678`),
+and the load reads them back with the character (`CInputDB::QuestLoad`,
+`G/input_db.cpp:1079-1101`). A flag therefore outlives the session that set it.
+
+The Rewrite's `quest_flag` table (`db/migrations/0016_quest_flag.sql`) is that record's
+home: one row per flag, the whole name in one column and the value beside it, with the
+value never zero. `db/src/quest_flags.rs` reads them in name order and writes a character's
+whole set in one transaction: the player's rows are deleted and the flags are inserted, so
+a save is the old set or the new one and never a mix.
+
+**The world.** `quest::Manager::load_flags` sets the stored flags on the character's record
+and rebuilds its quest list from the flags that end in `.__status` (`quest::PC::Build`,
+`G/questpc.cpp:664-679`), so a quest that ran in an earlier session continues where it left
+it. `quest::Manager::flags_of` gives the flags a save writes, in name order and without the
+zeros.
+
+The admission loads them (`GameState::shown_on_admit`, under the player id the enter
+carries), the leave takes them (`GameState::leave_world_by`, into `Kept::quest_flags`), and
+the periodic save asks the world for them (`GameState::answer_kept`). The descriptor reads
+them at the select (`load_select_rows`) and writes them with the character (`save_held`),
+after the row and the quickslots, as legacy writes them after the row.
+
+**The member rule.** `CWarMap::IncMember` (`G/war_map.cpp:353-359`) reads the flag and
+clears it only when the player's guild is neither of the two sides: the guild is no longer
+in the war, so the player is not one of its members. The timeout the map asked for is
+cancelled only by a member (`event_cancel(&m_pkTimeoutEvent)`, `:374`). `CWarMap::DecMember`
+(`:438`) clears the flag of a member that leaves the map, and it runs before the character
+is written (`G/char.cpp:1763,1786`), so the flags a save carries are the ones the map
+left.
+
+**The zero flag.** `quest::Manager::set_quest_flag` with the value zero now deletes the
+flag, as legacy's `SetFlag` does (`G/questpc.cpp:59-63`). The guild's change of master
+clears two flags that way (`G/questlua_guild.cpp:411-412,417`), and a flag that was
+cleared reads as absent and is not written. A flag that is not there is not deleted and
+makes no record, as legacy's `DeleteFlag` does nothing for a flag it does not hold
+(`G/questpc.cpp:78-90`).
+
+**The kill event.** Legacy's quest load answers even a character with no flags: the store
+sends the quest load with a count of zero (`RESULT_QUEST_LOAD`,
+`server/server/db/ClientManagerPlayer.cpp:1019-1025`) and the game makes the record and
+marks it loaded (`CInputDB::QuestLoad`, `G/input_db.cpp:1079-1101`). So every character
+that is logged in has a quest record, and the events reach it.
+
+The kill event is the one that shows it. `CQuestManager::Kill` (`G/questmanager.cpp:574-611`)
+runs the no-target quests' `kill` scripts for the killer, and the only one is
+`napierdalator` (`object/notarget/kill/napierdalator.start`): a character that has no
+state for the quest is a miss, the quest has a start state and no `begin_condition`, so it
+starts (`NPC::HandleReceiveAllEvent`, `G/questnpc.cpp:482-530`) and its script runs. The
+script's only effect is a global rank point (`pc.global_rank_add_point`, the global rank
+board, which the Rewrite does not have), and the client sees nothing of it: the script
+ends with a bare `[DONE]`, which `SendScript` (`G/questmanager.cpp:1122-1130`) swallows,
+because nobody answered and the skin is the normal one.
+
+The Rewrite's record now exists for every character, so the quest runtime ran that script
+on every kill. Its APIs are not ported, and a refusal ended the script the way a script
+error does: with the bare `[DONE]` the client closes a window with, which the legacy never
+sends. **A refusal now ends the script as a script that says nothing ends**: the bare
+`[DONE]` is swallowed, and the client sees nothing, as it does in legacy. A script error
+still ends the script the legacy's error did.
+
+**The tests.** Six unit tests:
+
+- `quest/src/manager.rs`: `a_flag_whose_value_is_zero_is_deleted` — a flag set to zero is
+  gone, not a flag of the value zero, and a save does not write it.
+- `quest/src/manager.rs`: `the_stored_flags_come_back_with_the_character` — the stored
+  flags are the character's, and the quest's state is rebuilt from the flag that names it.
+- `quest/src/manager.rs`: `a_kill_runs_the_no_target_quest_and_the_client_sees_nothing` —
+  the kill runs the no-target quest, and its refusal ends the script silently, so the
+  client sees nothing.
+- `prodomo/src/game_state.rs`: `the_world_holds_the_quest_flags_the_load_read` — the flags
+  the load read are the world's, and the ones the world holds are the ones a save writes,
+  even though the quest record goes when the character leaves.
+- `prodomo/src/game_state/guild.rs`: `a_player_whose_guild_is_neither_side_watches_the_war_and_loses_the_flag`
+  — a player whose guild is not in the war watches it and loses the flag, and a watcher
+  does not call off the timeout the map asked for.
+- `prodomo/src/game_state/guild.rs`: `a_member_that_leaves_the_wars_map_loses_the_flag_in_the_save`
+  — the flags a leave carries do not hold the flag the war's map cleared.
+
+**The parity scenarios.** `the_flag_war_stands_its_flags_up_and_the_member_sees_them`,
+`the_wars_map_goes_with_the_war_and_its_member_comes_back` and
+`a_war_without_a_side_ends_when_the_map_times_out` now say what the member does after the
+warp: the map tells the world that the member joined its team (`WarUC 1 1 2 0 0` and
+`ObserverCount 0`), where it used to say that it watched the war. The war's member rule is
+on the wire, and the flag that carries it survives the reconnect.
+
+`a_removed_member_keeps_the_withdraw_time_across_a_relog` proves the other half: a member
+that is removed from a guild carries the guild's withdraw time as a flag
+(`G/input_main.cpp:2930`), the flag is written with the character and read back with it,
+and the master that invites the member again hears the penalty line
+(`VerifyGuildJoinableCondition`, `G/guild.cpp:2165-2170`).
+
+**The divergences.**
+
+- The whole set is written at once. Legacy writes the flags that changed
+  (`quest::PC::m_FlagSaveMap`, `G/questpc.cpp:519-590`), one row per flag, and deletes the
+  row of a flag that was cleared. The Rewrite's save is one transaction that replaces the
+  character's rows with the flags the world holds, which is the same set when the world
+  holds them all — and it does, because the admission loads the stored flags into the
+  character's record.
+- The whole name is one column. Legacy splits it at the first dot into the quest's name
+  and the flag's state (`G/questpc.cpp:545-560`) and joins them again on the load
+  (`G/input_db.cpp:1089-1094`). The split is a property of its table, not of the flag.
+- `Loading quest. Please wait a moment.` is never said: the flags come with the character
+  instead of after it, so no quest ever waits for them. The event flags stay in memory
+  (ADR-0006).
+- A call of an API the Rewrite does not back ends the script silently, where a script error
+  ends it with the bare `[DONE]` the client closes a window with
+  (`G/questmanager.cpp:1122-1130`). The legacy has no such call: its API worked, and its
+  script carried on to an end the client saw nothing of, so the refusal sends nothing
+  either. The global rank points the no-target kill quest counts are not kept, as the
+  global rank board is not ported. ADR-0006's sentence about the refusal is amended by this
+  section: the refusal still raises the error, and the script still ends, but the end is the
+  silent one.
+
+**The inventory.** `sys.quest.runtime` and `sys.guild.war` keep their rows and gain the
+notes of this section; `sys.guild.war` stays `partial`, because the flag's take and the
+base's score are still proved by unit tests alone.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; doc green with
+`-D warnings`; doc-tests green (9 targets; 1 passed, 19 ignored); the full workspace
+all-targets DB run green on all 39 targets, the 132 parity scenarios among them; this
+slice's unit tests green; no scratch database left.
+
+ADR-0006's sentence about the refusal is amended above, and its "Quest records" bullet
+already names this section. No owner question added. V25 is taken.

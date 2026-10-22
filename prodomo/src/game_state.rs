@@ -1080,7 +1080,7 @@ impl GameState {
         reply: tokio::sync::oneshot::Sender<Result<Shown, EnterWorldRefused>>,
     ) {
         let answer = self.enter_world_with_items(vid, player_id, name, items, outbox);
-        let answer = answer.map(|()| self.shown_on_admit(vid, name, loaded));
+        let answer = answer.map(|()| self.shown_on_admit(vid, player_id, name, loaded));
         if reply.send(answer).is_err() {
             debug!(
                 ?vid,
@@ -1136,7 +1136,8 @@ impl GameState {
     }
 
     /// Tell the caller what a save of the character under `vid` writes: its points, its
-    /// quickslots and where its body stands, or `None` when it is not online.
+    /// quickslots, its quest flags and where its body stands, or `None` when it is not
+    /// online.
     fn answer_kept(&self, vid: common::vid::Vid, reply: oneshot::Sender<Option<Kept>>) {
         let place = self.kept_place(vid);
         let kept = self.characters.find_by_vid(vid).ok().map(|character| Kept {
@@ -1144,10 +1145,19 @@ impl GameState {
             quickslots: character.quickslots().clone(),
             place,
             alignment: self.real_alignment_of(vid.raw()),
+            quest_flags: self.quest_flags_of(character.player_id()),
         });
         if reply.send(kept).is_err() {
             debug!(?vid, "nobody was left to hear a character's points");
         }
+    }
+
+    /// The quest flags of the character under `player_id` (`quest::PC::Save`,
+    /// `G/questpc.cpp:519-590`): the flags a save writes with the character.
+    fn quest_flags_of(&self, player_id: u32) -> Vec<(Vec<u8>, i32)> {
+        self.quests()
+            .map(|quests| quests.manager().flags_of(player_id))
+            .unwrap_or_default()
     }
     /// Run the `/skillup` line and answer with what climbed, or nothing when a
     /// gate refused.
@@ -1316,11 +1326,26 @@ impl GameState {
     /// The answer to an admitted character: its load's points, quickslots and gold are set on it,
     /// then its body is placed and, when the load showed it, the revive-invisible affect starts.
     /// The placement's records come first, and the update that starts the affect after them.
-    fn shown_on_admit(&mut self, vid: common::vid::Vid, name: &str, loaded: Box<Loaded>) -> Shown {
+    fn shown_on_admit(
+        &mut self,
+        vid: common::vid::Vid,
+        player_id: u32,
+        name: &str,
+        loaded: Box<Loaded>,
+    ) -> Shown {
         if let Some(character) = self.characters.find_player_mut(name) {
             character.set_points(loaded.points);
             character.set_quickslots(loaded.quickslots);
             character.set_gold(loaded.gold);
+        }
+        // `CInputDB::QuestLoad` (`G/input_db.cpp:1079-1101`): the character's quest flags
+        // are set on its quest record when it enters, so a quest that ran in an earlier
+        // session is where it left it. The record is the one the quest manager holds for
+        // the player's id, as legacy's `GetPCForce` gets it.
+        if let Some(quests) = self.quests.as_mut() {
+            quests
+                .manager_mut()
+                .load_flags(player_id, loaded.quest_flags);
         }
         if !loaded.skills.is_empty() {
             let state = self.pc_skills.entry(vid.raw()).or_default();
@@ -1446,13 +1471,25 @@ impl GameState {
         let _event = self.affect_events.remove(&vid);
         self.stop_browsing(vid);
         self.close_storage(vid);
+        // `CWarMap::DecMember` (`G/war_map.cpp:400-451`): a player that leaves a war map
+        // leaves its team, or the watchers. It clears the war member's flag
+        // (`ch->SetQuestFlag("war.is_war_member", 0)`, `G/war_map.cpp:438`), and it runs
+        // before the character is written (`G/char.cpp:1763,1786`), so the flag is taken
+        // after it: a member that left the map is no member of the war.
+        let war_map = self.bodies.get(&vid).map_or(0, |body| body.map);
+        self.leave_war_map(vid, war_map);
+        // The quest flags are taken before the quest record goes: `CHARACTER::Disconnect`
+        // writes the character, and with it the quest flags (`G/char.cpp:1673-1679`),
+        // before it erases the quest record (`CQuestManager::DisconnectPC`,
+        // `G/char.cpp:1800`).
+        let quest_flags = self
+            .characters
+            .find_by_vid(vid)
+            .map(|character| self.quest_flags_of(character.player_id()))
+            .unwrap_or_default();
         self.end_quests(vid);
         self.forget_portal_times(vid);
         let alignment = self.real_alignment_of(vid.raw());
-        // `CWarMap::DecMember` (`G/war_map.cpp:400-451`): a player that leaves a war map
-        // leaves its team, or the watchers.
-        let war_map = self.bodies.get(&vid).map_or(0, |body| body.map);
-        self.leave_war_map(vid, war_map);
         let place = self.remove_body(vid);
         let character = self.characters.find_by_vid(vid).ok()?;
         let kept = Kept {
@@ -1460,6 +1497,7 @@ impl GameState {
             quickslots: character.quickslots().clone(),
             place,
             alignment,
+            quest_flags,
         };
         self.characters.destroy(vid).ok()?;
         Some(kept)
@@ -4921,6 +4959,7 @@ mod tests {
                 gold: 1_200_000_000_000_000_000 - 1,
                 show: None,
                 skills: Vec::new(),
+                quest_flags: Vec::new(),
             }),
             outbox,
             reply,
@@ -4934,6 +4973,62 @@ mod tests {
         assert_eq!(character.gold(), 1_200_000_000_000_000_000 - 1);
         let swapped = slot_answer(&mut state, QuickslotStep::Swap { slot: 6, with: 0 });
         assert_eq!(swapped.quickslots.get(0), Some(skill));
+    }
+
+    /// `CInputDB::QuestLoad` (`G/input_db.cpp:1079-1101`) and `quest::PC::Save`
+    /// (`G/questpc.cpp:520-588`): the quest flags the load read are the character's, and
+    /// the ones the world holds are the ones a save writes.
+    #[test]
+    fn the_world_holds_the_quest_flags_the_load_read() {
+        use quest::manager::Manager;
+
+        use crate::game_state::quests::Quests;
+        let mut state = a_state();
+        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe");
+        let manager = Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
+        state.quests = Some(Quests::new(
+            manager,
+            std::sync::Arc::default(),
+            gamedata::mob_locale_names::MobNamesByLanguage::default(),
+        ));
+        let (outbox, _inbox) = a_live_outbox();
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        state.apply(GameCommand::EnterWorld {
+            vid: Vid::new(7),
+            player_id: 7,
+            name: "Shaman".to_string(),
+            items: Vec::new(),
+            loaded: Box::new(crate::game_loop_messages::Loaded {
+                points: None,
+                quickslots: world::character::Quickslots::default(),
+                gold: 0,
+                show: None,
+                skills: Vec::new(),
+                quest_flags: vec![(b"guild_manage.new_withdraw_time".to_vec(), 1_700_000_000)],
+            }),
+            outbox,
+            reply,
+        });
+        assert!(answer.blocking_recv().unwrap().is_ok());
+        // The character holds the flag the load read.
+        let quests = state.quests().expect("the quests are loaded");
+        assert_eq!(
+            quests
+                .manager()
+                .quest_flag(7, b"guild_manage.new_withdraw_time"),
+            Some(1_700_000_000)
+        );
+        // The save writes the flags the world holds, even though the quest record goes
+        // when the character leaves (`CHARACTER::Disconnect` saves the character before
+        // it erases the quest record, `G/char.cpp:1673-1679,1800`).
+        let kept = state
+            .leave_world(Vid::new(7))
+            .expect("the character leaves");
+        assert_eq!(
+            kept.quest_flags,
+            vec![(b"guild_manage.new_withdraw_time".to_vec(), 1_700_000_000)]
+        );
     }
 
     fn an_npc_map(index: i32) -> MapRegion {

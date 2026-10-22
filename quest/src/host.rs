@@ -750,11 +750,15 @@ fn register_api(lua: &Lua, locale_dir: &Path) -> mlua::Result<()> {
     Ok(())
 }
 
-/// A function whose system the Rewrite has not ported: calling it ends the script with an
-/// error, as any legacy script error does.
+/// The prefix of a refusal: the call of an API the Rewrite does not back. The manager reads
+/// it to tell a refusal from a script error (`is_refusal`, `quest/src/manager.rs`).
+pub const NOT_PORTED: &str = "not ported: ";
+
+/// A function whose system the Rewrite has not ported: calling it ends the script, as a
+/// script that says nothing ends.
 fn not_ported(lua: &Lua, name: &'static str) -> mlua::Result<Function> {
     lua.create_function(move |_, _: MultiValue| -> mlua::Result<()> {
-        Err(mlua::Error::runtime(format!("not ported: {name}")))
+        Err(mlua::Error::runtime(format!("{NOT_PORTED}{name}")))
     })
 }
 

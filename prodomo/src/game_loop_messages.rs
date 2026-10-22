@@ -1463,6 +1463,12 @@ pub struct Loaded {
     /// The nonzero skill slots the load read (`player_skill`), which the world
     /// holds as the character's levels from the admission on.
     pub skills: Vec<db::player_skills::StoredSkill>,
+    /// The quest flags the load read (`quest_flag`), which the world holds as the
+    /// character's quest record from the admission on. Legacy reads them with the
+    /// character (`CInputDB::QuestLoad`, `G/input_db.cpp:1079-1101`) and writes them with
+    /// it (`quest::PC::Save`, `G/questpc.cpp:519-590`), so a flag outlives the session
+    /// that set it.
+    pub quest_flags: Vec<(Vec<u8>, i32)>,
 }
 
 /// What the world holds of a character that a save writes: asked for before a save, and
@@ -1480,6 +1486,9 @@ pub struct Kept {
     /// The alignment the world holds, which a save writes. Legacy's `SaveReal` writes the
     /// real alignment (`G/char.cpp:1546`), and the kills raise it.
     pub alignment: i32,
+    /// The quest flags the world holds, which a save writes: legacy's `quest::PC` writes
+    /// them with the character (`G/char.cpp:1670-1678`).
+    pub quest_flags: Vec<(Vec<u8>, i32)>,
 }
 
 /// Why installing the item id allocator did not succeed.

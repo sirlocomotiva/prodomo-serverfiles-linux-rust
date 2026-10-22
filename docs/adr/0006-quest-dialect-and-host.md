@@ -76,14 +76,12 @@ on it (`expecting 'when' or 'function'`, line 139). It is not in `quest_list` an
   the game through one function that lives only for the current script run (`Lua::scope`), so
   the API borrows the game state without `unsafe` or `'static` data. `q.yield` is
   `coroutine.yield`, and a name whose system is not ported raises a "not ported" error, which
-  ends the script as any legacy script error does.
+  ends the script as a script that says nothing ends: the client sees no `[DONE]`, where a
+  script error sends one (ledger 244).
 - **Quest records**: a character's quest flags (`quest.flag` values, `__status` for the state)
-  live in memory while the character is logged in and end with it (`DisconnectPC`). No ported
-  API writes one: `set_state`, `q.setstate`, `pc.setqf` and the rest are "not ported", so no
-  script can change a state that a later login would see. Legacy's `quest` table, loaded with
-  the character and saved with it, lands as a new table with the first of them, and until then
-  the lost flags are a recorded Divergence with a STATUS row. Event flags stay in memory, as
-  they are until an event system is ported.
+  live in the store with the character, in the `quest_flag` table, and are loaded with it and
+  saved with it (ledger 244). A flag whose value is zero is no flag: it is deleted, as legacy's
+  `SetFlag` does. The event flags stay in memory, as they are until an event system is ported.
 
 ## Considered options
 

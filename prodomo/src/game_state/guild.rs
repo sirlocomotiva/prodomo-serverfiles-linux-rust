@@ -3263,9 +3263,9 @@ impl GameState {
     /// joins the team of its guild when it carries the war member's flag, and watches
     /// the war otherwise.
     pub(super) fn join_war_map(&mut self, vid: Vid, map: i32) {
-        if !self.war_maps.contains_key(&map) {
+        let Some(war) = self.war_maps.get(&map) else {
             return;
-        }
+        };
         let Ok(character) = self.characters.find_by_vid(vid) else {
             return;
         };
@@ -3278,9 +3278,12 @@ impl GameState {
             .as_ref()
             .and_then(|quests| quests.manager().quest_flag(pid, b"war.is_war_member"))
             .unwrap_or(0);
-        // `IncMember` clears the flag it read (`G/war_map.cpp:357`): the entry's flag
-        // is consumed by the join.
-        if flag > 0 {
+        // `IncMember` (`G/war_map.cpp:355-359`): the flag makes the player a member of the
+        // war, but only a player whose guild is one of the two sides is a member of it. A
+        // player whose guild is neither watches the war, and the flag is cleared: the
+        // guild is no longer in the war, so the player is not one of its members.
+        let member = flag > 0 && war.team_of(guild).is_some();
+        if flag > 0 && !member {
             if let Some(quests) = self.quests.as_mut() {
                 quests
                     .manager_mut()
@@ -3289,7 +3292,7 @@ impl GameState {
         }
         if let Some(war) = self.war_maps.get_mut(&map) {
             war.inc_member(vid, pid, guild, flag > 0);
-            if flag > 0 {
+            if member {
                 // `IncMember` cancels the timeout the map asked for
                 // (`event_cancel(&m_pkTimeoutEvent)`, `G/war_map.cpp:374`): a member
                 // that came ends the wait for the side that never came.
@@ -7021,6 +7024,7 @@ mod tests {
     use super::*;
     use crate::client_registry::{ChannelClients, ClientEntry, Lease};
     use crate::game_loop::PulseProcessor;
+    use crate::game_loop_messages::Departure;
     use gamedata::map_atlas::{MapAtlas, MapRegion};
     use gamedata::mob_locale_names::MobNamesByLanguage;
     use quest::manager::Manager;
@@ -7039,6 +7043,10 @@ mod tests {
     const FAR: (i32, i32) = (9000, 9000);
 
     const GUILD_ID: u32 = 7;
+
+    /// A player that is in no guild at all, so the war's member rule has a player whose
+    /// guild is neither of the two sides.
+    const STRANGER_VID: u32 = 300;
 
     /// `get_global_time()` in seconds, past every penalty: the quest flags default to 0,
     /// so `NOW - 0` clears the one-day withdraw and disband delays.
@@ -8316,13 +8324,16 @@ mod tests {
                 .manager()
                 .quest_flag(pid, name)
         };
+        // The two flags the new master had are cleared (`SetQuestFlag(name, 0)`,
+        // `G/questlua_guild.cpp:411-412`), and a flag whose value is zero is no flag at
+        // all (`quest::PC::DeleteFlag`, `G/questpc.cpp:78-90`).
         assert_eq!(
             flags(GUEST_VID, b"change_guild_master.be_other_leader"),
-            Some(0)
+            None
         );
         assert_eq!(
             flags(GUEST_VID, b"change_guild_master.be_other_member"),
-            Some(0)
+            None
         );
         assert_eq!(
             flags(GUEST_VID, b"change_guild_master.resign_limit"),
@@ -8336,10 +8347,9 @@ mod tests {
             flags(MASTER_VID, b"change_guild_master.be_other_member"),
             Some(300)
         );
-        assert_eq!(
-            flags(MASTER_VID, b"change_guild_master.resign_limit"),
-            Some(0)
-        );
+        // The master's own resign limit is cleared (`SetQuestFlag(name, 0)`,
+        // `G/questlua_guild.cpp:417`), so it is no flag at all.
+        assert_eq!(flags(MASTER_VID, b"change_guild_master.resign_limit"), None);
     }
 
     #[test]
@@ -10364,6 +10374,85 @@ mod tests {
                 .timeout_pulse
                 .is_some(),
             "the map asked for the timeout"
+        );
+    }
+
+    /// `CWarMap::IncMember` (`G/war_map.cpp:353-359`): the war member's flag makes a
+    /// player a member of the war, but only a player whose guild is one of the two
+    /// sides is a member of it. A player whose guild is neither watches the war, and the
+    /// flag is cleared: the guild is no longer in the war.
+    #[test]
+    fn a_player_whose_guild_is_neither_side_watches_the_war_and_loses_the_flag() {
+        let (mut world, mut orders, _lease, mut master) = a_war_on_with_quests(" 1");
+        the_master_on_the_wars_map(&mut world, &mut orders);
+        let _ = heard(&mut master);
+        // The other side has no member on the map, so the map says so and asks for a
+        // timeout.
+        world.run_war_map_ticks(1_500);
+        let _ = heard(&mut master);
+        // A player of a guild that is not in the war carries the flag the war entry
+        // set.
+        let _stranger = enter(&mut world, STRANGER_VID, FAR, 0);
+        world
+            .quests
+            .as_mut()
+            .expect("quests")
+            .manager_mut()
+            .set_quest_flag(STRANGER_VID, b"war.is_war_member", 1);
+        world.join_war_map(Vid::new(STRANGER_VID), 1_100_000);
+        let war = world.war_maps.get(&1_100_000).expect("the war's map");
+        assert_eq!(
+            war.teams[0].members, 1,
+            "the master's team holds one member"
+        );
+        assert_eq!(war.teams[1].members, 0, "the other guild has no member");
+        assert!(
+            war.watchers.contains(&STRANGER_VID),
+            "the player of a guild that is not in the war watches it"
+        );
+        assert_eq!(
+            world
+                .quests
+                .as_ref()
+                .expect("quests")
+                .manager()
+                .quest_flag(STRANGER_VID, b"war.is_war_member"),
+            None,
+            "the flag is cleared: the guild is not in the war"
+        );
+        assert!(
+            war.timeout_pulse.is_some(),
+            "a watcher does not cancel the timeout the map asked for"
+        );
+    }
+
+    /// `CWarMap::DecMember` (`G/war_map.cpp:438`) clears the war member's flag, and it
+    /// runs before the character is written (`G/char.cpp:1763,1786`): a member that left
+    /// the war's map is no member of the war, so the flags a save writes do not carry it.
+    #[test]
+    fn a_member_that_leaves_the_wars_map_loses_the_flag_in_the_save() {
+        let (mut world, mut orders, _lease, mut master) = a_war_on_with_quests(" 1");
+        the_master_on_the_wars_map(&mut world, &mut orders);
+        let _ = heard(&mut master);
+        assert_eq!(
+            world
+                .quests
+                .as_ref()
+                .expect("quests")
+                .manager()
+                .quest_flag(MASTER_VID, b"war.is_war_member"),
+            Some(1),
+            "the member carries the flag the war entry set"
+        );
+        let kept = world
+            .leave_world_by(Vid::new(MASTER_VID), Departure::Disconnect)
+            .expect("the member leaves");
+        assert!(
+            kept.quest_flags
+                .iter()
+                .all(|(name, _)| name != b"war.is_war_member"),
+            "the flag the war map cleared is not in the save: {:?}",
+            kept.quest_flags
         );
     }
 

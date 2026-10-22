@@ -12,6 +12,7 @@ pub mod item_id_range;
 pub mod items;
 pub mod player_skills;
 pub mod players;
+pub mod quest_flags;
 pub mod quickslots;
 pub mod safebox;
 pub mod store;

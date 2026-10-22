@@ -356,6 +356,9 @@ struct Held {
     /// The nonzero skill slots the load read (`player_skill`), which the world
     /// holds as the character's levels from the admission on.
     skills: Vec<db::player_skills::StoredSkill>,
+    /// The quest flags the load read (`quest_flag`), which the world holds as the
+    /// character's quest record from the admission on, and which the save writes back.
+    quest_flags: Vec<(Vec<u8>, i32)>,
     /// The channel the client logged in through, which is `g_bChannel` on the descriptor.
     ///
     /// It is held from the Channel login rather than read from the listener, because a
@@ -939,7 +942,7 @@ fn hold_points(held: &mut Held, points: world::character::Points) {
     held.points = Some(points);
 }
 
-/// Hold the points, quickslots and place the world holds for a character.
+/// Hold the points, quickslots, quest flags and place the world holds for a character.
 fn hold_kept(held: &mut Held, kept: Kept) {
     if let Some(points) = kept.points {
         hold_points(held, points);
@@ -948,6 +951,7 @@ fn hold_kept(held: &mut Held, kept: Kept) {
         held_character.alignment = kept.alignment;
     }
     held.quickslots = kept.quickslots;
+    held.quest_flags = kept.quest_flags;
     if let (Some((map, x, y)), Some(avatar)) = (kept.place, held.avatar.as_mut()) {
         avatar.map = map;
         avatar.x = x;
@@ -4724,13 +4728,14 @@ where
     let mut burst = loading_burst(&character, &points, vid, &view);
     // `PlayerLoad` sets each stored quickslot right after the map test and before the points
     // packet (`G/input_db.cpp:439-440`), and `TPlayerTable::skills` rides the player row.
-    let Some((quickslots, skills)) =
+    let Some((quickslots, skills, quest_flags)) =
         load_select_rows(&context.store, addr, player, &mut burst).await
     else {
         return false;
     };
     held.quickslots = quickslots;
     held.skills = skills;
+    held.quest_flags = quest_flags;
     held.character = Some(character.clone());
     held.channel = seat.number;
     // `SetPlayerProto`'s GM level (`G/input_db.cpp:1931-1955`): the character's own
@@ -4928,6 +4933,7 @@ async fn load_select_rows(
 ) -> Option<(
     world::character::Quickslots,
     Vec<db::player_skills::StoredSkill>,
+    Vec<(Vec<u8>, i32)>,
 )> {
     let stored = match db::quickslots::load_quickslots(store, player).await {
         Ok(stored) => stored,
@@ -4946,7 +4952,23 @@ async fn load_select_rows(
         }
     };
     prodomo::loading_phase::fill_skill_levels(burst, &skills);
-    Some((quickslots, skills))
+    // `CInputDB::QuestLoad` (`G/input_db.cpp:1079-1101`): the character's quest flags,
+    // which the world holds as its quest record from the admission on.
+    let flags = match db::quest_flags::load_flags(store, player).await {
+        Ok(flags) => flags,
+        Err(error) => {
+            warn!(%addr, player, %error, "Quest flag load failed; closing");
+            return None;
+        }
+    };
+    let quest_flags: Vec<(Vec<u8>, i32)> = flags
+        .into_iter()
+        .map(|flag| (flag.name, flag.value))
+        .collect();
+    if !quest_flags.is_empty() {
+        info!(%addr, player, flags = quest_flags.len(), "quest flags loaded");
+    }
+    Some((quickslots, skills, quest_flags))
 }
 
 /// The item load at character select, the way `CInputDB::ItemLoad` places a character's
@@ -5316,6 +5338,7 @@ fn loaded_state(
             .map_or(0, |character| u64::try_from(character.gold).unwrap_or(0)),
         show,
         skills: held.skills.clone(),
+        quest_flags: held.quest_flags.clone(),
     }
 }
 
@@ -5465,13 +5488,29 @@ async fn save_held(context: &ConnectionContext, held: &Held, at: std::time::Inst
         // are their own table, written after the row.
         Ok(true) => {
             let slots = prodomo::quickslot::stored(&held.quickslots);
-            match db::quickslots::save_quickslots(&context.store, character.id, &slots).await {
-                Ok(()) => true,
-                Err(error) => {
-                    warn!(player = character.id, %error, "Could not save the quickslots");
-                    false
-                }
+            if let Err(error) =
+                db::quickslots::save_quickslots(&context.store, character.id, &slots).await
+            {
+                warn!(player = character.id, %error, "Could not save the quickslots");
+                return false;
             }
+            // `CHARACTER::Save` writes the quest flags after the player row
+            // (`G/char.cpp:1673-1679`, `quest::PC::Save`, `G/questpc.cpp:520-588`).
+            let flags: Vec<db::quest_flags::StoredQuestFlag> = held
+                .quest_flags
+                .iter()
+                .map(|(name, value)| db::quest_flags::StoredQuestFlag {
+                    name: name.clone(),
+                    value: *value,
+                })
+                .collect();
+            if let Err(error) =
+                db::quest_flags::save_flags(&context.store, character.id, &flags).await
+            {
+                warn!(player = character.id, %error, "Could not save the quest flags");
+                return false;
+            }
+            true
         }
         Ok(false) => {
             warn!(
@@ -8666,6 +8705,7 @@ mod tests {
                 quickslots: world::character::Quickslots::default(),
                 place: None,
                 alignment: -250,
+                quest_flags: Vec::new(),
             },
         );
         assert_eq!(

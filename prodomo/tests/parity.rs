@@ -13275,6 +13275,109 @@ fn a_guild_invites_accepts_and_removes() {
     assert_eq!(members[0][0], 1, "the joiner's row is gone");
 }
 
+/// `sys.guild.core`, `sys.quest.runtime`, `cg.guild.remove`, `cg.guild.add`: a member
+/// that is removed from a guild carries the guild's withdraw time as a quest flag
+/// (`G/input_main.cpp:2930`), and a flag is written with the character
+/// (`quest::PC::Save`, `G/questpc.cpp:520-588`) and read back with it
+/// (`CInputDB::QuestLoad`, `G/input_db.cpp:1079-1101`). So a member that is removed,
+/// logs out and comes back cannot be invited into a guild for the withdraw delay
+/// (`VerifyGuildJoinableCondition`, `G/guild.cpp:2165-2170`): the inviter hears the
+/// penalty line (`G/guild.cpp:2066-2069`).
+#[test]
+fn a_removed_member_keeps_the_withdraw_time_across_a_relog() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+          154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    give_guild_purse(&database);
+    let (mut alice, _alpha, _alice_entered) = enter_world_seeing(&server, b"alice", 0);
+    let (mut yankee, yankee_listed, _) = enter_world_seeing(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, true, None);
+    let yankee_vid = yankee_listed.id;
+    let yankee_player = {
+        let rows = support::rows(
+            database.url(),
+            "SELECT id FROM player WHERE name = 'Yankee'",
+            1,
+        );
+        u32::try_from(rows[0][0]).unwrap()
+    };
+    // Alpha founds the guild and Yankee joins it.
+    alice.send_record(&client_answer_make_guild(b"MyGuild"));
+    let named = alice.read_game();
+    let id = check_guild_named(&named);
+    for _ in 0..8 {
+        alice.read_game();
+    }
+    assert_eq!(yankee.read_game(), named, "the other PC hears the name");
+    alice.quiet("the creation settled");
+    yankee.quiet("the creation settled");
+    alice.send_record(&client_guild_add_member(yankee_vid));
+    alice.quiet("the inviter hears nothing");
+    let invited = yankee.read_game();
+    assert_eq!(guild_subheader(&invited), GUILD_SUBHEADER_GC_GUILD_INVITE);
+    yankee.send_record(&client_guild_invite_answer(id, 1));
+    for _ in 0..6 {
+        yankee.read_game();
+    }
+    alice.read_game();
+    alice.read_game();
+    alice.quiet("the join settled");
+    yankee.quiet("the join settled");
+    // The master removes the member: the removal sets the member's withdraw time
+    // (`G/input_main.cpp:2930`).
+    alice.send_record(&client_guild_remove_member(yankee_player));
+    let removed = alice.read_game();
+    assert_eq!(guild_subheader(&removed), GUILD_SUBHEADER_GC_REMOVE);
+    alice.quiet("the removal settled");
+    yankee.quiet("the victim hears no REMOVE");
+    // The member leaves and comes back: the flag is written with the character and read
+    // back with it.
+    drop(yankee);
+    server.wait_for("Character disconnected; wrote the row");
+    // The master is told the member is gone: the release of its claim (`ClearSync`,
+    // `G/char.cpp:5568-5575`) and its removal from the view.
+    alice.sees_disconnect(yankee_vid);
+    let flags = support::rows(
+        database.url(),
+        "SELECT value FROM quest_flag WHERE player_id = (SELECT id FROM player WHERE name = \
+          'Yankee')",
+        1,
+    );
+    assert_eq!(
+        flags.len(),
+        1,
+        "the withdraw time is stored with the character"
+    );
+    assert!(
+        flags[0][0] > 1_600_000_000,
+        "the stored withdraw time is the epoch second the removal stamped: {}",
+        flags[0][0]
+    );
+    let (mut yankee, yankee_again, _) = enter_world_seeing(&server, b"bob", 0);
+    yankee.quiet("the member is back");
+    // The master sees the member again: its walk mode, then its insert and its summary.
+    alice.sees_arrive(yankee_again.id, true, None);
+    // The master invites the member again: the withdraw penalty refuses the invite.
+    alice.send_record(&client_guild_add_member(yankee_again.id));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"<Guild> You cannot invite people within 1 days of leaving the guild."),
+        "the member that left a guild a moment ago cannot be invited"
+    );
+    alice.quiet("the refusal settled");
+    yankee.quiet("the invitee hears nothing");
+}
+
 /// A `CG_GUILD` `CHANGE_GRADE_NAME`: the header, the subheader 2, the grade byte, and
 /// the 9 name field bytes.
 fn client_guild_grade_name(grade: u8, name: &[u8]) -> Vec<u8> {
@@ -14708,14 +14811,16 @@ fn the_flag_war_stands_its_flags_up_and_the_member_sees_them() {
     let port = server.channel(1).port();
     assert_eq!(alice.read_game(), a_warp_record(FLAG_MAP_START, port));
     // The client follows the warp: it reconnects and lands on the war's own copy of the
-    // flag map. The quest flag the war entry set is lost with the reconnect, so the
-    // member watches the war instead of joining a team (`CWarMap::IncMember`,
+    // flag map. The quest flag the war entry set came with the character: the quest
+    // flags are written with the character (`quest::PC::Save`, `G/questpc.cpp:520-588`)
+    // and read back with it (`CInputDB::QuestLoad`, `G/input_db.cpp:1079-1101`), so the
+    // member joins the team of its guild (`CWarMap::IncMember`,
     // `G/war_map.cpp:342-398`).
     drop(alice);
     let join = WarMapJoin {
         guilds: [1, 2],
-        joiners: [0, 0],
-        observers: 1,
+        joiners: [1, 0],
+        observers: 0,
         war_type: 2,
         war_state: 6,
         scores: [0, 0],
@@ -14823,14 +14928,16 @@ fn the_wars_map_goes_with_the_war_and_its_member_comes_back() {
     // first time.
     //
     // The map tells its players the two counts and the joining member the war's own
-    // records (`CWarMap::IncMember`, `G/war_map.cpp:342-398`). The member watches the
-    // war instead of joining a team: the flag the war entry set is a quest flag, and
-    // the quest flags live in memory (ledger 227.3), so the reconnect lost it.
+    // records (`CWarMap::IncMember`, `G/war_map.cpp:342-398`). The member joins the
+    // team of its guild: the flag the war entry set is a quest flag, and the quest
+    // flags are written with the character (`quest::PC::Save`, `G/questpc.cpp:520-588`)
+    // and read back with it (`CInputDB::QuestLoad`, `G/input_db.cpp:1079-1101`), so the
+    // reconnect kept it.
     drop(alice);
     let join = WarMapJoin {
         guilds: [1, 2],
-        joiners: [0, 0],
-        observers: 1,
+        joiners: [1, 0],
+        observers: 0,
         war_type: 1,
         war_state: 6,
         scores: [0, 0],
@@ -15486,15 +15593,16 @@ fn a_war_without_a_side_ends_when_the_map_times_out() {
     // and logs in again. The row it left behind names the war's own copy of the map, so
     // the member comes back onto it.
     //
-    // The member watches the war instead of joining a team: the flag the war entry set
-    // is a quest flag, and the quest flags live in memory (ledger 227.3), so the
-    // reconnect lost it. Either way his side has no member on the map, which is what
-    // the map asks about.
+    // The member joins the team of its guild: the flag the war entry set is a quest
+    // flag, and the quest flags are written with the character (`quest::PC::Save`,
+    // `G/questpc.cpp:520-588`) and read back with it (`CInputDB::QuestLoad`,
+    // `G/input_db.cpp:1079-1101`), so the reconnect kept it. The other side has no
+    // member on the map, which is what the map asks about.
     drop(alice);
     let join = WarMapJoin {
         guilds: [1, 2],
-        joiners: [0, 0],
-        observers: 1,
+        joiners: [1, 0],
+        observers: 0,
         war_type: 1,
         war_state: 6,
         scores: [0, 0],

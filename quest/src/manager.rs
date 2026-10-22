@@ -30,6 +30,11 @@
 //!   `select_item` are not ported), a first result that is not text (legacy's `strcmp(NULL)`)
 //!   and a `select` whose last result is not a table (legacy's unprotected `luaL_getn`) all end
 //!   the script the way a Lua error did.
+//! - A call of an API the Rewrite does not back ends the script as a script that says nothing
+//!   ends: the bare `[DONE]` is not sent (`SendScript`, `G/questmanager.cpp:1122-1130`). The
+//!   legacy's API worked, and its script carried on to an end the client saw nothing of, so
+//!   the refusal sends nothing either. A script error still ends the script the legacy's error
+//!   did, with the `[DONE]` the client closes the window with.
 //! - A condition (`when ... with`, `begin_condition`) that raises an error is false, and so is a
 //!   chat menu label that raises one empty: legacy read the error message as the result, which
 //!   made a failing condition true.
@@ -40,8 +45,8 @@
 //! - A chat menu index outside `0..=65535` is logged and skipped (legacy allocates it).
 //! - A file whose quest has no number is logged and skipped (legacy asserts), and a quest number
 //!   with no quest names the empty quest.
-//! - Quest states and flags live as long as the character is logged in; no API that reads them
-//!   is ported yet.
+//! - Quest states and flags live in the store with the character (ledger 244); no API that
+//!   reads them is ported yet.
 //! - `getnpcid` with no name answers 0 (legacy built a `std::string` from `NULL`).
 //! - An NPC's race is looked up by the caller, which finds the NPC on the character's own map.
 
@@ -281,15 +286,74 @@ impl Manager {
     pub fn quest_flag(&self, pid: u32, name: &[u8]) -> Option<i32> {
         self.pcs.get(&pid)?.flags.get(name).copied()
     }
-    /// `quest::PC::SetFlag`: sets a quest flag of character `pid`, which the
-    /// book training counts read (`G/char_skill.cpp:407,592,600`). Creates the
-    /// character's record, as legacy's `GetPCForce` does for a writer.
+    /// `quest::PC::SetFlag` (`G/questpc.cpp:52-76`): sets a quest flag of character
+    /// `pid`, which the book training counts read (`G/char_skill.cpp:407,592,600`).
+    /// Creates the character's record, as legacy's `GetPCForce` does for a writer.
+    ///
+    /// A flag whose value is zero is no flag at all: the legacy deletes it
+    /// (`quest::PC::DeleteFlag`, `G/questpc.cpp:78-90`), so a flag that was cleared
+    /// reads as absent and a save does not write it. A flag that is not there is not
+    /// deleted, and no record is made for it.
     pub fn set_quest_flag(&mut self, pid: u32, name: &[u8], value: i32) {
+        if value == 0 {
+            if let Some(pc) = self.pcs.get_mut(&pid) {
+                pc.flags.remove(name);
+            }
+            return;
+        }
         self.pcs
             .entry(pid)
             .or_default()
             .flags
             .insert(name.to_vec(), value);
+    }
+
+    /// `CInputDB::QuestLoad` (`G/input_db.cpp:1079-1101`) with `quest::PC::SetFlag`
+    /// (`G/questpc.cpp:55-72`): the stored flags of character `pid`.
+    ///
+    /// The load sets the flags on a record that holds none, so they replace what the
+    /// record had: the character's flags are the stored ones.
+    ///
+    /// The quest list follows the flags (`quest::PC::Build`, `G/questpc.cpp:664-679`): a
+    /// flag whose name ends in `.__status` is the state of the quest the rest of the name
+    /// names, and the quest the script runs is that one. A flag whose value is zero is no
+    /// flag and is dropped, as legacy's `SetFlag` deletes it.
+    pub fn load_flags(&mut self, pid: u32, flags: impl IntoIterator<Item = (Vec<u8>, i32)>) {
+        let pc = self.pcs.entry(pid).or_default();
+        pc.flags.clear();
+        for (name, value) in flags {
+            if value == 0 {
+                pc.flags.remove(&name);
+            } else {
+                pc.flags.insert(name, value);
+            }
+        }
+        pc.quests.clear();
+        for (name, value) in &pc.flags {
+            let Some(quest_name) = name.as_slice().strip_suffix(b".__status") else {
+                continue;
+            };
+            let Some(index) = self.host.quest_index(quest_name) else {
+                continue;
+            };
+            pc.quests.insert(index, *value);
+        }
+    }
+
+    /// `quest::PC::Save` (`G/questpc.cpp:519-590`): the flags of character `pid` that a
+    /// save writes, in name order.
+    ///
+    /// A flag whose value is zero is no flag and is not written: the legacy deletes it
+    /// instead (`quest::PC::SetFlag`, `G/questpc.cpp:60-64`).
+    pub fn flags_of(&self, pid: u32) -> Vec<(Vec<u8>, i32)> {
+        let Some(pc) = self.pcs.get(&pid) else {
+            return Vec::new();
+        };
+        pc.flags
+            .iter()
+            .filter(|(_, value)| **value != 0)
+            .map(|(name, value)| (name.clone(), *value))
+            .collect()
     }
 
     /// `game.get_event_flag`: an event flag, 0 when it was never set.
@@ -1300,6 +1364,17 @@ impl Run<'_, '_> {
             }
             Ok(values) => self.suspension(&values),
             Err(error) => {
+                // A refusal is not a script error: the legacy's API worked, and the script
+                // ended as a script that says nothing ends. So the end is silent: the bare
+                // `[DONE]` is swallowed (`SendScript`, `G/questmanager.cpp:1122-1130`), and
+                // the client sees nothing where the legacy's script saw nothing either.
+                if is_refusal(&error) {
+                    tracing::debug!("QUEST refused: {error}");
+                    self.goto_end(pc);
+                    pc.pending_state = None;
+                    pc.running = None;
+                    return false;
+                }
                 tracing::warn!("LUA_ERROR: {error}");
                 None
             }
@@ -1418,6 +1493,13 @@ impl Run<'_, '_> {
         let skin = std::mem::replace(&mut output.skin, QUEST_SKIN_NORMAL);
         cx.game.script(skin, &script);
     }
+}
+
+/// Whether `error` is a refusal: the call of an API the Rewrite does not back
+/// (`not_ported`, `quest/src/host.rs`). A refusal is not a script error: the legacy's API
+/// worked, so the legacy's script carried on and ended as a script that says nothing ends.
+fn is_refusal(error: &mlua::Error) -> bool {
+    error.to_string().contains(host::NOT_PORTED)
 }
 
 /// `IsScriptTrue` (`questlua.cpp:173`): no condition is true, else the truth of its last
@@ -1994,6 +2076,27 @@ mod tests {
         manager.logout(PID);
     }
 
+    /// `CQuestManager::Kill` (`G/questmanager.cpp:574-611`): the no-target kill quest
+    /// (`napierdalator`, `object/notarget/kill/napierdalator.start`) runs on every kill a
+    /// character makes, as it does in legacy: the character has a quest record, and the
+    /// quest is a miss, so it starts (`ExecuteQuestScript`, `questnpc.cpp:526-530`).
+    ///
+    /// The quest's APIs are not ported, so the script ends as a script that says nothing
+    /// ends, and the client sees nothing: the bare `[DONE]` is swallowed (`SendScript`,
+    /// `G/questmanager.cpp:1122-1130`).
+    #[test]
+    fn a_kill_runs_the_no_target_quest_and_the_client_sees_nothing() {
+        let mut manager = manager().lock().unwrap();
+        manager.logout(PID);
+        manager.load_flags(PID, []);
+        let mut game = Fake::default();
+        assert!(
+            manager.kill(PID, 3, Some(PID), &mut game),
+            "the no-target kill quest runs"
+        );
+        assert_eq!(game.take(), Vec::new(), "the silent end sends nothing");
+    }
+
     #[test]
     fn an_unported_api_ends_the_script_as_an_error_did() {
         let mut manager = manager().lock().unwrap();
@@ -2529,6 +2632,118 @@ mod tests {
             scripts.iter().any(|(_, text)| text.contains("Knights")),
             "the button names the enemy guild: {scripts:?}"
         );
+    }
+
+    /// `CInputDB::QuestLoad` (`G/input_db.cpp:1079-1101`) with `quest::PC::SetFlag`
+    /// (`G/questpc.cpp:55-72`) and `quest::PC::Build` (`G/questpc.cpp:664-679`): the
+    /// stored flags come back with the character, and the quest's state is rebuilt from
+    /// the flag that names it, so a quest that ran in an earlier session continues where
+    /// it left it.
+    #[test]
+    fn the_stored_flags_come_back_with_the_character() {
+        let mut manager = load();
+        manager.load_flags(
+            PID,
+            [
+                (b"guild_manage.new_withdraw_time".to_vec(), 1_700_000_000),
+                (b"guild_war_join.__status".to_vec(), 1),
+            ],
+        );
+        assert_eq!(
+            manager.quest_flag(PID, b"guild_manage.new_withdraw_time"),
+            Some(1_700_000_000),
+            "the guild's withdraw time is the flag the guild's ladder reads"
+        );
+        assert_eq!(
+            manager.quest_flag(PID, b"guild_war_join.__status"),
+            Some(1),
+            "the quest's state is the flag that names it"
+        );
+        // The flags a save writes are the non-zero ones, in name order.
+        assert_eq!(
+            manager.flags_of(PID),
+            vec![
+                (b"guild_manage.new_withdraw_time".to_vec(), 1_700_000_000),
+                (b"guild_war_join.__status".to_vec(), 1),
+            ]
+        );
+        // A flag whose value is zero is no flag: legacy's `SetFlag` deletes it.
+        manager.load_flags(
+            PID,
+            [
+                (b"guild_manage.new_withdraw_time".to_vec(), 1_700_000_000),
+                (b"guild_war_join.__status".to_vec(), 0),
+            ],
+        );
+        assert_eq!(manager.quest_flag(PID, b"guild_war_join.__status"), None);
+        assert_eq!(
+            manager.flags_of(PID),
+            vec![(b"guild_manage.new_withdraw_time".to_vec(), 1_700_000_000)],
+            "a zero flag is not written"
+        );
+        // The load sets the flags on a record that holds none, so a load replaces the
+        // record's flags: the character's flags are the stored ones.
+        manager.load_flags(PID, [(b"guild_war_join.__status".to_vec(), 1)]);
+        assert_eq!(
+            manager.flags_of(PID),
+            vec![(b"guild_war_join.__status".to_vec(), 1)],
+            "the load replaces what the record held"
+        );
+    }
+
+    /// `quest::PC::SetFlag` (`G/questpc.cpp:52-76`) and `quest::PC::DeleteFlag`
+    /// (`G/questpc.cpp:78-90`): a flag whose value is zero is no flag at all. The legacy
+    /// erases it and writes the deletion, so the flag reads as absent and a save does
+    /// not write it.
+    #[test]
+    fn a_flag_whose_value_is_zero_is_deleted() {
+        let mut manager = load();
+        manager.set_quest_flag(PID, b"war.is_war_member", 1);
+        assert_eq!(
+            manager.quest_flag(PID, b"war.is_war_member"),
+            Some(1),
+            "the flag is set"
+        );
+        manager.set_quest_flag(PID, b"war.is_war_member", 0);
+        assert_eq!(
+            manager.quest_flag(PID, b"war.is_war_member"),
+            None,
+            "the flag is gone, and not a flag of the value zero"
+        );
+        assert!(
+            manager.flags_of(PID).is_empty(),
+            "a flag that was cleared is not written"
+        );
+    }
+
+    /// The quest's state is rebuilt from the flag that names it (`quest::PC::Build`,
+    /// `G/questpc.cpp:664-679`): the button runs the script of the state the character
+    /// is in, and a state the quest does not have has no script.
+    #[test]
+    fn the_quest_state_is_rebuilt_from_its_flag() {
+        let mut manager = load();
+        let quest = manager
+            .host()
+            .quest_index(b"guild_war_join")
+            .expect("the war join quest");
+        let mut game = Fake {
+            map_index: 100,
+            any_war: 4.0,
+            ..Fake::default()
+        };
+        // The character is in the quest's start state: the button asks to join the war.
+        assert!(manager.button(PID, quest, &mut game), "the button runs");
+        assert!(
+            game.take().iter().any(|(_, text)| text.contains("Knights")),
+            "the button names the enemy guild"
+        );
+        // A state the quest does not have has no script, so the button runs nothing.
+        manager.load_flags(PID, [(b"guild_war_join.__status".to_vec(), 1)]);
+        assert!(
+            !manager.button(PID, quest, &mut game),
+            "a state the quest does not have has no script"
+        );
+        assert!(game.take().is_empty(), "nothing ran");
     }
 
     /// The letter and the button name one quest, where the generic event handler runs
