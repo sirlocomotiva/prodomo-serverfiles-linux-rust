@@ -7,14 +7,6 @@
 //! `KOR_aGuildWarInfo` (`G/constants.cpp:1132-1145`), and each names the map it is fought
 //! on — 0 for the field war, which is fought where the players already stand.
 //!
-//! # What is not here yet
-//!
-//! The start positions (the war's members are warped to them when they join, which is the
-//! `guild_war_join` quest's `guild.war_enter`), the war's members, the observers, the flags
-//! (`warmap::WAR_FLAG_VNUM0` and the base, `G/war_map.h:24-32`), the score the map keeps
-//! and the map's own end (its timeout, its draw and its exit) are ledger 237's. This module
-//! holds the map the war is fought on.
-//!
 //! # Divergences
 //!
 //! - **The map index and the Channel's map set.** Legacy checks the map twice: the declare
@@ -22,6 +14,11 @@
 //!   asks the Channel's `MAP_ALLOW` (`map_allow_find`, `G/guild_war.cpp:488-493`). The
 //!   Rewrite keeps the two checks apart: the atlas's indices are the map index, and the
 //!   hosted maps are the `MAP_ALLOW`.
+//! - **The flag's rule.** Legacy's flag mob runs its state through the character state
+//!   machine (`CHARACTER::StateFlag`, `G/char_state.cpp:1185-1216`) and the base's through
+//!   its own (`CHARACTER::StateFlagBase`, `G/char_state.cpp:1218-1222`); the Rewrite runs
+//!   the same two rules from the war map's tick, because the flag's characters carry no
+//!   state of their own. The wire is the same; the owner of the rule is not.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -134,6 +131,53 @@ const WAR_MAP_END_DELAY: u64 = (10 + 5) * PASSES_PER_SEC as u64;
 /// players out.
 const WAR_MAP_EXIT_DELAY: u64 = 10 * PASSES_PER_SEC as u64;
 
+/// The Pulses between the flag's reset and the flags' return (`war_reset_flag_event`,
+/// `G/war_map.cpp:962`): ten seconds.
+const FLAG_RESET_DELAY: u64 = 10 * PASSES_PER_SEC as u64;
+
+/// The Pulses between two runs of the flag mob's state (`CHARACTER::StateFlag`,
+/// `G/char_state.cpp:1186`): `PASSES_PER_SEC(0.5)` is twelve Pulses, so the flag is
+/// looked for twice a second.
+const FLAG_STATE_PULSES: u64 = 12;
+
+/// The reach of the flag and the base (`FuncFindChrForFlag` and
+/// `FuncFindChrForFlagBase`, `G/char_state.cpp:56` and `:122`): `DISTANCE_APPROX` of
+/// five hundred units.
+pub(super) const FLAG_REACH: i32 = 500;
+
+/// One side's flag: where it is, or who carries it.
+///
+/// Legacy keeps the flag as a mob (`CWarMap::STeamData`'s `pkChrFlag`,
+/// `G/war_map.h:114-133`): the flag stands on the map until a player takes it, and the
+/// mob is gone while a player carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WarFlag {
+    /// The flag stands on the map at this point.
+    OnMap(i32, i32),
+    /// A player carries it, under the flag's affect (`AFFECT_WAR_FLAG`).
+    Carried(Vid),
+}
+
+/// The war's flags (`CWarMap`'s flag mobs, `G/war_map.cpp:831-893`): the flag war's map
+/// owns two flags and two bases, and only a flag map has them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WarFlags {
+    /// The two flags, one for each team: the flag's own guild is the team's, and a flag
+    /// that is not on the map is carried or waits for the reset.
+    pub flags: [Option<WarFlag>; 2],
+    /// The two bases (`pkChrFlagBase`), at the map's start positions.
+    pub bases: [(i32, i32); 2],
+    /// `m_pkResetFlagEvent`: the Pulse at which the flags come back
+    /// (`war_reset_flag_event`, `G/war_map.cpp:913-930`).
+    pub reset_pulse: Option<u64>,
+    /// `pkChrFlag`: the flag characters' VIDs. A flag that is carried, away or gone has
+    /// none (`CWarMap::RemoveFlag`, `G/war_map.cpp:881-893`).
+    pub flag_vids: [Option<u32>; 2],
+    /// `pkChrFlagBase`: the base characters' VIDs, which stand until the war ends
+    /// (`CWarMap::SetEnded`, `G/war_map.cpp:745-768`).
+    pub base_vids: [Option<u32>; 2],
+}
+
 /// `CWarMap::STeamData` (`G/war_map.h:114-133`): one side of a war.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct WarTeam {
@@ -203,6 +247,9 @@ pub(super) struct WarMap {
     /// `m_bTimeout`: the map has asked for a timeout and the war is waiting for it
     /// (`G/war_map.cpp:477-479`). The map says so once.
     pub timed_out: bool,
+    /// The map's flags: the two flags and the two bases of a flag map, and nothing for
+    /// the other war maps (`CWarMap`'s constructor, `G/war_map.cpp:126-131`).
+    pub flags: Option<WarFlags>,
 }
 
 impl WarMap {
@@ -213,6 +260,9 @@ impl WarMap {
     /// The constructor also sets the map's begin event (`war_begin_event`,
     /// `G/war_map.cpp:124-127`): the map asks whether the war is over a minute after
     /// it was created, and then every ten seconds.
+    ///
+    /// A flag map stands its flags and its bases up at once (`AddFlagBase` and
+    /// `AddFlag`, `G/war_map.cpp:126-131`): each flag is on its own base.
     pub(super) fn new(
         map_index: i32,
         base_map: i32,
@@ -231,6 +281,25 @@ impl WarMap {
             [guilds[0], guilds[1]]
         } else {
             [guilds[1], guilds[0]]
+        };
+        // `CWarMap`'s constructor (`G/war_map.cpp:126-131`): only a flag map has flags,
+        // and each stands on its own base.
+        let flags = if map_type == WAR_MAP_TYPE_FLAG {
+            war_map_of(base_map).map(|info| WarFlags {
+                flags: [
+                    Some(WarFlag::OnMap(info.start[0].0, info.start[0].1)),
+                    Some(WarFlag::OnMap(info.start[1].0, info.start[1].1)),
+                ],
+                bases: [info.start[0], info.start[1]],
+                reset_pulse: None,
+                // The characters are stood up by the world, which owns the map's
+                // characters (`CWarMap`'s constructor adds the bases and the flags,
+                // `G/war_map.cpp:126-131`).
+                flag_vids: [None, None],
+                base_vids: [None, None],
+            })
+        } else {
+            None
         };
         Self {
             map_index,
@@ -251,6 +320,7 @@ impl WarMap {
             check_pulse: Some(pulse + 60 * u64::from(PASSES_PER_SEC)),
             timeout_pulse: None,
             timed_out: false,
+            flags,
         }
     }
 
@@ -413,6 +483,122 @@ impl WarMap {
     pub(super) fn mark_timed_out(&mut self) {
         self.timed_out = true;
         self.timeout_pulse = None;
+    }
+
+    /// The flag of the team `index`, and where it is (`CWarMap::STeamData`'s
+    /// `pkChrFlag`, `G/war_map.h:114-133`).
+    pub(super) fn flag_of(&self, index: usize) -> Option<WarFlag> {
+        self.flags
+            .as_ref()
+            .and_then(|flags| flags.flags.get(index).copied().flatten())
+    }
+
+    /// The base of the team `index` (`pkChrFlagBase`, `G/war_map.h:114-133`): the point
+    /// the team's flag stands on, and the point the base's character stands on.
+    pub(super) fn base_of(&self, index: usize) -> Option<(i32, i32)> {
+        self.flags.as_ref()?.bases.get(index).copied()
+    }
+
+    /// `CWarMap::IsFlagOnBase` (`G/war_map.cpp:898-911`): the flag stands on its base.
+    ///
+    /// The flag starts on its base (`AddFlag`, `G/war_map.cpp:855-879`, spawns it at the
+    /// map's start point, which is where `AddFlagBase` spawns the base), and a flag that
+    /// is carried is nowhere near it.
+    pub(super) fn is_flag_on_base(&self, index: usize) -> bool {
+        let Some(flags) = self.flags.as_ref() else {
+            return false;
+        };
+        let Some(base) = flags.bases.get(index) else {
+            return false;
+        };
+        matches!(flags.flags.get(index), Some(Some(WarFlag::OnMap(x, y))) if *x == base.0 && *y == base.1)
+    }
+
+    /// `CWarMap::RemoveFlag` (`G/war_map.cpp:881-893`) and `StateFlag`'s last step
+    /// (`G/char_state.cpp:1211`): the flag leaves the map, and a player carries it.
+    ///
+    /// Reports whether the flag was on the map: a flag that is already carried or away
+    /// is not taken twice.
+    pub(super) fn carry_flag(&mut self, index: usize, carrier: Vid) -> bool {
+        let Some(flags) = self.flags.as_mut() else {
+            return false;
+        };
+        let Some(slot) = flags.flags.get_mut(index) else {
+            return false;
+        };
+        if !matches!(slot, Some(WarFlag::OnMap(_, _))) {
+            return false;
+        }
+        *slot = Some(WarFlag::Carried(carrier));
+        true
+    }
+
+    /// `CWarMap::OnKill`'s flag arm (`G/war_map.cpp:811-823`): the flag lies where its
+    /// carrier fell.
+    ///
+    /// Reports whether the flag was carried: a flag that is on the map stays where it
+    /// is.
+    pub(super) fn drop_flag(&mut self, index: usize, at: (i32, i32)) -> bool {
+        let Some(flags) = self.flags.as_mut() else {
+            return false;
+        };
+        let Some(slot) = flags.flags.get_mut(index) else {
+            return false;
+        };
+        if !matches!(slot, Some(WarFlag::Carried(_))) {
+            return false;
+        }
+        *slot = Some(WarFlag::OnMap(at.0, at.1));
+        true
+    }
+
+    /// `CWarMap::ResetFlag` (`G/war_map.cpp:941-964`): the flags leave the map and come
+    /// back ten seconds later.
+    ///
+    /// Reports whether the reset happened: a reset that already waits does nothing
+    /// (`if (m_pkResetFlagEvent) return;`), and a map that has ended keeps its flags
+    /// (`if (m_bEnded) return;`).
+    pub(super) fn reset_flags(&mut self, pulse: u64) -> bool {
+        if self.ended {
+            return false;
+        }
+        let Some(flags) = self.flags.as_mut() else {
+            return false;
+        };
+        if flags.reset_pulse.is_some() {
+            return false;
+        }
+        flags.flags = [None, None];
+        flags.reset_pulse = Some(pulse + FLAG_RESET_DELAY);
+        true
+    }
+
+    /// Whether the reset is due (`war_reset_flag_event`, `G/war_map.cpp:913-930`).
+    pub(super) fn reset_due(&self, pulse: u64) -> bool {
+        self.flags
+            .as_ref()
+            .is_some_and(|flags| flags.reset_pulse.is_some_and(|due| due <= pulse))
+    }
+
+    /// `war_reset_flag_event` (`G/war_map.cpp:913-930`): the flags are back on their
+    /// bases, and the reset waits for nothing.
+    pub(super) fn flags_back(&mut self) {
+        let Some(flags) = self.flags.as_mut() else {
+            return;
+        };
+        flags.flags = [
+            Some(WarFlag::OnMap(flags.bases[0].0, flags.bases[0].1)),
+            Some(WarFlag::OnMap(flags.bases[1].0, flags.bases[1].1)),
+        ];
+        flags.reset_pulse = None;
+    }
+
+    /// Whether the flag mob's state is due (`CHARACTER::StateFlag`,
+    /// `G/char_state.cpp:1186`): the state runs every half a second, so the flag is
+    /// looked for twice a second.
+    pub(super) fn flag_state_due(&self, pulse: u64) -> bool {
+        let since = pulse.saturating_sub(self.started_pulse);
+        since >= FLAG_STATE_PULSES && since % FLAG_STATE_PULSES == 0
     }
 }
 

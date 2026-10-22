@@ -33,6 +33,7 @@ use common::cfloat::f64_to_i32;
 use common::item_slots::{
     usable_inventory_cells, EWindows, CUSTOM_INVENTORY_SLOT_END, CUSTOM_INVENTORY_SLOT_START,
 };
+use common::point_slot as point;
 use common::vid::Vid;
 use gamedata::server_attr::SectreeGrid;
 use protocol::cg_guild_answer::GUILD_NAME_FIELD_SIZE;
@@ -53,13 +54,18 @@ use world::character::{
 };
 use world::item::gc_item_clear;
 
+use super::affect::{affect_remove_frame, Affect};
 use super::fight::AFF_STUN_WORD;
 use super::guild_mark::{self, INVALID_MARK_ID, MARK_PIXELS};
 use super::GameState;
-use crate::chat_line::{chat_packet, Arg};
+use crate::chat_line::{chat_packet, format_line, Arg};
 use crate::client_registry::ClientOrder;
 use crate::item_move::{gold_delta, row_changes, Mover};
+use crate::loading_phase::{
+    AFFECT_WAR_FLAG, AFF_WAR_FLAG1, AFF_WAR_FLAG2, AFF_WAR_FLAG3, INFINITE_AFFECT_DURATION,
+};
 use crate::save::PASSES_PER_SEC;
+use crate::sync_position::distance_approx;
 
 /// `GUILD_CREATE_FEE`: the 200000 gold `CInputMain::AnswerMakeGuild` gates on and takes
 /// (`G/input_main.cpp:2677,2719-2720`). The quest arm gates on the same 200000
@@ -71,6 +77,18 @@ pub(super) const GUILD_CREATE_ITEM_VNUM: u32 = 70_101;
 /// `GUILD_BASE_POWER` (`G/guild.h:14`): 400. A new guild's power and max power are both
 /// this (`ComputeGuildPoints`, `G/guild.cpp:1439-1444`, at level 1).
 const GUILD_BASE_POWER: u32 = 400;
+/// The line the flag's take says (`CHARACTER::StateFlag`, `G/char_state.cpp:1213`):
+/// `"%s 길드의 깃발을 %s 님이 획득하였습니다."` — the flag's guild and the carrier.
+///
+/// The bytes are the legacy's own, in the code page the legacy source is written in: the
+/// multi-language build's `LC_TEXT` (`G/locale.hpp:31`) looks a text up with
+/// `LOCALE_YMIR`, which answers the text itself (`G/locale.cpp:73-74`), so the line
+/// goes out in the legacy's words.
+const FLAG_TAKE_NOTICE: &[u8] = b"%s \xb1\xe6\xb5\xe5\xc0\xc7 \xb1\xea\xb9\xdf\xc0\xbb %s \xb4\xd4\xc0\xcc \xc8\xb9\xb5\xe6\xc7\xcf\xbf\xb4\xbd\xc0\xb4\xcf\xb4\xd9.";
+/// The line the base's score says (`CHARACTER::StateFlagBase`,
+/// `G/char_state.cpp:158`): `"%s 길드가 %s 길드의 깃발을 빼앗았습니다!"` — the base's
+/// guild and the flag's guild.
+const FLAG_SCORE_NOTICE: &[u8] = b"%s \xb1\xe6\xb5\xe5\xb0\xa1 %s \xb1\xe6\xb5\xe5\xc0\xc7 \xb1\xea\xb9\xdf\xc0\xbb \xbb\xa9\xbe\xd1\xbe\xd2\xbd\xc0\xb4\xcf\xb4\xd9!";
 /// `GUILD_POWER_PER_LEVEL` (`G/guild.h:16`): 100. A loaded guild's max power is
 /// `400 + (level - 1) * 100` (`ComputeGuildPoints`, `G/guild.cpp:1439-1444`).
 const GUILD_POWER_PER_LEVEL: u32 = 100;
@@ -128,6 +146,13 @@ pub(super) const GUILD_WAR_TYPE_FLAG: u8 = 2;
 /// `GUILD_WAR_TYPE_MAX_NUM` (`common/length.h:772`): 3. A `/war` type at or past it
 /// folds to field (`G/cmd_general.cpp:2055-2056`).
 pub(super) const GUILD_WAR_TYPE_MAX_NUM: u8 = 3;
+/// `warmap::WAR_FLAG_VNUM0` and `warmap::WAR_FLAG_VNUM1` (`G/war_map.h:26-27`): the two
+/// flags' vnums, the first for the team of the lower guild id (`CWarMap::AddFlag`,
+/// `G/war_map.cpp:866`).
+const WAR_FLAG_VNUM: [u32; 2] = [20_035, 20_036];
+/// `warmap::WAR_FLAG_BASE_VNUM` (`G/war_map.h:29`): the base's vnum, which the flag
+/// stands on (`CWarMap::AddFlagBase`, `G/war_map.cpp:852`).
+const WAR_FLAG_BASE_VNUM: u32 = 20_038;
 /// `EGuildWarState` (`common/length.h:776-785`): none, sent-declare, refused,
 /// received-declare, wait-start, cancelled, on-war, ended, over, reserved.
 const GUILD_WAR_NONE: u8 = 0;
@@ -3229,6 +3254,9 @@ impl GameState {
             self.last_pulse,
         );
         self.war_maps.insert(map_index, map);
+        // `CWarMap`'s constructor (`G/war_map.cpp:126-131`): a flag map stands its two
+        // bases and its two flags up at once.
+        self.war_map_stand_flags(map_index);
     }
 
     /// `CWarMap::IncMember` (`G/war_map.cpp:342-398`): a character that enters a war map
@@ -3660,11 +3688,43 @@ impl GameState {
             return true;
         }
         // The battle map's own rule (`G/war_map.cpp:807-809`). The flag map's rule is
-        // the flag's return, which ledger 242 ports.
+        // the flag's return (`G/war_map.cpp:811-823`).
         if war.map_type == super::war_map::WAR_MAP_TYPE_NORMAL {
             self.war_map_score(map, killer_guild, victim_guild, 1);
+        } else {
+            self.war_map_flag_return(map, victim);
         }
         true
+    }
+
+    /// `CWarMap::OnKill`'s flag arm (`G/war_map.cpp:811-823`): the flag the victim
+    /// carried lies where the victim fell, and the victim loses the flag's affects.
+    fn war_map_flag_return(&mut self, index: i32, victim: Vid) {
+        let Some(flag_guild) = self.war_flag_carried(victim) else {
+            return;
+        };
+        let Some(spot) = self.spot_of(victim.raw()) else {
+            return;
+        };
+        // `AddFlag(idx, ch->GetX(), ch->GetY())` (`G/war_map.cpp:816`): the flag lies
+        // where the victim fell, when it is not already on the map.
+        if let Some(team) = self
+            .war_maps
+            .get(&index)
+            .and_then(|war| war.team_of(flag_guild))
+        {
+            let dropped = self
+                .war_maps
+                .get_mut(&index)
+                .is_some_and(|war| war.drop_flag(team, (spot.x, spot.y)));
+            if dropped {
+                // The flag's character stands where the flag fell
+                // (`AddFlag`, `G/war_map.cpp:855-879`).
+                self.war_map_stand_flag(index, team, (spot.x, spot.y));
+            }
+        }
+        // `ch->RemoveAffect(AFFECT_WAR_FLAG)` (`G/war_map.cpp:820`).
+        self.remove_war_flag_affects(victim);
     }
 
     /// The score of a war map (`CWarMap::UpdateScore`, `G/war_map.cpp:660-681`, with the
@@ -3711,6 +3771,479 @@ impl GameState {
         let total = enemy.score.wrapping_add(u32::try_from(delta).unwrap_or(0));
         enemy.score = total;
         Some(total)
+    }
+
+    /// The war's flags (`CWarMap`'s flag mobs, `G/war_map.cpp:831-893`): the flag war's
+    /// map owns two flags and two bases.
+    ///
+    /// The flag mob's state (`CHARACTER::StateFlag`, `G/char_state.cpp:1185-1215`) runs
+    /// twice a second and hands the flag to the player nearest it; the base mob's state
+    /// (`CHARACTER::StateFlagBase`, `G/char_state.cpp:98-170`) gives a point to the
+    /// player that brings the other team's flag to the base. The reset
+    /// (`CWarMap::ResetFlag`, `G/war_map.cpp:941-964`) takes the flags away and brings
+    /// them back ten seconds later.
+    fn war_map_flags(&mut self, index: i32, pulse: u64) {
+        // `war_reset_flag_event` (`G/war_map.cpp:913-930`): the flags are back on their
+        // bases.
+        if self
+            .war_maps
+            .get(&index)
+            .is_some_and(|war| war.reset_due(pulse))
+        {
+            if let Some(war) = self.war_maps.get_mut(&index) {
+                war.flags_back();
+            }
+            // `war_reset_flag_event` (`G/war_map.cpp:913-930`): the flags come back, and
+            // their characters stand on their bases again (`AddFlag`, `:866-867`).
+            for team in 0..2 {
+                let Some(base) = self.war_maps.get(&index).and_then(|war| war.base_of(team)) else {
+                    continue;
+                };
+                self.war_map_stand_flag(index, team, base);
+            }
+        }
+        // The states run every half a second (`G/char_state.cpp:1186` and `:1220`).
+        if !self
+            .war_maps
+            .get(&index)
+            .is_some_and(|war| war.flag_state_due(pulse))
+        {
+            return;
+        }
+        // The base mob's state runs before the flag mob's state: the bases are spawned
+        // first (`CWarMap`'s constructor, `G/war_map.cpp:126-131`).
+        self.war_map_flag_score(index, pulse);
+        self.war_map_flag_take(index);
+    }
+
+    /// `CWarMap::AddFlagBase` and `CWarMap::AddFlag` (`G/war_map.cpp:832-879`): the
+    /// flag and the base are characters on the war's own map.
+    ///
+    /// The base stands first and the flag on the same point, so the flag stands on its
+    /// base (`CWarMap::IsFlagOnBase`, `G/war_map.cpp:898-911`): the constructor adds the
+    /// two bases and then the two flags (`G/war_map.cpp:126-131`).
+    fn war_map_stand_flags(&mut self, index: i32) {
+        let Some(war) = self.war_maps.get(&index) else {
+            return;
+        };
+        let Some(flags) = war.flags.as_ref() else {
+            return;
+        };
+        let base_map = war.base_map;
+        let bases = flags.bases;
+        for team in 0..2 {
+            let at = bases[team];
+            let base = self.war_map_spawn_mob(index, base_map, WAR_FLAG_BASE_VNUM, at);
+            let flag = self.war_map_spawn_mob(index, base_map, WAR_FLAG_VNUM[team], at);
+            if let Some(war) = self.war_maps.get_mut(&index) {
+                if let Some(flags) = war.flags.as_mut() {
+                    flags.base_vids[team] = base;
+                    flags.flag_vids[team] = flag;
+                }
+            }
+        }
+    }
+
+    /// `CWarMap::AddFlag` (`G/war_map.cpp:855-879`): the flag of the team `team` stands
+    /// at `at`, where the carrier of the flag fell.
+    fn war_map_stand_flag(&mut self, index: i32, team: usize, at: (i32, i32)) {
+        let Some(war) = self.war_maps.get(&index) else {
+            return;
+        };
+        let base_map = war.base_map;
+        let vid = self.war_map_spawn_mob(index, base_map, WAR_FLAG_VNUM[team], at);
+        if let Some(war) = self.war_maps.get_mut(&index) {
+            if let Some(flags) = war.flags.as_mut() {
+                flags.flag_vids[team] = vid;
+            }
+        }
+    }
+
+    /// `CWarMap::RemoveFlag` (`G/war_map.cpp:881-893`): the flag's character dies, and
+    /// the flag leaves the map.
+    fn war_map_remove_flag(&mut self, index: i32, team: usize) {
+        let Some(vid) = self
+            .war_maps
+            .get_mut(&index)
+            .and_then(|war| war.flags.as_mut())
+            .and_then(|flags| flags.flag_vids.get_mut(team).copied().flatten())
+        else {
+            return;
+        };
+        // `pkChrFlag->Dead(NULL, true)` (`G/war_map.cpp:888`): the character is gone.
+        self.destroy_npc(vid);
+        if let Some(war) = self.war_maps.get_mut(&index) {
+            if let Some(flags) = war.flags.as_mut() {
+                flags.flag_vids[team] = None;
+            }
+        }
+    }
+
+    /// `CWarMap::SetEnded` (`G/war_map.cpp:739-779`): the war is over, so the flag and
+    /// the base characters are destroyed and the flag reset is cancelled.
+    fn war_map_destroy_flags(&mut self, index: i32) {
+        let vids: Vec<u32> = self
+            .war_maps
+            .get_mut(&index)
+            .and_then(|war| war.flags.as_mut())
+            .map(|flags| {
+                flags
+                    .flag_vids
+                    .iter()
+                    .chain(flags.base_vids.iter())
+                    .copied()
+                    .flatten()
+                    .collect()
+            })
+            .unwrap_or_default();
+        for vid in vids {
+            self.destroy_npc(vid);
+        }
+        if let Some(war) = self.war_maps.get_mut(&index) {
+            if let Some(flags) = war.flags.as_mut() {
+                flags.flag_vids = [None, None];
+                flags.base_vids = [None, None];
+                // `event_cancel(&m_pkResetFlagEvent)` (`G/war_map.cpp:769`).
+                flags.reset_pulse = None;
+            }
+        }
+    }
+
+    /// Stands one character of `vnum` at `at` on the war map `index`
+    /// (`CWarMap::AddFlag` and `CWarMap::AddFlagBase`, `G/war_map.cpp:832-879`).
+    ///
+    /// The private map is a copy of the base map's grid
+    /// (`SECTREE_MANAGER::CreatePrivateMap`, `G/sectree_manager.cpp:943-1026`), so the
+    /// point's cell and the map's region are the base map's.
+    fn war_map_spawn_mob(
+        &mut self,
+        index: i32,
+        base_map: i32,
+        vnum: u32,
+        at: (i32, i32),
+    ) -> Option<u32> {
+        let channel = self.war_map_channel(index)?;
+        let region = self
+            .recall
+            .atlas()
+            .and_then(|atlas| atlas.region(base_map))
+            .cloned()?;
+        let cells = self.regens.cells_of(base_map)?;
+        let npc = {
+            let respawner = self.regens.respawner_mut()?;
+            respawner
+                .spawn_one((&region, &cells), vnum, at, &mut self.dice)
+                .ok()?
+        }?;
+        let vid = npc.vid;
+        let pulse = self.last_pulse;
+        self.stand_runtime((channel, index), vec![npc], pulse);
+        Some(vid)
+    }
+
+    /// `CHARACTER::StateFlag` (`G/char_state.cpp:1185-1215`) with `FuncFindChrForFlag`
+    /// (`G/char_state.cpp:33-97`): the player nearest the flag takes it.
+    ///
+    /// The player must be on the map, not an observer, alive, in a guild, and carry no
+    /// flag; the closest one within [`super::war_map::FLAG_REACH`] takes it. A player of
+    /// the flag's own guild may take it only when it does not stand on its base
+    /// (`G/char_state.cpp:68-76`). The flag leaves the map, the carrier gets the flag's
+    /// affects, and the map says so.
+    fn war_map_flag_take(&mut self, index: i32) {
+        // The flags that stand on the map, and the guild each of them belongs to.
+        let mut on_map: Vec<(usize, i32, i32, u32)> = Vec::new();
+        if let Some(war) = self.war_maps.get(&index) {
+            for team in 0..2 {
+                if let Some(super::war_map::WarFlag::OnMap(x, y)) = war.flag_of(team) {
+                    on_map.push((team, x, y, war.guilds[team]));
+                }
+            }
+        }
+        for (team, x, y, flag_guild) in on_map {
+            let Some(carrier) = self.war_flag_nearer(index, team, x, y, flag_guild) else {
+                continue;
+            };
+            // `RemoveFlag` (`G/war_map.cpp:881-893`): the flag leaves the map.
+            let taken = self
+                .war_maps
+                .get_mut(&index)
+                .is_some_and(|war| war.carry_flag(team, carrier));
+            if !taken {
+                continue;
+            }
+            // `RemoveFlag` (`G/war_map.cpp:881-893`): the flag's character dies with
+            // the flag.
+            self.war_map_remove_flag(index, team);
+            self.war_flag_give(carrier, flag_guild, team);
+            self.notice_war_map_flag_take(index, flag_guild, carrier);
+        }
+    }
+
+    /// The player nearest the flag at `(x, y)` that may take it (`FuncFindChrForFlag`,
+    /// `G/char_state.cpp:33-97`): a player on the map that is not an observer
+    /// (`IsObserverMode`, `:45`), is alive (`IsDead`, `:51`), is in a guild
+    /// (`GetGuild`, `:47`), and carries no flag (`IsAffectFlag`, `:60-62`).
+    ///
+    /// The nearest one wins (`m_iMinDistance > iDist`, `:57`). A player of the flag's
+    /// own guild may take it only when the flag does not stand on its base
+    /// (`IsFlagOnBase`, `:71`), and a player that fails that rule does not take the
+    /// flag away from a farther player that may.
+    fn war_flag_nearer(
+        &self,
+        index: i32,
+        team: usize,
+        x: i32,
+        y: i32,
+        flag_guild: u32,
+    ) -> Option<Vid> {
+        let war = self.war_maps.get(&index)?;
+        let on_base = war.is_flag_on_base(team);
+        let mut vids: Vec<Vid> = war.present.iter().copied().collect();
+        vids.sort_by_key(|vid| vid.raw());
+        let mut best: Option<(Vid, i32)> = None;
+        for vid in vids {
+            let Ok(character) = self.characters.find_by_vid(vid) else {
+                continue;
+            };
+            let pid = character.player_id();
+            if war.watchers.contains(&pid) {
+                continue;
+            }
+            if self.is_dead(vid.raw()) {
+                continue;
+            }
+            let Some(guild) = self.guild_of(pid) else {
+                continue;
+            };
+            if self.war_flag_carries(vid) {
+                continue;
+            }
+            let Some(spot) = self.spot_of(vid.raw()) else {
+                continue;
+            };
+            let distance = distance_approx(spot.x - x, spot.y - y);
+            if distance > super::war_map::FLAG_REACH {
+                continue;
+            }
+            if best.is_some_and(|(_, nearest)| distance >= nearest) {
+                continue;
+            }
+            // Our own flag stays on its base (`G/char_state.cpp:68-76`).
+            if guild == flag_guild && on_base {
+                continue;
+            }
+            best = Some((vid, distance));
+        }
+        best.map(|(vid, _)| vid)
+    }
+
+    /// Whether the player under `vid` carries a flag (`IsAffectFlag(AFF_WAR_FLAG1)`,
+    /// `IsAffectFlag(AFF_WAR_FLAG2)` or `IsAffectFlag(AFF_WAR_FLAG3)`,
+    /// `G/char_state.cpp:60-62` and `:122`).
+    fn war_flag_carries(&self, vid: Vid) -> bool {
+        let Some(event) = self.affect_events.get(&vid) else {
+            return false;
+        };
+        event.affects.iter().any(|affect| {
+            affect.kind == AFFECT_WAR_FLAG
+                && matches!(affect.flag, AFF_WAR_FLAG1 | AFF_WAR_FLAG2 | AFF_WAR_FLAG3)
+        })
+    }
+
+    /// The flag the player under `vid` carries: the flag's affect names the guild whose
+    /// flag it is (`lApplyValue`, `G/char_state.cpp:139` and `:150`).
+    ///
+    /// The affect's own bit (`AFF_WAR_FLAG1` or `AFF_WAR_FLAG2`) is the flag the client
+    /// shows above the carrier's head.
+    fn war_flag_carried(&self, vid: Vid) -> Option<u32> {
+        let event = self.affect_events.get(&vid)?;
+        let affect = event
+            .affects
+            .iter()
+            .find(|affect| affect.kind == AFFECT_WAR_FLAG)?;
+        u32::try_from(affect.value).ok()
+    }
+
+    /// `StateFlag`'s two affects (`G/char_state.cpp:1209-1210`): the flag's affect, which
+    /// names the flag's guild and sets the flag's bit, and the speed the carrier gets,
+    /// which takes its speed to fifty.
+    fn war_flag_give(&mut self, carrier: Vid, flag_guild: u32, team: usize) {
+        let flag = if team == 0 {
+            AFF_WAR_FLAG1
+        } else {
+            AFF_WAR_FLAG2
+        };
+        self.add_pc_affect(
+            carrier,
+            Affect {
+                kind: AFFECT_WAR_FLAG,
+                apply_on: u8::try_from(point::POINT_NONE).unwrap_or(u8::MAX),
+                value: i32::try_from(flag_guild).unwrap_or(0),
+                flag,
+                remaining: INFINITE_AFFECT_DURATION,
+                sp_cost: 0,
+            },
+            false,
+        );
+        let speed = self.move_speed_of(carrier.raw());
+        self.add_pc_affect(
+            carrier,
+            Affect {
+                kind: AFFECT_WAR_FLAG,
+                apply_on: u8::try_from(point::POINT_MOV_SPEED).unwrap_or(u8::MAX),
+                value: 50 - speed,
+                flag: 0,
+                remaining: INFINITE_AFFECT_DURATION,
+                sp_cost: 0,
+            },
+            false,
+        );
+    }
+
+    /// `CHARACTER::StateFlagBase` (`G/char_state.cpp:98-170`): a player of the base's
+    /// guild that carries the other team's flag and stands near the base gives its guild
+    /// a point, the flag resets, and the map says so.
+    fn war_map_flag_score(&mut self, index: i32, pulse: u64) {
+        // The player that scores, and the two guilds the score is between: the base's
+        // guild and the flag's guild.
+        let mut scored: Option<(u32, u32)> = None;
+        {
+            let Some(war) = self.war_maps.get(&index) else {
+                return;
+            };
+            let Some(flags) = war.flags.as_ref() else {
+                return;
+            };
+            let bases = flags.bases;
+            let guilds = war.guilds;
+            let mut vids: Vec<Vid> = war.present.iter().copied().collect();
+            vids.sort_by_key(|vid| vid.raw());
+            'bases: for (team, base) in bases.iter().enumerate() {
+                let base_guild = guilds[team];
+                for vid in vids.iter().copied() {
+                    let Ok(character) = self.characters.find_by_vid(vid) else {
+                        continue;
+                    };
+                    let pid = character.player_id();
+                    if war.watchers.contains(&pid) {
+                        continue;
+                    }
+                    // The player must be of the base's guild (`G/char_state.cpp:138`).
+                    if self.guild_of(pid) != Some(base_guild) {
+                        continue;
+                    }
+                    // The flag it carries must be the other team's
+                    // (`G/char_state.cpp:139-141`).
+                    let Some(flag_guild) = self.war_flag_carried(vid) else {
+                        continue;
+                    };
+                    if flag_guild == base_guild {
+                        continue;
+                    }
+                    let Some(spot) = self.spot_of(vid.raw()) else {
+                        continue;
+                    };
+                    if distance_approx(spot.x - base.0, spot.y - base.1)
+                        > super::war_map::FLAG_REACH
+                    {
+                        continue;
+                    }
+                    scored = Some((base_guild, flag_guild));
+                    break 'bases;
+                }
+            }
+        }
+        let Some((base_guild, flag_guild)) = scored else {
+            return;
+        };
+        // `SendGuildWarScore` (`G/char_state.cpp:150`): the base's guild scores against
+        // the flag's guild.
+        self.war_map_score(index, base_guild, flag_guild, 1);
+        // `pMap->ResetFlag()` (`G/char_state.cpp:151`).
+        self.war_map_reset_flags(index, pulse);
+        // The line (`G/char_state.cpp:153-158`).
+        self.notice_war_map_flag_score(index, base_guild, flag_guild);
+    }
+
+    /// `CWarMap::ResetFlag` (`G/war_map.cpp:941-964`): the players on the map lose the
+    /// flag's affects, the flags leave the map, and they come back ten seconds later.
+    fn war_map_reset_flags(&mut self, index: i32, pulse: u64) {
+        let reset = self
+            .war_maps
+            .get_mut(&index)
+            .is_some_and(|war| war.reset_flags(pulse));
+        if !reset {
+            return;
+        }
+        // `RemoveFlag(0)` and `RemoveFlag(1)` (`G/war_map.cpp:957-958`): the flag
+        // characters die with the flags.
+        for team in 0..2 {
+            self.war_map_remove_flag(index, team);
+        }
+        // `FRemoveFlagAffect` (`G/war_map.cpp:932-939`): every player on the map loses
+        // the flag's affects.
+        let vids: Vec<Vid> = self
+            .war_maps
+            .get(&index)
+            .map(|war| war.present.iter().copied().collect())
+            .unwrap_or_default();
+        for vid in vids {
+            self.remove_war_flag_affects(vid);
+        }
+    }
+
+    /// `RemoveAffect(AFFECT_WAR_FLAG)` (`G/char_state.cpp:937`): every affect of that
+    /// type goes, the flag's own and the speed with it (`RemoveAffect`,
+    /// `G/char_affect.cpp:864-887`, takes every affect of the type).
+    fn remove_war_flag_affects(&mut self, vid: Vid) {
+        let flags_before = self.affect_flags_of(vid);
+        let removed = match self.affect_events.get_mut(&vid) {
+            Some(event) => super::affect::take_affects_of_kind(&mut event.affects, AFFECT_WAR_FLAG),
+            None => Vec::new(),
+        };
+        if removed.is_empty() {
+            return;
+        }
+        // `ComputeAffect(pkAff, false)` (`G/char_affect.cpp:838`): the affect's value goes
+        // back to the point it was added to.
+        for affect in &removed {
+            self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
+        }
+        let flags_after = self.affect_flags_of(vid);
+        if flags_after != flags_before {
+            self.send_affect_update(vid, flags_after);
+        }
+        for affect in &removed {
+            let _delivered = self.write_to_client(vid, affect_remove_frame(affect));
+        }
+    }
+
+    /// The line the flag's take says (`StateFlag`, `G/char_state.cpp:1213`): the flag's
+    /// guild and the carrier's name.
+    ///
+    /// The line is built before it goes out, because the legacy's `LC_TEXT`
+    /// (`G/locale.hpp:31`) looks the text up with `LOCALE_YMIR`, which answers the text
+    /// itself (`G/locale.cpp:73-74`): the legacy's own words go to the client.
+    fn notice_war_map_flag_take(&mut self, index: i32, flag_guild: u32, carrier: Vid) {
+        let guild_name = self.guild_name_of(flag_guild);
+        let player_name = self.character_name_of(carrier);
+        let line = format_line(
+            FLAG_TAKE_NOTICE,
+            &[Arg::Text(&guild_name), Arg::Text(&player_name)],
+        );
+        self.notice_war_map(index, &line);
+    }
+
+    /// The line the base's score says (`StateFlagBase`, `G/char_state.cpp:158`): the
+    /// base's guild and the flag's guild, both of them guild names.
+    fn notice_war_map_flag_score(&mut self, index: i32, base_guild: u32, flag_guild: u32) {
+        let base_name = self.guild_name_of(base_guild);
+        let flag_name = self.guild_name_of(flag_guild);
+        let line = format_line(
+            FLAG_SCORE_NOTICE,
+            &[Arg::Text(&base_name), Arg::Text(&flag_name)],
+        );
+        self.notice_war_map(index, &line);
     }
 
     /// `CWarMap::CheckWarEnd` (`G/war_map.cpp:470-495`): a side with no members ends the
@@ -4037,6 +4570,9 @@ impl GameState {
         if let Some(map) = self.war_maps.get_mut(&map_index) {
             map.end(self.last_pulse);
         }
+        // `CWarMap::SetEnded` (`G/war_map.cpp:745-768`): the flag and base characters
+        // are destroyed when the war ends.
+        self.war_map_destroy_flags(map_index);
         let (score_lo, score_hi) = (score(&self.guilds, lo, hi), score(&self.guilds, hi, lo));
         // Two draws, and they are not the same one: the ladder math follows the DB's
         // `WarEnd`, which a forced draw turns into a draw whatever the scores are
@@ -4194,6 +4730,15 @@ impl GameState {
             .by_id
             .get(&id)
             .map_or(Vec::new(), |guild| guild.name.clone())
+    }
+
+    /// `GetName` (`G/char.cpp:2843`) of the character under `vid`, empty when the
+    /// character is gone.
+    fn character_name_of(&self, vid: Vid) -> Vec<u8> {
+        self.characters
+            .find_by_vid(vid)
+            .map(|character| character.name().as_bytes().to_vec())
+            .unwrap_or_default()
     }
 
     /// One side's insert (`CGuild::DeclareWar`, `G/guild_war.cpp:372-384`): false when
@@ -4576,6 +5121,13 @@ impl GameState {
             .collect();
         for index in timing_out {
             self.war_map_timeout(index, pulse);
+        }
+        // The flag mob's state (`CHARACTER::StateFlag`, `G/char_state.cpp:1185-1215`)
+        // and the base mob's state (`CHARACTER::StateFlagBase`,
+        // `G/char_state.cpp:98-170`): the flag war's own rule.
+        let maps: Vec<i32> = self.war_maps.keys().copied().collect();
+        for index in maps {
+            self.war_map_flags(index, pulse);
         }
     }
 
@@ -9812,6 +10364,351 @@ mod tests {
                 .timeout_pulse
                 .is_some(),
             "the map asked for the timeout"
+        );
+    }
+
+    /// The private copy of the flag map (`CWarMapManager::CreateWarMap`,
+    /// `G/war_map.cpp:1042-1059`): the flag war's map is 111.
+    const FLAG_MAP: i32 = 1_110_000;
+    /// The flag map itself (`CWarMapManager::LoadWarMapInfo`, `G/war_map.cpp:1003-1008`).
+    const FLAG_BASE_MAP: i32 = 111;
+    /// The flag map's two start points (`CWarMapManager::LoadWarMapInfo`,
+    /// `G/war_map.cpp:1003-1008`): the first team's flag and base, the second team's.
+    const FLAG_SPOTS: [(i32, i32); 2] = [(64_400, 6_900), (74_700, 18_200)];
+    /// The Pulse at which the flag mob's state runs the first time
+    /// (`CHARACTER::StateFlag`, `G/char_state.cpp:1186`): twelve Pulses after the map
+    /// was made.
+    const FIRST_FLAG_PULSE: u64 = 12;
+
+    /// The world with the flag map in its map index, so that a flag war may be
+    /// declared (`GuildWar_IsWarMap`, `G/guild_war.cpp:260-271`).
+    fn with_the_flag_map(world: GameState) -> GameState {
+        let atlas = MapAtlas::from_regions(vec![MapRegion {
+            index: FLAG_BASE_MAP,
+            name: b"flag".to_vec(),
+            sx: 0,
+            sy: 0,
+            ex: 6_400,
+            ey: 6_400,
+            spawn: (0, 0),
+            empire_spawns: None,
+        }]);
+        let channel_maps: HashMap<u8, Vec<u32>> =
+            HashMap::from([(super::super::fixtures::PLACE.0, vec![FLAG_BASE_MAP as u32])]);
+        world.with_recall(Arc::new(atlas), &channel_maps, &[])
+    }
+
+    /// A flag war with a member of each guild on the map: the master of the first
+    /// guild at `spot`, the master of the second at the other flag.
+    ///
+    /// The members join the war as members (`CWarMap::IncMember`,
+    /// `G/war_map.cpp:342-398`): the war's entry flag (`war.is_war_member`) is set
+    /// before they stand on the map.
+    fn a_flag_war(
+        master_spot: (i32, i32),
+        rival_spot: (i32, i32),
+    ) -> (
+        GameState,
+        UnboundedReceiver<Vec<u8>>,
+        UnboundedReceiver<Vec<u8>>,
+    ) {
+        let (_clock, world, master, _guest) = a_guilded_pair();
+        let mut world = with_the_flag_map(world);
+        world.quests = Some(a_quest_manager());
+        install_war_pair(&mut world);
+        let rival = enter(&mut world, 200, FAR, 0);
+        world.link_guild(Vid::new(200));
+        // The war is declared, so the two guilds' enemy entries exist and the score
+        // has a pair to change (`G/guild_war.cpp:372-384`).
+        let _ = world.guild_war(Vid::new(MASTER_VID), b"Wolves 2", NOW);
+        world.create_war_map(FLAG_MAP, GUILD_ID, SECOND_ID);
+        if let Some(quests) = world.quests.as_mut() {
+            quests
+                .manager_mut()
+                .set_quest_flag(MASTER_VID, b"war.is_war_member", 1);
+            quests
+                .manager_mut()
+                .set_quest_flag(200, b"war.is_war_member", 1);
+        }
+        stand_on(&mut world, MASTER_VID, FLAG_MAP, master_spot);
+        stand_on(&mut world, 200, FLAG_MAP, rival_spot);
+        (world, master, rival)
+    }
+
+    /// Stand the player under `vid` on the war's map at `spot` (`PlayerLoad`'s `Show`,
+    /// `G/input_login.cpp:590`).
+    fn stand_on(world: &mut GameState, vid: u32, map: i32, spot: (i32, i32)) {
+        world.place_body(
+            Vid::new(vid),
+            crate::game_loop_messages::EnterPlace {
+                channel: super::super::fixtures::PLACE.0,
+                map,
+                x: spot.0,
+                y: spot.1,
+                z: 0,
+            },
+            crate::loading_phase::PcCard {
+                name: format!("P{vid}"),
+                job: 0,
+                empire: 1,
+                level: 10,
+                conqueror_level: 0,
+                language: 0,
+                pk_mode: crate::loading_phase::PK_MODE_PROTECT,
+                skill_group: 0,
+                alignment: 0,
+            },
+        );
+    }
+
+    /// The player under `vid` stands at `spot` on the war's map and is still a member
+    /// of the war (`CWarMap::IncMember`, `G/war_map.cpp:342-398`): the war's entry flag
+    /// is set before he stands on the map, and the map counts him once.
+    fn move_on_the_wars_map(world: &mut GameState, vid: u32, map: i32, spot: (i32, i32)) {
+        let pid = world
+            .characters
+            .find_by_vid(Vid::new(vid))
+            .expect("the player is in the world")
+            .player_id();
+        // `DecMember` clears the war member's flag (`G/war_map.cpp:438`), so it is set
+        // again after the leave.
+        world.leave_war_map(Vid::new(vid), map);
+        if let Some(quests) = world.quests.as_mut() {
+            quests
+                .manager_mut()
+                .set_quest_flag(pid, b"war.is_war_member", 1);
+        }
+        stand_on(world, vid, map, spot);
+    }
+
+    /// The flag affect the player under `vid` holds (`StateFlag`'s first affect,
+    /// `G/char_state.cpp:1209`): the flag's guild and the flag's bit.
+    fn flag_affect(world: &GameState, vid: u32) -> Option<(u32, u32)> {
+        let event = world.affect_events.get(&Vid::new(vid))?;
+        let affect = event
+            .affects
+            .iter()
+            .find(|affect| affect.kind == AFFECT_WAR_FLAG)?;
+        Some((u32::try_from(affect.value).unwrap_or(0), affect.flag))
+    }
+
+    /// `CHARACTER::StateFlag` (`G/char_state.cpp:1185-1215`): a player of the other
+    /// guild takes the flag that stands on the map, the flag leaves the map, the
+    /// carrier gets the flag's affects, and the map says so.
+    #[test]
+    fn a_player_of_the_other_guild_takes_the_flag() {
+        let (mut world, mut master, mut rival) = a_flag_war(FLAG_SPOTS[1], FLAG_SPOTS[0]);
+        let _ = heard(&mut master);
+        let _ = heard(&mut rival);
+        world.last_pulse = FIRST_FLAG_PULSE;
+        world.run_war_map_ticks(FIRST_FLAG_PULSE);
+        // The flag the rival took is the first team's, and the rival carries it.
+        let war = world.war_maps.get(&FLAG_MAP).expect("the war's map");
+        let team = war.team_of(GUILD_ID).expect("the first guild's team");
+        assert_eq!(
+            war.flag_of(team),
+            Some(super::super::war_map::WarFlag::Carried(Vid::new(200))),
+            "the flag is carried by the rival"
+        );
+        assert_eq!(
+            flag_affect(&world, 200),
+            Some((GUILD_ID, AFF_WAR_FLAG1)),
+            "the carrier holds the flag's guild and the first flag's bit"
+        );
+        // The line the take says (`G/char_state.cpp:1213`) names the flag's guild and
+        // the carrier.
+        let held = heard(&mut rival);
+        let line = held
+            .iter()
+            .find(|record| record[0] == protocol::gc_inventory::HEADER_GC_CHAT.value())
+            .unwrap_or_else(|| panic!("the map says who took the flag: {held:?}"));
+        let text = &line[protocol::gc_chat::GC_CHAT_WIRE_SIZE..];
+        assert!(
+            text.windows(7).any(|window| window == b"Knights"),
+            "the line names the flag's guild: {text:?}"
+        );
+    }
+
+    /// `FuncFindChrForFlag` (`G/char_state.cpp:68-76`): a player of the flag's own
+    /// guild may not take it while it stands on its base, so that the flag is not
+    /// carried away from its own base.
+    #[test]
+    fn a_player_of_the_flags_own_guild_may_not_take_it_from_its_base() {
+        let (mut world, mut master, mut rival) = a_flag_war(FLAG_SPOTS[0], FLAG_SPOTS[1]);
+        let _ = heard(&mut master);
+        let _ = heard(&mut rival);
+        world.last_pulse = FIRST_FLAG_PULSE;
+        world.run_war_map_ticks(FIRST_FLAG_PULSE);
+        let war = world.war_maps.get(&FLAG_MAP).expect("the war's map");
+        let team = war.team_of(GUILD_ID).expect("the first guild's team");
+        assert_eq!(
+            war.flag_of(team),
+            Some(super::super::war_map::WarFlag::OnMap(
+                FLAG_SPOTS[0].0,
+                FLAG_SPOTS[0].1
+            )),
+            "the flag stands on its base"
+        );
+        assert_eq!(
+            flag_affect(&world, MASTER_VID),
+            None,
+            "the master holds no flag"
+        );
+    }
+
+    /// `CHARACTER::StateFlagBase` (`G/char_state.cpp:98-170`): a player of the base's
+    /// guild that carries the other team's flag and stands at the base gives its guild
+    /// a point, the flags reset, and the map says so.
+    #[test]
+    fn the_base_scores_the_flag_it_carries() {
+        // The master takes the second team's flag, which stands at the second spot.
+        let (mut world, mut master, mut rival) = a_flag_war(FLAG_SPOTS[1], FLAG_SPOTS[1]);
+        let _ = heard(&mut master);
+        let _ = heard(&mut rival);
+        world.last_pulse = FIRST_FLAG_PULSE;
+        world.run_war_map_ticks(FIRST_FLAG_PULSE);
+        assert_eq!(
+            flag_affect(&world, MASTER_VID),
+            Some((SECOND_ID, AFF_WAR_FLAG2)),
+            "the master carries the second team's flag"
+        );
+        // The master stands at the first team's base with the flag.
+        move_on_the_wars_map(&mut world, MASTER_VID, FLAG_MAP, FLAG_SPOTS[0]);
+        world.last_pulse = FIRST_FLAG_PULSE * 2;
+        world.run_war_map_ticks(FIRST_FLAG_PULSE * 2);
+        let score = world
+            .guilds
+            .by_id
+            .get(&GUILD_ID)
+            .and_then(|guild| guild.enemies.get(&SECOND_ID))
+            .expect("the enemy entry")
+            .score;
+        assert_eq!(score, 1, "the base's guild scores against the flag's guild");
+        let war = world.war_maps.get(&FLAG_MAP).expect("the war's map");
+        let team = war.team_of(GUILD_ID).expect("the first guild's team");
+        assert_eq!(war.teams[team].score, 1, "the map's score follows");
+        // `pMap->ResetFlag()` (`G/char_state.cpp:151`): the flags leave the map and the
+        // carrier loses the flag's affects.
+        assert_eq!(war.flag_of(team), None, "the flag left the map");
+        assert_eq!(war.flag_of(1 - team), None, "the other flag left the map");
+        assert_eq!(
+            flag_affect(&world, MASTER_VID),
+            None,
+            "the carrier holds no flag"
+        );
+        // The line the base's score says (`G/char_state.cpp:158`) names the base's
+        // guild and the flag's guild.
+        let held = heard(&mut master);
+        let line = held
+            .iter()
+            .find(|record| {
+                record[0] == protocol::gc_inventory::HEADER_GC_CHAT.value()
+                    && record[protocol::gc_chat::GC_CHAT_WIRE_SIZE..]
+                        .windows(7)
+                        .any(|window| window == b"Knights")
+            })
+            .unwrap_or_else(|| panic!("the map says who took the flag: {held:?}"));
+        let text = &line[protocol::gc_chat::GC_CHAT_WIRE_SIZE..];
+        assert!(
+            text.windows(6).any(|window| window == b"Wolves"),
+            "the line names the flag's guild: {text:?}"
+        );
+    }
+
+    /// `war_reset_flag_event` (`G/war_map.cpp:913-930`): the flags come back on their
+    /// bases ten seconds after the reset.
+    #[test]
+    fn the_flags_come_back_ten_seconds_after_the_reset() {
+        let (mut world, mut master, mut rival) = a_flag_war(FLAG_SPOTS[1], FLAG_SPOTS[1]);
+        let _ = heard(&mut master);
+        let _ = heard(&mut rival);
+        world.last_pulse = FIRST_FLAG_PULSE;
+        world.run_war_map_ticks(FIRST_FLAG_PULSE);
+        move_on_the_wars_map(&mut world, MASTER_VID, FLAG_MAP, FLAG_SPOTS[0]);
+        world.last_pulse = FIRST_FLAG_PULSE * 2;
+        world.run_war_map_ticks(FIRST_FLAG_PULSE * 2);
+        let reset = world
+            .war_maps
+            .get(&FLAG_MAP)
+            .and_then(|war| war.flags.as_ref())
+            .and_then(|flags| flags.reset_pulse)
+            .expect("the reset waits for the flags");
+        assert_eq!(
+            reset,
+            FIRST_FLAG_PULSE * 2 + 10 * 25,
+            "the reset is ten seconds out"
+        );
+        // Ten seconds later the flags stand on their bases again.
+        world.last_pulse = reset;
+        world.run_war_map_ticks(reset);
+        let war = world.war_maps.get(&FLAG_MAP).expect("the war's map");
+        let team = war.team_of(GUILD_ID).expect("the first guild's team");
+        assert_eq!(
+            war.flag_of(team),
+            Some(super::super::war_map::WarFlag::OnMap(
+                FLAG_SPOTS[0].0,
+                FLAG_SPOTS[0].1
+            )),
+            "the flag stands on its base again"
+        );
+    }
+
+    /// `CWarMap::OnKill`'s flag arm (`G/war_map.cpp:811-823`): the flag the carrier
+    /// carried lies where the carrier fell, and the carrier loses the flag's affects.
+    #[test]
+    fn the_flag_lies_where_its_carrier_fell() {
+        let (mut world, mut master, mut rival) = a_flag_war(FLAG_SPOTS[1], FLAG_SPOTS[1]);
+        let _ = heard(&mut master);
+        let _ = heard(&mut rival);
+        world.last_pulse = FIRST_FLAG_PULSE;
+        world.run_war_map_ticks(FIRST_FLAG_PULSE);
+        assert_eq!(
+            flag_affect(&world, MASTER_VID),
+            Some((SECOND_ID, AFF_WAR_FLAG2)),
+            "the master carries the second team's flag"
+        );
+        // The master falls on the map, and the rival kills him there.
+        world.guild_war_kill(Vid::new(200), Vid::new(MASTER_VID));
+        let war = world.war_maps.get(&FLAG_MAP).expect("the war's map");
+        let team = war.team_of(SECOND_ID).expect("the second guild's team");
+        assert_eq!(
+            war.flag_of(team),
+            Some(super::super::war_map::WarFlag::OnMap(
+                FLAG_SPOTS[1].0,
+                FLAG_SPOTS[1].1
+            )),
+            "the flag lies where the carrier fell"
+        );
+        assert_eq!(
+            flag_affect(&world, MASTER_VID),
+            None,
+            "the master holds no flag"
+        );
+    }
+
+    /// `FuncFindChrForFlag` (`G/char_state.cpp:68-76`): a player of the flag's own
+    /// guild may take it once it does not stand on its base, because the rule keeps
+    /// the flag on its base and not the players of its own guild away from it.
+    #[test]
+    fn a_player_of_the_flags_own_guild_may_take_it_off_its_base() {
+        let (mut world, mut master, mut rival) = a_flag_war(FLAG_SPOTS[0], FLAG_SPOTS[1]);
+        let _ = heard(&mut master);
+        let _ = heard(&mut rival);
+        // The first team's flag lies away from its base, where the master stands.
+        let away = (FLAG_SPOTS[0].0 + 100, FLAG_SPOTS[0].1);
+        world
+            .war_maps
+            .get_mut(&FLAG_MAP)
+            .and_then(|war| war.flags.as_mut())
+            .expect("the map's flags")
+            .flags[0] = Some(super::super::war_map::WarFlag::OnMap(away.0, away.1));
+        move_on_the_wars_map(&mut world, MASTER_VID, FLAG_MAP, away);
+        world.last_pulse = FIRST_FLAG_PULSE;
+        world.run_war_map_ticks(FIRST_FLAG_PULSE);
+        assert_eq!(
+            flag_affect(&world, MASTER_VID),
+            Some((GUILD_ID, AFF_WAR_FLAG1)),
+            "the master carries his own guild's flag"
         );
     }
 }

@@ -990,6 +990,51 @@ impl Respawner {
         self.vids = spawner.into_vids();
         Ok(site.npcs)
     }
+
+    /// `SpawnMob` (`G/char_manager.cpp:382-470`) at one point: the proto, the cell
+    /// checks, the sectree, then the character.
+    ///
+    /// The war's flags and their bases are stood up this way (`CWarMap::AddFlag` and
+    /// `CWarMap::AddFlagBase`, `G/war_map.cpp:832-879`): a character of a vnum at a
+    /// point of a map, outside the map's regen entries. The point is the map's own
+    /// coordinates, and the caller names the map the character stands on.
+    ///
+    /// Answers the character it stood, or nothing for a vnum with no proto, for a point
+    /// with no sectree, and for a cell the character may not stand in.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NpcVidsExhausted`] when the character outnumbers the VIDs left.
+    pub fn spawn_one(
+        &mut self,
+        (region, cells): (&MapRegion, &MapCells),
+        vnum: u32,
+        (x, y): (i32, i32),
+        dice: &mut dyn Dice,
+    ) -> Result<Option<Npc>, NpcVidsExhausted> {
+        let mut spawner =
+            NpcSpawner::new(&self.protos, &self.groups, &self.names, self.vids.clone());
+        if let Some(clips) = &self.clips {
+            spawner = spawner.with_clips(clips);
+        }
+        let mut site = Site {
+            region,
+            cells,
+            npcs: Vec::new(),
+        };
+        // `SpawnMob` is passed the point and no rotation (`G/war_map.cpp:865`): the
+        // rotation is drawn, and the character stands without the spawn motion.
+        let place = Place {
+            x,
+            y,
+            z: 0,
+            spawn_motion: false,
+            facing: Facing::Drawn,
+        };
+        let _stood = spawner.spawn_mob(&mut site, vnum, place, dice)?;
+        self.vids = spawner.into_vids();
+        Ok(site.npcs.into_iter().next())
+    }
 }
 
 /// `iMaxHP = m_pkMobData->m_table.dwMaxHP` (`G/char.cpp:3017`): the `DWORD` read into an `int`.
@@ -1851,6 +1896,54 @@ mod tests {
             entries.iter().filter(|e| e.spawns() && e.time != 0).count()
         );
         assert_eq!(map.regens.len(), 1_118);
+    }
+
+    /// `SpawnMob` (`G/char_manager.cpp:382-470`) at one point: the war's flags and their
+    /// bases stand on the flag map (`CWarMap::AddFlag` and `CWarMap::AddFlagBase`,
+    /// `G/war_map.cpp:832-879`).
+    #[test]
+    fn the_flag_mobs_stand_on_the_flag_map() {
+        let root = owners();
+        let protos = MobProtos::load(&root.join("proto")).unwrap();
+        let names = MobLocaleNames::load(&root.join("locale/europe/country")).unwrap();
+        let groups = MobGroups::load(&root.join("locale/europe")).unwrap();
+        let map_dir = root.join("locale/europe/map");
+        let atlas = MapAtlas::load(&map_dir).unwrap();
+        let region = atlas.region(111).expect("the flag map");
+        let attr = server_attr::load_map(&map_dir, region).unwrap();
+        let cells = MapCells::new(SectreeGrid::of(region).unwrap(), Arc::new(attr));
+        let mut respawner = Respawner::new(
+            Arc::new(protos),
+            Arc::new(groups),
+            Arc::new(names),
+            NpcVids::default(),
+        );
+        let mut dice = crate::character::Pcg32::new(1, 0);
+        // The flag map's two start points (`CWarMapManager::LoadWarMapInfo`,
+        // `G/war_map.cpp:1003-1008`) and the flag vnums (`warmap`, `G/war_map.h:26-27`).
+        let flags = [(20_035u32, (64_400, 6_900)), (20_036, (74_700, 18_200))];
+        for (vnum, at) in flags {
+            let npc = respawner
+                .spawn_one((region, &cells), vnum, at, &mut dice)
+                .unwrap()
+                .expect("the flag stands");
+            assert_eq!(npc.vnum, vnum);
+            assert_eq!((npc.x, npc.y), at);
+            assert_eq!(npc.char_type, CHAR_TYPE_NPC, "the flag is an NPC");
+        }
+        // The base (`warmap::WAR_FLAG_BASE_VNUM`, `G/war_map.h:29`) stands on the same
+        // point as the flag.
+        let base = respawner
+            .spawn_one((region, &cells), 20_038, flags[0].1, &mut dice)
+            .unwrap()
+            .expect("the base stands");
+        assert_eq!((base.vnum, base.x, base.y), (20_038, 64_400, 6_900));
+        // A vnum with no proto stands nothing (`SpawnMob` answers nothing,
+        // `G/char_manager.cpp:391-395`).
+        assert!(respawner
+            .spawn_one((region, &cells), 999_999, flags[0].1, &mut dice)
+            .unwrap()
+            .is_none());
     }
 
     /// `max_count - count`, with a negative maximum and a count past it running none.

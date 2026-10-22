@@ -73,6 +73,17 @@ fn c_string(bytes: &[u8]) -> &[u8] {
         .map_or(bytes, |nul| &bytes[..nul])
 }
 
+/// `snprintf` on a format the caller has chosen (`snprintf`, `G/char_state.cpp:1213`):
+/// the ported lines' formats, whose conversions the arguments fill.
+///
+/// A line the legacy builds with `LC_TEXT` is built here and not looked up: the
+/// multi-language build's `LC_TEXT` (`G/locale.hpp:31`) looks the text up with
+/// `LOCALE_YMIR`, which answers the text itself (`G/locale.cpp:73-74`).
+#[must_use]
+pub(crate) fn format_line(format: &[u8], args: &[Arg<'_>]) -> Vec<u8> {
+    vsnprintf(format, args)
+}
+
 /// The part of `vsnprintf` the ported lines use: `%%`, `%d`, `%02d` and `%s`.
 ///
 /// Each conversion takes the next argument. A conversion with no argument left, or with one of

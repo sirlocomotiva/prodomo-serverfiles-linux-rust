@@ -1,8 +1,8 @@
 # Rewrite status
 
-Last reviewed: 2026-10-22, after ledger section 241 (the war's map judges the war).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 242 onwards (the war's
-own flags).
+Last reviewed: 2026-10-22, after ledger section 243 (the war's own flags).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 244 onwards (the
+flag's take and the base's score on the wire).
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -57,7 +57,11 @@ enemy's guild name reaches it with the enter, as the war's walk says. Since 241 
 judges the war: a kill on it scores the war by one point, a score that reaches the war's end
 score ends the war, a side with no member on it makes the map say so and wait a minute, a
 member that comes calls the wait off, a member that leaves asks at once and still hears it,
-and the wait's end judges a war younger than five minutes a draw. The rest of combat, skills,
+and the wait's end judges a war younger than five minutes a draw. Since 242 the flag war has
+flags: the nearest player that may take one carries it, a player of the flag's own guild may
+not take it from its base, the base scores the other team's flag, the flags reset and come
+back ten seconds later, and the flag lies where its carrier fell. Since 243 the flag and its
+base are characters on the war's own map, and they are destroyed with the war. The rest of combat, skills,
 parties, guilds and the rest of step 4 are not ported yet. The two-process layout (a `game-server` and a `db-server`
 talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177; sections 1-175
 record how it was built and stay as history. Since section 178 the one `prodomo` binary reads
@@ -373,6 +377,7 @@ owner should know about (178.5):
 | V21. The death's item drop penalty differs from legacy in six ways (ledger 235). (a) The shuffle uses the game's one generator, where legacy uses a fresh `std::mt19937` seeded from `std::random_device` (`G/char_battle.cpp:1085-1087`), so which items a penalty drops is not legacy's set. (b) The dropped items' rows go at once, where legacy's go in the delayed-save queue's flush, up to 127 Pulses (about 5.1 seconds) after the drop, and they name the victim until then. (c) `AddToGround` finding no tree for the point loses the item in legacy (`G/item.cpp:569-574`, a Defect); the Rewrite keeps it. (d) The GM arm is narrower: legacy's `GetGMLevel() == GM_PLAYER || test_server` runs the penalty for a GM when `test_server` is on, and it is on in the owner's configuration; the Rewrite spares the GM. (e) Legacy's quickslot sync for a worn item names the wear index, which is an inventory cell, and deletes the wrong quickslot (`G/char_battle.cpp:1150`); the Rewrite syncs the flat cell and deletes nothing. (f) The private shop, the protected inventory, the agreed PvP, the arena duel and the forked road are not ported, so their refusals and their flags cannot happen. | `G/char_battle.cpp:1016-1199`; `G/item_manager.cpp:478-499`, `:546-564`; `G/main.cpp:284-288`; `G/item.cpp:569-574`; `G/unique_item.h:29`. |
 | V22. A guild war's member is sent to the war map before the quest that asked it closes, where legacy sends it after (ledger 239). The quest's end (`[DONE]`) is written first and the warp follows, because the quest step answers the descriptor and the warp goes through the order queue. | The `GC_WARP` is sent while the script runs, so the load comes first and the quest's end after it (`CHARACTER::WarpSet`, `G/char.cpp:6694-6792`). The two records are the same; only their order differs. |
 | V23. A guild war's map sends its members back to the place they came from, where legacy sends them back onto the war map (ledger 240). The exit's warp names the town the member came from, and the member stays connected; legacy warps to the pending warp, which the warp to the war map overwrote with the war map's own start position, so the member is sent back onto the war map and is disconnected with it a few seconds later. | The rule is `CHARACTER::ExitToSavedLocation` (`G/char.cpp:6687-6692`), which warps to `m_posWarp` and `m_lWarpMapIndex` (`G/char.cpp:6690`); the place the member came from is `m_posExit` and `m_lExitMapIndex` (`G/char.cpp:6679-6683`), which legacy forgets without reading. The end state is the same: the member is back in the town, by its next login in legacy and by the warp in the Rewrite. |
+| V24. The flag war's flags take and score are run by the war map's tick, where legacy runs them by the flag and base characters' own states (ledgers 242 and 243). The wire is the same: the nearest player that may take a flag carries it, the base scores the other team's flag, and the flags reset and come back ten seconds later. | The flag mob's state (`CHARACTER::StateFlag`, `G/char_state.cpp:1185-1216`) and the base mob's (`CHARACTER::StateFlagBase`, `:1218-1222`) run through the character state machine, which the Rewrite's characters do not have; the war map's tick runs the same two rules (`prodomo/src/game_state/guild.rs`). |
 
 ## Legacy defects not to reproduce
 

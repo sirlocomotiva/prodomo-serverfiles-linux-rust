@@ -14529,12 +14529,24 @@ fn the_letter_button(letter: &[u8]) -> Option<u32> {
 /// `G/guild_war.cpp:680-727`) read between the fan and the list. The two quest indexes
 /// the letters carry are returned: the button a client presses names its quest.
 fn declare_and_accept_a_battle_war(alice: &mut Keyed, yankee: &mut Keyed) -> (u32, u32) {
-    alice.send_record(&client_chat(CHAT_TALKING, b"/war Wolves 1"));
+    declare_and_accept_a_war_of_type(alice, yankee, 1)
+}
+
+/// [`declare_and_accept_a_battle_war`] for a war of the type `war_type`: the type is the
+/// second argument of the `/war` line (`do_war`, `G/cmd_general.cpp:2044-2056`).
+fn declare_and_accept_a_war_of_type(
+    alice: &mut Keyed,
+    yankee: &mut Keyed,
+    war_type: u8,
+) -> (u32, u32) {
+    let declare = format!("/war Wolves {war_type}");
+    let accept = format!("/war MyGuild {war_type}");
+    alice.send_record(&client_chat(CHAT_TALKING, declare.as_bytes()));
     let war = alice.read_game();
-    assert_eq!(war[12], 1, "bType is battle");
+    assert_eq!(war[12], war_type, "bType is the war's type");
     assert_eq!(war[13], 1, "bWarState is SEND_DECLARE");
     let war = yankee.read_game();
-    assert_eq!(war[12], 1, "bType is battle");
+    assert_eq!(war[12], war_type, "bType is the war's type");
     assert_eq!(war[13], 3, "bWarState is RECV_DECLARE");
     assert_eq!(
         alice.read_game(),
@@ -14546,7 +14558,7 @@ fn declare_and_accept_a_battle_war(alice: &mut Keyed, yankee: &mut Keyed) -> (u3
         a_notice_line(b"[LS;475;MyGuild;Wolves]"),
         "Yankee hears the declare"
     );
-    yankee.send_record(&client_chat(CHAT_TALKING, b"/war MyGuild 1"));
+    yankee.send_record(&client_chat(CHAT_TALKING, accept.as_bytes()));
     let mut indexes = [0, 0];
     for (side, client) in [("Alice", &mut *alice), ("Yankee", &mut *yankee)] {
         assert_eq!(
@@ -14560,7 +14572,7 @@ fn declare_and_accept_a_battle_war(alice: &mut Keyed, yankee: &mut Keyed) -> (u3
             GUILD_SUBHEADER_GC_WAR,
             "{side}'s fan: {war:02x?}"
         );
-        assert_eq!(war[12], 1, "{side}'s bType is battle");
+        assert_eq!(war[12], war_type, "{side}'s bType is the war's type");
         assert_eq!(war[13], 6, "{side}'s bWarState is ON_WAR");
         // The war asks the member to join it: the letter with the button.
         let letter = client.read_game();
@@ -14646,6 +14658,95 @@ fn a_war_with_a_map_asks_its_member_and_the_member_joins_the_war_map() {
         "the other master sees the member leave"
     );
     yankee.quiet("the other master does not join");
+}
+
+/// The flag war map's start positions (`CWarMapManager::LoadWarMapInfo`,
+/// `G/war_map.cpp:1003-1008`): map 111's two teams, the lower guild id's first.
+const FLAG_MAP_START: (i32, i32) = (64_400, 6_900);
+
+/// The Channels the flag war runs on: the flag map (111) stands on the first Channel
+/// (`map_allow_find`, `G/guild_war.cpp:488-493`).
+fn flag_war_channels() -> Vec<ChannelSpec> {
+    vec![
+        ChannelSpec {
+            number: 1,
+            listeners: 2,
+            maps: vec![1, 3, 111],
+        },
+        ChannelSpec {
+            number: 99,
+            listeners: 1,
+            maps: vec![72],
+        },
+    ]
+}
+
+/// `sys.guild.war`, `gc.character.add`: a war of the flag type is fought on the flag map
+/// (map 111), and the private copy of it stands the two flags and the two bases up
+/// (`CWarMap::AddFlagBase` and `CWarMap::AddFlag`, `G/war_map.cpp:832-879`). The member
+/// that joins the war lands on its own guild's flag and sees the flag and the base in the
+/// view (`warmap::WAR_FLAG_VNUM0` and `warmap::WAR_FLAG_BASE_VNUM`, `G/war_map.h:26-29`).
+#[test]
+fn the_flag_war_stands_its_flags_up_and_the_member_sees_them() {
+    let Some((_database, server, mut alice, alpha_listed, mut yankee, _yankee)) =
+        a_war_pair_ready_on(None, &flag_war_channels())
+    else {
+        return;
+    };
+    let (alice_index, _yankee_index) = declare_and_accept_a_war_of_type(&mut alice, &mut yankee, 2);
+    // The member presses the button and says yes: she is sent to the flag map's start
+    // position, which is where her own guild's flag stands.
+    alice.send_record(&client_script_button(alice_index));
+    let question = alice.read_game();
+    assert_eq!(question[0], GC_SCRIPT, "the question: {question:02x?}");
+    alice.send_record(&client_script_answer(0));
+    let done = alice.read_game();
+    assert_eq!(&done[6..], b"[DONE]", "the quest's end script");
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha_listed.id.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "the member leaves its map");
+    let port = server.channel(1).port();
+    assert_eq!(alice.read_game(), a_warp_record(FLAG_MAP_START, port));
+    // The client follows the warp: it reconnects and lands on the war's own copy of the
+    // flag map. The quest flag the war entry set is lost with the reconnect, so the
+    // member watches the war instead of joining a team (`CWarMap::IncMember`,
+    // `G/war_map.cpp:342-398`).
+    drop(alice);
+    let join = WarMapJoin {
+        guilds: [1, 2],
+        joiners: [0, 0],
+        observers: 1,
+        war_type: 2,
+        war_state: 6,
+        scores: [0, 0],
+    };
+    let (mut alice, _alpha, entered) =
+        enter_world_seeing_guilded_on_war_map(&server, b"alice", 0, 1, &join);
+    // The view holds the flag and its base: each insert names its race (`GetRaceNum`,
+    // `G/char.cpp:1074`), its kind and its place.
+    let mut flags = 0;
+    let mut bases = 0;
+    for insert in entered.shown.inserts() {
+        let race = u16::from_le_bytes([insert[22], insert[23]]);
+        let x = i32::from_le_bytes(insert[9..13].try_into().expect("x"));
+        let y = i32::from_le_bytes(insert[13..17].try_into().expect("y"));
+        match race {
+            20_035 => {
+                flags += 1;
+                assert_eq!(insert[21], 1, "the flag is a CHAR_TYPE_NPC");
+                assert_eq!((x, y), FLAG_MAP_START, "the flag stands on its base");
+            }
+            20_038 => {
+                bases += 1;
+                assert_eq!(insert[21], 1, "the base is a CHAR_TYPE_NPC");
+                assert_eq!((x, y), FLAG_MAP_START, "the base stands on its point");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(flags, 1, "the member sees its own guild's flag");
+    assert_eq!(bases, 1, "the member sees the base under it");
+    alice.quiet("the flag war's map is quiet");
 }
 
 /// The war map's other start position: the guild of the higher id takes the second

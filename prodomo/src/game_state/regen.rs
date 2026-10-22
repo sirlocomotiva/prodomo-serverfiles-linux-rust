@@ -57,8 +57,8 @@ use std::sync::Arc;
 use common::vid::Vid;
 use gamedata::map_atlas::MapRegion;
 use gamedata::server_attr::ATTR_BANPK;
-use world::cells::HostedCells;
-use world::npc::{Npc, Respawner};
+use world::cells::{HostedCells, MapCells};
+use world::npc::{MapNpcs, Npc, Respawner};
 
 use tracing::warn;
 
@@ -182,6 +182,21 @@ impl Regens {
     #[cfg(test)]
     pub(super) fn holds(&self, what: Due) -> bool {
         self.due.iter().any(|&(_, due)| due == what)
+    }
+
+    /// The cells of the map `index`: the sectrees it builds and the attributes its
+    /// file gave them.
+    ///
+    /// A private map has no cells of its own: it is a copy of the map it was copied
+    /// from (`SECTREE_MANAGER::CreatePrivateMap`, `G/sectree_manager.cpp:943-1026`), so
+    /// a character on it is checked against the base map's cells.
+    pub(super) fn cells_of(&self, index: i32) -> Option<MapCells> {
+        self.cells.get(index).cloned()
+    }
+
+    /// The spawner the regens spawn from, once boot has handed it over.
+    pub(super) fn respawner_mut(&mut self) -> Option<&mut Respawner> {
+        self.respawner.as_mut()
     }
 }
 
@@ -374,10 +389,14 @@ impl GameState {
     /// Stands runtime-spawned characters on their map after the others: each enters the
     /// map's view, which sends its insert to every player that now sees it; an ore vein's
     /// end is scheduled; and a warp or goto NPC starts its event.
-    fn stand_runtime(&mut self, key: (u8, i32), stood: Vec<Npc>, pulse: u64) {
-        let Some(list) = self.npcs.get_mut(&key) else {
-            return;
-        };
+    ///
+    /// A map with no regen characters holds none yet, so its list is made here: a war
+    /// map is a private copy of a map, and it holds only what the war stands up.
+    pub(super) fn stand_runtime(&mut self, key: (u8, i32), stood: Vec<Npc>, pulse: u64) {
+        let list = self
+            .npcs
+            .entry(key)
+            .or_insert_with(|| Arc::new(MapNpcs::default()));
         let list = Arc::make_mut(list);
         let first = list.npcs.len();
         list.npcs.extend(stood);

@@ -133,6 +133,27 @@ pub const AFFECT_STUN: u32 = 210;
 /// `AFFECT_SLOW` (`G/affect.h:35`): `NormalAttackAffect`'s slow.
 pub const AFFECT_SLOW: u32 = 211;
 
+/// `AFFECT_WAR_FLAG` (`G/affect.h:49`): the affect a war's flag gives its carrier, and
+/// the one its speed comes with.
+pub const AFFECT_WAR_FLAG: u32 = 222;
+
+/// `INFINITE_AFFECT_DURATION` (`G/affect.h:289`) as the 32-bit `long` the legacy's
+/// `AddAffect` takes: sixty years of seconds, which the word holds as 1,471,228,928.
+pub const INFINITE_AFFECT_DURATION: i32 = 1_471_228_928;
+
+/// `AFF_WAR_FLAG1` (`G/affect.h:251`), numbered from 1: the bit the first team's flag
+/// sets on its carrier.
+pub const AFF_WAR_FLAG1: u32 = 37;
+
+/// `AFF_WAR_FLAG2` (`G/affect.h:252`), numbered from 1: the bit the other team's flag
+/// sets on its carrier.
+pub const AFF_WAR_FLAG2: u32 = 38;
+
+/// `AFF_WAR_FLAG3` (`G/affect.h:253`), numbered from 1: the bit the third flag sets on
+/// its carrier. The legacy's flag wars own two flags, and the third bit is only ever
+/// read (`G/char_state.cpp:62`).
+pub const AFF_WAR_FLAG3: u32 = 39;
+
 /// `AFF_POISON` (`G/affect.h:214`), numbered from 1 as `game_state::affect::flags_of` reads it.
 pub const AFF_POISON: u32 = 5;
 

@@ -34326,3 +34326,142 @@ parity scenario green 1/1; no scratch database left — the ones an interrupted 
 had left were dropped by hand, and the run after that left none.
 
 No ADR changed. No owner question added. V23 is taken.
+
+## 242. The war's own flags: the take, the score and the reset (`sys.guild.war`, seventh part)
+
+The flag war was a war without a flag. The map judged it (ledger 241), but the map held no
+flag, no base and no carrier, so nothing could be carried, nothing could be scored and
+nothing could be reset. Legacy's flag war has two flags, one for each team, each standing
+on its own base in the middle of the map, and the flag *is* the war's score: a player that
+carries the other team's flag to its own base gives its guild a point, and the flags go
+back to their bases.
+
+**The flags the map holds.** `CWarMap`'s constructor (`G/war_map.cpp:126-131`) adds the two
+bases and then the two flags, and only a flag map has them. The vnums are
+`warmap::WAR_FLAG_VNUM0` (20035) and `warmap::WAR_FLAG_VNUM1` (20036) and the base's is
+`warmap::WAR_FLAG_BASE_VNUM` (20038) (`G/war_map.h:24-32`). A base stands at the map's
+start point of its team, and the flag stands on the same point, so the flag stands on its
+base (`CWarMap::IsFlagOnBase`, `G/war_map.cpp:898-911`). The flag map's two start points
+are `(64400, 6900)` and `(72870, 18200)` (`CWarMapManager::LoadWarMapInfo`,
+`G/war_map.cpp:1000-1006`).
+
+The Rewrite's `WarMap` holds the two flags and their two bases
+(`prodomo/src/game_state/war_map.rs`): a flag is either standing on a point or carried by
+a player, the map knows which, and the base's point is the map's own.
+
+**The take.** The flag mob runs its state twice a second (`CHARACTER::StateFlag`,
+`G/char_state.cpp:1185-1216`) and asks the map for the player that may take it
+(`FuncFindChrForFlag`, `G/char_state.cpp:33-97`): a player on the map that is not an
+observer, is alive, is in a guild and carries no flag, within 500 units. The nearest one
+wins (`m_iMinDistance > iDist`, `:57`). A player of the flag's *own* guild may take it
+only when the flag does not stand on its base (`:68-76`), so a guild's own flag is safe
+while it is home — and a player that fails that rule does not take the flag away from a
+farther player that may. The carrier gets two affects: the flag's own (`AFFECT_WAR_FLAG`,
+`POINT_NONE`, the flag's guild, and `AFF_WAR_FLAG1` or `AFF_WAR_FLAG2` by the team) and
+the speed (`POINT_MOV_SPEED`, 50 minus the carrier's speed, `:1208-1209`). The flag's
+character dies with the flag (`CWarMap::RemoveFlag`, `G/war_map.cpp:881-893`) and the map
+says so (`:1213-1215`).
+
+The Rewrite's `GameState::war_map_flag_take` runs that rule on the game's Pulse (the
+states run every half a second, `G/char_state.cpp:1187`), and
+`GameState::war_flag_give` gives the two affects.
+
+**The score.** The base mob runs its state twice a second (`CHARACTER::StateFlagBase`,
+`G/char_state.cpp:1218-1222`) and asks for the player that brings the other team's flag to
+it (`FuncFindChrForFlagBase`, `G/char_state.cpp:98-170`): a player within 500 units who
+carries a flag and is of the base's guild scores a point for that guild against the
+flag's guild (`SendGuildWarScore`, `:150`). Then the flags reset
+(`CWarMap::ResetFlag`, `G/war_map.cpp:941-964`) and the map says so (`:153-158`). The
+Rewrite's `GameState::war_map_flag_score` runs that rule, scores the war by the map's own
+score path (`GameState::war_map_score`), resets the flags and says so.
+
+**The reset.** The reset takes the flags away, takes the flag's affects from every player
+on the map (`FRemoveFlagAffect`, `G/war_map.cpp:932-939`) and brings the flags back ten
+seconds later (`war_reset_flag_event`, `:913-930`). A second reset while one is pending
+does nothing (`if (m_pkResetFlagEvent) return;`, `:946`), and a map that has ended keeps
+its flags (`:949`).
+
+**The kill.** A member that falls on the flag map leaves the flag where it fell
+(`CWarMap::OnKill`'s flag arm, `G/war_map.cpp:811-823`): the flag lies where its carrier
+died — when it is not already on the map — and the carrier loses the flag's affect
+(`:820`). The Rewrite's `GameState::war_map_flag_return` does this.
+
+**The tests.** Six unit tests in `prodomo/src/game_state/guild.rs`: a player of the other
+guild takes the flag, a player of the flag's own guild may not take it from its base but
+may take it off it, the base scores the flag it carries, the flags come back ten seconds
+after the reset, and the flag lies where its carrier fell.
+
+**The divergences.**
+
+- The flag's own body — the character the flag is, which legacy spawns and destroys — is
+  ledger 243's. The rule is live against the map's own record of the flag; the character
+  is not stood up yet.
+
+**The inventory.** The row `sys.guild.war` stays `partial` — the flag's rule is live now —
+and its note names the new part.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; doc green with
+`-D warnings`; doc-tests green (9 targets; 1 passed, 19 ignored); the full workspace
+all-targets DB run green on all 39 targets (4049 tests; parity 131/131); this slice's six
+new unit tests green 6/6; no scratch database left.
+
+No ADR changed. No owner question added. V23 is taken.
+
+## 243. The flag war's map stands its flags and bases up (`sys.guild.war`, eighth part)
+
+The flag was a rule without a body: the map knew where the flag was and who carried it,
+but there was no character on the map to be the flag. Legacy spawns the flag and its base
+as characters of the war's own map, and destroys them when the war ends.
+
+**The bodies.** `CWarMap::AddFlagBase` and `CWarMap::AddFlag`
+(`G/war_map.cpp:832-879`) spawn a character of the vnum at a point of the map: the base's
+vnum for the base, and the team's own flag vnum for the flag. `SpawnMob`
+(`G/char_manager.cpp:382-470`) takes the point and no rotation, checks the proto and the
+cell, and stands the character in the map's sectree.
+
+The Rewrite's `Respawner::spawn_one` (`world/src/npc.rs`) does that: the proto, the cell
+checks, the sectree, then the character, and it answers the character it stood — or
+nothing for a vnum with no proto, a point with no sectree and a cell the character may not
+stand in.
+
+**The standing.** A flag map stands its two bases and its two flags up when it is made
+(`CWarMap`'s constructor, `G/war_map.cpp:126-131`): the base first and the flag on the
+same point, so the flag stands on its base. The Rewrite's
+`GameState::war_map_stand_flags` does this when the war's private copy of the map is made
+(`GameState::create_war_map`), and the flag's character is put on the map's own list — a
+private map holds no regen characters, so the list is made for it
+(`GameState::regen`'s `stand_runtime`, `prodomo/src/game_state/regen.rs`).
+
+The flags come back the same way after a reset (`war_reset_flag_event`,
+`G/war_map.cpp:913-930`), at the base's point.
+
+**The end.** The war's end destroys the flag and base characters
+(`CWarMap::SetEnded`, `G/war_map.cpp:739-779`) and cancels the pending reset
+(`event_cancel(&m_pkResetFlagEvent)`, `:770`). The Rewrite's
+`GameState::war_map_destroy_flags` does this.
+
+**The tests.** A unit test in `world/src/npc.rs` stands the flag mobs on the flag map: the
+two flags and the two bases stand on their points, and the map's own list holds them.
+
+**The parity scenario.** `the_flag_war_stands_its_flags_up_and_the_member_sees_them`
+proves the bodies on the wire: two guilds at war of the flag type, the member that takes
+the war's entry letter warps to the war's own copy of the flag map, and the view it enters
+holds the flag and its base — each insert names the vnum, the kind and the place, and the
+flag stands on the base's point.
+
+**The divergences.**
+
+- The flag and the base are characters with no behaviour of their own: legacy's flag mob
+  runs its state through the character state machine, and the Rewrite runs the same rule
+  from the war map's tick. The wire is the same; the owner of the rule is not.
+
+**The inventory.** The row `sys.guild.war` stays `partial` — the flag's rule and the flag's
+bodies are live now — and its note names the new part.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; doc green with
+`-D warnings`; doc-tests green (9 targets; 1 passed, 19 ignored); the full workspace
+all-targets DB run green on all 39 targets (4049 tests; the prodomo lib 1179, the protocol
+lib 1229, the world lib 542; parity 131/131); this slice's seven new unit tests green 7/7
+and its parity scenario green 1/1; no scratch database left.
+
+No ADR changed. No owner question added. V24 is taken.
