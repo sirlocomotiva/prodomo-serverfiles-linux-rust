@@ -7309,6 +7309,7 @@ fn build_world(
         .with_pc_skills(Arc::clone(&data.pc_skills))
         .with_guild_skills(Arc::clone(&data.guild_skills))
         .with_shop_price_3x_disabled(config.game.disable_shop_price_3x)
+        .with_test_server(config.game.test_server)
         .with_drop_lifetime(config.game.item_destroy_time_dropitem)
         .with_gold_lifetime(config.game.item_destroy_time_dropgold)
         .with_clients(Arc::clone(clients))

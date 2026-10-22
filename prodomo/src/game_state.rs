@@ -459,6 +459,14 @@ pub struct GameState {
     gauss: world::character::Gauss,
     /// `g_bEmpireShopPriceTripleDisable`: a stranger's prices are not tripled.
     shop_price_3x_disabled: bool,
+    /// `test_server` (`G/config.cpp:72`): the test-server mode, on unless the
+    /// configuration turns it off.
+    ///
+    /// Legacy's defaults are on (`G/config.cpp:72`), and the owner's `CONFIG` files do
+    /// not turn it off, so the deployment ran in it. The war's end score is divided by
+    /// ten in it (`G/war_map.cpp:700`), which is the rule that uses it here; the other
+    /// rules wait for the `test_server` audit (owner question 5).
+    test_server: bool,
     /// The keeper each character browses, keyed by its VID.
     browsing: HashMap<common::vid::Vid, shop::Browsing>,
     /// The open trades, keyed by the VID of the character that started each.
@@ -595,6 +603,7 @@ impl GameState {
             item_masks: Arc::default(),
             gauss: world::character::Gauss::new(),
             shop_price_3x_disabled: false,
+            test_server: true,
             browsing: HashMap::new(),
             trades: BTreeMap::new(),
             trading: HashMap::new(),

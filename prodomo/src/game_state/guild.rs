@@ -3974,10 +3974,11 @@ impl GameState {
             if !taken {
                 continue;
             }
-            // `RemoveFlag` (`G/war_map.cpp:881-893`): the flag's character dies with
-            // the flag.
-            self.war_map_remove_flag(index, team);
+            // `StateFlag` (`G/char_state.cpp:1209-1213`): the carrier gets the flag's
+            // affects first, then the flag's character dies with the flag
+            // (`RemoveFlag`, `G/war_map.cpp:881-893`), then the map says so.
             self.war_flag_give(carrier, flag_guild, team);
+            self.war_map_remove_flag(index, team);
             self.notice_war_map_flag_take(index, flag_guild, carrier);
         }
     }
@@ -4159,13 +4160,17 @@ impl GameState {
         let Some((base_guild, flag_guild)) = scored else {
             return;
         };
-        // `SendGuildWarScore` (`G/char_state.cpp:150`): the base's guild scores against
-        // the flag's guild.
-        self.war_map_score(index, base_guild, flag_guild, 1);
-        // `pMap->ResetFlag()` (`G/char_state.cpp:151`).
+        // `pMap->ResetFlag()` (`G/char_state.cpp:151`): the flags leave the map and the
+        // players lose the flag's affects.
         self.war_map_reset_flags(index, pulse);
         // The line (`G/char_state.cpp:153-158`).
         self.notice_war_map_flag_score(index, base_guild, flag_guild);
+        // `SendGuildWarScore` (`G/char_state.cpp:150`) hands the score to the DB, and
+        // the DB's answer (`CInputDB::GuildWarScore`, `G/input_db.cpp:1374-1380`) sets
+        // it and sends the record (`CGuild::SetWarScoreAgainstTo`,
+        // `G/guild_war.cpp:179-217`). The record therefore follows the reset and the
+        // notice, as it does in legacy.
+        self.war_map_score(index, base_guild, flag_guild, 1);
     }
 
     /// `CWarMap::ResetFlag` (`G/war_map.cpp:941-964`): the players on the map lose the
@@ -4319,6 +4324,11 @@ impl GameState {
     /// The score that ends the war (`KOR_aGuildWarInfo`'s `iEndScore`,
     /// `G/constants.cpp:1132-1145`): the battle war ends at a hundred points and the
     /// flag war at ten.
+    ///
+    /// `if (test_server) iEndScore /= 10;` (`G/war_map.cpp:700`): in the test-server
+    /// mode the end score is a tenth, so the battle war ends at ten points and the flag
+    /// war at one. The mode is on unless the configuration turns it off, and the owner's
+    /// `CONFIG` files do not, so the deployment ran in it.
     fn war_end_score(&self, lo: u32, hi: u32) -> Option<i32> {
         let war_type = self
             .guilds
@@ -4326,9 +4336,25 @@ impl GameState {
             .get(&lo)
             .and_then(|guild| guild.enemies.get(&hi))
             .map_or(0, |enemy| enemy.war_type);
-        super::war_map::WAR_TYPES
+        let end_score = super::war_map::WAR_TYPES
             .get(usize::from(war_type))
-            .map(|info| info.end_score)
+            .map(|info| info.end_score)?;
+        Some(if self.test_server {
+            end_score / 10
+        } else {
+            end_score
+        })
+    }
+
+    /// Set `test_server`, the configured `game.test_server`.
+    ///
+    /// Legacy's compiled-in default is on (`G/config.cpp:72`), and the world's default
+    /// is on with it. The war's end score is divided by ten in the mode
+    /// (`G/war_map.cpp:700`).
+    #[must_use]
+    pub const fn with_test_server(mut self, test_server: bool) -> Self {
+        self.test_server = test_server;
+        self
     }
 
     /// `CWarMap::Timeout` (`G/war_map.cpp:510-578`): the war that waited a minute for a
@@ -10164,8 +10190,9 @@ mod tests {
     }
 
     /// `CWarMap::CheckScore` (`G/war_map.cpp:683-735`): the war ends when one side's
-    /// score reaches the war's end score — a hundred points for the battle war — and
-    /// the war must have run for thirty seconds before a score can end it.
+    /// score reaches the war's end score — a hundred points for the battle war, a tenth
+    /// of that in the test-server mode (`G/war_map.cpp:700`) — and the war must have
+    /// run for thirty seconds before a score can end it.
     #[test]
     fn the_score_ends_the_war_when_it_reaches_the_end_score() {
         let (mut world, mut orders, _lease, _master) = a_war_on_with_quests(" 1");
@@ -10204,26 +10231,44 @@ mod tests {
         );
         // The war is a minute old, so a score may end it.
         world.last_pulse = 1_000;
-        // One point short of the end score.
+        // One point short of the end score, which is ten in the test-server mode the
+        // world runs in (`G/war_map.cpp:700`).
         world
             .guilds
             .by_id
             .get_mut(&GUILD_ID)
             .and_then(|guild| guild.enemies.get_mut(&SECOND_ID))
             .expect("the enemy entry")
-            .score = 99;
+            .score = 9;
         world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
         // The score reached the end score, so the war ended and the pair's entry is
         // gone with it.
         let war = world.war_maps.get(&map_index).expect("the war's map");
         let team = war.team_of(GUILD_ID).expect("the guild's team");
-        assert_eq!(
-            war.teams[team].score, 100,
-            "the score reached the end score"
-        );
+        assert_eq!(war.teams[team].score, 10, "the score reached the end score");
         assert!(
             !world.guilds.wars.contains(&(GUILD_ID, SECOND_ID)),
             "the war ended on the score"
+        );
+    }
+
+    /// `if (test_server) iEndScore /= 10;` (`G/war_map.cpp:700`): the war's end score is
+    /// a tenth in the test-server mode, which legacy has on by default
+    /// (`G/config.cpp:72`) and the owner's `CONFIG` files never turn off. The flag war
+    /// ends at one point in the mode and at ten out of it.
+    #[test]
+    fn the_end_score_is_a_tenth_in_the_test_server_mode() {
+        let (world, _master, _rival) = a_flag_war(FLAG_SPOTS[0], FLAG_SPOTS[1]);
+        assert_eq!(
+            world.war_end_score(GUILD_ID, SECOND_ID),
+            Some(1),
+            "the flag war ends at one point in the test-server mode"
+        );
+        let world = world.with_test_server(false);
+        assert_eq!(
+            world.war_end_score(GUILD_ID, SECOND_ID),
+            Some(10),
+            "and at ten out of it"
         );
     }
 
@@ -10701,6 +10746,58 @@ mod tests {
         assert!(
             text.windows(6).any(|window| window == b"Wolves"),
             "the line names the flag's guild: {text:?}"
+        );
+    }
+
+    /// The order of the records on the wire, `StateFlag` (`G/char_state.cpp:1209-1213`)
+    /// and `StateFlagBase` (`G/char_state.cpp:150-158`).
+    ///
+    /// The take gives the carrier the flag's affects, then the flag's character dies,
+    /// then the map says who took it. The base's score resets the flags, says so, and
+    /// only then sends the score: the score reaches the client through the DB's answer
+    /// (`CInputDB::GuildWarScore`, `G/input_db.cpp:1374-1380`), and the DB answers after
+    /// the game's own records are out.
+    ///
+    /// The flag's character needs the map's regen rows, which this world's fixture does
+    /// not carry, so the removal of the flag is not among the records here; the parity
+    /// scenario `the_flag_is_taken_and_the_base_scores_the_war` sees it.
+    #[test]
+    fn the_take_and_the_score_keep_the_legacy_order() {
+        let (mut world, mut master, mut rival) = a_flag_war(FLAG_SPOTS[1], FLAG_SPOTS[1]);
+        let _ = heard(&mut master);
+        let _ = heard(&mut rival);
+        // The take.
+        world.last_pulse = FIRST_FLAG_PULSE;
+        world.run_war_map_ticks(FIRST_FLAG_PULSE);
+        let held = heard(&mut master);
+        let affect = held
+            .iter()
+            .position(|record| record[0] == protocol::gc_inventory::HEADER_GC_AFFECT_ADD.value())
+            .unwrap_or_else(|| panic!("the carrier hears the flag's affect: {held:?}"));
+        let notice = held
+            .iter()
+            .position(|record| record[0] == protocol::gc_inventory::HEADER_GC_CHAT.value())
+            .unwrap_or_else(|| panic!("the map says who took the flag: {held:?}"));
+        assert!(
+            affect < notice,
+            "the affects come before the notice: {held:?}"
+        );
+        // The score.
+        move_on_the_wars_map(&mut world, MASTER_VID, FLAG_MAP, FLAG_SPOTS[0]);
+        world.last_pulse = FIRST_FLAG_PULSE * 2;
+        world.run_war_map_ticks(FIRST_FLAG_PULSE * 2);
+        let held = heard(&mut master);
+        let notice = held
+            .iter()
+            .position(|record| record[0] == protocol::gc_inventory::HEADER_GC_CHAT.value())
+            .unwrap_or_else(|| panic!("the map says the score: {held:?}"));
+        let score = held
+            .iter()
+            .position(|record| record[0] == protocol::gc_inventory::HEADER_GC_GUILD.value())
+            .unwrap_or_else(|| panic!("the score record: {held:?}"));
+        assert!(
+            notice < score,
+            "the notice comes before the score: {held:?}"
         );
     }
 

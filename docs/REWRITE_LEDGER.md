@@ -34612,3 +34612,91 @@ slice's unit tests green; no scratch database left.
 
 ADR-0006's sentence about the refusal is amended above, and its "Quest records" bullet
 already names this section. No owner question added. V25 is taken.
+
+## 245. The flag's take and the base's score on the wire (`sys.guild.war`, tenth part)
+
+Ledger 242 put the war's own flags in the world and proved them with unit tests. This
+section puts the take and the score on the wire, and it fixes the two orders the legacy
+keeps.
+
+**The take.** `CHARACTER::StateFlag` (`G/char_state.cpp:1185-1215`) runs twice a second
+(`PASSES_PER_SEC(0.5)`, `:1186`) and hands the flag to the player nearest it
+(`FuncFindChrForFlag`, `G/char_state.cpp:33-97`): the player must be a living player of a
+guild, within 500 units of the flag, and without a flag of its own; a player of the flag's
+own guild may take it only while the flag is not on its base. The carrier gets the flag's
+affects first (`AddAffect`, `:1209-1210`) — the flag's affect (`AFFECT_WAR_FLAG`, 222) with
+the flag's guild and the other team's flag bit (`AFF_WAR_FLAG2`, 38), and a move-speed
+affect — then the flag's character dies with the flag (`CWarMap::RemoveFlag`,
+`G/war_map.cpp:881-893`), and the map says who took it (`:1213`).
+
+The Rewrite sent the flag's death before the affects. Legacy sends the affects first, so
+the carrier's affect is on the wire before the flag leaves the view, and the client can
+show the carrier's flag while the flag is still standing.
+
+**The score.** `CHARACTER::StateFlagBase` (`G/char_state.cpp:98-170`) gives a point to a
+player of the base's own guild that stands within 500 units of the base and carries the
+other team's flag. Legacy then sends the score to the database (`SendGuildWarScore`,
+`G/char_state.cpp:151`), resets the flags (`CWarMap::ResetFlag`, `G/war_map.cpp:941-964`:
+the flags' characters die and the carriers lose the flag's affects) and says so
+(`:153-158`).
+
+The score the client sees is not that call. The database answers with it
+(`CInputDB::GuildWarScore`, `G/input_db.cpp:1375-1380`), and the answer sets the score
+(`CGuild::SetWarScoreAgainstTo`, `G/guild_war.cpp:179-217`); for a war that is fought on
+a map, the answer reaches the map (`CWarMap::UpdateScore`, `G/war_map.cpp:661-682`), which
+sends the score record to the players on it (`CWarMap::SendScorePacket`,
+`G/war_map.cpp:641-659`). The record therefore follows the reset and the notice. The
+Rewrite sent it first, before the flags were gone.
+
+**The view.** A step (`FUNC_COMBO` is 3) `Sync`s the body to the point
+(`CHARACTER::Move`, `G/char.cpp:3610-3622`): it changes the body's sectree but not its
+view. Only a walk's motion samples the view (`UpdateSectree`, `G/char_state.cpp:797`), so
+a flag that a member walks to comes into her view when the walk is sampled, and a member
+that steps there never sees it. The parity scenario's walk ends with a real walk for that
+reason, and the flag's take needs the distance, not the view: legacy hands the flag to
+the nearest player within 500 units whether or not the flag is in her view.
+
+**The test-server mode.** `CWarMap::CheckScore` (`G/war_map.cpp:683-735`) ends the war
+when one side's score reaches the war's end score, and `if (test_server) iEndScore /= 10;`
+(`:700`) divides that score by ten in the test-server mode: the battle war ends at ten
+points and the flag war at one. Legacy's compiled-in default is on (`G/config.cpp:72`),
+and the owner's `CONFIG` files never turn it off, so the deployment ran in the mode. The
+Rewrite's `game.test_server` was in the configuration and nothing read it; the world reads
+it now (`GameState::with_test_server`), so the war ends where legacy's ends.
+
+**The tests.**
+
+- `prodomo/src/game_state/guild.rs`: `the_take_and_the_score_keep_the_legacy_order` — the
+  carrier's affect comes before the map's line, and the map's line comes before the score.
+- `prodomo/src/game_state/guild.rs`: `the_end_score_is_a_tenth_in_the_test_server_mode` —
+  the flag war ends at one point in the mode and at ten out of it.
+- `prodomo/tests/parity.rs`: `the_flag_is_taken_and_the_base_scores_the_war` — a member
+  joins the war, walks to the other team's flag, takes it (the flag's affect with the
+  flag's guild and the other team's flag bit, the flag's character dies, the map says who
+  took it), carries it back to her own base and scores (the flags reset, the map says so,
+  and the score record follows with the guild that scored, the guild it scored against and
+  the score).
+
+The scenario's war is younger than the thirty seconds `CheckScore` asks for
+(`G/war_map.cpp:694`), so its one point does not end the war while the scenario runs.
+
+**The inventory.** `sys.guild.war` keeps its row and gains the note of this section; it
+stays `partial`, like the other systems that are live but not wholly on the wire.
+
+**The divergences.**
+
+- The score record follows the map's line without a database round trip. Legacy's record
+  is the database's answer, so it arrives a moment later than the line; the order is the
+  same.
+- The candidates for the take are every player on the war's map, where legacy offers the
+  flag to the flag's own sectree and its neighbours (`GetSectree()->ForEachAround(f)`,
+  `G/char_state.cpp:1196`). The rule is the distance in both, and a player within 500
+  units of the flag is in that sectree or in one of its neighbours, so the outcome is the
+  same.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; doc green with
+`-D warnings`; doc-tests green; the full workspace all-targets DB run green on all 39
+targets, the 133 parity scenarios among them; this slice's unit tests green; no scratch
+database left.
+
+No ADR changed. No owner question added. V26 is taken.

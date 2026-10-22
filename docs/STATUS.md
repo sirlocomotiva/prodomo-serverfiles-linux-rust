@@ -1,8 +1,9 @@
 # Rewrite status
 
-Last reviewed: 2026-10-22, after ledger section 244 (the quest flags in the store).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 245 onwards (the
-flag's take and the base's score on the wire).
+Last reviewed: 2026-10-22, after ledger section 245 (the flag's take and the base's score
+on the wire).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 246 onwards (the
+whisper, and then the messenger).
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -63,7 +64,11 @@ not take it from its base, the base scores the other team's flag, the flags rese
 back ten seconds later, and the flag lies where its carrier fell. Since 243 the flag and its
 base are characters on the war's own map, and they are destroyed with the war. Since 244 a quest's
 flags live in the store with the character, so a flag outlives the session that set it, and the war's
-member joins its team after the warp to the war's map. The rest of combat, skills,
+member joins its team after the warp to the war's map. Since 245 the flag's take and the
+base's score are on the wire: the carrier gets the flag's affects before the flag's
+character dies, the map says who took it, and the base's score resets the flags, says so
+and only then sends the score record, because the record is the database's answer; the
+war's end score is a tenth in the test-server mode, as legacy's is. The rest of combat, skills,
 parties, guilds and the rest of step 4 are not ported yet. The two-process layout (a `game-server` and a `db-server`
 talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177; sections 1-175
 record how it was built and stay as history. Since section 178 the one `prodomo` binary reads

@@ -14854,6 +14854,234 @@ fn the_flag_war_stands_its_flags_up_and_the_member_sees_them() {
     alice.quiet("the flag war's map is quiet");
 }
 
+/// The flag war's other start position: the guild of the higher id takes the second
+/// (`GetStartPosition`, `G/guild_war.cpp:662`).
+const FLAG_MAP_START_OTHER: (i32, i32) = (74_700, 18_200);
+
+/// The race of the first team's flag character (`warmap::WAR_FLAG_VNUM0`,
+/// `G/war_map.h:26`): the client reads it from the insert (`GetRaceNum`,
+/// `G/char.cpp:1074`).
+const FLAG_RACE: u16 = 20_035;
+/// The race of the other team's flag character (`warmap::WAR_FLAG_VNUM1`,
+/// `G/war_map.h:27`).
+const OTHER_FLAG_RACE: u16 = 20_036;
+
+/// The vid of the flag character with the race `race` among the inserts, if there is one.
+fn flag_vid_of<'a>(inserts: impl IntoIterator<Item = &'a [u8]>, race: u16) -> Option<u32> {
+    inserts
+        .into_iter()
+        .filter(|insert| insert[0] == GC_CHARACTER_ADD && insert.len() > 24)
+        .find(|insert| u16::from_le_bytes([insert[22], insert[23]]) == race)
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+}
+
+/// Walk the character of `client` from `from` towards `to`.
+///
+/// The steps `Sync` the body to the point (`FUNC_COMBO` is 3, `CHARACTER::Move`,
+/// `G/char.cpp:3610-3622`), and the last leg is a walk (`FUNC_MOVE` is 1), whose motion
+/// samples the view (`UpdateSectree`, `G/char_state.cpp:797`): a `Sync` changes the
+/// body's sectree but not its view. A move further than 750 units is refused
+/// (`MOVE_DISTANCE_LIMIT`, `CInputMain::Move`, `G/input_main.cpp:1757-1891`), so the
+/// legs are shorter than that.
+fn walk_to(client: &mut Keyed, from: (i32, i32), to: (i32, i32)) {
+    let (dx, dy) = (i64::from(to.0 - from.0), i64::from(to.1 - from.1));
+    let squared = u64::try_from(dx * dx + dy * dy).expect("the squares fit");
+    // The legs: the shortest ones that keep every leg under the move limit.
+    let mut steps = 1u64;
+    while (700 * steps) * (700 * steps) < squared {
+        steps += 1;
+    }
+    let steps = i64::try_from(steps).expect("the steps fit");
+    for step in 1..steps {
+        let x = i32::try_from(i64::from(from.0) + dx * step / steps).expect("the point fits");
+        let y = i32::try_from(i64::from(from.1) + dy * step / steps).expect("the point fits");
+        client.send_record(&client_move(
+            3,
+            7,
+            40,
+            x,
+            y,
+            0x5eed + u32::try_from(step).unwrap_or(0),
+        ));
+    }
+    client.send_record(&client_move(1, 0, 0, to.0, to.1, 0x5f00));
+}
+
+/// `sys.guild.war`, `gc.affect.add`, `gc.character.del`, `gc.chat`, `gc.guild`: the flag
+/// war's flag is taken and the base scores the war.
+///
+/// `CHARACTER::StateFlag` (`G/char_state.cpp:1185-1215`): the flag's state runs twice a
+/// second and hands the flag to the player nearest it. The carrier gets the flag's
+/// affects, the flag's character dies with the flag, and the map says who took it.
+///
+/// `CHARACTER::StateFlagBase` (`G/char_state.cpp:98-170`): the base's state gives a point
+/// to a player of its own guild that carries the other team's flag and stands at the
+/// base. The flags reset, the map says so, and the score record follows: the score
+/// reaches the client through the DB's answer (`CInputDB::GuildWarScore`,
+/// `G/input_db.cpp:1374-1380`).
+#[test]
+fn the_flag_is_taken_and_the_base_scores_the_war() {
+    let Some((_database, server, mut alice, alpha_listed, mut yankee, _yankee)) =
+        a_war_pair_ready_on(None, &flag_war_channels())
+    else {
+        return;
+    };
+    let (alice_index, _yankee_index) = declare_and_accept_a_war_of_type(&mut alice, &mut yankee, 2);
+    // The member joins the war: the button, the question, the answer, the removal and the
+    // warp that takes her to the flag map.
+    alice.send_record(&client_script_button(alice_index));
+    let question = alice.read_game();
+    assert_eq!(question[0], GC_SCRIPT, "the question: {question:02x?}");
+    alice.send_record(&client_script_answer(0));
+    let done = alice.read_game();
+    assert_eq!(&done[6..], b"[DONE]", "the quest's end script");
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha_listed.id.to_le_bytes());
+    assert_eq!(alice.read_game(), removed, "the member leaves its map");
+    let port = server.channel(1).port();
+    assert_eq!(alice.read_game(), a_warp_record(FLAG_MAP_START, port));
+    // The yankee sees her leave the map: the character's deletion.
+    let mut expected = vec![GC_CHARACTER_DEL];
+    expected.extend_from_slice(&alpha_listed.id.to_le_bytes());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let (_skipped, departure) = read_until_record_keeping(&mut yankee, &expected, deadline);
+    assert_eq!(departure, expected, "the member leaves the yankee's view");
+    // The client follows the warp: it reconnects and lands on the war's own copy of the
+    // flag map, on her own guild's flag.
+    drop(alice);
+    let join = WarMapJoin {
+        guilds: [1, 2],
+        joiners: [1, 0],
+        observers: 0,
+        war_type: 2,
+        war_state: 6,
+        scores: [0, 0],
+    };
+    let (mut alice, _alpha, entered) =
+        enter_world_seeing_guilded_on_war_map(&server, b"alice", 0, 1, &join);
+    let own_flag = flag_vid_of(entered.shown.inserts(), FLAG_RACE)
+        .expect("the member sees its own guild's flag");
+    // She walks to the other team's flag, which stands on the other team's base, and
+    // takes it.
+    walk_to(&mut alice, FLAG_MAP_START, FLAG_MAP_START_OTHER);
+    let other_flag = the_flag_is_taken(&mut alice);
+    assert_ne!(other_flag, own_flag, "the two flags are two characters");
+    // She carries the flag back to her own guild's base, and the base scores the war.
+    walk_to(&mut alice, FLAG_MAP_START_OTHER, FLAG_MAP_START);
+    the_base_scores(&mut alice, own_flag);
+    yankee.quiet("the war's map is quiet");
+}
+
+/// The take, as the wire shows it, and the vid of the flag that was taken.
+///
+/// `CHARACTER::StateFlag` (`G/char_state.cpp:1185-1215`): the flag's state runs twice a
+/// second and hands the flag to the player nearest it. The carrier gets the flag's
+/// affects, the flag's character dies with the flag, and the map says who took it.
+fn the_flag_is_taken(alice: &mut Keyed) -> u32 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let (seen, affect) = read_until_header(alice, GC_AFFECT_ADD, deadline);
+    // The other team's flag came into her view on the way.
+    let other_flag = flag_vid_of(seen.iter().map(Vec::as_slice), OTHER_FLAG_RACE)
+        .expect("the other team's flag came into her view");
+    // The carrier gets the flag's affects (`AddAffect`, `G/char_state.cpp:1209-1210`):
+    // the flag's guild, the other team's flag bit, and no point of its own.
+    assert_eq!(
+        u32::from_le_bytes(affect[1..5].try_into().expect("the type")),
+        prodomo::loading_phase::AFFECT_WAR_FLAG,
+        "the flag's affect"
+    );
+    assert_eq!(affect[5], 0, "the flag's affect applies on no point");
+    assert_eq!(
+        i32::from_le_bytes(affect[6..10].try_into().expect("the value")),
+        2,
+        "the flag's guild"
+    );
+    assert_eq!(
+        u32::from_le_bytes(affect[10..14].try_into().expect("the flag")),
+        prodomo::loading_phase::AFF_WAR_FLAG2,
+        "the other team's flag bit"
+    );
+    // The flag's character dies with the flag (`RemoveFlag`, `G/war_map.cpp:881-893`),
+    // after the affects and before the notice.
+    let mut flag_gone = vec![GC_CHARACTER_DEL];
+    flag_gone.extend_from_slice(&other_flag.to_le_bytes());
+    let (skipped, removal) = read_until_record_keeping(alice, &flag_gone, deadline);
+    assert_eq!(removal, flag_gone, "the flag leaves the view");
+    assert!(
+        !skipped.iter().any(|record| record[0] == GC_CHAT),
+        "the notice follows the flag's removal: {skipped:?}"
+    );
+    // The line the take says (`G/char_state.cpp:1213`) names the flag's guild and the
+    // carrier.
+    let (_skipped, notice) = read_until_header(alice, GC_CHAT, deadline);
+    let text = String::from_utf8_lossy(&notice[10..]);
+    assert!(
+        text.contains("Wolves"),
+        "the line names the flag's guild: {text:?}"
+    );
+    assert!(
+        text.contains("Alpha"),
+        "the line names the carrier: {text:?}"
+    );
+    other_flag
+}
+
+/// The score, as the wire shows it.
+///
+/// `CHARACTER::StateFlagBase` (`G/char_state.cpp:98-170`): the base's state gives a point
+/// to a player of its own guild that carries the other team's flag and stands at the
+/// base. The flags reset, the map says so, and the score record follows: the score
+/// reaches the client through the DB's answer (`CInputDB::GuildWarScore`,
+/// `G/input_db.cpp:1375-1380`).
+fn the_base_scores(alice: &mut Keyed, own_flag: u32) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    // The reset takes the flags away (`ResetFlag`, `G/war_map.cpp:941-964`): her own
+    // flag's character dies with it.
+    let mut own_flag_gone = vec![GC_CHARACTER_DEL];
+    own_flag_gone.extend_from_slice(&own_flag.to_le_bytes());
+    let (skipped, removal) = read_until_record_keeping(alice, &own_flag_gone, deadline);
+    assert_eq!(removal, own_flag_gone, "her own flag leaves the view");
+    assert!(
+        !skipped.iter().any(|record| record[0] == GC_CHAT),
+        "the notice follows the reset: {skipped:?}"
+    );
+    // The line the score says (`G/char_state.cpp:158`) names the base's guild and the
+    // flag's guild.
+    let (_skipped, notice) = read_until_header(alice, GC_CHAT, deadline);
+    let text = String::from_utf8_lossy(&notice[10..]);
+    assert!(
+        text.contains("MyGuild"),
+        "the line names the base's guild: {text:?}"
+    );
+    assert!(
+        text.contains("Wolves"),
+        "the line names the flag's guild: {text:?}"
+    );
+    // The score follows the notice: the score record names the guild that scored, the
+    // guild it scored against, and the score.
+    let (skipped, score) = read_until_header(alice, GC_GUILD, deadline);
+    assert!(
+        !skipped.iter().any(|record| record[0] == GC_GUILD),
+        "the score record is the first: {skipped:?}"
+    );
+    assert_eq!(score[3], 19, "the score record's subheader: {score:02x?}");
+    assert_eq!(
+        u32::from_le_bytes(score[4..8].try_into().expect("the guild")),
+        1,
+        "the base's guild scored"
+    );
+    assert_eq!(
+        u32::from_le_bytes(score[8..12].try_into().expect("the opponent")),
+        2,
+        "against the flag's guild"
+    );
+    assert_eq!(
+        u32::from_le_bytes(score[12..16].try_into().expect("the score")),
+        1,
+        "one point"
+    );
+}
+
 /// The war map's other start position: the guild of the higher id takes the second
 /// (`GetStartPosition(gw.map_index, GetID() < dwOppGID ? 0 : 1, pos)`,
 /// `G/guild_war.cpp:662`).
@@ -15118,12 +15346,45 @@ fn declare_and_accept_war(alice: &mut Keyed, yankee: &mut Keyed) {
 /// brings between the war's end and the map's exit: a monster's move, a death, the
 /// affects that go with it. The wanted record ends the wait.
 fn read_until_record(client: &mut Keyed, wanted: &[u8], deadline: std::time::Instant) -> Vec<u8> {
+    read_until_record_keeping(client, wanted, deadline).1
+}
+
+/// Read from `client` until the record `wanted` arrives, and return it with the records
+/// read on the way.
+fn read_until_record_keeping(
+    client: &mut Keyed,
+    wanted: &[u8],
+    deadline: std::time::Instant,
+) -> (Vec<Vec<u8>>, Vec<u8>) {
+    let mut seen = Vec::new();
     loop {
         let record = client
             .read_game_raw_until(deadline)
             .expect("the record the map's exit brings");
         if record == wanted {
-            return record;
+            return (seen, record);
+        }
+        seen.push(record);
+    }
+}
+
+/// Read from `client` until a record with the header `header` arrives, and return it with
+/// the records read on the way.
+fn read_until_header(
+    client: &mut Keyed,
+    header: u8,
+    deadline: std::time::Instant,
+) -> (Vec<Vec<u8>>, Vec<u8>) {
+    let mut seen = Vec::new();
+    loop {
+        let record = client
+            .read_game_raw_until(deadline)
+            .expect("the record the map's exit brings");
+        let head = record[0];
+        seen.push(record);
+        if head == header {
+            let wanted = seen.pop().expect("the record");
+            return (seen, wanted);
         }
     }
 }
