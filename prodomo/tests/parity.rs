@@ -16776,7 +16776,9 @@ fn a_friend_request_answered_yes_lists_both_directions_and_relogin_keeps_it() {
 }
 
 /// `sys.messenger`: out of the test-server mode a grant's add answers LOGOUT, never
-/// LOGIN (`MessengerManager::SendLogin`'s GM gate, `G/messenger_manager.cpp:554-566`).
+/// LOGIN (`MessengerManager::SendLogin`'s GM gate, `G/messenger_manager.cpp:554-566`),
+/// and the grant's disconnect fans both rows the relation holds: the LOGOUT, then the
+/// `TEAM_LOGOUT` (`MessengerManager::Logout`, `G/messenger_manager.cpp:241-246`).
 /// Alice (a `HIGH_WIZARD`) asks after Yankee, who answers yes: the relation holds
 /// both directions, but Yankee hears Alice as LOGOUT while Alice hears Yankee as LOGIN.
 #[test]
@@ -16784,7 +16786,7 @@ fn a_player_lists_a_gm_but_hears_logout_for_the_name() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let server = Server::start_configured(
+    let mut server = Server::start_configured(
         binary(),
         database.url(),
         &default_channels(),
@@ -16840,8 +16842,29 @@ fn a_player_lists_a_gm_but_hears_logout_for_the_name() {
     );
     alice.quiet("the yes settled");
     yankee.quiet("the yes settled");
+    // Alice's disconnect fans the leaving name twice: Yankee holds both a friend row
+    // and a team row for Alpha, so it hears the LOGOUT and then the `TEAM_LOGOUT`
+    // (`MessengerManager::Logout`, `G/messenger_manager.cpp:241-246`, answered in the
+    // fan order the 248 scenario proves for the friend half).
+    let old = alice.client.local_addr();
     drop(alice);
+    assert_eq!(
+        yankee.read_game(),
+        ownership_of(0, alice_listed.id),
+        "the release of Alice"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        messenger_login(5, b"Alpha"),
+        "the holder hears the LOGOUT"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        messenger_login(2, b"Alpha"),
+        "the team holder hears the `TEAM_LOGOUT`"
+    );
+    yankee.sees_leave(alice_listed.id);
+    server.wait_for(&format!("Client connection closed addr={old}"));
     drop(yankee);
-    let _ = (alice_listed, yankee_listed);
     wait_for(&database, "(SELECT count(*) FROM messenger_list) = 2");
 }

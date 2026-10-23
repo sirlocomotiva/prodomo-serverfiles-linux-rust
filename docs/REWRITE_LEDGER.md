@@ -35174,3 +35174,34 @@ holding.
 `sys.messenger` stays `partial` (the team list beyond the GMs, INVITE_ANSWER's
 absent arm, the offline rework's remainder). No ADR changed. No owner question
 added. V26 stays open.
+
+## 254. The team's login and logout fans are proved (`sys.messenger`, fifth part)
+
+The port carried the team's login and logout fans since 248, but nothing proved
+them. The sweep is closed at the negative control: `RemoveAllList` appears only
+in `G/messenger_manager.cpp` (its sole caller is the unported `pc_change_name`
+quest bridge, ledger 251), `P2PLogin`/`P2PLogout` are retired with the DB-peer
+protocol (ADR-0002), and `GC_INVITE` has no send site (`INvite` lives only in the
+packet enum). What is live is `LoadTeamList`'s own fans
+(`G/messenger_manager.cpp:48-52`), `SendTeamList` with its online/offline split
+(`:99-136`), `SendTeamLogin` with no GM gate (`:145-176`), `SendTeamLogout`
+(`:178-208`), and the two fan loops of `Logout` (`:241-246`).
+
+The port already stood all of it up 1:1 except one deliberate absence: legacy's
+`Logout` returns early for a name the login set never held (`:243-244`), while
+the port fans unconditionally. The set exists only to suppress the DB round trip
+`Login` runs; the fans and the erase are pure memory work the port's `Logout`
+repeats exactly, and the port has no DB trip to suppress, so there is nothing
+to skip. Three new unit tests pin the delivery split the sweep turned up: the
+entrant's own TEAM_LIST rides the world's own outbox
+(`write_to_client(vid)`), while the holders' TEAM_LOGIN and TEAM_LOGOUT ride
+the registry (`deliver`, by name) — `a_login_sends_the_team_list_to_the_entrant`,
+`a_login_fans_the_team_login_to_every_holder`,
+`a_logout_fans_the_team_logout_to_every_holder`. Parity extends the 253
+scenario's drop: Yankee holds both a friend row and a team row for Alpha, so
+Alice's disconnect answers the release, the LOGOUT, the TEAM_LOGOUT, and the
+removal, in `Logout`'s own fan order (`:203-208` before `:241-246`).
+
+`sys.messenger` stays `partial` (the team list beyond the GMs, INVITE_ANSWER's
+absent arm, the offline rework's remainder). No ADR changed. No owner question
+added. V26 stays open.

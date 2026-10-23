@@ -1,8 +1,8 @@
 # Rewrite status
 
-Last reviewed: 2026-10-23, after ledger section 253 (a player lists a grant but
-hears logout for the name).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 254 onwards (the
+Last reviewed: 2026-10-23, after ledger section 254 (the team's login and logout
+fans are proved).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 255 onwards (the
 rest of the messenger: the team list beyond the GMs, the offline rework's remainder;
 `MESSENGER_SUBHEADER_CG_INVITE_ANSWER` has no handler arm, so there is nothing to port).
 
@@ -84,7 +84,10 @@ answers `[LS;657]`. Since 251 the character deletion wipes every messenger row t
 character's name is in, so no friend list names a character that is gone. Since 252 the
 whisper's chat-counter gate is live: the tenth line in a run is consumed with no record
 and closes the connection. Since 253 a player that lists a grant hears LOGOUT for the
-name, never LOGIN, while the grant hears the player as LOGIN. The rest of combat, skills,
+name, never LOGIN, while the grant hears the player as LOGIN. Since 254 the team's
+login and logout fans are proved: the entrant hears its TEAM_LIST, every holder hears
+the TEAM_LOGIN, and the grant's disconnect fans the LOGOUT then the TEAM_LOGOUT. The
+rest of combat, skills,
 parties, guilds and the rest of step 4 are not ported yet. The two-process layout (a `game-server` and a `db-server`
 talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177; sections 1-175
 record how it was built and stay as history. Since section 178 the one `prodomo` binary reads

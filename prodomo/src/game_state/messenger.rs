@@ -743,6 +743,10 @@ impl GameState {
 mod tests {
     use super::*;
     use crate::game_state::fixtures::{a_world, enter, TestClock};
+    use protocol::gc_messenger::{
+        MESSENGER_SUBHEADER_GC_TEAM_LIST, MESSENGER_SUBHEADER_GC_TEAM_LOGIN,
+        MESSENGER_SUBHEADER_GC_TEAM_LOGOUT,
+    };
 
     /// The fixture names the character it enters `P{vid}`.
     const VID: u32 = 100;
@@ -1170,5 +1174,103 @@ mod tests {
             record[3], MESSENGER_SUBHEADER_GC_LOGOUT,
             "a player hears LOGOUT for the GM"
         );
+    }
+
+    /// `SendTeamList` (`G/messenger_manager.cpp:99-136`): the entrant's own client
+    /// hears the `TEAM_LIST` of the GM names other than its own.
+    #[test]
+    fn a_login_sends_the_team_list_to_the_entrant() {
+        let (mut world, _clock, mut inbox) = a_world_with_one();
+        let mut taken = std::mem::take(&mut world.messenger);
+        taken.login(
+            &mut world,
+            Vid::new(VID),
+            b"P100",
+            &[],
+            &[b"P101".to_vec()],
+            &BTreeMap::new(),
+        );
+        world.messenger = taken;
+        let list = inbox.try_recv().expect("the entrant hears its team");
+        assert_eq!(list[0], 0x4a, "the entrant's record is a messenger one");
+        assert_eq!(
+            list[3], MESSENGER_SUBHEADER_GC_TEAM_LIST,
+            "the entrant hears its TEAM_LIST"
+        );
+        assert_eq!(&list[6..], b"P101", "the team names the other GM");
+    }
+
+    /// `LoadTeamList`'s own fans (`G/messenger_manager.cpp:48-52`): every owner of
+    /// the entrant's own name on its team hears the `TEAM_LOGIN`.
+    #[test]
+    fn a_login_fans_the_team_login_to_every_holder() {
+        let (mut world, mut owner, mut companion) = a_pair_on_the_registry();
+        while owner.try_next().is_some() {}
+        while companion.try_next().is_some() {}
+        let mut taken = std::mem::take(&mut world.messenger);
+        // P100 stands its team up first, so P101's login finds its holder.
+        taken.login(
+            &mut world,
+            Vid::new(VID),
+            b"P100",
+            &[],
+            &[b"P101".to_vec()],
+            &BTreeMap::new(),
+        );
+        taken.login(
+            &mut world,
+            Vid::new(OTHER),
+            b"P101",
+            &[],
+            &[b"P100".to_vec()],
+            &BTreeMap::new(),
+        );
+        world.messenger = taken;
+        while companion.try_next().is_some() {}
+        let login = owner.try_next().expect("the holder hears the team come in");
+        assert_eq!(login[0], 0x4a, "the holder's record is a messenger one");
+        assert_eq!(
+            login[3], MESSENGER_SUBHEADER_GC_TEAM_LOGIN,
+            "the holder hears the `TEAM_LOGIN`"
+        );
+        assert_eq!(&login[5..], b"P101", "the record names the entrant");
+    }
+
+    /// `MessengerManager::Logout`'s team half (`G/messenger_manager.cpp:241-246`):
+    /// every owner of the leaving name's own team list hears the `TEAM_LOGOUT`, and
+    /// the team's maps forget the name.
+    #[test]
+    fn a_logout_fans_the_team_logout_to_every_holder() {
+        let (mut world, mut owner, mut companion) = a_pair_on_the_registry();
+        let mut taken = std::mem::take(&mut world.messenger);
+        taken.login(
+            &mut world,
+            Vid::new(OTHER),
+            b"P101",
+            &[],
+            &[b"P100".to_vec()],
+            &BTreeMap::new(),
+        );
+        taken.login(
+            &mut world,
+            Vid::new(VID),
+            b"P100",
+            &[],
+            &[b"P101".to_vec()],
+            &BTreeMap::new(),
+        );
+        world.messenger = taken;
+        while owner.try_next().is_some() {}
+        while companion.try_next().is_some() {}
+        let mut taken = std::mem::take(&mut world.messenger);
+        taken.logout(&mut world, b"P101");
+        world.messenger = taken;
+        let logout = owner.try_next().expect("the holder hears the team leave");
+        assert_eq!(logout[0], 0x4a, "the holder's record is a messenger one");
+        assert_eq!(
+            logout[3], MESSENGER_SUBHEADER_GC_TEAM_LOGOUT,
+            "the holder hears the `TEAM_LOGOUT`"
+        );
+        assert_eq!(&logout[5..], b"P101", "the record names the leaver");
     }
 }
