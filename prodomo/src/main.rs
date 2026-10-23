@@ -57,7 +57,8 @@ use prodomo::channel_login::{
 };
 use prodomo::channel_status::ChannelStatusBoard;
 use prodomo::chat::{
-    judge_chat, ChatContext, ChatEffect, ChatOutcome, ChatState, CHAT_GUILD, CHAT_PARTY,
+    judge_chat, ChatContext, ChatEffect, ChatOutcome, ChatState, WhisperCounter, CHAT_GUILD,
+    CHAT_PARTY,
 };
 use prodomo::chat_line::Recipient;
 use prodomo::client_live::{
@@ -2031,6 +2032,15 @@ async fn whisper_line(
             return false;
         }
     };
+    // `#ifdef ENABLE_WHISPER_CHAT_SPAMLIMIT` (`G/input_main.cpp:356-362`): the
+    // counter increments on the reset of a new window first, ahead of the
+    // block-chat affect and the rest of the handler. At 10 and above the line
+    // is consumed with no record and the descriptor disconnects
+    // (`DelayedDisconnect(0)`); below 10 the line proceeds.
+    if held.chat.judge_whisper_counter(context.game.pulse()) == WhisperCounter::Refused {
+        info!(%addr, "Whisper refused by the chat counter; closing");
+        return false;
+    }
     let Some(character) = held.character.as_ref() else {
         warn!(%addr, "Whisper without a character; ignoring");
         return true;

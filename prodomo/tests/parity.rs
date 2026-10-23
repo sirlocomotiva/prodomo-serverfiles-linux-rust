@@ -34,6 +34,7 @@ use protocol::gc_guild::{
     GUILD_SUBHEADER_GC_REMOVE, GUILD_SUBHEADER_GC_SKILL_INFO, GUILD_SUBHEADER_GC_WAR,
     GUILD_SUBHEADER_GC_WAR_END_LIST, GUILD_SUBHEADER_GC_WAR_SCORE,
 };
+use protocol::gc_inventory::HEADER_GC_OWNERSHIP;
 use protocol::gc_mark::{HEADER_GC_MARK_BLOCK, HEADER_GC_MARK_IDXLIST, HEADER_GC_SYMBOL_DATA};
 use protocol::gc_whisper::{WHISPER_TYPE_GM, WHISPER_TYPE_OFFLINE, WHISPER_TYPE_SYSTEM};
 use protocol::tea::{decrypt_padded, encrypt_padded, TeaKey};
@@ -5230,8 +5231,97 @@ fn a_whisper_reaches_the_character_it_names() {
     yankee.quiet("the neighbour hears nothing either");
 }
 
-/// A whisper for a character that is not there is left for it, and the sender is told.
+/// `sys.char.chat`: the tenth whisper in a run is consumed with no record and closes the
+/// connection, while the nine before it reach the character they name.
 ///
+/// `#ifdef ENABLE_WHISPER_CHAT_SPAMLIMIT` (`G/input_main.cpp:356-362`): the counter
+/// increments first, so the tenth line is consumed (`DelayedDisconnect(0)`, `:359`) and
+/// no answer ever reaches the target. The `closes` walk skips what an NPC does on its
+/// own, because a nearby NPC may walk or speak before the close lands.
+#[test]
+fn a_tenth_whisper_in_a_run_closes_the_connection() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, true, None);
+
+    // The ten lines go out back to back with no reads between them, so no
+    // five-second counter window can fall in between and reset the count: the
+    // counter is shared with the chat lines (`held.chat`), and a reset would
+    // let the tenth line through. Yankee reads the nine deliveries (a stamina
+    // refill, the walk's own look update, an ownership clear, or a view
+    // removal may be interleaved and the loop skips only those); Alice's own
+    // walk strays are hers to keep, and the `closes` walk skips what an NPC
+    // does on its own. `yankee.quiet` proves the tenth line reached no target
+    // and `wait_for` proves the counter refused it.
+    for _ in 0..9 {
+        alice.send_record(&client_whisper(b"Yankee", b"hello"));
+    }
+    alice.send_record(&client_whisper(b"Yankee", b"one too many"));
+    let stray_deadline = std::time::Instant::now() + QUIET_WINDOW * 2;
+    let mut delivered = 0;
+    while delivered < 9 {
+        let record = yankee
+            .read_game_raw_until(stray_deadline)
+            .expect("the nine lines arrive");
+        if record == whisper_packet(WHISPER_TYPE_GM, b"Alpha", b"hello") {
+            delivered += 1;
+        } else {
+            assert!(
+                is_stamina_refill(&record)
+                    || yankee.timer_end(&record)
+                    || record[0] == HEADER_GC_OWNERSHIP.value()
+                    || record[0] == GC_CHARACTER_DEL,
+                "{record:02x?}"
+            );
+        }
+    }
+    let quiet_deadline = std::time::Instant::now() + QUIET_WINDOW;
+    while let Some(record) = yankee.read_game_raw_until(quiet_deadline) {
+        assert!(
+            is_stamina_refill(&record)
+                || yankee.timer_end(&record)
+                || record[0] == HEADER_GC_OWNERSHIP.value()
+                || record[0] == GC_CHARACTER_DEL,
+            "{record:02x?}"
+        );
+    }
+    server.wait_for("Whisper refused by the chat counter");
+    // Alice's own walk strays may land after the tenth line went out, and the
+    // close may land while she reads them: her shutdown is a `DelayedDisconnect`,
+    // so the connection can shut before she has drained them. She reads only
+    // what is already on the wire and stops at the first quiet beat or close.
+    // (`read_game_raw_until` reports a closed connection by panicking, so the
+    // `catch_unwind` reads strays until the close or the first quiet beat.)
+    let mut own = std::panic::AssertUnwindSafe(&mut alice);
+    let _ = std::panic::catch_unwind(move || loop {
+        let beat = std::time::Instant::now() + QUIET_WINDOW;
+        let Some(record) = own.read_game_raw_until(beat) else {
+            break;
+        };
+        assert!(
+            is_stamina_refill(&record)
+                || own.timer_end(&record)
+                || record[0] == GC_MOVE
+                || record[0] == GC_WALK_MODE
+                || record[0] == GC_CHARACTER_UPDATE,
+            "{record:02x?}"
+        );
+    });
+    alice.closes("the tenth line is consumed and closes the connection");
+}
+
 /// `G/input_main.cpp:404-505`: the line waits in the store for the target, the sender gets a
 /// `WHISPER_TYPE_SYSTEM` record, and the target reads the line when it next enters
 /// (`CInputDB::ReadOfflineMessages`, `G/input_db.cpp:2455-2476`).

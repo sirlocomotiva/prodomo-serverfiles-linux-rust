@@ -35102,3 +35102,32 @@ asserts the wipe beside the archived row.
 `sys.messenger` stays `partial` (the team list beyond the GMs, INVITE_ANSWER's
 absent arm, the offline rework's remainder). No ADR changed. No owner question
 added. V26 stays open.
+
+## 252. The tenth whisper in a run closes the connection (`sys.char.chat`)
+
+The whisper's chat-counter gate is live. `CInputMain::Whisper`
+(`G/input_main.cpp:352-362`, behind `#ifdef ENABLE_WHISPER_CHAT_SPAMLIMIT`):
+the counter increments on the reset of a new window first, ahead of the
+block-chat affect and the rest of the handler; at 10 and above the line is
+consumed with no record and a disconnect is scheduled (`DelayedDisconnect(0)`),
+while below 10 the line proceeds through the rest of the handler. The port's
+`ChatState::judge_whisper_counter` runs that gate at the same call site — the
+top of the whisper handler, before the character lookup — on the same counter
+the chat lines share (`held.chat`), with the same window reset
+(`CHAT_COUNTER_WINDOW_PULSES`, five seconds) and the same disconnect refusal.
+A whisper has no interpreter arm, so unlike a chat line no `/`-prefixed text
+escapes the counter.
+
+**The test.** `prodomo/tests/parity.rs`: a new
+`a_tenth_whisper_in_a_run_closes_the_connection` sends ten lines back to back
+(the burst leaves no room for a five-second window reset between sends) and
+proves the nine reach the character they name while the tenth is consumed, the
+target hears nothing of it, and the connection closes. The sends carry no reads
+between them, so the delivery loop skips only the ambient strays (a stamina
+refill, the walk's own look update, an ownership clear, a view removal) with a
+deadline drain, and the sender's own walk strays are read only until the close
+or the first quiet beat. Unit tests pin the gate: nine pass, the tenth refuses,
+and a later window passes again.
+
+`sys.char.chat` stays `partial` (`SpamBlockCheck`, the prism check). No ADR
+changed. No owner question added. V26 stays open.

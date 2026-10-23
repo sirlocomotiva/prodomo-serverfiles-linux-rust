@@ -179,11 +179,38 @@ impl ChatState {
         self.counter
     }
 
+    /// The chat counter's gate for one whisper line, ahead of the rest of the handler.
+    ///
+    /// `ENABLE_WHISPER_CHAT_SPAMLIMIT` (`input_main.cpp:356-362`): the counter
+    /// increments on the reset of a new window first. Below 10 the line proceeds
+    /// through the rest of the handler; at 10 and above the line is consumed with
+    /// no record and a disconnect is scheduled (`DelayedDisconnect(0)`), which
+    /// only the first call arms. A whisper has no interpreter arm, so unlike a
+    /// chat line no `/`-prefixed text escapes the counter.
+    pub fn judge_whisper_counter(&mut self, pulse: u64) -> WhisperCounter {
+        self.reset_chat_counter_at(pulse);
+        if self.increase_chat_counter() >= CHAT_COUNTER_DISCONNECT {
+            return WhisperCounter::Refused;
+        }
+        WhisperCounter::Pass
+    }
+
     /// `return m_bChatCounter;` (`char.cpp:8764`).
     #[must_use]
     pub const fn get_chat_counter(&self) -> u8 {
         self.counter
     }
+}
+
+/// What one whisper line's counter gate says: the line proceeds, or it is
+/// consumed and the descriptor disconnects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhisperCounter {
+    /// The counter is below 10: the line proceeds through the rest of the handler.
+    Pass,
+    /// The counter reached 10: the line is consumed with no record and the
+    /// descriptor disconnects.
+    Refused,
 }
 
 /// What the sender needs to be known by before a line can be judged.
@@ -810,6 +837,49 @@ mod tests {
             vec![ChatEffect::DelayedDisconnect]
         );
         assert_eq!(state.counter(), 10);
+    }
+
+    #[test]
+    fn nine_whispers_pass_and_the_tenth_refuses_and_disconnects() {
+        // `if (ch->IncreaseChatCounter() >= 10)` (`input_main.cpp:357`): the first
+        // nine lines pass the gate, the tenth is consumed, and only the
+        // disconnect differs from the ninth (`DelayedDisconnect(0)`, `:359`).
+        let mut state = ChatState::new();
+        for index in 1..=9_u8 {
+            assert_eq!(
+                state.judge_whisper_counter(0),
+                WhisperCounter::Pass,
+                "line {index} must pass the counter"
+            );
+        }
+        assert_eq!(state.counter(), 9);
+        assert_eq!(state.judge_whisper_counter(0), WhisperCounter::Refused);
+        assert_eq!(state.counter(), 10);
+    }
+
+    #[test]
+    fn a_whisper_is_judged_before_the_slash_check() {
+        // A whisper has no interpreter arm: even a `/`-prefixed line spends the
+        // counter, unlike `judge_chat`'s command early return (`:802-806`).
+        let mut state = ChatState::new();
+        assert_eq!(state.judge_whisper_counter(0), WhisperCounter::Pass);
+        assert_eq!(state.counter(), 1);
+    }
+
+    #[test]
+    fn the_whisper_counter_resets_in_a_later_window() {
+        // The shared window (`reset_chat_counter_at`, `char_manager.cpp:700-704`):
+        // nine lines, then a later window, then the tenth passes again instead of
+        // refusing.
+        let mut state = ChatState::new();
+        for _ in 0..9 {
+            assert_eq!(state.judge_whisper_counter(0), WhisperCounter::Pass);
+        }
+        assert_eq!(
+            state.judge_whisper_counter(u64::from(CHAT_COUNTER_WINDOW_PULSES)),
+            WhisperCounter::Pass
+        );
+        assert_eq!(state.counter(), 1);
     }
 
     #[test]
