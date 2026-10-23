@@ -261,6 +261,13 @@ pub enum ChatEffect {
     /// `DelayedDisconnect(0)` (`:811`). The frame is consumed and the descriptor is
     /// closed on the descriptor's own delayed-disconnect schedule.
     DelayedDisconnect,
+    /// `SendBlockChatInfo(ch, seconds)` (`input_main.cpp:126-155`): the ladder the
+    /// silenced sender hears — `[LS;652]` at zero, then the hour-and-minute,
+    /// hour-only, minute-only, or seconds key with the split time.
+    BlockChatInfo {
+        /// The silence's remaining seconds, as `FindAffect` reads them.
+        seconds: i32,
+    },
     /// A `GC_CHAT` line to the sender alone, built the way `CHARACTER::ChatPacket`
     /// builds one (`char.cpp:5140-5189`): `id` is 0, the empire is the descriptor's,
     /// and `bCanFormat` is left at its constructor value of `true`.
@@ -406,15 +413,8 @@ pub fn judge_chat(record: &CgChat, state: &mut ChatState, context: &ChatContext)
 
     // `ch->FindAffect(AFFECT_BLOCK_CHAT)` (`input_main.cpp:828-834`).
     if let Some(seconds) = context.block_chat_seconds {
-        let text = if seconds <= 0 {
-            BLOCK_CHAT_NO_DURATION
-        } else {
-            // Legacy would also send its uninitialised `buf` here. Only the locale
-            // string is reproduced; see the module note.
-            "[LS;1042]"
-        };
         return ChatOutcome::Judged {
-            effects: vec![ChatEffect::InfoToSender { text }],
+            effects: vec![ChatEffect::BlockChatInfo { seconds }],
         };
     }
 
@@ -620,12 +620,19 @@ pub fn guild_record(effect: &ChatEffect, empire: u8) -> Option<GcChat> {
 /// for every other effect.
 ///
 /// The line is built by [`chat_packet`]: the text is looked up in the recipient's language and
-/// then formatted. The one info text with an argument is the shout level refusal
-/// (`input_main.cpp:888`, `LC_TEXT("Shout can only be used at level %d or higher.")`), and no
-/// other info text holds a `%`.
+/// then formatted. The info texts with arguments are the shout level refusal
+/// (`input_main.cpp:888`, `LC_TEXT("Shout can only be used at level %d or higher.")`) and the
+/// silence ladder (`SendBlockChatInfo`, `input_main.cpp:126-155`), and no other info text
+/// holds a `%`.
 #[must_use]
 pub fn info_line(effect: &ChatEffect, to: Recipient<'_>) -> Option<Vec<u8>> {
     match effect {
+        ChatEffect::BlockChatInfo { seconds } => Some(chat_packet(
+            to,
+            CHAT_INFO,
+            block_chat_info_key(*seconds),
+            &block_chat_info_args(*seconds),
+        )),
         ChatEffect::InfoToSender { text } => Some(chat_packet(to, CHAT_INFO, text.as_bytes(), &[])),
         ChatEffect::ShoutBelowLevel { limit } => Some(chat_packet(
             to,
@@ -634,6 +641,52 @@ pub fn info_line(effect: &ChatEffect, to: Recipient<'_>) -> Option<Vec<u8>> {
             &[Arg::Int(i64::from(*limit))],
         )),
         _ => None,
+    }
+}
+
+/// The key `SendBlockChatInfo` chats for `seconds` (`input_main.cpp:126-155`):
+/// `[LS;652]` at zero, then the hour-and-minute, hour-only, minute-only, or
+/// seconds key. The time splits the legacy way: whole hours out first, then
+/// whole minutes, and what is left is seconds.
+fn block_chat_info_key(seconds: i32) -> &'static [u8] {
+    if seconds <= 0 {
+        return BLOCK_CHAT_NO_DURATION.as_bytes();
+    }
+    let hour = seconds / 3_600;
+    let minute = (seconds - hour * 3_600) / 60;
+    if hour > 0 && minute > 0 {
+        b"[LS;1028;%d;%d;%d]"
+    } else if hour > 0 {
+        b"[LS;1029;%d;%d]"
+    } else if minute > 0 {
+        b"[LS;1030;%d;%d]"
+    } else {
+        b"[LS;1042;%d]"
+    }
+}
+
+/// The arguments the key takes: the split hours, minutes and seconds that are
+/// not zero. Legacy would also send its uninitialised `buf` after the key; only
+/// the locale string is reproduced, see the module note.
+fn block_chat_info_args(seconds: i32) -> Vec<Arg<'static>> {
+    if seconds <= 0 {
+        return Vec::new();
+    }
+    let hour = seconds / 3_600;
+    let minute = (seconds - hour * 3_600) / 60;
+    let rest = seconds - hour * 3_600 - minute * 60;
+    if hour > 0 && minute > 0 {
+        vec![
+            Arg::Int(i64::from(hour)),
+            Arg::Int(i64::from(minute)),
+            Arg::Int(i64::from(rest)),
+        ]
+    } else if hour > 0 {
+        vec![Arg::Int(i64::from(hour)), Arg::Int(i64::from(rest))]
+    } else if minute > 0 {
+        vec![Arg::Int(i64::from(minute)), Arg::Int(i64::from(rest))]
+    } else {
+        vec![Arg::Int(i64::from(rest))]
     }
 }
 
@@ -925,12 +978,7 @@ mod tests {
         let ChatOutcome::Judged { effects } = judge_chat(&record, &mut state, &ctx) else {
             panic!("a block-chat affect must not close");
         };
-        assert_eq!(
-            effects,
-            vec![ChatEffect::InfoToSender {
-                text: BLOCK_CHAT_NO_DURATION
-            }]
-        );
+        assert_eq!(effects, vec![ChatEffect::BlockChatInfo { seconds: 0 }]);
         assert_eq!(
             state.counter(),
             1,
@@ -939,7 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn a_positive_block_duration_sends_only_the_locale_string() {
+    fn a_positive_block_duration_carries_its_seconds() {
         let mut state = ChatState::new();
         let mut ctx = context();
         ctx.block_chat_seconds = Some(65);
@@ -947,9 +995,36 @@ mod tests {
         let ChatOutcome::Judged { effects } = judge_chat(&record, &mut state, &ctx) else {
             panic!("a block-chat affect must not close");
         };
+        assert_eq!(effects, vec![ChatEffect::BlockChatInfo { seconds: 65 }]);
+    }
+
+    #[test]
+    fn the_silence_ladder_splits_hours_minutes_and_seconds() {
+        // `SendBlockChatInfo` (`input_main.cpp:126-155`): `[LS;652]` at zero,
+        // 1028 for hours and minutes, 1029 for hours alone, 1030 for minutes
+        // alone, and 1042 for seconds alone.
+        assert_eq!(block_chat_info_key(0), b"[LS;652]");
         assert_eq!(
-            effects,
-            vec![ChatEffect::InfoToSender { text: "[LS;1042]" }]
+            (
+                block_chat_info_key(3_661),
+                block_chat_info_args(3_661).len()
+            ),
+            (b"[LS;1028;%d;%d;%d]".as_slice(), 3)
+        );
+        assert_eq!(
+            (
+                block_chat_info_key(3_600),
+                block_chat_info_args(3_600).len()
+            ),
+            (b"[LS;1029;%d;%d]".as_slice(), 2)
+        );
+        assert_eq!(
+            (block_chat_info_key(90), block_chat_info_args(90).len()),
+            (b"[LS;1030;%d;%d]".as_slice(), 2)
+        );
+        assert_eq!(
+            (block_chat_info_key(30), block_chat_info_args(30).len()),
+            (b"[LS;1042;%d]".as_slice(), 1)
         );
     }
 

@@ -35205,3 +35205,66 @@ removal, in `Logout`'s own fan order (`:203-208` before `:241-246`).
 `sys.messenger` stays `partial` (the team list beyond the GMs, INVITE_ANSWER's
 absent arm, the offline rework's remainder). No ADR changed. No owner question
 added. V26 stays open.
+
+## 255. A GM silences a character for a parsed time (`cmd.block_chat`, `cmd.jy`, `sys.char.chat`)
+
+The lay is `do_block_chat` (`G/cmd_gm.cpp:3364-3433`) with the retirement ledger
+it forced. The gate runs before the split (`:3366-3370`): `answer_block_chat`
+asks `block_chat_allowed` first, so a player that sends an empty line hears the
+refusal, never the usage — the upgraded gate test runs the whole dispatch for
+that reason. The split is `one_argument`, the time is `parse_time_str`
+(`G/utils.cpp:236-287`), and the port matches it byte for byte: a bare number
+adds when the back ends with no unit, an empty back is 0, and a byte outside
+the digits and `s`/`m`/`h`/`d` refuses the line. The refusal is the two format
+lines, never the usage. A space refuses the line, so the usage example's own
+`1m 30s` never lays; the scenario pins that the example spells a lay legacy
+refuses.
+
+The rework the slice turned up is that `do_block_chat` has no unsilence arm.
+Its last lines (`:3429-3430`) are a bare `AddAffect` for every lay, 0 included:
+a 0 (and a bare name, which parses to 0) is the same `AddAffect(223,
+POINT_NONE, 0, 0, 0, 0, true)` a 90-second lay is, and `AddAffect` stands a 0
+duration up to 1 (`G/char_affect.cpp:676-680`). The `[LS;988]` release belongs
+to `RemoveAffect(AFFECT_BLOCK_CHAT)` (`:863-868`), which no command, whisper
+arm, or talk arm calls — the sweep of `AFFECT_BLOCK_CHAT` outside
+`char_affect.cpp` finds only the two command lays, the whisper gate, the talk
+gate, the GG arm, and the enum. So the port lays the 0, chats no release, and
+the lay's own 1-to-0 tick lifts it: that tick is the slice's recorded
+Divergence, because legacy's silence never ticks (the tick loop
+`ProcessAffect` decrements every row, `:424-442`, but the silence's own event
+never runs — legacy's `StartAffectEvent` cadence is the unported `passes_per_sec`
+event wheel). The quiet-0-lift the tree carried was a fiction; the scenario's
+tail now retires the old row, lands the 0-add, and reads the tick's own
+remove within the second, with the store row still standing.
+
+The rest is 1:1. A lay over one tick chats `[LS;852]` before the add
+(`AddAffect`, `:670-674`); the override retires the old row first, then the
+add lands. The talk gate answers `SendBlockChatInfo` (`G/input_main.cpp:126-155`)
+with the full ladder — `[LS;652]` at 0, 1028 for hours and minutes, 1029 for
+hours alone, 1030 for minutes alone, 1042 for seconds alone — carried by a new
+`BlockChatInfo` effect, never the old flat key. The whisper gate answers the
+`[LS;652]` info line (`:364-368`), after the spam counter (`:355-362`) the
+port keeps in 252's stead. A live lay writes its row, as `AddAffect` writes
+`QUERY_ADD_AFFECT` for a PC (`:756-765`); an offline name's row is written by
+the name (`CClientManager::BlockChat`, `db/ClientManager.cpp:2159-2186`),
+quiet when no row carries it, and the caller hears the requested line either
+way. The silence rides the load (`LoadAffect`, `:573-666`): a restored row's
+add rides the enter-game burst behind the update, and only the silence is
+saved, because only it is ported.
+
+`cmd.block_chat` and `cmd.jy` go `ported` on
+`a_gm_silences_a_character_and_the_silence_answers_its_chat`, which lays
+`1m30s`, reads the notice and the add, hears `[LS;1030;1;30]` on a talking
+line, the `[LS;652]` info line on a whisper, the usage on an empty line, the
+format pair on a spaced time, quiet on the caller's own name, and the 0 lay's
+retire-add-tick tail. `cmd.vote_block_chat` stays `missing`: its body returns
+before its first split. `cmd.block_chat_list` stays `missing`: its answer is
+the unported `QID_BLOCK_CHAT_LIST` return query.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings` on
+the workspace all-targets run; doc green with `-D warnings`; doc-tests green
+(1 passed, 25 ignored); the full workspace all-targets DB run green on all 40
+targets (prodomo lib 1238, parity 141 of 141, protocol 1267), with the new
+silence scenario among the passes; no scratch database left. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair. No ADR changed. No owner question
+added. V26 stays open.

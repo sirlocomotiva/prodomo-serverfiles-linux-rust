@@ -252,6 +252,19 @@ impl GameState {
         let _added = self.write_to_client(vid, frame);
     }
 
+    /// The remaining duration of the first `AFFECT_BLOCK_CHAT` row of the player
+    /// under `vid` (`FindAffect`, `G/char_affect.cpp:129-142`), or `None` when it
+    /// holds none. The chat judge and the whisper gate read it.
+    pub(super) fn block_chat_seconds_of(&self, vid: Vid) -> Option<i32> {
+        self.affect_events.get(&vid).and_then(|event| {
+            event
+                .affects
+                .iter()
+                .find(|affect| affect.kind == crate::loading_phase::AFFECT_BLOCK_CHAT)
+                .map(|affect| affect.remaining)
+        })
+    }
+
     /// `AddAffect`'s stun arm on the player under `vid`: a body whose destination is not
     /// its spot stops where it stands, its fight pose ends (`battle_end`), and the sync
     /// record goes around (`G/char_affect.cpp:698-707`, `G/char.cpp:3828-3846`). The
@@ -281,7 +294,7 @@ impl GameState {
     }
 
     /// `GetPoint(POINT_ATT_SPEED)` of the player under `vid`, or 0 when it is gone.
-    fn attack_speed_of(&self, vid: u32) -> i32 {
+    pub(super) fn attack_speed_of(&self, vid: u32) -> i32 {
         self.characters
             .find_by_vid(Vid::new(vid))
             .ok()

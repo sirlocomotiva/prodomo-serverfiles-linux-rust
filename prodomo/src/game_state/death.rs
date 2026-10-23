@@ -1124,7 +1124,8 @@ impl GameState {
     /// The `bSave` half of `ClearAffect(true)` on the player under `vid`
     /// (`G/char_affect.cpp:259-337`): every affect but the no-clear and no-save ones is
     /// uncomputed, erased, and refused its next run, with its remove packet to the player.
-    /// Of the affects a player can hold, the revive-invisible stays (no-save, `:43-55`) and
+    /// Of the affects a player can hold, the revive-invisible stays (no-save, `:43-55`),
+    /// the silence stays (no-clear, `IS_NO_CLEAR_ON_DEATH_AFFECT`, `:57-83`), and
     /// the poison, stun, slow and 263's slow go. Then the flags update when they or either
     /// speed moved. `CheckMaximumPoints` is dead here: no affect here touches a maximum.
     fn clear_affects_on_death(&mut self, vid: Vid) {
@@ -1135,7 +1136,9 @@ impl GameState {
         };
         let mut cleared = Vec::new();
         event.affects.retain(|affect| {
-            if affect.kind == crate::loading_phase::AFFECT_REVIVE_INVISIBLE {
+            if affect.kind == crate::loading_phase::AFFECT_REVIVE_INVISIBLE
+                || affect.kind == crate::loading_phase::AFFECT_BLOCK_CHAT
+            {
                 return true;
             }
             cleared.push(*affect);

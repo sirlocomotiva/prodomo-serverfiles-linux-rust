@@ -946,6 +946,10 @@ impl GameState {
             GameCommand::SetBlockMode { vid, rest, reply } => {
                 self.answer_set_block_mode(vid, &rest, reply);
             }
+            GameCommand::BlockChatOf { vid, reply } => self.answer_block_chat_of(vid, reply),
+            GameCommand::BlockChat { vid, rest, reply } => {
+                self.answer_block_chat(vid, &rest, reply);
+            }
             GameCommand::Stop => {
                 // The loop handles `Stop` itself, before a command ever reaches a
                 // processor. Reaching here would mean the loop and the state
@@ -1256,12 +1260,14 @@ impl GameState {
     /// online.
     fn answer_kept(&self, vid: common::vid::Vid, reply: oneshot::Sender<Option<Kept>>) {
         let place = self.kept_place(vid);
+        let affects = self.saved_affects_of(vid);
         let kept = self.characters.find_by_vid(vid).ok().map(|character| Kept {
             points: character.points().cloned(),
             quickslots: character.quickslots().clone(),
             place,
             alignment: self.real_alignment_of(vid.raw()),
             quest_flags: self.quest_flags_of(character.player_id()),
+            affects,
         });
         if reply.send(kept).is_err() {
             debug!(?vid, "nobody was left to hear a character's points");
@@ -1273,6 +1279,31 @@ impl GameState {
     fn quest_flags_of(&self, player_id: u32) -> Vec<(Vec<u8>, i32)> {
         self.quests()
             .map(|quests| quests.manager().flags_of(player_id))
+            .unwrap_or_default()
+    }
+
+    /// The saved affects of the character under `vid` (`LoadAffect`'s rows,
+    /// `G/char_affect.cpp:573-666`): the silence rows it still carries, in row
+    /// order. A save writes them; an expired silence is already gone from the
+    /// event, so it is gone from the save too.
+    fn saved_affects_of(&self, vid: common::vid::Vid) -> Vec<db::player_affects::StoredAffect> {
+        self.affect_events
+            .get(&vid)
+            .map(|event| {
+                event
+                    .affects
+                    .iter()
+                    .filter(|affect| affect.kind == crate::loading_phase::AFFECT_BLOCK_CHAT)
+                    .map(|affect| db::player_affects::StoredAffect {
+                        affect_type: affect.kind,
+                        apply_on: affect.apply_on,
+                        apply_value: affect.value,
+                        flag: affect.flag,
+                        duration: affect.remaining,
+                        sp_cost: affect.sp_cost,
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
     /// Run the `/skillup` line and answer with what climbed, or nothing when a
@@ -1318,6 +1349,87 @@ impl GameState {
         }
         if reply.send(answer).is_err() {
             debug!(?vid, "nobody was left to hear a block mode's answer");
+        }
+    }
+
+    /// Answer the remaining `AFFECT_BLOCK_CHAT` duration of `vid`.
+    fn answer_block_chat_of(&mut self, vid: common::vid::Vid, reply: oneshot::Sender<Option<i32>>) {
+        let answer = self.block_chat_seconds_of(vid);
+        if reply.send(answer).is_err() {
+            debug!(?vid, "nobody was left to hear a silence's answer");
+        }
+    }
+
+    /// Run the `/block_chat` or `/jy` line: silence the named character for the
+    /// parsed time, or unsilence it when the time is `0`.
+    ///
+    /// The gate runs before the line is split (`do_block_chat`,
+    /// `G/cmd_gm.cpp:3366-3368`). An empty name is quiet past the usage line,
+    /// and a refused time is quiet past the two format lines (`:3370-3395`).
+    fn answer_block_chat(
+        &mut self,
+        vid: common::vid::Vid,
+        rest: &[u8],
+        reply: oneshot::Sender<crate::game_loop_messages::BlockChatAnswer>,
+    ) {
+        use crate::command::one_argument;
+        use crate::game_loop_messages::BlockChatAnswer;
+        use protocol::gc_chat::CHAT_TYPE_INFO;
+        let send = |answer: BlockChatAnswer| {
+            if reply.send(answer).is_err() {
+                debug!(?vid, "nobody was left to hear a silence's answer");
+            }
+        };
+        if !self.block_chat_allowed(vid) {
+            send(BlockChatAnswer::Shown);
+            return;
+        }
+        let (name, back) = one_argument(rest);
+        let Some(mover) = self.own_mover(vid) else {
+            send(BlockChatAnswer::Shown);
+            return;
+        };
+        if name.is_empty() {
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_INFO,
+                b"Usage: block_chat <name> <time> (0 to off)",
+                &[],
+            );
+            send(BlockChatAnswer::Shown);
+            return;
+        }
+        let Some(seconds) = crate::game_state::whisper::parse_block_seconds(back) else {
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_INFO,
+                b"The time is in the wrong format. Please specify by adding h, m, or s.",
+                &[],
+            );
+            self.tell(vid, mover, CHAT_TYPE_INFO, b"e.g: 10s, 10m, 1m 30s", &[]);
+            send(BlockChatAnswer::Shown);
+            return;
+        };
+        match self.block_chat(vid, &name, seconds) {
+            crate::game_state::whisper::BlockTarget::Moved(target) => {
+                let laid = self.characters.find_by_vid(target).ok().map_or(
+                    BlockChatAnswer::Shown,
+                    |character| BlockChatAnswer::Moved {
+                        name: character.name().as_bytes().to_vec(),
+                        player: character.player_id(),
+                        seconds,
+                    },
+                );
+                send(laid);
+            }
+            crate::game_state::whisper::BlockTarget::Offline => {
+                send(BlockChatAnswer::Offline { name, seconds });
+            }
+            crate::game_state::whisper::BlockTarget::Itself => {
+                send(BlockChatAnswer::Shown);
+            }
         }
     }
 
@@ -1502,6 +1614,27 @@ impl GameState {
                     u32::from_ne_bytes(slot.next_read.to_ne_bytes());
             }
         }
+        // `LoadAffect` (`G/char_affect.cpp:573-666`): the saved affects the store read
+        // are the character's timed affects again. Only the silence is saved, so only
+        // it is restored, and a row that would fire no tick is gone instead
+        // (`ProcessAffect` ends it on its first run, `G/char_affect.cpp:424-442`).
+        // Each add packet the burst carries, behind the update, as the load's adds
+        // ride the queue they found.
+        let mut silence = Vec::new();
+        for saved in &loaded.affects {
+            if saved.affect_type == crate::loading_phase::AFFECT_BLOCK_CHAT && saved.duration > 0 {
+                let restored = crate::game_state::affect::Affect {
+                    kind: saved.affect_type,
+                    apply_on: saved.apply_on,
+                    value: saved.apply_value,
+                    flag: saved.flag,
+                    remaining: saved.duration,
+                    sp_cost: saved.sp_cost,
+                };
+                self.add_affect(vid, restored);
+                silence.push(crate::game_state::affect::affect_add_frame(&restored));
+            }
+        }
         let (records, update) = match loaded.show {
             Some(show) => {
                 let records = self.place_body(vid, show.place, show.card);
@@ -1510,7 +1643,11 @@ impl GameState {
             }
             None => (Vec::new(), None),
         };
-        Shown { records, update }
+        Shown {
+            records,
+            update,
+            silence,
+        }
     }
 
     /// As [`GameState::enter_world`], and [`EnterWorldRefused::ItemRefused`] when an
@@ -1651,6 +1788,7 @@ impl GameState {
         self.forget_portal_times(vid);
         let alignment = self.real_alignment_of(vid.raw());
         let place = self.remove_body(vid);
+        let affects = self.saved_affects_of(vid);
         let character = self.characters.find_by_vid(vid).ok()?;
         let kept = Kept {
             points: character.points().cloned(),
@@ -1658,6 +1796,7 @@ impl GameState {
             place,
             alignment,
             quest_flags,
+            affects,
         };
         self.characters.destroy(vid).ok()?;
         Some(kept)
@@ -5128,6 +5267,7 @@ mod tests {
                 messenger_companions: Vec::new(),
                 messenger_team: Vec::new(),
                 messenger_levels: std::collections::BTreeMap::new(),
+                affects: Vec::new(),
             }),
             outbox,
             reply,
@@ -5177,6 +5317,7 @@ mod tests {
                 messenger_companions: Vec::new(),
                 messenger_team: Vec::new(),
                 messenger_levels: std::collections::BTreeMap::new(),
+                affects: Vec::new(),
             }),
             outbox,
             reply,

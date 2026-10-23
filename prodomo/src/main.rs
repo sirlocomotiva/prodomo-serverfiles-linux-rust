@@ -383,6 +383,9 @@ struct Held {
     /// The quest flags the load read (`quest_flag`), which the world holds as the
     /// character's quest record from the admission on, and which the save writes back.
     quest_flags: Vec<(Vec<u8>, i32)>,
+    /// The saved affects the load read (`player_affect`), which the world holds as the
+    /// character's timed affects from the admission on, and which the save writes back.
+    affects: Vec<db::player_affects::StoredAffect>,
     /// The channel the client logged in through, which is `g_bChannel` on the descriptor.
     ///
     /// It is held from the Channel login rather than read from the listener, because a
@@ -976,6 +979,7 @@ fn hold_kept(held: &mut Held, kept: Kept) {
     }
     held.quickslots = kept.quickslots;
     held.quest_flags = kept.quest_flags;
+    held.affects = kept.affects;
     if let (Some((map, x, y)), Some(avatar)) = (kept.place, held.avatar.as_mut()) {
         avatar.map = map;
         avatar.x = x;
@@ -1345,6 +1349,7 @@ async fn entering_burst(
         shown.records,
         &npcs,
         shown.update,
+        shown.silence,
         channel,
         global_time(),
     ))
@@ -1791,6 +1796,34 @@ async fn guild_answer(
         None => Some(false),
     }
 }
+
+/// `FindAffect(AFFECT_BLOCK_CHAT)` (`G/input_main.cpp:828-834`), asked lazily:
+/// only a plain line pays the world round-trip — a slash line goes to the
+/// interpreter before the counter and never reaches the silence check
+/// (`G/input_main.cpp:802`). A character outside the world holds no silence.
+/// `None` closes the connection: the world could not answer, as with the
+/// talking relay.
+async fn silence_answer(
+    game: &GameLoopController,
+    record: &CgChat,
+    addr: SocketAddr,
+    world: Option<common::vid::Vid>,
+) -> Option<Option<i32>> {
+    if record.text.len() > 1 && record.text[0] == b'/' {
+        return Some(None);
+    }
+    let Some(world_vid) = world else {
+        return Some(None);
+    };
+    match game.block_chat_of(world_vid).await {
+        Ok(seconds) => Some(seconds),
+        Err(error) => {
+            warn!(%addr, %error, "The world could not answer the silence question; closing");
+            None
+        }
+    }
+}
+
 /// An info line to the sender: the one `send_all` the judge's sender-only effects share.
 /// `false` closes the connection.
 async fn send_info_line<S>(
@@ -1918,14 +1951,16 @@ where
     let Some(in_guild) = guild_answer(&context.game, &record, addr, held.world).await else {
         return false;
     };
+    let Some(block_chat_seconds) = silence_answer(&context.game, &record, addr, held.world).await
+    else {
+        return false;
+    };
     let chat_context = ChatContext {
         name: character.name.clone(),
         vid: character.id,
         empire: character.empire,
         level: character.level,
-        // The Rewrite has no way to set `AFFECT_BLOCK_CHAT` yet, so it is always absent,
-        // which is the legacy state for a character that was never silenced.
-        block_chat_seconds: None,
+        block_chat_seconds,
         in_party,
         in_guild,
         language: to.language,
@@ -1956,7 +1991,9 @@ where
                 info!(%addr, "Chat counter reached the disconnect line; closing");
                 return false;
             }
-            ChatEffect::InfoToSender { .. } | ChatEffect::ShoutBelowLevel { .. } => {
+            ChatEffect::BlockChatInfo { .. }
+            | ChatEffect::InfoToSender { .. }
+            | ChatEffect::ShoutBelowLevel { .. } => {
                 if !send_info_line(session, addr, effect, to).await {
                     return false;
                 }
@@ -4990,7 +5027,7 @@ where
     let mut burst = loading_burst(&character, &points, vid, &view);
     // `PlayerLoad` sets each stored quickslot right after the map test and before the points
     // packet (`G/input_db.cpp:439-440`), and `TPlayerTable::skills` rides the player row.
-    let Some((quickslots, skills, quest_flags)) =
+    let Some((quickslots, skills, quest_flags, affects)) =
         load_select_rows(&context.store, addr, player, &mut burst).await
     else {
         return false;
@@ -4998,6 +5035,7 @@ where
     held.quickslots = quickslots;
     held.skills = skills;
     held.quest_flags = quest_flags;
+    held.affects = affects;
     held.character = Some(character.clone());
     held.channel = seat.number;
     // `SetPlayerProto`'s GM level (`G/input_db.cpp:1931-1955`): the character's own
@@ -5196,6 +5234,7 @@ async fn load_select_rows(
     world::character::Quickslots,
     Vec<db::player_skills::StoredSkill>,
     Vec<(Vec<u8>, i32)>,
+    Vec<db::player_affects::StoredAffect>,
 )> {
     let stored = match db::quickslots::load_quickslots(store, player).await {
         Ok(stored) => stored,
@@ -5230,7 +5269,16 @@ async fn load_select_rows(
     if !quest_flags.is_empty() {
         info!(%addr, player, flags = quest_flags.len(), "quest flags loaded");
     }
-    Some((quickslots, skills, quest_flags))
+    // `LoadAffect` (`G/char_affect.cpp:573-666`): the saved affects the character
+    // carries again from the admission on.
+    let affects = match db::player_affects::load_affects(store, player).await {
+        Ok(affects) => affects,
+        Err(error) => {
+            warn!(%addr, player, %error, "Affect load failed; closing");
+            return None;
+        }
+    };
+    Some((quickslots, skills, quest_flags, affects))
 }
 
 /// The item load at character select, the way `CInputDB::ItemLoad` places a character's
@@ -5611,6 +5659,7 @@ fn loaded_state(
         messenger_companions: messenger.companions,
         messenger_team: messenger.team,
         messenger_levels: messenger.levels,
+        affects: held.affects.clone(),
     }
 }
 
@@ -5828,6 +5877,14 @@ async fn save_held(context: &ConnectionContext, held: &Held, at: std::time::Inst
                 db::quest_flags::save_flags(&context.store, character.id, &flags).await
             {
                 warn!(player = character.id, %error, "Could not save the quest flags");
+                return false;
+            }
+            // `QUERY_ADD_AFFECT` (`db/ClientManagerPlayer.cpp:1563-1585`): the saved
+            // affects the character still carries, written after the player row.
+            if let Err(error) =
+                db::player_affects::save_affects(&context.store, character.id, &held.affects).await
+            {
+                warn!(player = character.id, %error, "Could not save the affects");
                 return false;
             }
             true
@@ -7857,6 +7914,7 @@ where
         LineCommand::PartyRequestDeny => party_request_deny_step(addr, context, held, rest).await,
         LineCommand::MessengerAuth => messenger_auth_step(addr, context, held, rest).await,
         LineCommand::SetBlockMode => set_block_mode_step(addr, context, held, rest).await,
+        LineCommand::BlockChat => block_chat_step(addr, context, held, rest).await,
         LineCommand::GlobalNotice => global_notice_step(addr, context, held, &rest),
         LineCommand::MapNotice => map_notice_step(addr, context, held, &rest),
         LineCommand::BigNotice => big_notice_step(session, addr, context, held, &rest).await,
@@ -7999,6 +8057,90 @@ async fn set_block_mode_step(
     }
     info!(%addr, "Block mode");
     true
+}
+
+/// `do_block_chat` (`G/cmd_gm.cpp:3364-3433`): the world lays the silence the line
+/// names and answers what moved. A moved live character's lay is stored: the
+/// `QUERY_ADD_AFFECT` write `AddAffect` makes for a PC
+/// (`G/char_affect.cpp:756-765`), which a 0-spelling reaches too (its lay stands
+/// on the next tick, as the loaded row would). An offline name's row is stored
+/// by the name (`CClientManager::BlockChat`, `db/ClientManager.cpp:2159-2186`),
+/// quiet when no row carries it. Every line rode the outboxes already: the
+/// usage and format lines and the privilege refusal to the caller, the
+/// `[LS;852]` to the target, and the requested line when the name named nobody
+/// online. A refused store closes the session, as a refused block mode does.
+async fn block_chat_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    use prodomo::game_loop_messages::BlockChatAnswer;
+    let Some(vid) = held.world else {
+        info!(%addr, "Block chat without a character in the world; ignoring");
+        return true;
+    };
+    let answer = match context.game.block_chat(vid, rest).await {
+        Ok(answer) => answer,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a chat block; closing");
+            return false;
+        }
+    };
+    match answer {
+        BlockChatAnswer::Shown => true,
+        BlockChatAnswer::Moved {
+            name,
+            player,
+            seconds,
+        } => {
+            let rows = [db::player_affects::StoredAffect {
+                affect_type: prodomo::loading_phase::AFFECT_BLOCK_CHAT,
+                apply_on: 0,
+                apply_value: 0,
+                flag: 0,
+                duration: seconds,
+                sp_cost: 0,
+            }];
+            if let Err(error) =
+                db::player_affects::save_affects(&context.store, player, &rows).await
+            {
+                warn!(%addr, %error, "The chat block could not be stored; closing");
+                return false;
+            }
+            info!(
+                %addr,
+                name = String::from_utf8_lossy(&name).into_owned(),
+                seconds,
+                "Chat block stored"
+            );
+            true
+        }
+        BlockChatAnswer::Offline { name, seconds } => {
+            match db::player_affects::lay_affect(
+                &context.store,
+                &String::from_utf8_lossy(&name),
+                seconds,
+            )
+            .await
+            {
+                Ok(laid) => {
+                    info!(
+                        %addr,
+                        name = String::from_utf8_lossy(&name).into_owned(),
+                        seconds,
+                        laid,
+                        "Offline chat block stored"
+                    );
+                    true
+                }
+                Err(error) => {
+                    warn!(%addr, %error, "The offline chat block could not be stored; closing");
+                    false
+                }
+            }
+        }
+    }
 }
 
 /// `do_guildskillup`: the world runs the `/gskillup` line, and a landed up's row is
@@ -9141,6 +9283,7 @@ mod tests {
                 place: None,
                 alignment: -250,
                 quest_flags: Vec::new(),
+                affects: Vec::new(),
             },
         );
         assert_eq!(

@@ -11,6 +11,7 @@ pub mod guilds;
 pub mod item_id_range;
 pub mod items;
 pub mod messenger;
+pub mod player_affects;
 pub mod player_skills;
 pub mod players;
 pub mod quest_flags;

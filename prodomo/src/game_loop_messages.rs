@@ -1200,6 +1200,27 @@ pub enum GameCommand {
         /// Where the game thread reports the line and the flag writes, when the line runs.
         reply: oneshot::Sender<SetBlockModeAnswer>,
     },
+    /// The remaining `AFFECT_BLOCK_CHAT` duration of the character online under
+    /// `vid` (`FindAffect`, `G/char_affect.cpp:129-142`), or `None` when it holds
+    /// none: the descriptor asks before judging a chat line. See
+    /// `game_state::affect`.
+    BlockChatOf {
+        /// The VID of the speaking character.
+        vid: common::vid::Vid,
+        /// Where the game thread reports the remaining duration.
+        reply: oneshot::Sender<Option<i32>>,
+    },
+    /// Runs one `/block_chat` or `/jy` line (`do_block_chat`,
+    /// `G/cmd_gm.cpp:3364-3433`): the named character is silenced for the parsed
+    /// time, `0` included. See `game_state::whisper`.
+    BlockChat {
+        /// The VID of the GM whose client sent the line.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports whether a row moved.
+        reply: oneshot::Sender<BlockChatAnswer>,
+    },
     /// Requests terminal loop shutdown.
     Stop,
 }
@@ -1247,6 +1268,33 @@ pub struct SetBlockModeAnswer {
     pub line: Option<Vec<u8>>,
     /// The seven `game_option.block_*` flag writes for the store.
     pub flags: Vec<(Vec<u8>, i32)>,
+}
+
+/// What a `/block_chat` line did that the descriptor keeps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockChatAnswer {
+    /// The usage, the format lines, the privilege refusal, or the caller's own
+    /// name: everything the line showed already rode an outbox.
+    Shown,
+    /// A live character's silence moved, with its name and player id: the
+    /// descriptor writes its row, as `AddAffect` writes it for a PC
+    /// (`G/char_affect.cpp:756-765`), 0 included.
+    Moved {
+        /// The silenced character's name.
+        name: Vec<u8>,
+        /// Its player id.
+        player: u32,
+        /// The ticks the line laid; a 0 lay stands on the next tick.
+        seconds: i32,
+    },
+    /// The name named nobody online: the descriptor stores the silence of an
+    /// offline name's row (`BlockChat`, `db/ClientManager.cpp:2159-2186`).
+    Offline {
+        /// The name as the caller sent it.
+        name: Vec<u8>,
+        /// The ticks the line laid; a 0 lay stands on the next load.
+        seconds: i32,
+    },
 }
 
 /// What a hit changed that the descriptor keeps.
@@ -1333,6 +1381,10 @@ pub struct Shown {
     /// The character's own `GC_CHARACTER_UPDATE`, with the affect flags its revive-invisible
     /// affect sets. Its enter-game burst carries it; `None` when the character has no place.
     pub update: Option<Vec<u8>>,
+    /// The `GC_AFFECT_ADD` of each restored silence (`LoadAffect`,
+    /// `G/char_affect.cpp:573-666`). The burst carries them behind the update, as
+    /// the load's add packets ride the queue they found.
+    pub silence: Vec<Vec<u8>>,
 }
 
 /// Where a character stands, as the descriptor holds it. The world reads the point of a
@@ -1605,6 +1657,10 @@ pub struct Loaded {
     pub messenger_team: Vec<Vec<u8>>,
     /// Every grant's name-to-level map, which the GM gates read.
     pub messenger_levels: std::collections::BTreeMap<Vec<u8>, u8>,
+    /// The saved affects the load read (`player_affect`), which the world holds
+    /// as the character's timed affects from the admission on. Legacy restores
+    /// them with the character (`LoadAffect`, `G/char_affect.cpp:573-666`).
+    pub affects: Vec<db::player_affects::StoredAffect>,
 }
 
 /// What the world holds of a character that a save writes: asked for before a save, and
@@ -1625,6 +1681,9 @@ pub struct Kept {
     /// The quest flags the world holds, which a save writes: legacy's `quest::PC` writes
     /// them with the character (`G/char.cpp:1670-1678`).
     pub quest_flags: Vec<(Vec<u8>, i32)>,
+    /// The saved affects the world holds, which a save writes: the silence rows
+    /// (`AFFECT_BLOCK_CHAT`) the character still carries.
+    pub affects: Vec<db::player_affects::StoredAffect>,
 }
 
 /// Why installing the item id allocator did not succeed.
@@ -3462,6 +3521,39 @@ impl GameLoopController {
     ) -> Result<SetBlockModeAnswer, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::SetBlockMode { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world for the remaining `AFFECT_BLOCK_CHAT` duration of the
+    /// character online under `vid`, or `None` when it holds none.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn block_chat_of(&self, vid: common::vid::Vid) -> Result<Option<i32>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::BlockChatOf { vid, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/block_chat` or `/jy` line, and waits for the
+    /// moved silence. What the line shows is written to the players' outboxes
+    /// before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn block_chat(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<BlockChatAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::BlockChat { vid, rest, reply })
             .await
             .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)

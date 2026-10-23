@@ -16868,3 +16868,125 @@ fn a_player_lists_a_gm_but_hears_logout_for_the_name() {
     drop(yankee);
     wait_for(&database, "(SELECT count(*) FROM messenger_list) = 2");
 }
+
+/// `cmd.block_chat` (`do_block_chat`, `G/cmd_gm.cpp:3364-3433`): a `HIGH_WIZARD`
+/// silences a character for a parsed time and the silence answers every chat arm.
+/// Alice silences Yankee for `1m30s`, and Yankee hears the `[LS;852]` first and
+/// the silence's `GC_AFFECT_ADD` behind it (`AddAffect`, `G/char_affect.cpp:670-674`).
+/// A talking line from Yankee never reaches the map: the sender alone hears
+/// `[LS;1030;1;30]` (`SendBlockChatInfo`, `G/input_main.cpp:126-155`). Its whisper
+/// answers the sender with the `[LS;652]` info line (`G/input_main.cpp:364-368`)
+/// and the target hears nothing. The store holds the one silence row
+/// (`player_affect`, 223). The usage line answers an empty line, and a spaced
+/// time is refused as a wrong format: the parser's `default` arm turns a space
+/// into -1, so even the usage example's `1m 30s` never lays (`parse_time_str`,
+/// `G/utils.cpp:235-287`); both are quiet on the map. A bare name is the
+/// 0-spelling, not a refusal: the old row is retired and the 0 lay lands, and
+/// its own 1-to-0 tick lifts it (the tick is a Divergence: legacy's silence
+/// never ticks). The caller hears nothing wherever it laid: only the caller's
+/// own name is the quiet it is (`G/cmd_gm.cpp:3418-3421`).
+#[test]
+fn a_gm_silences_a_character_and_the_silence_answers_its_chat() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _) = enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_arrive(yankee_listed.id, true, None);
+
+    alice.send_record(&client_chat(CHAT_TALKING, b"/block_chat Yankee 1m30s"));
+    let notice = yankee.read_game();
+    assert_eq!(&notice[10..], b"[LS;852]", "the notice chats first");
+    let added = yankee.read_game();
+    assert_eq!(added.len(), AFFECT_ADD_LEN);
+    assert_eq!(added[0], GC_AFFECT_ADD);
+    assert_eq!(&added[1..5], &223u32.to_le_bytes(), "the silence's type");
+    assert_eq!(&added[5], &0, "POINT_NONE");
+    assert_eq!(&added[14..18], &90i32.to_le_bytes(), "1m30s is 90 ticks");
+    alice.quiet("a lay is quiet on the caller");
+    wait_for(
+        &database,
+        "(SELECT count(*) FROM player_affect WHERE affect_type = 223) = 1",
+    );
+
+    // The silenced talking line never reaches the map: only the sender hears.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"can you hear me"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(b"[LS;1030;1;30]"),
+        "one minute and thirty seconds stay"
+    );
+    alice.quiet("the map hears no silenced line");
+
+    // The silenced whisper answers the sender with an info line, and the named
+    // target hears nothing.
+    yankee.send_record(&client_whisper(b"Alpha", b"a secret"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(b"[LS;652]"),
+        "a silenced sender hears `[LS;652]`"
+    );
+    alice.quiet("the whisper never reached its target");
+
+    // An empty line answers the usage; a spaced time is a wrong format, even the
+    // usage example's own `1m 30s`. Both land on the caller alone.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/block_chat"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"Usage: block_chat <name> <time> (0 to off)"),
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/block_chat Yankee 1m 30s"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"The time is in the wrong format. Please specify by adding h, m, or s."),
+    );
+    assert_eq!(alice.read_game(), an_info_line(b"e.g: 10s, 10m, 1m 30s"));
+    yankee.quiet("a format refusal reaches no target");
+
+    // The caller's own name is quiet: the `ch != tch` arm lays nothing.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/block_chat Alpha 10s"));
+    alice.quiet("a self-name lays nothing");
+    yankee.quiet("and reaches nobody");
+
+    // A bare name is the 0 lay, not a refusal: the old row is retired and the
+    // 0-add lands, and its own tick lifts it within the second.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/block_chat Yankee"));
+    let retired = yankee.read_game();
+    assert_eq!(
+        retired[0], GC_AFFECT_REMOVE,
+        "the override retires the old row first"
+    );
+    let relaid = yankee.read_game();
+    assert_eq!(relaid.len(), AFFECT_ADD_LEN);
+    assert_eq!(relaid[0], GC_AFFECT_ADD);
+    assert_eq!(&relaid[14..18], &1i32.to_le_bytes(), "the 0 stands as a 1");
+    alice.quiet("a 0 lay is quiet on the caller");
+    let lifted = yankee.read_game();
+    assert_eq!(lifted.len(), AFFECT_REMOVE_LEN);
+    assert_eq!(lifted[0], GC_AFFECT_REMOVE);
+    assert_eq!(&lifted[1..5], &223u32.to_le_bytes(), "the tick lifted it");
+    yankee.send_record(&client_chat(CHAT_TALKING, b"i am back"));
+    let back = yankee.read_game();
+    assert_eq!(&back[10..], b"Yankee : i am back");
+    assert_eq!(alice.read_game(), back, "the map hears the line again");
+    wait_for(
+        &database,
+        "(SELECT count(*) FROM player_affect WHERE affect_type = 223) = 1",
+    );
+}

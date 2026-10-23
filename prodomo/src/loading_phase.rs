@@ -137,6 +137,9 @@ pub const AFFECT_SLOW: u32 = 211;
 /// the one its speed comes with.
 pub const AFFECT_WAR_FLAG: u32 = 222;
 
+/// `AFFECT_BLOCK_CHAT` (`G/affect.h:51`): the silence `do_block_chat` lays on.
+pub const AFFECT_BLOCK_CHAT: u32 = 223;
+
 /// `INFINITE_AFFECT_DURATION` (`G/affect.h:289`) as the 32-bit `long` the legacy's
 /// `AddAffect` takes: sixty years of seconds, which the word holds as 1,471,228,928.
 pub const INFINITE_AFFECT_DURATION: i32 = 1_471_228_928;
@@ -1017,6 +1020,7 @@ pub fn enter_game_burst(
     shown: Vec<Vec<u8>>,
     npcs: &MapNpcs,
     update: Option<Vec<u8>>,
+    silence: Vec<Vec<u8>>,
     channel: u8,
     now: u32,
 ) -> EnterGameBurst {
@@ -1028,10 +1032,13 @@ pub fn enter_game_burst(
         before.push(encoded(&mut GcNpcPosition::new(entries), "the NPC list"));
     }
     // The character's own update comes first: `ReviveInvisible` changes the affect flags the
-    // update carries, and the update is sent before the affect's own record.
+    // update carries, and the update is sent before the affect's own record. The restored
+    // silences ride behind the update, as `LoadAffect`'s adds ride the queue they found
+    // (`G/char_affect.cpp:573-666`).
     if let Some(frame) = update {
         before.push(frame);
     }
+    before.extend(silence);
     // `ch->ReviveInvisible(5)` adds an affect, and `AddAffect` sends `GC_AFFECT_ADD` for
     // every affect it takes on a PC (`G/char.cpp:7490-7493`, `G/char_affect.cpp:747-750`).
     before.push(encoded(
@@ -1884,7 +1891,15 @@ mod tests {
     /// it is six records around the descriptor's own `SetPhase(PHASE_GAME)`.
     #[test]
     fn enter_game_burst_headers_are_in_legacy_order() {
-        let burst = enter_game_burst(&hero(), own_pair(3), &no_npcs(), None, 1, 1_600_000_000);
+        let burst = enter_game_burst(
+            &hero(),
+            own_pair(3),
+            &no_npcs(),
+            None,
+            Vec::new(),
+            1,
+            1_600_000_000,
+        );
         assert_eq!(
             headers(&burst.before_phase),
             vec![1, 136, 126],
@@ -1901,7 +1916,7 @@ mod tests {
     /// and writing it as content as well would put two on the wire.
     #[test]
     fn no_enter_game_half_carries_a_phase_record() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, Vec::new(), 1, 0);
         for frame in all(&burst.before_phase, &burst.after_phase) {
             assert_ne!(
                 frame[0], 253,
@@ -1972,7 +1987,7 @@ mod tests {
     /// after the NPC records and before `SetPhase(PHASE_GAME)`.
     #[test]
     fn the_revive_invisible_affect_is_sent_once_with_five_seconds() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, Vec::new(), 1, 0);
         let affects: Vec<&Vec<u8>> = all(&burst.before_phase, &burst.after_phase)
             .into_iter()
             .filter(|f| f[0] == 126)
@@ -2001,7 +2016,7 @@ mod tests {
     /// after it.
     #[test]
     fn the_affect_is_the_last_record_before_the_phase_change() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, Vec::new(), 1, 0);
         assert_eq!(
             burst.before_phase.last().map(|f| f[0]),
             Some(126),
@@ -2016,7 +2031,15 @@ mod tests {
 
     #[test]
     fn time_then_channel_carry_their_whole_values() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 4, 1_600_000_000);
+        let burst = enter_game_burst(
+            &hero(),
+            own_pair(0),
+            &no_npcs(),
+            None,
+            Vec::new(),
+            4,
+            1_600_000_000,
+        );
         let frames = all(&burst.before_phase, &burst.after_phase);
         let time_at = frames.iter().position(|f| f[0] == 106).unwrap();
         let channel_at = frames.iter().position(|f| f[0] == 121).unwrap();
@@ -2033,7 +2056,7 @@ mod tests {
     /// command line, and the text is the unterminated tail.
     #[test]
     fn the_letters_event_line_is_the_last_record() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, Vec::new(), 1, 0);
         let last = burst.after_phase.last().unwrap();
         assert_eq!(last[0], 4, "GC_CHAT is byte 4");
         assert_eq!(
@@ -2059,7 +2082,7 @@ mod tests {
     /// `SEventLetters` writes; the sent bytes must keep the space.
     #[test]
     fn the_letters_event_line_keeps_its_space() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, Vec::new(), 1, 0);
         let last = burst.after_phase.last().unwrap();
         let text = &last[10..];
         assert_eq!(text, b"letters_event 0");
@@ -2069,7 +2092,7 @@ mod tests {
     /// An empty NPC list sends nothing at all: `SendNPCPosition` returns before it writes.
     #[test]
     fn an_empty_npc_list_sends_no_record() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, Vec::new(), 1, 0);
         assert!(
             !all(&burst.before_phase, &burst.after_phase)
                 .into_iter()
@@ -2200,7 +2223,7 @@ mod tests {
         character_additional(&neighbour, &hero_points(), 0x0a0b_0c0d, (0, 0))
             .encode_into(&mut info);
         shown.extend([add, info]);
-        let burst = enter_game_burst(&hero(), shown.clone(), &no_npcs(), None, 1, 0);
+        let burst = enter_game_burst(&hero(), shown.clone(), &no_npcs(), None, Vec::new(), 1, 0);
         assert_eq!(
             headers(&burst.before_phase),
             vec![1, 136, 1, 136, 126],
@@ -2213,7 +2236,7 @@ mod tests {
     /// before the phase change, so the own pair can never reach the client twice.
     #[test]
     fn the_burst_adds_no_insert_of_its_own() {
-        let burst = enter_game_burst(&hero(), Vec::new(), &no_npcs(), None, 1, 0);
+        let burst = enter_game_burst(&hero(), Vec::new(), &no_npcs(), None, Vec::new(), 1, 0);
         assert_eq!(headers(&burst.before_phase), vec![126]);
     }
 
@@ -2222,7 +2245,7 @@ mod tests {
     #[test]
     fn the_mini_map_sits_between_the_shown_records_and_the_affect() {
         let npcs = npcs_listed();
-        let burst = enter_game_burst(&hero(), own_pair(0), &npcs, None, 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &npcs, None, Vec::new(), 1, 0);
         assert_eq!(headers(&burst.before_phase), vec![1, 136, 115, 126]);
         let mut expected = Vec::new();
         GcNpcPosition::new(npcs.positions.iter().map(npc_position).collect())
@@ -2285,7 +2308,8 @@ mod tests {
     #[test]
     fn the_package_sdb_is_absent_from_both_bursts() {
         let loading = loading_burst(&hero(), &hero_points(), 1, &with_neighbour());
-        let entering = enter_game_burst(&hero(), own_pair(0), &npcs_listed(), None, 1, 0);
+        let entering =
+            enter_game_burst(&hero(), own_pair(0), &npcs_listed(), None, Vec::new(), 1, 0);
         assert!(
             !all(&loading.before_map_test, &loading.after_map_test)
                 .into_iter()
@@ -2303,7 +2327,7 @@ mod tests {
     /// A hard-coded welcome would be a Divergence: the snapshot has no `GREET` row.
     #[test]
     fn no_hard_coded_greeting_is_sent() {
-        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, 1, 0);
+        let burst = enter_game_burst(&hero(), own_pair(0), &no_npcs(), None, Vec::new(), 1, 0);
         let lines: Vec<&Vec<u8>> = all(&burst.before_phase, &burst.after_phase)
             .into_iter()
             .filter(|f| f[0] == 4)
@@ -2317,7 +2341,8 @@ mod tests {
     #[test]
     fn every_record_is_its_own_frame() {
         let loading = loading_burst(&hero(), &hero_points(), 1, &with_neighbour());
-        let entering = enter_game_burst(&hero(), own_pair(0), &npcs_listed(), None, 1, 0);
+        let entering =
+            enter_game_burst(&hero(), own_pair(0), &npcs_listed(), None, Vec::new(), 1, 0);
         for half in [
             &loading.before_map_test,
             &loading.after_map_test,

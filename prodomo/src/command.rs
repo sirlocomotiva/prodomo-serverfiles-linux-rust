@@ -143,6 +143,7 @@ impl CommandEntry {
             "do_map_notice" => Command::MapNotice,
             "do_big_notice" => Command::BigNotice,
             "do_setblockmode" => Command::SetBlockMode,
+            "do_block_chat" => Command::BlockChat,
             _ => Command::NotPorted(self.name),
         }
     }
@@ -203,6 +204,9 @@ pub enum Command {
     MapNotice,
     /// `do_big_notice`: the GM hears its own line in the big font.
     BigNotice,
+    /// `do_block_chat`: the named character is silenced for the parsed time, or
+    /// unsilenced when the time is `0` (`G/cmd_gm.cpp:3364-3433`).
+    BlockChat,
     /// An entry this build does not port, by name.
     NotPorted(&'static str),
 }

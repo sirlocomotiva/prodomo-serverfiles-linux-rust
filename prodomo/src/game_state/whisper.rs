@@ -1,4 +1,3 @@
-//! The whisper: a private line from one character to another.
 //!
 //! # What the legacy does
 //!
@@ -52,7 +51,7 @@
 
 use crate::chat_line::{chat_packet, Arg};
 use common::vid::Vid;
-use protocol::gc_chat::CHAT_TYPE_COMMAND;
+use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO};
 use protocol::gc_whisper::{
     GcWhisper, WHISPER_TYPE_OFFLINE, WHISPER_TYPE_SENDER_BLOCKED, WHISPER_TYPE_SYSTEM,
     WHISPER_TYPE_TARGET_BLOCKED,
@@ -80,6 +79,16 @@ const OFFLINE_MESSAGE_DELAY_MS: u32 = 10 * 1000;
 /// The five hours a waiting line lives (`iHour`,
 /// `CClientManager::OfflineMessageGarbage`, `server/server/db/ClientManager.cpp:4642`).
 const OFFLINE_MESSAGE_LIFETIME_MS: u32 = 5 * 60 * 60 * 1000;
+/// What a `/block_chat` line did to a live character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BlockTarget {
+    /// The name named nobody online: the caller heard the requested line.
+    Offline,
+    /// The caller named itself: the quiet `ch != tch` arm.
+    Itself,
+    /// A row moved on the silence of the returned character.
+    Moved(Vid),
+}
 
 /// `EBlockAction` (`G/char.h:371-379`): the block-mode bits. Only the whisper and
 /// the messenger-invite gates read them here; the exchange, party, guild, request
@@ -127,6 +136,43 @@ pub(super) fn parse_block_mode(word: &[u8]) -> u8 {
         value = value.saturating_mul(10).saturating_add(u32::from(digit));
     }
     value.to_le_bytes()[0]
+}
+
+/// `parse_time_str` (`G/utils.cpp:235-285`): the seconds a `do_block_chat` back
+/// names. A number just adds to the seconds when the back ends with no unit; an
+/// empty back is `0`; a byte that is neither a digit nor `s`, `m`, `h` or `d`
+/// refuses the whole line. `None` is that refusal, `Some(0)` a 0 lay: legacy
+/// lays it (`G/cmd_gm.cpp:3429-3430`), where it stands on the next tick.
+pub(super) fn parse_block_seconds(back: &[u8]) -> Option<i32> {
+    let mut tmp: i64 = 0;
+    let mut secs: i64 = 0;
+    for &byte in back {
+        match byte {
+            b'm' | b'M' => {
+                secs = secs.saturating_add(tmp.saturating_mul(60));
+                tmp = 0;
+            }
+            b'h' | b'H' => {
+                secs = secs.saturating_add(tmp.saturating_mul(3_600));
+                tmp = 0;
+            }
+            b'd' | b'D' => {
+                secs = secs.saturating_add(tmp.saturating_mul(86_400));
+                tmp = 0;
+            }
+            b's' | b'S' => {
+                secs = secs.saturating_add(tmp);
+                tmp = 0;
+            }
+            b'0'..=b'9' => {
+                tmp = tmp
+                    .saturating_mul(10)
+                    .saturating_add(i64::from(byte - b'0'));
+            }
+            _ => return None,
+        }
+    }
+    Some(i32::try_from(secs.saturating_add(tmp)).unwrap_or(i32::MAX))
 }
 
 /// What the legacy says when the line was left for the target
@@ -185,6 +231,13 @@ impl GameState {
         let target = std::str::from_utf8(name)
             .ok()
             .and_then(|name| self.whisper_target(name));
+        // `if (ch->FindAffect(AFFECT_BLOCK_CHAT))` (`G/input_main.cpp:364-368`): a
+        // silenced sender hears `[LS;652]` and the line goes nowhere, ahead of the
+        // self-name drop, the blocks and the target lookup.
+        if self.block_chat_seconds_of(vid).is_some() {
+            self.answer_silenced_whisper(vid);
+            return WhisperOutcome::Answered;
+        }
         // `if (pkChr == ch) return (iExtraLen);` (`G/input_main.cpp:372`): the
         // sender's own name is dropped without a word, before any block check.
         if target == Some(vid) {
@@ -334,6 +387,22 @@ impl GameState {
         let _sent = self.write_to_client(vid, bytes);
     }
 
+    /// Tell a silenced sender its line went nowhere (`G/input_main.cpp:364-368`):
+    /// `ChatPacket(CHAT_TYPE_INFO, "[LS;652]")`, the same locale key a silenced
+    /// talker hears for a zero remaining duration.
+    fn answer_silenced_whisper(&mut self, vid: Vid) {
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        self.tell(
+            vid,
+            mover,
+            CHAT_TYPE_INFO,
+            crate::chat::BLOCK_CHAT_NO_DURATION.as_bytes(),
+            &[],
+        );
+    }
+
     /// The lines waiting for the character that just entered, and their removal.
     ///
     /// `CHARACTER::ReadOfflineMessages` (`G/char.cpp:11438-11446`) asks for the
@@ -454,12 +523,111 @@ impl GameState {
         });
         line.map(|line| (line, flags))
     }
+
+    /// The silence privilege: `GetQuestFlag("chat_privilege.block")` (`G/cmd_gm.cpp:3367`).
+    const BLOCK_CHAT_PRIVILEGE: &'static [u8] = b"chat_privilege.block";
+
+    /// The gate of `do_block_chat` (`G/cmd_gm.cpp:3366-3368`): below `GM_HIGH_WIZARD`
+    /// the privilege flag opens it; without either the caller hears the
+    /// no-such-command line (`G/cmd.cpp:693-698`). Runs before the usage and
+    /// format checks, as the legacy runs it before it splits the line.
+    pub(super) fn block_chat_allowed(&mut self, vid: Vid) -> bool {
+        let gm = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(world::character::Character::points)
+            .map_or(
+                crate::command::GM_PLAYER,
+                world::character::Points::gm_level,
+            );
+        let privileged = gm < crate::command::GM_HIGH_WIZARD && {
+            let pid = self
+                .characters
+                .find_by_vid(vid)
+                .ok()
+                .map(world::character::Character::player_id);
+            pid.is_some_and(|pid| {
+                self.quests
+                    .as_ref()
+                    .and_then(|quests| quests.manager().quest_flag(pid, Self::BLOCK_CHAT_PRIVILEGE))
+                    .is_some_and(|value| value > 0)
+            })
+        };
+        if gm < crate::command::GM_HIGH_WIZARD && !privileged {
+            if let Some(mover) = self.own_mover(vid) {
+                self.tell(
+                    vid,
+                    mover,
+                    CHAT_TYPE_INFO,
+                    crate::command::NO_SUCH_COMMAND.as_bytes(),
+                    &[],
+                );
+            }
+            return false;
+        }
+        true
+    }
+
+    /// `do_block_chat` past the gate (`G/cmd_gm.cpp:3370-3431`): lay the silence
+    /// `name` names for `seconds` ticks. `parse_time_str` (`G/utils.cpp:236-287`)
+    /// never yields less than 0, and the parse turns a bare name into a 0 the
+    /// same way the 0-spelling lays it: `do_block_chat` has no separate
+    /// unsilence arm (`:3429-3430` are its only live-character lines).
+    ///
+    /// An absent name is the offline arm (`G/cmd_gm.cpp:3401-3418`, whose
+    /// game-to-game half is retired, ADR-0001, and whose no-such-name half is a
+    /// store write the caller makes): the caller hears the requested line and
+    /// nothing moves. The caller's own name lays nothing.
+    ///
+    /// A lay of more than one tick chats `[LS;852]` to the target first
+    /// (`AddAffect`, `G/char_affect.cpp:670-674`), then lays
+    /// `AddAffect(223, POINT_NONE, 0, 0, seconds, 0, true)`; a 0 lay stands on
+    /// the next tick (`ProcessAffect` ends it on its first run,
+    /// `G/char_affect.cpp:424-442`), and is lifted by its own 1-to-0 tick
+    /// (a Divergence: legacy's silence never ticks).
+    pub(super) fn block_chat(&mut self, vid: Vid, name: &[u8], seconds: i32) -> BlockTarget {
+        let target = std::str::from_utf8(name)
+            .ok()
+            .and_then(|name| self.whisper_target(name));
+        let Some(target) = target else {
+            // `FindPC` found nobody and the retired game-to-game relay knew
+            // nobody either: the caller hears the requested line, as both
+            // offline arms end it (`G/cmd_gm.cpp:3414-3418`).
+            if let Some(mover) = self.own_mover(vid) {
+                self.tell(vid, mover, CHAT_TYPE_INFO, b"Chat block requested", &[]);
+            }
+            return BlockTarget::Offline;
+        };
+        if target == vid {
+            return BlockTarget::Itself;
+        }
+        if seconds > 1 {
+            if let Some(mover) = self.own_mover(target) {
+                self.tell(target, mover, CHAT_TYPE_INFO, b"[LS;852]", &[]);
+            }
+        }
+        self.add_pc_affect(
+            target,
+            super::affect::Affect {
+                kind: crate::loading_phase::AFFECT_BLOCK_CHAT,
+                apply_on: 0,
+                value: 0,
+                flag: 0,
+                remaining: seconds,
+                sp_cost: 0,
+            },
+            true,
+        );
+        BlockTarget::Moved(target)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game_state::fixtures::{a_world, enter, TestClock};
+    use protocol::gc_inventory::{HEADER_GC_AFFECT_ADD, HEADER_GC_AFFECT_REMOVE};
     use protocol::gc_whisper::GC_WHISPER_WIRE_SIZE;
 
     /// The fixture names the character it enters `P{vid}`.
@@ -667,26 +835,41 @@ mod tests {
         assert_eq!(parse_block_mode(b"x"), 0);
     }
 
-    /// Enter the second player and return its inbox, past the enter queue.
+    /// Enter the second player and return its inbox, past the enter queue. The
+    /// `enter` fixture shows the body, which the chat lines need for their mover.
     fn enter_second_player(world: &mut GameState) -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
-        let (tx, mut inbox) = tokio::sync::mpsc::unbounded_channel();
-        world
-            .enter_world_with_items(
-                Vid::new(OTHER),
-                OTHER,
-                "P101",
-                &[],
-                crate::client_registry::ClientOutbox::new(tx),
-            )
-            .expect("the second player enters");
-        let _list = inbox.try_recv().expect("the enter WAR_LIST is queued");
+        let mut inbox = enter(world, OTHER, (3200, 3200), 0);
+        let _burst = heard(&mut inbox);
         inbox
+    }
+
+    /// Drain what one inbox holds.
+    fn heard(inbox: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<Vec<u8>> {
+        std::iter::from_fn(|| inbox.try_recv().ok()).collect()
+    }
+
+    /// Raise the caller to a GM that may silence (`GM_HIGH_WIZARD`).
+    fn make_gm(world: &mut GameState, vid: u32) {
+        let mut caller_points = world
+            .characters
+            .find_by_vid(Vid::new(vid))
+            .expect("the caller is online")
+            .points()
+            .expect("the caller has points")
+            .clone();
+        caller_points.set_gm_level(crate::command::GM_HIGH_WIZARD);
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(vid))
+            .expect("the caller is online")
+            .set_points(Some(caller_points));
     }
 
     #[test]
     fn a_blocked_sender_hears_the_sender_blocked_record() {
         let (mut world, _clock, mut sender) = a_world_with_a_player();
         let mut target = enter_second_player(&mut world);
+        let _second_burst = heard(&mut sender);
         world.block_modes.insert(Vid::new(VID), BLOCK_WHISPER);
 
         let outcome =
@@ -709,6 +892,7 @@ mod tests {
     fn a_blocked_target_hears_the_target_blocked_record() {
         let (mut world, _clock, mut sender) = a_world_with_a_player();
         let mut target = enter_second_player(&mut world);
+        let _second_burst = heard(&mut sender);
         world.block_modes.insert(Vid::new(OTHER), BLOCK_WHISPER);
 
         let outcome =
@@ -765,5 +949,235 @@ mod tests {
             .set_block_mode(Vid::new(9999), BLOCK_WHISPER)
             .is_none());
         assert_eq!(world.block_mode(Vid::new(9999)), 0);
+    }
+
+    #[test]
+    fn the_back_names_seconds_units_or_refusal() {
+        assert_eq!(parse_block_seconds(b""), Some(0), "an empty back is 0");
+        assert_eq!(parse_block_seconds(b"0"), Some(0), "the 0 lay");
+        assert_eq!(
+            parse_block_seconds(b"90"),
+            Some(90),
+            "a bare number is seconds"
+        );
+        assert_eq!(parse_block_seconds(b"10s"), Some(10));
+        assert_eq!(parse_block_seconds(b"10m"), Some(600));
+        assert_eq!(parse_block_seconds(b"2h"), Some(7_200));
+        assert_eq!(parse_block_seconds(b"1d"), Some(86_400));
+        assert_eq!(parse_block_seconds(b"1m30s"), Some(90));
+        assert_eq!(
+            parse_block_seconds(b"1M 30S"),
+            None,
+            "a space refuses the line"
+        );
+        assert_eq!(
+            parse_block_seconds(b"10x"),
+            None,
+            "an unknown byte refuses the line"
+        );
+        assert_eq!(parse_block_seconds(b"10m,"), None);
+    }
+
+    #[test]
+    fn a_player_without_the_privilege_hears_the_no_such_command_line() {
+        let (mut world, _clock, mut caller) = a_world_with_a_player();
+        let mut target = enter_second_player(&mut world);
+        let _enter = heard(&mut caller);
+
+        assert!(!world.block_chat_allowed(Vid::new(VID)));
+        let lines = heard(&mut caller);
+        assert_eq!(lines.len(), 1, "the refusal is the only line");
+        assert!(
+            lines[0]
+                .windows(crate::command::NO_SUCH_COMMAND.len())
+                .any(|window| window == crate::command::NO_SUCH_COMMAND.as_bytes()),
+            "the caller hears the no-such-command line"
+        );
+        assert!(world.block_chat_seconds_of(Vid::new(OTHER)).is_none());
+        assert!(target.try_recv().is_err(), "the target heard nothing");
+    }
+
+    #[test]
+    fn the_gate_runs_before_the_word_is_split() {
+        // The legacy gate runs before `one_argument` (`G/cmd_gm.cpp:3366-3370`),
+        // so an empty line from a player answers the refusal, never the usage.
+        let (mut world, _clock, mut caller) = a_world_with_a_player();
+        let _enter = heard(&mut caller);
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        world.answer_block_chat(Vid::new(VID), b"", reply);
+        assert_eq!(
+            answer.blocking_recv().expect("the answer"),
+            crate::game_loop_messages::BlockChatAnswer::Shown
+        );
+        let lines = heard(&mut caller);
+        assert_eq!(lines.len(), 1, "the refusal is the only line");
+        assert!(
+            lines[0]
+                .windows(crate::command::NO_SUCH_COMMAND.len())
+                .any(|window| window == crate::command::NO_SUCH_COMMAND.as_bytes()),
+            "the gate answers before the split"
+        );
+    }
+
+    #[test]
+    fn a_gm_silences_and_the_target_hears_the_notice_and_the_add() {
+        let (mut world, _clock, mut caller) = a_world_with_a_player();
+        let mut target = enter_second_player(&mut world);
+        make_gm(&mut world, VID);
+        let _enter = heard(&mut caller);
+
+        assert_eq!(
+            world.block_chat(Vid::new(VID), b"P101", 65),
+            BlockTarget::Moved(Vid::new(OTHER))
+        );
+        assert_eq!(world.block_chat_seconds_of(Vid::new(OTHER)), Some(65));
+        assert!(
+            caller.try_recv().is_err(),
+            "the caller hears nothing on a lay"
+        );
+        let fanned = heard(&mut target);
+        assert_eq!(fanned.len(), 2, "the notice and the add");
+        assert!(
+            fanned[0].windows(8).any(|window| window == b"[LS;852]"),
+            "the notice chats first"
+        );
+        assert_eq!(
+            fanned[1][0],
+            HEADER_GC_AFFECT_ADD.value(),
+            "the add packet follows"
+        );
+    }
+
+    #[test]
+    fn a_silence_of_one_tick_lays_no_notice() {
+        let (mut world, _clock, _caller) = a_world_with_a_player();
+        let mut target = enter_second_player(&mut world);
+        make_gm(&mut world, VID);
+
+        assert_eq!(
+            world.block_chat(Vid::new(VID), b"P101", 1),
+            BlockTarget::Moved(Vid::new(OTHER))
+        );
+        assert_eq!(world.block_chat_seconds_of(Vid::new(OTHER)), Some(1));
+        let fanned = heard(&mut target);
+        assert_eq!(fanned.len(), 1, "only the add, no `[LS;852]`");
+        assert_eq!(fanned[0][0], HEADER_GC_AFFECT_ADD.value());
+    }
+
+    #[test]
+    fn the_caller_cannot_silence_itself() {
+        let (mut world, _clock, mut caller) = a_world_with_a_player();
+        make_gm(&mut world, VID);
+        let _enter = heard(&mut caller);
+
+        assert_eq!(
+            world.block_chat(Vid::new(VID), b"P100", 60),
+            BlockTarget::Itself
+        );
+        assert!(world.block_chat_seconds_of(Vid::new(VID)).is_none());
+        assert!(caller.try_recv().is_err(), "a self-name is quiet");
+    }
+
+    #[test]
+    fn an_absent_name_is_the_requested_line() {
+        let (mut world, _clock, mut caller) = a_world_with_a_player();
+        make_gm(&mut world, VID);
+        let _enter = heard(&mut caller);
+
+        assert_eq!(
+            world.block_chat(Vid::new(VID), b"Nobody", 60),
+            BlockTarget::Offline
+        );
+        let lines = heard(&mut caller);
+        assert_eq!(lines.len(), 1, "the requested line is the only line");
+        assert!(
+            lines[0]
+                .windows(b"Chat block requested".len())
+                .any(|window| window == b"Chat block requested"),
+            "the caller hears the requested line"
+        );
+    }
+
+    #[test]
+    fn a_zero_lay_overwrites_the_row_and_adds_quietly() {
+        // `do_block_chat` has no unsilence arm: a 0 (or a bare name) is the same
+        // `AddAffect` every lay is (`G/cmd_gm.cpp:3429-3430`). The override
+        // retires the old row first, then the 0-add lands.
+        let (mut world, _clock, _caller) = a_world_with_a_player();
+        let mut target = enter_second_player(&mut world);
+        make_gm(&mut world, VID);
+        assert_eq!(
+            world.block_chat(Vid::new(VID), b"P101", 65),
+            BlockTarget::Moved(Vid::new(OTHER))
+        );
+        let _lay = heard(&mut target);
+
+        assert_eq!(
+            world.block_chat(Vid::new(VID), b"P101", 0),
+            BlockTarget::Moved(Vid::new(OTHER))
+        );
+        assert_eq!(world.block_chat_seconds_of(Vid::new(OTHER)), Some(1));
+        let fanned = heard(&mut target);
+        assert_eq!(fanned.len(), 2, "the retirement and the add");
+        assert_eq!(fanned[0][0], HEADER_GC_AFFECT_REMOVE.value());
+        assert_eq!(fanned[1][0], HEADER_GC_AFFECT_ADD.value());
+    }
+
+    #[test]
+    fn a_zero_lay_with_no_row_adds_quietly() {
+        let (mut world, _clock, _caller) = a_world_with_a_player();
+        let mut target = enter_second_player(&mut world);
+        make_gm(&mut world, VID);
+
+        assert_eq!(
+            world.block_chat(Vid::new(VID), b"P101", 0),
+            BlockTarget::Moved(Vid::new(OTHER))
+        );
+        assert_eq!(world.block_chat_seconds_of(Vid::new(OTHER)), Some(1));
+        let fanned = heard(&mut target);
+        assert_eq!(
+            fanned.len(),
+            1,
+            "only the add, no `[LS;852]` and no `[LS;988]`"
+        );
+        assert_eq!(fanned[0][0], HEADER_GC_AFFECT_ADD.value());
+    }
+
+    #[test]
+    fn a_silenced_whisper_is_answered_with_the_locale_key() {
+        let (mut world, _clock, mut sender) = a_world_with_a_player();
+        let mut target = enter_second_player(&mut world);
+        make_gm(&mut world, VID);
+        assert_eq!(
+            world.block_chat(Vid::new(VID), b"P101", 65),
+            BlockTarget::Moved(Vid::new(OTHER))
+        );
+        let _lay = heard(&mut target);
+        let _lay_notice = heard(&mut sender);
+
+        // The silence gates the sender: silence the sender too and whisper.
+        world.add_pc_affect(
+            Vid::new(VID),
+            super::super::affect::Affect {
+                kind: crate::loading_phase::AFFECT_BLOCK_CHAT,
+                apply_on: 0,
+                value: 0,
+                flag: 0,
+                remaining: 30,
+                sp_cost: 0,
+            },
+            true,
+        );
+        let _add = heard(&mut sender);
+        let outcome =
+            world.deliver_whisper(Vid::new(VID), b"P101", b"hello", b"the record".to_vec());
+        assert_eq!(outcome, WhisperOutcome::Answered);
+        let lines = heard(&mut sender);
+        assert_eq!(lines.len(), 1, "the refusal is the only line");
+        assert!(
+            lines[0].windows(8).any(|window| window == b"[LS;652]"),
+            "a silenced sender hears `[LS;652]`"
+        );
+        assert!(target.try_recv().is_err(), "the target heard nothing");
     }
 }
