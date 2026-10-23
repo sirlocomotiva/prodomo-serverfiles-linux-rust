@@ -34862,3 +34862,102 @@ showed, paid in the receipt rather than in silence. Byte repairs only; no cell's
 changed.
 
 No ADR changed. No owner question added. V26 is taken.
+
+## 248. The friend add, its yes and its remove are live (`sys.messenger`, first part)
+
+The messenger is the friend list: `MessengerManager` (`G/messenger_manager.cpp`) keeps
+the relations (`m_Relation`/`m_InverseRelation`, `G/messenger_manager.h:79`), the GM
+team list (`ENABLE_MESSENGER_TEAM`, `common/prodomodefines.h:155`), the online set and
+the pending requests as CRC pairs (`m_set_requestToAdd`, `:302`). The list rides the
+store: `Login` (`:46-60`) asks the DB for the account's rows, and the answer loads the
+relations, sends the list, tells every holder of this name of its login, and stands the
+GM team list up the same way (`LoadList` `:159-194`, `LoadTeamList` `:24-52`). A player
+that leaves loses its rows the same way: `CHARACTER::Disconnect` calls `Logout`
+(`G/char.cpp:1817`), which fans the logout to every holder and erases the rows from
+memory (`:196-271`).
+
+The wire is two records. `protocol::cg_messenger` is `HEADER_CG_MESSENGER` (67):
+the 2-byte base (`TPacketCGMessenger`, `packet.h:1944-1977`), 4 more VID bytes for
+`ADD_BY_VID` (0) and a raw 24-byte name field (`CHARACTER_NAME_MAX_LEN`,
+`common/length.h:15`) for `ADD_BY_NAME` (1) and `REMOVE` (2). `INVITE_ANSWER` (3)
+and every unknown subheader consume the base alone, the analyzer's own default arm
+(`G/input_main.cpp:1225-1228`). `protocol::gc_messenger` is `HEADER_GC_MESSENGER`
+(74): the 4-byte envelope whose `size` word counts it (`TPacketGCMessenger`,
+`packet.h:1877-1906`), one `connected + length + name` entry per companion with no
+terminator (`SendList`, `G/messenger_manager.cpp:481-513`), and the login, logout and
+`REMOVE_FRIEND` records as an envelope with a length byte and the name. The `INVITE`
+subheader (6) is never sent, so the codec declares the byte and produces no record of
+it. `protocol::gc_inventory` marks the row implemented: 110 of 134 game-to-client
+bytes now, 24 missing (12 fixed-size, 12 dynamic); `AGENTS.md` carries the same
+counts.
+
+The store is one table, `db/migrations/0017_messenger_list.sql`: `messenger_list`
+holds one row per direction of a friendship, keyed by the `(account, companion)` pair,
+because `AuthToAdd` calls `AddToList` twice (`:330-332`) and each call inserts its own
+row (`:348-350`). The same pair of inserts with `ON CONFLICT DO NOTHING` is the same
+stored fact as legacy's insert-after-freshness-check (`:337-339`). The remove deletes
+both legs in either key order, the way `__FIX_DELETE_FRIEND_REFRESH__`'s own DELETE
+does (`:447-448`), and `wipe_name` deletes every row either side names, the way the
+character deletion does (`server/server/db/ClientManagerPlayer.cpp:1541`). Every
+value is a bound parameter: legacy interpolated the names into the SQL
+(`:58,349,447-449,474-475`), which the `EscapeString` gate before them (`:51-55`,
+`:341-345`) tried to make safe. That gate is a Defect this crate does not reproduce.
+The account and companion columns are the ported Name shape, 2 to 24 ASCII letters
+and digits.
+
+The world is `prodomo/src/game_state/messenger.rs`, one `Relations` beside the
+whisper's own state: the relation and its inverse, keyed by the character Name's
+bytes in byte order as legacy's `std::set<std::string>` is. `login` is `LoadList`
+and `LoadTeamList`: it loads the rows the caller read, fans `SendLogin`'s LOGIN to
+every holder past its GM gate, sends the LIST (none when the list is empty, because
+`LoadList` early-returns on `uiNumRows == 0`), and stands the GM team list up from
+the grants other than the entrant's own name. `logout` is `MessengerManager::Logout`:
+the LOGOUT fans first, then the erase of every map the name is in. `request_to_add`
+is `RequestToAdd` (`:273-324`): it refuses a target the relation already holds or a
+request already pending, else computes the CRC pair of the two names in the request's
+own order (`GetCRC32` at `:294-304`, the byte-at-a-time CRC-32
+`game_state::guild_mark` carries for the marks) and sends the target the
+`messenger_auth %s` command line, whose answer is the `do_messenger_auth` command.
+`auth_to_add` is `AuthToAdd` (`:326-363`): it recomputes the pair with the same two
+names in the same order and consumes it, sends the added line (`:346`) and both
+LOGIN records to both sides, and answers whether the rows need writing. A deny sends
+`[LS;548;%s]` and consumes the pair with no rows (`G/cmd_general.cpp:2288-2291`).
+`remove_from_list` is `RemoveFromList` (`:365-451`): it refuses a target the
+relation does not hold, else sends `REMOVE_FRIEND` (`:431-451`) and the deleted
+line (`:399`) to the two sides legacy does and erases both directions. The GM gate
+is `gm_get_level`'s (`G/gm.cpp:12-14`): the record's owner is a player and the
+companion is a grant, which legacy answers with no record (`:554-566`). The
+test-server mode silences the gate in it, because `gm_new_get_level` answers
+`GM_IMPLEMENTOR` before the map is asked (`G/gm.cpp:12-14`).
+
+The descriptor (`prodomo/src/main.rs`) runs the record's own gates before the world
+runs `RequestToAdd` past them. The `ADD_BY_VID` arm is `CInputMain::Messenger`'s
+(`G/input_main.cpp:1140-1178`): quiet for a VID nobody holds, quiet for a companion
+with no outbox, `[LS;659]` when a player adds a GM (in or past the mode), quiet when
+the caller names itself; the observer and block-mode gates pass because this build
+has no observer mode and block modes are unported. The `ADD_BY_NAME` arm
+(`:1180-1214`) reads the target with `FindPC` past its own self and block gates and
+answers a name that is not there with `[LS;660;%s]` (`:1196-1198`); the caller's own
+level is the points', the name's is the grant the store holds, matched on the account
+and the name regardless of the case the way `gm_get_level` reads it
+(`G/input_db.cpp:1806-1830`). The remove answers with nothing; the descriptor writes
+both rows' delete after the world runs, and a refused delete closes the way a refused
+load does. Login reads the rows and the GM names before the world runs, the same
+admission the enter's load already is. The answer is `do_messenger_auth`
+(`G/cmd_general.cpp:2272-2296`): the second word names the requester and every word
+but `y` (first byte) is a deny; the world runs the answer and the descriptor writes
+both rows' insert only when the answer became a friendship.
+
+**The test.** `prodomo/tests/parity.rs`:
+`a_friend_request_answered_yes_lists_both_directions_and_relogin_keeps_it` proves
+the round trip: Alice's `ADD_BY_NAME Yankee` reaches Bob as the `messenger_auth
+Alpha` line, Bob's `/messenger_auth y Alpha` lists both directions (each side hears
+the added line and the other's LOGIN, and the pair's rows land in the store), the
+rows survive the relogin (Alice's next enter carries the LIST with Yankee), and the
+remove takes both rows back (the remover hears the `REMOVE_FRIEND` record, the
+removed side hears who left the list). The GM `TEAM_LIST` rides behind the enter in
+every existing enter helper that grants it, and the login's own LOGOUT and logout
+fans prove the leave path. `cg.game.messenger`, `cmd.messenger_auth` and
+`gc.messenger` are ported; `sys.messenger` is `partial` (block modes, the invite
+answer and the offline rework are not ported). No ADR changed. No owner question
+added. V26 is taken.

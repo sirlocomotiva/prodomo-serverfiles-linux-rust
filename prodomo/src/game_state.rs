@@ -69,6 +69,7 @@ mod fixtures;
 mod guild;
 mod guild_mark;
 mod item_penalty;
+mod messenger;
 mod mob_ai;
 mod mob_battle;
 mod mob_party;
@@ -527,6 +528,8 @@ pub struct GameState {
     protect_level: u8,
     /// The guilds and their member index. See [`guild`].
     guilds: guild::Guilds,
+    /// The messenger's relations. See [`messenger`].
+    messenger: messenger::Relations,
     /// The war maps the live wars are fought on, keyed by the private map index
     /// (`CWarMapManager::m_mapWarMap`, `G/war_map.cpp:166`). See [`war_map`].
     war_maps: BTreeMap<i32, war_map::WarMap>,
@@ -641,6 +644,7 @@ impl GameState {
             recall: death::Recall::default(),
             protect_level: DEFAULT_PROTECT_LEVEL,
             guilds: guild::Guilds::default(),
+            messenger: messenger::Relations::default(),
             war_maps: BTreeMap::new(),
             marks: guild_mark::MarkManager::default(),
             symbols: std::collections::BTreeMap::new(),
@@ -911,6 +915,11 @@ impl GameState {
                 record,
                 reply,
             } => self.answer_whisper(vid, &name, &text, record, reply),
+            GameCommand::MessengerLogin { .. }
+            | GameCommand::MessengerAddByVid { .. }
+            | GameCommand::MessengerAddByName { .. }
+            | GameCommand::MessengerAuth { .. }
+            | GameCommand::MessengerRemove { .. } => self.apply_messenger(command),
             GameCommand::LeaveWorld {
                 vid,
                 departure,
@@ -941,6 +950,55 @@ impl GameState {
                 false,
                 "apply_delegated claims every item, ground, motion and pick command"
             ),
+        }
+    }
+
+    /// Runs one messenger command; the relations live on this state's own field.
+    fn apply_messenger(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::MessengerLogin {
+                vid,
+                name,
+                companions,
+                team,
+                levels,
+            } => {
+                let mut taken = std::mem::take(&mut self.messenger);
+                taken.login(self, vid, &name, &companions, &team, &levels);
+                self.messenger = taken;
+            }
+            GameCommand::MessengerAddByVid {
+                vid,
+                target_vid,
+                settled,
+            } => {
+                self.answer_messenger_add_by_vid(vid, common::vid::Vid::new(target_vid));
+                drop(settled);
+            }
+            GameCommand::MessengerAddByName {
+                vid,
+                name,
+                companion_level,
+                settled,
+            } => {
+                self.messenger_add_by_name(vid, &name, companion_level);
+                drop(settled);
+            }
+            GameCommand::MessengerAuth {
+                vid,
+                requester,
+                deny,
+                reply,
+            } => self.answer_messenger_auth(vid, &requester, deny, reply),
+            GameCommand::MessengerRemove {
+                vid,
+                companion,
+                settled,
+            } => {
+                self.answer_messenger_remove(vid, &companion);
+                drop(settled);
+            }
+            _ => debug_assert!(false, "only messenger commands reach apply_messenger"),
         }
     }
 
@@ -1108,6 +1166,25 @@ impl GameState {
     ) {
         let answer = self.enter_world_with_items(vid, player_id, name, items, outbox);
         let answer = answer.map(|()| {
+            // `MessengerManager::instance().Login(ch->GetName())`
+            // (`G/input_login.cpp:671`) runs before the lines that waited are read
+            // (`ReadOfflineMessages`, `:728-729`).
+            let Loaded {
+                messenger_companions,
+                messenger_team,
+                messenger_levels,
+                ..
+            } = loaded.as_ref();
+            let mut taken = std::mem::take(&mut self.messenger);
+            taken.login(
+                self,
+                vid,
+                name.as_bytes(),
+                messenger_companions,
+                messenger_team,
+                messenger_levels,
+            );
+            self.messenger = taken;
             // `ch->ReadOfflineMessages()` (`G/input_login.cpp:728-729`): the lines
             // that waited for this character are read when it enters.
             self.deliver_offline_messages(vid, name);
@@ -1503,6 +1580,19 @@ impl GameState {
         let _event = self.affect_events.remove(&vid);
         self.stop_browsing(vid);
         self.close_storage(vid);
+        // `MessengerManager::instance().Logout(GetName())` (`G/char.cpp:1817`): the
+        // disconnect's own step, after `DisconnectPC`, `CloseSafebox` and `CloseMall`
+        // and before the deleted body's own steps. A warp keeps the character online,
+        // so it logs nothing out. The logout must have the name, which the manager
+        // still holds.
+        if departure == Departure::Disconnect {
+            if let Ok(character) = self.characters.find_by_vid(vid) {
+                let name = Vec::from(character.name().as_bytes());
+                let mut taken = std::mem::take(&mut self.messenger);
+                taken.logout(self, &name);
+                self.messenger = taken;
+            }
+        }
         // `CWarMap::DecMember` (`G/war_map.cpp:400-451`): a player that leaves a war map
         // leaves its team, or the watchers. It clears the war member's flag
         // (`ch->SetQuestFlag("war.is_war_member", 0)`, `G/war_map.cpp:438`), and it runs
@@ -4997,6 +5087,9 @@ mod tests {
                 show: None,
                 skills: Vec::new(),
                 quest_flags: Vec::new(),
+                messenger_companions: Vec::new(),
+                messenger_team: Vec::new(),
+                messenger_levels: std::collections::BTreeMap::new(),
             }),
             outbox,
             reply,
@@ -5043,6 +5136,9 @@ mod tests {
                 show: None,
                 skills: Vec::new(),
                 quest_flags: vec![(b"guild_manage.new_withdraw_time".to_vec(), 1_700_000_000)],
+                messenger_companions: Vec::new(),
+                messenger_team: Vec::new(),
+                messenger_levels: std::collections::BTreeMap::new(),
             }),
             outbox,
             reply,

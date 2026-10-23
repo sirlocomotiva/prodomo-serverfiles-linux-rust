@@ -1,9 +1,10 @@
 # Rewrite status
 
-Last reviewed: 2026-10-22, after ledger section 247 (the flag carrier sees the flag before
-the take).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 248 onwards (the
-messenger).
+Last reviewed: 2026-10-23, after ledger section 248 (the friend add, its yes and its
+remove are live).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 249 onwards (the
+rest of the messenger: the team list beyond the GMs, block modes, the invite answer, the
+offline rework).
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -72,7 +73,10 @@ war's end score is a tenth in the test-server mode, as legacy's is. Since 246 a 
 reaches the character it names, on the sender's Channel or on another one, the name is
 matched without regard to the case, the sender's own name drops the line and an empty line
 sends nothing; a line for a character that is not there waits for it in the world's memory
-and the sender is told, and the target reads the line when it next enters. The rest of combat, skills,
+and the sender is told, and the target reads the line when it next enters. Since 248 a
+friend add, its yes and its remove are live: the request reaches the target as the
+`messenger_auth` line, the yes lists both directions and stores both rows, the relogin
+keeps them, and the remove takes them back. The rest of combat, skills,
 parties, guilds and the rest of step 4 are not ported yet. The two-process layout (a `game-server` and a `db-server`
 talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177; sections 1-175
 record how it was built and stay as history. Since section 178 the one `prodomo` binary reads
@@ -91,7 +95,6 @@ The direction since then:
 
 ## Build order
 
-Each step lands as one or more ledger sections with a gate receipt.
 
 | step | scope | state |
 |---|---|---|

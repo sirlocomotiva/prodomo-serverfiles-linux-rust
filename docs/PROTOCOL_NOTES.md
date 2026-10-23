@@ -57,6 +57,8 @@ Legacy client, game-to-client, game-to-game, and DB packet definitions/codecs.
 - `cg_variable` covers source-verified chat, whisper, SyncPosition, active-profile MyShop, FishEvent, Shop, and Messenger variable prefixes plus the typed SyncPosition element slice.
 - `cg_whisper` covers header 19 `HEADER_CG_WHISPER` (0x13), the whisper request: a header, an explicit little-endian size word that counts the whole record, the raw 25-byte name field, and the raw text that follows it. The size is a floor and not an equality, so trailing bytes past it are legal and ignored, and a size under the 28-byte fixed part is its own refusal because the legacy closes the descriptor for it (`G/input_main.cpp:344-353`). The name and the text are C strings, so each stops at its first NUL, and the text is bounded by `CHAT_MAX_LEN` (512) as the legacy's `char buf[CHAT_MAX_LEN + 1]` is.
 - `gc_whisper` covers header 34 `HEADER_GC_WHISPER` (0x22), the whisper answer: a header, an explicit little-endian size word that counts the whole record, the type byte, the raw 25-byte name field, the `bCanFormat` byte that `LOCALE_STRING_RENEWAL` adds (`G/input_main.cpp:631`), and the raw text that follows. The fixed part is 30 packed bytes, measured from a verbatim 32-bit compile under `#pragma pack(1)` with the repository's known-width controls; the `bool` is one byte, so the field is the legacy's own.
+- `cg_messenger` covers header 67 `HEADER_CG_MESSENGER` (0x43), the friend add and remove: the 2-byte base (`TPacketCGMessenger`, `packet.h:1944-1977`), 4 more VID bytes for `ADD_BY_VID` (0), and a raw 24-byte name field for `ADD_BY_NAME` (1) and `REMOVE` (2); `INVITE_ANSWER` (3) and every unknown subheader consume the base alone, the analyzer's own default arm (`G/input_main.cpp:1225-1228`). The name arms read 24 bytes where the `REMOVE` struct carries 31 that legacy never reads, and the names are C strings read to the first NUL.
+- `gc_messenger` covers header 74 `HEADER_GC_MESSENGER` (0x4a), the friend and team lists with the login, logout and remove-friend records: the 4-byte envelope whose size word counts it (`TPacketGCMessenger`), one `connected + length + name` entry per companion with no terminator, and the login, logout and `REMOVE_FRIEND` records as an envelope with a length byte and the name. The `INVITE` subheader (6) is never sent, so the codec declares the byte and produces no record of it.
 - `cg_party_skill` covers the exact six-byte `TPacketCGPartyUseSkill` record.
 - `cg_party` covers the five fixed-width party records of headers 72, 73, 74, 75, and 78, with explicit little-endian words, one shared error type, and separately named record and frame-payload widths so a wrong-width frame is rejected rather than misread; `cg_quickslot_add`, `cg_quickslot_del`, and `cg_quickslot_swap` cover the three quickslot records of headers 16, 17, and 18, where the add record is a counted run and the del/swap pair differ only in their declared slot byte.
 - `cg_pick` covers the four fixed-width game-phase records that carry a single client choice and nothing else, at headers 31, 61, 66, and 114, where `CgQuestConfirm` is the only one with two fields and the only one whose `u8` precedes its `u32`, and where the three single-word records share one width and are therefore separated by their header rather than their length.
@@ -421,6 +423,19 @@ Sections 163 through 167 establish the honest baseline and correct three method 
   text of the system's own lines carries its NUL, because those lengths are `strlen(msg) + 1`,
   while a relayed line carries none.
 
+- `protocol/src/cg_messenger.rs` and `protocol/src/gc_messenger.rs` (ledger 248) implement
+  the messenger records, bytes 67 and 74. The client record is the 2-byte base
+  (`TPacketCGMessenger`, `packet.h:1944-1977`) with 4 more VID bytes for `ADD_BY_VID`
+  and a raw 24-byte name field for `ADD_BY_NAME` and `REMOVE`; the name arms read 24
+  bytes where the `REMOVE` struct carries 31 that legacy never reads
+  (`G/input_main.cpp:1181,1198`), and `INVITE_ANSWER` (3) with every unknown subheader
+  consumes the base alone (`:1225-1228`). The game record is the 4-byte envelope whose
+  size word counts it with one `connected + length + name` entry per companion and no
+  terminator (`SendList`, `G/messenger_manager.cpp:481-513`); the login, logout and
+  `REMOVE_FRIEND` records are an envelope with a length byte and the name. The `INVITE`
+  subheader (6) is never sent by this tree, only named by the enum, so the codec
+  declares the byte and produces no record of it.
+
 ## Shared record types
 
 Records that share a body keep their header. `CgFlyTarget` is one 13-byte record under
@@ -648,6 +663,10 @@ has none. Regenerate this list instead of editing it by hand.
 | `cg_safebox_move.rs` | Explicit codec for the fixed legacy `TPacketCGItemMove` record as it is |
 | `cg_sash.rs` | Transport-free codec for the CG direction of `TPacketSash`. |
 | `cg_shoot.rs` | Explicit codec for the fixed legacy `TPacketCGShoot` record. |
+| `cg_messenger.rs` | The `HEADER_CG_MESSENGER` (0x43) friend add and remove records. |
+| `cg_micro.rs` | Transport-free codecs for four tiny fixed-width CG game-phase records. |
+| `cg_move.rs` | Explicit codec for the fixed legacy `TPacketCGMove` record. |
+| `cg_name.rs` | Transport-free codecs for the three CG records that carry fixed `char[N+1]` strings. |
 | `cg_use_skill.rs` | Explicit codec for the fixed legacy `TPacketCGUseSkill` record. |
 | `cg_variable.rs` | Incremental framing for source-verified variable-length client packets. |
 | `cg_vid.rs` | The two 5-byte records that are a header plus a 32-bit virtual id. |
@@ -661,6 +680,7 @@ has none. Regenerate this list instead of editing it by hand.
 | `gc_actors.rs` | The game-to-client actor, target, and main-character records. |
 | `gc_fields.rs` | The game-to-client records that carry named scalar fields and raw fixed |
 | `gc_inventory.rs` | Machine-readable inventory of the legacy game-to-client packet headers. |
+| `gc_messenger.rs` | The `HEADER_GC_MESSENGER` (0x4a) friend list, login, logout and remove records. |
 | `gc_nested.rs` | The game-to-client records that nest another record or carry a fixed array. |
 | `gc_small.rs` | The small fixed-width game-to-client records. |
 | `gc_vid.rs` | The game-to-client records that carry one 32-bit value. |

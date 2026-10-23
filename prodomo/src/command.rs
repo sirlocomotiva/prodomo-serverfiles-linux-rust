@@ -138,6 +138,7 @@ impl CommandEntry {
             "do_party_request" => Command::PartyRequest,
             "do_party_request_accept" => Command::PartyRequestAccept,
             "do_party_request_deny" => Command::PartyRequestDeny,
+            "do_messenger_auth" => Command::MessengerAuth,
             "do_notice" => Command::GlobalNotice,
             "do_map_notice" => Command::MapNotice,
             "do_big_notice" => Command::BigNotice,
@@ -189,6 +190,9 @@ pub enum Command {
     PartyRequestAccept,
     /// `do_party_request_deny`: the leader denies the guest's request.
     PartyRequestDeny,
+    /// `do_messenger_auth`: the target answers a friend request named by the line's
+    /// second word (`G/cmd_general.cpp:2272-2296`).
+    MessengerAuth,
     /// `do_notice`: every client on every Channel hears the GM's line.
     GlobalNotice,
     /// `do_map_notice`: every client on the GM's Channel and map hears the line.

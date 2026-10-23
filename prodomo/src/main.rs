@@ -121,13 +121,13 @@ use protocol::cg_inventory::{
     HEADER_CG_GUILD_SYMBOL_UPLOAD, HEADER_CG_ITEM_DROP, HEADER_CG_ITEM_DROP2, HEADER_CG_ITEM_MOVE,
     HEADER_CG_ITEM_PICKUP, HEADER_CG_ITEM_USE, HEADER_CG_LOGIN2, HEADER_CG_LOGIN3,
     HEADER_CG_MARK_CRCLIST, HEADER_CG_MARK_IDXLIST, HEADER_CG_MARK_LOGIN, HEADER_CG_MARK_UPLOAD,
-    HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE, HEADER_CG_PARTY_INVITE_ANSWER,
-    HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE, HEADER_CG_PARTY_SET_STATE,
-    HEADER_CG_PARTY_USE_SKILL, HEADER_CG_QUEST_INPUT_STRING, HEADER_CG_QUICKSLOT_ADD,
-    HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP, HEADER_CG_SCRIPT_ANSWER,
-    HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SHOOT, HEADER_CG_SHOP, HEADER_CG_STATE_CHECKER,
-    HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET, HEADER_CG_USE_SKILL,
-    HEADER_CG_WARP, HEADER_CG_WHISPER,
+    HEADER_CG_MESSENGER, HEADER_CG_MOVE, HEADER_CG_ON_CLICK, HEADER_CG_PARTY_INVITE,
+    HEADER_CG_PARTY_INVITE_ANSWER, HEADER_CG_PARTY_PARAMETER, HEADER_CG_PARTY_REMOVE,
+    HEADER_CG_PARTY_SET_STATE, HEADER_CG_PARTY_USE_SKILL, HEADER_CG_QUEST_INPUT_STRING,
+    HEADER_CG_QUICKSLOT_ADD, HEADER_CG_QUICKSLOT_DEL, HEADER_CG_QUICKSLOT_SWAP,
+    HEADER_CG_SCRIPT_ANSWER, HEADER_CG_SCRIPT_BUTTON, HEADER_CG_SHOOT, HEADER_CG_SHOP,
+    HEADER_CG_STATE_CHECKER, HEADER_CG_SYMBOL_CRC, HEADER_CG_SYNC_POSITION, HEADER_CG_TARGET,
+    HEADER_CG_USE_SKILL, HEADER_CG_WARP, HEADER_CG_WHISPER,
 };
 use protocol::cg_item_drop::CgItemDrop;
 use protocol::cg_item_drop2::CgItemDrop2;
@@ -3417,6 +3417,141 @@ async fn party_parameter_step(
     debug!(%addr, mode = record.distribute_mode, "Party mode handed to the world");
     true
 }
+/// `CInputMain::Messenger` (`G/input_main.cpp:1128-1233`): the world runs the named arm,
+/// and the caller writes the pair's rows when an answer or a remove says so.
+///
+/// A malformed frame or a world that cannot be asked closes, as every malformed frame
+/// does; a record from a character outside the world is ignored. The `ADD_BY_VID` and
+/// `ADD_BY_NAME` gates that name the target run here, where the descriptor's GM level
+/// and the store's grant read live; the world runs `RequestToAdd` past them. The GM
+/// gate's own read is `gm_get_level` (`G/gm.cpp:12-14`), matched on the name regardless
+/// of case, which the test-server mode silences to `GM_IMPLEMENTOR`.
+async fn messenger_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    frame: &ClientFrame,
+) -> bool {
+    use protocol::cg_messenger::CgMessenger;
+    let record = match CgMessenger::decode(frame) {
+        Ok(record) => record,
+        Err(error) => {
+            warn!(%addr, %error, "Client sent a malformed MESSENGER; closing");
+            return false;
+        }
+    };
+    let Some(world_vid) = held.world else {
+        warn!(%addr, "MESSENGER from a character outside the world; ignoring");
+        return true;
+    };
+    match record {
+        CgMessenger::AddByVid { vid } => {
+            match context.game.messenger_add_by_vid(world_vid, vid).await {
+                Ok(settling) => held.settling = Some(settling),
+                Err(error) => {
+                    warn!(%addr, %error, "The world could not take the add; closing");
+                    return false;
+                }
+            }
+            debug!(%addr, target = vid, "Messenger add-by-vid handed to the world");
+            true
+        }
+        CgMessenger::AddByName { name } => {
+            // The name is the C string the 24-byte field carries: legacy copies it
+            // with `strlcpy` at the arm (`G/input_main.cpp:1184`), so the NUL padding
+            // never reaches the lookup.
+            let record = CgMessenger::AddByName { name };
+            let companion = record.companion_name().to_vec();
+            // `if (ch->GetGMLevel() == GM_PLAYER && gm_get_level(name) != GM_PLAYER)`
+            // (`G/input_main.cpp:1186-1191`): the caller's own level is the held one,
+            // and the name's is the grant the store holds, matched on the account and
+            // the name. The test-server mode silences the gate.
+            let companion_level = if context.modes.test_server {
+                None
+            } else {
+                match messenger_companion_level(&context.store, addr, &companion).await {
+                    Ok(level) => level,
+                    Err(()) => return false,
+                }
+            };
+            match context
+                .game
+                .messenger_add_by_name(world_vid, companion, companion_level)
+                .await
+            {
+                Ok(settling) => held.settling = Some(settling),
+                Err(error) => {
+                    warn!(%addr, %error, "The world could not take the add; closing");
+                    return false;
+                }
+            }
+            debug!(%addr, "Messenger add-by-name handed to the world");
+            true
+        }
+        CgMessenger::Remove { name } => {
+            // The C string, as above (`G/input_main.cpp:1241`): the padding reaches
+            // neither the world nor the store.
+            let record = CgMessenger::Remove { name };
+            let companion = record.companion_name().to_vec();
+            match context
+                .game
+                .messenger_remove(world_vid, companion.clone())
+                .await
+            {
+                Ok(settling) => held.settling = Some(settling),
+                Err(error) => {
+                    warn!(%addr, %error, "The world could not take the remove; closing");
+                    return false;
+                }
+            }
+            let Some(character) = held.character.as_ref() else {
+                return true;
+            };
+            let Ok(companion) = std::str::from_utf8(&companion) else {
+                return true;
+            };
+            if let Err(error) =
+                db::messenger::remove_pair(&context.store, character.name.as_str(), companion).await
+            {
+                warn!(%addr, %error, "The friend remove could not be stored; closing");
+                return false;
+            }
+            debug!(%addr, companion, "Messenger remove handed to the world and stored");
+            true
+        }
+        // The default arm: `sys_err(...); break` — the base alone is consumed
+        // (`G/input_main.cpp:1225-1228`).
+        CgMessenger::Consumed { subheader } => {
+            debug!(%addr, subheader, "Messenger subheader is not reached; consuming");
+            true
+        }
+    }
+}
+
+/// The `gm_get_level` read for a name the `ADD_BY_NAME` arm names: the grant's authority
+/// matched on the account and the name (`G/input_db.cpp:1806-1830`), or `None` for a
+/// player. Answers `None` (closing) when the store refuses.
+async fn messenger_companion_level(
+    store: &db::store::Store,
+    addr: SocketAddr,
+    name: &[u8],
+) -> Result<Option<u8>, ()> {
+    use std::str::from_utf8;
+    let Ok(text) = from_utf8(name.split(|&byte| byte == 0).next().unwrap_or(name)) else {
+        return Ok(None);
+    };
+    let grants = match db::accounts::list_gm_grants(store).await {
+        Ok(grants) => grants,
+        Err(error) => {
+            warn!(%addr, %error, "GM grant load failed; closing");
+            return Err(());
+        }
+    };
+    Ok(grants
+        .iter()
+        .find(|grant| grant.name.as_bytes().eq_ignore_ascii_case(text.as_bytes()))
+        .map(|grant| u8::try_from(grant.authority.as_i32()).unwrap_or(u8::MAX)))
+}
 
 /// `CInputMain::UseSkill` (`G/input_main.cpp:2173-2177`): the world runs the character's
 /// cast and sends what it shows (see `game_state::pc_skill`). The cast answers nothing
@@ -3814,6 +3949,7 @@ where
         Some(MainRecord::Belongings) => belongings_step(session, addr, context, held, &frame).await,
         Some(MainRecord::World) => world_step(addr, context, held, &frame).await,
         Some(MainRecord::Npc) => npc_step(session, addr, context, held, &frame).await,
+        Some(MainRecord::Messenger) => messenger_step(addr, context, held, &frame).await,
         Some(MainRecord::Guild) => {
             if frame.header == HEADER_CG_GUILD.value() {
                 cg_guild_step(session, addr, context, held, &frame).await
@@ -3856,6 +3992,8 @@ enum MainRecord {
     /// `CG_ON_CLICK` (26), `CG_SHOP` (50), `CG_SCRIPT_ANSWER` (29), `CG_QUEST_INPUT_STRING`
     /// (30) and `CG_SCRIPT_BUTTON` (66).
     Npc,
+    /// `CG_MESSENGER` (67): `CInputMain::Messenger` (`G/input_main.cpp:1128-1233`).
+    Messenger,
     /// `CG_ANSWER_MAKE_GUILD` (49): `CInputMain::AnswerMakeGuild`
     /// (`G/input_main.cpp:2672-2730`), read through the same main input
     /// (`G/input_main.cpp:3834-3836`).
@@ -3889,6 +4027,8 @@ fn main_record(phase: ClientPhase, header: u8) -> Option<MainRecord> {
         MainRecord::World
     } else if is_npc_step(header) {
         MainRecord::Npc
+    } else if header == HEADER_CG_MESSENGER.value() {
+        MainRecord::Messenger
     } else if header == HEADER_CG_ANSWER_MAKE_GUILD.value() || header == HEADER_CG_GUILD.value() {
         MainRecord::Guild
     } else if is_transaction_record(header) {
@@ -5326,7 +5466,13 @@ where
         card: PcCard::of(character, language, context.pk_protect_level),
     };
     let items = std::mem::take(&mut held.items);
-    let loaded = loaded_state(held, Some(show));
+    // `MessengerManager::Login`'s store reads (`G/messenger_manager.cpp:58-65`): the
+    // account's rows and the GM team. A refused read closes, as a refused load does.
+    let Some(messenger) = messenger_load(&context.store, addr, character.name.as_str()).await
+    else {
+        return false;
+    };
+    let loaded = loaded_state(held, Some(show), messenger);
     let Some((world_vid, shown)) =
         join_the_world(context, addr, character, vid, (items, loaded), outbox).await
     else {
@@ -5434,6 +5580,7 @@ fn place_entering_character(context: &ConnectionContext, addr: SocketAddr, held:
 fn loaded_state(
     held: &Held,
     show: Option<prodomo::game_loop_messages::Showing>,
+    messenger: MessengerLoad,
 ) -> prodomo::game_loop_messages::Loaded {
     let mut points = held.points.clone();
     // `m_pointsInstant.gm_level` (`char.h:468`) rides the admission, so the world reads it
@@ -5451,7 +5598,58 @@ fn loaded_state(
         show,
         skills: held.skills.clone(),
         quest_flags: held.quest_flags.clone(),
+        messenger_companions: messenger.companions,
+        messenger_team: messenger.team,
+        messenger_levels: messenger.levels,
     }
+}
+
+/// The store's messenger rows for one entering character: its friend names, the GM team
+/// names other than its own, and every grant's name-to-level map.
+struct MessengerLoad {
+    companions: Vec<Vec<u8>>,
+    team: Vec<Vec<u8>>,
+    levels: std::collections::BTreeMap<Vec<u8>, u8>,
+}
+
+/// Read the store's messenger rows for the character `name`: its friend names in the pair
+/// key's order, the GM names other than its own, and every grant's name-to-level map
+/// (`MessengerManager::Login`, `G/messenger_manager.cpp:46-65`, and its team half,
+/// `LoadTeamList`, `:24-52`). Answers `None` when the store refuses, which closes the
+/// descriptor as a refused load does.
+async fn messenger_load(
+    store: &db::store::Store,
+    addr: SocketAddr,
+    name: &str,
+) -> Option<MessengerLoad> {
+    let companions = match db::messenger::load_list(store, name).await {
+        Ok(companions) => companions,
+        Err(error) => {
+            warn!(%addr, %error, "Messenger list load failed; closing");
+            return None;
+        }
+    };
+    let grants = match db::accounts::list_gm_grants(store).await {
+        Ok(grants) => grants,
+        Err(error) => {
+            warn!(%addr, %error, "GM grant load failed; closing");
+            return None;
+        }
+    };
+    let mut team = Vec::new();
+    let mut levels = std::collections::BTreeMap::new();
+    for grant in &grants {
+        let level = u8::try_from(grant.authority.as_i32()).unwrap_or(u8::MAX);
+        levels.insert(grant.name.as_bytes().to_vec(), level);
+        if !grant.name.as_bytes().eq_ignore_ascii_case(name.as_bytes()) {
+            team.push(grant.name.as_bytes().to_vec());
+        }
+    }
+    Some(MessengerLoad {
+        companions,
+        team,
+        levels,
+    })
 }
 
 /// Puts a live client's character into the game thread's world, and records the entry.
@@ -7647,6 +7845,7 @@ where
             party_request_accept_step(addr, context, held, rest).await
         }
         LineCommand::PartyRequestDeny => party_request_deny_step(addr, context, held, rest).await,
+        LineCommand::MessengerAuth => messenger_auth_step(addr, context, held, rest).await,
         LineCommand::GlobalNotice => global_notice_step(addr, context, held, &rest),
         LineCommand::MapNotice => map_notice_step(addr, context, held, &rest),
         LineCommand::BigNotice => big_notice_step(session, addr, context, held, &rest).await,
@@ -7983,6 +8182,61 @@ async fn party_request_deny_step(
         }
     }
     info!(%addr, "Party request denied");
+    true
+}
+/// `do_messenger_auth` (`G/cmd_general.cpp:2272-2296`): the world consumes the request the
+/// second word names and answers whether it became a friendship, and the caller writes
+/// the pair's rows when it did. An empty line is quiet (`if (!*arg1 || !*arg2) return`),
+/// as is an answer to a request nobody made. The deny's own `[LS;548]` line rode the
+/// outbox already.
+async fn messenger_auth_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Messenger auth without a character in the world; ignoring");
+        return true;
+    };
+    // `two_arguments(argument, arg1, arg2, ...)`: the answer and the requester's name.
+    let mut words = rest
+        .split(|&byte| byte == b' ' || byte == 0x09)
+        .filter(|word| !word.is_empty());
+    let (Some(answer), Some(requester)) = (words.next(), words.next()) else {
+        return true;
+    };
+    let deny = !matches!(answer.first(), Some(b'y' | b'Y'));
+    let added = match context
+        .game
+        .messenger_auth(vid, requester.to_vec(), deny)
+        .await
+    {
+        Ok(added) => added,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a friend answer; closing");
+            return false;
+        }
+    };
+    // A deny consumes the request and answers the requester, but writes no rows:
+    // `AuthToAdd` only inserts on a yes (`G/messenger_manager.cpp:330-332`).
+    if deny || !added {
+        return true;
+    }
+    let Some(character) = held.character.as_ref() else {
+        return true;
+    };
+    if let Err(error) = db::messenger::add_pair(
+        &context.store,
+        character.name.as_str(),
+        &String::from_utf8_lossy(requester),
+    )
+    .await
+    {
+        warn!(%addr, %error, "The friendship could not be stored; closing");
+        return false;
+    }
+    info!(%addr, "Friend answer stored");
     true
 }
 

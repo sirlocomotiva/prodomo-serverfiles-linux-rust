@@ -1410,7 +1410,8 @@ fn dynamic_len(header: u8) -> usize {
         | GC_SHOP
         | GC_SCRIPT
         | GC_GUILD
-        | GC_WHISPER => usize::MAX,
+        | GC_WHISPER
+        | GC_MESSENGER => usize::MAX,
         other => panic!("{other} is a fixed-width loading or enter-game record"),
     }
 }
@@ -1421,7 +1422,14 @@ fn word_sized(record: &[u8]) -> Option<usize> {
     let header = record[0];
     if matches!(
         header,
-        GC_CHAT | GC_ENTITY | GC_SYNC_POSITION | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT | GC_WHISPER
+        GC_CHAT
+            | GC_ENTITY
+            | GC_SYNC_POSITION
+            | GC_NPC_POSITION
+            | GC_SHOP
+            | GC_SCRIPT
+            | GC_WHISPER
+            | GC_MESSENGER
     ) {
         Some(usize::from(record[1]) | (usize::from(record[2]) << 8))
     } else {
@@ -1467,6 +1475,10 @@ const AFFECT_REVIVE_INVISIBLE: u32 = 215;
 const GC_TIME: u8 = 106;
 const GC_CHANNEL: u8 = 121;
 const GC_CHAT: u8 = 4;
+/// `HEADER_CG_MESSENGER` (`protocol/src/cg_inventory.rs`).
+const CG_MESSENGER: u8 = 0x43;
+/// `HEADER_GC_MESSENGER` (`protocol/src/gc_inventory.rs`).
+const GC_MESSENGER: u8 = 0x4a;
 /// `HEADER_CG_WHISPER` (`protocol/src/cg_inventory.rs`).
 const CG_WHISPER: u8 = 0x13;
 /// `HEADER_GC_WHISPER` (`protocol/src/gc_inventory.rs`).
@@ -1518,9 +1530,10 @@ fn game_len(header: u8) -> usize {
         GC_SKILL_LEVEL_NEW => SKILL_LEVEL_LEN,
         GC_CHARACTER_ADD => CHARACTER_ADD_LEN,
         GC_CHAR_ADDITIONAL_INFO => CHAR_ADDITIONAL_INFO_LEN,
-        GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT | GC_GUILD | GC_WHISPER => {
-            dynamic_len(header)
-        }
+        // GC_MESSENGER rides the same `size`-word framing as the other dynamic records
+        // (`TPacketGCMessenger`, `G/packet.h:1896-1901`).
+        GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT | GC_GUILD | GC_WHISPER
+        | GC_MESSENGER => dynamic_len(header),
         GC_AFFECT_ADD => AFFECT_ADD_LEN,
         GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
         GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
@@ -1696,6 +1709,31 @@ fn enter_world_on(
     (keyed, character)
 }
 
+/// [`enter_world_on`], reading the GM `TEAM_LIST` the enter leaves behind when `team`
+/// names one: the entrant the grant names hears none, every other entrant hears the
+/// grant's `TEAM_LIST` behind its burst (`LoadTeamList`, `G/messenger_manager.cpp:24-52`).
+fn enter_world_on_with_team(
+    server: &Server,
+    channel: u8,
+    login: &[u8],
+    slot: u8,
+    language: u8,
+    team: Option<&[u8]>,
+) -> (Keyed, Listed) {
+    let (mut keyed, character, _quickslots, _items) =
+        load_with_quickslots_on(server, channel, login, slot, language);
+    let _entered = enter_game_shown(&mut keyed);
+    if let Some(name) = team {
+        assert_eq!(
+            keyed.read_game(),
+            messenger_team_list(name),
+            "the entrant hears the GM team"
+        );
+    }
+    keyed.still("nothing follows");
+    (keyed, character)
+}
+
 /// [`enter_world`], answering what the burst showed.
 fn enter_world_seeing(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed, Entered) {
     enter_world_seeing_on(server, 1, login, slot, ENGLISH)
@@ -1728,6 +1766,30 @@ fn enter_world_seeing_guilded(
         load_with_quickslots_on(server, 1, login, slot, ENGLISH);
     assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
     let entered = enter_game_view_guilded(&mut keyed, members);
+    (keyed, character, entered)
+}
+
+/// [`enter_world_seeing_guilded`], reading the GM `TEAM_LIST` the enter leaves behind
+/// when `team` names one. The grant owner's own enter hears none.
+fn enter_world_seeing_guilded_with_team(
+    server: &Server,
+    login: &[u8],
+    slot: u8,
+    members: usize,
+    team: Option<&[u8]>,
+) -> (Keyed, Listed, Entered) {
+    let (mut keyed, character, quickslots, _items) =
+        load_with_quickslots_on(server, 1, login, slot, ENGLISH);
+    assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
+    let entered = enter_game_guilded(&mut keyed, members);
+    if let Some(name) = team {
+        assert_eq!(
+            keyed.read_game(),
+            messenger_team_list(name),
+            "the entrant hears the GM team"
+        );
+    }
+    keyed.still("nothing follows");
     (keyed, character, entered)
 }
 
@@ -5573,9 +5635,9 @@ fn notice_cast(server: &Server, database: &ScratchDatabase) -> (Keyed, Keyed, Ke
         "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
          FROM account WHERE login = 'alice'",
     );
-    let (alice, _) = enter_world(server, b"alice", 0);
-    let (yankee, _) = enter_world_in(server, b"bob", 0, GERMAN);
-    let (charlie, _) = enter_world_on(server, 99, b"carol", 0, ENGLISH);
+    let (alice, _) = enter_world_on_with_team(server, 1, b"alice", 0, ENGLISH, None);
+    let (yankee, _) = enter_world_on_with_team(server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
+    let (charlie, _) = enter_world_on_with_team(server, 99, b"carol", 0, ENGLISH, Some(b"Alpha"));
     (alice, yankee, charlie)
 }
 
@@ -15163,6 +15225,13 @@ fn the_flag_is_taken_and_the_base_scores_the_war() {
         enter_world_seeing_guilded_on_war_map(&server, b"alice", 0, 1, &join);
     let own_flag = flag_vid_of(entered.shown.inserts(), FLAG_RACE)
         .expect("the member sees its own guild's flag");
+    // The re-enter logs the member back into the team, and the holder hears it
+    // (`LoadTeamList`'s own fans, `G/messenger_manager.cpp:48-52`).
+    assert_eq!(
+        yankee.read_game(),
+        messenger_login(1, b"Alpha"),
+        "the other master sees the team come back"
+    );
     // She walks towards the other team's flag, which stands on the other team's base, and
     // stops short of it: the flag's state hands it to the player nearest it
     // (`StateFlag`, `G/char_state.cpp:1185-1215`), and a player within 500 of it takes it
@@ -15358,7 +15427,7 @@ fn the_other_side_of_the_war_takes_the_other_start_position() {
 /// a field war alone (`CGuildManager::EndWar`, `G/guild_manager.cpp:698-704`).
 #[test]
 fn the_wars_map_goes_with_the_war_and_its_member_comes_back() {
-    let Some((_database, server, mut alice, alpha_listed, mut yankee, _yankee)) =
+    let Some((_database, mut server, mut alice, alpha_listed, mut yankee, _yankee)) =
         a_war_pair_ready_on(None, &war_channels())
     else {
         return;
@@ -15387,7 +15456,22 @@ fn the_wars_map_goes_with_the_war_and_its_member_comes_back() {
     // flags are written with the character (`quest::PC::Save`, `G/questpc.cpp:520-588`)
     // and read back with it (`CInputDB::QuestLoad`, `G/input_db.cpp:1079-1101`), so the
     // reconnect kept it.
+    // The warp took the member's body off the town: its removal is already queued
+    // (`G/char.cpp:786-789`). The warp is no disconnect, so the team hears no logout:
+    // `MessengerManager::Logout` is the disconnect's own step (`G/char.cpp:1817`),
+    // and the member never disconnected. The drop below only closes the old
+    // descriptor, which the world already let go at the warp; the close line keeps
+    // the re-enter behind it.
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&alpha_listed.id.to_le_bytes());
+    assert_eq!(
+        yankee.read_game(),
+        removed,
+        "the other master sees the member leave the town"
+    );
+    let old = alice.client.local_addr();
     drop(alice);
+    server.wait_for(&format!("Client connection closed addr={old}"));
     let join = WarMapJoin {
         guilds: [1, 2],
         joiners: [1, 0],
@@ -15398,15 +15482,12 @@ fn the_wars_map_goes_with_the_war_and_its_member_comes_back() {
     };
     let (mut alice, _alpha, _entered) =
         enter_world_seeing_guilded_on_war_map(&server, b"alice", 0, 1, &join);
-    // The master who stayed in the town still has the member's removal to read: the
-    // warp that took the member to the war's map took its body off the town, and the
-    // players that saw it were sent its removal (`G/char.cpp:786-789`).
-    let mut removed = vec![GC_CHARACTER_DEL];
-    removed.extend_from_slice(&alpha_listed.id.to_le_bytes());
+    // The re-enter logs the member back into the team, and the holder hears it
+    // (`LoadTeamList`'s own fans, `G/messenger_manager.cpp:48-52`).
     assert_eq!(
         yankee.read_game(),
-        removed,
-        "the other master sees the member leave the town"
+        messenger_login(1, b"Alpha"),
+        "the other master sees the team come back"
     );
     // The GM stops the war: the echo, then each side's END fan and the every-PC
     // `WAR_END_LIST`.
@@ -15510,9 +15591,9 @@ fn a_war_pair_ready_on(
     );
     let server = Server::start_configured(binary(), database.url(), channels, "");
     let (mut alice, alpha_listed, _alice_entered) =
-        enter_world_seeing_guilded(&server, b"alice", 0, 1);
+        enter_world_seeing_guilded_with_team(&server, b"alice", 0, 1, None);
     let (yankee, yankee_listed, _yankee_entered) =
-        enter_world_seeing_guilded(&server, b"bob", 0, 1);
+        enter_world_seeing_guilded_with_team(&server, b"bob", 0, 1, Some(b"Alpha"));
     alice.sees_arrive(yankee_listed.id, true, Some(b"Wolves"));
     Some((database, server, alice, alpha_listed, yankee, yankee_listed))
 }
@@ -16106,6 +16187,13 @@ fn a_war_without_a_side_ends_when_the_map_times_out() {
         removed,
         "the other master sees the member leave the town"
     );
+    // The re-enter logs the member back into the team, and the holder hears it
+    // (`LoadTeamList`'s own fans, `G/messenger_manager.cpp:48-52`).
+    assert_eq!(
+        yankee.read_game(),
+        messenger_login(1, b"Alpha"),
+        "the other master sees the team come back"
+    );
     // A minute after the map was made, the map asks whether the war is over: the other
     // side has no member on it, so the map says so.
     let deadline = std::time::Instant::now() + Duration::from_secs(90);
@@ -16132,4 +16220,197 @@ fn a_war_without_a_side_ends_when_the_map_times_out() {
     // The forced draw's rows: both draws tallied, both ladders unchanged.
     wait_for(&database, "(SELECT count(*) FROM guild WHERE draw = 1) = 2");
     assert_guild_tallies(&database, "the timeout's draw tallies both draws");
+}
+
+/// A `CG_MESSENGER` `ADD_BY_NAME`: the header, the subheader and the raw 24-byte name
+/// field (`TPacketCGMessenger` plus `CHARACTER_NAME_MAX_LEN`,
+/// `G/input_main.cpp:1180-1185`).
+fn client_messenger_add_by_name(name: &[u8]) -> Vec<u8> {
+    let mut record = vec![CG_MESSENGER, 1];
+    let mut field = [0u8; 24];
+    field[..name.len()].copy_from_slice(name);
+    record.extend_from_slice(&field);
+    record
+}
+
+/// A `CG_MESSENGER` `REMOVE`: the header, the subheader and the raw 24-byte name field
+/// (`G/input_main.cpp:1216-1224`).
+fn client_messenger_remove(name: &[u8]) -> Vec<u8> {
+    let mut record = vec![CG_MESSENGER, 2];
+    let mut field = [0u8; 24];
+    field[..name.len()].copy_from_slice(name);
+    record.extend_from_slice(&field);
+    record
+}
+/// The `GC_MESSENGER` `TEAM_LIST` the enter leaves behind when a GM grant names
+/// someone else: the header, the size word, the subheader, the online byte, the
+/// length and the name bytes (`MessengerManager::SendTeamList`,
+/// `G/messenger_manager.cpp:104-136`). The entrant whose own name the grant
+/// carries hears no such record, because the team is every GM name other than
+/// its own (`LoadTeamList`, `:24-52`).
+fn messenger_team_list(name: &[u8]) -> Vec<u8> {
+    let total = u16::try_from(4 + 2 + name.len()).expect("a short name");
+    let mut record = vec![GC_MESSENGER];
+    record.extend_from_slice(&total.to_le_bytes());
+    let len = u8::try_from(name.len()).expect("a short name");
+    record.extend_from_slice(&[0, 1, len]);
+    record.extend_from_slice(name);
+    record
+}
+
+/// A `GC_MESSENGER` login or logout: the header, the `size` word, the subheader, the
+/// name length and the name bytes (`MessengerManager::SendLogin`,
+/// `G/messenger_manager.cpp:515-543`).
+fn messenger_login(subheader: u8, name: &[u8]) -> Vec<u8> {
+    let total = u16::try_from(4 + 1 + name.len()).expect("a short name");
+    let mut record = vec![GC_MESSENGER];
+    record.extend_from_slice(&total.to_le_bytes());
+    record.push(subheader);
+    record.push(u8::try_from(name.len()).expect("a short name"));
+    record.extend_from_slice(name);
+    record
+}
+
+/// A `GC_MESSENGER` LIST with one online entry: the header, the `size` word, the
+/// subheader and the `connected = 1` entry (`MessengerManager::SendList`,
+/// `G/messenger_manager.cpp:481-513`).
+fn messenger_list(name: &[u8]) -> Vec<u8> {
+    let total = u16::try_from(4 + 2 + name.len()).expect("a short name");
+    let mut record = vec![GC_MESSENGER];
+    record.extend_from_slice(&total.to_le_bytes());
+    record.push(3);
+    record.push(1);
+    record.push(u8::try_from(name.len()).expect("a short name"));
+    record.extend_from_slice(name);
+    record
+}
+
+/// `sys.messenger`: Alice's `ADD_BY_NAME Yankee` reaches Bob as the `messenger_auth
+/// Alpha` command line, and Bob's `/messenger_auth y Alpha` lists both directions:
+/// each side hears the added line and the other's LOGIN, the rows land in the store,
+/// and the list rides Alice's next enter. The remove takes both rows back.
+#[test]
+fn a_friend_request_answered_yes_lists_both_directions_and_relogin_keeps_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+         154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    let (mut alice, alice_listed) = enter_world(&server, b"alice", 0);
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.send_record(&client_messenger_add_by_name(b"Yankee"));
+    assert_eq!(
+        yankee.read_game(),
+        a_command_line(b"messenger_auth Alpha"),
+        "the target hears the ask"
+    );
+    alice.quiet("the asker hears nothing yet");
+    yankee.quiet("the ask settled");
+    // The yes: each side hears the added line and the other's LOGIN, and the pair's
+    // rows land in the store.
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/messenger_auth y Alpha"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(b"<Messenger> Alpha has been added as a friend."),
+        "the answerer hears the added line"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"<Messenger> Yankee has been added as a friend."),
+        "the asker hears the added line"
+    );
+    assert_eq!(
+        alice.read_game(),
+        messenger_login(4, b"Yankee"),
+        "the asker hears the LOGIN"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        messenger_login(4, b"Alpha"),
+        "the answerer hears the LOGIN"
+    );
+    alice.quiet("the yes settled");
+    yankee.quiet("the yes settled");
+    // The rows survive the relogin: Alice's leave fans her disconnect's release, the
+    // LOGOUT, and her removal to Yankee. The next enter waits for the server's own
+    // close line, which is when the world has let her go.
+    let old = alice.client.local_addr();
+    drop(alice);
+    assert_eq!(
+        yankee.read_game(),
+        ownership_of(0, alice_listed.id),
+        "the release of Alice"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        messenger_login(5, b"Alpha"),
+        "the holder hears the LOGOUT"
+    );
+    yankee.sees_leave(alice_listed.id);
+    server.wait_for(&format!("Client connection closed addr={old}"));
+    let (mut keyed, _empire, list) = select_screen(&server, b"alice");
+    let _burst = read_loading_burst(&mut keyed, &list, 0);
+    let mut alice = keyed;
+    alice.send_record(&client_enter_game());
+    // The entrant's burst leads: the outbox the enter's own login wrote drains when the
+    // descriptor forwards the Shown reply, so the login's LIST and own-holder LOGIN
+    // ride behind it.
+    let add = alice.read_game();
+    assert_eq!(add[0], GC_CHARACTER_ADD);
+    let info = alice.read_game();
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO);
+    finish_enter_game(&mut alice, add, info);
+    assert_eq!(
+        alice.read_game(),
+        messenger_list(b"Yankee"),
+        "the enter carries the LIST"
+    );
+    // The remove: Yankee sends `REMOVE Alpha`, which legacy answers as
+    // `RemoveFromList(char_name, ch->GetName())` (`G/input_main.cpp:1223`), so the
+    // line goes to Alpha's wire naming Yankee and the record to Yankee's naming
+    // Alpha. Yankee first drains the tail his own earlier bursts wrote behind
+    // the LIST: the seven raw shapes the drain's own trace shows in this order
+    // (`01/35`, `88/70`, `13/55`, `11/25`, `7f/06`, `13/55`, `13/55`). The
+    // `11/25` is the point change (header `0x11`), the `13/55`s 55-byte look
+    // updates (header `0x13`), and `7f/06` the teleport. Each is asserted by
+    // header and length.
+    for (header, len) in [
+        (GC_CHARACTER_ADD, CHARACTER_ADD_LEN),
+        (GC_CHAR_ADDITIONAL_INFO, CHAR_ADDITIONAL_INFO_LEN),
+        (19, CHARACTER_UPDATE_LEN),
+        (GC_POINT_CHANGE, POINT_CHANGE_LEN),
+        (0x7f, 6),
+        (19, CHARACTER_UPDATE_LEN),
+        (19, CHARACTER_UPDATE_LEN),
+    ] {
+        let tail = yankee.read_game_raw();
+        assert_eq!((tail[0], tail.len()), (header, len), "{tail:02x?}");
+    }
+    // The remove is called with `(char_name, ch->GetName()) =
+    // (Alpha, Yankee)`, so the line goes to Alice's wire and the record to
+    // Yankee's: legacy `RemoveFromList(account, companion)` sends the line to
+    // `FindPC(account)` naming `companion`, and the REMOVE_FRIEND record to
+    // `FindPC(companion)` naming `account` (`G/messenger_manager.cpp:386-407`).
+    yankee.send_record(&client_messenger_remove(b"Alpha"));
+    assert_eq!(
+        yankee.read_game(),
+        messenger_login(7, b"Alpha"),
+        "the remover hears the REMOVE_FRIEND record"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"<Messenger> Yankee has been deleted from friends list."),
+        "the removed side hears who left the list"
+    );
+    yankee.quiet("the remove settled");
+    wait_for(&database, "(SELECT count(*) FROM messenger_list) = 0");
 }

@@ -875,6 +875,21 @@ pub enum GameCommand {
         /// Where the game thread reports where the line went.
         reply: oneshot::Sender<WhisperOutcome>,
     },
+    /// `MessengerManager::Login`'s load half, reached once the descriptor read the
+    /// rows: the list's companions, the team's GM names and every grant's level. See
+    /// `game_state::messenger`.
+    MessengerLogin {
+        /// The VID of the character that logged in.
+        vid: common::vid::Vid,
+        /// The character Name bytes.
+        name: Vec<u8>,
+        /// The companions the store's rows carry, in the pair key's order.
+        companions: Vec<Vec<u8>>,
+        /// The GM names other than this character's own.
+        team: Vec<Vec<u8>>,
+        /// Every grant's name-to-level map, which the GM gates read.
+        levels: std::collections::BTreeMap<Vec<u8>, u8>,
+    },
     /// `CInputMain::PartyInvite`: the character online under `vid` invites the character
     /// `guest` names to its party. See `game_state::party`.
     PartyInvite {
@@ -959,6 +974,56 @@ pub enum GameCommand {
         /// The mode the client sent.
         mode: u8,
         /// Dropped once the set has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// `MessengerManager::AuthToAdd`: the character online under `vid` answers the
+    /// friend request the `requester` name named. See `game_state::messenger`.
+    MessengerAuth {
+        /// The VID of the answering character.
+        vid: common::vid::Vid,
+        /// The requester name the answer named.
+        requester: Vec<u8>,
+        /// Whether the answer denies: `deny` is every answer whose first byte is
+        /// not `y` (`do_messenger_auth`, `cmd_general.cpp:2283-2284`).
+        deny: bool,
+        /// Answers whether the request became a friendship, which is when the caller
+        /// writes the pair's rows. A deny never becomes one, even though the consume
+        /// answers `true` (`G/messenger_manager.cpp:330-334`).
+        reply: oneshot::Sender<bool>,
+    },
+    /// `MessengerManager::RequestToAdd` through the `ADD_BY_VID` arm: the character online
+    /// under `vid` asks the character whose VID `target` names. See
+    /// `game_state::messenger`.
+    MessengerAddByVid {
+        /// The VID of the asking character.
+        vid: common::vid::Vid,
+        /// The companion's VID the client sent.
+        target_vid: u32,
+        /// Dropped once the request has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// `MessengerManager::RequestToAdd` through the `ADD_BY_NAME` arm, after the caller
+    /// read the name's own grant level, which the GM gate reads. See
+    /// `game_state::messenger`.
+    MessengerAddByName {
+        /// The VID of the asking character.
+        vid: common::vid::Vid,
+        /// The companion name the client sent, as a C string.
+        name: Vec<u8>,
+        /// The grant level of the name the caller read, and `None` in the test-server
+        /// mode, where every level is `GM_IMPLEMENTOR` and the gate is silent.
+        companion_level: Option<u8>,
+        /// Dropped once the request has run, see [`Settled`].
+        settled: oneshot::Sender<()>,
+    },
+    /// `MessengerManager::RemoveFromList` through the REMOVE arm: the character online
+    /// under `vid` takes the `companion` name away. See `game_state::messenger`.
+    MessengerRemove {
+        /// The VID of the removing character.
+        vid: common::vid::Vid,
+        /// The companion name the client sent, as a C string.
+        companion: Vec<u8>,
+        /// Dropped once the remove has run, see [`Settled`].
         settled: oneshot::Sender<()>,
     },
     /// `CInputMain::PartyUseSkill`: the character online under `vid` uses the party
@@ -1507,6 +1572,16 @@ pub struct Loaded {
     /// it (`quest::PC::Save`, `G/questpc.cpp:519-590`), so a flag outlives the session
     /// that set it.
     pub quest_flags: Vec<(Vec<u8>, i32)>,
+    /// The friend names the store's `messenger_list` holds for this character, in the pair
+    /// key's order, which `answer_enter_world` logs in before it delivers the lines that
+    /// waited (`MessengerManager::Login` before `ReadOfflineMessages`,
+    /// `G/input_login.cpp:671,728`).
+    pub messenger_companions: Vec<Vec<u8>>,
+    /// The GM names other than this character's own (`LoadTeamList`,
+    /// `G/messenger_manager.cpp:32-46`).
+    pub messenger_team: Vec<Vec<u8>>,
+    /// Every grant's name-to-level map, which the GM gates read.
+    pub messenger_levels: std::collections::BTreeMap<Vec<u8>, u8>,
 }
 
 /// What the world holds of a character that a save writes: asked for before a save, and
@@ -2981,6 +3056,103 @@ impl GameLoopController {
         .await
         .map_err(|_| MoveItemError::NotSent)?;
         Ok(settling)
+    }
+    /// Hands the world a `CG_MESSENGER` `ADD_BY_VID` from the character online under `vid`,
+    /// without waiting. The visible gates ran in the CG step's own walk; the world runs
+    /// `RequestToAdd`. The [`Settled`] resolves once the add has run.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn messenger_add_by_vid(
+        &self,
+        vid: common::vid::Vid,
+        target_vid: u32,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::MessengerAddByVid {
+            vid,
+            target_vid,
+            settled,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Hands the world a `CG_MESSENGER` `ADD_BY_NAME` from the character online under
+    /// `vid`, without waiting. The caller's GM-gate read (`gm_get_level`) ran in the CG
+    /// step's own walk and rides `companion_level`. The [`Settled`] resolves once the
+    /// add has run.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn messenger_add_by_name(
+        &self,
+        vid: common::vid::Vid,
+        name: Vec<u8>,
+        companion_level: Option<u8>,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::MessengerAddByName {
+            vid,
+            name,
+            companion_level,
+            settled,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Hands the world a `CG_MESSENGER` `REMOVE` from the character online under `vid`,
+    /// without waiting. The caller writes the pair's rows once the remove has run. The
+    /// [`Settled`] resolves once the remove has run.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver.
+    pub async fn messenger_remove(
+        &self,
+        vid: common::vid::Vid,
+        companion: Vec<u8>,
+    ) -> Result<Settled, MoveItemError> {
+        let (settled, settling) = oneshot::channel();
+        self.send_command(GameCommand::MessengerRemove {
+            vid,
+            companion,
+            settled,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        Ok(settling)
+    }
+
+    /// Hands the world a `/messenger_auth` answer from the character online under `vid`,
+    /// and waits for whether the pair became one, which is when the caller writes the
+    /// pair's rows.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemError::NotSent`] when the game thread has closed its receiver, and
+    /// [`MoveItemError::NoAnswer`] when it never answered.
+    pub async fn messenger_auth(
+        &self,
+        vid: common::vid::Vid,
+        requester: Vec<u8>,
+        deny: bool,
+    ) -> Result<bool, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::MessengerAuth {
+            vid,
+            requester,
+            deny,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
     /// Asks the world whether the character online under `vid` holds a party, and
     /// waits for the answer.
