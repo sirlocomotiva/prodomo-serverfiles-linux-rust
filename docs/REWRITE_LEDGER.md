@@ -35029,3 +35029,51 @@ pushed), and the session's line plus last-wins pending byte.
 `sys.char.chat`, `sys.messenger` and `quest.game_option` stay `partial` (the
 unported bits' use sites, INVITE_ANSWER, the offline rework). No ADR changed. No
 owner question added. V26 stays open.
+
+## 250. The other block bits refuse at their own gates (`sys.messenger`, third part)
+
+The four use sites the ledger 249 close left unwatched are live. `CExchange::Start`
+(`G/exchange.cpp:120-150`): the self trade, the non-player trade, the victim's open
+shop or safebox (the busy line), the distance, the victim's live trade (`ALREADY`),
+then the victim's `BLOCK_EXCHANGE` bit, which chats the rejecting line. The port
+keeps that order: the busy arm before the distance, the `ALREADY` arm before the
+block arm, and the block arm chats `The other player is rejecting the exchange.`
+to the starter while the victim hears nothing and no trade opens.
+`CHARACTER::PartyInvite` (`G/char.cpp:5839-5908`): the non-leader line (`[LS;832]`)
+before the guest's `BLOCK_PARTY_INVITE` bit, which answers `[LS;833;%s]` naming
+the guest to the inviter while the guest hears nothing and no invite waits.
+`CHARACTER::RequestToParty` (`G/char.cpp:5651-5676`): the no-leader line, the live
+request, the PC pair, then the leader's `BLOCK_PARTY_REQUEST` bit, which refuses
+quietly — the caller answers `PartyRequestDenied`, the leader hears nothing, and
+no request waits. `CGuild::Invite` (`G/guild.cpp:2027-2055`): the quest-running
+arms before the invitee's `BLOCK_GUILD_INVITE` bit, which answers `[LS;940]` to
+the inviter while the invitee hears nothing and no invite waits, before the auth
+(`[LS;941]`) and empire (`[LS;942]`) gates.
+
+The offline rework's first gate is live too. `CInputDB::ReadOfflineMessages`
+(`G/input_db.cpp:2455-2476`) refuses a character that blocks whispers (`:2460`):
+no record is written and the rows stay waiting. The port's
+`deliver_offline_messages` returns before taking any row when the entering
+character's bit is set, at the same call site the enter answer already held
+(`G/input_login.cpp:728-729`).
+
+`MESSENGER_SUBHEADER_CG_INVITE_ANSWER` has no handler arm in the checked-in
+server: `protocol/src/cg_messenger.rs:77-78` already records that no arm reads
+it, so there is nothing to port.
+
+**The test.** `prodomo/tests/parity.rs`: a new
+`a_block_byte_refuses_at_the_exchange_party_and_guild_gates` proves the four legs
+(the 100-line lint keeps them out of `a_block_byte_refuses_the_line_it_names`).
+Yankee spawns beside Alpha (the trade's distance arm runs before the block arm),
+and the purse rides in before the enter (the founding judge reads the world's
+in-memory gold): his exchange bit answers the rejecting line to Alice and he
+hears nothing; his party-invite bit answers `[LS;833;Yankee]` to her and he hears
+nothing; Alice's request bit then refuses Yankee's `/party_request` quietly (he
+hears `PartyRequestDenied`, she hears nothing); then she founds `MyGuild` and her
+guild-invite answers `[LS;940]` to her while Yankee hears nothing. A
+`set_block_mode` helper sends each `/setblockmode` line and drains its command
+line, skipping the peer's arrival chats on a fresh enter. Unit tests pin each
+gate's line, silence, and waiting-row absence, plus the offline-message drop with
+the rows left waiting. `sys.messenger` stays `partial` (the team list beyond the
+GMs, INVITE_ANSWER's absent arm, the offline rework's remainder). No ADR changed.
+No owner question added. V26 stays open.

@@ -5372,6 +5372,171 @@ fn a_block_byte_refuses_the_line_it_names() {
     wait_for(&database, "(SELECT count(*) FROM messenger_list) = 0");
 }
 
+/// Send `/setblockmode {byte}` from `who` and drain its command line, so a block-gate
+/// leg leaves only its own bit on the wire.
+fn set_block_mode(who: &mut Keyed, byte: u8) {
+    let line = format!("/setblockmode {byte}");
+    who.send_record(&client_chat(CHAT_TYPE_TALKING, line.as_bytes()));
+    let want = a_command_line(line.as_bytes()[1..].as_ref());
+    // The peer's arrival chats (`%s : %s`, `G/input_main.cpp:975-1005`) may still sit
+    // ahead of the command line on a fresh enter — one per peer already inside —
+    // so skip every chat until the command line lands.
+    loop {
+        let record = who.read_game();
+        if record == want {
+            break;
+        }
+        assert_eq!(
+            record[0], GC_CHAT,
+            "only arrival chats sit ahead: {record:02x?}"
+        );
+    }
+}
+
+/// `sys.messenger`: the four remaining block bits refuse at their own gates. Yankee's
+/// exchange bit answers the rejecting line, his party-invite bit answers `[LS;833]`
+/// naming him, Alice's request bit refuses Yankee's request quietly, and her
+/// guild-invite answers `[LS;940]` — each to the caller alone
+/// (`G/exchange.cpp:135-139`, `G/char.cpp:5846-5849`, `G/char.cpp:5673`,
+/// `G/guild.cpp:2046-2050`).
+#[test]
+fn a_block_byte_refuses_at_the_exchange_party_and_guild_gates() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    // Yankee spawns beside Alpha (470000, 950000): the trade's distance arm runs
+    // before the block arm, so a far spawn would die quiet at range, not with the line.
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+         154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    // Alpha's purse is funded before entering: the founding judge reads the world's
+    // in-memory gold, so a later UPDATE would land in the rows but never in the load.
+    give_guild_purse(&database);
+    let (mut alice, alpha) = enter_world(&server, b"alice", 0);
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, true, None);
+    // Yankee sees no one arrive: Alice's enter burst ran before his character existed,
+    // so only her client hears his insert.
+    // The partner blocks exchanges (`BLOCK_EXCHANGE`): Alice's `START` answers the
+    // rejecting line and Yankee hears nothing, with whisper and messenger bits clear.
+    set_block_mode(&mut yankee, 1);
+    alice.send_record(&client_exchange(0, u64::from(yankee_listed.id), 0, 0));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"The other player is rejecting the exchange."),
+        "the starter hears the rejecting line"
+    );
+    yankee.quiet("the rejected start reaches nobody");
+    // The guest blocks party invites (`BLOCK_PARTY_INVITE`): Alice's invite answers
+    // `[LS;833;Yankee]` to her and Yankee hears nothing.
+    set_block_mode(&mut yankee, 2);
+    let mut invite = vec![CG_PARTY_INVITE];
+    invite.extend_from_slice(&yankee_listed.id.to_le_bytes());
+    alice.send_record(&invite);
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;833;Yankee]"),
+        "the inviter hears the guest's name"
+    );
+    yankee.quiet("the blocked invite reaches nobody");
+    // The leader blocks party requests (`BLOCK_PARTY_REQUEST`): Yankee's request is
+    // refused quietly — he hears `PartyRequestDenied` and Alice hears nothing.
+    set_block_mode(&mut alice, 32);
+    set_block_mode(&mut yankee, 0);
+    let request = format!("/party_request {}", alpha.id);
+    yankee.send_record(&client_chat(CHAT_TYPE_TALKING, request.as_bytes()));
+    assert_eq!(
+        yankee.read_game(),
+        a_command_line(b"PartyRequestDenied"),
+        "the requester hears the denial"
+    );
+    alice.quiet("the blocked request reaches nobody");
+    // The guest blocks guild invites (`BLOCK_GUILD_INVITE`): Alice founds her guild
+    // first — Yankee hears the name broadcast alone — then her invite answers
+    // `[LS;940]` to her and Yankee hears nothing. Neither side clears its block byte
+    // first: Alice's 32 touches no founding gate, and a late clear would leave a
+    // point-change on the wire that the creation drain below cannot tell from the
+    // creation walk.
+    let _made = drain_guild_founding(&mut alice, &mut yankee, alpha.id);
+    set_block_mode(&mut yankee, 4);
+    alice.send_record(&client_guild_add_member(yankee_listed.id));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;940]"),
+        "the inviter hears the block line"
+    );
+    yankee.quiet("the blocked invite reaches nobody");
+}
+
+/// Drain Alice's founding of `MyGuild` with Yankee watching: the broadcast, the made
+/// line, the spent item, and the login walk — then Yankee hears the broadcast alone.
+/// Returns the guild id.
+fn drain_guild_founding(alice: &mut Keyed, yankee: &mut Keyed, alpha_pid: u32) -> u32 {
+    alice.send_record(&client_answer_make_guild(b"MyGuild"));
+    let named = alice.read_game();
+    assert_eq!(
+        guild_subheader(&named),
+        GUILD_SUBHEADER_GC_GUILD_NAME,
+        "the broadcast first: {named:02x?}"
+    );
+    let made_id = check_guild_named(&named);
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;682;MyGuild]"),
+        "the made line"
+    );
+    alice.read_game();
+    assert_eq!(
+        alice.read_game(),
+        a_clear_record(0),
+        "the one 70101 is destroyed"
+    );
+    let grades = alice.read_game();
+    assert_eq!(
+        guild_subheader(&grades),
+        GUILD_SUBHEADER_GC_GRADE,
+        "the grade walk: {grades:02x?}"
+    );
+    check_guild_grade_walk(&grades);
+    let info = alice.read_game();
+    assert_eq!(
+        guild_subheader(&info),
+        GUILD_SUBHEADER_GC_INFO,
+        "the info walk: {info:02x?}"
+    );
+    check_guild_info_walk(&info, made_id, alpha_pid);
+    let list = alice.read_game();
+    assert_eq!(
+        guild_subheader(&list),
+        GUILD_SUBHEADER_GC_LIST,
+        "the list walk: {list:02x?}"
+    );
+    check_guild_list_walk(&list, alpha_pid);
+    let login = alice.read_game();
+    assert_eq!(
+        guild_subheader(&login),
+        GUILD_SUBHEADER_GC_LOGIN,
+        "its own login: {login:02x?}"
+    );
+    let skills = alice.read_game();
+    assert_eq!(
+        guild_subheader(&skills),
+        GUILD_SUBHEADER_GC_SKILL_INFO,
+        "the skill walk: {skills:02x?}"
+    );
+    check_guild_skill_walk(&skills);
+    assert_eq!(yankee.read_game(), named, "the other PC hears the name");
+    yankee.quiet("and nothing else follows the founding");
+    made_id
+}
+
 /// `sys.party`: a party line reaches every linked member, the speaker included, and no
 /// outsider on the same map. Alice invites Yankee; Yankee answers; Alice speaks; both hear
 /// the type-3 line, and Charlie (same map, no party) hears nothing

@@ -11,8 +11,8 @@
 //! - **No dungeons, observers or arenas.** Those gates always pass, with a comment at
 //!   each. The empire check, the 30-level window, the partyless check and the 8-member
 //!   cap are live.
-//! - **No block modes.** `BLOCK_PARTY_INVITE`/`BLOCK_PARTY_REQUEST` are unported, so
-//!   nobody blocks and the guest-side checks pass.
+//! - **The block modes.** `BLOCK_PARTY_INVITE` refuses the invite with `[LS;833;%s]`
+//!   naming the guest; `BLOCK_PARTY_REQUEST` refuses the request quietly.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -1055,8 +1055,8 @@ impl GameState {
     }
 
     /// `CHARACTER::PartyInvite` (`G/char.cpp:5839-5908`): the non-leader line, the
-    /// block-mode line (unported — never blocks, the check passes with a comment),
-    /// the joinable gates, the dup-invite quiet return, the 250-Pulse invite event,
+    /// block-mode line (`[LS;833;%s]` names the guest, `G/char.cpp:5846-5849`), the
+    /// joinable gates, the dup-invite quiet return, the 250-Pulse invite event,
     /// and the INVITE to the guest.
     fn character_party_invite(&mut self, inviter: Vid, guest: Vid) {
         let (Some(inviter_pid), Some(guest_pid)) = (self.pid_of(inviter), self.pid_of(guest))
@@ -1070,7 +1070,14 @@ impl GameState {
             self.info_to(inviter, b"[LS;832]", &[]);
             return;
         }
-        // `BLOCK_PARTY_INVITE`: block modes are unported, so nobody blocks.
+        if self.is_block_mode(guest, super::whisper::BLOCK_PARTY_INVITE) {
+            self.info_to(
+                inviter,
+                b"[LS;833;%s]",
+                &[crate::chat_line::Arg::Text(&self.name_arg(guest_pid))],
+            );
+            return;
+        }
         match self.joinable(inviter_pid, guest_pid) {
             JoinErr::None => {}
             JoinErr::Server => {
@@ -1255,7 +1262,11 @@ impl GameState {
         if self.parties.requests.contains_key(&guest_pid) {
             return false;
         }
-        // Both are PCs, and `BLOCK_PARTY_REQUEST` is unported (nobody blocks).
+        // The leader blocks requests: quiet, and the caller answers `PartyRequestDenied`
+        // (`G/char.cpp:5673-5674`, before `IsPartyJoinableCondition`).
+        if self.is_block_mode(leader, super::whisper::BLOCK_PARTY_REQUEST) {
+            return false;
+        }
         match self.joinable(leader_pid, guest_pid) {
             JoinErr::None => {}
             JoinErr::Server => {
@@ -2173,6 +2184,45 @@ mod tests {
         assert!(heard(&mut leader).is_empty());
         assert!(heard(&mut guest).is_empty());
         assert!(world.party_leader_of(GUEST_VID).is_none());
+    }
+
+    /// A guest who blocks party invites refuses the invite: the inviter hears
+    /// `[LS;833;%s]` naming the guest, the guest hears nothing, and no invite waits
+    /// (`G/char.cpp:5846-5849`).
+    #[test]
+    fn an_invite_for_a_guest_who_blocks_invites_answers_833() {
+        let (_clock, mut world, mut leader, mut guest) = a_pair();
+        heard(&mut leader);
+        heard(&mut guest);
+        world.block_modes.insert(
+            Vid::new(GUEST_VID),
+            crate::game_state::whisper::BLOCK_PARTY_INVITE,
+        );
+        world.party_invite(Vid::new(LEADER_VID), Vid::new(GUEST_VID));
+        let told = heard(&mut leader);
+        assert_eq!(told.len(), 1, "the inviter heard one line");
+        assert_eq!(told[0][0], protocol::gc_inventory::HEADER_GC_CHAT.value());
+        assert!(heard(&mut guest).is_empty(), "the guest heard nothing");
+        assert!(
+            !world.parties.invites.contains_key(&(LEADER_VID, GUEST_VID)),
+            "no invite waits"
+        );
+    }
+
+    /// A leader who blocks party requests refuses the request quietly: the guest hears
+    /// `PartyRequestDenied` from the caller, the leader hears nothing, and no request
+    /// waits (`G/char.cpp:5673-5674`).
+    #[test]
+    fn a_request_for_a_leader_who_blocks_requests_is_denied_quietly() {
+        let (_clock, mut world, _leader, mut guest) = a_pair();
+        world.block_modes.insert(
+            Vid::new(LEADER_VID),
+            crate::game_state::whisper::BLOCK_PARTY_REQUEST,
+        );
+        world.party_request(Vid::new(GUEST_VID), b"100");
+        let told = heard(&mut guest);
+        assert_eq!(told.len(), 1, "the guest heard the denial");
+        assert!(world.parties.requests.is_empty(), "no request waits");
     }
 
     #[test]

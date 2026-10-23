@@ -21,8 +21,9 @@
 //! its map. Then gold at `GOLD_MAX_MAX` is refused with the yang-limit line, and a browsed shop
 //! or an open safebox with the other-transaction line; then `ExchangeStart` ignores the
 //! character itself and an NPC, refuses a player who browses a shop or has its safebox open
-//! with the busy line, ignores one `EXCHANGE_MAX_DISTANCE` or farther away, and answers
-//! `ALREADY` when that player trades already. Otherwise both windows open.
+//! with the busy line, ignores one `EXCHANGE_MAX_DISTANCE` or farther away, answers
+//! `ALREADY` when that player trades already, and refuses one who blocks exchanges with
+//! the rejecting line. Otherwise both windows open.
 //!
 //! An offer (`ITEM_ADD`, `ITEM_DEL`, `ELK_ADD`) runs only while the other side does not accept.
 //! The accept that completes the trade settles it: the store writes both sides' rows in one
@@ -55,9 +56,9 @@
 //!
 //! # Not ported
 //!
-//! The spectator check, `IsSecured`, the exchange-block mode, the personal shop, the cube and the
-//! aura window are not in the Rewrite, so none refuses a trade. An open safebox refuses as an
-//! open shop does (`exchange.cpp:92-98`). The mall does not: `IsOpenSafebox` is the safebox only.
+//! The spectator check, `IsSecured`, the personal shop, the cube and the aura window are
+//! not in the Rewrite, so none refuses a trade. An open safebox refuses as an open shop
+//! does (`exchange.cpp:92-98`). The mall does not: `IsOpenSafebox` is the safebox only.
 //! The quest check on `START` (`CQuestManager::GiveItemToPC`, `G/questmanager.cpp:892-916`) runs
 //! a quest's `target` click on the player asked, and no quest can set a target (`target.*` is not
 //! ported), so it never takes the trade, as in the Rewrite. A script that waits for either
@@ -79,6 +80,10 @@ use world::character::{
     COMPLETED_NOTICE, EXCHANGE_MAX_DISTANCE, GOLD_MAX_MAX, OTHER_TRANSACTION_NOTICE,
     PARTNER_BUSY_NOTICE, YANG_LIMIT_NOTICE,
 };
+
+/// The line legacy chats to the starter when the player asked blocks exchanges
+/// (`LC_TEXT("The other player is rejecting the exchange.")`, `G/exchange.cpp:135-139`).
+pub const PARTNER_REJECTS_NOTICE: &str = "The other player is rejecting the exchange.";
 
 use super::shop::notice;
 use super::GameState;
@@ -219,6 +224,8 @@ pub enum TradeDeclined {
     },
     /// The player asked trades already.
     PartnerTrading,
+    /// The player asked blocks exchanges.
+    PartnerRejects,
     /// The character does not trade.
     NotTrading,
     /// The other side accepts, so the offers are fixed.
@@ -409,6 +416,9 @@ impl GameState {
                 reason: TradeDeclined::PartnerTrading,
                 records: vec![Trade::already_record().encode()],
             };
+        }
+        if self.is_block_mode(partner, super::whisper::BLOCK_EXCHANGE) {
+            return self.told(TradeDeclined::PartnerRejects, PARTNER_REJECTS_NOTICE, mover);
         }
         let (trade, said) = Trade::start(vid.raw(), target);
         let deal = Deal {
@@ -1268,6 +1278,23 @@ mod tests {
         assert_eq!(declined(again), silent(TradeDeclined::Trading));
         assert!(!square.state.trading.contains_key(&ALPHA));
         assert!(square.heard(A).is_empty());
+    }
+
+    /// A player who blocks exchanges refuses the start with the rejecting line
+    /// (`G/exchange.cpp:135-139`), after the `ALREADY` arm: a trading partner that
+    /// blocks answers `ALREADY`, not the line.
+    #[test]
+    fn a_start_for_a_partner_who_blocks_exchanges_is_rejected() {
+        let mut square = a_square(&[], &[]);
+        square
+            .state
+            .block_modes
+            .insert(YANKEE, crate::game_state::whisper::BLOCK_EXCHANGE);
+        let rejected = square.step(A, start(YANKEE));
+        let told = vec![line(1, PARTNER_REJECTS_NOTICE)];
+        assert_eq!(declined(rejected), (TradeDeclined::PartnerRejects, told));
+        assert!(square.state.trading.is_empty(), "no trade opened");
+        assert!(square.heard(Y).is_empty(), "the partner heard nothing");
     }
 
     #[test]

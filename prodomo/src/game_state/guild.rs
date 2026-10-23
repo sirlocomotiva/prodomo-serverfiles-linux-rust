@@ -428,10 +428,11 @@ pub enum GuildJoinAnswer {
         /// the joiner is offline.
         own: Vec<Vec<u8>>,
     },
-    /// A gate refused: the line legacy sends to the inviter (`[LS;940]` aside — block
-    /// modes are unported) or to the invitee (the accept ladder), or nothing for the
-    /// quiet arms (no guild, no invite, a deny, the guilded/duplicate row). The
-    /// descriptor sends the line, if any, to `to`, and stores nothing.
+    /// A gate refused: the line legacy sends to the inviter (`[LS;940]` names the block
+    /// mode, `[LS;941]`/`[LS;942]` the auth and empire gates) or to the invitee (the
+    /// accept ladder), or nothing for the quiet arms (no guild, no invite, a deny, the
+    /// guilded/duplicate row). The descriptor sends the line, if any, to `to`, and
+    /// stores nothing.
     Refused {
         /// Whose client hears the line.
         to: Vid,
@@ -1298,7 +1299,13 @@ impl GameState {
         if self.quest_running(invitee_vid) {
             return;
         }
-        // `BLOCK_GUILD_INVITE`: block modes are unported, so nobody blocks.
+        // `BLOCK_GUILD_INVITE` (`G/guild.cpp:2046-2050`): the invitee blocks guild
+        // invites, so the inviter hears `[LS;940]` and the request never runs, before
+        // the auth and empire gates.
+        if self.is_block_mode(invitee_vid, super::whisper::BLOCK_GUILD_INVITE) {
+            self.tell_guild(vid, b"[LS;940]", &[]);
+            return;
+        }
         // Both empire reads use `card.empire`: `characters` holds PCs only, so a VID
         // found here always has a card.
         let empires_differ = self.bodies.get(&vid).map(|body| body.card.empire)
@@ -7342,6 +7349,28 @@ mod tests {
             }
         );
         assert!(heard(&mut guest).is_empty());
+    }
+
+    /// An invitee who blocks guild invites refuses the invite: the inviter hears
+    /// `[LS;940]` and the guest hears nothing, and no invite waits
+    /// (`G/guild.cpp:2046-2050`).
+    #[test]
+    fn an_invite_for_a_guest_who_blocks_guild_invites_answers_940() {
+        let (_clock, mut world, mut master, mut guest) = a_guilded_pair();
+        heard(&mut master);
+        heard(&mut guest);
+        world.block_modes.insert(
+            Vid::new(GUEST_VID),
+            crate::game_state::whisper::BLOCK_GUILD_INVITE,
+        );
+        world.guild_add_member(Vid::new(MASTER_VID), GUEST_VID, NOW);
+        let told = heard(&mut master);
+        assert_eq!(told.len(), 1, "the inviter heard one line");
+        assert!(heard(&mut guest).is_empty(), "the guest heard nothing");
+        assert!(
+            !world.guilds.invites.contains_key(&(GUILD_ID, GUEST_VID)),
+            "no invite waits"
+        );
     }
 
     #[test]

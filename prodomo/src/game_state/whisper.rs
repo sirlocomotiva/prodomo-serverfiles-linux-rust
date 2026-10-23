@@ -346,10 +346,14 @@ impl GameState {
 
     /// The lines that waited for the character that just entered.
     ///
-    /// `CInputDB::ReadOfflineMessages` (`G/input_db.cpp:2455-2476`) writes one
-    /// record per line: the name is the sender's, the text is the line with its
-    /// NUL, and the type is `WHISPER_TYPE_OFFLINE`.
+    /// `CInputDB::ReadOfflineMessages` (`G/input_db.cpp:2455-2476`) refuses a character
+    /// that blocks whispers (`:2460`) and otherwise writes one record per line: the
+    /// name is the sender's, the text is the line with its NUL, and the type is
+    /// `WHISPER_TYPE_OFFLINE`.
     pub(super) fn deliver_offline_messages(&mut self, vid: common::vid::Vid, name: &str) {
+        if self.is_block_mode(vid, BLOCK_WHISPER) {
+            return;
+        }
         for message in self.take_offline_messages(name.as_bytes()) {
             let mut text = message.text.clone();
             text.push(0);
@@ -383,9 +387,9 @@ impl GameState {
     }
 
     /// The block mode of the character under `vid` (`m_pointsInstant.bBlockMode`,
-    /// `G/char.h:471`), or zero when nobody is there. Only the whisper and the
-    /// messenger-invite gates read it: the exchange, party, guild, request and
-    /// equipment bits ride along unwatched.
+    /// `G/char.h:471`), or zero when nobody is there. The whisper gates, the
+    /// messenger-invite gates and the exchange, party, guild and party-request gates
+    /// read it; the equipment bit rides along unwatched (`do_view_equip` is unported).
     #[must_use]
     pub(super) fn block_mode(&self, vid: Vid) -> u8 {
         self.block_modes.get(&vid).copied().unwrap_or(0)
@@ -612,6 +616,41 @@ mod tests {
         assert!(
             world.take_offline_messages(b"Nobody").is_empty(),
             "the line was taken away"
+        );
+    }
+
+    /// A character that blocks whispers hears no waiting line when it enters
+    /// (`G/input_db.cpp:2460`): the lines stay untaken.
+    #[test]
+    fn a_character_who_blocks_whispers_reads_no_waiting_line() {
+        let (mut world, clock, _sender) = a_world_with_a_player();
+        clock.set(20_000);
+        world.offline_messages.insert(
+            b"Nobody".to_vec(),
+            vec![OfflineMessage {
+                from: "P100".to_owned(),
+                text: b"hello".to_vec(),
+                left_at: 20_000,
+            }],
+        );
+        let (tx, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+        world
+            .enter_world_with_items(
+                Vid::new(OTHER),
+                OTHER,
+                "Nobody",
+                &[],
+                crate::client_registry::ClientOutbox::new(tx),
+            )
+            .expect("the character enters");
+        let _list = inbox.try_recv().expect("the enter WAR_LIST is queued");
+        world.block_modes.insert(Vid::new(OTHER), BLOCK_WHISPER);
+        world.deliver_offline_messages(Vid::new(OTHER), "Nobody");
+        assert!(inbox.try_recv().is_err(), "the waiting line was not read");
+        assert_eq!(
+            world.take_offline_messages(b"Nobody").len(),
+            1,
+            "the line stays waiting"
         );
     }
 

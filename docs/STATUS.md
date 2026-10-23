@@ -1,10 +1,10 @@
 # Rewrite status
 
-Last reviewed: 2026-10-23, after ledger section 249 (the block byte refuses the line
-it names).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 250 onwards (the
-rest of the messenger: the team list beyond the GMs, the other block bits' use sites,
-the invite answer, the offline rework).
+Last reviewed: 2026-10-23, after ledger section 250 (the other block bits refuse at
+their own gates).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 251 onwards (the
+rest of the messenger: the team list beyond the GMs, the offline rework's remainder;
+`MESSENGER_SUBHEADER_CG_INVITE_ANSWER` has no handler arm, so there is nothing to port).
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
