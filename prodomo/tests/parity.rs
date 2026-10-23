@@ -3196,7 +3196,15 @@ fn a_character_is_deleted_with_the_delete_code() {
             "{record:02x?}"
         );
     }
-    // `strncmp(..., 7)`: the eighth byte is not compared.
+    // `strncmp(..., 7)`: the eighth byte is not compared. The character deletion names
+    // every messenger row the name is in, either side
+    // (`ClientManagerPlayer.cpp:1541`), so deleting Alpha clears both legs of
+    // its friendship while Beta's own row survives.
+    sql(
+        &database,
+        "INSERT INTO messenger_list (account, companion) VALUES ('Alpha', 'Beta'), ('Beta', \
+         'Alpha')",
+    );
     assert_eq!(
         alice.answer(&client_delete(0, *b"Ab12345X")),
         [GC_PLAYER_DELETE_SUCCESS, 0]
@@ -3210,7 +3218,9 @@ fn a_character_is_deleted_with_the_delete_code() {
         "NOT EXISTS (SELECT 1 FROM player WHERE name = 'Alpha') \
          AND (SELECT count(*) FROM player_deleted WHERE name = 'Alpha' \
          AND player ->> 'level' = '250') = 1 \
-         AND EXISTS (SELECT 1 FROM player WHERE name = 'Beta')",
+         AND EXISTS (SELECT 1 FROM player WHERE name = 'Beta') \
+         AND NOT EXISTS (SELECT 1 FROM messenger_list WHERE account = 'Alpha' OR companion = \
+         'Alpha')",
     );
 }
 

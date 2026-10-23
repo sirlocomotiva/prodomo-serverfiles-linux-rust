@@ -35077,3 +35077,28 @@ gate's line, silence, and waiting-row absence, plus the offline-message drop wit
 the rows left waiting. `sys.messenger` stays `partial` (the team list beyond the
 GMs, INVITE_ANSWER's absent arm, the offline rework's remainder). No ADR changed.
 No owner question added. V26 stays open.
+
+## 251. The deleted character's friends forget it (`sys.messenger`, `sys.login.character`)
+
+The character deletion wiped every messenger row the name was in, either as the
+account or as the companion
+(`snprintf(queryStr, ..., "DELETE FROM messenger_list%s WHERE account='%s' OR \
+companion='%s'", ..., szName, szName)`, `D/ClientManagerPlayer.cpp:1541`), so no
+row names a character that is gone. The port's `db::players::delete_player` did
+not, so a deleted character's friendships survived as rows a `pc.change_name`
+rename never touches (`pc_change_name`'s wipe is `MessengerManager::RemoveAllList`,
+`G/questlua_pc.cpp:2291-2292`, and that bridge is not ported; the select-phase
+`CHANGE_NAME` that is ported only clears the flag). A recreated character with
+the same Name would inherit a live friend list it never made.
+
+The fix reads the name before the archiving delete and wipes its rows in the same
+transaction, and only when the delete takes the row: a refused delete (wrong
+code, a level outside the limits, an empty slot) leaves the lists alone. The
+delete parity scenario seeds both legs of an Alpha-Beta friendship before the
+delete and asserts afterwards that no row names Alpha, and the `db` unit test
+asserts the wipe beside the archived row.
+
+`sys.login.character` stays `ported` (its scenario now names the wipe) and
+`sys.messenger` stays `partial` (the team list beyond the GMs, INVITE_ANSWER's
+absent arm, the offline rework's remainder). No ADR changed. No owner question
+added. V26 stays open.

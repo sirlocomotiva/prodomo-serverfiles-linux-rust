@@ -7,6 +7,7 @@ mod support;
 
 use db::accounts::{create_account, AccountError, AccountId, Name, NewAccount};
 use db::credentials::{DeleteCode, Login, NewPassword};
+use db::messenger::add_pair;
 use db::players::{
     change_name, create_player, delete_player, load_character, lobby, save_character,
     save_position, select_empire, Created, LobbyPlayer, NewPlayer, PlayerDelete, PlayerSave,
@@ -441,10 +442,19 @@ async fn a_delete_needs_the_code_the_slot_and_a_level_inside_the_limits() {
     assert!(!delete_player(store, alice, &lower).await.unwrap());
     assert_eq!(player_count(store).await, 2);
 
+    // Legacy's character deletion wipes every row the name is in, either side
+    // (`ClientManagerPlayer.cpp:1541`), so no friend list names a character
+    // that is gone.
+    add_pair(store, "Hero", "Other").await.unwrap();
     assert!(delete_player(store, alice, &delete(1, hero, b"Ab3dE5gX"))
         .await
         .unwrap());
     assert_eq!(player_count(store).await, 1);
+    let messenger: i64 = sqlx::query_scalar("SELECT count(*) FROM messenger_list")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(messenger, 0);
     let (archived_id, archived_name, level): (i32, String, i64) = sqlx::query_as(
         "SELECT player_id, name, (player ->> 'level')::bigint FROM player_deleted \
          WHERE account_id = $1",

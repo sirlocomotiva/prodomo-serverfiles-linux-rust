@@ -307,6 +307,17 @@ pub async fn delete_player(
     if delete.code.get(..DELETE_CODE_BYTES) != Some(code.as_bytes()) {
         return Ok(false);
     }
+    let gone_name: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM player WHERE account_id = $1 AND slot = $2 AND id = $3",
+    )
+    .bind(account_id)
+    .bind(i16::from(delete.slot))
+    .bind(player_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    // The messenger wipe names every row the name is in (`ClientManagerPlayer.cpp:1541`),
+    // and it fires only when the delete takes the row: a refused delete leaves
+    // the lists alone.
     let archived = sqlx::query(
         "WITH gone AS (DELETE FROM player WHERE account_id = $1 AND slot = $2 AND id = $3 \
          AND level < $4 AND level >= $5 RETURNING *) \
@@ -321,6 +332,14 @@ pub async fn delete_player(
     .execute(&mut *transaction)
     .await?
     .rows_affected();
+    if archived == 1 {
+        if let Some(name) = gone_name.as_deref() {
+            sqlx::query("DELETE FROM messenger_list WHERE account = $1 OR companion = $1")
+                .bind(name)
+                .execute(&mut *transaction)
+                .await?;
+        }
+    }
     transaction.commit().await?;
     Ok(archived == 1)
 }
