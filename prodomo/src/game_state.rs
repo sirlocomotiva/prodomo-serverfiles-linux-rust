@@ -431,6 +431,9 @@ pub struct GameState {
     /// `get_dword_time()` when each character last left a line for an absent target
     /// (`dwLastOfflinePMTime`, `G/char.h:2177`).
     last_offline_pm: HashMap<common::vid::Vid, u32>,
+    /// The block mode of each character (`m_pointsInstant.bBlockMode`, `G/char.h:471`):
+    /// the `EBlockAction` bits `SetBlockMode` wrote and the quest flags persist.
+    block_modes: HashMap<common::vid::Vid, u8>,
     /// The affect event of each character that has one (`m_pkAffectEvent`): the potion
     /// recovery, the stamina refill and the timed affects. See [`affect`].
     affect_events: HashMap<common::vid::Vid, affect::AffectEvent>,
@@ -601,6 +604,7 @@ impl GameState {
             clients: None,
             offline_messages: HashMap::new(),
             last_offline_pm: HashMap::new(),
+            block_modes: HashMap::new(),
             affect_events: HashMap::new(),
             affect_sequence: 0,
             npc_affects: HashMap::new(),
@@ -939,6 +943,9 @@ impl GameState {
                 reply,
             } => self.answer_restart(vid, kind, mover, reply),
             GameCommand::SkillUp { vid, rest, reply } => self.answer_skill_up(vid, &rest, reply),
+            GameCommand::SetBlockMode { vid, rest, reply } => {
+                self.answer_set_block_mode(vid, &rest, reply);
+            }
             GameCommand::Stop => {
                 // The loop handles `Stop` itself, before a command ever reaches a
                 // processor. Reaching here would mean the loop and the state
@@ -1280,6 +1287,37 @@ impl GameState {
         let answer = crate::game_loop_messages::SkillUpAnswer { climbed };
         if reply.send(answer).is_err() {
             debug!(?vid, "nobody was left to hear a skill-up's answer");
+        }
+    }
+
+    /// Run the `/setblockmode` line and answer with its command line and its
+    /// quest-flag writes. An empty line is quiet (`if (*arg1)`): the byte only
+    /// changes when the line names one, and the store only hears the flags then.
+    fn answer_set_block_mode(
+        &mut self,
+        vid: common::vid::Vid,
+        rest: &[u8],
+        reply: oneshot::Sender<crate::game_loop_messages::SetBlockModeAnswer>,
+    ) {
+        use crate::command::one_argument;
+        let (word, _) = one_argument(rest);
+        let answer = if word.is_empty() {
+            crate::game_loop_messages::SetBlockModeAnswer::default()
+        } else {
+            let mode = crate::game_state::whisper::parse_block_mode(&word);
+            match self.set_block_mode(vid, mode) {
+                Some((line, flags)) => crate::game_loop_messages::SetBlockModeAnswer {
+                    line: Some(line),
+                    flags,
+                },
+                None => crate::game_loop_messages::SetBlockModeAnswer::default(),
+            }
+        };
+        if let Some(line) = answer.line.clone() {
+            let _sent = self.write_to_client(vid, line);
+        }
+        if reply.send(answer).is_err() {
+            debug!(?vid, "nobody was left to hear a block mode's answer");
         }
     }
 

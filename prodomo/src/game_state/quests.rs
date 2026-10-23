@@ -112,12 +112,14 @@ pub type QuestStepOutcome = (
     Vec<super::guild::GuildQuestStore>,
 );
 
-/// What a quest run reports (230s): the records, the GRAND climbs, and the `guild.*`
-/// calls the scripts made (each for [`GameState::answer_guild_quest`] after the step).
+/// What a quest run reports: the records, the GRAND climbs, the `guild.*`
+/// calls the scripts made (each for [`GameState::answer_guild_quest`] after the step),
+/// and the last `pc.send_block_mode` byte the scripts set, for the block byte.
 type QuestRun = (
     Vec<Vec<u8>>,
     Vec<(u8, u8, i32)>,
     Vec<super::guild::GuildQuestOp>,
+    Option<u8>,
 );
 
 /// `get_global_time()` in seconds: the wall clock a quest step judges against.
@@ -178,6 +180,9 @@ pub(super) struct Session<'s> {
     pub(super) guilds: super::guild::GuildShadow,
     /// What the client is sent, in order.
     pub(super) records: Vec<Vec<u8>>,
+    /// The `pc.send_block_mode` byte the scripts set, the last one winning;
+    /// `SetBlockModeForce` writes the byte beside the quest flags, and no flag moves.
+    pub(super) block_mode: Option<u8>,
 }
 
 impl<'s> Session<'s> {
@@ -493,6 +498,21 @@ impl Game for Session<'_> {
             .min(40)
     }
 
+    fn send_block_mode(&mut self, mode: u8) {
+        // `SetBlockModeForce` (`G/char.cpp:7658-7661`): the byte lands now, the
+        // client hears `setblockmode %d` in this step's records, and no quest
+        // flag moves — so the pending byte rides the session and lands after
+        // the step, next to where the world's flags would have landed.
+        let to = self.mover.recipient(self.locale);
+        self.records.push(chat_packet(
+            to,
+            CHAT_TYPE_COMMAND,
+            b"setblockmode %d",
+            &[Arg::Int(i64::from(mode))],
+        ));
+        self.block_mode = Some(mode);
+    }
+
     fn map_index(&self) -> i32 {
         self.map_index
     }
@@ -561,9 +581,15 @@ impl GameState {
                 manager.button(pid, *quest, game);
             }
         });
-        let Some(((), (mut records, climbs, ops))) = answered else {
+        let Some(((), (mut records, climbs, ops, block_mode))) = answered else {
             return Ok(QuestStepOutcome::default());
         };
+        if let Some(mode) = block_mode {
+            // `pc.send_block_mode` landed after the script's own records and after
+            // the guild drains: `SetBlockModeForce` writes the byte beside the
+            // flags (`G/char.cpp:7658-7661`), never through them.
+            self.block_modes.insert(vid, mode);
+        }
         let now = quest_now();
         let mut stores = Vec::new();
         for op in &ops {
@@ -599,13 +625,16 @@ impl GameState {
             .spot_of(vid.raw())
             .map_or((0, 0), |spot| (spot.x, spot.y));
         let place = GroundPlace { channel, map, x, y };
-        let Some(((), (records, _, _))) =
+        let Some(((), (records, _, _, block_mode))) =
             self.run_quests(place, mover, level, pid, |manager, game| {
                 manager.letter(pid, quest, 0, game);
             })
         else {
             return;
         };
+        if let Some(mode) = block_mode {
+            self.block_modes.insert(vid, mode);
+        }
         for record in records {
             let _sent = self.write_to_client(vid, record);
         }
@@ -628,13 +657,16 @@ impl GameState {
         let level = character
             .points()
             .map_or(1, world::character::Points::level);
-        let Some((taken, (mut records, climbs, ops))) =
+        let Some((taken, (mut records, climbs, ops, block_mode))) =
             self.run_quests(place, mover, level, pid, |manager, game| {
                 manager.click(pid, target, u32::from(race), game)
             })
         else {
             return (false, QuestStepOutcome::default());
         };
+        if let Some(mode) = block_mode {
+            self.block_modes.insert(vid, mode);
+        }
         let now = quest_now();
         let mut stores = Vec::new();
         for op in &ops {
@@ -678,10 +710,16 @@ impl GameState {
         let level = character
             .points()
             .map_or(1, world::character::Points::level);
-        self.run_quests(place, mover, level, pid, |manager, game| {
+        let landed = self.run_quests(place, mover, level, pid, |manager, game| {
             manager.levelup(pid, game);
-        })
-        .map_or_else(Vec::new, |((), (records, _, _))| records)
+        });
+        let Some(((), (records, _, _, block_mode))) = landed else {
+            return Vec::new();
+        };
+        if let Some(mode) = block_mode {
+            self.block_modes.insert(vid, mode);
+        }
+        records
     }
 
     /// `CQuestManager::Kill` for the character under `vid`, which killed race `race` under
@@ -710,11 +748,17 @@ impl GameState {
         let leader = self
             .quest_kill_leader(vid)
             .or(if partied { None } else { Some(pid) });
-        self.run_quests(place, mover, level, pid, |manager, game| {
+        let landed = self.run_quests(place, mover, level, pid, |manager, game| {
             manager.set_quest_npc(victim);
             manager.kill(pid, race, leader, game);
-        })
-        .map_or_else(Vec::new, |((), (records, _, _))| records)
+        });
+        let Some(((), (records, _, _, block_mode))) = landed else {
+            return Vec::new();
+        };
+        if let Some(mode) = block_mode {
+            self.block_modes.insert(vid, mode);
+        }
+        records
     }
 
     /// Run `op` on the manager with a [`Game`] for the character of `pid` standing
@@ -790,6 +834,7 @@ impl GameState {
             points,
             climbs: Vec::new(),
             guild_ops: Vec::new(),
+            block_mode: None,
             guilds: guilds.clone(),
             records: Vec::new(),
         };
@@ -798,9 +843,10 @@ impl GameState {
             records,
             climbs,
             guild_ops,
+            block_mode,
             ..
         } = session;
-        Some((answer, (records, climbs, guild_ops)))
+        Some((answer, (records, climbs, guild_ops, block_mode)))
     }
 }
 
@@ -935,6 +981,7 @@ mod tests {
             guild_ops: Vec::new(),
             guilds: super::super::guild::GuildShadow::default(),
             records: Vec::new(),
+            block_mode: None,
         };
         assert_eq!(session.mob_name(20_016), Some(b"Smith".to_vec()));
         assert_eq!(session.mob_name(20_017), None, "a name with no proto");
@@ -953,5 +1000,65 @@ mod tests {
             .map(|(_, chat_type)| chat_packet(to, *chat_type, b"%s", &[Arg::Text(b"hi")]))
             .collect();
         assert_eq!(session.records, expected);
+    }
+
+    /// `SetBlockModeForce` (`G/char.cpp:7658-7661`): the byte lands now, the
+    /// client hears `setblockmode %d` in this step's records, the last call
+    /// winning, and no quest flag moves — the pending byte rides the session.
+    #[test]
+    fn send_block_mode_lands_the_line_and_the_last_byte_wins() {
+        use gamedata::mob_locale_names::{MobLocaleNames, MobNamesByLanguage};
+        use gamedata::mob_proto::MobProto;
+        use gamedata::mob_proto::CHAR_TYPE_NPC;
+        use gamedata::records::MobTableRecord;
+
+        let protos = MobProtos::from_rows(vec![MobProto {
+            line: 2,
+            table: MobTableRecord {
+                vnum: 20_016,
+                mob_type: CHAR_TYPE_NPC,
+                ..MobTableRecord::default()
+            },
+        }]);
+        let english = MobLocaleNames::parse(b"VNUM\tNAME\n20016\tSmith\n").unwrap();
+        let names = MobNamesByLanguage::from_tables(vec![english]);
+        let locale = LocaleStrings::default();
+        let mut dice = Pcg32::new(1, 1);
+        let tables = gamedata::pc_skill_data::PcSkills::default();
+        let mut slots = super::super::pc_skill::PcSkillState::default();
+        let mut session = Session {
+            map_index: 0,
+            war_map: 0,
+            level: 1,
+            npcs: None,
+            protos: &protos,
+            names: &names,
+            locale: &locale,
+            mover: test_place::MOVER,
+            tables: &tables,
+            dice: &mut dice,
+            reader: Vid::new(1),
+            card: (0, 1),
+            pc_level: 10,
+            caller: None,
+            slots: &mut slots,
+            affects: None,
+            points: None,
+            climbs: Vec::new(),
+            guild_ops: Vec::new(),
+            guilds: super::super::guild::GuildShadow::default(),
+            records: Vec::new(),
+            block_mode: None,
+        };
+        assert_eq!(session.block_mode, None);
+        session.send_block_mode(8);
+        session.send_block_mode(24);
+        assert_eq!(session.block_mode, Some(24), "the last call wins");
+        assert_eq!(session.records.len(), 2);
+        let to = test_place::MOVER.recipient(&locale);
+        assert_eq!(
+            session.records[1],
+            chat_packet(to, CHAT_TYPE_COMMAND, b"setblockmode %d", &[Arg::Int(24)]),
+        );
     }
 }

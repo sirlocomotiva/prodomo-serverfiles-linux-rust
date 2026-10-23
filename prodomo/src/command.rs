@@ -142,6 +142,7 @@ impl CommandEntry {
             "do_notice" => Command::GlobalNotice,
             "do_map_notice" => Command::MapNotice,
             "do_big_notice" => Command::BigNotice,
+            "do_setblockmode" => Command::SetBlockMode,
             _ => Command::NotPorted(self.name),
         }
     }
@@ -195,6 +196,9 @@ pub enum Command {
     MessengerAuth,
     /// `do_notice`: every client on every Channel hears the GM's line.
     GlobalNotice,
+    /// `do_setblockmode`: the `/setblockmode` line's byte becomes the character's own
+    /// block mode, and the client hears `setblockmode %d` beside seven quest flags.
+    SetBlockMode,
     /// `do_map_notice`: every client on the GM's Channel and map hears the line.
     MapNotice,
     /// `do_big_notice`: the GM hears its own line in the big font.

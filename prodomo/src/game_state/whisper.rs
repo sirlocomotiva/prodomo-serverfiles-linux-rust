@@ -50,8 +50,13 @@
 //! it may leave another one. The wait is ten seconds per sender
 //! (`G/input_main.cpp:426-428`).
 
+use crate::chat_line::{chat_packet, Arg};
 use common::vid::Vid;
-use protocol::gc_whisper::{GcWhisper, WHISPER_TYPE_OFFLINE, WHISPER_TYPE_SYSTEM};
+use protocol::gc_chat::CHAT_TYPE_COMMAND;
+use protocol::gc_whisper::{
+    GcWhisper, WHISPER_TYPE_OFFLINE, WHISPER_TYPE_SENDER_BLOCKED, WHISPER_TYPE_SYSTEM,
+    WHISPER_TYPE_TARGET_BLOCKED,
+};
 use tracing::{debug, warn};
 
 use crate::game_loop_messages::WhisperOutcome;
@@ -75,6 +80,54 @@ const OFFLINE_MESSAGE_DELAY_MS: u32 = 10 * 1000;
 /// The five hours a waiting line lives (`iHour`,
 /// `CClientManager::OfflineMessageGarbage`, `server/server/db/ClientManager.cpp:4642`).
 const OFFLINE_MESSAGE_LIFETIME_MS: u32 = 5 * 60 * 60 * 1000;
+
+/// `EBlockAction` (`G/char.h:371-379`): the block-mode bits. Only the whisper and
+/// the messenger-invite gates read them here; the exchange, party, guild, request
+/// and equipment views are unported. Each bit sits on the character's own mode
+/// byte (`m_pointsInstant.bBlockMode`, `G/char.h:471`), which `SetBlockMode`
+/// writes and `SetBlockModeForce` pushes without the quest flags
+/// (`G/char.cpp:7643-7661`).
+pub(super) const BLOCK_EXCHANGE: u8 = 1 << 0;
+/// `BLOCK_PARTY_INVITE` (`:373`): 1 << 1.
+pub(super) const BLOCK_PARTY_INVITE: u8 = 1 << 1;
+/// `BLOCK_GUILD_INVITE` (`:374`): 1 << 2.
+pub(super) const BLOCK_GUILD_INVITE: u8 = 1 << 2;
+pub(super) const BLOCK_WHISPER: u8 = 1 << 3;
+/// `BLOCK_MESSENGER_INVITE` (`G/char.h:376`).
+pub(super) const BLOCK_MESSENGER_INVITE: u8 = 1 << 4;
+/// `BLOCK_PARTY_REQUEST` (`G/char.h:377`): 1 << 5.
+pub(super) const BLOCK_PARTY_REQUEST: u8 = 1 << 5;
+/// `BLOCK_VIEW_EQUIPMENT` (`G/char.h:378`): 1 << 6.
+pub(super) const BLOCK_VIEW_EQUIPMENT: u8 = 1 << 6;
+
+/// The seven `game_option.block_*` quest-flag writes `SetBlockMode` makes beside
+/// the byte, each the flag name and its 0/1 value.
+pub(super) type BlockFlagWrites = Vec<(Vec<u8>, i32)>;
+
+/// The `EBlockAction` bits in the order `SetBlockMode` writes their flags
+/// (`G/char.cpp:7649-7655`).
+const BLOCK_BITS: [u8; 7] = [
+    BLOCK_EXCHANGE,
+    BLOCK_PARTY_INVITE,
+    BLOCK_GUILD_INVITE,
+    BLOCK_WHISPER,
+    BLOCK_MESSENGER_INVITE,
+    BLOCK_PARTY_REQUEST,
+    BLOCK_VIEW_EQUIPMENT,
+];
+/// `str_to_number(flag, arg1)` (`G/cmd_general.cpp:2306-2307`): the byte the
+/// `/setblockmode` line names. A non-numeric word reads as zero, and only the
+/// low byte survives.
+pub(super) fn parse_block_mode(word: &[u8]) -> u8 {
+    let mut value: u32 = 0;
+    for &byte in word {
+        let Some(digit) = byte.checked_sub(b'0').filter(|digit| *digit < 10) else {
+            return 0;
+        };
+        value = value.saturating_mul(10).saturating_add(u32::from(digit));
+    }
+    value.to_le_bytes()[0]
+}
 
 /// What the legacy says when the line was left for the target
 /// (`G/input_main.cpp:472`).
@@ -132,12 +185,29 @@ impl GameState {
         let target = std::str::from_utf8(name)
             .ok()
             .and_then(|name| self.whisper_target(name));
-        match target {
-            Some(target) if target == vid => {
-                // `if (pkChr == ch) return (iExtraLen);` (`G/input_main.cpp:372`):
-                // the sender's own name is dropped without a word.
-                WhisperOutcome::Dropped
+        // `if (pkChr == ch) return (iExtraLen);` (`G/input_main.cpp:372`): the
+        // sender's own name is dropped without a word, before any block check.
+        if target == Some(vid) {
+            return WhisperOutcome::Dropped;
+        }
+        // `if (ch->IsBlockMode(BLOCK_WHISPER))` (`G/input_main.cpp:387-400`,
+        // repeated at `:508-517` once the target's descriptor is known): a
+        // sender who blocks whispers hears the sender-blocked record with the
+        // target's name in it, and the line goes nowhere.
+        if self.is_block_mode(vid, BLOCK_WHISPER) {
+            self.answer_blocked(vid, name, WHISPER_TYPE_SENDER_BLOCKED);
+            return WhisperOutcome::Answered;
+        }
+        if let Some(target) = target {
+            if self.is_block_mode(target, BLOCK_WHISPER) {
+                // `else if (pkChr && pkChr->IsBlockMode(BLOCK_WHISPER))`
+                // (`G/input_main.cpp:518-529`): the target blocks whispers, so the
+                // sender hears the target-blocked record with the target's name.
+                self.answer_blocked(vid, name, WHISPER_TYPE_TARGET_BLOCKED);
+                return WhisperOutcome::Answered;
             }
+        }
+        match target {
             Some(target) => {
                 if text.is_empty() {
                     // `if (buflen > 0)` (`G/input_main.cpp:622`): an empty line
@@ -245,6 +315,25 @@ impl GameState {
         let _sent = self.write_to_client(vid, bytes);
     }
 
+    /// Tell the sender its line was refused for a block (`G/input_main.cpp:387-400`
+    /// and `:518-529`): a record of `whisper_type` whose name is the *target's*
+    /// name, with no text. The legacy writes the name twice (`strlcpy` into
+    /// `szNameFrom` both times, `:392-393`) and sends the fixed record with no
+    /// payload, so the name the client shows is the target's.
+    fn answer_blocked(&mut self, vid: common::vid::Vid, name: &[u8], whisper_type: u8) {
+        let record = GcWhisper {
+            whisper_type,
+            name_from: crate::loading_phase::name_bytes_field(name),
+            can_format: true,
+            text: Vec::new(),
+        };
+        let Ok(bytes) = record.encode() else {
+            warn!(?vid, "a block notice did not fit its record");
+            return;
+        };
+        let _sent = self.write_to_client(vid, bytes);
+    }
+
     /// The lines waiting for the character that just entered, and their removal.
     ///
     /// `CHARACTER::ReadOfflineMessages` (`G/char.cpp:11438-11446`) asks for the
@@ -291,6 +380,75 @@ impl GameState {
                 .retain(|message| now.wrapping_sub(message.left_at) <= OFFLINE_MESSAGE_LIFETIME_MS);
             !messages.is_empty()
         });
+    }
+
+    /// The block mode of the character under `vid` (`m_pointsInstant.bBlockMode`,
+    /// `G/char.h:471`), or zero when nobody is there. Only the whisper and the
+    /// messenger-invite gates read it: the exchange, party, guild, request and
+    /// equipment bits ride along unwatched.
+    #[must_use]
+    pub(super) fn block_mode(&self, vid: Vid) -> u8 {
+        self.block_modes.get(&vid).copied().unwrap_or(0)
+    }
+
+    /// Whether the character under `vid` blocks `bit` (`CHARACTER::IsBlockMode`,
+    /// `G/char.h:899`).
+    #[must_use]
+    pub(super) fn is_block_mode(&self, vid: Vid, bit: u8) -> bool {
+        self.block_mode(vid) & bit != 0
+    }
+
+    /// The `game_option.block_*` quest flag for one block bit, which `SetBlockMode`
+    /// writes beside the byte (`G/char.cpp:7649-7655`).
+    const fn block_flag(bit: u8) -> &'static [u8] {
+        match bit {
+            BLOCK_EXCHANGE => b"game_option.block_exchange",
+            BLOCK_PARTY_INVITE => b"game_option.block_party_invite",
+            BLOCK_GUILD_INVITE => b"game_option.block_guild_invite",
+            BLOCK_WHISPER => b"game_option.block_whisper",
+            BLOCK_MESSENGER_INVITE => b"game_option.block_messenger_invite",
+            BLOCK_PARTY_REQUEST => b"game_option.block_party_request",
+            _ => b"game_option.block_view_equipment",
+        }
+    }
+
+    /// `CHARACTER::SetBlockMode` (`G/char.cpp:7643-7656`): write `mode`, chat
+    /// `setblockmode %d` to the character's own client, and write the seven
+    /// `game_option.block_*` quest flags. The caller answers the character's own
+    /// record and the store from the returned byte and flags.
+    pub(super) fn set_block_mode(
+        &mut self,
+        vid: Vid,
+        mode: u8,
+    ) -> Option<(Vec<u8>, BlockFlagWrites)> {
+        let character = self.characters.find_by_vid(vid).ok()?;
+        let pid = character.player_id();
+        self.block_modes.insert(vid, mode);
+        let mut flags = BlockFlagWrites::new();
+        if let Some(quests) = self.quests.as_mut() {
+            let manager = quests.manager_mut();
+            for bit in BLOCK_BITS {
+                let value = i32::from(u8::from(mode & bit != 0));
+                manager.set_quest_flag(pid, Self::block_flag(bit), value);
+                flags.push((Self::block_flag(bit).to_vec(), value));
+            }
+        } else {
+            for bit in BLOCK_BITS {
+                flags.push((
+                    Self::block_flag(bit).to_vec(),
+                    i32::from(u8::from(mode & bit != 0)),
+                ));
+            }
+        }
+        let line = self.own_mover(vid).map(|mover| {
+            chat_packet(
+                mover.recipient(&self.locale),
+                CHAT_TYPE_COMMAND,
+                b"setblockmode %d",
+                &[Arg::Int(i64::from(mode))],
+            )
+        });
+        line.map(|line| (line, flags))
     }
 }
 
@@ -455,5 +613,118 @@ mod tests {
             world.take_offline_messages(b"Nobody").is_empty(),
             "the line was taken away"
         );
+    }
+
+    #[test]
+    fn the_byte_is_digits_only_and_only_the_low_byte_survives() {
+        assert_eq!(parse_block_mode(b"8"), 8);
+        assert_eq!(parse_block_mode(b"264"), 8, "only the low byte survives");
+        assert_eq!(parse_block_mode(b""), 0, "checked before parsing");
+        assert_eq!(
+            parse_block_mode(b"8x"),
+            0,
+            "a non-numeric word reads as zero"
+        );
+        assert_eq!(parse_block_mode(b"x"), 0);
+    }
+
+    /// Enter the second player and return its inbox, past the enter queue.
+    fn enter_second_player(world: &mut GameState) -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
+        let (tx, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+        world
+            .enter_world_with_items(
+                Vid::new(OTHER),
+                OTHER,
+                "P101",
+                &[],
+                crate::client_registry::ClientOutbox::new(tx),
+            )
+            .expect("the second player enters");
+        let _list = inbox.try_recv().expect("the enter WAR_LIST is queued");
+        inbox
+    }
+
+    #[test]
+    fn a_blocked_sender_hears_the_sender_blocked_record() {
+        let (mut world, _clock, mut sender) = a_world_with_a_player();
+        let mut target = enter_second_player(&mut world);
+        world.block_modes.insert(Vid::new(VID), BLOCK_WHISPER);
+
+        let outcome =
+            world.deliver_whisper(Vid::new(VID), b"P101", b"hello", b"the record".to_vec());
+        assert_eq!(outcome, WhisperOutcome::Answered);
+        let notice = sender.try_recv().expect("the sender was told");
+        assert_eq!(notice[0], protocol::gc_inventory::HEADER_GC_WHISPER.value());
+        assert_eq!(notice[3], WHISPER_TYPE_SENDER_BLOCKED);
+        let mut named = b"P101\0".to_vec();
+        named.extend_from_slice(&[0; 20]);
+        assert_eq!(
+            &notice[4..29],
+            named.as_slice(),
+            "the record names the target"
+        );
+        assert!(target.try_recv().is_err(), "the target heard nothing");
+    }
+
+    #[test]
+    fn a_blocked_target_hears_the_target_blocked_record() {
+        let (mut world, _clock, mut sender) = a_world_with_a_player();
+        let mut target = enter_second_player(&mut world);
+        world.block_modes.insert(Vid::new(OTHER), BLOCK_WHISPER);
+
+        let outcome =
+            world.deliver_whisper(Vid::new(VID), b"P101", b"hello", b"the record".to_vec());
+        assert_eq!(outcome, WhisperOutcome::Answered);
+        let notice = sender.try_recv().expect("the sender was told");
+        assert_eq!(notice[3], WHISPER_TYPE_TARGET_BLOCKED);
+        assert!(target.try_recv().is_err(), "the target heard nothing");
+    }
+
+    #[test]
+    fn self_whisper_stays_quiet_even_when_blocked() {
+        let (mut world, _clock, mut inbox) = a_world_with_a_player();
+        world.block_modes.insert(Vid::new(VID), BLOCK_WHISPER);
+
+        let outcome =
+            world.deliver_whisper(Vid::new(VID), b"P100", b"hello", b"the record".to_vec());
+        assert_eq!(outcome, WhisperOutcome::Dropped);
+        assert!(inbox.try_recv().is_err(), "the sender heard nothing");
+    }
+
+    #[test]
+    fn set_block_mode_writes_the_byte_the_line_and_the_seven_flags() {
+        let (mut world, _clock, _inbox) = a_world_with_a_player();
+        let (line, flags) = world
+            .set_block_mode(Vid::new(VID), BLOCK_WHISPER | BLOCK_MESSENGER_INVITE)
+            .expect("the character is online");
+        assert_eq!(
+            world.block_mode(Vid::new(VID)),
+            BLOCK_WHISPER | BLOCK_MESSENGER_INVITE
+        );
+        assert!(world.is_block_mode(Vid::new(VID), BLOCK_WHISPER));
+        assert!(!world.is_block_mode(Vid::new(VID), BLOCK_EXCHANGE));
+        assert_eq!(line[0], protocol::gc_inventory::HEADER_GC_CHAT.value());
+        assert!(line
+            .windows(b"setblockmode 24".len())
+            .any(|window| window == b"setblockmode 24"));
+        let names: Vec<&[u8]> = flags.iter().map(|(name, _)| name.as_slice()).collect();
+        assert_eq!(
+            names,
+            [
+                b"game_option.block_exchange".as_slice(),
+                b"game_option.block_party_invite".as_slice(),
+                b"game_option.block_guild_invite".as_slice(),
+                b"game_option.block_whisper".as_slice(),
+                b"game_option.block_messenger_invite".as_slice(),
+                b"game_option.block_party_request".as_slice(),
+                b"game_option.block_view_equipment".as_slice(),
+            ]
+        );
+        let values: Vec<i32> = flags.iter().map(|(_, value)| *value).collect();
+        assert_eq!(values, [0, 0, 0, 1, 1, 0, 0]);
+        assert!(world
+            .set_block_mode(Vid::new(9999), BLOCK_WHISPER)
+            .is_none());
+        assert_eq!(world.block_mode(Vid::new(9999)), 0);
     }
 }

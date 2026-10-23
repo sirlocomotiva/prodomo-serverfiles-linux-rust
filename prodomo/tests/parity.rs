@@ -5275,13 +5275,108 @@ fn a_whisper_for_a_character_that_is_not_there_is_left_for_it() {
         "the line keeps its bytes and its NUL"
     );
 }
+
+/// `sys.char.chat`, `sys.messenger`: a block byte refuses the line it names.
+/// Alice's `/setblockmode 8` lands her whisper block, so her whisper to Yankee
+/// answers the sender-blocked record and Bob hears nothing; Yankee's line back
+/// answers the target-blocked record. Yankee's `/setblockmode 16` lands his
+/// friend-request block, so Alice's add answers `[LS;657]` and no ask reaches
+/// him. Both `/setblockmode` lines answer the `setblockmode %d` command line
+/// and persist the seven `game_option.block_*` quest flags, so the next enter
+/// still refuses.
+///
+/// `do_setblockmode` (`G/cmd_general.cpp:2300-2309`), `CInputMain::Whisper`
+/// (`G/input_main.cpp:372-400`, `:508-529`) and `CInputMain::Messenger`'s
+/// `ADD_BY_NAME` arm (`G/input_main.cpp:1202-1206`).
+#[test]
+fn a_block_byte_refuses_the_line_it_names() {
+    use protocol::gc_whisper::{WHISPER_TYPE_SENDER_BLOCKED, WHISPER_TYPE_TARGET_BLOCKED};
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    alice.sees_arrive(yankee_listed.id, true, None);
+
+    alice.send_record(&client_chat(CHAT_TYPE_TALKING, b"/setblockmode 8"));
+    assert_eq!(
+        alice.read_game(),
+        a_command_line(b"setblockmode 8"),
+        "the setter hears the setblockmode command line"
+    );
+    alice.quiet("the set settled");
+
+    // A sender who blocks whispers hears the sender-blocked record with the
+    // target's name in it, and the line goes nowhere.
+    alice.send_record(&client_whisper(b"Yankee", b"hello"));
+    let notice = alice.read_game();
+    assert_eq!(notice[0], GC_WHISPER);
+    assert_eq!(notice[3], WHISPER_TYPE_SENDER_BLOCKED);
+    assert_eq!(
+        &notice[4..29],
+        &name_field(b"Yankee")[..],
+        "the notice names the target"
+    );
+    yankee.quiet("the blocked sender's line reaches nobody");
+
+    // The target blocks whispers, so the sender hears the target-blocked record
+    // with the target's name. Alice clears her own block first, or her own
+    // sender check would answer first (`:387-400` runs before `:518-529`).
+    alice.send_record(&client_chat(CHAT_TYPE_TALKING, b"/setblockmode 0"));
+    assert_eq!(
+        alice.read_game(),
+        a_command_line(b"setblockmode 0"),
+        "the clearer hears the setblockmode command line"
+    );
+    yankee.send_record(&client_chat(CHAT_TYPE_TALKING, b"/setblockmode 8"));
+    assert_eq!(
+        yankee.read_game(),
+        a_command_line(b"setblockmode 8"),
+        "the setter hears the setblockmode command line"
+    );
+    alice.send_record(&client_whisper(b"Yankee", b"again"));
+    let notice = alice.read_game();
+    assert_eq!(notice[0], GC_WHISPER);
+    assert_eq!(notice[3], WHISPER_TYPE_TARGET_BLOCKED);
+    assert_eq!(
+        &notice[4..29],
+        &name_field(b"Yankee")[..],
+        "the notice names the target"
+    );
+
+    // The target blocks friend requests, so the caller hears `[LS;657]` and the
+    // request never runs.
+    yankee.send_record(&client_chat(CHAT_TYPE_TALKING, b"/setblockmode 16"));
+    assert_eq!(
+        yankee.read_game(),
+        a_command_line(b"setblockmode 16"),
+        "the setter hears the setblockmode command line"
+    );
+    alice.send_record(&client_messenger_add_by_name(b"Yankee"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;657]"),
+        "the caller hears the blocked line"
+    );
+    yankee.quiet("the blocked invite reaches nobody");
+    wait_for(&database, "(SELECT count(*) FROM messenger_list) = 0");
+}
+
 /// `sys.party`: a party line reaches every linked member, the speaker included, and no
 /// outsider on the same map. Alice invites Yankee; Yankee answers; Alice speaks; both hear
 /// the type-3 line, and Charlie (same map, no party) hears nothing
 /// (`G/input_main.cpp:957-975`, `G/party.h:277-285`).
 /// The party link's walk: read from `who` until the link's shape has arrived — `adds`
-/// ADDs, `links` LINKs, an UPDATE, and, when `parameter` is set, a PARAMETER. The
-/// periodic state UPDATE may sit anywhere, so the walk gates on shape, not on count.
 fn drain_party_walk(who: &mut Keyed, note: &str, adds: usize, links: usize, parameter: bool) {
     let mut headers = Vec::new();
     let mut seen_adds = 0;

@@ -87,8 +87,11 @@ pub const LS_PLAYER_CANNOT_ADD_A_GM: &[u8] = b"[LS;659]";
 /// `"[LS;660;%s]"`, the named character is not online (`G/input_main.cpp:1197`).
 pub const LS_NOT_ONLINE: &[u8] = b"[LS;660;%s]";
 
+/// `"[LS;657]"`, the target blocks friend requests (`G/input_main.cpp:1157-1160`,
+/// `:1203-1206`).
+pub const LS_MESSENGER_BLOCKED: &[u8] = b"[LS;657]";
+
 /// `"[LS;548;%s]"`, the notice a deny answers to the requester
-/// (`G/cmd_general.cpp:2288-2291`).
 pub const LS_ADD_DENIED: &[u8] = b"[LS;548;%s]";
 
 /// `"messenger_auth %s"`, the command line the target hears, whose answer is the
@@ -568,8 +571,8 @@ impl GameState {
     /// `RequestToAdd` runs past the arm's gates. `Find` answers quiet for a VID nobody
     /// holds; the manager only ever holds players (`enter_world_with_items` is the only
     /// insert path), so both `IsPC` arms pass; the observer arm passes (this build has
-    /// no observer mode); `BLOCK_MESSENGER_INVITE` passes (block modes are unported,
-    /// so nobody blocks); a companion with no outbox is quiet (the desc the arm asks
+    /// no observer mode); the target's `BLOCK_MESSENGER_INVITE` answers `[LS;657]`;
+    /// a companion with no outbox is quiet (the desc the arm asks
     /// for); a player may not add a GM (`[LS;659]`); the caller may not add itself.
     pub(super) fn answer_messenger_add_by_vid(&mut self, caller: Vid, target: Vid) {
         // `LPCHARACTER ch_companion = ...Find(p2->vid); if (!ch_companion) return`
@@ -577,6 +580,21 @@ impl GameState {
         if self.characters.find_by_vid(target).is_err()
             || self.characters.find_by_vid(caller).is_err()
         {
+            return;
+        }
+        // `if (ch_companion->IsBlockMode(BLOCK_MESSENGER_INVITE))`
+        // (`:1157-1160`): the target blocks friend requests, so the caller hears
+        // `[LS;657]` and the request never runs.
+        if self.is_block_mode(target, crate::game_state::whisper::BLOCK_MESSENGER_INVITE) {
+            if let Some(mover) = self.own_mover(caller) {
+                let line = chat_packet(
+                    mover.recipient(&self.locale),
+                    CHAT_TYPE_INFO,
+                    LS_MESSENGER_BLOCKED,
+                    &[],
+                );
+                let _sent = self.write_to_client(caller, line);
+            }
             return;
         }
         // `if (ch_companion->GetDesc())` inverted (`:1162-1165`): the outbox is the desc.
@@ -640,7 +658,8 @@ impl GameState {
 
     /// `CInputMain::Messenger`'s `ADD_BY_NAME` arm (`G/input_main.cpp:1180-1214`):
     /// `RequestToAdd` runs past the arm's gates. `FindPC` answers the named character
-    /// or the offline notice; the self and block-mode gates run below.
+    /// or the offline notice; the self gate runs before the `BLOCK_MESSENGER_INVITE`
+    /// gate, which answers `[LS;657]`.
     pub(super) fn messenger_add_by_name(
         &mut self,
         caller: Vid,
@@ -685,9 +704,23 @@ impl GameState {
             return;
         };
         // `if (tch == ch) // 자신은 추가할 수 없다` (`G/input_main.cpp:1199-1200`): the
-        // caller names its own name. `BLOCK_MESSENGER_INVITE` passes: block modes are
-        // unported, so nobody blocks.
+        // caller names its own name.
         if caller == target {
+            return;
+        }
+        // `if (tch->IsBlockMode(BLOCK_MESSENGER_INVITE) == true)`
+        // (`G/input_main.cpp:1202-1206`): the target blocks friend requests, so the
+        // caller hears `[LS;657]` and the request never runs.
+        if self.is_block_mode(target, crate::game_state::whisper::BLOCK_MESSENGER_INVITE) {
+            if let Some(mover) = self.own_mover(caller) {
+                let line = chat_packet(
+                    mover.recipient(&self.locale),
+                    CHAT_TYPE_INFO,
+                    LS_MESSENGER_BLOCKED,
+                    &[],
+                );
+                let _sent = self.write_to_client(caller, line);
+            }
             return;
         }
         let mut taken = std::mem::take(&mut self.messenger);
@@ -985,5 +1018,59 @@ mod tests {
             "no pair waits"
         );
         assert!(inbox.try_recv().is_err(), "the caller heard nothing");
+    }
+
+    fn blocked_line(world: &GameState, caller: Vid) -> Vec<u8> {
+        chat_packet(
+            world
+                .own_mover(caller)
+                .expect("the caller has a mover")
+                .recipient(&world.locale),
+            CHAT_TYPE_INFO,
+            LS_MESSENGER_BLOCKED,
+            &[],
+        )
+    }
+
+    #[test]
+    fn a_blocked_invite_by_vid_answers_657_and_requests_nothing() {
+        let (mut world, _clock, mut caller_inbox) = a_world_with_one();
+        a_second(&mut world);
+        while caller_inbox.try_recv().is_ok() {}
+        world.block_modes.insert(
+            Vid::new(OTHER),
+            crate::game_state::whisper::BLOCK_MESSENGER_INVITE,
+        );
+        world.answer_messenger_add_by_vid(Vid::new(VID), Vid::new(OTHER));
+        assert!(
+            !world.messenger.waits(&world, Vid::new(OTHER), b"P100"),
+            "no pair waits"
+        );
+        assert_eq!(
+            caller_inbox.try_recv().expect("the caller was told"),
+            blocked_line(&world, Vid::new(VID)),
+            "the caller heard the [LS;657] line"
+        );
+    }
+
+    #[test]
+    fn a_blocked_invite_by_name_answers_657_and_requests_nothing() {
+        let (mut world, _clock, mut caller_inbox) = a_world_with_one();
+        a_second(&mut world);
+        while caller_inbox.try_recv().is_ok() {}
+        world.block_modes.insert(
+            Vid::new(OTHER),
+            crate::game_state::whisper::BLOCK_MESSENGER_INVITE,
+        );
+        world.messenger_add_by_name(Vid::new(VID), b"P101", None);
+        assert!(
+            !world.messenger.waits(&world, Vid::new(OTHER), b"P100"),
+            "no pair waits"
+        );
+        assert_eq!(
+            caller_inbox.try_recv().expect("the caller was told"),
+            blocked_line(&world, Vid::new(VID)),
+            "the caller heard the [LS;657] line"
+        );
     }
 }

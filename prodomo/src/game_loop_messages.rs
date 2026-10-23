@@ -1187,6 +1187,19 @@ pub enum GameCommand {
         /// Where the game thread reports the climbed slot, when the up lands.
         reply: oneshot::Sender<SkillUpAnswer>,
     },
+    /// Runs one `/setblockmode` line (`do_setblockmode`, `G/cmd_general.cpp:2300-2309`):
+    /// the byte becomes the character's own block mode, and the world's answer carries
+    /// the `setblockmode %d` command line for the client's own queue plus the seven
+    /// `game_option.block_*` quest flags for the store. See
+    /// `game_state::whisper`.
+    SetBlockMode {
+        /// The VID of the blocking player.
+        vid: common::vid::Vid,
+        /// The chat line after the command word.
+        rest: Vec<u8>,
+        /// Where the game thread reports the line and the flag writes, when the line runs.
+        reply: oneshot::Sender<SetBlockModeAnswer>,
+    },
     /// Requests terminal loop shutdown.
     Stop,
 }
@@ -1224,6 +1237,16 @@ pub struct RestartAnswer {
 pub struct SkillUpAnswer {
     /// The climbed slot, or `None` when the up refused.
     pub climbed: Option<(u8, u8)>,
+}
+
+/// What a `/setblockmode` line changed that the descriptor keeps.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SetBlockModeAnswer {
+    /// The `setblockmode %d` command line for the client's own queue, or `None`
+    /// when the character was not online.
+    pub line: Option<Vec<u8>>,
+    /// The seven `game_option.block_*` flag writes for the store.
+    pub flags: Vec<(Vec<u8>, i32)>,
 }
 
 /// What a hit changed that the descriptor keeps.
@@ -3420,6 +3443,25 @@ impl GameLoopController {
     ) -> Result<SkillUpAnswer, MoveItemError> {
         let (reply, answer) = oneshot::channel();
         self.send_command(GameCommand::SkillUp { vid, rest, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/setblockmode` line of a player, and waits for
+    /// the command line and the flag writes. The line is written to the player's
+    /// outbox before the answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn set_block_mode(
+        &self,
+        vid: common::vid::Vid,
+        rest: Vec<u8>,
+    ) -> Result<SetBlockModeAnswer, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::SetBlockMode { vid, rest, reply })
             .await
             .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)

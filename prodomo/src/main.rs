@@ -7846,6 +7846,7 @@ where
         }
         LineCommand::PartyRequestDeny => party_request_deny_step(addr, context, held, rest).await,
         LineCommand::MessengerAuth => messenger_auth_step(addr, context, held, rest).await,
+        LineCommand::SetBlockMode => set_block_mode_step(addr, context, held, rest).await,
         LineCommand::GlobalNotice => global_notice_step(addr, context, held, &rest),
         LineCommand::MapNotice => map_notice_step(addr, context, held, &rest),
         LineCommand::BigNotice => big_notice_step(session, addr, context, held, &rest).await,
@@ -7935,6 +7936,58 @@ async fn skill_up(
         return false;
     }
     info!(%addr, vnum, level, "Skill up");
+    true
+}
+
+/// `do_setblockmode` (`G/cmd_general.cpp:2300-2309`): the world runs the line,
+/// the `setblockmode %d` command line rode the outbox already, and the seven
+/// `game_option.block_*` flag writes are stored (`SetQuestFlag` writes the
+/// rows). An empty line is quiet (`if (*arg1)`): the world answers no line
+/// and no flags, and there is nothing to store.
+async fn set_block_mode_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    rest: Vec<u8>,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Block mode without a character in the world; ignoring");
+        return true;
+    };
+    let answer = match context.game.set_block_mode(vid, rest).await {
+        Ok(answer) => answer,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a block mode; closing");
+            return false;
+        }
+    };
+    let Some(character) = held.character.as_ref() else {
+        return true;
+    };
+    // `SetQuestFlag` writes the world's quest record now (`G/char.cpp:7649-7655`),
+    // and the save writes the descriptor's record later (`G/char.cpp:1673-1679`):
+    // the flag moves into the held record first, and the whole record is stored.
+    for (name, value) in &answer.flags {
+        if let Some(slot) = held.quest_flags.iter_mut().find(|(held, _)| held == name) {
+            slot.1 = *value;
+        } else {
+            held.quest_flags.push((name.clone(), *value));
+        }
+    }
+    held.quest_flags.retain(|(_, value)| *value != 0);
+    let flags: Vec<db::quest_flags::StoredQuestFlag> = held
+        .quest_flags
+        .iter()
+        .map(|(name, value)| db::quest_flags::StoredQuestFlag {
+            name: name.clone(),
+            value: *value,
+        })
+        .collect();
+    if let Err(error) = db::quest_flags::save_flags(&context.store, character.id, &flags).await {
+        warn!(%addr, %error, "The block mode could not be stored; closing");
+        return false;
+    }
+    info!(%addr, "Block mode");
     true
 }
 

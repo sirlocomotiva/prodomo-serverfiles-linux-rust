@@ -160,6 +160,11 @@ pub trait Game {
     /// `GetSkillLevel(vnum)` of the character the script runs for (230g).
     fn skill_level(&self, vnum: u32) -> u8;
 
+    /// `SetBlockModeForce(mode)` of the character the script runs for
+    /// (`G/questlua_pc.cpp:2190-2197`): the byte becomes the character's own
+    /// block mode, the client hears `setblockmode %d`, and no quest flag moves.
+    fn send_block_mode(&mut self, mode: u8);
+
     /// `GetMapIndex()` of the character the script runs for: the map it stands on, the
     /// private index when it stands on a private map.
     fn map_index(&self) -> i32;
@@ -1646,6 +1651,20 @@ fn pc_api(
             };
             Some(Value::Number(f64::from(cx.game.skill_level(dword(vnum)))))
         }
+        b"pc.send_block_mode" => {
+            // `pc_send_block_mode` (`G/questlua_pc.cpp:2190-2197`): the number
+            // becomes the character's own block mode; a non-number is zero
+            // (`(BYTE)lua_tonumber`), and only the low byte survives.
+            let mode = match lua.coerce_number(first.clone())? {
+                Some(number) => {
+                    let bytes = dword(number).to_le_bytes();
+                    bytes[0]
+                }
+                None => 0,
+            };
+            cx.game.send_block_mode(mode);
+            None
+        }
         _ => return Ok(None),
     };
     Ok(Some(result.into_iter().collect()))
@@ -1858,6 +1877,7 @@ mod tests {
         map_index: i32,
         war_map: i32,
         any_war: f64,
+        blocked: Vec<u8>,
     }
 
     impl Fake {
@@ -1912,6 +1932,10 @@ mod tests {
 
         fn skill_level(&self, vnum: u32) -> u8 {
             u8::from(self.learned.contains(&vnum)) * 40
+        }
+
+        fn send_block_mode(&mut self, mode: u8) {
+            self.blocked.push(mode);
         }
 
         fn map_index(&self) -> i32 {
@@ -2504,6 +2528,30 @@ mod tests {
         assert_eq!(leveled(&mut probe, &number(2.0)), number(0.0));
         assert_eq!(leveled(&mut probe, &[table.clone()]), number(0.0));
         assert_eq!(leveled(&mut probe, &[]), number(0.0));
+    }
+
+    /// `pc_send_block_mode` (`G/questlua_pc.cpp:2190-2197`): the number becomes
+    /// the character's own block mode, dworded and low-byte only; a non-number
+    /// is zero; the call pushes nothing.
+    #[test]
+    fn the_block_mode_number_becomes_the_characters_own_byte() {
+        let manager = manager().lock().unwrap();
+        let number = |value: f64| vec![Value::Number(value)];
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            flags: BTreeMap::new(),
+        };
+        let blocked =
+            |probe: &mut Probe, args: &[Value]| probe.call("pc.send_block_mode", args).unwrap();
+        assert!(blocked(&mut probe, &number(8.0)).is_empty());
+        assert!(
+            blocked(&mut probe, &number(264.9)).is_empty(),
+            "dworded, then low byte only"
+        );
+        assert!(blocked(&mut probe, &[]).is_empty(), "a non-number is zero");
+        assert_eq!(probe.game.blocked, [8, 8, 0]);
     }
 
     /// The skin index rounds ties to even and falls back to the normal skin; a value that

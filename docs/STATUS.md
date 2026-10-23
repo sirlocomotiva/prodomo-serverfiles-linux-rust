@@ -1,10 +1,10 @@
 # Rewrite status
 
-Last reviewed: 2026-10-23, after ledger section 248 (the friend add, its yes and its
-remove are live).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 249 onwards (the
-rest of the messenger: the team list beyond the GMs, block modes, the invite answer, the
-offline rework).
+Last reviewed: 2026-10-23, after ledger section 249 (the block byte refuses the line
+it names).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 250 onwards (the
+rest of the messenger: the team list beyond the GMs, the other block bits' use sites,
+the invite answer, the offline rework).
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -76,7 +76,11 @@ sends nothing; a line for a character that is not there waits for it in the worl
 and the sender is told, and the target reads the line when it next enters. Since 248 a
 friend add, its yes and its remove are live: the request reaches the target as the
 `messenger_auth` line, the yes lists both directions and stores both rows, the relogin
-keeps them, and the remove takes them back. The rest of combat, skills,
+keeps them, and the remove takes them back. Since 249 the `/setblockmode` byte lands
+beside the seven `game_option.block_*` quest flags, the login restores it through `quest
+game_option`, a sender who blocks whispers hears the sender-blocked record, a target who
+blocks them answers the target-blocked record, and a target who blocks friend requests
+answers `[LS;657]`. The rest of combat, skills,
 parties, guilds and the rest of step 4 are not ported yet. The two-process layout (a `game-server` and a `db-server`
 talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177; sections 1-175
 record how it was built and stay as history. Since section 178 the one `prodomo` binary reads

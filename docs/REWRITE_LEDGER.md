@@ -34961,3 +34961,71 @@ fans prove the leave path. `cg.game.messenger`, `cmd.messenger_auth` and
 `gc.messenger` are ported; `sys.messenger` is `partial` (block modes, the invite
 answer and the offline rework are not ported). No ADR changed. No owner question
 added. V26 is taken.
+
+## 249. The block byte refuses the line it names (`sys.char.chat`, `sys.messenger`, second part)
+
+The block mode is one byte on the character (`m_pointsInstant.bBlockMode`,
+`G/char.h:471`) with the seven `EBlockAction` bits (`G/char.h:370-379`):
+exchange, party invite, guild invite, whisper, messenger invite, party request,
+and view equipment. `CHARACTER::SetBlockMode` (`G/char.cpp:7643-7656`) writes the
+byte, chats `setblockmode %d` to the character's own client, and writes the seven
+`game_option.block_*` quest flags beside it; `CHARACTER::SetBlockModeForce`
+(`:7658-7661`) writes the byte and chats the same line, and no quest flag moves.
+`CHARACTER::IsBlockMode` (`G/char.h:899`) tests one bit. The login restores the
+byte from the flags: `quest game_option`
+(`legacy/gamedata/locale/europe/quest/_basic/game_option.lua`) sums the seven
+flag bits into `val` and calls `pc.send_block_mode(val)`, which is
+`ch->SetBlockModeForce((BYTE)lua_tonumber(L, 1))`
+(`G/questlua_pc.cpp:2190-2197`; a non-number is zero, and only the low byte
+survives the cast).
+
+The Rewrite keeps the byte in `GameState::block_modes`, keyed by VID; the store
+keeps the seven flags in the character's quest-flag rows, which the descriptor
+already loads and saves. `/setblockmode` is `do_setblockmode`
+(`G/cmd_general.cpp:2300-2309`): an empty line is quiet (`if (*arg1)`), otherwise
+the word reads as a number (`str_to_number`: a non-numeric word is zero, and only
+the low byte survives) and becomes the character's own block mode. The world's
+answer carries the `setblockmode %d` command line for the client's own queue and
+the seven flag writes for the store; the descriptor merges the flags into its
+held record (zero flags dropped) and saves the record. `pc.send_block_mode` runs
+through the quest bridge: the session chats the same `setblockmode %d` line in
+the step's own records, no flag moves, and the last byte the scripts set rides
+the session and lands on the world after the step, next to where the world's own
+flag writes would have landed.
+
+The two gates that read a bit are live. `CInputMain::Whisper`
+(`G/input_main.cpp:340-649`) drops the sender's own name before any block check
+(`:372`); a sender who blocks whispers hears the sender-blocked record with the
+target's name (`:387-400`, repeated at `:508-517` once the target's descriptor is
+known); otherwise the target who blocks whispers answers the target-blocked
+record with the target's name (`:518-529`). The legacy writes the name twice
+(`strlcpy` into `szNameFrom` both times, `:392-393`) and sends the fixed 30-byte
+record with no payload, so the name the client shows is the target's in both
+answers (`common/length.h:424-426`: 2 is target-blocked, 3 is sender-blocked).
+`CInputMain::Messenger` answers `[LS;657]` when the companion blocks friend
+requests, both for the `ADD_BY_VID` arm (`:1154-1160`, past the observer arm and
+before the no-desc, GM and self gates) and for the `ADD_BY_NAME` arm
+(`:1202-1206`, past the self gate), and the request never runs. The exchange,
+party, guild, request and equipment bits ride along unwatched: their use sites
+(`G/exchange.cpp:135`, `G/char.cpp:5673`, `:5846`, `:2412`, `G/guild.cpp:2046`)
+are unported systems.
+
+**The test.** `prodomo/tests/parity.rs`:
+`a_block_byte_refuses_the_line_it_names` proves all five legs: Alice's
+`/setblockmode 8` lands her whisper block and she hears the `setblockmode 8`
+command line; her whisper to Yankee answers the sender-blocked record naming
+Yankee and Bob hears nothing; with her own block cleared and Yankee's block set,
+her whisper answers the target-blocked record naming Yankee and he hears
+nothing; Yankee's `/setblockmode 16` lands his friend-request block, so Alice's
+add answers `[LS;657]`, Yankee hears nothing, and the store holds no
+`messenger_list` row. The sender check runs before the target check, so her own
+block answers first when both are set. Unit tests pin the parser (digits only,
+low byte only, a non-numeric word is zero), the seven flags beside the byte, the
+self-name drop before any block check, the blocked records' type and target
+name, the messenger `[LS;657]` answers for both arms with no pair waiting, the
+bridge's number dwording and low-byte truncation (a non-number is zero, nothing
+pushed), and the session's line plus last-wins pending byte.
+`cmd.setblockmode` and `lua.pc.send_block_mode` are ported;
+`sys.char.chat`, `sys.messenger` and `quest.game_option` stay `partial` (the
+unported bits' use sites, INVITE_ANSWER, the offline rework). No ADR changed. No
+owner question added. V26 stays open.
