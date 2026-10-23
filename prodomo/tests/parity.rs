@@ -16774,3 +16774,74 @@ fn a_friend_request_answered_yes_lists_both_directions_and_relogin_keeps_it() {
     yankee.quiet("the remove settled");
     wait_for(&database, "(SELECT count(*) FROM messenger_list) = 0");
 }
+
+/// `sys.messenger`: out of the test-server mode a grant's add answers LOGOUT, never
+/// LOGIN (`MessengerManager::SendLogin`'s GM gate, `G/messenger_manager.cpp:554-566`).
+/// Alice (a `HIGH_WIZARD`) asks after Yankee, who answers yes: the relation holds
+/// both directions, but Yankee hears Alice as LOGOUT while Alice hears Yankee as LOGIN.
+#[test]
+fn a_player_lists_a_gm_but_hears_logout_for_the_name() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) SELECT id, 0, 'Yankee', 1, \
+         154, 470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, alice_listed) =
+        enter_world_on_with_team(&server, 1, b"alice", 0, ENGLISH, None);
+    let (mut yankee, yankee_listed) =
+        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    alice.sees_arrive(yankee_listed.id, true, None);
+    alice.send_record(&client_messenger_add_by_name(b"Yankee"));
+    assert_eq!(
+        yankee.read_game(),
+        a_command_line(b"messenger_auth Alpha"),
+        "the target hears the ask"
+    );
+    alice.quiet("the asker hears nothing yet");
+    yankee.quiet("the ask settled");
+    yankee.send_record(&client_chat(CHAT_TALKING, b"/messenger_auth y Alpha"));
+    assert_eq!(
+        yankee.read_game(),
+        an_info_line(b"<Messenger> Alpha has been added as a friend."),
+        "the answerer hears the added line"
+    );
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"<Messenger> Yankee has been added as a friend."),
+        "the asker hears the added line"
+    );
+    assert_eq!(
+        alice.read_game(),
+        messenger_login(4, b"Yankee"),
+        "the grant hears the player as LOGIN"
+    );
+    assert_eq!(
+        yankee.read_game(),
+        messenger_login(5, b"Alpha"),
+        "the player hears the grant as LOGOUT, never LOGIN"
+    );
+    alice.quiet("the yes settled");
+    yankee.quiet("the yes settled");
+    drop(alice);
+    drop(yankee);
+    let _ = (alice_listed, yankee_listed);
+    wait_for(&database, "(SELECT count(*) FROM messenger_list) = 2");
+}

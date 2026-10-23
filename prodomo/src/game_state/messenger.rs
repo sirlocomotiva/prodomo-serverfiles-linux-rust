@@ -53,10 +53,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::command::{GM_IMPLEMENTOR, GM_PLAYER};
 use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO};
-#[cfg(test)]
-use protocol::gc_messenger::MESSENGER_SUBHEADER_GC_LIST;
 use protocol::gc_messenger::{encode, GcMessenger, GcMessengerEntry, GC_MESSENGER_NAME_MAX};
-
+#[cfg(test)]
+use protocol::gc_messenger::{
+    MESSENGER_SUBHEADER_GC_LIST, MESSENGER_SUBHEADER_GC_LOGIN, MESSENGER_SUBHEADER_GC_LOGOUT,
+};
 use tokio::sync::oneshot;
 use tracing::debug;
 
@@ -312,7 +313,9 @@ impl Relations {
     /// be one a request inserted; it is consumed either way; a yes adds both directions.
     ///
     /// `responder` is the character answering, and `requester` the name its
-    /// `do_messenger_auth` command named, which is who the request asked.
+    /// `do_messenger_auth` command named, which is who the request asked. The command's
+    /// own arena gate (`[LS;403]`, `G/cmd_general.cpp:2274-2278`) passes: there are no
+    /// arenas, as `sys.event.arena` is unported.
     pub(super) fn auth_to_add(
         &mut self,
         state: &mut GameState,
@@ -392,12 +395,12 @@ impl Relations {
                 let _sent = state.write_to_client(owner_vid, line);
             }
         }
-        // `LPCHARACTER tch = FindPC(companion); if (tch) SendLogin(...) else
-        // SendLogout(...)` (`G/messenger_manager.cpp:317-325`): the owner's desc hears
-        // the companion's own name, through `SendLogin(account, companion)`'s
-        // `tch->GetDesc()->BufferedPacket` on the account's side with the companion's
-        // bytes (`:537-543`).
-        let record = if online_by_name(state, companion) {
+        // `__AddToList` answers the companion's own name through `SendLogin`'s GM gate
+        // (`G/messenger_manager.cpp:537-543`): a player hears nothing when the companion
+        // is a grant. The test-server mode silences the gate (`G/gm.cpp:12-14`).
+        let login = online_by_name(state, companion)
+            && !gm_gate(state, account, companion_level_of(state, companion));
+        let record = if login {
             GcMessenger::Login(companion.to_vec())
         } else {
             GcMessenger::Logout(companion.to_vec())
@@ -522,12 +525,19 @@ fn gm_level_of(state: &GameState, vid: Vid) -> u8 {
         .unwrap_or(GM_PLAYER)
 }
 
+/// The companion's level for a GM gate (`gm_get_level`, `G/gm.cpp:110-113`): the points'
+/// own when the companion is online, and none when nobody answers to the name, which is
+/// the player's — legacy's list does not hold it. The points' level rode the admission
+/// from the store's grant, so it is the list's own answer.
+fn companion_level_of(state: &GameState, companion: &[u8]) -> Option<u8> {
+    vid_of(state, companion).map(|vid| gm_level_of(state, vid))
+}
+
 /// Whether a name stands in the game: `m_set_loginAccount`'s answer
 /// (`G/messenger_manager.cpp:492,503`).
 fn online_by_name(state: &GameState, name: &[u8]) -> bool {
     vid_of(state, name).is_some()
 }
-
 /// The character Name bytes of the character under `vid`, empty when nobody is there.
 fn name_of(state: &GameState, vid: Vid) -> Vec<u8> {
     state
@@ -748,6 +758,38 @@ mod tests {
         let mut world = a_world(&clock);
         let inbox = enter(&mut world, VID, (3200, 3200), 0);
         (world, clock, inbox)
+    }
+
+    fn a_pair_on_the_registry() -> (
+        GameState,
+        crate::client_registry::Lease,
+        crate::client_registry::Lease,
+    ) {
+        use crate::client_registry::{ChannelClients, ClientEntry};
+        use crate::game_state::fixtures::PLACE;
+        use std::sync::Arc;
+        let clock = TestClock::default();
+        let clients = Arc::new(ChannelClients::new());
+        let mut world = a_world(&clock).with_clients(Arc::clone(&clients));
+        let _first = enter(&mut world, VID, (3200, 3200), 0);
+        let _second = enter(&mut world, OTHER, (3200, 3200), 0);
+        let owner = clients.join(ClientEntry {
+            channel: PLACE.0,
+            map: PLACE.1,
+            name: format!("P{VID}"),
+            vid: VID,
+            empire: 1,
+            language: 0,
+        });
+        let companion = clients.join(ClientEntry {
+            channel: PLACE.0,
+            map: PLACE.1,
+            name: format!("P{OTHER}"),
+            vid: OTHER,
+            empire: 1,
+            language: 0,
+        });
+        (world, owner, companion)
     }
 
     fn a_second(world: &mut GameState) {
@@ -1071,6 +1113,62 @@ mod tests {
             caller_inbox.try_recv().expect("the caller was told"),
             blocked_line(&world, Vid::new(VID)),
             "the caller heard the [LS;657] line"
+        );
+    }
+
+    /// `__AddToList` answers the companion's own name as LOGIN past `SendLogin`'s GM
+    /// gate (`G/messenger_manager.cpp:310-325`, `:537-543`): a player companion reaches
+    /// the owner's registry outbox while the owner's own client hears the added line.
+    #[test]
+    fn an_add_lists_a_player_companion_for_the_owner() {
+        let (mut world, mut owner, _companion) = a_pair_on_the_registry();
+        let mut taken = std::mem::take(&mut world.messenger);
+        assert!(taken.add_to_list(&mut world, b"P100", b"P101"));
+        world.messenger = taken;
+        let record = owner.try_next().expect("the owner hears the LOGIN");
+        assert_eq!(record[0], 0x4a, "the owner's record is a messenger one");
+        assert_eq!(
+            record[3], MESSENGER_SUBHEADER_GC_LOGIN,
+            "the companion's name rides a LOGIN"
+        );
+        assert_eq!(&record[5..], b"P101", "the record names the companion");
+    }
+
+    /// `SendLogin`'s GM gate (`G/messenger_manager.cpp:554-566`): the relation still
+    /// lands when a player lists a grant, but the owner's registry outbox hears LOGOUT
+    /// for the name, never LOGIN — the owner stands in the game, so `__AddToList`
+    /// answers at all only past the gate.
+    #[test]
+    fn an_add_for_a_gm_companion_answers_logout_for_a_player() {
+        let (world, mut owner, _companion) = a_pair_on_the_registry();
+        let mut world = world.with_test_server(false);
+        let mut companion_points = world
+            .characters
+            .find_by_vid(Vid::new(OTHER))
+            .expect("the companion is online")
+            .points()
+            .expect("the companion has points")
+            .clone();
+        companion_points.set_gm_level(GM_IMPLEMENTOR);
+        world
+            .characters
+            .find_by_vid_mut(Vid::new(OTHER))
+            .expect("the companion is online")
+            .set_points(Some(companion_points));
+        while owner.try_next().is_some() {}
+        let mut taken = std::mem::take(&mut world.messenger);
+        assert!(taken.add_to_list(&mut world, b"P100", b"P101"));
+        world.messenger = taken;
+        assert_eq!(
+            world.messenger.companions_of(b"P100"),
+            vec![b"P101".to_vec()],
+            "the pair holds past the gate"
+        );
+        let record = owner.try_next().expect("the owner hears an answer");
+        assert_eq!(record[0], 0x4a, "the owner's record is a messenger one");
+        assert_eq!(
+            record[3], MESSENGER_SUBHEADER_GC_LOGOUT,
+            "a player hears LOGOUT for the GM"
         );
     }
 }

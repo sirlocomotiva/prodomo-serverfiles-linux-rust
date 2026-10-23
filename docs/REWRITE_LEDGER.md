@@ -35131,3 +35131,46 @@ and a later window passes again.
 
 `sys.char.chat` stays `partial` (`SpamBlockCheck`, the prism check). No ADR
 changed. No owner question added. V26 stays open.
+
+## 253. A player lists a grant but hears logout for the name (`sys.messenger`, fourth part)
+
+`MessengerManager::SendLogin` answers nothing when the record's owner is a player
+and the companion is a grant (`ch->GetGMLevel() == GM_PLAYER &&
+gm_get_level(companion.c_str()) != GM_PLAYER`, `G/messenger_manager.cpp:554-556`),
+while `SendLogout` has no such gate (`G/messenger_manager.cpp:571-593`). The
+relation still lands both directions: `AuthToAdd` inserts both legs whatever the
+gate says (`G/messenger_manager.cpp:328-332`), and `__AddToList` answers the
+offline leg through the ungated `SendLogout` (`G/messenger_manager.cpp:336-355`).
+The port's `Relations::auth_to_add` answered the online leg with LOGIN whenever
+the companion stood in the game, so a player listing a grant heard LOGIN for a
+name legacy never logs in. The port now answers through the same gate: LOGIN
+only when the companion is online and neither the owner-player/grant-companion
+pair holds, else LOGOUT. The companion's level is the points' own when the
+companion is online (`gm_get_level`, `G/gm.cpp:110-113`, resolved at admission
+from the store's grant) and the player's when nobody answers to the name, which
+is legacy's list's own answer since its list holds nothing. The gate reads
+`state.test_server` for both sides (`G/gm.cpp:53`: the mode makes every level
+`GM_IMPLEMENTOR`), so the mode keeps answering LOGIN everywhere, and the
+scenario runs with `test_server = false` to prove the live gate. The load path
+that fans a login to every holder of the name (`G/messenger_manager.cpp:190-193`)
+already ran through the same gate; `companion_level_of` now serves both call
+sites. The `CG_MESSENGER` add arm's own GM gate (`G/input_main.cpp:1186-1190`,
+`[LS;659]`) is untouched: the scenario's asker is the grant, so its ask passes.
+
+**The test.** `prodomo/tests/parity.rs`: a new
+`a_player_lists_a_gm_but_hears_logout_for_the_name` grants Alpha `HIGH_WIZARD`
+to Alice's account, enters Alice (no team record: the grant names her own
+character) and Yankee (the grant's `TEAM_LIST` trails his burst, which
+`enter_world_on_with_team` drains), and proves Alice's `ADD_BY_NAME Yankee`
+reaches Yankee as the `messenger_auth Alpha` ask, his yes lists both directions
+in the store, and the answers split: Alice hears Yankee as LOGIN while Yankee
+hears Alpha as LOGOUT, never LOGIN. Yankee walks (his fixture row sets no
+stamina, and the schema default is 0) and already saw Alice inside his own
+enter burst, so only `alice.sees_arrive(..., true, ...)` follows the enters.
+Unit tests pin both legs: a player companion answers LOGIN to the owner's
+registry outbox, while a grant companion answers LOGOUT with the pair still
+holding.
+
+`sys.messenger` stays `partial` (the team list beyond the GMs, INVITE_ANSWER's
+absent arm, the offline rework's remainder). No ADR changed. No owner question
+added. V26 stays open.
