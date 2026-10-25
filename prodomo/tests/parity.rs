@@ -24,7 +24,9 @@ use prodomo::descriptor_crypto::derive_legacy_descriptor_keys;
 use protocol::cg_inventory::{resolve_cg_base_size, CG_KEEP_ALIVE, HEADER_CG_PONG};
 use protocol::cg_mark::{CgMarkCRCList, CgMarkIdxList, CgMarkLogin, CgMarkUpload, CgSymbolCrc};
 use protocol::cg_variable::encode_guild_symbol_upload;
-use protocol::gc_chat::{CHAT_TYPE_BIG_NOTICE, CHAT_TYPE_NOTICE, CHAT_TYPE_TALKING};
+use protocol::gc_chat::{
+    CHAT_TYPE_BIG_NOTICE, CHAT_TYPE_COMMAND, CHAT_TYPE_INFO, CHAT_TYPE_NOTICE, CHAT_TYPE_TALKING,
+};
 use protocol::gc_guild::{
     GUILD_NAME_FIELD_SIZE, GUILD_SUBHEADER_GC_CHANGE_EXP, GUILD_SUBHEADER_GC_CHANGE_MEMBER_GENERAL,
     GUILD_SUBHEADER_GC_CHANGE_MEMBER_GRADE, GUILD_SUBHEADER_GC_COMMENTS, GUILD_SUBHEADER_GC_GRADE,
@@ -898,6 +900,9 @@ struct Keyed {
     /// burst's `POINT_STAMINA`; a fixture row is stored at 12,345 ([`add_characters`]) unless
     /// the scenario stores 0 itself.
     walking: bool,
+    /// The level of the character this connection enters, which the quest login event's
+    /// conditions read. [`Keyed::loaded`] sets it from the loading burst's `POINT_LEVEL`.
+    level: i64,
     /// The VIDs whose revive-invisible timer this connection has seen the entry of and not yet
     /// the expiry of. [`Keyed::timer_record`] keeps it.
     timers: Vec<[u8; 4]>,
@@ -926,6 +931,7 @@ impl Keyed {
             language: ENGLISH,
             channel_number: 1,
             walking: true,
+            level: 0,
             timers: Vec::new(),
             monsters: Vec::new(),
             pushed: Vec::new(),
@@ -1519,6 +1525,9 @@ const POINT_CHANGE_LEN: usize = 4 + 4 + 1 + 8 + 8;
 /// `POINT_STAMINA`, the points record's slot of the current stamina.
 const POINT_STAMINA: usize = 9;
 
+/// `POINT_LEVEL`, the points record's slot of the level.
+const POINT_LEVEL: usize = 1;
+
 /// The length of each record the game sends to a client: the loading and enter-game bursts
 /// and the in-game ones. A variable record reports `usize::MAX`, and the caller sizes it from
 /// its own `WORD wSize`.
@@ -1680,16 +1689,26 @@ fn enter_world(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed) {
     enter_world_in(server, login, slot, ENGLISH)
 }
 
-/// [`enter_world`] without the quiet check that follows the enter burst.
+/// [`enter_world`] without reading the quest login event or the quiet check that follows.
 ///
 /// A character that reads a line left for it hears it right behind its own burst
-/// (`CHARACTER::ReadOfflineMessages`, `G/input_login.cpp:728-729`), and the check that
-/// follows the burst accounts for no such record.
+/// (`CHARACTER::ReadOfflineMessages`, `G/input_login.cpp:728-729`), before its quest login
+/// event, so the caller reads the lines and then [`read_login_event`].
 fn enter_world_reading(server: &Server, login: &[u8], slot: u8) -> (Keyed, Listed) {
     let (mut keyed, character, _quickslots, _items) =
         load_with_quickslots_on(server, 1, login, slot, ENGLISH);
     let _entered = enter_game_shown(&mut keyed);
     (keyed, character)
+}
+
+/// [`enter_world`] for a character whose stored `game_option.block_*` flags make the block
+/// byte `block`, which its quest login event names with `said` and sends back
+/// ([`read_login_event_blocking`]).
+fn enter_world_blocking(server: &Server, login: &[u8], block: u8, said: Option<&[u8]>) -> Keyed {
+    let (mut keyed, _character) = enter_world_reading(server, login, 0);
+    read_login_event_blocking(&mut keyed, block, said);
+    keyed.still("nothing follows");
+    keyed
 }
 
 /// [`enter_world`] for an auth login in `language`.
@@ -1731,6 +1750,7 @@ fn enter_world_on_with_team(
             "the entrant hears the GM team"
         );
     }
+    read_login_event(&mut keyed);
     keyed.still("nothing follows");
     (keyed, character)
 }
@@ -1790,6 +1810,7 @@ fn enter_world_seeing_guilded_with_team(
             "the entrant hears the GM team"
         );
     }
+    read_login_event(&mut keyed);
     keyed.still("nothing follows");
     (keyed, character, entered)
 }
@@ -1809,6 +1830,7 @@ fn enter_world_seeing_guilded_on_war_map(
     assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
     let entered = enter_game_guilded(&mut keyed, members);
     read_war_map_join(&mut keyed, join);
+    read_login_event(&mut keyed);
     keyed.still("nothing follows");
     (keyed, character, entered)
 }
@@ -1929,6 +1951,7 @@ fn enter_game_burst(keyed: &mut Keyed) -> Vec<u8> {
 /// [`enter_game_burst`], answering what the burst showed.
 fn enter_game_view(keyed: &mut Keyed) -> Entered {
     let entered = enter_game_shown(keyed);
+    read_login_event(keyed);
     keyed.still("nothing follows");
     entered
 }
@@ -1937,8 +1960,80 @@ fn enter_game_view(keyed: &mut Keyed) -> Entered {
 /// before its own view pair.
 fn enter_game_view_guilded(keyed: &mut Keyed, members: usize) -> Entered {
     let entered = enter_game_guilded(keyed, members);
+    read_login_event(keyed);
     keyed.still("nothing follows");
     entered
+}
+
+/// The lines the quest login event sends a character whose stored flags block nothing,
+/// which the descriptor writes behind everything the enter queued
+/// ([`read_login_event_blocking`]).
+fn read_login_event(keyed: &mut Keyed) {
+    read_login_event_blocking(keyed, 0, None);
+}
+
+/// The lines the quest login event sends (`CQuestManager::Login`,
+/// `G/questmanager.cpp:541-556`), in quest order, each to the entrant's empire:
+/// `dungeoninfo`'s `dungeon_info_qid` (it is the first quest of `quest_list`),
+/// `event_info`'s three event flags (none is set), then `game_option`'s `syschat` naming
+/// what the stored flags block, `said`, when they block something, and its `setblockmode`
+/// line with the byte `block` (`_basic/game_option.lua`). From level 30 `item_attr67add`
+/// sends its letter's button (`send_letter`), which ends at `q.set_title`, a refusal, so
+/// the button rides a `[DONE]` with no quest info. No other login script sends anything
+/// on a map no zone script names, and the letter pass sends nothing to a member of no
+/// guild at war.
+fn read_login_event_blocking(keyed: &mut Keyed, block: u8, said: Option<&[u8]>) {
+    let first = keyed.read_game();
+    assert_eq!(
+        first.get(..4),
+        Some(&[GC_CHAT, 0x1c, 0, CHAT_TYPE_COMMAND][..]),
+        "dungeoninfo's line leads the login event: {first:02x?}"
+    );
+    let empire = first[8];
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"dungeon_info_qid 1")
+    );
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"event_info 0 0 0"),
+        "event_info's line: no event flag is set"
+    );
+    if let Some(said) = said {
+        assert_eq!(
+            keyed.read_game(),
+            chat_packet(CHAT_TYPE_INFO, empire, said),
+            "game_option names what the flags block"
+        );
+    }
+    let line = format!("setblockmode {block}");
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, empire, line.as_bytes()),
+        "game_option sends the byte the flags make"
+    );
+    if keyed.level >= 30 {
+        assert_eq!(
+            keyed.read_game(),
+            server_script(
+                0,
+                b"[QUESTBUTTON idx;40|name;Sixth and Seventh Bonus][DONE]"
+            ),
+            "item_attr67add's letter from level 30"
+        );
+    }
+}
+
+/// The rest of an enter-game burst whose view the scenario read by hand: the game phase,
+/// the time, the Channel 1 record, the `letters_event` command line, the war list, then
+/// the quest login event.
+fn read_enter_tail(keyed: &mut Keyed) {
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
+    assert_eq!(keyed.read_game()[0], GC_TIME);
+    assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
+    assert_eq!(keyed.read_game()[0], GC_CHAT);
+    enter_war_list(keyed);
+    read_login_event(keyed);
 }
 
 /// [`enter_game_burst`] without the final quiet check, for a burst that more records follow.
@@ -2176,9 +2271,10 @@ fn walk_mode_of(vid: &[u8]) -> Vec<u8> {
 
 impl Keyed {
     /// Note the loading burst's points record `points`: the character walks when its
-    /// `POINT_STAMINA` is at or below 0.
+    /// `POINT_STAMINA` is at or below 0, and its level is its `POINT_LEVEL`.
     fn loaded(&mut self, points: &[u8]) {
         self.walking = point_slot(points, POINT_STAMINA) <= 0;
+        self.level = point_slot(points, POINT_LEVEL);
     }
 
     /// Read the view insert of the character `vid`, which walks when `walking`: its walk mode
@@ -3415,6 +3511,7 @@ fn a_character_is_loaded_and_the_game_is_entered_in_legacy_order() {
     assert_eq!(chat[9], 1, "bCanFormat");
     assert_eq!(&chat[10..], b"letters_event 0");
     enter_war_list(&mut keyed);
+    read_login_event(&mut keyed);
     keyed.still("nothing follows");
 }
 
@@ -3735,11 +3832,7 @@ fn entering_a_map_shows_its_npcs_and_a_click_keeps_the_connection() {
     );
     assert_eq!(entries[warp][0], 3, "the warp is listed as a warp");
 
-    assert_eq!(alice.read_game(), [GC_PHASE, PHASE_GAME]);
-    assert_eq!(alice.read_game()[0], GC_TIME);
-    assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
-    assert_eq!(alice.read_game()[0], GC_CHAT);
-    enter_war_list(&mut alice);
+    read_enter_tail(&mut alice);
     alice.still("nothing follows");
 
     alice.send_record(&client_click(base));
@@ -3817,6 +3910,7 @@ fn a_map_shows_its_monsters_and_stones_in_view() {
     add_characters(&database);
     let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
     let entered = enter_game_shown(&mut alice);
+    read_login_event(&mut alice);
     assert_eq!(inserted_at(&entered.add), ALPHA_ENTERS_AT);
     let shown = &entered.shown;
 
@@ -4035,6 +4129,7 @@ fn a_warp_npc_sends_its_neighbour_away_and_the_client_comes_back_at_the_target()
     let (_empire, list) = login_by_key(&mut alice, b"alice", key, CLIENT_KEY).expect("logs in");
     let (alpha, _quickslots, _items) = load_selected(&mut alice, &list, 0);
     let own = enter_game_records(&mut alice);
+    read_login_event(&mut alice);
     assert_eq!(
         inserted_at(&own),
         (450_100, 903_400),
@@ -4150,11 +4245,7 @@ fn a_warp_to_no_map_sends_nothing_and_the_character_stays() {
         }),
         "the warp stands where Alpha stands"
     );
-    assert_eq!(alice.read_game(), [GC_PHASE, PHASE_GAME]);
-    assert_eq!(alice.read_game()[0], GC_TIME);
-    assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
-    assert_eq!(alice.read_game()[0], GC_CHAT);
-    enter_war_list(&mut alice);
+    read_enter_tail(&mut alice);
 
     // Four quiet windows are 1.2 seconds, at least two fires.
     for _ in 0..4 {
@@ -4199,6 +4290,7 @@ fn a_warp_whose_save_fails_closes_without_sending_the_client_away() {
 
     let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
     let own = enter_game_records(&mut alice);
+    read_login_event(&mut alice);
     assert_eq!(
         inserted_at(&own),
         (450_100, 903_400),
@@ -4255,6 +4347,7 @@ fn a_goto_npc_shows_its_neighbour_at_its_target_on_the_same_map() {
 
     let (mut alice, alpha, _items) = load_character(&server, b"alice", 0);
     let own = enter_game_records(&mut alice);
+    read_login_event(&mut alice);
     assert_eq!(inserted_at(&own), ALPHA_ENTERS_AT);
     let shown = alice.read_game();
     assert_eq!(shown[0], GC_CHARACTER_ADD);
@@ -4446,11 +4539,7 @@ fn a_quest_npc_answers_a_click_with_its_dialog_and_runs_it() {
         .collect();
     assert_eq!(managers.len(), 1, "map 1 has one OX manager");
     let ox = managers[0];
-    assert_eq!(alice.read_game(), [GC_PHASE, PHASE_GAME]);
-    assert_eq!(alice.read_game()[0], GC_TIME);
-    assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
-    assert_eq!(alice.read_game()[0], GC_CHAT);
-    enter_war_list(&mut alice);
+    read_enter_tail(&mut alice);
     alice.quiet("the enter-game burst is over");
 
     alice.send_record(&client_click(ox));
@@ -4568,11 +4657,7 @@ fn a_keeper_opens_its_shop_and_a_buy_and_a_sale_are_stored() {
     let [keeper] = keepers[..] else {
         panic!("map 3 shows one keeper 20042, not {keepers:?}");
     };
-    assert_eq!(alice.read_game(), [GC_PHASE, PHASE_GAME]);
-    assert_eq!(alice.read_game()[0], GC_TIME);
-    assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
-    assert_eq!(alice.read_game()[0], GC_CHAT);
-    enter_war_list(&mut alice);
+    read_enter_tail(&mut alice);
     alice.quiet("the burst is over");
 
     // When: nobody's window is open, a buy and a close are ignored.
@@ -5374,22 +5459,29 @@ fn a_whisper_for_a_character_that_is_not_there_is_left_for_it() {
         b"waiting\0",
         "the line keeps its bytes and its NUL"
     );
+    read_login_event(&mut charlie);
+    charlie.quiet("the line, then her login");
 }
 
-/// `sys.messenger`: a new session forgets the block byte and the offline-line clock of
-/// the last one, because every enter is a new `CHARACTER` and `CHARACTER::Initialize`
-/// zeroes both (`memset(&m_pointsInstant, 0, ...)` and `dwLastOfflinePMTime = 0`,
-/// `G/char.cpp:252`, `:270-271`). Only `/setblockmode` and the quest login's
-/// `pc.send_block_mode` write the byte again, and the quest login is not ported.
+/// `sys.messenger`, `event.input_db.quest_login_event`, `quest.game_option`: a new session
+/// starts with the block byte and the offline-line clock at zero, because every enter is a
+/// new `CHARACTER` and `CHARACTER::Initialize` zeroes both (`memset(&m_pointsInstant, 0,
+/// ...)` and `dwLastOfflinePMTime = 0`, `G/char.cpp:252`, `:270-271`). The lines that waited
+/// are read at that zero byte (`ReadOfflineMessages`, `G/input_login.cpp:728-729`), and
+/// then the quest login event (`CQuestManager::Login`, `G/questmanager.cpp:541-556`) runs
+/// `game_option`, which reads the `game_option.block_*` flags `/setblockmode` stored, names
+/// what they block and sends the byte back (`pc.send_block_mode`).
 ///
-/// Yankee blocks whispers and leaves. Alice blocks whispers and comes back, so her line
-/// to the absent Yankee is left for him, not refused as the sender's block; her second
-/// line inside ten seconds is told to wait (`G/input_main.cpp:426-428`); she comes back
-/// again and her third line is left at once. Yankee comes back and reads the first and
-/// the third line (`CInputDB::ReadOfflineMessages`, `G/input_db.cpp:2455-2476`), because
-/// his block went with his last session.
+/// Yankee blocks whispers and leaves. Alice blocks whispers and comes back: her login
+/// names the whisper block, and her line to the absent Yankee answers the sender's block.
+/// She clears it, and her line is left for him; her second line inside ten seconds is told
+/// to wait (`G/input_main.cpp:426-428`); she comes back again, her login sends the zero
+/// byte, and her third line is left at once. Yankee comes back and reads the first and the
+/// third line (`CInputDB::ReadOfflineMessages`, `G/input_db.cpp:2455-2476`) before his
+/// login restores his block.
 #[test]
-fn a_new_session_forgets_the_last_ones_block_byte_and_offline_clock() {
+fn a_new_session_restores_the_block_byte_from_its_flags_after_the_waiting_lines() {
+    use protocol::gc_whisper::WHISPER_TYPE_SENDER_BLOCKED;
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
@@ -5405,6 +5497,9 @@ fn a_new_session_forgets_the_last_ones_block_byte_and_offline_clock() {
     );
     // The first line left for an absent target needs ten seconds of uptime.
     wait_for_the_offline_message_delay(&server);
+    // `game_option`'s words for a whisper block: `_100_say .. " "`, then `_160_say .. " "`
+    // (`translate.lua`).
+    let whisper_block: &[u8] = b"Blocheaza: Soapta ";
 
     let (mut yankee, _) = enter_world(&server, b"bob", 0);
     set_block_mode(&mut yankee, 8);
@@ -5417,7 +5512,15 @@ fn a_new_session_forgets_the_last_ones_block_byte_and_offline_clock() {
     let old = alice.client.local_addr();
     drop(alice);
     server.wait_for(&format!("Client connection closed addr={old}"));
-    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    let mut alice = enter_world_blocking(&server, b"alice", 8, Some(whisper_block));
+    alice.send_record(&client_whisper(b"Yankee", b"blocked"));
+    let notice = alice.read_game();
+    assert_eq!(
+        (notice[0], notice[3]),
+        (GC_WHISPER, WHISPER_TYPE_SENDER_BLOCKED),
+        "her login restored her block, so her line answers it: {notice:02x?}"
+    );
+    set_block_mode(&mut alice, 0);
 
     let sent = whisper_packet(
         WHISPER_TYPE_SYSTEM,
@@ -5429,7 +5532,7 @@ fn a_new_session_forgets_the_last_ones_block_byte_and_offline_clock() {
     assert_eq!(
         alice.read_game(),
         sent,
-        "her block went with her last session, so the line is left"
+        "her block is cleared, so the line is left"
     );
     alice.send_record(&client_whisper(b"Yankee", b"second"));
     assert_eq!(
@@ -5444,7 +5547,7 @@ fn a_new_session_forgets_the_last_ones_block_byte_and_offline_clock() {
     let old = alice.client.local_addr();
     drop(alice);
     server.wait_for(&format!("Client connection closed addr={old}"));
-    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    let mut alice = enter_world_blocking(&server, b"alice", 0, None);
     alice.send_record(&client_whisper(b"Yankee", b"third"));
     assert_eq!(
         alice.read_game(),
@@ -5467,10 +5570,11 @@ fn a_new_session_forgets_the_last_ones_block_byte_and_offline_clock() {
         assert_eq!(
             yankee.read_game(),
             whisper_packet(WHISPER_TYPE_OFFLINE, b"Alpha", text),
-            "his block went with his last session, so the line is read"
+            "the lines are read at the new session's zero byte"
         );
     }
-    yankee.quiet("only the two lines waited");
+    read_login_event_blocking(&mut yankee, 8, Some(whisper_block));
+    yankee.quiet("only the two lines waited, then his login");
 }
 
 /// `sys.char.chat`, `sys.messenger`: a block byte refuses the line it names.
@@ -5479,8 +5583,9 @@ fn a_new_session_forgets_the_last_ones_block_byte_and_offline_clock() {
 /// answers the target-blocked record. Yankee's `/setblockmode 16` lands his
 /// friend-request block, so Alice's add answers `[LS;657]` and no ask reaches
 /// him. Both `/setblockmode` lines answer the `setblockmode %d` command line
-/// and persist the seven `game_option.block_*` quest flags, which only the
-/// unported quest login event reads back (ledger 256).
+/// and persist the seven `game_option.block_*` quest flags, which the next
+/// session's quest login event reads back
+/// ([`a_new_session_restores_the_block_byte_from_its_flags_after_the_waiting_lines`]).
 ///
 /// `do_setblockmode` (`G/cmd_general.cpp:2300-2309`), `CInputMain::Whisper`
 /// (`G/input_main.cpp:372-400`, `:508-529`) and `CInputMain::Messenger`'s
@@ -5887,8 +5992,6 @@ fn a_party_line_reaches_the_members_and_no_outsider() {
 /// accepted into the existing party, and a member's own request is refused with `[LS;549]`.
 #[test]
 fn a_party_request_retargets_to_the_leader_and_is_denied_then_accepted() {
-    use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO};
-
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
@@ -8988,6 +9091,7 @@ fn seat_alpha_and_zulu(server: &Server, database: &ScratchDatabase, others: &[&s
 fn enter_game_unread(server: &Server, login: &[u8]) -> (Keyed, Listed) {
     let (mut keyed, character, _items) = load_character(server, login, 0);
     enter_game_records(&mut keyed);
+    read_login_event(&mut keyed);
     (keyed, character)
 }
 
@@ -9404,11 +9508,7 @@ fn enter_game_with_parts(keyed: &mut Keyed) -> (Vec<u8>, [u16; 6]) {
     });
     let (_shown, affect) = read_shown(keyed);
     assert_eq!(affect[0], GC_AFFECT_ADD);
-    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
-    assert_eq!(keyed.read_game()[0], GC_TIME);
-    assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
-    assert_eq!(keyed.read_game()[0], GC_CHAT);
-    enter_war_list(keyed);
+    read_enter_tail(keyed);
     keyed.still("nothing follows");
     (add, parts)
 }
@@ -10866,6 +10966,7 @@ fn a_click_targets_a_monster_and_a_player_and_a_leave_clears_it() {
     alpha_keyed.send_record(&client_target(1));
     alpha_keyed.quiet("the loading phase consumes a use and a click");
     let entered = enter_game_shown(&mut alpha_keyed);
+    read_login_event(&mut alpha_keyed);
     let dog = entered
         .shown
         .monsters
@@ -11090,6 +11191,7 @@ fn a_full_regen_stands_nothing_more_each_time_it_runs() {
     add_characters(&database);
     let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
     let entered = enter_game_shown(&mut alice);
+    read_login_event(&mut alice);
     let dogs = |inserts: &[Vec<u8>]| {
         inserts
             .iter()
@@ -11200,6 +11302,7 @@ fn thirty_dogs_by_alpha(
     add_characters(database);
     let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
     let entered = enter_game_shown(&mut alice);
+    read_login_event(&mut alice);
     let dogs: HashMap<u32, (i32, i32)> = entered
         .shown
         .monsters
@@ -11511,6 +11614,7 @@ fn alpha_swinging_by(database: &ScratchDatabase, lines: &str) -> (Server, Keyed,
     add_characters(database);
     let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
     let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
     let swing = client_move(
         FUNC_ATTACK,
         7,
@@ -12147,6 +12251,7 @@ fn a_kill_pays_the_killer_the_monsters_exp_with_an_exp_orb() {
     let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
     let alpha_vid = listed.id;
     let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
     let dog = vid_shown_at(
         entered.shown.monsters.iter().map(Vec::as_slice),
         ALPHA_ENTERS_AT,
@@ -12506,6 +12611,7 @@ fn an_aggressive_monster_chases_a_player_into_its_reach_and_swings() {
     add_characters(&database);
     let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
     let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
     let boar = vid_shown_at(
         entered.shown.monsters.iter().map(Vec::as_slice),
         (470_900, 950_000),
@@ -12586,6 +12692,7 @@ fn alpha_level_1_vs_boar(
     );
     let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
     let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
     let boar = vid_shown_at(
         entered.shown.monsters.iter().map(Vec::as_slice),
         ALPHA_ENTERS_AT,
@@ -12861,6 +12968,7 @@ fn a_hit_group_member_tells_its_party_and_the_party_swings_back() {
     let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
     let alpha_vid = listed.id;
     let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
     let swing = client_move(
         FUNC_ATTACK,
         7,
@@ -13229,6 +13337,7 @@ fn a_skill_up_spends_and_a_cast_heals_over_the_wire() {
     let (mut alpha, listed, _items) = load_character(&server, b"alice", 0);
     let alpha_vid = listed.id;
     let _entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
     alpha.send_record(&client_chat(CHAT_TALKING, b"/skillup 109"));
     // The spend's point change (slot 28) then byte 76.
     let mut saw_spend = false;
@@ -14058,21 +14167,30 @@ fn a_removed_member_keeps_the_withdraw_time_across_a_relog() {
     // The master is told the member is gone: the release of its claim (`ClearSync`,
     // `G/char.cpp:5568-5575`) and its removal from the view.
     alice.sees_disconnect(yankee_vid);
+    // Yankee's login moved `sash_mission` and `yohara_system` to their information states
+    // (`when login or levelup with pc.get_level() >= 40 and not pc.is_gm()` and `>= 120`,
+    // `set_state`), so their `__status` flags, each the CRC32 of the state's name, are
+    // stored with him behind the withdraw time, in name order.
     let flags = support::rows(
         database.url(),
         "SELECT value FROM quest_flag WHERE player_id = (SELECT id FROM player WHERE name = \
-          'Yankee')",
+          'Yankee') ORDER BY name",
         1,
     );
     assert_eq!(
         flags.len(),
-        1,
-        "the withdraw time is stored with the character"
+        3,
+        "the withdraw time and the two states are stored with the character"
     );
     assert!(
         flags[0][0] > 1_600_000_000,
         "the stored withdraw time is the epoch second the removal stamped: {}",
         flags[0][0]
+    );
+    assert_eq!(
+        (flags[1][0], flags[2][0]),
+        (695_801_987, 1_998_515_313),
+        "`sash_mission.__status` is `information`, `yohara_system.__status` `information_new`"
     );
     let (mut yankee, yankee_again, _) = enter_world_seeing(&server, b"bob", 0);
     yankee.quiet("the member is back");
@@ -16814,9 +16932,8 @@ fn a_friend_request_answered_yes_lists_both_directions_and_relogin_keeps_it() {
     );
     yankee.sees_leave(alice_listed.id);
     server.wait_for(&format!("Client connection closed addr={old}"));
-    let (mut keyed, _empire, list) = select_screen(&server, b"alice");
-    let _burst = read_loading_burst(&mut keyed, &list, 0);
-    let mut alice = keyed;
+    let (mut alice, _empire, list) = select_screen(&server, b"alice");
+    let _burst = read_loading_burst(&mut alice, &list, 0);
     alice.send_record(&client_enter_game());
     // The entrant's burst leads: the outbox the enter's own login wrote drains when the
     // descriptor forwards the Shown reply, so the login's LIST and own-holder LOGIN
@@ -16831,6 +16948,7 @@ fn a_friend_request_answered_yes_lists_both_directions_and_relogin_keeps_it() {
         messenger_list(b"Yankee"),
         "the enter carries the LIST"
     );
+    read_login_event(&mut alice);
     // The remove: Yankee sends `REMOVE Alpha`, which legacy answers as
     // `RemoveFromList(char_name, ch->GetName())` (`G/input_main.cpp:1223`), so the
     // line goes to Alpha's wire naming Yankee and the record to Yankee's naming

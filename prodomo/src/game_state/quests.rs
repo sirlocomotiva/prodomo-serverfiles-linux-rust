@@ -640,6 +640,48 @@ impl GameState {
         }
     }
 
+    /// `CQuestManager::Login` (`G/questmanager.cpp:541-556`) for the character under `vid`,
+    /// which just entered the game with its quest flags loaded: its `login` scripts run, then
+    /// its `letter` scripts, and the records they sent go to its own client after the
+    /// enter's.
+    ///
+    /// Legacy runs it from `quest_login_event` (`G/input_db.cpp:995-1050`) once the
+    /// descriptor is in `PHASE_GAME`, or at once when `QuestLoad` finds it there already
+    /// (`:1104-1115`). The Rewrite loads the flags as the world admits the character, which
+    /// is the `CG_ENTER_GAME` that sets that phase, so the event runs there.
+    pub(super) fn quest_login(&mut self, vid: Vid) {
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return;
+        };
+        let pid = character.player_id();
+        let level = character
+            .points()
+            .map_or(1, world::character::Points::level);
+        let Some(mover) = self.own_mover(vid) else {
+            return;
+        };
+        let Some((channel, map)) = self.place_of(vid.raw()) else {
+            return;
+        };
+        let (x, y) = self
+            .spot_of(vid.raw())
+            .map_or((0, 0), |spot| (spot.x, spot.y));
+        let place = GroundPlace { channel, map, x, y };
+        let Some((_, (records, _, _, block_mode))) =
+            self.run_quests(place, mover, level, pid, |manager, game| {
+                manager.login(pid, game)
+            })
+        else {
+            return;
+        };
+        if let Some(mode) = block_mode {
+            self.block_modes.insert(vid, mode);
+        }
+        for record in records {
+            let _sent = self.write_to_client(vid, record);
+        }
+    }
+
     /// `CQuestManager::Click` for the character under `vid` clicking the NPC `target` of race
     /// `race`: whether a quest took the click, the records its scripts sent either way, and
     /// the GRAND climbs its reads landed (each for the store's `store_skill`).
@@ -1059,6 +1101,56 @@ mod tests {
         assert_eq!(
             session.records[1],
             chat_packet(to, CHAT_TYPE_COMMAND, b"setblockmode %d", &[Arg::Int(24)]),
+        );
+    }
+
+    /// `CQuestManager::Login` (`G/questmanager.cpp:541-556`) on the world: the login
+    /// scripts run for the character with the flags its load set, `game_option` says what
+    /// it blocks and sends `setblockmode`, the byte lands on the character, and the lines go
+    /// to its own client.
+    #[test]
+    fn a_login_lands_the_block_byte_and_sends_its_lines() {
+        use crate::game_state::fixtures::{a_world, enter, TestClock};
+
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe");
+        let manager = Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
+        world.quests = Some(Quests::new(
+            manager,
+            Arc::default(),
+            MobNamesByLanguage::default(),
+        ));
+        let mut inbox = enter(&mut world, 1, (500, 500), 0);
+        while inbox.try_recv().is_ok() {}
+        let vid = Vid::new(1);
+        if let Some(quests) = world.quests.as_mut() {
+            quests
+                .manager_mut()
+                .load_flags(1, [(b"game_option.block_whisper".to_vec(), 1)]);
+        }
+
+        world.quest_login(vid);
+        assert_eq!(world.block_modes.get(&vid), Some(&8));
+        let mut lines = Vec::new();
+        while let Ok(line) = inbox.try_recv() {
+            lines.push(line);
+        }
+        let to = world
+            .own_mover(vid)
+            .expect("in the world")
+            .recipient(&world.locale);
+        let command = chat_packet(to, CHAT_TYPE_COMMAND, b"setblockmode %d", &[Arg::Int(8)]);
+        let at = lines
+            .iter()
+            .position(|line| *line == command)
+            .expect("the client hears the byte");
+        assert!(
+            lines[..at]
+                .iter()
+                .any(|line| line.get(3) == Some(&CHAT_TYPE_INFO)),
+            "the syschat that names the block comes first"
         );
     }
 }

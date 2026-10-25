@@ -35364,3 +35364,152 @@ all-targets DB run green on all 40 targets (prodomo lib 1241, parity 142 of 142,
 `cargo-clippy` are the `/usr/bin` pair.
 
 No ADR changed. No owner question added. V26 stays open.
+
+## 257. The quest login event (`event.input_db.quest_login_event`, `quest.game_option`)
+
+A character now runs its quest `login` event when it enters the game. `quest::Manager::login`
+is `CQuestManager::Login` (`G/questmanager.cpp:541-556`) with `NPC::OnLogin`
+(`G/questnpc.cpp:353-397`). It needs a character the manager has seen, which the load makes,
+as `CheckQuestLoaded` needs `IsLoaded`. One pass runs every no-NPC `login` script in quest
+order, at the character's state of each quest, or at the start state when the character
+never ran the quest and may start it (`MatchingQuest`, `G/questnpc.h:112-139`). This is
+`HandleReceiveAllNoWaitEvent`, so a script still waiting for its client is closed with
+legacy's `QUEST NOT END RUNNING on Login/Logout` warning. A second pass runs every `letter`
+script the same way (`HandleReceiveAllEvent`), and there a waiting script is kept
+(`G/questnpc.cpp:621-758`). The pass is the new `Run::handle_receive_all`. `levelup` moves
+onto it as well, because `NPC::OnLevelUp` is `HandleReceiveAllEvent` too (`:348-351`), so it
+runs matches and starts in one quest-order pass instead of `handle_event`'s order, which ran
+every match before every start.
+
+`GameState::quest_login` runs in `answer_enter_world` after `shown_on_admit`. That puts it
+behind the messenger login and `deliver_offline_messages`, and its records ride the outbox
+that `main.rs` drains after the burst. So the client gets them behind the burst, the war
+list, the team list, the friend LIST and the offline lines, which is legacy's order: the
+offline read is synchronous in `Entergame` (`G/input_login.cpp:728-729`), and the login
+waits for the quest load. A Warp re-enters through `answer_enter_world`, so the login runs on
+every Warp, as legacy's reconnect does. A Divergence on timing: the login runs at once. When
+legacy's quest load lands before the game phase, `quest_login_event` runs the login at the
+first one-second tick that finds the character in the game (`G/input_db.cpp:1005-1048`,
+`:1104-1115`).
+
+Two API names join `BRIDGED`, which goes from 60 to 62.
+
+- `pc.getqf` (`pc_get_quest_flag`, `G/questlua_pc.cpp:1180-1197`) reads the running quest's
+  flag `QUEST.NAME`, 0 when unset. An argument that is not a string is warned
+  `QUEST wrong get flag` and answers nothing.
+- `pc.send_block_mode`. Its dispatch arm has existed since ledger 249, but the name was never
+  bridged, so a Lua call to it was refused. Ledger 256's unit test reached the arm directly
+  and could not see this.
+
+What a login sends. For a character on a map no zone script names, every enter hears:
+
+- `dungeoninfo`'s `dungeon_info_qid 1`, because it is the first quest of `quest_list`;
+- `event_info`'s `event_info 0 0 0`, because no ported system sets an event flag;
+- `game_option`'s `syschat`, which names what the stored `block_*` flags block, but only
+  when the byte is not 0, then its `setblockmode N`.
+
+`game_option` adds 6 for `block_view_equipment`, as its source says (ADR-0004). From level 30,
+`item_attr67add`'s `send_letter` sends `[QUESTBUTTON idx;40|name;Sixth and Seventh Bonus][DONE]`
+in skin 0. These are the bytes legacy's `SendScript` sends. Legacy then sends a
+`GC_QUEST_INFO` that titles the button (`q.set_title`, `q.start`, then `SendQuestInfoPakcet`
+from `EndRunning`, `G/questpc.cpp:231-308`, `:343-346`). The port's `q.set_title` refuses, so
+that record is missing. This is the next slice. Four more login scripts are worth noting:
+
+- `sash_mission`, for a non-GM from level 40, moves to `information`.
+- `yohara_system`, from level 120, moves to `information_new`.
+- The letters of both states end at `find_npc_by_vnum`, a refusal, so nothing reaches the
+  client.
+- `costume_option` and `ds_give_qualification` refuse silently.
+
+**Not ported.** `EndRunning` runs the old state's `leave`, the new state's `enter` and its
+`letter` when a script changes its state (`G/questpc.cpp:352-371`), and the port runs none of
+them. So legacy sends a level-40 character the sash letter twice at login: once from the state
+change and once from the letter pass. The port sends it neither time.
+
+**A port Defect, fixed.** A `set_state` was lost whenever the script did not end in its first
+step:
+
+- One called before a `wait`, `select` or `input` was carried on the `Pc`, but nothing applied
+  it when the answer ended the script.
+- One called after a resume was dropped outright.
+
+The cause: `execute` applied the pending state only when the first step ended, and the
+refusal and error paths threw it away. Now `Run::end_running` applies it at every end of a
+script, whether the script finished, refused or failed, because legacy's `EndRunning` follows
+every `RunState` that returns false. `Running` carries its quest's number for this. A
+Divergence remains: `quest_setstate` writes the state and its flag at once
+(`G/questlua_quest.cpp:112-146`), but the port moves the quest only when the script ends. So
+a character that leaves while the script waits keeps the old state.
+
+**The tests.** `prodomo/tests/parity.rs`. The harness reads the login on every enter path:
+
+- `Keyed::level` comes from the loading burst's `POINT_LEVEL` (slot 1).
+- `read_login_event` and `read_login_event_blocking` read the four lines and, from level 30,
+  the letter.
+- `read_enter_tail` is the hand-read enter tail of five scenarios.
+- `enter_world_blocking` enters a character whose flags block something.
+
+With the login wired and the harness unchanged, 119 of the 142 scenarios failed on records
+nobody accounted for. That is the positive control that every enter runs it.
+
+The 256 scenario is rewritten as
+`a_new_session_restores_the_block_byte_from_its_flags_after_the_waiting_lines`:
+
+1. Alice blocks whispers, leaves and comes back. Her login names the block (`Blocheaza: Soapta `,
+   the locale's `_100_say` and `_160_say`) and sends `setblockmode 8`.
+2. Her whisper to the absent Yankee answers `WHISPER_TYPE_SENDER_BLOCKED`.
+3. She clears the block, and the 256 legs follow: the left line, the ten-second wait, and the
+   new session's zero clock.
+4. Yankee comes back and reads the two lines at the new session's zero byte, and then his
+   login restores his 8.
+
+Other scenario changes:
+
+- `a_removed_member_keeps_the_withdraw_time_across_a_relog` now asserts the stored rows in name
+  order: the withdraw time, `sash_mission.__status` = 695801987 and
+  `yohara_system.__status` = 1998515313, which the level-154 login wrote.
+- `a_whisper_for_a_character_that_is_not_there_is_left_for_it` reads Charlie's login and
+  checks that she is quiet afterwards.
+
+Unit tests:
+
+- `quest`: `a_login_restores_the_block_byte_from_the_flags_the_load_read` and
+  `a_set_state_lands_when_the_script_ends_whichever_step_asked`.
+- `prodomo`: `a_login_lands_the_block_byte_and_sends_its_lines`.
+
+One mutant, applied to the fixed file and restored by checksum: the completion path's
+`end_running` was replaced by `pc.running = None`. The set_state test fails at "the state
+asked for before the wait", a semantic kill.
+
+Rows:
+
+- Ported with a scenario: `event.input_db.quest_login_event`, `quest.game_option`,
+  `quest.event_info`, `lua.pc.getqf`, `lua.cmdchat`, `lua.syschat`, `lua.raw_script`,
+  `lua.set_skin`, `lua.pc.get_level` and `lua.q.getcurrentquestindex`.
+- `lua.pc.send_block_mode` names the new scenario.
+- Partial, with notes: `lua.set_state`, `lua.q.setstate`, `lua.q.set_state`,
+  `quest.dungeoninfo`, `quest.item_attr67add`, `quest.sash_mission` and
+  `quest.yohara_system`.
+- `lua.q.set_title` stays missing, with a note.
+- `sys.messenger`'s note names the rewritten scenario.
+
+`docs/STATUS.md` updates its quest-flag, quest-event and refused-API Divergence rows; the last
+said 24 backed names and that `set_state` was "not ported".
+
+Gates:
+
+- fmt clean.
+- Build with no warnings.
+- clippy green with `-D warnings`, after two parity functions over 100 lines were shortened by
+  `read_enter_tail`.
+- doc green with `RUSTDOCFLAGS="-D warnings"`.
+- doc-tests green (1 passed, 25 ignored).
+- The full workspace all-targets DB run is green on all 40 targets against `postgres:18` in
+  Podman: prodomo lib 1242, parity 142 of 142, protocol 1267, quest lib 81.
+- No scratch database was left by the gate run. Twelve `prodomo_proc_521397_*` databases from
+  an earlier failing run in this session, whose process was gone, were dropped by hand. Why
+  their drop failed was not investigated.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair.
+
+No ADR changed. No owner question added. V26 stays open.

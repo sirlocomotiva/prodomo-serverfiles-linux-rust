@@ -45,8 +45,9 @@
 //! - A chat menu index outside `0..=65535` is logged and skipped (legacy allocates it).
 //! - A file whose quest has no number is logged and skipped (legacy asserts), and a quest number
 //!   with no quest names the empty quest.
-//! - Quest states and flags live in the store with the character (ledger 244); no API that
-//!   reads them is ported yet.
+//! - Quest states and flags live in the store with the character (ledger 244). `pc.getqf`
+//!   reads them (ledger 257) and `pc.learn_grand_master_skill` writes its read count; no other
+//!   API reaches them yet.
 //! - `getnpcid` with no name answers 0 (legacy built a `std::string` from `NULL`).
 //! - An NPC's race is looked up by the caller, which finds the NPC on the character's own map.
 
@@ -389,19 +390,43 @@ impl Manager {
         })
     }
     /// `CQuestManager::LevelUp`: character `pid` leveled up, so the no-target quests' `levelup`
-    /// scripts run (`questmanager.cpp:667-681`). Every owner script with a `levelup` trigger is
-    /// such a script, and neither takes a chat menu or an argument. A character the manager
-    /// never saw still misses, as legacy's `GetPC` returns NULL for it (`sys_err` there).
+    /// scripts run (`questmanager.cpp:667-681`) the way `NPC::OnLevelUp` runs them
+    /// (`HandleReceiveAllEvent`, `G/questnpc.cpp:348-351`). Every owner script with a `levelup`
+    /// trigger is such a script, and neither takes a chat menu or an argument. A character the
+    /// manager never saw still misses, as legacy's `GetPC` returns NULL for it (`sys_err` there).
     pub fn levelup(&mut self, pid: u32, game: &mut dyn Game) -> bool {
         if !self.pcs.contains_key(&pid) {
             tracing::warn!("QUEST LEVELUP_EVENT no such pc id : {pid}");
             return false;
         }
         self.operate(pid, game, |run, pc, npcs| match npcs.get(&QUEST_NO_NPC) {
-            Some(npc) => run.handle_event(pc, npc, "levelup"),
+            Some(npc) => run.handle_receive_all(pc, npc, "levelup", Wait::Kept),
             None => false,
         })
     }
+
+    /// `CQuestManager::Login` (`G/questmanager.cpp:541-556`) with `NPC::OnLogin`
+    /// (`G/questnpc.cpp:353-397`): character `pid` entered the game with its flags loaded,
+    /// so every no-target `login` script runs at its quest's state, and a script that
+    /// still waits for its client when it returns is closed at once
+    /// (`HandleReceiveAllNoWaitEvent`); then every `letter` script runs the same way, but
+    /// left waiting (`HandleReceiveAllEvent`). Returns whether a `login` script ran. A
+    /// character the manager never saw misses, as legacy's `GetPC` returns NULL for it.
+    pub fn login(&mut self, pid: u32, game: &mut dyn Game) -> bool {
+        if !self.pcs.contains_key(&pid) {
+            tracing::warn!("QUEST no such pc id : {pid}");
+            return false;
+        }
+        self.operate(pid, game, |run, pc, npcs| {
+            let Some(npc) = npcs.get(&QUEST_NO_NPC) else {
+                return false;
+            };
+            let ran = run.handle_receive_all(pc, npc, "login", Wait::Closed);
+            run.handle_receive_all(pc, npc, "letter", Wait::Kept);
+            ran
+        })
+    }
+
     /// `CHARACTER::SetQuestNPCID` (`G/char.cpp:7610-7613`): records `victim` as the quest NPC
     /// for the next dispatch. `Reward` calls it before `Kill`; `operate` publishes the
     /// stored VID to the bridge (`cx.npc_vid`).
@@ -1074,8 +1099,9 @@ struct Pc {
     current: Vec<u8>,
     /// `m_bShouldSendDone`: the client answered, so a bare `[DONE]` must close its window.
     send_done: bool,
-    /// `SetCurrentQuestStateName`: a `set_state` the running script asked for, applied when
-    /// its thread ends so the bridge's `&mut Cx` never reaches the `Pc`.
+    /// `SetCurrentQuestStateName`: a `set_state` the running script asked for in a step
+    /// that suspended, carried until its thread ends ([`Run::end_running`]) so the
+    /// bridge's `&mut Cx` never reaches the `Pc`.
     pending_state: Option<Vec<u8>>,
     npc_vid: u32,
 }
@@ -1084,10 +1110,21 @@ struct Pc {
 #[derive(Debug)]
 struct Running {
     thread: mlua::Result<Thread>,
+    /// The number of the quest the script belongs to, which its `set_state` moves.
+    quest: u32,
     suspend: Suspend,
     /// `chat_scripts`: the entries of the chat menu this script shows.
     chat: Vec<ArgScript>,
     state: i32,
+}
+
+/// What a receive-all pass does with a script that still waits for its client when it returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wait {
+    /// `HandleReceiveAllEvent`: the script keeps waiting.
+    Kept,
+    /// `HandleReceiveAllNoWaitEvent`, which the login runs: the script is closed.
+    Closed,
 }
 
 /// `suspend_state`.
@@ -1129,7 +1166,8 @@ struct Cx<'g> {
     npc_vid: u32,
     /// The quest that runs, for error messages (`GetCurrentQuestName`).
     quest: Vec<u8>,
-    /// What `set_state` asked for, which `execute` moves the `Pc` to when the script ends.
+    /// What `set_state` asked for in this step, which [`Run::end_running`] moves the `Pc` to
+    /// when the script ends, or the `Pc` carries while the script waits.
     pending_state: Option<Vec<u8>>,
     /// The character's quest flags: the split half the bridge owns while `op` keeps
     /// the rest (`operate`). A name whose answer mutates quest state
@@ -1283,6 +1321,49 @@ impl Run<'_, '_> {
         true
     }
 
+    /// `NPC::HandleReceiveAllEvent` and `NPC::HandleReceiveAllNoWaitEvent`
+    /// (`G/questnpc.cpp:621-646,726-758`) over `MatchingQuest` (`G/questnpc.h:112-139`):
+    /// in quest order, each quest's script at the character's state of it, or its start
+    /// state's when the character never ran it and may start it. Unlike
+    /// [`Run::handle_event`], which runs every match before every start, the scripts run
+    /// in one pass in quest order.
+    ///
+    /// With [`Wait::Closed`] a script still waiting for its client when it returns is
+    /// closed (`CloseState` and `EndRunning`), and a running script does not stop the pass:
+    /// legacy's no-wait variant has its `IsRunning` check commented out.
+    fn handle_receive_all(&self, pc: &mut Pc, npc: &Npc, event: &str, wait: Wait) -> bool {
+        if wait == Wait::Kept && pc.running.is_some() {
+            return false;
+        }
+        let Some(quests) = npc.own.get(event) else {
+            return false;
+        };
+        let mut handled = false;
+        for (quest, states) in quests {
+            let (state, code) = match pc.quests.get(quest) {
+                Some(state) => match states.get(state) {
+                    Some(code) => (*state, code),
+                    None => continue,
+                },
+                None => match states.get(&0) {
+                    Some(code) if self.can_start(*quest) => (0, code),
+                    _ => continue,
+                },
+            };
+            handled = true;
+            let name = self.quest_name(*quest);
+            let waits = self.execute(pc, *quest, name.clone(), state, code.clone(), Vec::new());
+            if waits && wait == Wait::Closed {
+                tracing::warn!(
+                    "QUEST NOT END RUNNING on Login/Logout - {}",
+                    String::from_utf8_lossy(&name)
+                );
+                self.end_running(pc);
+            }
+        }
+        handled
+    }
+
     /// `NPC::HandleEvent` (`questnpc.cpp:476`): the script of each quest's current state, then
     /// the start state of each quest the character never ran.
     fn handle_event(&self, pc: &mut Pc, npc: &Npc, event: &str) -> bool {
@@ -1332,22 +1413,28 @@ impl Run<'_, '_> {
         pc.send_done = false;
         self.cx.borrow_mut().quest.clone_from(&name);
         pc.current = name;
+        pc.pending_state = None;
         pc.running = Some(Running {
             thread,
+            quest,
             suspend: Suspend::None,
             chat,
             state,
         });
-        let ran = self.resume(pc, Ok(MultiValue::new()));
-        let pending = self.cx.borrow_mut().pending_state.take();
-        if pc.running.is_none() {
-            if let Some(state) = pending {
-                self.goto_state(pc, quest, &state);
-            }
-        } else if let Some(state) = pending {
-            pc.pending_state = Some(state);
+        self.resume(pc, Ok(MultiValue::new()))
+    }
+
+    /// `EndRunning`'s state change (`G/questpc.cpp:352-371`), which every end of a script
+    /// runs, a refusal's and an error's too: the quest of the script moves to the state its
+    /// last `set_state` named, whichever step asked for it (`quest_setstate` writes the
+    /// running state at once, `G/questlua_quest.cpp:112-146`).
+    fn end_running(&self, pc: &mut Pc) {
+        let asked = self.cx.borrow_mut().pending_state.take();
+        let pending = asked.or_else(|| pc.pending_state.take());
+        pc.pending_state = None;
+        if let (Some(running), Some(state)) = (pc.running.take(), pending) {
+            self.goto_state(pc, running.quest, &state);
         }
-        ran
     }
 
     /// `RunState` (`questlua.cpp:995`), and the `CloseState` and `EndRunning` every caller did
@@ -1364,7 +1451,7 @@ impl Run<'_, '_> {
         let step = match resumed {
             Ok(values) if values.is_empty() => {
                 self.goto_end(pc);
-                pc.running = None;
+                self.end_running(pc);
                 return false;
             }
             Ok(values) => self.suspension(&values),
@@ -1376,8 +1463,7 @@ impl Run<'_, '_> {
                 if is_refusal(&error) {
                     tracing::debug!("QUEST refused: {error}");
                     self.goto_end(pc);
-                    pc.pending_state = None;
-                    pc.running = None;
+                    self.end_running(pc);
                     return false;
                 }
                 tracing::warn!("LUA_ERROR: {error}");
@@ -1394,13 +1480,15 @@ impl Run<'_, '_> {
             );
             self.cx.borrow_mut().output.error = true;
             self.goto_end(pc);
-            pc.pending_state = None;
-            pc.running = None;
+            self.end_running(pc);
             return false;
         };
         self.cx.borrow_mut().output.script.extend(text);
         if let Some(running) = pc.running.as_mut() {
             running.suspend = suspend;
+        }
+        if let Some(state) = self.cx.borrow_mut().pending_state.take() {
+            pc.pending_state = Some(state);
         }
         self.send_script(pc);
         true
@@ -1607,13 +1695,13 @@ fn text_api(
     Ok(TextOutcome::Hit(result))
 }
 
-/// The `pc.*` bridged names: the level, the grand-master read and the skill level.
-/// Returns `None` for a name this table does not hold.
+/// The `pc.*` bridged names: the level, the map, the quest flags, the grand-master read, the
+/// skill level and the block mode. Returns `None` for a name this table does not hold.
 fn pc_api(
     lua: &Lua,
     cx: &mut Cx<'_>,
     name: &[u8],
-    first: &Value,
+    (first, last): (&Value, &Value),
 ) -> mlua::Result<Option<MultiValue>> {
     let number = |value: u32| Some(Value::Number(f64::from(value)));
     let result = match name {
@@ -1621,6 +1709,23 @@ fn pc_api(
         b"pc.get_map_index" => Some(Value::Number(f64::from(cx.game.map_index()))),
         b"pc.get_war_map" => Some(Value::Number(f64::from(cx.game.war_map()))),
         b"pc.is_gm" => Some(Value::Boolean(false)),
+        b"pc.getqf" => {
+            // `pc_get_quest_flag` (`G/questlua_pc.cpp:1180-1197`): the last argument, text
+            // or a number, names a flag of the quest that runs (`GetCurrentQuestName() + "."
+            // + sz`), and a flag the character never set reads 0 (`quest::PC::GetFlag`,
+            // `G/questpc.cpp:92-103`). Anything else logs and pushes nothing.
+            let Some(flag) = host::c_string(lua, last.clone())? else {
+                tracing::warn!("QUEST wrong get flag");
+                return Ok(Some(MultiValue::new()));
+            };
+            let name = [&cx.quest[..], b".", &flag].concat();
+            let value = cx
+                .quest_flags
+                .as_deref()
+                .and_then(|flags| flags.get(&name).copied())
+                .unwrap_or(0);
+            Some(Value::Number(f64::from(value)))
+        }
         b"pc.learn_grand_master_skill" => {
             // `pc_learn_grand_master_skill` (`questlua_pc.cpp:121-133`): a non-number
             // pushes nothing; a number pushes the climb. The count lives here, in
@@ -1749,7 +1854,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
     if let TextOutcome::Hit(result) = text_api(lua, cx, name, args, last.clone())? {
         return Ok(result.into_iter().collect());
     }
-    if let Some(answered) = pc_api(lua, cx, name, &first)? {
+    if let Some(answered) = pc_api(lua, cx, name, (&first, &last))? {
         return Ok(answered);
     }
     if let Some(answered) = guild_api(lua, cx, name, args)? {
@@ -2097,6 +2202,75 @@ mod tests {
         manager.answer(PID, 254, &mut game);
         assert_eq!(game.take(), [(0, "[DONE]".to_owned())]);
         assert!(!manager.is_running(PID));
+        manager.logout(PID);
+    }
+
+    /// `quest_setstate` writes the running state in whichever step of the script calls it
+    /// (`G/questlua_quest.cpp:112-146`), and `EndRunning` moves the quest when the script
+    /// ends (`G/questpc.cpp:352-371`): a `set_state` before a `wait()` lands when the answer
+    /// ends the script, one after it lands too, and a refusal ends the script with the state
+    /// it asked for.
+    #[test]
+    fn a_set_state_lands_when_the_script_ends_whichever_step_asked() {
+        let mut manager = manager().lock().unwrap();
+        manager.logout(PID);
+        let mut game = Fake::default();
+        let quest = manager.host.quest_index(b"item_attr67add").unwrap();
+        let at = usize::try_from(quest - 1).unwrap();
+        let talk = manager.host.quests()[at].states[&b"talk"[..]];
+        assert_ne!(talk, 0, "`talk` is not the start state");
+        let status: &[u8] = b"item_attr67add.__status";
+        let run = |manager: &mut Manager, source: &[u8], state: i32, game: &mut Fake| {
+            let code = host::load_chunk(manager.host.lua(), source, "=test");
+            manager.operate(PID, game, |run, pc, _| {
+                run.execute(
+                    pc,
+                    quest,
+                    b"item_attr67add".to_vec(),
+                    state,
+                    code,
+                    Vec::new(),
+                )
+            });
+        };
+
+        run(&mut manager, b"set_state('talk') wait()", 0, &mut game);
+        // A bare `[NEXT]` goes in the no-window skin (`SendScript`).
+        assert_eq!(game.take(), [(0, "[NEXT]".to_owned())]);
+        assert_eq!(
+            manager.quest_flag(PID, status),
+            Some(0),
+            "the script still waits"
+        );
+        manager.answer(PID, 254, &mut game);
+        assert_eq!(game.take(), [(0, "[DONE]".to_owned())]);
+        assert_eq!(
+            manager.quest_flag(PID, status),
+            Some(talk),
+            "the state asked for before the wait"
+        );
+
+        run(&mut manager, b"wait() set_state('start')", talk, &mut game);
+        game.take();
+        manager.answer(PID, 254, &mut game);
+        assert_eq!(
+            manager.quest_flag(PID, status),
+            Some(0),
+            "the state asked for after the wait"
+        );
+
+        run(
+            &mut manager,
+            b"set_state('talk') q.set_title('x')",
+            0,
+            &mut game,
+        );
+        assert!(!manager.is_running(PID));
+        assert_eq!(
+            manager.quest_flag(PID, status),
+            Some(talk),
+            "the refusal ends the script with the state it asked for"
+        );
         manager.logout(PID);
     }
 
@@ -2615,6 +2789,60 @@ mod tests {
             manager.quest_flag(PID, b"yohara_system.__status"),
             Some(1_998_515_313),
             "at 120 the yohara quest moves to CRC32(`information_new`)"
+        );
+        manager.logout(PID);
+    }
+
+    /// `CQuestManager::Login` (`G/questmanager.cpp:541-556`) and `NPC::OnLogin`
+    /// (`G/questnpc.cpp:353-397`): `game_option`'s login script reads the flags the load
+    /// set and sends the block byte, its own `+ 6` for `block_view_equipment` kept; a
+    /// character the manager never saw misses.
+    #[test]
+    fn a_login_restores_the_block_byte_from_the_flags_the_load_read() {
+        let mut manager = manager().lock().unwrap();
+        manager.logout(PID);
+        let mut stranger = Fake::default();
+        assert!(!manager.login(PID, &mut stranger));
+        assert!(stranger.blocked.is_empty() && stranger.chats.is_empty());
+
+        let mut game = Fake {
+            level: 10,
+            map_index: 1,
+            ..Fake::default()
+        };
+        manager.load_flags(PID, Vec::new());
+        assert!(manager.login(PID, &mut game));
+        assert_eq!(game.blocked, [0], "no flag sends a zero byte");
+        assert!(
+            !game.chats.iter().any(|(kind, _)| *kind == ChatKind::Info),
+            "no flag says nothing"
+        );
+
+        let mut game = Fake {
+            level: 10,
+            map_index: 1,
+            ..Fake::default()
+        };
+        manager.load_flags(
+            PID,
+            [
+                (b"game_option.block_whisper".to_vec(), 1),
+                (b"game_option.block_view_equipment".to_vec(), 1),
+                (b"game_option.block_party_invite".to_vec(), 2),
+            ],
+        );
+        assert!(manager.login(PID, &mut game));
+        assert_eq!(game.blocked, [8 + 6], "whisper's 8 and the script's 6");
+        let said = format!(
+            "{} {} Equipment",
+            text(&manager, "gameforge.game_option._100_say"),
+            text(&manager, "gameforge.game_option._160_say"),
+        );
+        assert!(
+            game.chats
+                .contains(&(ChatKind::Info, said.clone().into_bytes())),
+            "{:?} lacks {said:?}",
+            game.chats
         );
         manager.logout(PID);
     }

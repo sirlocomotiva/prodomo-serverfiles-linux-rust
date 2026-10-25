@@ -1200,7 +1200,12 @@ impl GameState {
             // `ch->ReadOfflineMessages()` (`G/input_login.cpp:728-729`): the lines
             // that waited for this character are read when it enters.
             self.deliver_offline_messages(vid, name);
-            self.shown_on_admit(vid, player_id, name, loaded)
+            let shown = self.shown_on_admit(vid, player_id, name, loaded);
+            // `CQuestManager::Login` (`G/input_db.cpp:1005-1048`) runs once the
+            // descriptor is in `PHASE_GAME`, after everything `Entergame` sent; its
+            // records ride the outbox, which the descriptor drains after the burst.
+            self.quest_login(vid);
+            shown
         });
         if reply.send(answer).is_err() {
             debug!(
