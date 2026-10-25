@@ -35268,3 +35268,99 @@ targets (prodomo lib 1238, parity 141 of 141, protocol 1267), with the new
 silence scenario among the passes; no scratch database left. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair. No ADR changed. No owner question
 added. V26 stays open.
+
+## 256. A new session forgets the last one's block byte and offline clock (`sys.messenger`, sixth part)
+
+The offline rework's remainder turned out to be state that outlived its session. Every
+enter in legacy is a new `CHARACTER`, and `CHARACTER::Initialize` zeroes the block mode
+with the rest of `m_pointsInstant` (`memset(&m_pointsInstant, 0, ...)`, `G/char.cpp:252`)
+and the offline-line clock (`dwLastOfflinePMTime = 0`, `:270-271`). The port keeps both
+in the world, keyed by VID (`GameState::block_modes`, `GameState::last_offline_pm`), and
+a player's VID is its player id (`character_vid`, `prodomo/src/main.rs`), so the next
+session of the same character found the last one's values under the same key. The leave
+cleaned every other VID-keyed map (the outbox, the affect event, the browse, the trade,
+the storage, the portal times and the body) and missed these two. Three things followed
+from it. A sender that came back inside ten seconds was told to wait, where legacy lets
+the first line of the new session through. A character that blocked whispers kept the
+block across a relog in this run, while its client was never sent the `setblockmode`
+line that shows it, and lost it at a restart. And the offline read at the enter gated on
+the last session's byte, so the lines that waited for a character that had once blocked
+whispers stayed unread. `GameState::forget_whisper_session` now drops both values when a
+character leaves, for every departure, beside `forget_portal_times`.
+
+The sweep for writers of the byte is closed at both controls: `bBlockMode` is written only
+by `SetBlockMode` (`do_setblockmode`, `G/cmd_general.cpp:2309`) and `SetBlockModeForce`
+(`pc_send_block_mode`, `G/questlua_pc.cpp:2194`). Ledger 249 said the login restores the
+byte through `quest game_option`, and that holds for legacy only. The bridge is live, but
+nothing runs the quest `login` event: `CQuestManager::Login` (`G/questmanager.cpp:541-556`,
+called from `QuestLoad` or `quest_login_event`, `G/input_db.cpp:1005-1048` and
+`:1104-1115`) has no counterpart in `quest::Manager`, while `levelup` and `kill`, the
+positive controls, are dispatched from `game_state/quests.rs`. So until
+`event.input_db.quest_login_event` is ported a session starts with the byte at zero, as
+legacy's does for the moment before its login event. Twenty-seven quests have login
+scripts, which is why that event is a slice of its own. `game_option`'s own script adds 6,
+not 64, for `block_view_equipment`; the quest source is never edited (ADR-0004), so the
+event will reproduce it when it lands.
+
+The read is in the order legacy runs it. `CClientManager::RequestReadOfflineMessages`
+answers every waiting line and erases them (`server/server/db/ClientManager.cpp:4613-4629`,
+the erase at `:4628`), and only then does `CInputDB::ReadOfflineMessages` refuse a
+character that blocks whispers (`G/input_db.cpp:2460`). The refused lines are gone.
+Ledger 250 said they stay waiting, which misread where the erase is. The port now takes
+the lines before its gate. With the byte at zero at every enter the gate cannot fire at
+the enter today, which is also legacy's usual case: the read's answer is one DB round
+trip, while the login event that restores the byte waits for the next tick of a
+one-second event. The garbage sweep drops a line at five hours to the millisecond:
+`duration_cast<hours>(age).count() >= iHour` truncates (`:4648`), and the port kept a line
+that was exactly five hours old.
+
+Nothing else of the messenger is left. Ledger 248 recorded "the team list beyond the
+GMs". Legacy's team query is `SELECT '%s',mName FROM common.gmlist WHERE mName!='%s'`
+(`G/messenger_manager.cpp:61-62`), every row of the table whatever its `mAuthority` or
+`mServerIP`, less the entrant's own name under MySQL's case-insensitive comparison. The
+descriptor lists every grant but the entrant's own, compared without regard to the case
+(`messenger_load`, `prodomo/src/main.rs`). The only rows legacy would list beyond that are
+`PLAYER` rows, which `gm_grant` refuses by its `CHECK` (migration 0001: "a player needs no
+grant"). `MESSENGER_SUBHEADER_CG_INVITE_ANSWER` has no handler arm (ledger 250). Two
+legacy details of the offline path were checked and need nothing: the text the port
+stores already stops at its first NUL and at `CHAT_MAX_LEN` (`CgWhisper::decode`), as
+`strlcpy` into `buf` does (`G/input_main.cpp:430-432`), and `bCanFormat` stays true on the
+delivered line, because its only `false` is behind `__BL_CLIENT_LOCALE_STRING__`
+(`G/input_main.cpp:630`), which nothing defines (the same sweep finds
+`LOCALE_STRING_RENEWAL` defined at `common/prodomodefines.h:32`).
+
+**The test.** `prodomo/tests/parity.rs`: a new
+`a_new_session_forgets_the_last_ones_block_byte_and_offline_clock`. Yankee blocks
+whispers and leaves. Alice blocks whispers and comes back, so her line to the absent
+Yankee is left for him (the system's sent notice), not refused as the sender's block. Her
+second line is told to wait. She comes back again and her third line is left at once, and
+the scenario asserts that the relog fit inside the ten seconds, or the line would not tell
+the two clocks apart. Yankee comes back and reads the first and the third line as
+`WHISPER_TYPE_OFFLINE` records from Alpha, because his block went with his last session.
+Unit tests in `game_state/whisper.rs`: `a_new_session_may_leave_a_line_at_once`,
+`a_new_session_starts_with_no_block_byte`, `a_line_is_dropped_at_five_hours_and_not_before`,
+and `a_character_who_blocks_whispers_loses_the_lines_that_waited` (renamed from 250's
+`a_character_who_blocks_whispers_reads_no_waiting_line`, whose assertion now holds that the
+line is gone). Mutation sweep, each mutant applied to the fixed file and restored by
+checksum, all semantic kills and none a compile error: dropping the leave's call fails both
+session unit tests and the scenario (at Alice's first line, the sender-blocked record);
+dropping only the clock's removal fails the scenario at the third line; `<=` for `<` in the
+sweep fails the five-hour test; and gating before the take fails the blocking-reader test.
+
+`sys.messenger` goes `ported` on
+`a_friend_request_answered_yes_lists_both_directions_and_relogin_keeps_it`, with the note
+naming the scenarios of 249 to 256. `lua.pc.send_block_mode` stays `ported`, but its
+scenario is now the unit test that runs it
+(`prodomo/src/game_state/quests.rs::send_block_mode_lands_the_line_and_the_last_byte_wins`):
+the scenario 249 named never reaches the bridge, and no binary scenario can until the login
+event is ported. `quest.game_option`, `event.input_db.quest_login_event` and
+`cg.game.messenger` have new notes. The 249 scenario's doc no longer says the next enter
+still refuses.
+
+Gates: fmt clean; build with no warnings; clippy green with `-D warnings`; doc green with
+`RUSTDOCFLAGS="-D warnings"`; doc-tests green (1 passed, 25 ignored); the full workspace
+all-targets DB run green on all 40 targets (prodomo lib 1241, parity 142 of 142, protocol
+1267) against `postgres:18` in Podman; no scratch database left. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair.
+
+No ADR changed. No owner question added. V26 stays open.

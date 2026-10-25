@@ -429,10 +429,11 @@ pub struct GameState {
     /// keyed by the name they wait for.
     offline_messages: HashMap<Vec<u8>, Vec<whisper::OfflineMessage>>,
     /// `get_dword_time()` when each character last left a line for an absent target
-    /// (`dwLastOfflinePMTime`, `G/char.h:2177`).
+    /// (`dwLastOfflinePMTime`, `G/char.h:2177`). A session's own: the leave forgets it.
     last_offline_pm: HashMap<common::vid::Vid, u32>,
     /// The block mode of each character (`m_pointsInstant.bBlockMode`, `G/char.h:471`):
-    /// the `EBlockAction` bits `SetBlockMode` wrote and the quest flags persist.
+    /// the `EBlockAction` bits `SetBlockMode` wrote and the quest flags persist. A
+    /// session's own: the leave forgets it.
     block_modes: HashMap<common::vid::Vid, u8>,
     /// The affect event of each character that has one (`m_pkAffectEvent`): the potion
     /// recovery, the stamina refill and the timed affects. See [`affect`].
@@ -1786,6 +1787,7 @@ impl GameState {
             .unwrap_or_default();
         self.end_quests(vid);
         self.forget_portal_times(vid);
+        self.forget_whisper_session(vid);
         let alignment = self.real_alignment_of(vid.raw());
         let place = self.remove_body(vid);
         let affects = self.saved_affects_of(vid);

@@ -415,15 +415,19 @@ impl GameState {
 
     /// The lines that waited for the character that just entered.
     ///
-    /// `CInputDB::ReadOfflineMessages` (`G/input_db.cpp:2455-2476`) refuses a character
-    /// that blocks whispers (`:2460`) and otherwise writes one record per line: the
-    /// name is the sender's, the text is the line with its NUL, and the type is
-    /// `WHISPER_TYPE_OFFLINE`.
+    /// The store's answer takes the lines away as it sends them
+    /// (`CClientManager::RequestReadOfflineMessages`,
+    /// `server/server/db/ClientManager.cpp:4613-4629`, whose erase is at `:4628`), and
+    /// only then does `CInputDB::ReadOfflineMessages` (`G/input_db.cpp:2455-2476`)
+    /// refuse a character that blocks whispers (`:2460`): the refused lines are gone.
+    /// Otherwise it writes one record per line: the name is the sender's, the text is
+    /// the line with its NUL, and the type is `WHISPER_TYPE_OFFLINE`.
     pub(super) fn deliver_offline_messages(&mut self, vid: common::vid::Vid, name: &str) {
+        let messages = self.take_offline_messages(name.as_bytes());
         if self.is_block_mode(vid, BLOCK_WHISPER) {
             return;
         }
-        for message in self.take_offline_messages(name.as_bytes()) {
+        for message in messages {
             let mut text = message.text.clone();
             text.push(0);
             // `int len = MIN(CHAT_MAX_LEN, strlen(p->szMessage) + 1);`
@@ -445,14 +449,29 @@ impl GameState {
     /// Drop the lines that have waited for five hours.
     ///
     /// `CClientManager::OfflineMessageGarbage`
-    /// (`server/server/db/ClientManager.cpp:4637-4654`) drops them hourly.
+    /// (`server/server/db/ClientManager.cpp:4637-4654`) drops them hourly. Its test is
+    /// `duration_cast<hours>(age).count() >= iHour` (`:4648`), and the cast truncates, so
+    /// a line goes at five hours to the millisecond.
     pub(super) fn expire_offline_messages(&mut self) {
         let now = self.clock.now();
         self.offline_messages.retain(|_, messages| {
             messages
-                .retain(|message| now.wrapping_sub(message.left_at) <= OFFLINE_MESSAGE_LIFETIME_MS);
+                .retain(|message| now.wrapping_sub(message.left_at) < OFFLINE_MESSAGE_LIFETIME_MS);
             !messages.is_empty()
         });
+    }
+
+    /// Forget the whisper state of the character under `vid`, as its departure does.
+    ///
+    /// Every enter is a new `CHARACTER`, and `CHARACTER::Initialize` zeroes both values
+    /// it holds here: the block mode with the rest of `m_pointsInstant`
+    /// (`G/char.cpp:252`), and the offline-line clock (`dwLastOfflinePMTime = 0`,
+    /// `:270-271`). The VID is the player id, so the next session would find either
+    /// under the same key. Only `/setblockmode` and the quest login's
+    /// `pc.send_block_mode` write the byte again.
+    pub(super) fn forget_whisper_session(&mut self, vid: Vid) {
+        let _clock = self.last_offline_pm.remove(&vid);
+        let _mode = self.block_modes.remove(&vid);
     }
 
     /// The block mode of the character under `vid` (`m_pointsInstant.bBlockMode`,
@@ -788,9 +807,10 @@ mod tests {
     }
 
     /// A character that blocks whispers hears no waiting line when it enters
-    /// (`G/input_db.cpp:2460`): the lines stay untaken.
+    /// (`G/input_db.cpp:2460`), and the lines are gone: the store's answer took them
+    /// before the gate ran (`server/server/db/ClientManager.cpp:4628`).
     #[test]
-    fn a_character_who_blocks_whispers_reads_no_waiting_line() {
+    fn a_character_who_blocks_whispers_loses_the_lines_that_waited() {
         let (mut world, clock, _sender) = a_world_with_a_player();
         clock.set(20_000);
         world.offline_messages.insert(
@@ -815,11 +835,120 @@ mod tests {
         world.block_modes.insert(Vid::new(OTHER), BLOCK_WHISPER);
         world.deliver_offline_messages(Vid::new(OTHER), "Nobody");
         assert!(inbox.try_recv().is_err(), "the waiting line was not read");
-        assert_eq!(
-            world.take_offline_messages(b"Nobody").len(),
-            1,
-            "the line stays waiting"
+        assert!(
+            world.take_offline_messages(b"Nobody").is_empty(),
+            "the line was taken all the same"
         );
+    }
+
+    /// A line goes at five hours to the millisecond, and one a millisecond younger
+    /// stays (`duration_cast<hours>(age).count() >= iHour`,
+    /// `server/server/db/ClientManager.cpp:4648`).
+    #[test]
+    fn a_line_is_dropped_at_five_hours_and_not_before() {
+        let (mut world, clock, _inbox) = a_world_with_a_player();
+        let line = |left_at| OfflineMessage {
+            from: "P100".to_owned(),
+            text: b"hello".to_vec(),
+            left_at,
+        };
+        world
+            .offline_messages
+            .insert(b"Nobody".to_vec(), vec![line(1_000), line(1_001)]);
+        world
+            .offline_messages
+            .insert(b"Somebody".to_vec(), vec![line(1_000)]);
+        clock.set(1_000 + OFFLINE_MESSAGE_LIFETIME_MS);
+
+        world.expire_offline_messages();
+        assert_eq!(
+            world.take_offline_messages(b"Nobody"),
+            vec![line(1_001)],
+            "the five-hour line went and the younger one stayed"
+        );
+        assert!(
+            !world.offline_messages.contains_key(b"Somebody".as_slice()),
+            "a name with no line left is forgotten"
+        );
+    }
+
+    /// A character that leaves and comes back may leave a line at once: the new
+    /// session's clock starts at zero (`dwLastOfflinePMTime = 0`, `G/char.cpp:270-271`),
+    /// while the same session waits its ten seconds.
+    #[test]
+    fn a_new_session_may_leave_a_line_at_once() {
+        let (mut world, clock, mut inbox) = a_world_with_a_player();
+        clock.set(20_000);
+        world.deliver_whisper(Vid::new(VID), b"Nobody", b"first", b"record".to_vec());
+        let _sent = inbox.try_recv().expect("the sender was told");
+        clock.set(21_000);
+        world.deliver_whisper(Vid::new(VID), b"Nobody", b"second", b"record".to_vec());
+        let wait = inbox.try_recv().expect("the sender was told");
+        assert_eq!(
+            &wait[GC_WHISPER_WIRE_SIZE..],
+            b"You have to wait 10 seconds for send offline message.\0"
+        );
+
+        world.leave_world(Vid::new(VID)).expect("the sender leaves");
+        let mut inbox = enter(&mut world, VID, (3200, 3200), 0);
+        let _burst = heard(&mut inbox);
+        clock.set(22_000);
+        let outcome = world.deliver_whisper(Vid::new(VID), b"Nobody", b"third", b"record".to_vec());
+        assert_eq!(outcome, WhisperOutcome::Answered);
+        let notice = inbox.try_recv().expect("the sender was told");
+        assert_eq!(
+            &notice[GC_WHISPER_WIRE_SIZE..],
+            b"An offline message has been sent.\0",
+            "the new session's clock starts at zero"
+        );
+        let texts: Vec<Vec<u8>> = world
+            .take_offline_messages(b"Nobody")
+            .into_iter()
+            .map(|message| message.text)
+            .collect();
+        assert_eq!(texts, vec![b"first".to_vec(), b"third".to_vec()]);
+    }
+
+    /// A character that leaves and comes back starts with no block bit
+    /// (`memset(&m_pointsInstant, 0, ...)`, `G/char.cpp:252`): its whisper reaches the
+    /// waiting store, and a line left for it is read at its enter.
+    #[test]
+    fn a_new_session_starts_with_no_block_byte() {
+        let (mut world, clock, _inbox) = a_world_with_a_player();
+        clock.set(20_000);
+        let _first_session = enter_second_player(&mut world);
+        world
+            .set_block_mode(Vid::new(OTHER), BLOCK_WHISPER | BLOCK_MESSENGER_INVITE)
+            .expect("the character is online");
+        assert!(world.is_block_mode(Vid::new(OTHER), BLOCK_WHISPER));
+
+        world
+            .leave_world(Vid::new(OTHER))
+            .expect("the character leaves");
+        assert_eq!(
+            world.block_mode(Vid::new(OTHER)),
+            0,
+            "the leave forgets the byte"
+        );
+        world.offline_messages.insert(
+            b"P101".to_vec(),
+            vec![OfflineMessage {
+                from: "P100".to_owned(),
+                text: b"hello".to_vec(),
+                left_at: 20_000,
+            }],
+        );
+        let mut other = enter(&mut world, OTHER, (3200, 3200), 0);
+        let _burst = heard(&mut other);
+        assert_eq!(
+            world.block_mode(Vid::new(OTHER)),
+            0,
+            "the enter starts at zero"
+        );
+        world.deliver_offline_messages(Vid::new(OTHER), "P101");
+        let line = other.try_recv().expect("the waiting line was read");
+        assert_eq!(line[3], WHISPER_TYPE_OFFLINE);
+        assert_eq!(&line[GC_WHISPER_WIRE_SIZE..], b"hello\0");
     }
 
     #[test]

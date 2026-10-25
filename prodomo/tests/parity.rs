@@ -5376,14 +5376,111 @@ fn a_whisper_for_a_character_that_is_not_there_is_left_for_it() {
     );
 }
 
+/// `sys.messenger`: a new session forgets the block byte and the offline-line clock of
+/// the last one, because every enter is a new `CHARACTER` and `CHARACTER::Initialize`
+/// zeroes both (`memset(&m_pointsInstant, 0, ...)` and `dwLastOfflinePMTime = 0`,
+/// `G/char.cpp:252`, `:270-271`). Only `/setblockmode` and the quest login's
+/// `pc.send_block_mode` write the byte again, and the quest login is not ported.
+///
+/// Yankee blocks whispers and leaves. Alice blocks whispers and comes back, so her line
+/// to the absent Yankee is left for him, not refused as the sender's block; her second
+/// line inside ten seconds is told to wait (`G/input_main.cpp:426-428`); she comes back
+/// again and her third line is left at once. Yankee comes back and reads the first and
+/// the third line (`CInputDB::ReadOfflineMessages`, `G/input_db.cpp:2455-2476`), because
+/// his block went with his last session.
+#[test]
+fn a_new_session_forgets_the_last_ones_block_byte_and_offline_clock() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         470000, 950000 FROM account WHERE login = 'bob'",
+    );
+    // The first line left for an absent target needs ten seconds of uptime.
+    wait_for_the_offline_message_delay(&server);
+
+    let (mut yankee, _) = enter_world(&server, b"bob", 0);
+    set_block_mode(&mut yankee, 8);
+    let old = yankee.client.local_addr();
+    drop(yankee);
+    server.wait_for(&format!("Client connection closed addr={old}"));
+
+    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    set_block_mode(&mut alice, 8);
+    let old = alice.client.local_addr();
+    drop(alice);
+    server.wait_for(&format!("Client connection closed addr={old}"));
+    let (mut alice, _) = enter_world(&server, b"alice", 0);
+
+    let sent = whisper_packet(
+        WHISPER_TYPE_SYSTEM,
+        b"Yankee",
+        b"An offline message has been sent.\0",
+    );
+    let started = std::time::Instant::now();
+    alice.send_record(&client_whisper(b"Yankee", b"first"));
+    assert_eq!(
+        alice.read_game(),
+        sent,
+        "her block went with her last session, so the line is left"
+    );
+    alice.send_record(&client_whisper(b"Yankee", b"second"));
+    assert_eq!(
+        alice.read_game(),
+        whisper_packet(
+            WHISPER_TYPE_SYSTEM,
+            b"Yankee",
+            b"You have to wait 10 seconds for send offline message.\0",
+        ),
+        "the session's own clock holds its ten seconds"
+    );
+    let old = alice.client.local_addr();
+    drop(alice);
+    server.wait_for(&format!("Client connection closed addr={old}"));
+    let (mut alice, _) = enter_world(&server, b"alice", 0);
+    alice.send_record(&client_whisper(b"Yankee", b"third"));
+    assert_eq!(
+        alice.read_game(),
+        sent,
+        "the new session's clock starts at zero"
+    );
+    // The old clock would still refuse inside the ten seconds, so the line above
+    // proves the new one only when the relog fit inside them.
+    assert!(
+        started.elapsed() < Duration::from_millis(9_500),
+        "the relog took {:?}, too long to tell the two clocks apart",
+        started.elapsed()
+    );
+    let old = alice.client.local_addr();
+    drop(alice);
+    server.wait_for(&format!("Client connection closed addr={old}"));
+
+    let (mut yankee, _) = enter_world_reading(&server, b"bob", 0);
+    for text in [b"first\0", b"third\0"] {
+        assert_eq!(
+            yankee.read_game(),
+            whisper_packet(WHISPER_TYPE_OFFLINE, b"Alpha", text),
+            "his block went with his last session, so the line is read"
+        );
+    }
+    yankee.quiet("only the two lines waited");
+}
+
 /// `sys.char.chat`, `sys.messenger`: a block byte refuses the line it names.
 /// Alice's `/setblockmode 8` lands her whisper block, so her whisper to Yankee
 /// answers the sender-blocked record and Bob hears nothing; Yankee's line back
 /// answers the target-blocked record. Yankee's `/setblockmode 16` lands his
 /// friend-request block, so Alice's add answers `[LS;657]` and no ask reaches
 /// him. Both `/setblockmode` lines answer the `setblockmode %d` command line
-/// and persist the seven `game_option.block_*` quest flags, so the next enter
-/// still refuses.
+/// and persist the seven `game_option.block_*` quest flags, which only the
+/// unported quest login event reads back (ledger 256).
 ///
 /// `do_setblockmode` (`G/cmd_general.cpp:2300-2309`), `CInputMain::Whisper`
 /// (`G/input_main.cpp:372-400`, `:508-529`) and `CInputMain::Messenger`'s

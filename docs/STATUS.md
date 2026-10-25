@@ -1,10 +1,11 @@
 # Rewrite status
 
-Last reviewed: 2026-10-23, after ledger section 255 (a GM silences a character
-for a parsed time).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 256 onwards (the
-rest of the messenger: the team list beyond the GMs, the offline rework's remainder;
-`MESSENGER_SUBHEADER_CG_INVITE_ANSWER` has no handler arm, so there is nothing to port).
+Last reviewed: 2026-10-25, after ledger section 256 (a new session forgets the last
+one's block byte and offline clock).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 257 onwards. The
+messenger is `ported`. The next slice is the quest `login` event
+(`event.input_db.quest_login_event`): nothing runs it yet, so a session starts with its
+whisper block byte at zero until `quest game_option` can restore it.
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -89,8 +90,10 @@ login and logout fans are proved: the entrant hears its TEAM_LIST, every holder 
 the TEAM_LOGIN, and the grant's disconnect fans the LOGOUT then the TEAM_LOGOUT. Since
 255 a GM silences a character for a parsed time: the lay, the `[LS;852]` and the add,
 the talk gate's hour-minute-second ladder, the whisper gate's `[LS;652]` info line,
-the offline name's stored row, and the 0 lay that stands on the next tick. The
-rest of combat, skills,
+the offline name's stored row, and the 0 lay that stands on the next tick. Since
+256 a new session starts with no block byte and no offline-line clock, the offline read
+takes the waiting lines before it checks the block, and a line is dropped at five hours.
+The rest of combat, skills,
 parties, guilds and the rest of step 4 are not ported yet. The two-process layout (a `game-server` and a `db-server`
 talking the legacy DB-peer protocol over MySQL) was retired in ledger section 177; sections 1-175
 record how it was built and stay as history. Since section 178 the one `prodomo` binary reads
