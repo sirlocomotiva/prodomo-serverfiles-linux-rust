@@ -78,6 +78,7 @@ pub mod gc_messenger;
 pub mod gc_nested;
 pub mod gc_npc_position;
 pub mod gc_position;
+pub mod gc_quest_info;
 pub mod gc_safebox;
 pub mod gc_script;
 pub mod gc_shop;

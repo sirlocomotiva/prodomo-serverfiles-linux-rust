@@ -1418,7 +1418,8 @@ fn dynamic_len(header: u8) -> usize {
         | GC_SCRIPT
         | GC_GUILD
         | GC_WHISPER
-        | GC_MESSENGER => usize::MAX,
+        | GC_MESSENGER
+        | GC_QUEST_INFO => usize::MAX,
         other => panic!("{other} is a fixed-width loading or enter-game record"),
     }
 }
@@ -1437,6 +1438,7 @@ fn word_sized(record: &[u8]) -> Option<usize> {
             | GC_SCRIPT
             | GC_WHISPER
             | GC_MESSENGER
+            | GC_QUEST_INFO
     ) {
         Some(usize::from(record[1]) | (usize::from(record[2]) << 8))
     } else {
@@ -1543,7 +1545,7 @@ fn game_len(header: u8) -> usize {
         // GC_MESSENGER rides the same `size`-word framing as the other dynamic records
         // (`TPacketGCMessenger`, `G/packet.h:1896-1901`).
         GC_ENTITY | GC_CHAT | GC_NPC_POSITION | GC_SHOP | GC_SCRIPT | GC_GUILD | GC_WHISPER
-        | GC_MESSENGER => dynamic_len(header),
+        | GC_MESSENGER | GC_QUEST_INFO => dynamic_len(header),
         GC_AFFECT_ADD => AFFECT_ADD_LEN,
         GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
         GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
@@ -1978,10 +1980,11 @@ fn read_login_event(keyed: &mut Keyed) {
 /// `event_info`'s three event flags (none is set), then `game_option`'s `syschat` naming
 /// what the stored flags block, `said`, when they block something, and its `setblockmode`
 /// line with the byte `block` (`_basic/game_option.lua`). From level 30 `item_attr67add`
-/// sends its letter's button (`send_letter`), which ends at `q.set_title`, a refusal, so
-/// the button rides a `[DONE]` with no quest info. No other login script sends anything
-/// on a map no zone script names, and the letter pass sends nothing to a member of no
-/// guild at war.
+/// sends its letter (`send_letter`): the button, which rides a `[DONE]`, then the
+/// `GC_QUEST_INFO` that titles quest 40 in the client's quest window, which the script's
+/// end sends (`quest::PC::EndRunning`, `G/questpc.cpp:342-346`). No other login script
+/// sends anything on a map no zone script names, and the letter pass sends nothing to a
+/// member of no guild at war.
 fn read_login_event_blocking(keyed: &mut Keyed, block: u8, said: Option<&[u8]>) {
     let first = keyed.read_game();
     assert_eq!(
@@ -2020,6 +2023,11 @@ fn read_login_event_blocking(keyed: &mut Keyed, block: u8, said: Option<&[u8]>) 
                 b"[QUESTBUTTON idx;40|name;Sixth and Seventh Bonus][DONE]"
             ),
             "item_attr67add's letter from level 30"
+        );
+        assert_eq!(
+            keyed.read_game(),
+            server_quest_title(40, b"Sixth and Seventh Bonus"),
+            "the letter titles its quest"
         );
     }
 }
@@ -4449,6 +4457,12 @@ fn a_trader_beside_a_warp_is_told_why_and_stays() {
 /// `HEADER_GC_SCRIPT`: `TPacketGCScript`, a `WORD size` covering the whole record, the `skin`
 /// byte and a `WORD src_size`, then the script with no terminator (`G/packet.h`).
 const GC_SCRIPT: u8 = 45;
+/// `HEADER_GC_QUEST_INFO` (81): `packet_quest_info`, a `WORD size` covering the whole
+/// record, `WORD index`, `WORD c_index` and the `flag` byte, eight bytes measured for i686,
+/// then one part per flag bit (`quest::PC::SendQuestInfoPakcet`, `G/questpc.cpp:231-308`).
+const GC_QUEST_INFO: u8 = 81;
+/// `QUEST_SEND_TITLE`, the flag bit of the 31-byte `title` part (`G/quest.h`).
+const QUEST_SEND_TITLE: u8 = 1 << 1;
 /// `HEADER_CG_SCRIPT_ANSWER`: the header and the answer byte, `TPacketCGScriptAnswer`.
 const CG_SCRIPT_ANSWER: u8 = 0x1d;
 /// `HEADER_CG_QUEST_INPUT_STRING`: the header and `msg[65]`, `TPacketCGQuestInputString`.
@@ -4483,6 +4497,23 @@ fn server_script(skin: u8, script: &[u8]) -> Vec<u8> {
     record.push(skin);
     record.extend_from_slice(&src_size.to_le_bytes());
     record.extend_from_slice(script);
+    record
+}
+
+/// A `GC_QUEST_INFO` that titles quest `index` in category 0 and carries nothing else, in
+/// `packet_quest_info` field order: the size of the whole record, the index, `c_index`, the
+/// flag, then `title` zero-padded to its 31 bytes. Legacy writes the size word as 8 and leaves
+/// the bytes after the title's NUL uninitialised; both are Defects the Rewrite does not keep
+/// (ledger 258).
+fn server_quest_title(index: u16, title: &[u8]) -> Vec<u8> {
+    let mut record = vec![GC_QUEST_INFO];
+    record.extend_from_slice(&(8_u16 + 31).to_le_bytes());
+    record.extend_from_slice(&index.to_le_bytes());
+    record.extend_from_slice(&0_u16.to_le_bytes());
+    record.push(QUEST_SEND_TITLE);
+    let mut field = [0; 31];
+    field[..title.len()].copy_from_slice(title);
+    record.extend_from_slice(&field);
     record
 }
 
@@ -4572,6 +4603,82 @@ fn a_quest_npc_answers_a_click_with_its_dialog_and_runs_it() {
     alice.send_record(&client_script_answer(1));
     assert_eq!(alice.read_game(), server_script(0, b"[DONE]"));
     alice.quiet("Inchide ends the chat");
+}
+
+/// The high bit of `CG_SCRIPT_BUTTON`'s `idx`: the client's quest window asks about the
+/// quest the rest of `idx` names (`__SelectQuest`, `CInputMain::ScriptButton`,
+/// `G/input_main.cpp:2189-2193`).
+const SELECT_QUEST: u32 = 0x8000_0000;
+
+/// `item_attr67add`'s `when button or info` page, which `say` ends with `[ENTER]`
+/// (`_basic/item_attr67add.quest:14-18`).
+const ATTR67ADD_INFO: &[u8] = b"It is possible to add a 6th or 7th bonus to an[ENTER]equipment \
+    item which already has 5 bonuses.[ENTER]Seon-Hae is the expert in these matters. Go \
+    and[ENTER]talk to him if you are interested.[ENTER]";
+
+/// `lua.q.set_title`, `lua.q.start`, `gc.quest_info`, `cg.game.script_button`,
+/// `sys.quest.runtime`: Alpha, level 154, logs in and `item_attr67add`'s letter titles
+/// quest 40 in the client's quest window ([`read_login_event_blocking`]). The window's
+/// entry sends `CG_SCRIPT_BUTTON` with the high bit, and the quest's `info` script runs at
+/// the character's state of it (`CQuestManager::QuestInfo`, `G/questmanager.cpp:739-765`,
+/// `NPC::OnInfo`, `G/questnpc.cpp:761-808`): the page in skin 1, then `set_state(talk)`.
+/// `talk` has no `info`, so a second press answers nothing, and neither does a quest the
+/// character has no state of, nor `dungeoninfo`, whose `button` has no `info` beside it. The
+/// state is stored with the character, so its next login sends no letter.
+#[test]
+fn the_quest_window_runs_the_letters_info_and_the_quest_moves_on() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alice, _alpha) = enter_world(&server, b"alice", 0);
+
+    alice.send_record(&client_script_button(40 | SELECT_QUEST));
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &[ATTR67ADD_INFO, b"[DONE]"].concat()),
+        "the window's entry runs the quest's info page"
+    );
+    alice.quiet("the page is the press's one answer");
+    alice.unanswered(&client_script_button(40 | SELECT_QUEST));
+    alice.unanswered(&client_script_button(999 | SELECT_QUEST));
+    // `dungeoninfo`, quest 1, ran at the login and has a `button` but no `info`.
+    alice.unanswered(&client_script_button(1 | SELECT_QUEST));
+
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    // `item_attr67add.__status` is the CRC32 of `talk`, 0x9f24_d5bb, as a signed `long`.
+    let flags = support::rows(
+        database.url(),
+        "SELECT value FROM quest_flag WHERE player_id = (SELECT id FROM player WHERE name = \
+          'Alpha') AND name = 'item_attr67add.__status'::bytea",
+        1,
+    );
+    assert_eq!(
+        flags,
+        vec![vec![-1_624_975_941]],
+        "the info moved the quest on"
+    );
+
+    // The next login runs `talk`'s triggers, and `talk` has no login: no letter, no title.
+    let (mut alice, _alpha) = enter_world_reading(&server, b"alice", 0);
+    let first = alice.read_game();
+    let empire = first[8];
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"dungeon_info_qid 1")
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"event_info 0 0 0")
+    );
+    assert_eq!(
+        alice.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"setblockmode 0")
+    );
+    alice.still("the letter is not sent again");
 }
 
 /// `npc.txt`'s keeper on map 3, vnum 20042, whose click trigger is the shop's. Its shop, 9,

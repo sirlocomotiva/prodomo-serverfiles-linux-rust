@@ -35513,3 +35513,171 @@ Gates:
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair.
 
 No ADR changed. No owner question added. V26 stays open.
+
+## 258. The quest window's info (`lua.q.set_title`, `lua.q.start`, `gc.quest_info`)
+
+The level-30 login letter now titles its quest in the client's quest window, and the window's
+entry runs the quest's `info` page. Ledger 257 sent `item_attr67add`'s button and stopped at
+`q.set_title`, a refusal; legacy follows the button with a `GC_QUEST_INFO`.
+
+**The record.** `protocol::gc_quest_info` is `HEADER_GC_QUEST_INFO` (81), byte 81 of
+`gc_inventory`, now implemented. `packet_quest_info` (`G/packet.h:1868-1877`) is header,
+`WORD size`, `WORD index`, `WORD c_index` (`__QUEST_RENEWAL__`, `prodomodefines.h:18`) and
+`flag`: 8 bytes. The i686 cross compiler is not installed on this machine, so the width was
+measured with `clang++-19 -target i686-linux-gnu -fsyntax-only` and `static_assert`:
+`packet_script` 6, a packed two-`long` struct 8 and `sizeof(long)` 4 as controls, an assertion
+of 7 failing as the negative control, and the x86-64 target failing the `long` controls. Each
+`flag` bit appends one part in bit order (`quest::PC::SendQuestInfoPakcet`,
+`G/questpc.cpp:231-308`): the begin byte, the 31-byte title, the 17-byte clock name, the
+clock's `int`, the 17-byte counter name, the counter's `int`, the 25-byte icon file. The
+decoder refuses bit 7, a begin byte other than 0 or 1, and a size that is not 8 plus the parts.
+
+Three legacy Defects in it are not reproduced (`docs/STATUS.md`, PROTOCOL_NOTES):
+
+- The size word is always 8: the struct is copied into the buffer before each part adds its
+  length to `qi.size`. The client reads the parts by `flag`, but a record whose parts arrive
+  after its first 8 bytes would be framed wrong. The encoder writes the whole record's size.
+- A name is written as `N` bytes from `c_str()`, so the bytes past its terminating zero are
+  whatever the string's buffer held. The encoder writes zeros there.
+- A name of `N` bytes or more is sent with no terminator. The encoder keeps `N - 1` bytes.
+
+**The runtime.** `q.set_title`, `q.start` and `q.done` join `BRIDGED`, 62 to 65, in a new
+`window_api` beside `pc_api` and `guild_api`:
+
+- `q.set_title` takes the last argument, text or a number (`lua_tostring`), and sets the
+  title bit (`quest_set_title`, `G/questlua_quest.cpp:36-45`; `SetCurrentQuestTitle`,
+  `G/questpc.cpp:458-462`). Anything else changes nothing.
+- `q.start` begins a quest only when its `iIndex` is 0 (`SetCurrentQuestStartFlag`,
+  `G/questpc.cpp:215-221`, `:441-450`), and `PC::SetQuest` gives every numbered quest its
+  number. So `send_letter`'s `q.start` changes nothing, and the letter's record carries the
+  title alone: flag 2, index 40, category 0.
+- `q.done` ends a numbered quest: the begin byte goes to 0 and its bit is set
+  (`SetCurrentQuestDoneFlag`, `:223-229`, `:433-439`). Of the owner's quests only
+  `clear_letter` reaches it, on `event_end`, which waits for `cmd.eventflag`; `questlib.lua`'s
+  `restart_quest`, `complete_quest`, `giveup_quest` and `complete_quest_state` call it too, and
+  no quest calls them (`restart_quest` is found inside `giveup_quest_menu`, the positive
+  control). The row stays partial with a unit test.
+
+Each running script carries a `Window` (index, begin flag, title and the two send bits) that
+starts empty with the quest's number, moves into the call context while a step runs and back
+before any end reads it. `Run::end_running` sends it through the new `Game::quest_info` when a
+bit is set, before the script's `set_state` lands, which is `EndRunning`'s order
+(`G/questpc.cpp:342-346`, then `:352-371`). The prodomo `Session` encodes it into the step's
+records, so the record follows the button's `GC_SCRIPT`.
+
+`c_index` is `GetQuestCategoryByQuestIndex(qi.index)` (`G/questmanager.cpp:312-318`), keyed by
+the `WORD` index. `Manager::load` now reads `quest/questcategory.txt` as
+`ReadQuestCategoryToDict` does under `_QR_MS_` (`:320-365`): the first word is `atoi`'s
+category, the second the quest's name, and an unknown name is warned with legacy's line. A
+line of fewer than two words is warned and skipped, where legacy indexes past its vector (a
+Defect, `docs/STATUS.md`). A missing file is logged and every category is 0. The owner's file
+is empty, so every category is 0.
+
+**The window's entry.** `CG_SCRIPT_BUTTON` with the high bit is the quest window's
+`__SelectQuest` (`CInputMain::ScriptButton`, `G/input_main.cpp:2189-2193`). `GameState::quest`
+routes it to the new `Manager::info`, which is `CQuestManager::QuestInfo`
+(`G/questmanager.cpp:739-765`) and `NPC::OnInfo` (`G/questnpc.cpp:761-808`): nothing while a
+script runs, nothing for a quest the character has no state of (`QUEST no quest by`), and
+otherwise the quest's `info` script at that state, or a `QUEST no info script by state`
+warning. Unlike the button, it never starts a quest. `m_bQuestInfoFlag` is written and never
+read, so it has no port. A confirm waiting would take the press first in legacy; `confirm`
+is still refused, so no script waits on one.
+
+For `item_attr67add` the `info` page is its `when button or info` text in skin 1, then
+`set_state(talk)`. `talk` has no `info` and no `login`, so a second press answers nothing and
+the next login sends no letter.
+
+**The tests.** `prodomo/tests/parity.rs`:
+
+- `GC_QUEST_INFO` joins `dynamic_len`, `word_sized` and `game_len`, sized by its own word.
+- `read_login_event_blocking` reads, from level 30, the golden record `server_quest_title(40,
+  "Sixth and Seventh Bonus")` after the button, built in `packet_quest_info` field order. Every
+  scenario that enters a character at level 30 or above reads it: all 143 pass.
+- New scenario `the_quest_window_runs_the_letters_info_and_the_quest_moves_on`: Alpha
+  (level 154) enters, presses the window's entry for quest 40 and gets the page in skin 1 with
+  `[DONE]`. A second press, a press for quest 999 and one for `dungeoninfo` (quest 1, a
+  `button` with no `info`) are unanswered. After the disconnect,
+  `item_attr67add.__status` is stored as -1624975941, the CRC32 of `talk` (0x9f24d5bb) as a
+  signed `long`. The next login sends the three lines and no letter.
+
+Unit tests:
+
+- `protocol`: six in `gc_quest_info`: the letter's golden bytes, every part in bit order (107
+  bytes), the done byte and the bare 8-byte record, `c_field`'s cut, the decoder's refusals
+  (legacy's size 8 among them) and each bit's part size.
+- `quest`: `questcategory_txt_reads_as_the_word_split_did`,
+  `the_quest_window_names_follow_legacys_argument_rules`,
+  `the_letter_titles_its_quest_and_the_window_runs_its_info` (with a press while the OX
+  manager's menu waits and one for `dungeoninfo`) and
+  `the_window_sends_the_parts_its_bits_name_under_the_words_index`.
+- `prodomo`: `the_letter_titles_its_quest_and_the_window_runs_its_info` (a press before the
+  login is quiet, the golden record follows the button, the page runs) and
+  `the_quest_window_goes_out_as_one_quest_info_record` (golden bytes with category 0x0203 and
+  the begin byte).
+
+**Mutation sweep.** Fifteen mutants, each applied to the pristine file, checked to change
+executable code by line position, and restored by checksum. All fifteen are semantic kills,
+none by compile error:
+
+- `quest`: the window not moved back after a resume; `end_running` not sending; `q.start`'s
+  and `q.done`'s conditions inverted; `q.set_title` setting no bit; `info` starting a quest
+  with no state; `info` running the `button` event; the category looked up by a fixed index;
+  the begin byte on every record; `info` running while a script waits. The last survived the
+  first pass, which is why the OX-menu press was added to the manager test. The `q.start`,
+  `q.done` and `q.set_title` mutants were re-run after the Clippy refactor moved them into
+  `window_api`.
+- `prodomo`: the high bit pressing the button; the record not queued; the category dropped;
+  the high bit kept on the index. The category mutant is invisible with the owner's empty
+  `questcategory.txt`, which is why the session golden test carries category 0x0203.
+- `protocol`: legacy's size word of 8.
+
+The sweep's first pass compared line sets and reported three mutants as "not code" because
+the mutated line also appears elsewhere in the file; the comparison is now positional.
+
+`info` running the `button` event was first set aside as equivalent, on a search of the
+`.quest` files alone, where all 14 triggers are `when button or info`. The search widened to
+`.lua` (`when (.* or )?(info|button)\b` over `legacy/gamedata/locale/europe/quest`; 25
+triggers in 19 files; `game_option.lua` as the negative control with 0 hits, and a lone
+`when info begin` line as the positive control) finds two `button` triggers with no `info`:
+`dungeoninfo` and `guild_war_join`. `dungeoninfo` runs at every login, so the manager test
+and the scenario now press its window entry and expect nothing, which kills the mutant.
+
+Rows:
+
+- Ported with the new scenario: `lua.q.set_title`, `lua.q.start`, `gc.quest_info`.
+- Partial with a note: `lua.q.done`.
+- Notes: `cg.game.script_button` (the high bit is ported), `quest.item_attr67add` (its
+  `button`, `info` and `talk` move; the `talk` scripts wait for `attr67add.*`) and
+  `sys.quest.runtime`.
+
+Docs: `AGENTS.md`'s coverage row is 111 implemented and 23 missing (12 fixed-size, 11
+dynamic). `docs/STATUS.md` has the new next slice, the refused-API row (65 backed names,
+`q.set_title2` refused), and two new Defects. `docs/PROTOCOL_NOTES.md` has the record's
+module note and its map and index entries.
+
+The coverage counts are pinned in six tests: two in `gc_inventory` and four in
+`protocol/tests/cg_wiring.rs`. The first full gate run failed five of them, because only the
+first was updated with the row. All six now pin 111 implemented or 23 missing, as ledger 248
+did for the messenger.
+
+**Not ported.** `q.set_title2`, the clock, the counter and the icon have no owner caller; the
+codec carries their parts and the API refuses them. `EndRunning`'s `leave`, `enter` and
+`letter` on a state change are still not run (ledger 257).
+
+Gates:
+
+- fmt clean.
+- Build with no warnings.
+- clippy green with `-D warnings`, after `api` went over 100 lines and a `match` on one
+  pattern was flagged; the window arms moved into `window_api` and the match became `if let`.
+- doc green with `RUSTDOCFLAGS="-D warnings"`.
+- doc-tests green (1 passed, 26 ignored; the new ignored block is the codec's legacy struct).
+- The full workspace all-targets DB run is green on all 40 targets against `postgres:18` in
+  Podman, 4185 tests: prodomo lib 1244, parity 143 of 143, protocol 1273, quest lib 85.
+- No scratch database was left by the gate run (`prodomo\_%` counts 0; `prodomo%` counts the
+  one main database, the positive control).
+
+The width was measured with clang for i686 because `i686-linux-gnu-g++-12` is not installed.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair.
+
+No ADR changed. No owner question added. V26 stays open.

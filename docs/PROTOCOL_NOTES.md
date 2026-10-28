@@ -59,6 +59,7 @@ Legacy client, game-to-client, game-to-game, and DB packet definitions/codecs.
 - `gc_whisper` covers header 34 `HEADER_GC_WHISPER` (0x22), the whisper answer: a header, an explicit little-endian size word that counts the whole record, the type byte, the raw 25-byte name field, the `bCanFormat` byte that `LOCALE_STRING_RENEWAL` adds (`G/input_main.cpp:631`), and the raw text that follows. The fixed part is 30 packed bytes, measured from a verbatim 32-bit compile under `#pragma pack(1)` with the repository's known-width controls; the `bool` is one byte, so the field is the legacy's own.
 - `cg_messenger` covers header 67 `HEADER_CG_MESSENGER` (0x43), the friend add and remove: the 2-byte base (`TPacketCGMessenger`, `packet.h:1944-1977`), 4 more VID bytes for `ADD_BY_VID` (0), and a raw 24-byte name field for `ADD_BY_NAME` (1) and `REMOVE` (2); `INVITE_ANSWER` (3) and every unknown subheader consume the base alone, the analyzer's own default arm (`G/input_main.cpp:1225-1228`). The name arms read 24 bytes where the `REMOVE` struct carries 31 that legacy never reads, and the names are C strings read to the first NUL.
 - `gc_messenger` covers header 74 `HEADER_GC_MESSENGER` (0x4a), the friend and team lists with the login, logout and remove-friend records: the 4-byte envelope whose size word counts it (`TPacketGCMessenger`), one `connected + length + name` entry per companion with no terminator, and the login, logout and `REMOVE_FRIEND` records as an envelope with a length byte and the name. The `INVITE` subheader (6) is never sent, so the codec declares the byte and produces no record of it.
+- `gc_quest_info` covers header 81 `HEADER_GC_QUEST_INFO` (0x51), the quest window's record: the 8-byte `packet_quest_info` (with `c_index`, `__QUEST_RENEWAL__`), then one part per `flag` bit in bit order, with the whole record's size and zero-filled name fields where legacy writes 8 and uninitialised bytes (ledger 258).
 - `cg_party_skill` covers the exact six-byte `TPacketCGPartyUseSkill` record.
 - `cg_party` covers the five fixed-width party records of headers 72, 73, 74, 75, and 78, with explicit little-endian words, one shared error type, and separately named record and frame-payload widths so a wrong-width frame is rejected rather than misread; `cg_quickslot_add`, `cg_quickslot_del`, and `cg_quickslot_swap` cover the three quickslot records of headers 16, 17, and 18, where the add record is a counted run and the del/swap pair differ only in their declared slot byte.
 - `cg_pick` covers the four fixed-width game-phase records that carry a single client choice and nothing else, at headers 31, 61, 66, and 114, where `CgQuestConfirm` is the only one with two fields and the only one whose `u8` precedes its `u32`, and where the three single-word records share one width and are therefore separated by their header rather than their length.
@@ -436,6 +437,23 @@ Sections 163 through 167 establish the honest baseline and correct three method 
   subheader (6) is never sent by this tree, only named by the enum, so the codec
   declares the byte and produces no record of it.
 
+- `protocol/src/gc_quest_info.rs` (ledger 258) implements the quest window's record, byte 81.
+  `packet_quest_info` is `{ BYTE header; WORD size; WORD index; WORD c_index; BYTE flag; }`
+  under `pack(1)` (`packet.h:1868-1877`); `c_index` exists because `__QUEST_RENEWAL__` is
+  defined (`prodomodefines.h:18`), so the fixed part is **8 bytes**. The i686 cross compiler
+  was not installed, so the width was measured with `clang++-19 -target i686-linux-gnu` and
+  `static_assert`: `packet_script` (6), a packed two-`long` struct (8) and `sizeof(long)` (4)
+  as controls, an assertion of 7 failing, and the x86-64 target failing the `long` controls.
+  Each `flag` bit appends one part in bit order: the begin byte, the 31-byte title, the
+  17-byte clock name, the clock's `int`, the 17-byte counter name, the counter's `int` and the
+  25-byte icon file. Legacy's size word is always 8, because the struct is copied into the
+  buffer before each part adds to `qi.size` (`G/questpc.cpp:231-308`); the client reads the
+  parts by `flag`, but a record whose parts arrive later than its first 8 bytes would desync
+  its framing. The encoder writes the whole record's size and zero-fills each name field, and
+  the decoder refuses legacy's 8 when parts follow. `c_index` is
+  `GetQuestCategoryByQuestIndex(qi.index)`, keyed by the `WORD` index after the narrowing,
+  and is 0 for every quest while the owner's `questcategory.txt` is empty.
+
 ## Shared record types
 
 Records that share a body keep their header. `CgFlyTarget` is one 13-byte record under
@@ -682,6 +700,7 @@ has none. Regenerate this list instead of editing it by hand.
 | `gc_inventory.rs` | Machine-readable inventory of the legacy game-to-client packet headers. |
 | `gc_messenger.rs` | The `HEADER_GC_MESSENGER` (0x4a) friend list, login, logout and remove records. |
 | `gc_nested.rs` | The game-to-client records that nest another record or carry a fixed array. |
+| `gc_quest_info.rs` | `HEADER_GC_QUEST_INFO` (0x51): what the client's quest window shows of one quest. |
 | `gc_small.rs` | The small fixed-width game-to-client records. |
 | `gc_vid.rs` | The game-to-client records that carry one 32-bit value. |
 | `gc_whisper.rs` | `HEADER_GC_WHISPER` (0x22): a private line, from one player to another. |

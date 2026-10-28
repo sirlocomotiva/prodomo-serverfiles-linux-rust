@@ -234,9 +234,9 @@ const LIBRARIES: [&str; 4] = [
 pub const BRIDGE: &str = "quest bridge";
 
 /// The API names that reach the game through [`BRIDGE`], in [`crate::api::NAMES`] order: the
-/// dialog (`say`, `raw_script`, the skins and the images), the chat lines, and the lookups the
-/// ported systems can answer.
-pub const BRIDGED: [&str; 62] = [
+/// dialog (`say`, `raw_script`, the skins and the images), the chat lines, the quest window's
+/// title and begin byte, and the lookups the ported systems can answer.
+pub const BRIDGED: [&str; 65] = [
     "game.get_event_flag",
     "set_state",
     "set_skin",
@@ -297,6 +297,9 @@ pub const BRIDGED: [&str; 62] = [
     "pc.send_block_mode",
     "q.setstate",
     "q.set_state",
+    "q.set_title",
+    "q.start",
+    "q.done",
     "q.getcurrentquestindex",
     "q.getcurrentquestname",
 ];

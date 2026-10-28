@@ -16,7 +16,11 @@
 //!   suspends on `select`, `wait` and `input`, each of which sends the dialog built so far
 //!   through [`Game::script`], as `SendScript` (`questmanager.cpp:1113-1151`) sent `GC_SCRIPT`;
 //! - [`Manager::answer`] is `CG_SCRIPT_ANSWER` (`CInputMain::ScriptAnswer`), which picks a menu
-//!   entry or continues a `wait`, and [`Manager::input`] is `CG_QUEST_INPUT_STRING`.
+//!   entry or continues a `wait`, and [`Manager::input`] is `CG_QUEST_INPUT_STRING`;
+//! - a script that set its quest's title or called `q.start` or `q.done` sends the quest's
+//!   window through [`Game::quest_info`] when it ends, as `EndRunning` sent `GC_QUEST_INFO`
+//!   (`questpc.cpp:231-308`, `:343-346`), and [`Manager::info`] runs the `info` script the
+//!   quest window asks for.
 //!
 //! While the manager runs, the [`crate::host::BRIDGED`] names reach the game through
 //! [`crate::host::BRIDGE`] and a [`Game`] the caller lends for that one call.
@@ -50,6 +54,8 @@
 //!   API reaches them yet.
 //! - `getnpcid` with no name answers 0 (legacy built a `std::string` from `NULL`).
 //! - An NPC's race is looked up by the caller, which finds the NPC on the character's own map.
+//! - A `questcategory.txt` line with fewer than two words is logged and skipped; legacy read
+//!   past the end of its word list.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -178,6 +184,26 @@ pub trait Game {
     /// its arguments, dworded numbers or raw text. The world's guilds judge it now, while
     /// the script that asked still waits, and answer what legacy pushed.
     fn guild_call(&mut self, name: &[u8], args: &[GuildArg]) -> GuildAnswer;
+
+    /// Sends the character a `GC_QUEST_INFO`: the window of the quest whose script just
+    /// ended (`quest::PC::SendQuestInfoPakcet`, `G/questpc.cpp:231-308`).
+    fn quest_info(&mut self, info: &QuestInfo);
+}
+
+/// What `SendQuestInfoPakcet` (`G/questpc.cpp:231-308`) sends when a script that changed its
+/// quest's window ends: the quest's number and category, and the parts the script changed.
+/// The clock, the counter and the icon are not ported, so no script changes them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestInfo {
+    /// `iIndex`, the low half the record's `WORD` keeps: the number of the quest that ran.
+    pub index: u16,
+    /// `GetQuestCategoryByQuestIndex(index)`: the category `questcategory.txt` gives the
+    /// quest, 0 when it gives none.
+    pub category: u16,
+    /// `bStart`, when `q.start` or `q.done` set `QUEST_SEND_ISBEGIN`.
+    pub begin: Option<bool>,
+    /// `_title`, when `q.set_title` set `QUEST_SEND_TITLE`: the text up to its first zero.
+    pub title: Option<Vec<u8>>,
 }
 
 /// One argument of a `guild.*` quest call: a dworded number or the raw bytes.
@@ -217,24 +243,36 @@ pub struct Manager {
     /// `m_dwQuestNPCVID` (`G/char.h:1772`): the NPC the last `SetQuestNPCID` named. The
     /// bridge reads it when the character's own click did not name one.
     quest_npc_vid: u32,
+    /// `QuestCategoryIndexMap` (`G/questmanager.h:308`): each quest's category, by number.
+    categories: BTreeMap<u16, u32>,
 }
 
 impl Manager {
     /// Loads the [`Host`] of the locale directory `locale_dir` and indexes its scripts with
-    /// `quest/questnpc.txt`.
+    /// `quest/questnpc.txt`, and its quests' categories with `quest/questcategory.txt`.
+    ///
+    /// A `questcategory.txt` that cannot be read is logged and gives every quest category 0,
+    /// as `ReadQuestCategoryToDict` did (`G/questmanager.cpp:320-331`).
     ///
     /// # Errors
     ///
     /// The host fails to load, or `questnpc.txt` cannot be read.
     pub fn load(locale_dir: &Path) -> Result<Manager, HostError> {
         let host = Host::load(locale_dir)?;
-        let path = locale_dir.join("quest").join("questnpc.txt");
+        let quest_dir = locale_dir.join("quest");
+        let path = quest_dir.join("questnpc.txt");
         let questnpc = fs::read(&path).map_err(|error| HostError::Io(path, error))?;
-        Ok(Manager::new(host, &questnpc))
+        let path = quest_dir.join("questcategory.txt");
+        let questcategory = fs::read(&path).unwrap_or_else(|error| {
+            tracing::error!(path = %path.display(), %error, "QUEST Cannot open 'questcategory.txt'");
+            Vec::new()
+        });
+        Ok(Manager::new(host, &questnpc, &questcategory))
     }
 
-    /// Indexes the scripts of `host` by NPC, with the NPC names of `questnpc`.
-    pub fn new(host: Host, questnpc: &[u8]) -> Manager {
+    /// Indexes the scripts of `host` by NPC, with the NPC names of `questnpc` and the quest
+    /// categories of `questcategory`.
+    pub fn new(host: Host, questnpc: &[u8], questcategory: &[u8]) -> Manager {
         let mut files: BTreeMap<u32, NpcFiles> = BTreeMap::new();
         let mut npc_ids = BTreeMap::new();
         for (vnum, name) in parse_questnpc(questnpc) {
@@ -258,6 +296,7 @@ impl Manager {
         ]
         .into_iter()
         .collect();
+        let categories = parse_questcategory(questcategory, host.quest_indices());
         Manager {
             host,
             npcs,
@@ -265,6 +304,7 @@ impl Manager {
             event_flags,
             pcs: BTreeMap::new(),
             quest_npc_vid: 0,
+            categories,
         }
     }
 
@@ -535,6 +575,34 @@ impl Manager {
         })
     }
 
+    /// `CQuestManager::QuestInfo` (`G/questmanager.cpp:739-765`) and `NPC::OnInfo`
+    /// (`G/questnpc.cpp:761-808`): the client's quest window asked about quest `quest`
+    /// (`CG_SCRIPT_BUTTON` with the high bit, `CInputMain::ScriptButton`,
+    /// `G/input_main.cpp:2188-2192`), so its `info` script runs at the character's state of
+    /// it. Unlike the button, a quest the character has no state of runs nothing.
+    pub fn info(&mut self, pid: u32, quest: u32, game: &mut dyn Game) -> bool {
+        self.operate(pid, game, |run, pc, npcs| {
+            if pc.running.is_some() {
+                return false;
+            }
+            let Some(state) = pc.quests.get(&quest).copied() else {
+                tracing::warn!("QUEST no quest by (quest {quest})");
+                return false;
+            };
+            let Some(npc) = npcs.get(&QUEST_NO_NPC) else {
+                return false;
+            };
+            if run.event_script(pc, npc, "info", quest, state) {
+                return true;
+            }
+            tracing::warn!(
+                "QUEST no info script by state {state} (quest {})",
+                String::from_utf8_lossy(&run.quest_name(quest))
+            );
+            false
+        })
+    }
+
     /// `CQuestManager::Input`: the text a script's `input()` waits for.
     pub fn input(&mut self, pid: u32, msg: &[u8], game: &mut dyn Game) {
         let suspend = self
@@ -638,6 +706,7 @@ impl Manager {
             event_flags,
             pcs,
             quest_npc_vid,
+            categories,
         } = self;
         let pc = pcs.entry(pid).or_default();
         // `SetQuestNPCID` overwrites what the click recorded (`Reward` runs after any
@@ -663,6 +732,8 @@ impl Manager {
             quest: pc.current.clone(),
             pending_state: None,
             quest_flags: Some(&mut loaned),
+            window: Window::default(),
+            categories,
         });
         let run = Run { host, cx: &cx };
         let result = run.bridged(|| op(&run, pc, npcs));
@@ -1012,6 +1083,44 @@ fn parse_questnpc(text: &[u8]) -> Vec<(u32, Vec<u8>)> {
 }
 
 /// C's `isspace` in the C locale.
+/// `CQuestManager::ReadQuestCategoryToDict` (`G/questmanager.cpp:320-365`, with `_QR_MS_`
+/// defined): each line that is not empty is split at white space, and its first word, read
+/// by `atoi`, is the category of the quest its second word names. A later line for a quest
+/// replaces an earlier one, and a name no quest has is logged and skipped. The owner's file
+/// is empty, so every quest is in category 0.
+fn parse_questcategory(text: &[u8], indices: &BTreeMap<Vec<u8>, u32>) -> BTreeMap<u16, u32> {
+    let mut categories = BTreeMap::new();
+    for line in text.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let mut words = line
+            .split(|byte| is_c_space(*byte))
+            .filter(|word| !word.is_empty());
+        let (Some(number), Some(name)) = (words.next(), words.next()) else {
+            tracing::warn!(
+                line = %String::from_utf8_lossy(line),
+                "QUEST questcategory.txt line without a category and a quest; skipped"
+            );
+            continue;
+        };
+        // `atoi` is `(int)strtol` with a 32-bit `long`, and the map keeps it unsigned.
+        let category = strtol(number).clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+        let category =
+            u32::from_le_bytes(i32::try_from(category).unwrap_or_default().to_le_bytes());
+        if let Some(index) = indices.get(name) {
+            let [low, high, ..] = index.to_le_bytes();
+            categories.insert(u16::from_le_bytes([low, high]), category);
+        } else {
+            tracing::warn!(
+                "QUEST coult not find QuestIndex for name Quest: {}({category})",
+                String::from_utf8_lossy(name)
+            );
+        }
+    }
+    categories
+}
+
 fn is_c_space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
@@ -1116,6 +1225,46 @@ struct Running {
     /// `chat_scripts`: the entries of the chat menu this script shows.
     chat: Vec<ArgScript>,
     state: i32,
+    /// What the client's quest window shows of the quest, and what the script changed. It
+    /// lives here while the script waits, and in [`Cx::window`] while a step runs.
+    window: Window,
+}
+
+/// The part of a running script's `QuestState` the client's quest window reads, with the
+/// bits of `m_iSendToClient` that say what the script changed. Each run starts a new one
+/// (`OpenState`, and `PC::SetQuest` with `m_iSendToClient = 0`, `G/questpc.cpp:140-162`).
+#[derive(Debug, Default)]
+struct Window {
+    /// `iIndex`: `PC::SetQuest` gives it the number of the quest that runs.
+    index: u32,
+    /// `bStart`.
+    start: bool,
+    /// `_title`.
+    title: Vec<u8>,
+    /// `QUEST_SEND_ISBEGIN`: `q.start` or `q.done` moved `bStart`.
+    send_begin: bool,
+    /// `QUEST_SEND_TITLE`: `q.set_title` set the title.
+    send_title: bool,
+}
+
+impl Window {
+    /// What `SendQuestInfoPakcet` sends, when the script changed anything
+    /// (`if (m_iSendToClient)`, `G/questpc.cpp:342-346`). The category is looked up by the
+    /// index the record carries.
+    fn info(&self, categories: &BTreeMap<u16, u32>) -> Option<QuestInfo> {
+        if !self.send_begin && !self.send_title {
+            return None;
+        }
+        let [low, high, ..] = self.index.to_le_bytes();
+        let index = u16::from_le_bytes([low, high]);
+        let [low, high, ..] = categories.get(&index).copied().unwrap_or(0).to_le_bytes();
+        Some(QuestInfo {
+            index,
+            category: u16::from_le_bytes([low, high]),
+            begin: self.send_begin.then_some(self.start),
+            title: self.send_title.then(|| self.title.clone()),
+        })
+    }
 }
 
 /// What a receive-all pass does with a script that still waits for its client when it returns.
@@ -1174,6 +1323,11 @@ struct Cx<'g> {
     /// (`pc.learn_grand_master_skill`'s count) does it here, now. `None` only in
     /// the direct-call probe, which answers through the `Game` alone.
     quest_flags: Option<&'g mut BTreeMap<Vec<u8>, i32>>,
+    /// The quest window of the script whose step runs, which `q.set_title`, `q.start` and
+    /// `q.done` change; [`Run::resume`] moves it in from [`Running::window`] and back.
+    window: Window,
+    /// Each quest's category (`GetQuestCategoryByQuestIndex`).
+    categories: &'g BTreeMap<u16, u32>,
 }
 
 /// One call into the manager. No `Cx` borrow is held across a call into Lua, which may call
@@ -1408,6 +1562,8 @@ impl Run<'_, '_> {
         chat: Vec<ArgScript>,
     ) -> bool {
         let thread = code.and_then(|function| self.lua().create_thread(function));
+        // `PC::SetQuest`: `iIndex` is `GetQuestIndexByName`, 0 for the chat menu's quest.
+        let index = self.host.quest_indices().get(&name).copied().unwrap_or(0);
         pc.quests.insert(quest, state);
         pc.flags.insert([&name[..], b".__status"].concat(), state);
         pc.send_done = false;
@@ -1420,19 +1576,33 @@ impl Run<'_, '_> {
             suspend: Suspend::None,
             chat,
             state,
+            window: Window {
+                index,
+                ..Window::default()
+            },
         });
         self.resume(pc, Ok(MultiValue::new()))
     }
 
-    /// `EndRunning`'s state change (`G/questpc.cpp:352-371`), which every end of a script
-    /// runs, a refusal's and an error's too: the quest of the script moves to the state its
-    /// last `set_state` named, whichever step asked for it (`quest_setstate` writes the
-    /// running state at once, `G/questlua_quest.cpp:112-146`).
+    /// `EndRunning` (`G/questpc.cpp:310-374`), which every end of a script runs, a
+    /// refusal's and an error's too: the quest's window goes to the client when the script
+    /// changed it (`SendQuestInfoPakcet`, `:342-346`), and then the quest of the script
+    /// moves to the state its last `set_state` named, whichever step asked for it
+    /// (`quest_setstate` writes the running state at once, `G/questlua_quest.cpp:112-146`).
     fn end_running(&self, pc: &mut Pc) {
         let asked = self.cx.borrow_mut().pending_state.take();
         let pending = asked.or_else(|| pc.pending_state.take());
         pc.pending_state = None;
-        if let (Some(running), Some(state)) = (pc.running.take(), pending) {
+        let Some(running) = pc.running.take() else {
+            return;
+        };
+        {
+            let mut cx = self.cx.borrow_mut();
+            if let Some(info) = running.window.info(cx.categories) {
+                cx.game.quest_info(&info);
+            }
+        }
+        if let Some(state) = pending {
             self.goto_state(pc, running.quest, &state);
         }
     }
@@ -1440,14 +1610,20 @@ impl Run<'_, '_> {
     /// `RunState` (`questlua.cpp:995`), and the `CloseState` and `EndRunning` every caller did
     /// when it returned false.
     fn resume(&self, pc: &mut Pc, args: mlua::Result<MultiValue>) -> bool {
-        let Some(running) = pc.running.as_ref() else {
+        let Some(running) = pc.running.as_mut() else {
             return false;
         };
-        self.cx.borrow_mut().output.error = false;
+        {
+            let mut cx = self.cx.borrow_mut();
+            cx.output.error = false;
+            cx.window = std::mem::take(&mut running.window);
+        }
         let resumed = match &running.thread {
             Ok(thread) => args.and_then(|args| thread.resume::<MultiValue>(args)),
             Err(error) => Err(error.clone()),
         };
+        // The window goes back to the script before any end of it reads it.
+        running.window = std::mem::take(&mut self.cx.borrow_mut().window);
         let step = match resumed {
             Ok(values) if values.is_empty() => {
                 self.goto_end(pc);
@@ -1847,6 +2023,48 @@ fn guild_api(
     Ok(Some(pushed))
 }
 
+/// The names that change what the client's quest window shows of the running quest
+/// (`G/questlua_quest.cpp:17-45`). None answers anything; `false` means the name is not one of
+/// them.
+fn window_api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], last: Value) -> mlua::Result<bool> {
+    match name {
+        b"q.set_title" => {
+            // `quest_set_title` (`G/questlua_quest.cpp:36-45`): the last argument, text or a
+            // number, is the title (`SetCurrentQuestTitle`, `G/questpc.cpp:458-462`), and
+            // anything else changes nothing.
+            if let Some(title) = host::c_string(lua, last)? {
+                cx.window.title = title;
+                cx.window.send_title = true;
+            }
+        }
+        b"q.start" => {
+            // `SetCurrentQuestStartFlag` (`G/questpc.cpp:215-221`) begins the quest only
+            // when `iIndex` is 0 (`SetCurrentQuestBeginFlag`, `:441-450`). `PC::SetQuest`
+            // gives every quest that has a number its number, so only the chat menu's
+            // quest, which no script names, would begin.
+            if cx.window.index == 0 {
+                cx.window.start = true;
+                cx.window.index = cx
+                    .quest_indices
+                    .get(cx.quest.as_slice())
+                    .copied()
+                    .unwrap_or(0);
+                cx.window.send_begin = true;
+            }
+        }
+        b"q.done" => {
+            // `SetCurrentQuestDoneFlag` (`G/questpc.cpp:223-229`) with
+            // `ClearCurrentQuestBeginFlag` (`:433-439`): a quest with a number ends.
+            if cx.window.index != 0 {
+                cx.window.start = false;
+                cx.window.send_begin = true;
+            }
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Result<MultiValue> {
     let first = args.front().cloned().unwrap_or(Value::Nil);
     let last = args.back().cloned().unwrap_or(Value::Nil);
@@ -1859,6 +2077,9 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
     }
     if let Some(answered) = guild_api(lua, cx, name, args)? {
         return Ok(answered);
+    }
+    if window_api(lua, cx, name, last.clone())? {
+        return Ok(MultiValue::new());
     }
     let result = match name {
         b"set_skin" | b"setskin" => {
@@ -1983,6 +2204,7 @@ mod tests {
         war_map: i32,
         any_war: f64,
         blocked: Vec<u8>,
+        infos: Vec<QuestInfo>,
     }
 
     impl Fake {
@@ -2058,6 +2280,10 @@ mod tests {
                 b"name" => GuildAnswer::Text(b"Knights".to_vec()),
                 _ => GuildAnswer::None,
             }
+        }
+
+        fn quest_info(&mut self, info: &QuestInfo) {
+            self.infos.push(info.clone());
         }
     }
 
@@ -2406,6 +2632,98 @@ mod tests {
         assert!(parse_questnpc(b"").is_empty());
     }
 
+    /// `ReadQuestCategoryToDict` (`G/questmanager.cpp:320-365`, `_QR_MS_`): white space splits
+    /// a line, `atoi` reads the first word, the second names the quest, a later line wins,
+    /// and a name no quest has, a line without two words and an empty line are skipped.
+    #[test]
+    fn questcategory_txt_reads_as_the_word_split_did() {
+        let indices: BTreeMap<Vec<u8>, u32> = [
+            (b"alpha".to_vec(), 3),
+            (b"beta".to_vec(), 0x0001_0005),
+            (b"gamma".to_vec(), 9),
+            (b"delta".to_vec(), 11),
+        ]
+        .into_iter()
+        .collect();
+        let parsed = parse_questcategory(
+            b"1 alpha\r\n\n7\tbeta extra\n2 nobody\n   \nlonely\n-1 gamma\n4x delta\n5 alpha",
+            &indices,
+        );
+        let want: BTreeMap<u16, u32> = [
+            (3, 5),
+            // The map's key is a `WORD`: the index's low half.
+            (5, 7),
+            // `atoi("-1")` kept unsigned.
+            (9, u32::MAX),
+            // `atoi` stops at the first byte that is not a digit.
+            (11, 4),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(parsed, want);
+        assert!(parse_questcategory(b"", &indices).is_empty());
+        // The owner's file is empty, so every quest is in category 0.
+        assert!(manager().lock().unwrap().categories.is_empty());
+    }
+
+    /// `quest_set_title`, `quest_start` and `quest_done` (`G/questlua_quest.cpp:17-45`): the
+    /// title is the last argument when it is text or a number; `q.start` begins only a quest
+    /// whose window has no number yet, and `q.done` ends only one that has.
+    #[test]
+    fn the_quest_window_names_follow_legacys_argument_rules() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let string = |text: &[u8]| Value::String(lua.create_string(text).unwrap());
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::default(),
+            output: Output::default(),
+            flags: BTreeMap::new(),
+            window: Window::default(),
+        };
+        let table = Value::Table(lua.create_table().unwrap());
+        probe.call("q.set_title", &[table]).unwrap();
+        probe.call("q.set_title", &[]).unwrap();
+        assert!(!probe.window.send_title, "no text, no title");
+        probe
+            .call("q.set_title", &[string(b"first"), string(b"la\0st")])
+            .unwrap();
+        assert_eq!(probe.window.title, b"la");
+        probe.call("q.set_title", &[Value::Number(12.5)]).unwrap();
+        assert_eq!(probe.window.title, b"12.5");
+        assert!(probe.window.send_title);
+
+        // The probe's quest `q` has no number, so its window has none either.
+        probe.call("q.done", &[]).unwrap();
+        assert!(!probe.window.send_begin, "nothing to end");
+        probe.call("q.start", &[]).unwrap();
+        assert!(probe.window.start && probe.window.send_begin);
+        assert_eq!(probe.window.index, 0, "`q` names no quest");
+
+        probe.window = Window {
+            index: 40,
+            ..Window::default()
+        };
+        probe.call("q.start", &[]).unwrap();
+        assert!(
+            !probe.window.start && !probe.window.send_begin,
+            "a numbered quest is never begun"
+        );
+        probe.call("q.done", &[]).unwrap();
+        assert!(!probe.window.start && probe.window.send_begin);
+        let categories = [(40, 0x0002_0003)].into_iter().collect();
+        assert_eq!(
+            probe.window.info(&categories),
+            Some(QuestInfo {
+                index: 40,
+                category: 3,
+                begin: Some(false),
+                title: None,
+            })
+        );
+        assert_eq!(Window::default().info(&categories), None);
+    }
+
     #[test]
     fn file_names_split_as_load_state_script_did() {
         assert_eq!(
@@ -2489,6 +2807,8 @@ mod tests {
         output: Output,
         /// The loaned quest flags, as `operate` lends them: the count arms persist here.
         flags: BTreeMap<Vec<u8>, i32>,
+        /// The quest window the `q.*` arms change.
+        window: Window,
     }
 
     impl Probe<'_> {
@@ -2503,10 +2823,13 @@ mod tests {
                 quest: b"q".to_vec(),
                 pending_state: None,
                 quest_flags: Some(&mut self.flags),
+                window: std::mem::take(&mut self.window),
+                categories: &self.manager.categories,
             };
             let args: MultiValue = args.iter().cloned().collect();
             let result = api(self.manager.host.lua(), &mut cx, name.as_bytes(), &args);
             self.output = cx.output;
+            self.window = cx.window;
             Ok(result?.into_iter().collect())
         }
 
@@ -2530,6 +2853,7 @@ mod tests {
             game: Fake::at_ox_manager(),
             output: Output::default(),
             flags: BTreeMap::new(),
+            window: Window::default(),
         };
         // Text and numbers join, each up to a zero byte; anything else is skipped.
         let parts = [
@@ -2624,6 +2948,7 @@ mod tests {
             game: Fake::at_ox_manager(),
             output: Output::default(),
             flags: BTreeMap::new(),
+            window: Window::default(),
         };
         // A fractional id arrives dworded, truncating toward zero.
         assert!(probe.call("guild.level", &number(7.9)).unwrap().is_empty());
@@ -2676,6 +3001,7 @@ mod tests {
             game: Fake::at_ox_manager(),
             output: Output::default(),
             flags: BTreeMap::new(),
+            window: Window::default(),
         };
         probe.game.level = 40;
         assert_eq!(probe.call("pc.get_level", &[]).unwrap(), number(40.0));
@@ -2716,6 +3042,7 @@ mod tests {
             game: Fake::at_ox_manager(),
             output: Output::default(),
             flags: BTreeMap::new(),
+            window: Window::default(),
         };
         let blocked =
             |probe: &mut Probe, args: &[Value]| probe.call("pc.send_block_mode", args).unwrap();
@@ -2739,6 +3066,7 @@ mod tests {
             game: Fake::at_ox_manager(),
             output: Output::default(),
             flags: BTreeMap::new(),
+            window: Window::default(),
         };
         for (skin, want) in [
             (4.5, 4),
@@ -2791,6 +3119,149 @@ mod tests {
             "at 120 the yohara quest moves to CRC32(`information_new`)"
         );
         manager.logout(PID);
+    }
+
+    /// `send_letter` (`quest/questlib.lua:142`) at login: from level 30 `item_attr67add`'s
+    /// letter sends its button in skin 0 and then, as `EndRunning` does, the quest window its
+    /// `q.set_title` titled (`SendQuestInfoPakcet`, `G/questpc.cpp:231-308`); its `q.start`
+    /// begins nothing, because the quest has its number. The window's `info` runs the quest's
+    /// `button or info` script at its state, which moves it to `talk`, where no `info`
+    /// script waits, and a quest the character never ran runs nothing.
+    #[test]
+    fn the_letter_titles_its_quest_and_the_window_runs_its_info() {
+        const INFO: &str = "It is possible to add a 6th or 7th bonus to an[ENTER]equipment \
+                            item which already has 5 bonuses.[ENTER]Seon-Hae is the expert in \
+                            these matters. Go and[ENTER]talk to him if you are \
+                            interested.[ENTER][DONE]";
+        let mut manager = manager().lock().unwrap();
+        let quest = manager
+            .host()
+            .quest_index(b"item_attr67add")
+            .expect("the bonus quest");
+        let index = u16::try_from(quest).expect("a small number");
+        let talk = manager.host().quests()[usize::try_from(quest).expect("small") - 1].states
+            [&b"talk"[..]];
+        manager.logout(PID);
+        manager.load_flags(PID, Vec::new());
+        let mut young = Fake {
+            level: 29,
+            map_index: 1,
+            ..Fake::default()
+        };
+        assert!(manager.login(PID, &mut young));
+        assert!(young.infos.is_empty(), "no letter below level 30");
+
+        manager.logout(PID);
+        manager.load_flags(PID, Vec::new());
+        let mut game = Fake {
+            level: 30,
+            map_index: 1,
+            ..Fake::default()
+        };
+        assert!(manager.login(PID, &mut game));
+        let button = format!("[QUESTBUTTON idx;{quest}|name;Sixth and Seventh Bonus][DONE]");
+        assert_eq!(game.take(), [(QUEST_SKIN_NOWINDOW, button)]);
+        assert_eq!(
+            game.infos,
+            [QuestInfo {
+                index,
+                category: 0,
+                begin: None,
+                title: Some(b"Sixth and Seventh Bonus".to_vec()),
+            }]
+        );
+
+        // While a menu waits the window's entry runs nothing (`pc.IsRunning()`,
+        // `G/questnpc.cpp:765-777`), and the menu stays.
+        let mut ox = Fake {
+            level: 30,
+            map_index: 1,
+            ..Fake::at_ox_manager()
+        };
+        assert!(manager.click(PID, VID, OX_MANAGER, &mut ox));
+        assert_eq!(ox.take().len(), 1, "the menu");
+        assert!(!manager.info(PID, quest, &mut ox), "a script waits");
+        assert!(ox.take().is_empty() && manager.is_running(PID));
+        manager.answer(PID, 1, &mut ox);
+        assert_eq!(ox.take(), [(QUEST_SKIN_NOWINDOW, "[DONE]".to_owned())]);
+        assert!(!manager.is_running(PID));
+
+        assert!(manager.info(PID, quest, &mut game), "the window asks");
+        assert_eq!(game.take(), [(QUEST_SKIN_NORMAL, INFO.to_owned())]);
+        assert_eq!(game.infos.len(), 1, "the info script sets no title");
+        assert_eq!(
+            manager.quest_flag(PID, b"item_attr67add.__status"),
+            Some(talk)
+        );
+        assert!(!manager.info(PID, quest, &mut game), "talk has no info");
+        assert!(!manager.info(PID, 999, &mut game), "no quest 999 ran");
+        // `dungeoninfo` ran at the login and has a `button` but no `info`, so its entry runs
+        // nothing (`QUEST no info event`), where its button would ask for input.
+        let dungeoninfo = manager
+            .host()
+            .quest_index(b"dungeoninfo")
+            .expect("the dungeon quest");
+        assert!(!manager.info(PID, dungeoninfo, &mut game), "no info event");
+        assert!(game.take().is_empty() && game.infos.len() == 1);
+        manager.logout(PID);
+    }
+
+    /// `SendQuestInfoPakcet` (`G/questpc.cpp:231-308`): nothing is sent unless a bit is
+    /// set; `qi.index` is the low `WORD` of `iIndex`, the category is looked up by that
+    /// `WORD` (`GetQuestCategoryByQuestIndex`, `G/questmanager.cpp:312-318`) and narrowed
+    /// to `c_index`'s `WORD`, and only the parts whose bits are set are carried.
+    #[test]
+    fn the_window_sends_the_parts_its_bits_name_under_the_words_index() {
+        let categories = [(40, 7), (41, 0x0003_0009)].into_iter().collect();
+        let quiet = Window {
+            index: 40,
+            start: true,
+            title: b"kept".to_vec(),
+            ..Window::default()
+        };
+        assert_eq!(quiet.info(&categories), None, "no bit, no record");
+
+        let titled = Window {
+            index: 0x0001_0028,
+            title: b"Sixth".to_vec(),
+            send_title: true,
+            ..Window::default()
+        };
+        assert_eq!(
+            titled.info(&categories),
+            Some(QuestInfo {
+                index: 40,
+                category: 7,
+                begin: None,
+                title: Some(b"Sixth".to_vec()),
+            })
+        );
+        let begun = Window {
+            index: 41,
+            start: true,
+            send_begin: true,
+            ..Window::default()
+        };
+        assert_eq!(
+            begun.info(&categories),
+            Some(QuestInfo {
+                index: 41,
+                category: 9,
+                begin: Some(true),
+                title: None,
+            })
+        );
+        let done = Window {
+            index: 42,
+            send_begin: true,
+            ..Window::default()
+        };
+        assert_eq!(
+            done.info(&categories)
+                .map(|info| (info.category, info.begin)),
+            Some((0, Some(false))),
+            "a quest no line names is category 0"
+        );
     }
 
     /// `CQuestManager::Login` (`G/questmanager.cpp:541-556`) and `NPC::OnLogin`

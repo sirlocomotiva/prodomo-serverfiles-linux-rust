@@ -1,11 +1,13 @@
 # Rewrite status
 
-Last reviewed: 2026-10-25, after ledger section 257 (the quest `login` event).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 258 onwards. The
-messenger is `ported`, and since 257 a session's quest `login` event restores the block byte
-its `game_option` flags name. The next slice is the letter's quest info (`q.set_title`,
-`q.start` and `GC_QUEST_INFO`): `send_letter` now reaches every character from level 30 at
-login, and its button arrives without the record that titles it.
+Last reviewed: 2026-10-28, after ledger section 258 (the quest window's info).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 259 onwards. The
+messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
+`game_option` flags name, and since 258 the level-30 letter titles its quest in the client's
+quest window (`GC_QUEST_INFO`) and the window's entry runs the quest's `info` page. The next
+slice is the sash and Yohara letters: `find_npc_by_vnum`, `target.vid` and the record it
+sends, and the `leave`, `enter` and `letter` scripts legacy's `EndRunning` runs when a script
+changes its quest's state (`G/questpc.cpp:352-371`), which the port does not run yet.
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -371,7 +373,7 @@ owner should know about (178.5):
 | A quest's flags and state live in the store with the character (ledger 244), so a flag outlives the session that set it. `set_state` moves its quest when the script ends, whichever step called it and however the script ends (ledger 257), `pc.learn_grand_master_skill` writes its read count, and the server writes its own flags: the guild's withdraw time, the war's member flag and `/setblockmode`'s seven `game_option.block_*` flags (ledger 256). `pc.getqf` reads a flag (ledger 257); `pc.setqf` and the rest are "not ported". A state change runs no `leave`, `enter` or `letter` script, and until the script ends the quest's flag holds the old state, so a character that leaves while the script waits keeps the old one (ledger 257). The load brings the flags with the character, so `Loading quest. Please wait a moment.` is never said, and a save writes a character's whole set of flags at once instead of the flags that changed. A call of an API the Rewrite does not back ends the script silently, so the client sees no `[DONE]` where a script error sends one. The event flags stay in memory (ADR-0006). | The `quest` table is loaded with the character and saved with it (`D/ClientManagerPlayer.cpp:352-394`, `D/ClientManager.cpp:692-698`), a quest waits, with that line, until the load arrives (`G/questmanager.cpp:920-931`), and a save writes only the flags that changed (`quest::PC::Save`, `G/questpc.cpp:519-590`). `quest_setstate` writes the state and its flag at once (`G/questlua_quest.cpp:112-146`), and `EndRunning` runs the old state's `leave`, the new one's `enter` and its `letter` (`G/questpc.cpp:352-371`). |
 | `_basic/change_empire.lua` is not loaded: an `end` on line 132 closes its `if` chain early, so `qc` refuses it (ADR-0006, ledger 227). This goes when the owner fixes the source. | The same: legacy's `qc` aborts on it and it never reached `object/`. |
 | Only an NPC's `click` and `chat` scripts run (ledger 227), the `kill` and `levelup` events reach the no-target quests (ledger 244), a war's `letter` and the letter's `button` run (ledger 239), and the `login` event runs when a character enters the game or comes back from a Warp (ledger 257). The login runs at once, behind the enter's records and the offline lines it read. The `logout`, `timer`, `target` and every other event is raised by no ported system, and the hide-and-seek reward of `OnClick` is not ported. | Each system raises its event through `CQuestManager`, and `CHARACTER::OnClick` gives the hide-and-seek reward while that event runs (`G/char.cpp:6299-6330`). When the quest load lands before the game phase, `quest_login_event` runs the login at the first one-second tick that finds the character in the game (`G/input_db.cpp:1005-1048`, `:1104-1115`). |
-| A quest API name whose system is not ported raises a "not ported" error, which ends the script silently: the client sees no `[DONE]`, where a Lua error sends one (ADR-0006, ledger 227, ledger 244). Of the 699 names 62 are backed (ledger 257); `pc.warp`, `game.set_safebox_level` and `q.set_title` are among the refused, so `send_letter`'s button reaches the client without the `GC_QUEST_INFO` that titles it. | Every name runs. |
+| A quest API name whose system is not ported raises a "not ported" error, which ends the script silently: the client sees no `[DONE]`, where a Lua error sends one (ADR-0006, ledger 227, ledger 244). Of the 699 names 65 are backed (ledger 258); `pc.warp`, `game.set_safebox_level` and `q.set_title2` are among the refused. | Every name runs. |
 | A quest cannot open `io` or `debug`, `os` holds only `date`, `time`, `clock` and `difftime`, and the base library has no `loadfile`, `load` or `require` (ADR-0006, ledger 227). No loaded file calls a removed name: only the loggers of `luaFunctions.lua`, which no script calls, open a file, and only the unloaded `questing.lua` runs `os.execute`. | `io` and `debug` are opened (`G/questlua.cpp:652-654`, marked `TEMP`), and `luaopen_io` opens all of `os` (`liblua/liolib.c:752`). Lua 5.0's base library holds `loadfile` and `require` (`liblua/lbaselib.c:532-535`). |
 | A quest's number is its place in `quest_list` and then in the other scripts sorted by path, and an event's files run in byte order (ADR-0006, ledger 227). | The `readdir` order of `object/state/` and of each event directory, which the file system chooses. |
 | A `when` condition or a `begin_condition` that raises an error is false, and a chat menu label that raises one is empty (ledger 227). | The error message is read as the result, which makes a failing condition true (`IsScriptTrue`, `G/questlua.cpp:173-189`). |
@@ -690,6 +692,16 @@ owner should know about (178.5):
   is not a table reaches an unprotected `luaL_getn` (`G/questlua.cpp:970-1056`). The Rewrite ends
   the script as a Lua error (ledger 227).
 - `getnpcid` with no name builds a `std::string` from `NULL`. The Rewrite answers 0 (ledger 227).
+- `SendQuestInfoPakcet` copies `packet_quest_info` into its buffer before it adds each part's
+  length to `qi.size`, so every `GC_QUEST_INFO` says 8 bytes however many parts follow, and it
+  writes each name as `N` bytes from `c_str()`, which sends whatever the string's buffer held
+  past the terminating zero, and no zero at all for a name of `N` bytes or more
+  (`G/questpc.cpp:231-308`). The Rewrite writes the whole record's size, zero-fills each name
+  field and keeps `N - 1` bytes of a name (`protocol::gc_quest_info`, ledger 258).
+- `ReadQuestCategoryToDict` reads `data[0]` and `data[1]` of every non-empty line of
+  `questcategory.txt` without checking that the line has two words, so a line of blanks or of
+  one word indexes past its vector (`G/questmanager.cpp:320-365`). The Rewrite warns and skips
+  the line (ledger 258). The owner's file is empty.
 - D1. `StateMove` with a zero duration on its start millisecond divides 0 by 0, and `(int)NaN` is
   `INT_MIN`, so `Sync` logs a hack and keeps the spot (`G/char_state.cpp:784-793`). The Rewrite
   skips the Pulse's move and arrives on the next (ledger 229b).

@@ -834,7 +834,7 @@ pub const LEGACY_GC_PACKET_INVENTORY: &[LegacyGcPacket] = &[
         server_name: Some("HEADER_GC_QUEST_INFO"),
         cpp_type: "TPacketGCQuestInfo",
         framing: GcFraming::DynamicSize,
-        implemented_in_rust: false,
+        implemented_in_rust: true,
     },
     LegacyGcPacket {
         header: HEADER_GC_REQUEST_MAKE_GUILD,
@@ -1570,8 +1570,8 @@ mod tests {
             .filter(|entry| entry.implemented_in_rust)
             .map(|entry| entry.client_name)
             .collect();
-        assert_eq!(done.len(), 110);
-        assert_eq!(gc_missing_codec_count(), 24);
+        assert_eq!(done.len(), 111);
+        assert_eq!(gc_missing_codec_count(), 23);
         for name in [
             "HEADER_GC_AFFECT_ADD",
             "HEADER_GC_PLAYER_POINT_CHANGE",
@@ -1613,6 +1613,7 @@ mod tests {
             "HEADER_GC_MESSENGER",
             "HEADER_GC_SHOP",
             "HEADER_GC_SCRIPT",
+            "HEADER_GC_QUEST_INFO",
         ] {
             assert!(done.contains(&name), "expected {name} to be implemented");
         }
@@ -1675,6 +1676,6 @@ mod tests {
             !six.implemented_in_rust,
             "byte 6 has no server producer and must not claim a codec"
         );
-        assert_eq!(gc_missing_codec_count(), 24);
+        assert_eq!(gc_missing_codec_count(), 23);
     }
 }

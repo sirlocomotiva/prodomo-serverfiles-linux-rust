@@ -33,8 +33,9 @@ use gamedata::mob_locale_names::MobNamesByLanguage;
 use gamedata::mob_proto::MobProtos;
 use protocol::cg_quest_text::{CgQuestInputString, CG_QUEST_TEXT_FIELD_SIZE};
 use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO, CHAT_TYPE_NOTICE, CHAT_TYPE_TALKING};
+use protocol::gc_quest_info::{c_field, GcQuestInfo};
 use protocol::gc_script::GcScript;
-use quest::manager::{ChatKind, Game, Manager};
+use quest::manager::{ChatKind, Game, Manager, QuestInfo};
 use tracing::warn;
 use world::character::{number, Pcg32};
 use world::npc::MapNpcs;
@@ -88,7 +89,8 @@ pub enum QuestStep {
     /// `CG_SCRIPT_BUTTON`: the quest whose button the client pressed. The word is the
     /// quest's number (`makequestbutton`, `quest/questlib.lua:117-122`), and the high bit
     /// asks for the quest's information instead of its button
-    /// (`CInputMain::ScriptButton`, `G/input_main.cpp:2188-2196`).
+    /// (`CInputMain::ScriptButton`, `G/input_main.cpp:2188-2196`): the quest window's
+    /// entry, which a `GC_QUEST_INFO` made.
     Button(u32),
 }
 
@@ -121,6 +123,10 @@ type QuestRun = (
     Vec<super::guild::GuildQuestOp>,
     Option<u8>,
 );
+
+/// The bit of a `CG_SCRIPT_BUTTON` word that asks for the quest's information
+/// (`p->idx & 0x80000000`, `G/input_main.cpp:2188`).
+const QUEST_INFO_BIT: u32 = 0x8000_0000;
 
 /// `get_global_time()` in seconds: the wall clock a quest step judges against.
 pub(super) fn quest_now() -> u32 {
@@ -517,6 +523,19 @@ impl Game for Session<'_> {
         self.map_index
     }
 
+    fn quest_info(&mut self, info: &QuestInfo) {
+        let record = GcQuestInfo {
+            index: info.index,
+            category: info.category,
+            begin: info.begin,
+            title: info.title.as_deref().map(c_field),
+            ..GcQuestInfo::default()
+        };
+        let mut out = Vec::new();
+        record.encode_into(&mut out);
+        self.records.push(out);
+    }
+
     fn war_map(&self) -> i32 {
         self.war_map
     }
@@ -577,6 +596,9 @@ impl GameState {
         let answered = self.run_quests(place, mover, level, pid, |manager, game| match step {
             QuestStep::Answer(answer) => manager.answer(pid, *answer, game),
             QuestStep::Input(text) => manager.input(pid, text, game),
+            QuestStep::Button(quest) if quest & QUEST_INFO_BIT != 0 => {
+                manager.info(pid, quest & !QUEST_INFO_BIT, game);
+            }
             QuestStep::Button(quest) => {
                 manager.button(pid, *quest, game);
             }
@@ -1044,6 +1066,63 @@ mod tests {
         assert_eq!(session.records, expected);
     }
 
+    /// `SendQuestInfoPakcet` (`G/questpc.cpp:231-308`): the window a script changed goes
+    /// out in this step's records as one `GC_QUEST_INFO`, in `packet_quest_info` field
+    /// order, with the parts its bits name and the size of the whole record.
+    #[test]
+    fn the_quest_window_goes_out_as_one_quest_info_record() {
+        let protos = MobProtos::from_rows(Vec::new());
+        let names = MobNamesByLanguage::default();
+        let locale = LocaleStrings::default();
+        let mut dice = Pcg32::new(1, 1);
+        let tables = gamedata::pc_skill_data::PcSkills::default();
+        let mut slots = super::super::pc_skill::PcSkillState::default();
+        let mut session = Session {
+            map_index: 0,
+            war_map: 0,
+            level: 1,
+            npcs: None,
+            protos: &protos,
+            names: &names,
+            locale: &locale,
+            mover: test_place::MOVER,
+            tables: &tables,
+            dice: &mut dice,
+            reader: Vid::new(1),
+            card: (0, 1),
+            pc_level: 10,
+            caller: None,
+            slots: &mut slots,
+            affects: None,
+            points: None,
+            climbs: Vec::new(),
+            guild_ops: Vec::new(),
+            guilds: super::super::guild::GuildShadow::default(),
+            records: Vec::new(),
+            block_mode: None,
+        };
+        session.quest_info(&QuestInfo {
+            index: 0x0128,
+            category: 0x0203,
+            begin: Some(true),
+            title: Some(b"Bonus".to_vec()),
+        });
+        session.quest_info(&QuestInfo {
+            index: 0x0128,
+            category: 0,
+            begin: Some(false),
+            title: None,
+        });
+        let mut titled = vec![81, 40, 0, 0x28, 0x01, 0x03, 0x02, 0b11, 1];
+        let mut title = [0; 31];
+        title[..5].copy_from_slice(b"Bonus");
+        titled.extend_from_slice(&title);
+        assert_eq!(
+            session.records,
+            [titled, vec![81, 9, 0, 0x28, 0x01, 0, 0, 0b01, 0]]
+        );
+    }
+
     /// `SetBlockModeForce` (`G/char.cpp:7658-7661`): the byte lands now, the
     /// client hears `setblockmode %d` in this step's records, the last call
     /// winning, and no quest flag moves — the pending byte rides the session.
@@ -1152,5 +1231,120 @@ mod tests {
                 .any(|line| line.get(3) == Some(&CHAT_TYPE_INFO)),
             "the syschat that names the block comes first"
         );
+    }
+
+    /// `send_letter` at login titles its quest: the `GC_QUEST_INFO` the script's end sent
+    /// (`quest::PC::EndRunning`, `G/questpc.cpp:342-346`) follows the button's `GC_SCRIPT`,
+    /// and the quest window's entry (`CInputMain::ScriptButton` with the high bit,
+    /// `G/input_main.cpp`) runs the quest's `info` script.
+    #[test]
+    fn the_letter_titles_its_quest_and_the_window_runs_its_info() {
+        use crate::game_state::fixtures::{a_world, enter, points_at, TestClock, PLACE};
+
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe");
+        let manager = Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
+        let quest = manager
+            .host()
+            .quest_index(b"item_attr67add")
+            .expect("the letter's quest");
+        world.quests = Some(Quests::new(
+            manager,
+            Arc::default(),
+            MobNamesByLanguage::default(),
+        ));
+        let mut inbox = enter(&mut world, 1, (500, 500), 0);
+        while inbox.try_recv().is_ok() {}
+        let vid = Vid::new(1);
+        world
+            .characters
+            .find_by_vid_mut(vid)
+            .expect("entered")
+            .set_points(Some(points_at(30, 0, 0)));
+        if let Some(quests) = world.quests.as_mut() {
+            quests.manager_mut().load_flags(1, Vec::new());
+        }
+        let place = GroundPlace {
+            channel: PLACE.0,
+            map: PLACE.1,
+            x: 500,
+            y: 500,
+        };
+        let mover = world.own_mover(vid).expect("in the world");
+        // Before the login no state names the quest, so the window's entry runs nothing,
+        // where the letter's own button would have started it (`NPC::OnInfo`).
+        let (records, _climbs, _stores) = world
+            .quest(
+                vid,
+                &QuestStep::Button(quest | QUEST_INFO_BIT),
+                place,
+                mover,
+            )
+            .expect("the world holds the character");
+        assert!(records.is_empty(), "{records:?}");
+
+        world.quest_login(vid);
+        let mut lines = Vec::new();
+        while let Ok(line) = inbox.try_recv() {
+            lines.push(line);
+        }
+        let button = format!("[QUESTBUTTON idx;{quest}|name;Sixth and Seventh Bonus][DONE]");
+        let at = lines
+            .iter()
+            .position(|line| {
+                GcScript::decode(line).is_ok_and(|script| {
+                    script.skin == 0 && script.script.starts_with(button.as_bytes())
+                })
+            })
+            .expect("the letter's button");
+        // `packet_quest_info` in source field order: header, size, index, c_index, flag,
+        // then the 31-byte title the TITLE bit names.
+        let index = u16::try_from(quest).expect("a 16-bit quest number");
+        let mut golden = vec![81, 39, 0];
+        golden.extend_from_slice(&index.to_le_bytes());
+        golden.extend_from_slice(&[0, 0, 0b10]);
+        let mut title = [0; 31];
+        title[..23].copy_from_slice(b"Sixth and Seventh Bonus");
+        golden.extend_from_slice(&title);
+        assert_eq!(
+            lines.get(at + 1),
+            Some(&golden),
+            "the title follows its button"
+        );
+
+        let (records, _climbs, _stores) = world
+            .quest(
+                vid,
+                &QuestStep::Button(quest | QUEST_INFO_BIT),
+                place,
+                mover,
+            )
+            .expect("the world holds the character");
+        let info = records
+            .iter()
+            .find_map(|record| GcScript::decode(record).ok())
+            .expect("the info dialog");
+        assert_eq!(info.skin, 1, "QUEST_SKIN_NORMAL");
+        assert!(
+            info.script
+                .starts_with(b"It is possible to add a 6th or 7th bonus"),
+            "{info:?}"
+        );
+        // The dialog moved the quest to `talk`; a second press finds no script there.
+        let (records, _climbs, _stores) = world
+            .quest(
+                vid,
+                &QuestStep::Button(quest | QUEST_INFO_BIT),
+                place,
+                mover,
+            )
+            .expect("the world holds the character");
+        assert!(records.is_empty(), "{records:?}");
+        let (records, _climbs, _stores) = world
+            .quest(vid, &QuestStep::Button(999 | QUEST_INFO_BIT), place, mover)
+            .expect("the world holds the character");
+        assert!(records.is_empty(), "an unknown quest is quiet: {records:?}");
     }
 }
