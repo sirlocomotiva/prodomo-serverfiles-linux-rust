@@ -1574,6 +1574,7 @@ fn game_len(header: u8) -> usize {
         | GC_PARTY_REMOVE
         | GC_QUEST_TARGET_DELETE => 1 + 4,
         GC_QUEST_TARGET_CREATE => QUEST_TARGET_CREATE_LEN,
+        GC_QUEST_TARGET_UPDATE => QUEST_TARGET_UPDATE_LEN,
         GC_WARP => WARP_LEN,
         GC_WALK_MODE => WALK_MODE_LEN,
         GC_TARGET => TARGET_LEN,
@@ -1991,6 +1992,10 @@ const QUEST_YOHARA: u16 = 49;
 const GC_QUEST_TARGET_DELETE: u8 = 124;
 /// `HEADER_GC_TARGET_CREATE`, the client's `HEADER_GC_TARGET_CREATE_NEW`.
 const GC_QUEST_TARGET_CREATE: u8 = 125;
+/// `HEADER_GC_TARGET_UPDATE` (`G/packet.h`): the header, the target's `lID`, and the spot it
+/// marks, `lX` and `lY`, `TPacketGCTargetUpdate`.
+const GC_QUEST_TARGET_UPDATE: u8 = 123;
+const QUEST_TARGET_UPDATE_LEN: usize = 1 + 4 + 4 + 4;
 /// `TPacketGCTargetCreate`: the header, `lID`, the 33-byte `szName`, `dwVID` and `bType`.
 const QUEST_TARGET_CREATE_LEN: usize = 1 + 4 + 33 + 4 + 1;
 
@@ -2026,6 +2031,26 @@ fn server_quest_target_create(id: i32, name: &[u8], vid: u32) -> Vec<u8> {
     record.extend_from_slice(&vid.to_le_bytes());
     record.push(2);
     record
+}
+
+/// `GC_TARGET_UPDATE` of target `id` at the spot (`x`, `y`), in `TPacketGCTargetUpdate` field
+/// order.
+fn server_quest_target_update(id: i32, x: i32, y: i32) -> Vec<u8> {
+    let mut record = vec![GC_QUEST_TARGET_UPDATE];
+    for word in [id, x, y] {
+        record.extend_from_slice(&word.to_le_bytes());
+    }
+    record
+}
+
+/// Whether `record` is a `GC_TARGET_UPDATE`.
+///
+/// A quest's mark is followed a second later by its spot (`target_event`, `G/target.cpp:57-132`),
+/// and from level 40 the sash quest marks Theowahdan at every login on map 1, so the update lands
+/// inside whatever the scenario is about. The scenario about it reads with
+/// [`Keyed::read_game_marked`].
+fn is_mark_update(record: &[u8]) -> bool {
+    record.first() == Some(&GC_QUEST_TARGET_UPDATE)
 }
 
 /// The button and window title a letter quest's `send_letter` sends.
@@ -2698,8 +2723,8 @@ impl Keyed {
 
     /// Assert that nothing but a `GC_PING` cycle arrives, and absorb the revive timer's own
     /// records ([`Keyed::timer_record`]), the view records of the monsters, stones and veins
-    /// a walk's last sample brought in or took out ([`Keyed::monster_record`]), and a stamina
-    /// refill ([`is_stamina_refill`]).
+    /// a walk's last sample brought in or took out ([`Keyed::monster_record`]), a stamina
+    /// refill ([`is_stamina_refill`]) and a mark's update ([`is_mark_update`]).
     ///
     /// A ping is on its own timer and says nothing about the record just sent, so a ping
     /// inside the window is not an answer. Anything else is. The window's bytes are walked as
@@ -2745,6 +2770,7 @@ impl Keyed {
                 GC_CHARACTER_ADD => CHARACTER_ADD_LEN,
                 GC_CHAR_ADDITIONAL_INFO => CHAR_ADDITIONAL_INFO_LEN,
                 GC_CHARACTER_DEL => 1 + 4,
+                GC_QUEST_TARGET_UPDATE => QUEST_TARGET_UPDATE_LEN,
                 // Sized so that `is_stamina_refill` below can judge it; any other point
                 // change fails there.
                 GC_POINT_CHANGE => POINT_CHANGE_LEN,
@@ -2762,6 +2788,7 @@ impl Keyed {
                     || self.monster_record(record)
                     || self.timer_record(record)
                     || is_stamina_refill(record)
+                    || is_mark_update(record)
                     || is_npc_chatter(record),
                 "only a ping may arrive while nothing is expected ({note}): {record:02x?}"
             );
@@ -2783,8 +2810,8 @@ impl Keyed {
     }
 
     /// Assert that the descriptor closes the connection having sent nothing but what an NPC
-    /// does on its own ([`is_npc_chatter`]): a nearby NPC may walk or speak before the close
-    /// lands.
+    /// does on its own ([`is_npc_chatter`]) and a mark's update ([`is_mark_update`]): a nearby
+    /// NPC may walk or speak before the close lands.
     fn closes(&mut self, note: &str) {
         self.closes_within(note, parity::client::IO_TIMEOUT);
     }
@@ -2807,7 +2834,11 @@ impl Keyed {
         while at < plain.len() {
             let rest = &plain[at..];
             let width = chatter_width(rest)
-                .filter(|&width| width <= rest.len() && is_npc_chatter(&rest[..width]));
+                .filter(|&width| width <= rest.len() && is_npc_chatter(&rest[..width]))
+                .or_else(|| {
+                    (is_mark_update(rest) && rest.len() >= QUEST_TARGET_UPDATE_LEN)
+                        .then_some(QUEST_TARGET_UPDATE_LEN)
+                });
             let Some(width) = width else {
                 panic!("{note}: a record before the close: {rest:02x?}");
             };
@@ -2914,12 +2945,24 @@ impl Keyed {
     }
 
     /// Read the next loading or enter-game record that is not the revive timer's own, a
-    /// monster's nor a stamina refill: the first two are noted by [`Keyed::timer_record`] and
-    /// [`Keyed::monster_record`], and all three are skipped ([`is_stamina_refill`]). A scenario
-    /// that checks the timer or the refill reads with [`Keyed::read_game_raw`] instead.
+    /// monster's, a stamina refill nor a mark's update: the first two are noted by
+    /// [`Keyed::timer_record`] and [`Keyed::monster_record`], and all four are skipped
+    /// ([`is_stamina_refill`], [`is_mark_update`]). A scenario that checks the timer or the
+    /// refill reads with [`Keyed::read_game_raw`] instead, and one that checks the update with
+    /// [`Keyed::read_game_marked`].
     fn read_game(&mut self) -> Vec<u8> {
+        self.read_game_with(false)
+    }
+
+    /// [`Keyed::read_game`] with the marks' updates kept.
+    fn read_game_marked(&mut self) -> Vec<u8> {
+        self.read_game_with(true)
+    }
+
+    /// [`Keyed::read_game`], keeping the marks' updates when `marks` is set.
+    fn read_game_with(&mut self, marks: bool) -> Vec<u8> {
         loop {
-            let record = self.read_game_raw();
+            let record = self.read_game_raw_with(marks);
             eprintln!("GAME {:02x?}", &record[..record.len().min(24)]);
             // The heartbeat's own records: the ping, the handshake that was answered, and
             // the server's acknowledgement of the answer.
@@ -2985,12 +3028,17 @@ impl Keyed {
     }
 
     /// Read the next loading or enter-game record that is not an NPC's own doing
-    /// ([`is_npc_chatter`]), sizing a `WORD wSize` record from the first TEA unit and a
-    /// fixed-width one from [`game_len`].
+    /// ([`is_npc_chatter`]) nor a mark's update ([`is_mark_update`]), sizing a `WORD wSize`
+    /// record from the first TEA unit and a fixed-width one from [`game_len`].
     fn read_game_raw(&mut self) -> Vec<u8> {
+        self.read_game_raw_with(false)
+    }
+
+    /// [`Keyed::read_game_raw`], keeping the marks' updates when `marks` is set.
+    fn read_game_raw_with(&mut self, marks: bool) -> Vec<u8> {
         loop {
             let record = self.read_wire();
-            if !is_npc_chatter(&record) {
+            if !is_npc_chatter(&record) && (marks || !is_mark_update(&record)) {
                 return record;
             }
         }
@@ -3019,7 +3067,7 @@ impl Keyed {
     fn read_game_raw_until(&mut self, deadline: std::time::Instant) -> Option<Vec<u8>> {
         loop {
             let record = self.read_wire_until(deadline)?;
-            if !is_npc_chatter(&record) {
+            if !is_npc_chatter(&record) && !is_mark_update(&record) {
                 return Some(record);
             }
         }
@@ -3060,16 +3108,20 @@ impl Keyed {
     /// receive at any time" is exactly the kind of table that rots. A header `width_of`
     /// does not know panics, because a record nobody accounted for arriving in the window
     /// is a finding rather than noise, and a silent skip would read as "nothing arrived".
+    /// A mark's update is sized and dropped here ([`is_mark_update`]).
     fn drain_game(
         &mut self,
         window: Duration,
         width_of: impl Fn(u8) -> usize,
     ) -> (Vec<Vec<u8>>, Quiet) {
-        let (records, quiet) = self.drain_wire(window, width_of);
-        // An NPC's own doing is not part of any scenario's answer.
+        let (records, quiet) = self.drain_wire(window, |header| match header {
+            GC_QUEST_TARGET_UPDATE => QUEST_TARGET_UPDATE_LEN,
+            other => width_of(other),
+        });
+        // An NPC's own doing and a mark's update are not part of any scenario's answer.
         let records: Vec<Vec<u8>> = records
             .into_iter()
-            .filter(|record| !is_npc_chatter(record))
+            .filter(|record| !is_npc_chatter(record) && !is_mark_update(record))
             .collect();
         // Noted but not removed: a drain reports every record, the timer's included.
         for record in &records {
@@ -3079,8 +3131,8 @@ impl Keyed {
     }
 
     /// Assert that nothing arrives within [`QUIET_WINDOW`] but what an NPC does on its own
-    /// ([`is_npc_chatter`]) and the end of a revive timer this client saw start
-    /// ([`Keyed::timer_end`]), and that the connection stays open.
+    /// ([`is_npc_chatter`]), a mark's update ([`is_mark_update`]) and the end of a revive timer
+    /// this client saw start ([`Keyed::timer_end`]), and that the connection stays open.
     ///
     /// The timer runs on the clock, not on the scenario, so on a slow host a neighbour's five
     /// seconds can end inside the window: a CPU-throttled run saw it end in the check after a
@@ -3091,15 +3143,30 @@ impl Keyed {
 
     /// [`Keyed::still`] over a `window` of its own.
     fn still_for(&mut self, note: &str, window: Duration) {
+        self.still_with(note, window, false);
+    }
+
+    /// [`Keyed::still_for`], with a mark's update a finding too.
+    fn still_marked_for(&mut self, note: &str, window: Duration) {
+        self.still_with(note, window, true);
+    }
+
+    /// [`Keyed::still_for`], letting a mark's update through unless `marks` is set.
+    fn still_with(&mut self, note: &str, window: Duration, marks: bool) {
         let (records, quiet) = self.drain_wire(window, |header| match header {
             GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
             GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
+            GC_QUEST_TARGET_UPDATE => QUEST_TARGET_UPDATE_LEN,
             _ => panic!("a record nobody accounted for ({note}): header {header}"),
         });
         assert_eq!(quiet, Quiet::Open, "the client is still connected ({note})");
         let others: Vec<Vec<u8>> = records
             .into_iter()
-            .filter(|record| !is_npc_chatter(record) && !self.timer_end(record))
+            .filter(|record| {
+                !is_npc_chatter(record)
+                    && (marks || !is_mark_update(record))
+                    && !self.timer_end(record)
+            })
             .collect();
         assert!(others.is_empty(), "{note}: {others:02x?}");
     }
@@ -5009,6 +5076,187 @@ fn the_sash_letter_marks_theowahdan_and_the_letter_pass_marks_him_again() {
     alice.still("the quests stand where the first login moved them");
 }
 
+/// Theowahdan's spot and the sash quest's captain's, vnum 20355 at cell (573, 531): `npc.txt:11`
+/// and `:59` of map 1 past the map's base. Each stands on a box of 0 by 0, so neither stands
+/// anywhere else.
+const THEOWAHDAN_SPOT: (i32, i32) = (482_800, 943_900);
+const CAPTAIN_SPOT: (i32, i32) = (466_900, 949_100);
+
+/// A page that opens with `say_title(name)` (`questlib.lua:144`), the name between
+/// `color256(255, 230, 186)` and `color256(196, 196, 196)`, and goes on with each of `lines` as
+/// `say` sends it, then `end`.
+fn titled_page(name: &[u8], lines: &[&[u8]], end: &[u8]) -> Vec<u8> {
+    let mut page = [
+        &b"[COLOR r;1|g;0.90196078431373|b;0.72941176470588]"[..],
+        name,
+        b"[COLOR r;0.76862745098039|g;0.76862745098039|b;0.76862745098039][ENTER]",
+    ]
+    .concat();
+    for line in lines {
+        page.extend_from_slice(line);
+        page.extend_from_slice(b"[ENTER]");
+    }
+    page.extend_from_slice(end);
+    page
+}
+
+/// What `sash_mission`'s `theowahdan.target.click` says after its title and before its `wait()`
+/// (`_basic/sash_mission.lua:35-46`).
+const SASH_CLICK_FIRST: [&[u8]; 12] = [
+    b"",
+    b"Ah, here you are! I have discovered something",
+    b"extraordinary: a new pice of equipment called",
+    b"Sash.",
+    b"",
+    b"The sash offers you two options:",
+    b"Combination & Absorption.",
+    b"",
+    b"You can try combination with sash of same",
+    b"grade. Two sash combined can generate a",
+    b"sash of a biggest grade.",
+    b"",
+];
+
+/// What it says after the `wait()` (`:49-61`). `item_name(85000)` is empty: no row of
+/// `item_proto.txt` is 85000 or holds it in a range, so `GetTable` finds nothing (`_item_name`,
+/// `G/questlua_global.cpp:649-671`). `mob_name(20355)` is the captain's name in `mob_names.txt`.
+const SASH_CLICK_LAST: [&[u8]; 13] = [
+    b"",
+    b"In a absorption the sash take the bonus",
+    b"of a weapon or amour at a rate of your",
+    b"sash. The absorption rate varies between",
+    b"the sash grade, the weapon or amour",
+    b"absorbed will be destroyed.",
+    b"",
+    b"I'm able to create a sash of 1* Grade.",
+    b"But I need x40 .",
+    b"",
+    b"Just the Capitan is able to create this",
+    b"material, so go and talk to him.",
+    b"",
+];
+
+/// The next record, a `GC_TARGET_CREATE` of target `id` named `name`, answering the VID it marks.
+fn read_quest_target_create(keyed: &mut Keyed, id: i32, name: &[u8]) -> u32 {
+    let record = keyed.read_game_marked();
+    assert_eq!(record[0], GC_QUEST_TARGET_CREATE, "{record:02x?}");
+    let vid = u32::from_le_bytes(record[38..42].try_into().expect("four bytes"));
+    assert_eq!(record, server_quest_target_create(id, name, vid));
+    vid
+}
+
+/// `event.target.target_event`, `gc.target_update`, `lua.item_name`, `cg.game.on_click`,
+/// `quest.sash_mission`: Alpha, level 154, logs in on map 1 1000 from Theowahdan with
+/// `sash_mission` at `information` and the Yohara quest at `information_new`, so no login script
+/// moves them and only the letter pass marks him, with ID 1. A second after the mark its event
+/// (`target_event`, `G/target.cpp:57-132`) finds him 960 away and sends where he stands, once: he
+/// stands still, so the checks every `MINMAX(12, 960 / 60, 125)` Pulses after it send nothing.
+///
+/// A click on the marked NPC runs the quest's `target.click` before anything his race offers
+/// (`CQuestManager::Click`, `G/questmanager.cpp:918-950`, `NPC::OnTarget`,
+/// `G/questnpc.cpp:206-264`): the script deletes the mark, then says its first page up to its
+/// `wait()`. The answer runs the rest, the second page and `set_state("go_to_disciple")`, whose
+/// `letter` marks the captain across the map with the next ID and sends its letter; a second
+/// later the captain's spot follows. The new state is stored with the character.
+#[test]
+fn a_click_on_marked_theowahdan_runs_the_sash_quests_target_script() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 482800, y = 944900 WHERE name = 'Alpha'",
+    );
+    // The CRC32s of `information` and of `information_new`.
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT player.id, flag.name, \
+          flag.value FROM player, (VALUES ('sash_mission.__status'::bytea, 695801987), \
+          ('yohara_system.__status'::bytea, 1998515313)) AS flag (name, value) WHERE \
+          player.name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let theowahdan = enter_beside_theowahdan(&mut alice);
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    assert_eq!(
+        read_quest_target_create(&mut alice, 1, b"Theowahdan"),
+        theowahdan
+    );
+    let marked = std::time::Instant::now();
+    read_sash_and_yohara_letters(&mut alice, "letter");
+    assert_eq!(
+        alice.read_game_marked(),
+        server_quest_target_update(1, THEOWAHDAN_SPOT.0, THEOWAHDAN_SPOT.1),
+        "the mark's event sends where Theowahdan stands"
+    );
+    assert!(
+        marked.elapsed() >= Duration::from_millis(600),
+        "the event first runs a second after the mark: {:?}",
+        marked.elapsed()
+    );
+    alice.still_marked_for(
+        "he stands still, so his spot is not sent again",
+        Duration::from_millis(1_500),
+    );
+
+    alice.send_record(&client_click(theowahdan));
+    assert_eq!(
+        alice.read_game_marked(),
+        server_quest_target_delete(1),
+        "the script's `target.delete` comes first"
+    );
+    assert_eq!(
+        alice.read_game_marked(),
+        server_script(1, &titled_page(b"teowahdan", &SASH_CLICK_FIRST, b"[NEXT]"))
+    );
+    alice.still_marked_for(
+        "the script waits, and the deleted mark is gone",
+        QUIET_WINDOW,
+    );
+    alice.send_record(&client_script_answer(254));
+    assert_eq!(
+        alice.read_game_marked(),
+        server_script(1, &titled_page(b"teowahdan", &SASH_CLICK_LAST, b"[DONE]"))
+    );
+    let captain = read_quest_target_create(&mut alice, 2, b"Captain");
+    assert_ne!(captain, theowahdan);
+    read_letter(
+        &mut alice,
+        QUEST_SASH,
+        b"Increase your power",
+        "the new state",
+    );
+    assert_eq!(
+        alice.read_game_marked(),
+        server_quest_target_update(2, CAPTAIN_SPOT.0, CAPTAIN_SPOT.1),
+        "the captain's spot, a second after his mark"
+    );
+    alice.still_marked_for("nothing follows", Duration::from_millis(1_500));
+
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    let flags = support::rows(
+        database.url(),
+        "SELECT value FROM quest_flag WHERE player_id = (SELECT id FROM player WHERE name = \
+          'Alpha') AND name = 'sash_mission.__status'::bytea",
+        1,
+    );
+    assert_eq!(
+        flags,
+        vec![vec![1_675_612_723]],
+        "the CRC32 of `go_to_disciple`"
+    );
+}
+
 /// `npc.txt`'s keeper on map 3, vnum 20042, whose click trigger is the shop's. Its shop, 9,
 /// sells vnums 11901, 11903 and 50201, one of each.
 const KEEPER_VNUM: u16 = 20_042;
@@ -6777,12 +7025,17 @@ fn the_chat_counter_is_reset_every_five_seconds_of_pulses() {
             GC_PING => 1,
             GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
             GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
+            GC_QUEST_TARGET_UPDATE => QUEST_TARGET_UPDATE_LEN,
             other => panic!("unexpected record {other}"),
         });
         assert_eq!(quiet, Quiet::Open, "a dropped line never closes before ten");
         let mut lines = Vec::new();
         for record in records {
-            if record[0] != GC_PING && !is_npc_chatter(&record) && !alice.timer_record(&record) {
+            if record[0] != GC_PING
+                && !is_npc_chatter(&record)
+                && !is_mark_update(&record)
+                && !alice.timer_record(&record)
+            {
                 lines.push(record);
             }
         }
@@ -8969,10 +9222,11 @@ fn a_drunk_potion_pays_its_hit_points_over_the_next_seconds_and_the_save_keeps_t
     // The heal ticks land in these windows too (ledger 229l): Alpha is below its maximum
     // 1420, so every 75 Pulses add 29 (idle under 3 s) or 86. They fold into `hp_now`.
     let mut hp_now = 500;
-    let (mut seen, pair_base) = without_heal_ticks(
-        &read_a_move(&mut alpha, vid),
-        hp,
-        recovery,
+    let (mut seen, pair_base) = read_without_heal_ticks(
+        &mut alpha,
+        vid,
+        Duration::from_millis(700),
+        (hp, recovery),
         &mut hp_now,
         1420,
     );
@@ -9075,10 +9329,11 @@ fn a_recovering_character_is_saved_with_what_the_event_paid_while_it_is_still_co
     // heal ticks folded into `hp_now` — and the first step already inside it if the drink
     // joined before the tick at 25 pulses, which `paid` threads through (ledger 229l).
     let mut hp_now = 500;
-    let (kept, pair_base) = without_heal_ticks(
-        &read_a_move(&mut alpha, vid),
-        hp,
-        recovery,
+    let (kept, pair_base) = read_without_heal_ticks(
+        &mut alpha,
+        vid,
+        Duration::from_millis(700),
+        (hp, recovery),
         &mut hp_now,
         1420,
     );
@@ -9414,6 +9669,44 @@ fn without_heal_ticks(
         }
     }
     (kept, pair_base)
+}
+
+/// [`read_a_move_within`] then [`without_heal_ticks`], with a potion pair the window cut
+/// finished first.
+///
+/// The affect event writes a step's HP point and its recovery point as two frames, so on a
+/// loaded host the quiet window can close between them: the window then ends in an HP point
+/// that is no heal step from the pool the rest of the window folds to. That half's recovery
+/// point is the next record, and it is read here before the fold.
+fn read_without_heal_ticks(
+    keyed: &mut Keyed,
+    vid: u32,
+    window: Duration,
+    (hp, recovery): (u8, u8),
+    hp_now: &mut i64,
+    max_hp: i64,
+) -> (Vec<Seen>, Option<i64>) {
+    let mut seen = read_a_move_within(keyed, vid, window);
+    let cut = match seen.split_last() {
+        Some((&Seen::Point(kind, value), head)) if kind == hp => {
+            let mut before = *hp_now;
+            let _folded = without_heal_ticks(head, hp, recovery, &mut before, max_hp);
+            !is_heal_step(before, value, max_hp)
+        }
+        _ => false,
+    };
+    if cut {
+        let record = keyed.read_game();
+        assert_eq!(
+            record[0], GC_POINT_CHANGE,
+            "the cut pair's half: {record:02x?}"
+        );
+        assert_eq!(&record[4..8], &vid.to_le_bytes(), "the drinker's VID");
+        assert_eq!(record[8], recovery, "the cut pair's recovery half");
+        let owed = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
+        seen.push(Seen::Point(recovery, owed));
+    }
+    without_heal_ticks(&seen, hp, recovery, hp_now, max_hp)
 }
 
 /// [`Keyed::quiet_for`] past the heal ticks: every HP point record in the window folds into
@@ -10772,10 +11065,11 @@ fn a_potion_drunk_inside_the_window_ticks_on_the_entry_phase() {
     alpha.send_record(&client_item_use(0));
     // The heal ticks land in these windows too (ledger 229l) and fold into `hp_now`.
     let mut hp_now = 500;
-    let (kept, pair_base) = without_heal_ticks(
-        &read_a_move_within(&mut alpha, vid, Duration::from_millis(300)),
-        hp,
-        recovery,
+    let (kept, pair_base) = read_without_heal_ticks(
+        &mut alpha,
+        vid,
+        Duration::from_millis(300),
+        (hp, recovery),
         &mut hp_now,
         1420,
     );
@@ -11794,6 +12088,7 @@ impl Keyed {
                 GC_CHAR_ADDITIONAL_INFO => CHAR_ADDITIONAL_INFO_LEN,
                 GC_CHARACTER_DEL => 1 + 4,
                 GC_POINT_CHANGE => POINT_CHANGE_LEN,
+                GC_QUEST_TARGET_UPDATE => QUEST_TARGET_UPDATE_LEN,
                 other => panic!("an unexpected record: header {other}"),
             });
             assert_eq!(quiet, Quiet::Open, "the connection stays open");
@@ -11927,7 +12222,7 @@ fn fly_of(fly_type: u8, from: u32, to: u32) -> Vec<u8> {
 }
 impl Keyed {
     /// The next record past a ping, the revive timer's own and a stamina refill, with what an
-    /// NPC does on its own skipped as [`Keyed::read_game_raw`] skips it.
+    /// NPC does on its own and a mark's update skipped as [`Keyed::read_game_raw`] skips them.
     ///
     /// An effect record is passed over as well: a critical or a penetrating hit shows
     /// itself around its victim, and the victim's client sees it whether it waits for the
@@ -11975,15 +12270,19 @@ impl Keyed {
         }
     }
 
-    /// The revive's look update of the player under `vid`, past a ping, a stamina refill
-    /// and what an NPC does on its own. [`Keyed::read_own`] cannot read it: the restart's own
+    /// The revive's look update of the player under `vid`, past a ping, a stamina refill, a
+    /// mark's update and what an NPC does on its own. [`Keyed::read_own`] cannot read it: the restart's own
     /// removal forgot the VID, so the timer's check would note the update and absorb it as the
     /// revive timer's (ledger 229l).
     fn read_revive_update(&mut self, vid: u32) -> Vec<u8> {
         let own: [u8; 4] = vid.to_le_bytes();
         loop {
             let record = self.read_wire();
-            if record[0] == GC_PING || is_stamina_refill(&record) || is_npc_chatter(&record) {
+            if record[0] == GC_PING
+                || is_stamina_refill(&record)
+                || is_npc_chatter(&record)
+                || is_mark_update(&record)
+            {
                 continue;
             }
             if record[0] == GC_CHARACTER_UPDATE && record.len() >= 5 && record[1..5] == own {
@@ -12201,7 +12500,11 @@ fn swing_tail(
     loop {
         // Below the chatter filter: the closing move is the monster's own.
         let record = keyed.read_wire();
-        if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+        if record[0] == GC_PING
+            || keyed.timer_record(&record)
+            || is_stamina_refill(&record)
+            || is_mark_update(&record)
+        {
             continue;
         }
         if is_effect(&record) {
@@ -12353,6 +12656,7 @@ fn npc_move_of(
         if record[0] == GC_PING
             || keyed.timer_record(&record)
             || is_stamina_refill(&record)
+            || is_mark_update(&record)
             || is_effect(&record)
         {
             continue;
@@ -13598,7 +13902,7 @@ fn read_party_swing_sized(
 }
 
 /// Skip by rule until a swing's `DAMAGE_INFO` on `victim`: pings, the revive timer's,
-/// stamina refills, the victim's own heal ticks, the members' `GC_TARGET`, the punch's own
+/// stamina refills, marks' updates, the victim's own heal ticks, the members' `GC_TARGET`, the punch's own
 /// head and claim, the monsters' chats, and any NPC's own chatter.
 fn read_party_swing_head(
     keyed: &mut Keyed,
@@ -13612,7 +13916,11 @@ fn read_party_swing_head(
         let Some(record) = keyed.read_sized_until(sized, deadline) else {
             panic!("a swing within the window");
         };
-        if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+        if record[0] == GC_PING
+            || keyed.timer_record(&record)
+            || is_stamina_refill(&record)
+            || is_mark_update(&record)
+        {
             continue;
         }
         if record[0] == GC_DAMAGE_INFO && record[1..5] == victim.to_le_bytes() {
@@ -13673,7 +13981,11 @@ fn party_swing_tail(
         let Some(record) = keyed.read_sized_until(sized, deadline) else {
             panic!("a swing's closing move within the window");
         };
-        if record[0] == GC_PING || keyed.timer_record(&record) || is_stamina_refill(&record) {
+        if record[0] == GC_PING
+            || keyed.timer_record(&record)
+            || is_stamina_refill(&record)
+            || is_mark_update(&record)
+        {
             continue;
         }
         if record[0] == GC_MOVE

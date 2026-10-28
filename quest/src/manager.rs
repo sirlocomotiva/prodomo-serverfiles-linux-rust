@@ -154,6 +154,10 @@ pub trait Game {
     /// The race of the character `vid`, when it is in the world.
     fn race_of(&self, vid: u32) -> Option<u32>;
 
+    /// The name of item `vnum` in the character's language, when `ITEM_MANAGER::GetTable` finds
+    /// its proto.
+    fn item_name(&self, vnum: u32) -> Option<Vec<u8>>;
+
     /// The name of monster `vnum` in the character's language, when the monster exists.
     fn mob_name(&self, vnum: u32) -> Option<Vec<u8>>;
 
@@ -216,6 +220,10 @@ pub trait Game {
     /// `GetTargetEvent` (`G/target.cpp:284-315`): the VID the character's target of quest
     /// `quest` named `name` points at, and 0 when there is no such target.
     fn target_vid(&self, quest: u32, name: &[u8]) -> u32;
+
+    /// `GetTargetInfo(pid, TARGET_TYPE_VID, vid)` (`G/target.cpp:317-348`): the quest and the
+    /// kept name of the character's first target that points at `vid`, when one does.
+    fn target_at(&self, vid: u32) -> Option<(u32, Vec<u8>)>;
 }
 
 /// What `target.vid` asks `CTargetManager::CreateTarget` for (`G/questlua_target.cpp:45-66`):
@@ -459,10 +467,20 @@ impl Manager {
 
     /// `CQuestManager::Click`: character `pid` clicked the NPC `npc_vid` of race `race`. Returns
     /// whether a quest took the click, in which case the NPC's shop does not open.
+    ///
+    /// A click on a character one of the clicker's quests marked asks that quest first
+    /// (`G/questmanager.cpp:934-945`): its `click` script for the mark at the character's
+    /// state of it (`Run::on_target`) takes the click, and the NPC's own scripts do not run.
     pub fn click(&mut self, pid: u32, npc_vid: u32, race: u32, game: &mut dyn Game) -> bool {
         // `CHARACTER::OnClick` records the NPC before it asks the quests (`SetQuestNPCID`).
         self.pcs.entry(pid).or_default().npc_vid = npc_vid;
         self.operate(pid, game, |run, pc, npcs| {
+            let marked = run.cx.borrow().game.target_at(npc_vid);
+            if let Some((quest, name)) = marked {
+                if run.on_target(pc, quest, &name, b"click") {
+                    return true;
+                }
+            }
             let Some(npc) = npcs.get(&race) else {
                 tracing::debug!(pid, race, "QUEST click: no quest NPC of this race");
                 return false;
@@ -487,6 +505,24 @@ impl Manager {
             Some(npc) => run.handle_receive_all(pc, npc, "levelup", Wait::Kept),
             None => false,
         })
+    }
+
+    /// `CQuestManager::Target` (`G/questmanager.cpp:723-736`): the `verb` (`arrive`, `die`) of
+    /// character `pid`'s target of quest `quest` named `name`, which `target_event` reports,
+    /// runs that quest's script for it (`Run::on_target`). Returns whether one ran or a
+    /// waiting script kept it from running. A character the manager never saw misses, as
+    /// legacy's `GetPC` returns NULL for it.
+    pub fn target(
+        &mut self,
+        pid: u32,
+        (quest, name): (u32, &[u8]),
+        verb: &[u8],
+        game: &mut dyn Game,
+    ) -> bool {
+        if !self.pcs.contains_key(&pid) {
+            return false;
+        }
+        self.operate(pid, game, |run, pc, _| run.on_target(pc, quest, name, verb))
     }
 
     /// `CQuestManager::Login` (`G/questmanager.cpp:541-556`) with `NPC::OnLogin`
@@ -1510,6 +1546,62 @@ impl Run<'_, '_> {
         true
     }
 
+    /// `NPC::OnTarget` (`G/questnpc.cpp:206-264`) on the no-NPC scripts: the first `target`
+    /// entry of quest `quest` at the character's state of it whose argument begins with `name`
+    /// (`strncmp` over the name's length, so `boss` also answers `bossy.click`), names `verb`
+    /// after its first dot, and whose condition holds, runs at that state. Answers whether one
+    /// matched; nothing matches for a quest the character never ran.
+    ///
+    /// While another script waits for its client the match runs nothing but still answers
+    /// `true`. Legacy runs it, and `PC::SetQuest` drops the waiting script's state without
+    /// closing it (`G/questpc.cpp:140-164`), a Defect.
+    fn on_target(&self, pc: &mut Pc, quest: u32, name: &[u8], verb: &[u8]) -> bool {
+        let Some(&state) = pc.quests.get(&quest) else {
+            return false;
+        };
+        let Some(entries) = self
+            .no_npc
+            .and_then(|npc| npc.own_arg.get("target"))
+            .and_then(|quests| quests.get(&quest))
+            .and_then(|states| states.get(&state))
+        else {
+            return false;
+        };
+        for entry in entries {
+            let arg = self.target_arg(entry.arg.as_deref());
+            if !arg.starts_with(name) {
+                continue;
+            }
+            let Some(dot) = arg.iter().position(|byte| *byte == b'.') else {
+                continue;
+            };
+            if arg[dot + 1..] != *verb || !is_true(entry.when.as_ref()) {
+                continue;
+            }
+            if pc.running.is_some() {
+                tracing::warn!(quest, "QUEST a target script waits for the running one");
+                return true;
+            }
+            let name = self.quest_name(quest);
+            self.execute(pc, quest, name, state, entry.script.clone(), Vec::new());
+            return true;
+        }
+        false
+    }
+
+    /// A `target` entry's argument as `NPC::LoadStateScript` keeps it (`G/questnpc.cpp:171-180`):
+    /// the first line of its `.arg` file, read as the C string `OnTarget` compares.
+    fn target_arg(&self, file: Option<&[u8]>) -> &[u8] {
+        let Some(text) = file.and_then(|file| self.host.objects().get(file)) else {
+            return &[];
+        };
+        let end = text
+            .iter()
+            .position(|byte| *byte == b'\n' || *byte == 0)
+            .unwrap_or(text.len());
+        &text[..end]
+    }
+
     /// `NPC::ExecuteEventScript` (`G/questnpc.cpp:966-988`): the named quest's script for
     /// the event at the given state, and nothing else.
     ///
@@ -2273,23 +2365,15 @@ fn window_api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], last: Value) -> mlua::Res
 /// A family of API names that answers the names it backs and `None` for any other.
 type Family = fn(&Lua, &mut Cx<'_>, &[u8], &MultiValue) -> mlua::Result<Option<MultiValue>>;
 
-fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Result<MultiValue> {
-    let first = args.front().cloned().unwrap_or(Value::Nil);
+/// The window's look: its skin and its left and top images, each answering nothing.
+fn look_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
     let last = args.back().cloned().unwrap_or(Value::Nil);
-    let number = |value: u32| Some(Value::Number(f64::from(value)));
-    if let TextOutcome::Hit(result) = text_api(lua, cx, name, args, last.clone())? {
-        return Ok(result.into_iter().collect());
-    }
-    let families: [Family; 3] = [pc_api, target_api, guild_api];
-    for family in families {
-        if let Some(answered) = family(lua, cx, name, args)? {
-            return Ok(answered);
-        }
-    }
-    if window_api(lua, cx, name, last.clone())? {
-        return Ok(MultiValue::new());
-    }
-    let result = match name {
+    match name {
         b"set_skin" | b"setskin" => {
             if let Some(skin) = lua.coerce_number(last)? {
                 // `(int)rint(...)`, then the range check; a rounded value is a whole number, so
@@ -2301,7 +2385,6 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
             } else {
                 tracing::warn!("QUEST wrong skin index");
             }
-            None
         }
         b"setleftimage" | b"settopimage" => {
             if let Some(source) = host::c_string(lua, last)? {
@@ -2314,8 +2397,29 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
                 cx.output.script.extend(source);
                 cx.output.script.push(b']');
             }
-            None
         }
+        _ => return Ok(None),
+    }
+    Ok(Some(MultiValue::new()))
+}
+
+fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Result<MultiValue> {
+    let first = args.front().cloned().unwrap_or(Value::Nil);
+    let last = args.back().cloned().unwrap_or(Value::Nil);
+    let number = |value: u32| Some(Value::Number(f64::from(value)));
+    if let TextOutcome::Hit(result) = text_api(lua, cx, name, args, last.clone())? {
+        return Ok(result.into_iter().collect());
+    }
+    let families: [Family; 4] = [look_api, pc_api, target_api, guild_api];
+    for family in families {
+        if let Some(answered) = family(lua, cx, name, args)? {
+            return Ok(answered);
+        }
+    }
+    if window_api(lua, cx, name, last.clone())? {
+        return Ok(MultiValue::new());
+    }
+    let result = match name {
         b"getnpcid" => {
             let id = host::c_string(lua, last)?
                 .and_then(|name| cx.npc_ids.get(&name).copied())
@@ -2335,12 +2439,13 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
             };
             Some(Value::Number(f64::from(drawn)))
         }
-        b"mob_name" => {
+        b"item_name" | b"mob_name" => {
             let text = match lua.coerce_number(first)? {
-                Some(vnum) => cx.game.mob_name(dword(vnum)).unwrap_or_default(),
-                None => Vec::new(),
+                Some(vnum) if name == b"item_name" => cx.game.item_name(dword(vnum)),
+                Some(vnum) => cx.game.mob_name(dword(vnum)),
+                None => None,
             };
-            Some(Value::String(lua.create_string(text)?))
+            Some(Value::String(lua.create_string(text.unwrap_or_default())?))
         }
         b"get_time" | b"get_global_time" => number(cx.game.global_time()),
         b"game.get_event_flag" => {
@@ -2448,6 +2553,10 @@ mod tests {
             self.races.get(&vid).copied()
         }
 
+        fn item_name(&self, vnum: u32) -> Option<Vec<u8>> {
+            (vnum == 11_901).then(|| b"Smoking".to_vec())
+        }
+
         fn mob_name(&self, vnum: u32) -> Option<Vec<u8>> {
             (vnum == OX_MANAGER).then(|| b"Uriel".to_vec())
         }
@@ -2524,6 +2633,13 @@ mod tests {
                 .iter()
                 .find(|target| target.quest == quest && target.name == name)
                 .map_or(0, |target| target.vid)
+        }
+
+        fn target_at(&self, vid: u32) -> Option<(u32, Vec<u8>)> {
+            self.targets
+                .iter()
+                .find(|target| target.vid == vid)
+                .map(|target| (target.quest, target.name.clone()))
         }
     }
 
@@ -3150,6 +3266,11 @@ mod tests {
         assert!(probe.text("mob_name", &number(f64::NAN)).is_empty());
         assert!(probe.text("mob_name", &number(1e30)).is_empty());
         assert!(probe.text("mob_name", &[table.clone()]).is_empty());
+        assert_eq!(probe.text("item_name", &number(11901.0)), b"Smoking");
+        assert_eq!(probe.text("item_name", &[string(b"11901")]), b"Smoking");
+        assert!(probe.text("item_name", &number(20011.0)).is_empty());
+        assert!(probe.text("item_name", &number(f64::NAN)).is_empty());
+        assert!(probe.text("item_name", &[table.clone()]).is_empty());
         assert_eq!(
             probe.call("npc.get_race", &[]).unwrap(),
             number(f64::from(OX_MANAGER))
@@ -3779,6 +3900,115 @@ end
         assert!(probe.game.targets.is_empty());
         let error = probe.call("target.pos", &[]).unwrap_err().to_string();
         assert!(error.contains("not ported: target.pos"), "{error}");
+    }
+
+    /// `NPC::OnTarget` (`G/questnpc.cpp:206-264`) under a click and `CQuestManager::Target`:
+    /// in entry order at the quest's state, the first `target` entry whose argument begins
+    /// with the mark's name, names the verb after its first dot and whose condition holds
+    /// runs; the NPC's own scripts then do not. An unmarked NPC, a mark whose quest has no
+    /// entry for it at its state, or a name past the argument's first line (`getline`) leaves
+    /// the click to the NPC. The empty `questlib.lua` has no `wait`, so the script yields as
+    /// `wait` does.
+    #[test]
+    fn a_marked_npcs_click_runs_its_quests_target_script_first() {
+        const MARK: &str = r#"
+quest mark begin
+    state start begin
+        when 20001.click begin chat("start click") end
+    end
+    state hunt begin
+        when boss.target.arrive begin chat("boss arrive") end
+        when boss.target.click with pc.get_level() > 50 begin chat("boss high") end
+        when boss.target.click begin
+            chat("boss click")
+            q.yield("wait")
+            chat("boss after")
+        end
+        when bossy.target.click begin chat("bossy click") end
+        when "two\nlines".target.click begin chat("two lines") end
+        when 20001.click begin chat("npc click") end
+    end
+end
+"#;
+        let mut manager = synthetic("mark", MARK);
+        let states = manager.host().quests()[0].states.clone();
+        let mut game = Fake {
+            level: 10,
+            ..Fake::default()
+        };
+        let chats = |game: &mut Fake| -> Vec<String> {
+            game.chats
+                .drain(..)
+                .map(|(_, text)| String::from_utf8_lossy(&text).into_owned())
+                .collect()
+        };
+        let marks = [
+            (&b"boss"[..], 11),
+            (b"bos", 12),
+            (b"bossy", 13),
+            (b"two\nlines", 15),
+        ];
+        for (name, vid) in marks {
+            game.targets.push(Target {
+                quest: 1,
+                name: name.to_vec(),
+                vid,
+                desc: None,
+                send: true,
+            });
+        }
+        manager.load_flags(PID, [(b"mark.__status".to_vec(), states[&b"hunt"[..]])]);
+
+        assert!(manager.click(PID, 11, 20001, &mut game));
+        assert_eq!(
+            chats(&mut game),
+            ["boss click"],
+            "the verb and the condition"
+        );
+        assert!(
+            manager.click(PID, 11, 20001, &mut game),
+            "a waiting script still takes the click"
+        );
+        let seen = chats(&mut game);
+        assert!(seen.is_empty(), "and nothing else starts: {seen:?}");
+        manager.answer(PID, 254, &mut game);
+        assert_eq!(chats(&mut game), ["boss after"]);
+
+        assert!(manager.click(PID, 12, 20001, &mut game));
+        manager.answer(PID, 254, &mut game);
+        assert_eq!(
+            chats(&mut game),
+            ["boss click", "boss after"],
+            "`bos` begins `boss.click`"
+        );
+        assert!(manager.click(PID, 13, 20001, &mut game));
+        assert_eq!(chats(&mut game), ["bossy click"]);
+        game.level = 60;
+        assert!(manager.click(PID, 11, 20001, &mut game));
+        assert_eq!(chats(&mut game), ["boss high"]);
+        assert!(manager.click(PID, 14, 20001, &mut game));
+        assert_eq!(chats(&mut game), ["npc click"], "an unmarked NPC");
+        assert!(manager.click(PID, 15, 20001, &mut game));
+        assert_eq!(
+            chats(&mut game),
+            ["npc click"],
+            "the argument's first line is `two`"
+        );
+
+        assert!(manager.target(PID, (1, b"boss"), b"arrive", &mut game));
+        assert_eq!(chats(&mut game), ["boss arrive"]);
+        assert!(!manager.target(PID, (1, b"boss"), b"die", &mut game));
+        assert!(!manager.target(PID, (2, b"boss"), b"arrive", &mut game));
+        assert!(!manager.target(PID + 1, (1, b"boss"), b"arrive", &mut game));
+        assert!(chats(&mut game).is_empty());
+
+        manager.load_flags(PID, [(b"mark.__status".to_vec(), states[&b"start"[..]])]);
+        assert!(manager.click(PID, 11, 20001, &mut game));
+        assert_eq!(
+            chats(&mut game),
+            ["start click"],
+            "`start` has no target entry, so the NPC takes the click"
+        );
     }
 
     /// `send_letter` (`quest/questlib.lua:142`) at login: from level 30 `item_attr67add`'s

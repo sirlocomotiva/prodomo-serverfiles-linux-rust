@@ -1,17 +1,20 @@
 # Rewrite status
 
-Last reviewed: 2026-10-28, after ledger section 259 (the sash and Yohara letters).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 260 onwards. The
+Last reviewed: 2026-10-28, after ledger section 260 (the mark's click and its event).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 261 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
 quest window (`GC_QUEST_INFO`), and since 259 a script's state change runs the `leave`,
 `enter` and `letter` scripts legacy's `EndRunning` runs (`G/questpc.cpp:352-371`), so the
-sash letter marks Theowahdan (`find_npc_by_vnum`, `target.vid`, `GC_TARGET_CREATE`). The next
-slice is the mark's events: the click on a marked character (`CQuestManager::Click`'s target
-arm, `G/questmanager.cpp:918-950`, and `NPC::OnTarget`, `G/questnpc.cpp:206`), which the sash
-and Yohara quests answer with `target.delete`, and the mark's own event (`target_event`,
-`G/target.cpp:57-132`): `arrive` within 500, `die` when the VID is gone, and
-`GC_TARGET_UPDATE`.
+sash letter marks Theowahdan (`find_npc_by_vnum`, `target.vid`, `GC_TARGET_CREATE`). Since
+260 a click on a marked NPC runs its quest's `target.click` script (`CQuestManager::Click`'s
+target arm, `G/questmanager.cpp:918-950`, `NPC::OnTarget`, `G/questnpc.cpp:206-264`), each
+mark's event sends where the marked character stands (`target_event`, `G/target.cpp:57-132`,
+`GC_TARGET_UPDATE`), and `item_name` answers, so the sash quest moves to `go_to_disciple` and
+marks the captain. The next slice is the captain's click, whose `select` answer needs
+`pc.get_playtime` (`pc_get_playtime`) to move the quest to `time_to_wait`; that state's
+click then needs `pc.give_item2`, and `__complete`'s `pc.count_item`, `pc.remove_item`,
+`pc.give_item2_select` and `item.set_socket`.
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -377,9 +380,11 @@ owner should know about (178.5):
 | A quest's flags and state live in the store with the character (ledger 244), so a flag outlives the session that set it. `set_state` moves its quest when the script ends, whichever step called it and however the script ends (ledger 257), `pc.learn_grand_master_skill` writes its read count, and the server writes its own flags: the guild's withdraw time, the war's member flag and `/setblockmode`'s seven `game_option.block_*` flags (ledger 256). `pc.getqf` reads a flag (ledger 257); `pc.setqf` and the rest are "not ported". A state change runs no `leave`, `enter` or `letter` script, and until the script ends the quest's flag holds the old state, so a character that leaves while the script waits keeps the old one (ledger 257). The load brings the flags with the character, so `Loading quest. Please wait a moment.` is never said, and a save writes a character's whole set of flags at once instead of the flags that changed. A call of an API the Rewrite does not back ends the script silently, so the client sees no `[DONE]` where a script error sends one. The event flags stay in memory (ADR-0006). | The `quest` table is loaded with the character and saved with it (`D/ClientManagerPlayer.cpp:352-394`, `D/ClientManager.cpp:692-698`), a quest waits, with that line, until the load arrives (`G/questmanager.cpp:920-931`), and a save writes only the flags that changed (`quest::PC::Save`, `G/questpc.cpp:519-590`). `quest_setstate` writes the state and its flag at once (`G/questlua_quest.cpp:112-146`), and `EndRunning` runs the old state's `leave`, the new one's `enter` and its `letter` (`G/questpc.cpp:352-371`). |
 | `_basic/change_empire.lua` is not loaded: an `end` on line 132 closes its `if` chain early, so `qc` refuses it (ADR-0006, ledger 227). This goes when the owner fixes the source. | The same: legacy's `qc` aborts on it and it never reached `object/`. |
 | Only an NPC's `click` and `chat` scripts run (ledger 227), the `kill` and `levelup` events reach the no-target quests (ledger 244), a war's `letter` and the letter's `button` run (ledger 239), and the `login` event runs when a character enters the game or comes back from a Warp (ledger 257). The login runs at once, behind the enter's records and the offline lines it read. The `logout`, `timer`, `target` and every other event is raised by no ported system, and the hide-and-seek reward of `OnClick` is not ported. | Each system raises its event through `CQuestManager`, and `CHARACTER::OnClick` gives the hide-and-seek reward while that event runs (`G/char.cpp:6299-6330`). When the quest load lands before the game phase, `quest_login_event` runs the login at the first one-second tick that finds the character in the game (`G/input_db.cpp:1005-1048`, `:1104-1115`). |
-| A quest API name whose system is not ported raises a "not ported" error, which ends the script silently: the client sees no `[DONE]`, where a Lua error sends one (ADR-0006, ledger 227, ledger 244). Of the 699 names 73 are backed (ledger 259); `pc.warp`, `game.set_safebox_level`, `q.set_title2` and `target.pos` are among the refused. | Every name runs. |
+| A quest API name whose system is not ported raises a "not ported" error, which ends the script silently: the client sees no `[DONE]`, where a Lua error sends one (ADR-0006, ledger 227, ledger 244). Of the 699 names 74 are backed (ledger 260); `pc.warp`, `game.set_safebox_level`, `q.set_title2` and `target.pos` are among the refused. | Every name runs. |
 | `find_npc_by_vnum` answers the first NPC of the race that spawned on the character's map (ledger 259). | It walks the race's `unordered_set` (`G/typedef.h:33`, `G/questlua_global.cpp:792-822`), in no defined order, so a map with two NPCs of the race may answer either. |
 | A quest target's VID is read as a `DWORD` (ledger 259). | `target_vid` casts the number to `int` (`G/questlua_target.cpp:58-67`). Legacy's VIDs fit, but the Rewrite numbers NPCs from 0x8000_0000, which would not. |
+| A click on a marked character while the clicker's script waits is taken and runs nothing; the waiting script keeps its place (ledger 260). | `NPC::OnTarget` runs the target script through `ExecuteQuestScript`, whose `PC::SetQuest` overwrites the running state (`G/questnpc.cpp:206-264`, `G/questpc.cpp`), a Defect. |
+| A quest mark's event looks for the marked VID on the character's own Channel (ledger 260). | `target_event` asks `CHARACTER_MANAGER::Find` across the process (`G/target.cpp:57-132`). |
 | A quest state change nests at most 16 deep; a deeper change moves the quest without running its scripts and logs an error (ledger 259). | `EndRunning` recurses with no limit (`G/questpc.cpp:352-371`), so two states whose `enter` scripts move the quest to each other recurse until the stack runs out. |
 | A quest cannot open `io` or `debug`, `os` holds only `date`, `time`, `clock` and `difftime`, and the base library has no `loadfile`, `load` or `require` (ADR-0006, ledger 227). No loaded file calls a removed name: only the loggers of `luaFunctions.lua`, which no script calls, open a file, and only the unloaded `questing.lua` runs `os.execute`. | `io` and `debug` are opened (`G/questlua.cpp:652-654`, marked `TEMP`), and `luaopen_io` opens all of `os` (`liblua/liolib.c:752`). Lua 5.0's base library holds `loadfile` and `require` (`liblua/lbaselib.c:532-535`). |
 | A quest's number is its place in `quest_list` and then in the other scripts sorted by path, and an event's files run in byte order (ADR-0006, ledger 227). | The `readdir` order of `object/state/` and of each event directory, which the file system chooses. |
@@ -716,6 +721,11 @@ owner should know about (178.5):
 - `SendTargetCreatePacket` builds `TPacketGCTargetCreate` on the stack and `strlcpy`s the name
   into it (`G/target.cpp:15-28`), so the bytes of `szName` past the terminator are whatever the
   stack held. The Rewrite zero-fills them (ledger 259).
+- A click on a marked character while the clicker's script waits for an answer runs the mark's
+  `target.click` script through `ExecuteQuestScript`, whose `PC::SetQuest` puts the new state in
+  place of the waiting one (`G/questnpc.cpp:206-264`). The waiting coroutine is never closed and
+  its dialog's answer reaches the wrong script. The Rewrite takes the click and runs nothing
+  (ledger 260).
 - D1. `StateMove` with a zero duration on its start millisecond divides 0 by 0, and `(int)NaN` is
   `INT_MIN`, so `Sync` logs a hack and keeps the spot (`G/char_state.cpp:784-793`). The Rewrite
   skips the Pulse's move and arrives on the next (ledger 229b).

@@ -40,7 +40,9 @@ use gamedata::item_proto::ItemProtos;
 use gamedata::locale_string::{Ending, LocaleStrings, LOCALE_COUNT};
 use gamedata::map_atlas::{MapAtlas, MapRegion};
 use gamedata::mob_group::MobGroups;
-use gamedata::mob_locale_names::{MobLocaleNames, MobNamesByLanguage};
+use gamedata::mob_locale_names::{
+    ItemNamesByLanguage, MobLocaleNames, MobNamesByLanguage, ITEM_NAMES_FILE,
+};
 use gamedata::mob_names::MobNames;
 use gamedata::mob_proto::MobProtos;
 use gamedata::npc_shop::{shops_from_dump, NpcShops};
@@ -7455,8 +7457,8 @@ fn load_map_cells(config: &ServerConfig, atlas: &MapAtlas) -> Result<Arc<HostedC
 }
 
 /// Load the quests: every script of the Locale's `quest` folder compiled by the port of `qc` and
-/// loaded into one Lua 5.1 state with the quest libraries (ADR-0004, ADR-0006), and the mob names
-/// of every language, which `mob_name` answers in the character's.
+/// loaded into one Lua 5.1 state with the quest libraries (ADR-0004, ADR-0006), and the mob and
+/// item names of every language, which `mob_name` and `item_name` answer in the character's.
 ///
 /// A library, a state table or a file that fails stops the server, and so does a missing
 /// `questnpc.txt`. A script `qc` refuses is warned about and not loaded, as legacy's build left
@@ -7467,6 +7469,8 @@ fn load_quests(config: &ServerConfig, npcs: &NpcData) -> Result<Quests, String> 
         .map_err(|error| format!("Quests are unusable in {}: {error}", locale_dir.display()))?;
     let names = MobNamesByLanguage::load(&config.country_dir())
         .map_err(|error| format!("Mob names are unusable: {error}"))?;
+    let item_names = ItemNamesByLanguage::load_file(&config.country_dir(), ITEM_NAMES_FILE)
+        .map_err(|error| format!("Item names are unusable: {error}"))?;
     let host = manager.host();
     info!(
         quests = host.quests().len(),
@@ -7474,7 +7478,7 @@ fn load_quests(config: &ServerConfig, npcs: &NpcData) -> Result<Quests, String> 
         refused = host.refused().len(),
         "Quests loaded"
     );
-    Ok(Quests::new(manager, Arc::clone(&npcs.protos), names))
+    Ok(Quests::new(manager, Arc::clone(&npcs.protos), names).with_item_names(item_names))
 }
 
 /// Stand the NPCs, monsters and stones up in the world before the game thread starts, on each
@@ -9370,5 +9374,39 @@ mod tests {
             state.process_pulse(pulse);
         }
         assert_eq!(vids(&state), [FIRST_NPC_VID + 1]);
+    }
+
+    /// Boot hands the quests every language's `item_names.txt` (`LocaleService_LoadItemNameFile`,
+    /// `G/locale_service.cpp:480-500`): 60003 names an item there and a monster in
+    /// `mob_names.txt`, and Spanish names the swords its own way.
+    #[test]
+    fn boot_hands_the_quests_the_owners_item_names() {
+        use common::enums::{ELocale, LOCALE_DEFAULT};
+
+        const ONE_CHANNEL: &str = r#"
+[store]
+url = "postgres://prodomo@127.0.0.1/prodomo"
+[auth]
+port = 30001
+[[channel]]
+number = 1
+ports = [30003, 30005]
+maps = [1]
+"#;
+        let mut config = common::config::parse_server_config(ONE_CHANNEL, "test")
+            .unwrap_or_else(|error| panic!("{error}"));
+        config.game_data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata");
+        let data = NpcData {
+            protos: Arc::new(MobProtos::from_rows(Vec::new())),
+            groups: Arc::new(MobGroups::default()),
+            names: Arc::new(MobLocaleNames::parse(b"VNUM\tNAME\n").expect("a header")),
+            maps: Vec::new(),
+        };
+        let quests = load_quests(&config, &data).unwrap_or_else(|error| panic!("{error}"));
+        let names = quests.item_names();
+        let english = LOCALE_DEFAULT as u8;
+        assert_eq!(names.find(60_003, english), b"Simbol Eroic");
+        assert_eq!(names.find(10, english), b"Sabie+0");
+        assert_eq!(names.find(10, ELocale::Es as u8), b"Espada+0");
     }
 }

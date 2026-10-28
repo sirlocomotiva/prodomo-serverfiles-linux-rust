@@ -28,8 +28,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::vid::Vid;
+use gamedata::item_proto::ItemProtos;
 use gamedata::locale_string::LocaleStrings;
-use gamedata::mob_locale_names::MobNamesByLanguage;
+use gamedata::mob_locale_names::{ItemNamesByLanguage, MobNamesByLanguage};
 use gamedata::mob_proto::{MobProtos, CHAR_TYPE_GOTO, CHAR_TYPE_NPC, CHAR_TYPE_WARP};
 use protocol::cg_quest_text::{CgQuestInputString, CG_QUEST_TEXT_FIELD_SIZE};
 use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO, CHAT_TYPE_NOTICE, CHAT_TYPE_TALKING};
@@ -46,7 +47,8 @@ use crate::chat_line::{chat_packet, Arg};
 use crate::game_loop_messages::GroundPlace;
 use crate::item_move::{MoveItemRefused, Mover};
 
-/// The quests boot loaded, with the monsters their `mob_name` names.
+/// The quests boot loaded, with the monsters their `mob_name` names and the items their
+/// `item_name` names.
 #[derive(Debug)]
 pub struct Quests {
     /// The scripts, the NPCs they belong to and every character's running script.
@@ -55,6 +57,8 @@ pub struct Quests {
     protos: Arc<MobProtos>,
     /// Every language's mob names.
     names: MobNamesByLanguage,
+    /// Every language's item names, which name the items of the world's item protos.
+    item_names: ItemNamesByLanguage,
 }
 
 impl Quests {
@@ -65,7 +69,21 @@ impl Quests {
             manager,
             protos,
             names,
+            item_names: ItemNamesByLanguage::default(),
         }
+    }
+
+    /// These quests with `item_names` answering `item_name`; without them every item it finds
+    /// is `NoName`.
+    #[must_use]
+    pub fn with_item_names(self, item_names: ItemNamesByLanguage) -> Self {
+        Self { item_names, ..self }
+    }
+
+    /// The item names `item_name` answers from, which a test reads.
+    #[must_use]
+    pub fn item_names(&self) -> &ItemNamesByLanguage {
+        &self.item_names
     }
 
     /// The manager, which a test reads a flag or the running script from.
@@ -152,6 +170,10 @@ pub(super) struct Session<'s> {
     pub(super) protos: &'s MobProtos,
     /// Their names.
     pub(super) names: &'s MobNamesByLanguage,
+    /// `ITEM_MANAGER::GetTable`: an item with no proto has no name.
+    pub(super) items: &'s ItemProtos,
+    /// The items' names.
+    pub(super) item_names: &'s ItemNamesByLanguage,
     /// The chat lines' formats.
     pub(super) locale: &'s LocaleStrings,
     /// The character's language and empire.
@@ -198,6 +220,8 @@ pub(super) struct Session<'s> {
     pub(super) pid: u32,
     /// Every character's quest targets.
     pub(super) targets: &'s mut QuestTargets,
+    /// The Pulse the step runs at, from which a new target's event counts.
+    pub(super) pulse: u64,
 }
 
 impl<'s> Session<'s> {
@@ -462,6 +486,14 @@ impl Game for Session<'_> {
             .map(|npc| u32::from(npc.race))
     }
 
+    /// `_item_name` (`G/questlua_global.cpp:649-671`): the proto, an exact vnum or one inside a
+    /// range row ([`ItemProtos::get`]), then `LC_LOCALE_ITEM_TEXT` in the character's language,
+    /// `NoName` when its file does not name the vnum.
+    fn item_name(&self, vnum: u32) -> Option<Vec<u8>> {
+        self.items.get(vnum)?;
+        Some(self.item_names.find(vnum, self.mover.language).to_vec())
+    }
+
     fn mob_name(&self, vnum: u32) -> Option<Vec<u8>> {
         self.protos.get(vnum)?;
         Some(self.names.find(vnum, self.mover.language).to_vec())
@@ -570,7 +602,9 @@ impl Game for Session<'_> {
     }
 
     fn create_target(&mut self, target: &Target) {
-        let records = self.targets.create(self.pid, target);
+        let records = self
+            .targets
+            .create(self.pid, target, (self.map_index, self.pulse));
         self.records.extend(records);
     }
 
@@ -581,6 +615,10 @@ impl Game for Session<'_> {
 
     fn target_vid(&self, quest: u32, name: &[u8]) -> u32 {
         self.targets.vid(self.pid, quest, name)
+    }
+
+    fn target_at(&self, vid: u32) -> Option<(u32, Vec<u8>)> {
+        self.targets.at(self.pid, vid)
     }
 }
 
@@ -703,32 +741,7 @@ impl GameState {
             return;
         };
         let pid = character.player_id();
-        let level = character
-            .points()
-            .map_or(1, world::character::Points::level);
-        let Some(mover) = self.own_mover(vid) else {
-            return;
-        };
-        let Some((channel, map)) = self.place_of(vid.raw()) else {
-            return;
-        };
-        let (x, y) = self
-            .spot_of(vid.raw())
-            .map_or((0, 0), |spot| (spot.x, spot.y));
-        let place = GroundPlace { channel, map, x, y };
-        let Some((_, (records, _, _, block_mode))) =
-            self.run_quests(place, mover, level, pid, |manager, game| {
-                manager.login(pid, game)
-            })
-        else {
-            return;
-        };
-        if let Some(mode) = block_mode {
-            self.block_modes.insert(vid, mode);
-        }
-        for record in records {
-            let _sent = self.write_to_client(vid, record);
-        }
+        let _ran = self.run_quest_event(vid, |manager, game| manager.login(pid, game));
     }
 
     /// `CQuestManager::Click` for the character under `vid` clicking the NPC `target` of race
@@ -861,7 +874,7 @@ impl GameState {
     /// slots, the timed affects and the points, so a GRAND read runs now, while the
     /// script that asked still waits for the answer — and the climbs it landed come
     /// back for the store's `store_skill`.
-    fn run_quests<R>(
+    pub(super) fn run_quests<R>(
         &mut self,
         place: GroundPlace,
         mover: Mover,
@@ -877,6 +890,7 @@ impl GameState {
             characters,
             npcs,
             quests,
+            protos: items,
             locale,
             dice,
             bodies,
@@ -886,6 +900,7 @@ impl GameState {
             pc_skill_tables,
             guilds,
             quest_targets,
+            last_pulse,
             ..
         } = self;
         let quests = quests.as_mut()?;
@@ -915,6 +930,8 @@ impl GameState {
             npcs: map_npcs(npcs, place),
             protos: &quests.protos,
             names: &quests.names,
+            items,
+            item_names: &quests.item_names,
             locale,
             mover,
             map_index,
@@ -935,6 +952,7 @@ impl GameState {
             records: Vec::new(),
             pid,
             targets: quest_targets,
+            pulse: *last_pulse,
         };
         let answer = op(&mut quests.manager, &mut session);
         let Session {
@@ -1059,35 +1077,27 @@ mod tests {
         assert_eq!(input(&full), QuestStep::Input(vec![b'x'; 64]));
     }
 
-    /// `mob_name` names only a monster `CMobManager::Get` finds (`questlua_global.cpp:673`), and
-    /// each chat line goes out as `ChatPacket(type, "%s", text)` of its own type.
-    #[test]
-    fn a_script_names_existing_monsters_and_chats_in_its_lines_type() {
-        use gamedata::mob_locale_names::MobLocaleNames;
-        use gamedata::mob_proto::{MobProto, CHAR_TYPE_NPC};
-        use gamedata::records::MobTableRecord;
-
-        let protos = MobProtos::from_rows(vec![MobProto {
-            line: 2,
-            table: MobTableRecord {
-                vnum: 20_016,
-                mob_type: CHAR_TYPE_NPC,
-                ..MobTableRecord::default()
-            },
-        }]);
-        let english = MobLocaleNames::parse(b"VNUM\tNAME\n20016\tSmith\n20017\tGhost\n").unwrap();
-        let names = MobNamesByLanguage::from_tables(vec![english]);
+    /// Runs `f` with a session of character 1, in the mover's language, that names the
+    /// monsters of `protos` from `names` and the items of `items` from `item_names`.
+    fn with_session<R>(
+        (protos, names): (&MobProtos, &MobNamesByLanguage),
+        (items, item_names): (&ItemProtos, &ItemNamesByLanguage),
+        f: impl FnOnce(&mut Session<'_>) -> R,
+    ) -> R {
         let locale = LocaleStrings::default();
         let mut dice = Pcg32::new(1, 1);
         let tables = gamedata::pc_skill_data::PcSkills::default();
         let mut slots = super::super::pc_skill::PcSkillState::default();
+        let mut targets = QuestTargets::default();
         let mut session = Session {
             map_index: 0,
             war_map: 0,
             level: 1,
             npcs: None,
-            protos: &protos,
-            names: &names,
+            protos,
+            names,
+            items,
+            item_names,
             locale: &locale,
             mover: test_place::MOVER,
             tables: &tables,
@@ -1105,25 +1115,92 @@ mod tests {
             records: Vec::new(),
             block_mode: None,
             pid: 1,
-            targets: &mut QuestTargets::default(),
+            targets: &mut targets,
+            pulse: 0,
         };
-        assert_eq!(session.mob_name(20_016), Some(b"Smith".to_vec()));
-        assert_eq!(session.mob_name(20_017), None, "a name with no proto");
-        let kinds = [
-            (ChatKind::Talking, CHAT_TYPE_TALKING),
-            (ChatKind::Info, CHAT_TYPE_INFO),
-            (ChatKind::Notice, CHAT_TYPE_NOTICE),
-            (ChatKind::Command, CHAT_TYPE_COMMAND),
-        ];
-        for (kind, _) in kinds {
-            session.chat(kind, b"hi");
-        }
-        let to = test_place::MOVER.recipient(&locale);
-        let expected: Vec<Vec<u8>> = kinds
-            .iter()
-            .map(|(_, chat_type)| chat_packet(to, *chat_type, b"%s", &[Arg::Text(b"hi")]))
-            .collect();
-        assert_eq!(session.records, expected);
+        f(&mut session)
+    }
+
+    /// `mob_name` names only a monster `CMobManager::Get` finds (`questlua_global.cpp:673`), and
+    /// `item_name` only an item `GetTable` finds, a range row's vnums strictly inside it
+    /// (`questlua_global.cpp:649`), each in the character's language. Each chat line goes out as
+    /// `ChatPacket(type, "%s", text)` of its own type.
+    #[test]
+    fn a_script_names_existing_monsters_and_items_and_chats_in_its_lines_type() {
+        use gamedata::item_proto::ItemProto;
+        use gamedata::mob_locale_names::MobLocaleNames;
+        use gamedata::mob_proto::{MobProto, CHAR_TYPE_NPC};
+        use gamedata::records::MobTableRecord;
+
+        let protos = MobProtos::from_rows(vec![MobProto {
+            line: 2,
+            table: MobTableRecord {
+                vnum: 20_016,
+                mob_type: CHAR_TYPE_NPC,
+                ..MobTableRecord::default()
+            },
+        }]);
+        let ymir = MobLocaleNames::parse(b"VNUM\tNAME\n20016\tSmith\n20017\tGhost\n").unwrap();
+        let english = MobLocaleNames::parse(b"VNUM\tNAME\n20016\tBlacksmith\n").unwrap();
+        let names = MobNamesByLanguage::from_tables(vec![ymir, english]);
+        let range = ItemProto {
+            vnum_range: 99,
+            ..ItemProto::for_category_rule(110_000, 0, 0)
+        };
+        let items = ItemProtos::from_rows(vec![ItemProto::for_category_rule(11_901, 0, 0), range]);
+        let ymir = MobLocaleNames::parse(b"VNUM\tNAME\n11901\tSmoking\n110050\tBook\n30\tX\n");
+        let english = MobLocaleNames::parse(b"VNUM\tNAME\n11901\tTuxedo\n").unwrap();
+        let item_names = ItemNamesByLanguage::from_tables(vec![ymir.unwrap(), english]);
+        with_session((&protos, &names), (&items, &item_names), |session| {
+            assert_eq!(session.mob_name(20_016), Some(b"Smith".to_vec()));
+            assert_eq!(session.mob_name(20_017), None, "a name with no proto");
+            assert_eq!(session.item_name(11_901), Some(b"Smoking".to_vec()));
+            assert_eq!(
+                session.item_name(110_050),
+                Some(b"Book".to_vec()),
+                "inside the range"
+            );
+            assert_eq!(
+                session.item_name(110_051),
+                Some(b"NoName".to_vec()),
+                "a range's, unnamed"
+            );
+            assert_eq!(
+                session.item_name(110_000),
+                Some(b"NoName".to_vec()),
+                "the range's own row"
+            );
+            assert_eq!(
+                session.item_name(110_099),
+                None,
+                "a range's end is outside it"
+            );
+            assert_eq!(session.item_name(30), None, "a name with no proto");
+            let kinds = [
+                (ChatKind::Talking, CHAT_TYPE_TALKING),
+                (ChatKind::Info, CHAT_TYPE_INFO),
+                (ChatKind::Notice, CHAT_TYPE_NOTICE),
+                (ChatKind::Command, CHAT_TYPE_COMMAND),
+            ];
+            for (kind, _) in kinds {
+                session.chat(kind, b"hi");
+            }
+            let to = test_place::MOVER.recipient(session.locale);
+            let expected: Vec<Vec<u8>> = kinds
+                .iter()
+                .map(|(_, chat_type)| chat_packet(to, *chat_type, b"%s", &[Arg::Text(b"hi")]))
+                .collect();
+            assert_eq!(session.records, expected);
+
+            session.mover.language = common::enums::LOCALE_DEFAULT as u8;
+            assert_eq!(
+                session.mob_name(20_016),
+                Some(b"Blacksmith".to_vec()),
+                "the character's language"
+            );
+            assert_eq!(session.item_name(11_901), Some(b"Tuxedo".to_vec()));
+            assert_eq!(session.item_name(110_050), Some(b"NoName".to_vec()));
+        });
     }
 
     /// `SendQuestInfoPakcet` (`G/questpc.cpp:231-308`): the window a script changed goes
@@ -1144,6 +1221,8 @@ mod tests {
             npcs: None,
             protos: &protos,
             names: &names,
+            items: &ItemProtos::default(),
+            item_names: &ItemNamesByLanguage::default(),
             locale: &locale,
             mover: test_place::MOVER,
             tables: &tables,
@@ -1162,6 +1241,7 @@ mod tests {
             block_mode: None,
             pid: 1,
             targets: &mut QuestTargets::default(),
+            pulse: 0,
         };
         session.quest_info(&QuestInfo {
             index: 0x0128,
@@ -1216,6 +1296,8 @@ mod tests {
             npcs: None,
             protos: &protos,
             names: &names,
+            items: &ItemProtos::default(),
+            item_names: &ItemNamesByLanguage::default(),
             locale: &locale,
             mover: test_place::MOVER,
             tables: &tables,
@@ -1234,6 +1316,7 @@ mod tests {
             block_mode: None,
             pid: 1,
             targets: &mut QuestTargets::default(),
+            pulse: 0,
         };
         assert_eq!(session.block_mode, None);
         session.send_block_mode(8);
@@ -1474,22 +1557,30 @@ mod tests {
         assert_eq!(find_by_race(None, &protos, 60_003), 0);
     }
 
-    /// The sash quest's state change at level 40 runs its letter (`G/questpc.cpp:352-371`),
-    /// which finds Theowahdan on the map and marks him: the client hears `GC_TARGET_CREATE`
-    /// (125) before the button's `GC_SCRIPT` and the window's `GC_QUEST_INFO`. The mark is
-    /// the character's until it leaves the world, which drops it with no record
-    /// (`CTargetManager::Logout`, `G/char.cpp:1815`).
-    #[test]
-    fn a_letter_marks_the_npc_it_finds_until_the_character_leaves() {
-        use crate::game_state::fixtures::{enter, open_cells, points_at, stand_field, TestClock};
+    const THEOWAHDAN: u32 = world::npc::FIRST_NPC_VID + 3;
 
-        const THEOWAHDAN: u32 = world::npc::FIRST_NPC_VID + 3;
-        let clock = TestClock::default();
-        let npcs = vec![
-            npc(world::npc::FIRST_NPC_VID + 1, 101, 0),
-            npc(THEOWAHDAN, 60_003, CHAR_TYPE_NPC),
-        ];
-        let mut world = stand_field(&clock, npcs, open_cells(), true);
+    /// A world of the owner's quests with Theowahdan at (600, 600), and character 1, level
+    /// 40, entered at (500, 500) with no quest run and the inbox drained; then the level-up
+    /// that moves the sash quest on, whose letter marks him, at Pulse 100. Answers the world,
+    /// the inbox, the level-up's records and the sash quest's number.
+    fn marked_theowahdan(
+        clock: &crate::game_state::fixtures::TestClock,
+    ) -> (
+        GameState,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+        Vec<Vec<u8>>,
+        u32,
+    ) {
+        use crate::game_state::fixtures::{enter, open_cells, points_at, stand_field};
+
+        // Only a test moves Theowahdan: `AIFLAG_NOMOVE` keeps his idle wander
+        // (`__StateIdle_NPC`, one draw in 7, on the clock) from walking him between the checks.
+        let theowahdan = world::npc::Npc {
+            ai_flags: gamedata::mob_proto::AIFLAG_NOMOVE,
+            ..npc(THEOWAHDAN, 60_003, CHAR_TYPE_NPC)
+        };
+        let npcs = vec![npc(world::npc::FIRST_NPC_VID + 1, 101, 0), theowahdan];
+        let mut world = stand_field(clock, npcs, open_cells(), true);
         let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../legacy/gamedata/locale/europe");
         let manager = Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
@@ -1511,14 +1602,30 @@ mod tests {
         if let Some(quests) = world.quests.as_mut() {
             quests.manager_mut().load_flags(1, Vec::new());
         }
-        let place = test_place::AT;
+        world.last_pulse = 100;
         let mover = world.own_mover(vid).expect("in the world");
-        let place = GroundPlace {
+        let records = world.quest_levelup(vid, beside(), mover);
+        (world, inbox, records, sash)
+    }
+
+    /// Where character 1 stands in [`marked_theowahdan`]'s world.
+    fn beside() -> GroundPlace {
+        GroundPlace {
             channel: crate::game_state::fixtures::PLACE.0,
             map: crate::game_state::fixtures::PLACE.1,
-            ..place
-        };
-        let records = world.quest_levelup(vid, place, mover);
+            ..test_place::AT
+        }
+    }
+
+    /// The sash quest's state change at level 40 runs its letter (`G/questpc.cpp:352-371`),
+    /// which finds Theowahdan on the map and marks him: the client hears `GC_TARGET_CREATE`
+    /// (125) before the button's `GC_SCRIPT` and the window's `GC_QUEST_INFO`. The mark is
+    /// the character's until it leaves the world, which drops it with no record
+    /// (`CTargetManager::Logout`, `G/char.cpp:1815`).
+    #[test]
+    fn a_letter_marks_the_npc_it_finds_until_the_character_leaves() {
+        let clock = crate::game_state::fixtures::TestClock::default();
+        let (mut world, mut inbox, records, sash) = marked_theowahdan(&clock);
         // `TPacketGCTargetCreate` in source field order: header, `lID`, the 33-byte name,
         // `dwVID`, `bType`.
         let mut golden = vec![125, 1, 0, 0, 0];
@@ -1535,10 +1642,175 @@ mod tests {
         assert_eq!(records.len(), 3);
         assert_eq!(world.quest_targets.vid(1, sash, b"theowahdan"), THEOWAHDAN);
 
-        let _kept = world.leave_world(vid);
+        let _kept = world.leave_world(Vid::new(1));
         assert_eq!(world.quest_targets.vid(1, sash, b"theowahdan"), 0);
         while let Ok(line) = inbox.try_recv() {
             assert_ne!(line.first(), Some(&124), "the logout sends no delete");
         }
+    }
+
+    /// `target_event` (`G/target.cpp:57-132`), first a second after the mark: the client
+    /// hears where Theowahdan stands (`GC_TARGET_UPDATE`, 123) whenever that changed. Within
+    /// 500, 500 itself included, the sash quest has no `arrive` script, so the next check is a
+    /// second later; past it the next is the distance over 60 Pulses, at most 125. Once no
+    /// character holds his VID, the `die` check ends the mark and the client hears its end.
+    #[test]
+    fn the_marks_event_follows_the_npc_and_ends_with_it() {
+        use crate::game_loop::PulseProcessor;
+
+        fn theowahdan(world: &mut GameState) -> &mut world::npc::Npc {
+            let list = world
+                .npcs
+                .get_mut(&crate::game_state::fixtures::PLACE)
+                .expect("the map's NPCs");
+            Arc::make_mut(list)
+                .npcs
+                .iter_mut()
+                .find(|npc| npc.vid == THEOWAHDAN)
+                .expect("Theowahdan")
+        }
+
+        let clock = crate::game_state::fixtures::TestClock::default();
+        let (mut world, mut inbox, _records, sash) = marked_theowahdan(&clock);
+        let mut heard = |world: &mut GameState, pulse: u64| -> Vec<Vec<u8>> {
+            world.process_pulse(pulse);
+            std::iter::from_fn(|| inbox.try_recv().ok())
+                .filter(|record| matches!(record.first(), Some(123 | 124)))
+                .collect()
+        };
+        let update = |x: i32, y: i32| {
+            let mut out = vec![123, 1, 0, 0, 0];
+            out.extend_from_slice(&x.to_le_bytes());
+            out.extend_from_slice(&y.to_le_bytes());
+            out
+        };
+        let move_to = |world: &mut GameState, x: i32, y: i32| {
+            let npc = theowahdan(world);
+            (npc.x, npc.y) = (x, y);
+        };
+        assert!(heard(&mut world, 124).is_empty(), "a second after the mark");
+        assert_eq!(heard(&mut world, 125), [update(600, 600)]);
+        move_to(&mut world, 600, 3600);
+        assert!(heard(&mut world, 149).is_empty());
+        assert_eq!(
+            heard(&mut world, 150),
+            [update(600, 3600)],
+            "135 away, no `arrive` script: a second"
+        );
+        move_to(&mut world, 600, 9000);
+        assert!(heard(&mut world, 199).is_empty());
+        assert_eq!(
+            heard(&mut world, 200),
+            [update(600, 9000)],
+            "3018 away: 50 Pulses"
+        );
+        assert!(heard(&mut world, 324).is_empty());
+        assert!(
+            heard(&mut world, 325).is_empty(),
+            "8208 away: 125 Pulses, and the spot did not change"
+        );
+        move_to(&mut world, 600, 600);
+        assert!(heard(&mut world, 449).is_empty());
+        assert_eq!(heard(&mut world, 450), [update(600, 600)]);
+        move_to(&mut world, 500, 1021);
+        assert!(heard(&mut world, 474).is_empty());
+        assert_eq!(heard(&mut world, 475), [update(500, 1021)]);
+        move_to(&mut world, 500, 1022);
+        assert!(heard(&mut world, 499).is_empty());
+        assert_eq!(
+            heard(&mut world, 500),
+            [update(500, 1022)],
+            "500 away is within `arrive`'s reach: a second"
+        );
+        move_to(&mut world, 600, 600);
+        assert!(heard(&mut world, 511).is_empty());
+        assert_eq!(
+            heard(&mut world, 512),
+            [update(600, 600)],
+            "501 away: 12 Pulses"
+        );
+
+        world.destroy_npc(THEOWAHDAN);
+        assert!(heard(&mut world, 536).is_empty());
+        assert_eq!(
+            heard(&mut world, 537),
+            [vec![124, 1, 0, 0, 0]],
+            "the mark ends"
+        );
+        assert_eq!(world.quest_targets.vid(1, sash, b"theowahdan"), 0);
+        assert!(heard(&mut world, 1000).is_empty());
+    }
+
+    /// `target_event` while the character stands on another map than its mark's
+    /// (`G/target.cpp:77-78`), as a party summon's `Show` leaves it without a Warp
+    /// (`summon_show`): the client hears nothing, and the next check comes
+    /// `MINMAX(12, 5000 / 60, 125)` = 83 Pulses later.
+    #[test]
+    fn a_mark_waits_while_its_character_stands_on_another_map() {
+        use super::super::view::EntityKey;
+        use crate::game_loop::PulseProcessor;
+        use crate::game_state::fixtures::{region, TestClock, PLACE};
+        use gamedata::map_atlas::MapRegion;
+        use gamedata::server_attr::SectreeGrid;
+
+        let clock = TestClock::default();
+        let (mut world, mut inbox, _records, _sash) = marked_theowahdan(&clock);
+        let other = MapRegion {
+            index: PLACE.1 + 1,
+            ..region()
+        };
+        world.host_map(
+            PLACE.0,
+            other.index,
+            SectreeGrid::of(&other).expect("a grid"),
+        );
+        let mut heard = |world: &mut GameState, pulse: u64| -> Vec<Vec<u8>> {
+            world.process_pulse(pulse);
+            std::iter::from_fn(|| inbox.try_recv().ok())
+                .filter(|record| matches!(record.first(), Some(123 | 124)))
+                .collect()
+        };
+        // `summon_show`'s steps to another map: out of the old map's index, into the new one's.
+        let stand_on = |world: &mut GameState, map: i32| {
+            let from = world.place_of(1).expect("a place");
+            let mut effects = Vec::new();
+            let index = world.maps.get_mut(&from).expect("its map");
+            index.remove(EntityKey::Character(1), &mut effects);
+            world.bodies.get_mut(&Vid::new(1)).expect("a body").map = map;
+            assert!(world.show_body(1, (500, 500, 0), None));
+        };
+        stand_on(&mut world, other.index);
+        assert!(heard(&mut world, 125).is_empty(), "another map");
+        stand_on(&mut world, PLACE.1);
+        assert!(heard(&mut world, 207).is_empty());
+        let mut update = vec![123, 1, 0, 0, 0];
+        update.extend_from_slice(&600_i32.to_le_bytes());
+        update.extend_from_slice(&600_i32.to_le_bytes());
+        assert_eq!(heard(&mut world, 208), [update], "83 Pulses after the miss");
+    }
+
+    /// `CQuestManager::Click`'s target arm (`G/questmanager.cpp:934-945`): a click on the
+    /// marked Theowahdan runs the sash quest's `theowahdan.target.click`, which ends the mark
+    /// (`GC_TARGET_DELETE`) and talks until its first `wait`.
+    #[test]
+    fn a_click_on_the_marked_npc_runs_the_quests_target_script() {
+        let clock = crate::game_state::fixtures::TestClock::default();
+        let (mut world, _inbox, _records, sash) = marked_theowahdan(&clock);
+        let vid = Vid::new(1);
+        let mover = world.own_mover(vid).expect("in the world");
+        let (taken, (records, _climbs, _stores)) =
+            world.quest_click(vid, (THEOWAHDAN, 60_003), beside(), mover);
+        assert!(taken);
+        assert_eq!(records[0], [124, 1, 0, 0, 0], "{records:?}");
+        let page = GcScript::decode(&records[1]).expect("the first page");
+        assert!(
+            page.script
+                .windows(26)
+                .any(|text| text == b"Ah, here you are! I have d"),
+            "{page:?}"
+        );
+        assert_eq!(records.len(), 2);
+        assert_eq!(world.quest_targets.vid(1, sash, b"theowahdan"), 0);
+        assert!(world.quest_running(vid), "the page waits");
     }
 }

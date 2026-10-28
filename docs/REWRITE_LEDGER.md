@@ -35930,3 +35930,336 @@ Gates:
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
 
 No ADR changed. No owner question added. V26 stays open.
+
+
+## 260. The mark's click and its event (`event.target.target_event`, `gc.target_update`, `lua.item_name`, `lua.target.delete`)
+
+A click on Theowahdan, marked by the sash letter since ledger 259, now runs the sash quest's
+`theowahdan.target.click`. Each mark's event tells the client where the marked character
+stands, and `item_name` answers, so the answer to the click's first page moves the quest to
+`go_to_disciple`, whose letter marks the captain.
+
+**The click.** `Manager::click` first asks the new `Game::target_at` for the quest and kept
+name of the clicker's first mark on the clicked character (`GetTargetInfo(pid,
+TARGET_TYPE_VID, vid)`, `G/target.cpp:317-348`). When there is one, the new `Run::on_target`
+runs `NPC::OnTarget` (`G/questnpc.cpp:206-264`) on the no-NPC scripts, at the character's state
+of that quest. That is `CQuestManager::Click`'s target arm (`G/questmanager.cpp:934-945`):
+
+1. The `target` entries run in order. An entry matches when its argument begins with the mark's
+   name. This is `strncmp` over the name's length, so `boss` also answers `bossy.click`.
+2. The verb after the argument's first dot must be `click`, and the entry's condition must
+   hold.
+3. The first match runs and takes the click, and the NPC's own scripts do not run. With no
+   match the click goes on to the NPC as before.
+
+The argument is the first line of the entry's `.arg` file, read as the C string `OnTarget`
+compares (`NPC::LoadStateScript`, `G/questnpc.cpp:171-180`). A character that never ran the
+quest matches nothing.
+
+The new `Manager::target` is `CQuestManager::Target` (`G/questmanager.cpp:723-736`): the
+mark's event reports `arrive` and `die` through it, and a character the manager never saw
+misses, as legacy's `GetPC` returns NULL. No loaded quest has an `arrive` or `die` script (see
+Searches), so both answer that nothing ran.
+
+While another script waits for its client, a matching mark takes the click and runs nothing,
+and the waiting script keeps its place. Legacy runs the target script through
+`ExecuteQuestScript`, and its `PC::SetQuest` puts the new state in place of the waiting one
+without closing it (`G/questpc.cpp:140-164`). The waiting dialog's answer then reaches the
+wrong script. That is a Defect, not reproduced, and the Rewrite's behaviour is a Divergence
+(`docs/STATUS.md`).
+
+**The event.** `prodomo/src/game_state/quest_target.rs` now runs `target_event`
+(`G/target.cpp:57-132`). Each mark carries its event number, the map it was made on, the
+Pulse its next check is due, and the spot the client last heard (`old`). `process_pulse` calls
+`run_quest_targets`, which runs every due event, character by character in the order the
+marks were made:
+
+- The first check comes a second after the mark (`PASSES_PER_SEC(1)`).
+- When the character stands on another map, the next check comes in `MINMAX(12, 5000 / 60,
+  125)` = 83 Pulses and nothing else happens.
+- When no character holds the marked VID, the quest's `die` script runs and the mark ends
+  with its `GC_TARGET_DELETE` (`DeleteTarget`).
+- Otherwise, within 500 (`DISTANCE_APPROX`) the quest's `arrive` script runs. When the marked
+  spot differs from `old`, the client hears `GC_TARGET_UPDATE` and `old` moves to it. That
+  record is header 123, 13 bytes: `lID`, `lX`, `lY` (`TPacketGCTargetUpdate`,
+  `G/packet.h:2532-2537`, whose `long`s are 4 bytes on the 32-bit target). A mark the script
+  made silent sends nothing.
+- The next check is `MINMAX(12, iDist / 60, 125)` Pulses later, or a second later when an
+  `arrive` found no script (`G/target.cpp:78,128-131`).
+
+A replaced mark (`CreateTarget` on the same quest and name) keeps its event, its map and its
+due Pulse, and its `old` goes back to (0, 0), so the client hears the spot again at the next
+check. The codec `GcTargetUpdate` existed, so the coverage counts do not move.
+
+Two differences from legacy:
+
+- Legacy's `CHARACTER_MANAGER::Find` looks for the marked VID across the process. The Rewrite
+  looks in the character's own Channel, whose worlds hold the only characters a mark can name.
+  That is a Divergence (`docs/STATUS.md`).
+- Legacy's `FindByPID` miss ends the event and leaves the mark listed. A character's marks end
+  when it leaves the world (ledger 259), so no event outlives its character.
+
+**`item_name`.** The sash click's second page names the item it asks for with
+`item_name(85000)`. `_item_name` (`G/questlua_global.cpp:649-671`) works in two steps:
+
+1. It answers "" unless `ITEM_MANAGER::GetTable` finds the vnum, either as an exact row or
+   strictly inside a range row.
+2. Otherwise it answers `LC_LOCALE_ITEM_TEXT(vnum, language)`, which is `locale_item_find`:
+   the name from the language's `item_names.txt`, or `NoName`.
+
+`locale_item_init` (`G/locale.cpp:167-185`) reads the file as `locale_mob_init` reads
+`mob_names.txt`, and `LocaleService_LoadItemNameFile` (`G/locale_service.cpp:480-500`) loads
+one per language.
+
+The Rewrite reuses the monster-name reader:
+
+- `MobLocaleNames::load_language_file` and `MobNamesByLanguage::load_file` take the file name.
+- `ItemNamesByLanguage` is `MobNamesByLanguage` over `ITEM_NAMES_FILE`.
+- The boot loads every language's `item_names.txt` beside the quests and refuses to start with
+  "Item names are unusable" when one cannot be read.
+- `Session::item_name` asks `ItemProtos::get`, which handles the range rows, and then the
+  character's language.
+
+The Lua name shares `mob_name`'s argument rules: a number or numeric text names the vnum,
+anything else answers "". `BRIDGED` goes from 73 names to 74. 85000 is in no proto row, so the
+sash page reads `x40 .` with nothing between, as legacy's does.
+
+**The tests.** `prodomo/tests/parity.rs`. Every map-1 login from level 40 marks Theowahdan
+(ledger 259), so a second after the mark every such scenario now hears his spot. The harness
+reads around it:
+
+- `is_mark_update` names the record.
+- `read_game_raw` and `read_game_raw_until` skip it.
+- `drain_game` sizes it and filters it out.
+- `quiet_for`, `closes_within`, and the readers that size records themselves (the chat counter,
+  `wire_for`, the revive reader, the swing and move loops, and the party swing) accept it.
+- `read_game_marked` and `still_marked_for` are the readers that keep it. Under them an
+  unexpected update is a finding.
+
+New scenario `a_click_on_marked_theowahdan_runs_the_sash_quests_target_script`:
+
+1. Setup: Alpha enters 1000 from Theowahdan along y (960 by `DISTANCE_APPROX`), with the sash
+   quest stored at `information` and the Yohara quest at `information_new`.
+2. The login reads its lines, `item_attr67add`'s letter, the letter pass's mark of Theowahdan
+   (ID 1) and the sash and Yohara letters.
+3. At least 600 ms after the mark, `GC_TARGET_UPDATE` (1, 482800, 943900) arrives. Then 1.5
+   seconds pass with no record: he stands still, so the checks every 16 Pulses send nothing.
+4. The click on him brings `GC_TARGET_DELETE` of ID 1, then the first page (12 lines, skin 1,
+   titled `teowahdan`, the `mob_name` of 60003) ending `[NEXT]`, and nothing else in the quiet
+   window. The NPC's own scripts do not run.
+5. The answer 254 brings the second page (13 lines) ending `[DONE]`, the captain's mark
+   (`GC_TARGET_CREATE` of ID 2 named `Captain`, on another VID), the letter `Increase your
+   power`, and a second later the update (2, 466900, 949100). Then 1.5 seconds pass with no
+   record.
+6. After the disconnect the stored `sash_mission.__status` is 1675612723, the CRC32 of
+   `go_to_disciple`.
+
+All 145 scenarios pass. Ledger 259's sash scenario is unchanged: its `still` readers skip the
+update.
+
+Unit tests:
+
+- `quest`: `a_marked_npcs_click_runs_its_quests_target_script_first` covers:
+  - the verb and the condition;
+  - the prefix match (`bos` answers `boss.click`);
+  - a waiting script still taking the click and running nothing;
+  - an unmarked NPC and a mark with no entry going to the NPC;
+  - a mark named `two\nlines`, which its entry's argument `two\nlines.click` never matches,
+    because `getline` keeps only `two`.
+
+  The API probe gains `item_name`: a number and numeric text name 11901, and an unknown vnum,
+  NaN and a table answer "".
+- `prodomo`, in `quests`:
+  - `the_marks_event_follows_the_npc_and_ends_with_it`:
+    - the first check at Pulse 125;
+    - a second within 500, and at exactly 500;
+    - 12 Pulses at 501, 50 at 3018, and 125 at 8208, with nothing sent when the spot did not
+      change;
+    - the end with `GC_TARGET_DELETE` once the NPC is gone.
+  - `a_mark_waits_while_its_character_stands_on_another_map`: the character is taken through
+    `summon_show`'s steps to another map, which a party summon reaches without a Warp. It
+    hears nothing, and the check 83 Pulses later, back on the mark's map, sends the update.
+  - `a_click_on_the_marked_npc_runs_the_quests_target_script`: the owner's sash quest, the
+    delete, and the first page waiting.
+  - `a_script_names_existing_monsters_and_items_and_chats_in_its_lines_type`, renamed, adds
+    the item names: an exact row, a vnum inside a range with and without a name, the range's
+    own row, the range's end, and a vnum with no proto. A second language then names both a
+    monster and an item its own way.
+- `prodomo`, in `quest_target`:
+  - `the_next_check_follows_the_distance` (12 at 0 and 779, 13 at 780, 83 at 5000, 124 at
+    7499, 125 at 7560 and at `i32::MAX`, 25 when `arrive` found no script);
+  - `a_replace_keeps_the_event_and_its_pace`;
+  - `the_find_tells_a_spot_from_another_map_and_from_nobody`: an NPC and a character on the
+    event's map are found where they stand, on another map without a spot, and on another
+    Channel, like a VID nobody holds, not at all;
+  - `a_mark_on_a_character_of_another_map_stays_and_waits`: the find holds the character, so
+    no `die` runs and the mark stays; its (0, 0) is the old spot a new mark starts from, so
+    nothing is sent, and the check 83 Pulses later, once it stands on the mark's map, sends
+    the update.
+- `prodomo` binary: `boot_hands_the_quests_the_owners_item_names` runs `load_quests` on the
+  owner's tree. 60003 is `Simbol Eroic` in the item file (`teowahdan` in the monster file), and
+  vnum 10 is `Sabie+0` in English and `Espada+0` in Spanish. `Quests::item_names` is the new
+  reader it uses.
+- `gamedata`: `the_owners_item_names_load_in_every_language`, with the same Spanish row.
+
+**A flaky fixture.** The first mutation sweep counted kills from
+`the_marks_event_follows_the_npc_and_ends_with_it`. Fifteen runs of the unchanged code then
+failed it four times. The test moves Theowahdan by hand, and his own idle wander
+(`__StateIdle_NPC`: one draw in 7, a move timed on the clock) sometimes walked him back
+between two checks. The trace showed `npc_move` taking him from (500, 1021) back to (600,
+600).
+
+The owner's protos give both 60003 and 20355 `NOMOVE` (`AI_FLAG`), so on the server neither
+ever wanders, and the scenario was never exposed. The `marked_theowahdan` fixture now gives him
+`AIFLAG_NOMOVE` as the proto does, and 30 runs of the quest tests pass 30 times. The sweep was
+run again in full after the fix.
+
+**Searches.**
+
+- 85000 has no name. `item_proto.txt` has no row for it: a scan of the vnum column read 7123
+  exact rows and 180 range rows, and none covers 85000. As controls, 11901 is an exact row and
+  110050 falls inside `110000~110099`. The English `item_names.txt` has no row for 85000 and
+  names 11901 `Smoking` at line 1938.
+- No loaded quest has a target `arrive` or `die` script. `target\.(arrive|die)` over every
+  file of `legacy/gamedata/locale/europe/quest` finds none. `target\.click` finds the two
+  callers, `_basic/sash_mission.lua` and `_basic/yohara_system.lua` (the positive control).
+  `target\.zzz` finds none (the negative control).
+- `item_name[[:space:]]*\(` matches nine files of the quest tree. One hit, in `locale.lua`, is
+  `c_item_name`, a `questlib.lua` helper that writes an `[ITEM value;N]` tag and never calls
+  `item_name`. The other eight call it:
+  - The sash quest is the one this slice reaches. It also names its reward, 85005 (`Esarfa
+    Master (normala)`, in the protos), in `__complete`.
+  - `questlib.lua` calls it only inside `say_item_vnum`, `say_item_vnum_inline` and
+    `show_horse_menu`.
+  - The rest belong to systems not ported: the 7th and 8th skills, the battle pass, the
+    enchanted forest, the guild melt, the teleport ring and the dungeon library.
+- The language files: `country/*/item_names.txt` has eleven files, and ten are byte-identical
+  (one SHA-256). `es` names vnums 10 to 19 `Espada+N` where the others say `Sabie+N`, and adds
+  three rows at its end (30400 to 30402). The eleven `mob_names.txt` are identical.
+
+**Mutation sweep.** Thirty-six mutants, each applied to the pristine file, checked to change
+executable code by line position, and restored by checksum.
+
+- **The event** (`quest_target`):
+  - the next check's ceiling raised and its floor lowered;
+  - the distance step made 61;
+  - the pace without an `arrive` script ignored;
+  - a replace forgetting the pace or the event, or keeping the last spot;
+  - the first check made at once;
+  - an unchanged spot sent again, and the last spot not kept;
+  - `die` not ending the mark;
+  - `arrive` needing less than 500;
+  - the check after another map coming the next Pulse;
+  - a mark answering any VID;
+  - the update naming the next ID;
+  - an NPC or a character on another map found as gone, an NPC or a character of another
+    Channel found, and another map ending the mark (T16 to T20, added with the `Marked`
+    refactor below).
+- **The click** (`quest`):
+  - the target arm asking another verb;
+  - the name matched whole, not as a prefix;
+  - any verb matching;
+  - the condition ignored;
+  - a waiting script not holding the target, or the match not taken while it waits;
+  - the argument not cut at its line end;
+  - `item_name` reading the monster names.
+- **The names** (`prodomo` and `gamedata`):
+  - the session's `item_name` skipping the proto, reading the monster names, or reading the
+    first language;
+  - the session's `target_at` asking another VID;
+  - the item names file being the monsters', and `load_file` reading the monster file;
+  - the boot dropping the item names.
+
+The first pass left four survivors, and each now has the witness named under Tests:
+
+- T12, `arrive` at less than 500. No step stood at exactly 500. Now Theowahdan stands 500 and
+  501 away.
+- M6, the argument not cut at its line end. No quest named a target with a newline. A `when`
+  name may be a string, so `"two\nlines".target.click` compiles to the argument
+  `two\nlines.click`, which `getline` cuts to `two`.
+- G3, `item_name` reading the first language. The test had one language.
+- B1, the boot dropping the item names. Nothing read them past the boot: the sash page's 85000
+  has no proto, so it answers "" either way. Now the boot test reads them.
+
+That pass also counted T13, the check after another map coming the next Pulse, as killed by
+the flaky test. Run again with the fixture fixed, it survived. Its witness is the new
+another-map test.
+
+The full rerun after the fixes killed all 31, every one semantic, none by a compile error. M8
+also fails the tests that share the owner's manager through one `Mutex`, because the probe's
+panic poisons the lock. The harness's readers were not swept.
+
+Rows:
+
+- Ported with the new scenario: `event.target.target_event`, `gc.target_update`,
+  `lua.item_name`, and `lua.target.delete`, which the click's script calls with a note.
+- Notes added, still partial: `quest.sash_mission` (the captain's click and the later states),
+  `sys.combat.target`, `data.locale.names` (the item names) and `cg.game.on_click` (the target
+  arm).
+
+**The generator.** `.scratch/parity/tools/gen.py`'s `existing()` read the tables through
+`read`, the latin-1 reader meant for the legacy source. A rerun therefore wrote every
+non-ASCII note back double-encoded. It now reads the tables as UTF-8, which `write` writes. A
+second run changes nothing.
+
+The rerun moved one cell: `lua.pc.send_block_mode`'s source is back to
+`game/questlua_pc.cpp:3976`, the registration line the generator cites for every API row.
+Ledger 249 had hand-edited it to the function's line, 2190, and the generated cells are not
+ours to edit.
+
+Docs: `docs/STATUS.md` has the next slice (the captain's click, which needs
+`pc.get_playtime`, then `pc.give_item2`, `pc.count_item`, `pc.remove_item`,
+`pc.give_item2_select` and `item.set_socket`), the refused-API row (74 backed names), two
+Divergences and one Defect. No codec changed, so `AGENTS.md`'s coverage row and
+`docs/PROTOCOL_NOTES.md` are unchanged.
+
+**Not ported.** The captain's click, whose `select` answer calls `pc.get_playtime`, a refused
+name, and the sash quest's later states. Yohara's statue mark never exists on map 1, so its
+click is not reachable here.
+
+**The potion windows.** Two of the three full runs before the last one failed
+`a_potion_drunk_inside_the_window_ticks_on_the_entry_phase` with "a lone HP point is a heal
+tick: 599 from 500". The scenario passed eight runs alone. The affect event writes a step's HP
+point and its recovery point as two frames (`run_affect_event`,
+`prodomo/src/game_state/affect.rs`), so on a loaded host the drink's quiet window, 300 ms in
+that scenario, can close between them. The three scenarios that fold heal ticks now read their
+drink's window through `read_without_heal_ticks`. When the window ends in an HP point that is
+no heal step from the pool the rest of it folds to, the helper reads the next record and
+requires it to be the recovery point for the same VID. The server is unchanged.
+
+The control was a temporary 450 ms pause between a step's frames, reverted by checksum. The
+old harness then failed all three scenarios with the gate's message, and the new one passed all
+three. The first draft of the helper folded the window's head before it checked that the last
+record was an HP point, and it failed all three on a whole pair; the check now comes first.
+
+Gates:
+
+- fmt clean.
+- Build with no warnings.
+- clippy green with `-D warnings`, after three findings. `api` went over 100 lines again, so
+  the window's look (`set_skin`, `setskin`, `setleftimage`, `settopimage`) answers through a
+  fourth family, `look_api`, ahead of the other three; no other family or arm backs those
+  names, so the order changes nothing. `marked_spot` answered `Option<Option<_>>`, and now
+  answers a `Marked` of `Gone`, `Elsewhere` or `At(x, y)`, the three cases `target_event`
+  tells apart (`G/target.cpp:69-108`). The names test went over 100 lines, and its session
+  is now built by a `with_session` helper.
+- doc green with `RUSTDOCFLAGS="-D warnings"`, after the public `click` and `target` docs
+  stopped linking the private `Run::on_target`.
+- doc-tests green (1 passed, 26 ignored).
+- The full workspace all-targets DB run is green on all 40 targets against `postgres:18` in
+  Podman, 4209 tests: prodomo lib 1257, parity 145 of 145, protocol 1273, quest lib 92.
+  This is the run after the potion windows' fix; two of the three runs before it failed the
+  potion scenario, as above.
+- No scratch database was left by the gate runs (`prodomo\_%` counts 0; `prodomo%` counts the
+  one main database, the positive control).
+- After the three refactors the sweep's 15 `target_event` mutants and four `item_name`
+  session mutants ran again, and each was killed again by a test failure. Five more were
+  written for `Marked`'s arms (T16 to T20). T20, another map ending the mark, survived: no
+  test ran an event while the marked one stood on another map. Its witness is
+  `a_mark_on_a_character_of_another_map_stays_and_waits`, and the other four die on
+  `the_find_tells_a_spot_from_another_map_and_from_nobody`. All 36 are killed, every one
+  semantic.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
+
+No ADR changed. No owner question added. V26 stays open.

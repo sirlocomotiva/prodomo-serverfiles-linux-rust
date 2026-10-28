@@ -4560,6 +4560,8 @@ mod tests {
             npcs: None,
             protos: &gamedata::mob_proto::MobProtos::default(),
             names: &gamedata::mob_locale_names::MobNamesByLanguage::default(),
+            items: &gamedata::item_proto::ItemProtos::default(),
+            item_names: &gamedata::mob_locale_names::ItemNamesByLanguage::default(),
             locale,
             mover,
             tables: pc_skill_tables,
@@ -4578,6 +4580,7 @@ mod tests {
             block_mode: None,
             pid: 0,
             targets: &mut super::super::quest_target::QuestTargets::default(),
+            pulse: 0,
         };
         let climbed = session.learn_grand_master_skill(vnum, total);
         let super::super::quests::Session {

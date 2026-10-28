@@ -2981,8 +2981,9 @@ impl PulseProcessor for GameState {
     ///
     /// Counts the Pulse, then runs the events that are due on it: the ground items whose
     /// lifetime ran out, the affect event of each character (the potion's recovery, the stamina
-    /// refill and the revive timer, `run_affect_events`), the warp NPCs, and the regen events, the
-    /// ore veins' ends and the fight's stun, death and recovery events (`run_regens`). Last, as
+    /// refill and the revive timer, `run_affect_events`), the warp NPCs, the regen events, the
+    /// ore veins' ends and the fight's stun, death and recovery events (`run_regens`), and the
+    /// quest targets' events (`run_quest_targets`). Last, as
     /// `CHARACTER_MANAGER::Update` comes after the heartbeat's events (`G/main.cpp:777-782`),
     /// each moving player steps. The count is also the only way a test can tell that the game
     /// thread owns this value.
@@ -3002,6 +3003,7 @@ impl PulseProcessor for GameState {
         self.run_npc_affect_events(pulse);
         self.run_warp_npcs(pulse);
         self.run_regens(pulse);
+        self.run_quest_targets(pulse);
         self.step_motion(pulse);
         self.run_guild_ticks(pulse);
         self.run_war_map_ticks(pulse);

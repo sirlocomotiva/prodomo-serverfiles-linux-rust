@@ -25,11 +25,17 @@ ROW = re.compile(r'^\|\s*`([^`]+)`\s*\|(.*)\|\s*$')
 
 
 def existing(path):
-    """Hand-maintained columns by ID from a previous run."""
+    """Hand-maintained columns by ID from a previous run.
+
+    The tables are UTF-8, which `write` writes; `read` is latin-1 for the legacy source, and
+    reading a table through it would write every non-ASCII note back double-encoded.
+    """
     kept = {}
     if not os.path.exists(path):
         return kept
-    for line in read(path):
+    with open(path, encoding='utf-8') as handle:
+        lines = handle.read().split('\n')
+    for line in lines:
         match = ROW.match(line)
         if not match:
             continue

@@ -25,6 +25,13 @@
 //! in the player's own language (`LC_LOCALE_MOB_TEXT(vnum, GetLanguage())`), so
 //! [`crate::mob_locale_names::MobNamesByLanguage`] reads every language's file, `LOCALE_YMIR`'s
 //! from `en` as legacy does.
+//!
+//! The item names are the same reader over another file: `locale_item_init`
+//! (`G/locale.cpp:167-185`) reads `item_names.txt` line for line as `locale_mob_init` reads
+//! `mob_names.txt`, `LocaleService_LoadItemNameFile` (`G/locale_service.cpp:480-500`) picks each
+//! language's folder as the mob names' loader does, and `locale_item_find`
+//! (`G/locale.cpp:105-118`) answers as `locale_mob_find` does. The quest function `item_name`
+//! asks them in the player's language ([`crate::mob_locale_names::ItemNamesByLanguage`]).
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -38,6 +45,9 @@ use crate::locale_string::{country_code, LOCALE_COUNT};
 
 /// The file each language's folder holds.
 pub const MOB_NAMES_FILE: &str = "mob_names.txt";
+
+/// The item names' file in each language's folder.
+pub const ITEM_NAMES_FILE: &str = "item_names.txt";
 
 /// What `locale_mob_find` answers for a vnum the file does not name.
 pub const NO_NAME: &[u8] = b"NoName";
@@ -101,9 +111,20 @@ impl MobLocaleNames {
     ///
     /// Returns [`MobLocaleNamesError`] when the file cannot be read or parsed.
     pub fn load_language(country_dir: &Path, language: u8) -> Result<Self, MobLocaleNamesError> {
-        let path = country_dir
-            .join(country_code(language))
-            .join(MOB_NAMES_FILE);
+        Self::load_language_file(country_dir, language, MOB_NAMES_FILE)
+    }
+
+    /// Read one language's `file`, `<country_dir>/<code>/<file>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MobLocaleNamesError`] when the file cannot be read or parsed.
+    pub fn load_language_file(
+        country_dir: &Path,
+        language: u8,
+        file: &str,
+    ) -> Result<Self, MobLocaleNamesError> {
+        let path = country_dir.join(country_code(language)).join(file);
         let file = std::fs::read(&path).map_err(|source| MobLocaleNamesError::Io {
             path: path.clone(),
             message: source.to_string(),
@@ -162,8 +183,17 @@ impl MobNamesByLanguage {
     ///
     /// Returns [`MobLocaleNamesError`] when a file cannot be read or parsed.
     pub fn load(country_dir: &Path) -> Result<Self, MobLocaleNamesError> {
+        Self::load_file(country_dir, MOB_NAMES_FILE)
+    }
+
+    /// Read every language's `file`, as [`MobNamesByLanguage::load`] reads `mob_names.txt`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MobLocaleNamesError`] when a file cannot be read or parsed.
+    pub fn load_file(country_dir: &Path, file: &str) -> Result<Self, MobLocaleNamesError> {
         let tables = (0..LOCALE_COUNT)
-            .map(|language| MobLocaleNames::load_language(country_dir, language))
+            .map(|language| MobLocaleNames::load_language_file(country_dir, language, file))
             .collect::<Result<_, _>>()?;
         Ok(Self { tables })
     }
@@ -187,6 +217,10 @@ impl MobNamesByLanguage {
             .map_or(NO_NAME, |names| names.find(vnum))
     }
 }
+
+/// Every language's item names: legacy `localeItem`, read from [`ITEM_NAMES_FILE`] by
+/// [`MobNamesByLanguage::load_file`].
+pub type ItemNamesByLanguage = MobNamesByLanguage;
 
 /// `atoi` with a 32-bit `int`: C whitespace, a sign, then decimal digits, saturating.
 ///
@@ -233,6 +267,30 @@ mod tests {
             "Latin bytes, not transcoded"
         );
         assert_eq!(names.find(1), NO_NAME);
+    }
+
+    /// Every language's `item_names.txt` loads, byte-exact; a vnum no file names answers
+    /// `NoName`. Ten of the owner's eleven files are one file; Spanish names the swords 10 to 19
+    /// its own way.
+    #[test]
+    fn the_owners_item_names_load_in_every_language() {
+        let names = ItemNamesByLanguage::load_file(&owners_country(), ITEM_NAMES_FILE)
+            .expect("the owner's item names read");
+        let english = LOCALE_DEFAULT as u8;
+        assert_eq!(names.find(60_003, english), b"Simbol Eroic");
+        assert_eq!(names.find(11_901, english), b"Smoking");
+        assert_eq!(names.find(85_000, english), NO_NAME, "no row names 85000");
+        assert_eq!(names.find(10, english), b"Sabie+0");
+        assert_eq!(
+            names.find(10, common::enums::ELocale::Es as u8),
+            b"Espada+0"
+        );
+        let mobs = MobNamesByLanguage::load(&owners_country()).expect("the mob names read");
+        assert_eq!(
+            mobs.find(60_003, english),
+            b"teowahdan",
+            "the same vnum names a monster in the other file"
+        );
     }
 
     /// A repeated vnum answers with its first row: `std::map::insert` keeps the first.
