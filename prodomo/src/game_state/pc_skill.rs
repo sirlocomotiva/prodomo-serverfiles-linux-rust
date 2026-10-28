@@ -4576,6 +4576,8 @@ mod tests {
             guilds: super::super::guild::GuildShadow::default(),
             records: Vec::new(),
             block_mode: None,
+            pid: 0,
+            targets: &mut super::super::quest_target::QuestTargets::default(),
         };
         let climbed = session.learn_grand_master_skill(vnum, total);
         let super::super::quests::Session {

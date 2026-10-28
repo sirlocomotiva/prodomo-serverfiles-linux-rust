@@ -235,8 +235,8 @@ pub const BRIDGE: &str = "quest bridge";
 
 /// The API names that reach the game through [`BRIDGE`], in [`crate::api::NAMES`] order: the
 /// dialog (`say`, `raw_script`, the skins and the images), the chat lines, the quest window's
-/// title and begin byte, and the lookups the ported systems can answer.
-pub const BRIDGED: [&str; 65] = [
+/// title and begin byte, the quest targets, and the lookups the ported systems can answer.
+pub const BRIDGED: [&str; 73] = [
     "game.get_event_flag",
     "set_state",
     "set_skin",
@@ -253,6 +253,7 @@ pub const BRIDGED: [&str; 65] = [
     "mob_name",
     "get_time",
     "get_global_time",
+    "find_npc_by_vnum",
     "notice",
     "guild.get_rank",
     "guild.get_ladder_point",
@@ -289,6 +290,7 @@ pub const BRIDGED: [&str; 65] = [
     "npc.get_race",
     "pc.get_level",
     "pc.getqf",
+    "pc.setqf",
     "pc.get_map_index",
     "pc.learn_grand_master_skill",
     "pc.get_war_map",
@@ -302,6 +304,12 @@ pub const BRIDGED: [&str; 65] = [
     "q.done",
     "q.getcurrentquestindex",
     "q.getcurrentquestname",
+    "target.vid",
+    "target.npc",
+    "target.pc",
+    "target.delete",
+    "target.clear",
+    "target.id",
 ];
 
 /// The registry key of [`PRELUDE`]'s `getn`.

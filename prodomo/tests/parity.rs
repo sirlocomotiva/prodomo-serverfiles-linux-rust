@@ -1565,8 +1565,15 @@ fn game_len(header: u8) -> usize {
         GC_QUICKSLOT_DEL | GC_SAFEBOX_SIZE | GC_MALL_OPEN | GC_PARTY_PARAMETER => 1 + 1,
         GC_QUICKSLOT_SWAP => 1 + 2,
         GC_EXCHANGE => EXCHANGE_LEN,
-        GC_SAFEBOX_DEL | GC_MALL_DEL | GC_CHARACTER_DEL | GC_STUN | GC_DEAD | GC_PARTY_INVITE
-        | GC_PARTY_REMOVE => 1 + 4,
+        GC_SAFEBOX_DEL
+        | GC_MALL_DEL
+        | GC_CHARACTER_DEL
+        | GC_STUN
+        | GC_DEAD
+        | GC_PARTY_INVITE
+        | GC_PARTY_REMOVE
+        | GC_QUEST_TARGET_DELETE => 1 + 4,
+        GC_QUEST_TARGET_CREATE => QUEST_TARGET_CREATE_LEN,
         GC_WARP => WARP_LEN,
         GC_WALK_MODE => WALK_MODE_LEN,
         GC_TARGET => TARGET_LEN,
@@ -1971,7 +1978,98 @@ fn enter_game_view_guilded(keyed: &mut Keyed, members: usize) -> Entered {
 /// which the descriptor writes behind everything the enter queued
 /// ([`read_login_event_blocking`]).
 fn read_login_event(keyed: &mut Keyed) {
-    read_login_event_blocking(keyed, 0, None);
+    let _marks = read_login_event_blocking(keyed, 0, None);
+}
+
+/// The quest numbers of the letters a login sends: the quests of `quest_list`, then every
+/// other script by path, numbered as `qc` met their names.
+const QUEST_ATTR67ADD: u16 = 40;
+const QUEST_SASH: u16 = 44;
+const QUEST_YOHARA: u16 = 49;
+
+/// `HEADER_GC_TARGET_DELETE` (`G/packet.h`): the header and the target's `lID`.
+const GC_QUEST_TARGET_DELETE: u8 = 124;
+/// `HEADER_GC_TARGET_CREATE`, the client's `HEADER_GC_TARGET_CREATE_NEW`.
+const GC_QUEST_TARGET_CREATE: u8 = 125;
+/// `TPacketGCTargetCreate`: the header, `lID`, the 33-byte `szName`, `dwVID` and `bType`.
+const QUEST_TARGET_CREATE_LEN: usize = 1 + 4 + 33 + 4 + 1;
+
+/// The letter quests that mark a character (`send_letter` after `target.vid`): the quest,
+/// its title, the level its `login` and `levelup` scripts move it from `start` at, and the
+/// name the client shows on its mark.
+const MARKING_LETTERS: [(u16, &[u8], i64, &[u8]); 2] = [
+    (QUEST_SASH, b"A special cloth", 40, b"Theowahdan"),
+    (QUEST_YOHARA, b"Statuia Razboinicului", 120, b"Statue"),
+];
+
+/// The `lID` of a `GC_TARGET_CREATE`.
+fn quest_target_id(record: &[u8]) -> i32 {
+    i32::from_le_bytes(record[1..5].try_into().expect("four bytes"))
+}
+
+/// `GC_TARGET_DELETE` of target `id`.
+fn server_quest_target_delete(id: i32) -> Vec<u8> {
+    let mut record = vec![GC_QUEST_TARGET_DELETE];
+    record.extend_from_slice(&id.to_le_bytes());
+    record
+}
+
+/// `GC_TARGET_CREATE` of target `id` on `vid`, named `name` for the client, in
+/// `TPacketGCTargetCreate` field order (`G/packet.h:2523-2530`), its type
+/// `TARGET_TYPE_VID` (2).
+fn server_quest_target_create(id: i32, name: &[u8], vid: u32) -> Vec<u8> {
+    let mut record = vec![GC_QUEST_TARGET_CREATE];
+    record.extend_from_slice(&id.to_le_bytes());
+    let mut field = [0; 33];
+    field[..name.len()].copy_from_slice(name);
+    record.extend_from_slice(&field);
+    record.extend_from_slice(&vid.to_le_bytes());
+    record.push(2);
+    record
+}
+
+/// The button and window title a letter quest's `send_letter` sends.
+fn read_letter(keyed: &mut Keyed, quest: u16, title: &[u8], what: &str) {
+    let button = [
+        &b"[QUESTBUTTON idx;"[..],
+        quest.to_string().as_bytes(),
+        b"|name;",
+        title,
+        b"][DONE]",
+    ]
+    .concat();
+    assert_eq!(
+        keyed.read_game(),
+        server_script(0, &button),
+        "{what}'s button"
+    );
+    assert_eq!(
+        keyed.read_game(),
+        server_quest_title(quest, title),
+        "{what}'s letter titles its quest"
+    );
+}
+
+/// A marking letter's `GC_TARGET_CREATE`, when the next record, within [`QUIET_WINDOW`], is one
+/// naming `name`. The ID must be `next` when a target was already made in this login, since
+/// one login's targets take consecutive IDs of the process's one counter, and the VID is not 0.
+fn read_mark(keyed: &mut Keyed, name: &[u8], next: &mut Option<i32>) -> Option<Vec<u8>> {
+    let record = keyed.read_game_until(std::time::Instant::now() + QUIET_WINDOW)?;
+    let mut field = [0; 33];
+    field[..name.len()].copy_from_slice(name);
+    if record[0] != GC_QUEST_TARGET_CREATE || record.get(5..38) != Some(&field[..]) {
+        keyed.unread(vec![record]);
+        return None;
+    }
+    let id = quest_target_id(&record);
+    if let Some(next) = next {
+        assert_eq!(id, *next, "one login's marks take consecutive IDs");
+    }
+    *next = Some(id.wrapping_add(1));
+    let vid = u32::from_le_bytes(record[38..42].try_into().expect("four bytes"));
+    assert_ne!(vid, 0, "a mark points at a character");
+    assert_eq!(record, server_quest_target_create(id, name, vid));
+    Some(record)
 }
 
 /// The lines the quest login event sends (`CQuestManager::Login`,
@@ -1979,13 +2077,29 @@ fn read_login_event(keyed: &mut Keyed) {
 /// `dungeoninfo`'s `dungeon_info_qid` (it is the first quest of `quest_list`),
 /// `event_info`'s three event flags (none is set), then `game_option`'s `syschat` naming
 /// what the stored flags block, `said`, when they block something, and its `setblockmode`
-/// line with the byte `block` (`_basic/game_option.lua`). From level 30 `item_attr67add`
-/// sends its letter (`send_letter`): the button, which rides a `[DONE]`, then the
-/// `GC_QUEST_INFO` that titles quest 40 in the client's quest window, which the script's
-/// end sends (`quest::PC::EndRunning`, `G/questpc.cpp:342-346`). No other login script
-/// sends anything on a map no zone script names, and the letter pass sends nothing to a
-/// member of no guild at war.
-fn read_login_event_blocking(keyed: &mut Keyed, block: u8, said: Option<&[u8]>) {
+/// line with the byte `block` (`_basic/game_option.lua`).
+///
+/// Then the rest of the login pass, in quest order: from level 30 `item_attr67add`'s `login`
+/// script sends its letter (`send_letter`), the button riding a `[DONE]` and then the
+/// `GC_QUEST_INFO` that titles quest 40 in the client's quest window, which the script's end
+/// sends (`G/questpc.cpp:342-346`). A quest still at `start` whose `login` script moves it on
+/// runs its new state's `enter` and `letter` scripts there (`quest::PC::EndRunning`,
+/// `G/questpc.cpp:352-371`): from level 40 the sash quest marks Theowahdan, when he stands on
+/// the map, and sends its letter, and from level 120 the Yohara quest does the same with its
+/// statue. Then the letter pass (`HandleReceiveAllEvent`) sends the sash's and the Yohara
+/// quest's letters again, each mark replacing the one the login pass made
+/// (`GC_TARGET_DELETE` before the new `GC_TARGET_CREATE`). No other login script sends
+/// anything on a map no zone script names, and the letter pass sends nothing to a member of
+/// no guild at war.
+///
+/// Answers the marks the letter pass made, each a `GC_TARGET_CREATE`.
+fn read_login_event_blocking(keyed: &mut Keyed, block: u8, said: Option<&[u8]>) -> Vec<Vec<u8>> {
+    read_login_lines(keyed, block, said);
+    read_login_letters(keyed)
+}
+
+/// The command and info lines that lead the quest login event ([`read_login_event_blocking`]).
+fn read_login_lines(keyed: &mut Keyed, block: u8, said: Option<&[u8]>) {
     let first = keyed.read_game();
     assert_eq!(
         first.get(..4),
@@ -2015,21 +2129,94 @@ fn read_login_event_blocking(keyed: &mut Keyed, block: u8, said: Option<&[u8]>) 
         chat_packet(CHAT_TYPE_COMMAND, empire, line.as_bytes()),
         "game_option sends the byte the flags make"
     );
+}
+
+/// The letters that follow the quest login event's lines ([`read_login_event_blocking`]),
+/// answering the marks the letter pass made.
+fn read_login_letters(keyed: &mut Keyed) -> Vec<Vec<u8>> {
+    // The rest of the login pass, in quest order: `item_attr67add`, then each marking quest
+    // still at `start` moves on.
     if keyed.level >= 30 {
-        assert_eq!(
-            keyed.read_game(),
-            server_script(
-                0,
-                b"[QUESTBUTTON idx;40|name;Sixth and Seventh Bonus][DONE]"
-            ),
-            "item_attr67add's letter from level 30"
-        );
-        assert_eq!(
-            keyed.read_game(),
-            server_quest_title(40, b"Sixth and Seventh Bonus"),
-            "the letter titles its quest"
+        read_letter(
+            keyed,
+            QUEST_ATTR67ADD,
+            b"Sixth and Seventh Bonus",
+            "item_attr67add",
         );
     }
+    let mut next_id = None;
+    // The marking quests' letters: the login pass's when it moved them, else the letter pass's.
+    let first = read_marking_letters(keyed, &[], &mut next_id);
+    let marks = |sent: Vec<(u16, Option<Vec<u8>>)>| -> Vec<Vec<u8>> {
+        sent.into_iter().filter_map(|(_, mark)| mark).collect()
+    };
+    if first.is_empty() {
+        return Vec::new();
+    }
+    // A login pass that moved a quest is followed by the letter pass. One step's records go
+    // out together, so the letter pass's are on their way by now when there are any.
+    let ahead = keyed.read_game_until(std::time::Instant::now() + QUIET_WINDOW);
+    let follows = ahead.as_ref().is_some_and(|ahead| {
+        matches!(ahead[0], GC_QUEST_TARGET_DELETE | GC_QUEST_TARGET_CREATE)
+            || MARKING_LETTERS
+                .iter()
+                .any(|(_, title, _, _)| is_letter_of(ahead, title))
+    });
+    keyed.unread(ahead.into_iter().collect());
+    if !follows {
+        return marks(first);
+    }
+    marks(read_marking_letters(keyed, &first, &mut next_id))
+}
+
+/// Whether `record` is the `GC_SCRIPT` of the letter titled `title`.
+fn is_letter_of(record: &[u8], title: &[u8]) -> bool {
+    record.first() == Some(&GC_SCRIPT) && record.windows(title.len()).any(|window| window == title)
+}
+
+/// One pass of the marking quests' letters ([`MARKING_LETTERS`]), in quest order: each quest
+/// that sends its letter marks its NPC first when the NPC stands on the map. A mark the pass
+/// `before` made for the quest is replaced, `GC_TARGET_DELETE` before the new
+/// `GC_TARGET_CREATE`. Answers each quest that sent its letter, with its mark.
+fn read_marking_letters(
+    keyed: &mut Keyed,
+    before: &[(u16, Option<Vec<u8>>)],
+    next_id: &mut Option<i32>,
+) -> Vec<(u16, Option<Vec<u8>>)> {
+    let mut sent = Vec::new();
+    for (quest, title, from, name) in MARKING_LETTERS {
+        if keyed.level < from {
+            continue;
+        }
+        let replaced = before
+            .iter()
+            .find(|(marked, _)| *marked == quest)
+            .and_then(|(_, mark)| mark.as_deref());
+        if let Some(replaced) = replaced {
+            assert_eq!(
+                keyed.read_game(),
+                server_quest_target_delete(quest_target_id(replaced)),
+                "the letter's mark replaces the one before"
+            );
+            let mark = read_mark(keyed, name, next_id).expect("the replacing mark");
+            read_letter(keyed, quest, title, "the letter pass");
+            sent.push((quest, Some(mark)));
+            continue;
+        }
+        let mark = read_mark(keyed, name, next_id);
+        let ahead = keyed.read_game_until(std::time::Instant::now() + QUIET_WINDOW);
+        let letter = ahead
+            .as_ref()
+            .is_some_and(|ahead| is_letter_of(ahead, title));
+        keyed.unread(ahead.into_iter().collect());
+        if !letter {
+            assert!(mark.is_none(), "a mark comes with its letter");
+            continue;
+        }
+        read_letter(keyed, quest, title, "a marking letter");
+        sent.push((quest, mark));
+    }
+    sent
 }
 
 /// The rest of an enter-game burst whose view the scenario read by hand: the game phase,
@@ -4624,7 +4811,7 @@ const ATTR67ADD_INFO: &[u8] = b"It is possible to add a 6th or 7th bonus to an[E
 /// `NPC::OnInfo`, `G/questnpc.cpp:761-808`): the page in skin 1, then `set_state(talk)`.
 /// `talk` has no `info`, so a second press answers nothing, and neither does a quest the
 /// character has no state of, nor `dungeoninfo`, whose `button` has no `info` beside it. The
-/// state is stored with the character, so its next login sends no letter.
+/// state is stored with the character, so its next login sends no letter of quest 40.
 #[test]
 fn the_quest_window_runs_the_letters_info_and_the_quest_moves_on() {
     let Some(database) = ScratchDatabase::create() else {
@@ -4663,22 +4850,163 @@ fn the_quest_window_runs_the_letters_info_and_the_quest_moves_on() {
     );
 
     // The next login runs `talk`'s triggers, and `talk` has no login: no letter, no title.
+    // The sash and Yohara quests stand at the states the first login moved them to, so only
+    // the letter pass sends their letters, Theowahdan's mark taking the counter's next ID
+    // after the first login's two.
     let (mut alice, _alpha) = enter_world_reading(&server, b"alice", 0);
-    let first = alice.read_game();
-    let empire = first[8];
+    read_login_lines(&mut alice, 0, None);
+    let sent = read_marking_letters(&mut alice, &[], &mut Some(3));
     assert_eq!(
-        first,
-        chat_packet(CHAT_TYPE_COMMAND, empire, b"dungeon_info_qid 1")
-    );
-    assert_eq!(
-        alice.read_game(),
-        chat_packet(CHAT_TYPE_COMMAND, empire, b"event_info 0 0 0")
-    );
-    assert_eq!(
-        alice.read_game(),
-        chat_packet(CHAT_TYPE_COMMAND, empire, b"setblockmode 0")
+        sent.iter()
+            .map(|(quest, mark)| (*quest, mark.is_some()))
+            .collect::<Vec<_>>(),
+        [(QUEST_SASH, true), (QUEST_YOHARA, false)],
+        "Theowahdan stands on map 1, and no statue does"
     );
     alice.still("the letter is not sent again");
+}
+
+/// Theowahdan, the sash quest's NPC: `npc.txt:11` of map 1 stands vnum 60003 at cell
+/// (732, 479), point (482800, 943900) past the map's base.
+const THEOWAHDAN_VNUM: u16 = 60_003;
+
+/// Send `CG_ENTER_GAME` from the loading phase and read the enter-game burst up to the quest
+/// login event, answering the VID of the one Theowahdan the view shows.
+fn enter_beside_theowahdan(keyed: &mut Keyed) -> u32 {
+    keyed.send_record(&client_enter_game());
+    assert_eq!(keyed.read_game()[0], GC_CHARACTER_ADD);
+    assert_eq!(keyed.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
+    let (shown, affect) = read_shown(keyed);
+    assert_eq!(affect[0], GC_AFFECT_ADD);
+    let seen: Vec<u32> = shown
+        .inserts()
+        .iter()
+        .filter(|insert| insert[22..24] == THEOWAHDAN_VNUM.to_le_bytes())
+        .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
+        .collect();
+    assert_eq!(seen.len(), 1, "map 1 has one Theowahdan, in view");
+    assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
+    assert_eq!(keyed.read_game()[0], GC_TIME);
+    assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
+    assert_eq!(keyed.read_game()[0], GC_CHAT);
+    enter_war_list(keyed);
+    seen[0]
+}
+
+/// Reads the sash quest's letter and then the Yohara quest's, which marks nothing.
+fn read_sash_and_yohara_letters(keyed: &mut Keyed, what: &str) {
+    read_letter(
+        keyed,
+        QUEST_SASH,
+        b"A special cloth",
+        &format!("the sash's {what}"),
+    );
+    read_letter(
+        keyed,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        &format!("the Yohara quest's {what}"),
+    );
+}
+
+/// `lua.find_npc_by_vnum`, `lua.target.vid`, `lua.pc.setqf`, `lua.set_state`,
+/// `gc.target_create_new`, `gc.target_delete`, `quest.sash_mission`, `quest.yohara_system`:
+/// Alpha, level 154, logs in on map 1 beside Theowahdan with `sash_mission` at `start`. Its
+/// `login` script moves the quest to `information` (`quest::PC::EndRunning`,
+/// `G/questpc.cpp:352-371`): the state's `enter` script clears the quest's two counters
+/// (`pc.setqf` with 0 deletes a flag), and its `letter` script finds Theowahdan
+/// (`find_npc_by_vnum`) and marks him (`target.vid`, `GC_TARGET_CREATE` with the process's
+/// first ID, 1) before the letter. The Yohara quest moves the same way at 120 but finds no
+/// statue on map 1, so its letter marks nothing. The letter pass then runs both letters
+/// again, and the sash's new mark replaces the one of the same name
+/// (`CTargetManager::CreateTarget`, `G/target.cpp:134-238`): `GC_TARGET_DELETE` of ID 1
+/// before the create of ID 2. The logout forgets the marks (`CTargetManager::Logout`,
+/// `G/target.cpp:350-363`) and stores the state without the two counters, so the next
+/// login, which finds the quest at `information`, marks him once, with ID 3, and deletes
+/// nothing.
+#[test]
+fn the_sash_letter_marks_theowahdan_and_the_letter_pass_marks_him_again() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    // Alpha enters 1000 from Theowahdan, with the two counters the `enter` clears and a flag
+    // of the quest it keeps.
+    sql(
+        &database,
+        "UPDATE player SET x = 482800, y = 944900 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT player.id, flag.name, \
+          flag.value FROM player, (VALUES ('sash_mission.time_to_wait'::bytea, 5), \
+          ('sash_mission.collect_count'::bytea, 3), ('sash_mission.kept'::bytea, 9)) AS \
+          flag (name, value) WHERE player.name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let theowahdan = enter_beside_theowahdan(&mut alice);
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_quest_target_create(1, b"Theowahdan", theowahdan),
+        "the sash's new state marks Theowahdan"
+    );
+    read_sash_and_yohara_letters(&mut alice, "change");
+    assert_eq!(
+        alice.read_game(),
+        server_quest_target_delete(1),
+        "the letter pass's mark replaces the login's"
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_quest_target_create(2, b"Theowahdan", theowahdan)
+    );
+    read_sash_and_yohara_letters(&mut alice, "letter");
+    alice.still("nothing follows");
+
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    // `sash_mission.__status` is the CRC32 of `information`; `kept` sorts after it.
+    let flags = support::rows(
+        database.url(),
+        "SELECT value FROM quest_flag WHERE player_id = (SELECT id FROM player WHERE name = \
+          'Alpha') AND substring(name FROM 1 FOR 13) = 'sash_mission.'::bytea ORDER BY name",
+        1,
+    );
+    assert_eq!(
+        flags,
+        vec![vec![695_801_987], vec![9]],
+        "the state is stored, and the `enter` deleted the two counters"
+    );
+
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    assert_eq!(
+        enter_beside_theowahdan(&mut alice),
+        theowahdan,
+        "the map keeps its NPCs"
+    );
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    assert_eq!(
+        alice.read_game(),
+        server_quest_target_create(3, b"Theowahdan", theowahdan),
+        "the logout forgot the marks, so the letter pass deletes none"
+    );
+    read_sash_and_yohara_letters(&mut alice, "letter");
+    alice.still("the quests stand where the first login moved them");
 }
 
 /// `npc.txt`'s keeper on map 3, vnum 20042, whose click trigger is the shop's. Its shop, 9,
@@ -11362,8 +11690,10 @@ fn an_npc_near_a_player_wanders_and_tells_its_view() {
         assert_eq!((walk[1], walk[2]), (FUNC_WAIT, 0), "{walk:02x?}");
         let (dx, dy) = (to.0 - from.0, to.1 - from.1);
         let distance = (f64::from(dx)).hypot(f64::from(dy));
+        // `GetX() + (int) fx` (`G/char_state.cpp:748`) cuts each axis toward zero, so a walk
+        // of 300 lands as short as 300 less the diagonal of one unit, and none goes past 700.
         assert!(
-            (299.0..=701.0).contains(&distance),
+            distance > 300.0 - std::f64::consts::SQRT_2 && distance <= 700.0,
             "an idle walk runs 300 to 700: {distance}"
         );
         // The heading over 5: clockwise from north, as `GetDeltaByDegree` steps.

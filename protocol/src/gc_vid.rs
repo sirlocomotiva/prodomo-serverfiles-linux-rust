@@ -86,7 +86,7 @@ pub const GC_DRAGON_SOUL_REFINE_WIRE_SIZE: usize = 1 + 1 + ITEM_POS_WIRE_SIZE;
 /// | 84 | `HEADER_GC_SAFEBOX_MONEY_CHANGE` | `dwMoney` / `lMoney` | new safebox balance |
 /// | 86 | `HEADER_GC_SAFEBOX_DEL` | `pos` | safebox cell, `DWORD` under `__EXTENDED_SAFEBOX__` |
 /// | 106 | `HEADER_GC_TIME` | `time` | server `time_t` |
-/// | 124 | `HEADER_GC_TARGET_DELETE` | `lID` | deleted target VID |
+/// | 124 | `HEADER_GC_TARGET_DELETE` | `lID` | deleted quest target's ID |
 /// | 129 | `HEADER_GC_MALL_DEL` | `pos` | same struct as `HEADER_GC_SAFEBOX_DEL` |
 ///
 /// `HEADER_GC_SAFEBOX_MONEY_CHANGE` has no server producer: a whole-token search

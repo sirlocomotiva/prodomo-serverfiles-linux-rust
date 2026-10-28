@@ -80,6 +80,7 @@ mod party;
 mod pc_heal;
 pub(crate) mod pc_skill;
 mod pvp;
+mod quest_target;
 mod quests;
 mod regen;
 mod reward;
@@ -490,6 +491,8 @@ pub struct GameState {
     storages: HashMap<common::vid::Vid, safebox::Storage>,
     /// The quests boot loaded, when it did.
     quests: Option<Quests>,
+    /// The characters the quests marked for their characters' clients (`CTargetManager`).
+    quest_targets: quest_target::QuestTargets,
     /// The warp and goto NPCs standing on each map of each Channel, keyed as `npcs` is.
     warp_npcs: BTreeMap<(u8, i32), Vec<warp_npc::WarpNpc>>,
     /// When each character last traded or shopped, keyed by its VID, which `IsHack` reads.
@@ -627,6 +630,7 @@ impl GameState {
             trading: HashMap::new(),
             storages: HashMap::new(),
             quests: None,
+            quest_targets: quest_target::QuestTargets::default(),
             warp_npcs: BTreeMap::new(),
             portal_times: HashMap::new(),
             maps: BTreeMap::new(),

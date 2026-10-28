@@ -35681,3 +35681,252 @@ The width was measured with clang for i686 because `i686-linux-gnu-g++-12` is no
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair.
 
 No ADR changed. No owner question added. V26 stays open.
+
+## 259. The sash and Yohara letters (`lua.find_npc_by_vnum`, `lua.target.vid`, `lua.pc.setqf`, `gc.target_create_new`)
+
+A script's state change now runs the scripts legacy's `EndRunning` runs, so the sash letter
+reaches the client and marks Theowahdan. Ledger 257 moved the sash and Yohara quests on at the
+login and stored their states, but ran no `leave`, `enter` or `letter` script on the change,
+and the letter pass ended both letters at `find_npc_by_vnum`, a refusal.
+
+**The state change.** `Run::end_running` hands the state the script's last `set_state` named
+to the new `Run::goto_state`, with the state the script started in. That is
+`quest::PC::EndRunning` (`G/questpc.cpp:310-374`, the change at `:352-371`):
+
+1. The quest and its `__status` flag move to the new state. When it is the old one, nothing
+   else runs.
+2. The old state's `leave` script runs at the old state; running it puts the flag back, as
+   `PC::SetQuest` does.
+3. The quest and the flag move to the new state, and its `enter` script runs.
+4. The new state's `letter` script runs when the flag still names the new state. An `enter`
+   that moved the quest on again has changed it, so its letter does not run.
+
+Each script runs as `NPC::ExecuteEventScript` runs it (`G/questnpc.cpp:966-988`, through
+`CQuestManager::EnterState`, `LeaveState` and `Letter`, `G/questmanager.cpp:474-514`): the
+quest's own no-NPC script for that event and state, nested inside the end that started it, so
+a script that ends runs its own `EndRunning` first. `Run` carries the no-NPC scripts
+(`no_npc`) and the nesting depth (`changes`). A change past 16 deep logs an error and moves
+the quest without running its scripts; legacy recurses until its stack runs out. That is a
+Divergence (`STATE_CHANGE_DEPTH`, `docs/STATUS.md`). The status flag is written only in
+`goto_state` and `execute`, both into `pc.flags`; the bridge's half of the flags never holds
+it, so the `letter` check reads the flag the nested `enter` left.
+
+Still partial: legacy's `quest_setstate` writes the flag at once
+(`SetCurrentQuestStateName`, `G/questpc.cpp:115-118`), and the Rewrite writes it when the
+script ends. No loaded script reads its own status after `set_state`.
+
+**The API.** Eight names join `BRIDGED`, 65 to 73:
+
+- `pc.setqf` is `pc_set_quest_flag` (`G/questlua_pc.cpp:1215-1229`). Text or a number names
+  a flag of the running quest, and a number, `int(rint(...))` (rounded half to even), is its
+  value. A zero deletes the flag (`quest::PC::SetFlag`, `G/questpc.cpp:52-76`). Anything else
+  logs `QUEST wrong set flag` and changes nothing.
+- `find_npc_by_vnum` is `_find_npc_by_vnum` (`G/questlua_global.cpp:792-822`). A number names
+  a race, and the answer is the VID of an NPC of that race on the character's map, or 0. A
+  non-number logs and answers 0.
+- `target.vid`, `target.npc` and `target.pc` are one function, `target_vid`
+  (`G/questlua_target.cpp:47-70`). Text or a number names the mark and a number is its VID;
+  without both the call logs and does nothing. The third argument is the name the client
+  shows, and a numeric fourth of 0 keeps the record from the client. The VID is read as a
+  `DWORD`: legacy's `(int)` cast would clip the Rewrite's NPC VIDs, which start at
+  0x8000_0000. That is a Divergence.
+- `target.delete` ends the running quest's mark of that name, `target.clear` all of its
+  marks, and `target.id` answers the VID of the mark of that name, or 0
+  (`G/questlua_target.cpp:72-134`).
+
+The marks belong to the quest's number (`GetCurrentQuestIndex`). Four new `Game` methods carry
+them to the world: `find_npc`, `create_target`, `delete_target` and `target_vid`, with the new
+`quest::manager::Target`.
+
+**The world.** `prodomo/src/game_state/quest_target.rs` is `CTargetManager` for
+`TARGET_TYPE_VID` (`G/target.cpp`), one `QuestTargets` per process:
+
+- `create` takes the next ID of the one counter (`++m_iID`). A mark of the same quest and
+  name is replaced in place: its `GC_TARGET_DELETE` first when the client heard of it, then
+  the new `GC_TARGET_CREATE` (`CreateTarget`, `:134-238`). Otherwise the mark is added.
+- `delete` ends the quest's marks of that name, or all of them, in the order they were made
+  (`DeleteTarget`, `:240-282`).
+- `vid` answers `target.id` (`GetTargetEvent`, `:284-315`).
+- `logout` forgets a character's marks with no record (`CTargetManager::Logout`, `:350-363`,
+  which `CHARACTER::Disconnect` calls, `G/char.cpp:1815`). `GameState::end_quests` calls it
+  beside the manager's logout.
+
+The create record is `GcTargetCreateNew` (`TPacketGCTargetCreate`, `G/packet.h:2523-2530`):
+the header 125, `lID`, the 33-byte `szName`, `dwVID` and `bType` `TARGET_TYPE_VID` (2,
+`G/target.h:7`). The delete is the 5-byte `GcHeaderAndDword` with header 124 and the `lID`.
+Both codecs existed; the coverage counts do not move. `protocol/src/gc_vid.rs`'s row for 124
+now says the field is the target's ID, not a VID.
+
+`find_npc` answers the first NPC of the race on the character's map whose race is
+registered. Legacy keeps a set per race only for the races `RegisterRaceNum` registers: a
+proto of type NPC, WARP or GOTO (`G/mob_manager.cpp:83-84`) and the three Christmas races
+(20031, 20032 and 9004, `G/char_manager.cpp:47-49`, `G/xmas_event.h:8-10`). Any other race
+answers 0. Legacy walks an `unordered_set` (`G/typedef.h:33`) in no defined order; the
+Rewrite answers the first spawned. That is a Divergence.
+
+Two legacy Defects are not reproduced (`docs/STATUS.md`):
+
+- `CreateTarget` compares the stored name, cut to 32 bytes, with the whole name the script
+  passed (`strcmp`), so a mark named with 33 bytes or more never replaces its own earlier
+  mark. The Rewrite compares both names cut to 32 bytes.
+- `SendTargetCreatePacket` builds the record on the stack and `strlcpy`s the name into it, so
+  the bytes of `szName` past the terminator are stack bytes. The Rewrite zero-fills them.
+
+**What the login now sends.** The quest login event runs the `login` scripts in quest order
+(`item_attr67add` is 40, `sash_mission` 44, `yohara_system` 49). From level 30
+`item_attr67add` sends its letter. From level 40 a non-GM's `sash_mission` moves to
+`information`: the `enter` deletes `time_to_wait` and `collect_count`, and the `letter`
+finds Theowahdan (60003, who stands on maps 1, 21, 41 and 373), marks him, and sends `A
+special cloth`. From level 120 `yohara_system` moves to `information_new`, and its letter
+looks for the statue (20433, whose only `npc.txt` is `metin2_map_defensewave_port`'s), finds
+none, and sends `Statuia Razboinicului`. Then the letter pass runs both letters
+again: the sash's new mark replaces the login's, `GC_TARGET_DELETE` before the new create. A
+character whose stored states already moved gets only the letter pass.
+
+**The tests.** `prodomo/tests/parity.rs`:
+
+- The login reader is now `read_login_lines` (the three command and info lines) and
+  `read_login_letters`: `item_attr67add`'s letter, then one pass of the marking letters
+  (`read_marking_letters`: a mark when it comes, then the letter), then a second pass when
+  one follows within the quiet window. The second pass expects each first-pass mark replaced.
+  A login pass that moved nothing sends one pass, and a login pass that moved a quest sends
+  two; the records of one step go out together, so the wait only runs out on a login with
+  one pass.
+- Every scenario that enters a character at level 40 or more on map 1 reads the mark and the
+  letters. All 144 scenarios pass.
+- `the_quest_window_runs_the_letters_info_and_the_quest_moves_on`: the relog now reads the
+  letter pass's sash mark, with ID 3, and both letters.
+- New scenario `the_sash_letter_marks_theowahdan_and_the_letter_pass_marks_him_again`: Alpha
+  (level 154) enters 1000 from Theowahdan with three stored flags of the sash quest. The
+  scenario reads Theowahdan's VID from the view's insert of race 60003, then the golden
+  `GC_TARGET_CREATE` of ID 1 on that VID, the sash and Yohara letters, `GC_TARGET_DELETE` of
+  ID 1, the create of ID 2, and both letters again. After the disconnect the quest's stored
+  flags are `__status` 695801987 (the CRC32 of `information`) and `kept` 9: the `enter`
+  deleted the two counters. The relog sees Theowahdan at the same VID and gets the letter
+  pass alone: the create of ID 3, no delete, and both letters.
+
+Unit tests:
+
+- `quest`: `a_state_change_runs_the_new_states_enter_and_letter` (the `enter`'s deletions,
+  the target, and a relog's letter pass replacing the target),
+  `a_state_change_leaves_enters_and_letters_in_legacys_nesting` (a synthetic quest whose
+  states move each other: the chat order of `leave`, `enter` and `letter`, the skipped letter,
+  and the 16-deep guard), `setqf_rounds_to_even_and_a_zero_deletes`, and three for the
+  arguments: `find_npc_by_vnum_dwords_the_race_and_misses_as_zero`,
+  `the_target_names_follow_legacys_argument_rules` (`target.vid`, `npc` and `pc`) and
+  `the_target_id_delete_and_clear_find_the_quests_targets`. The level-up test now expects the
+  sash letter at 40 and the sash and Yohara letters at 120.
+- `prodomo`: `find_npc_by_vnum_answers_only_registered_races`,
+  `a_letter_marks_the_npc_it_finds_until_the_character_leaves` (the golden 125 record behind
+  a level-up, then `leave_world` clearing the mark), and four in `quest_target` with golden
+  bytes: `a_target_of_the_same_quest_and_name_is_replaced`,
+  `names_keep_32_bytes_and_long_names_match`, `a_delete_ends_the_quests_targets_in_order` and
+  `the_id_wraps_at_the_top_of_int`.
+
+The first parity run after the change failed 114 scenarios. The reader expected
+`item_attr67add`'s letter in the letter pass, but its letter is a `login` script, so it comes
+first. The trace seemed to show its button five times: each peek prints the record it puts
+back. With the order fixed, 12 relog scenarios still failed. Their quests had moved on an
+earlier login, and the reader took the letter pass's mark for a login-pass mark. The reader
+now reads one pass and looks for a second.
+
+**Searches.** No loaded quest calls `target.npc`, `target.pc`, `target.clear` or `target.id`:
+`target\.(npc|pc|clear|id)[[:space:]]*\(` over every file of
+`legacy/gamedata/locale/europe/quest` finds none. The same search for `target\.vid` finds the
+two callers, `_basic/sash_mission.lua` and `_basic/yohara_system.lua` (the positive control),
+and one for `target\.zzz` finds none (the negative control). The same tree has 18 files with no
+extension and others ending in `.start`, `.when`, `.arg` and `.script`, so the search names no
+extension. Those four rows stay partial with the unit test. `target.delete` is called only
+from the marks' clicks, which are not ported.
+
+The new names reach other quests; each was read:
+
+- `7and8th_skills` and `change_empire` call `pc.setqf` from item use.
+- `enchanted_forest` and `enchanted_forest_zone` call it on map 210 or in their dungeon.
+- The `guild_*` quests call it from clicks and chats behind refusals.
+- `ship_defense`'s call is commented out.
+- The questlib helpers `pc_find_square_guard_vid`, `pc_find_skill_teacher_vid` and
+  `next_time_set`, and `questing.lua`'s `local_pc_setqf`, have no callers. The search found
+  their definitions, the positive control.
+
+**Mutation sweep.** Twenty-seven mutants, each applied to the pristine file, checked to change
+executable code by line position, and restored by checksum. The first pass killed 24, all
+semantic, none by compile error:
+
+- `quest`: `leave` run at the new state; `enter` never run; the letter always run, and never
+  run; the depth guard doubled; `setqf` rounding half away from zero; `setqf` storing a zero;
+  `target.vid` silent by default; the VID clipped to 31 bits as legacy's `int` would;
+  `target.clear` naming an empty mark; `find_npc_by_vnum` asking for the next race;
+  `end_running` forgetting the state the script started in.
+- `prodomo`: every race registered; the logout keeping the marks; in `quest_target`, a replace
+  sending no delete, a replace adding a mark, a replace ignoring the quest, the store's logout
+  keeping the marks, `kept` not cutting at 32 and not stopping at a zero, the ID never
+  advancing, a silent mark sent, and `delete` ending other quests' marks or every mark of the
+  quest.
+
+Three survived:
+
+- The flag put to the new state, not the old, before the `leave` (Q6) is equivalent. `execute`
+  writes the flag for the script it runs, as legacy's `PC::SetQuest` does
+  (`G/questpc.cpp:140-164`), and nothing reads it when there is no `leave` script. Legacy's own
+  `SetFlag` before `LeaveState` is just as redundant. The port's write was removed and
+  `goto_state`'s doc says why. The defect it would hide, a `leave` run at the wrong state, is
+  Q1's, which is killed.
+- A `set_state` to the script's own state running the change scripts (Q7) survived because no
+  test named its own state. The flip quest's `d` now has a `kill` script that calls
+  `set_state("d")`, and the test expects that script's chat alone. Q7 is killed.
+- P2, the Christmas races left unregistered, was a weak mutant: `contains(&race.wrapping_add(1))`
+  still registers 20031, because 20032 is a Christmas race too. The stronger mutant
+  (`&& race == 0`, so only the proto type registers) is killed by
+  `find_npc_by_vnum_answers_only_registered_races`.
+
+So 26 of 27 are killed, all semantic, and the equivalent one's line is gone. The parity
+harness's reader was not swept.
+
+Rows:
+
+- Ported with the new scenario: `lua.find_npc_by_vnum`, `lua.pc.setqf`, `lua.target.vid`,
+  `gc.target_delete`, `gc.target_create_new`.
+- Partial with notes: `lua.target.npc`, `lua.target.pc`, `lua.target.delete`,
+  `lua.target.clear`, `lua.target.id`, `lua.set_state` (the flag's timing),
+  `quest.sash_mission` and `quest.yohara_system` (the clicks, the arrive event and the later
+  states). Stale sentences saying the change runs no scripts were removed from the last three.
+
+Docs: `docs/STATUS.md` has the new next slice (the marks' click and `target_event`), the
+refused-API row (73 backed names, `target.pos` refused), three Divergences and two Defects.
+No codec changed, so `AGENTS.md`'s coverage row and `docs/PROTOCOL_NOTES.md` are unchanged.
+
+**Not ported.** `target.pos` (no caller), `target_event` (the `arrive` and `die` events and
+`GC_TARGET_UPDATE`), and the click on a marked character (`CQuestManager::Click`'s target
+arm). The sash and Yohara quests answer the click with `target.delete`; that is ledger 260.
+
+**A scenario's bound.** The first full gate run failed
+`an_npc_near_a_player_wanders_and_tells_its_view` (ledger 229i) once, with a walk of 298.94; it
+passed alone three times. The scenario allowed 299 to 701, but the idle walk cuts each axis
+toward zero (`GetX() + (int) fx`, `G/char_state.cpp:748`; `wander_target`'s `f32_to_i32`), so a
+walk drawn at 300 lands as short as 300 less the diagonal of one unit, and none passes 700. The
+scenario now allows more than 300 - sqrt(2) and at most 700. No behaviour changed.
+
+Gates:
+
+- fmt clean.
+- Build with no warnings.
+- clippy green with `-D warnings`, after four findings: `api` went over 100 lines again, so the
+  `pc`, `target` and `guild` families answer through one loop over a `Family` list; three
+  `match`es on one pattern became `if let`; the argument test went over 100 lines and is now
+  three tests; the sash scenario went over 100 lines and reads its two letters through
+  `read_sash_and_yohara_letters`; and `quest_target`'s test `hex` used `format!` in a
+  `collect`, so it now writes as `descriptor_crypto`'s does.
+- doc green with `RUSTDOCFLAGS="-D warnings"`, after the manager's module doc stopped linking
+  the private `STATE_CHANGE_DEPTH`.
+- doc-tests green (1 passed, 26 ignored).
+- The full workspace all-targets DB run is green on all 40 targets against `postgres:18` in
+  Podman, 4198 tests: prodomo lib 1250, parity 144 of 144, protocol 1273, quest lib 91. The
+  parity run takes 184 seconds; each relog's look for a second letter pass waits out one quiet
+  window.
+- No scratch database was left by the gate run (`prodomo\_%` counts 0; `prodomo%` counts the
+  one main database, the positive control).
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
+
+No ADR changed. No owner question added. V26 stays open.

@@ -30,16 +30,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use common::vid::Vid;
 use gamedata::locale_string::LocaleStrings;
 use gamedata::mob_locale_names::MobNamesByLanguage;
-use gamedata::mob_proto::MobProtos;
+use gamedata::mob_proto::{MobProtos, CHAR_TYPE_GOTO, CHAR_TYPE_NPC, CHAR_TYPE_WARP};
 use protocol::cg_quest_text::{CgQuestInputString, CG_QUEST_TEXT_FIELD_SIZE};
 use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO, CHAT_TYPE_NOTICE, CHAT_TYPE_TALKING};
 use protocol::gc_quest_info::{c_field, GcQuestInfo};
 use protocol::gc_script::GcScript;
-use quest::manager::{ChatKind, Game, Manager, QuestInfo};
+use quest::manager::{ChatKind, Game, Manager, QuestInfo, Target};
 use tracing::warn;
 use world::character::{number, Pcg32};
 use world::npc::MapNpcs;
 
+use super::quest_target::QuestTargets;
 use super::GameState;
 use crate::chat_line::{chat_packet, Arg};
 use crate::game_loop_messages::GroundPlace;
@@ -128,6 +129,10 @@ type QuestRun = (
 /// (`p->idx & 0x80000000`, `G/input_main.cpp:2188`).
 const QUEST_INFO_BIT: u32 = 0x8000_0000;
 
+/// `MOB_SANTA_VNUM`, `MOB_XMAS_TREE_VNUM` and `MOB_XMAS_FIRWORK_SELLER_VNUM`
+/// (`G/xmas_event.h:8-10`), whose races `CHARACTER_MANAGER` registers whatever their protos.
+const XMAS_RACES: [u32; 3] = [20_031, 20_032, 9_004];
+
 /// `get_global_time()` in seconds: the wall clock a quest step judges against.
 pub(super) fn quest_now() -> u32 {
     SystemTime::now()
@@ -189,6 +194,10 @@ pub(super) struct Session<'s> {
     /// The `pc.send_block_mode` byte the scripts set, the last one winning;
     /// `SetBlockModeForce` writes the byte beside the quest flags, and no flag moves.
     pub(super) block_mode: Option<u8>,
+    /// `GetPlayerID()` of the character the script runs for, whose targets the scripts mark.
+    pub(super) pid: u32,
+    /// Every character's quest targets.
+    pub(super) targets: &'s mut QuestTargets,
 }
 
 impl<'s> Session<'s> {
@@ -555,6 +564,24 @@ impl Game for Session<'_> {
         let caller = self.caller;
         self.guilds.judge_shadow(caller, name, args)
     }
+
+    fn find_npc(&self, race: u32) -> u32 {
+        find_by_race(self.npcs, self.protos, race)
+    }
+
+    fn create_target(&mut self, target: &Target) {
+        let records = self.targets.create(self.pid, target);
+        self.records.extend(records);
+    }
+
+    fn delete_target(&mut self, quest: u32, name: Option<&[u8]>) {
+        let records = self.targets.delete(self.pid, quest, name);
+        self.records.extend(records);
+    }
+
+    fn target_vid(&self, quest: u32, name: &[u8]) -> u32 {
+        self.targets.vid(self.pid, quest, name)
+    }
 }
 
 impl GameState {
@@ -750,13 +777,17 @@ impl GameState {
         }
     }
 
-    /// End the running script of the character under `vid`, which is leaving the world.
+    /// End the running script of the character under `vid`, which is leaving the world, and
+    /// drop its quest targets (`CTargetManager::Logout`, `G/char.cpp:1815`).
     pub(super) fn end_quests(&mut self, vid: Vid) {
-        if let (Some(quests), Ok(character)) =
-            (self.quests.as_mut(), self.characters.find_by_vid(vid))
-        {
-            quests.manager.logout(character.player_id());
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return;
+        };
+        let pid = character.player_id();
+        if let Some(quests) = self.quests.as_mut() {
+            quests.manager.logout(pid);
         }
+        self.quest_targets.logout(pid);
     }
     /// `CQuestManager::LevelUp` for the character under `vid`, which just leveled up: the
     /// records its `levelup` scripts sent (`G/questmanager.cpp:667-681`). The manager must have
@@ -854,6 +885,7 @@ impl GameState {
             affect_events,
             pc_skill_tables,
             guilds,
+            quest_targets,
             ..
         } = self;
         let quests = quests.as_mut()?;
@@ -901,6 +933,8 @@ impl GameState {
             block_mode: None,
             guilds: guilds.clone(),
             records: Vec::new(),
+            pid,
+            targets: quest_targets,
         };
         let answer = op(&mut quests.manager, &mut session);
         let Session {
@@ -976,6 +1010,30 @@ mod test_place {
     };
 }
 
+/// `_find_npc_by_vnum`'s search (`G/questlua_global.cpp:792-823`): the VID of a character of
+/// race `race` among `npcs`, the characters on the map of the character the script runs for,
+/// and 0 when there is none.
+///
+/// `GetCharactersByRaceNum` holds the characters whose `GetRaceNum`, the low 16 bits of the
+/// vnum, is a registered race (`RegisterRaceNumMap`, `G/char_manager.cpp:868-877`): the vnum of
+/// an NPC, warp or goto proto (`G/mob_manager.cpp:83-84`) or of a Christmas character
+/// (`G/char_manager.cpp:47-49`). Of those the first spawned answers, where legacy's
+/// `unordered_set` had no order (a Divergence).
+fn find_by_race(npcs: Option<&MapNpcs>, protos: &MobProtos, race: u32) -> u32 {
+    let registered = XMAS_RACES.contains(&race)
+        || protos.get(race).is_some_and(|proto| {
+            matches!(
+                proto.mob_type,
+                CHAR_TYPE_NPC | CHAR_TYPE_WARP | CHAR_TYPE_GOTO
+            )
+        });
+    if !registered {
+        return 0;
+    }
+    npcs.and_then(|map| map.npcs.iter().find(|npc| u32::from(npc.race) == race))
+        .map_or(0, |npc| npc.vid)
+}
+
 /// The NPCs of the map at `place`.
 fn map_npcs(npcs: &BTreeMap<(u8, i32), Arc<MapNpcs>>, place: GroundPlace) -> Option<&MapNpcs> {
     npcs.get(&(place.channel, place.map)).map(Arc::as_ref)
@@ -1046,6 +1104,8 @@ mod tests {
             guilds: super::super::guild::GuildShadow::default(),
             records: Vec::new(),
             block_mode: None,
+            pid: 1,
+            targets: &mut QuestTargets::default(),
         };
         assert_eq!(session.mob_name(20_016), Some(b"Smith".to_vec()));
         assert_eq!(session.mob_name(20_017), None, "a name with no proto");
@@ -1100,6 +1160,8 @@ mod tests {
             guilds: super::super::guild::GuildShadow::default(),
             records: Vec::new(),
             block_mode: None,
+            pid: 1,
+            targets: &mut QuestTargets::default(),
         };
         session.quest_info(&QuestInfo {
             index: 0x0128,
@@ -1170,6 +1232,8 @@ mod tests {
             guilds: super::super::guild::GuildShadow::default(),
             records: Vec::new(),
             block_mode: None,
+            pid: 1,
+            targets: &mut QuestTargets::default(),
         };
         assert_eq!(session.block_mode, None);
         session.send_block_mode(8);
@@ -1346,5 +1410,135 @@ mod tests {
             .quest(vid, &QuestStep::Button(999 | QUEST_INFO_BIT), place, mover)
             .expect("the world holds the character");
         assert!(records.is_empty(), "an unknown quest is quiet: {records:?}");
+    }
+
+    fn proto(vnum: u32, mob_type: u8) -> gamedata::mob_proto::MobProto {
+        gamedata::mob_proto::MobProto {
+            line: 2,
+            table: gamedata::records::MobTableRecord {
+                vnum,
+                mob_type,
+                ..gamedata::records::MobTableRecord::default()
+            },
+        }
+    }
+
+    fn npc(vid: u32, vnum: u32, char_type: u8) -> world::npc::Npc {
+        world::npc::Npc {
+            vid,
+            vnum,
+            race: u16::try_from(vnum & 0xffff).expect("the low 16 bits"),
+            char_type,
+            x: 600,
+            y: 600,
+            hp: 100,
+            max_hp: 100,
+            ..world::npc::Npc::default()
+        }
+    }
+
+    /// `GetCharactersByRaceNum` holds only registered races: an NPC's, a warp's or a goto's
+    /// proto vnum, or a Christmas character's whatever its proto (`G/char_manager.cpp:47-49`).
+    /// Of a registered race the first spawned answers; a monster's race answers 0 though it
+    /// stands on the map, and so does a registered race that is not there. The race is the
+    /// character's low 16 bits (`GetRaceNum`, a `WORD`).
+    #[test]
+    fn find_npc_by_vnum_answers_only_registered_races() {
+        use gamedata::mob_proto::CHAR_TYPE_MONSTER;
+        let protos = MobProtos::from_rows(vec![
+            proto(60_003, CHAR_TYPE_NPC),
+            proto(101, CHAR_TYPE_MONSTER),
+            proto(20_018, CHAR_TYPE_WARP),
+            proto(20_031, CHAR_TYPE_MONSTER),
+            proto(9_010, CHAR_TYPE_GOTO),
+        ]);
+        let map = MapNpcs {
+            npcs: vec![
+                npc(0x8000_0001, 101, CHAR_TYPE_MONSTER),
+                npc(0x8000_0002, 60_003 + 65_536, CHAR_TYPE_MONSTER),
+                npc(0x8000_0003, 60_003, CHAR_TYPE_NPC),
+                npc(0x8000_0004, 20_031, CHAR_TYPE_MONSTER),
+                npc(0x8000_0005, 9_010, CHAR_TYPE_GOTO),
+            ],
+            positions: Vec::new(),
+            regens: Vec::new(),
+        };
+        let find = |race: u32| find_by_race(Some(&map), &protos, race);
+        assert_eq!(find(60_003), 0x8000_0002, "the first spawned of the race");
+        assert_eq!(find(101), 0, "a monster's race is not registered");
+        assert_eq!(find(20_031), 0x8000_0004, "the Christmas races are");
+        assert_eq!(find(9_010), 0x8000_0005, "a goto's is");
+        assert_eq!(find(20_018), 0, "a warp's race, but none on the map");
+        assert_eq!(find(60_003 + 65_536), 0, "no proto registers it");
+        assert_eq!(find(7), 0);
+        assert_eq!(find_by_race(None, &protos, 60_003), 0);
+    }
+
+    /// The sash quest's state change at level 40 runs its letter (`G/questpc.cpp:352-371`),
+    /// which finds Theowahdan on the map and marks him: the client hears `GC_TARGET_CREATE`
+    /// (125) before the button's `GC_SCRIPT` and the window's `GC_QUEST_INFO`. The mark is
+    /// the character's until it leaves the world, which drops it with no record
+    /// (`CTargetManager::Logout`, `G/char.cpp:1815`).
+    #[test]
+    fn a_letter_marks_the_npc_it_finds_until_the_character_leaves() {
+        use crate::game_state::fixtures::{enter, open_cells, points_at, stand_field, TestClock};
+
+        const THEOWAHDAN: u32 = world::npc::FIRST_NPC_VID + 3;
+        let clock = TestClock::default();
+        let npcs = vec![
+            npc(world::npc::FIRST_NPC_VID + 1, 101, 0),
+            npc(THEOWAHDAN, 60_003, CHAR_TYPE_NPC),
+        ];
+        let mut world = stand_field(&clock, npcs, open_cells(), true);
+        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe");
+        let manager = Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
+        let sash = manager.host().quest_index(b"sash_mission").expect("sash");
+        let protos = MobProtos::from_rows(vec![proto(60_003, CHAR_TYPE_NPC), proto(101, 0)]);
+        world.quests = Some(Quests::new(
+            manager,
+            Arc::new(protos),
+            MobNamesByLanguage::default(),
+        ));
+        let mut inbox = enter(&mut world, 1, (500, 500), 0);
+        while inbox.try_recv().is_ok() {}
+        let vid = Vid::new(1);
+        world
+            .characters
+            .find_by_vid_mut(vid)
+            .expect("entered")
+            .set_points(Some(points_at(40, 0, 0)));
+        if let Some(quests) = world.quests.as_mut() {
+            quests.manager_mut().load_flags(1, Vec::new());
+        }
+        let place = test_place::AT;
+        let mover = world.own_mover(vid).expect("in the world");
+        let place = GroundPlace {
+            channel: crate::game_state::fixtures::PLACE.0,
+            map: crate::game_state::fixtures::PLACE.1,
+            ..place
+        };
+        let records = world.quest_levelup(vid, place, mover);
+        // `TPacketGCTargetCreate` in source field order: header, `lID`, the 33-byte name,
+        // `dwVID`, `bType`.
+        let mut golden = vec![125, 1, 0, 0, 0];
+        let mut name = [0; 33];
+        name[..10].copy_from_slice(b"Theowahdan");
+        golden.extend_from_slice(&name);
+        golden.extend_from_slice(&THEOWAHDAN.to_le_bytes());
+        golden.push(2);
+        assert_eq!(records.first(), Some(&golden), "{records:?}");
+        let button = format!("[QUESTBUTTON idx;{sash}|name;A special cloth][DONE]");
+        let script = GcScript::decode(&records[1]).expect("the button");
+        assert_eq!((script.skin, script.script), (0, button.into_bytes()));
+        assert_eq!(records[2].first(), Some(&81), "the window");
+        assert_eq!(records.len(), 3);
+        assert_eq!(world.quest_targets.vid(1, sash, b"theowahdan"), THEOWAHDAN);
+
+        let _kept = world.leave_world(vid);
+        assert_eq!(world.quest_targets.vid(1, sash, b"theowahdan"), 0);
+        while let Ok(line) = inbox.try_recv() {
+            assert_ne!(line.first(), Some(&124), "the logout sends no delete");
+        }
     }
 }

@@ -20,7 +20,10 @@
 //! - a script that set its quest's title or called `q.start` or `q.done` sends the quest's
 //!   window through [`Game::quest_info`] when it ends, as `EndRunning` sent `GC_QUEST_INFO`
 //!   (`questpc.cpp:231-308`, `:343-346`), and [`Manager::info`] runs the `info` script the
-//!   quest window asks for.
+//!   quest window asks for;
+//! - a script that moved its quest to another state runs, as it ends, the old state's `leave`
+//!   script, the new state's `enter` script and, when that left the state alone, the new
+//!   state's `letter` script (`EndRunning`, `questpc.cpp:352-371`).
 //!
 //! While the manager runs, the [`crate::host::BRIDGED`] names reach the game through
 //! [`crate::host::BRIDGE`] and a [`Game`] the caller lends for that one call.
@@ -50,14 +53,18 @@
 //! - A file whose quest has no number is logged and skipped (legacy asserts), and a quest number
 //!   with no quest names the empty quest.
 //! - Quest states and flags live in the store with the character (ledger 244). `pc.getqf`
-//!   reads them (ledger 257) and `pc.learn_grand_master_skill` writes its read count; no other
-//!   API reaches them yet.
+//!   reads them (ledger 257), `pc.setqf` writes them (ledger 259) and
+//!   `pc.learn_grand_master_skill` writes its read count; no other API reaches them yet.
+//! - State changes nest at most 16 deep (`STATE_CHANGE_DEPTH`). An `enter` script that moved its
+//!   quest on ran the next change inside the first, so two states whose `enter` scripts named
+//!   each other recursed in legacy until the stack ran out; the Rewrite logs the change past
+//!   the limit and runs none of its scripts. No owner quest nests a change at all.
 //! - `getnpcid` with no name answers 0 (legacy built a `std::string` from `NULL`).
 //! - An NPC's race is looked up by the caller, which finds the NPC on the character's own map.
 //! - A `questcategory.txt` line with fewer than two words is logged and skipped; legacy read
 //!   past the end of its word list.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -121,6 +128,10 @@ const MAX_ARG_INDEX: i64 = 0xffff;
 
 /// A `CG_SCRIPT_ANSWER` above this continues a `wait`; one at or below it picks a menu entry.
 const ANSWER_RESUME: u8 = 250;
+
+/// How deep one state change may run another inside its scripts before the Rewrite stops it
+/// (the module's Divergences).
+const STATE_CHANGE_DEPTH: u8 = 16;
 
 /// The chat line types the quest API sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,6 +199,39 @@ pub trait Game {
     /// Sends the character a `GC_QUEST_INFO`: the window of the quest whose script just
     /// ended (`quest::PC::SendQuestInfoPakcet`, `G/questpc.cpp:231-308`).
     fn quest_info(&mut self, info: &QuestInfo);
+
+    /// `_find_npc_by_vnum` (`G/questlua_global.cpp:792-823`): the VID of a character of race
+    /// `race` on the character's map, among the races `CHARACTER_MANAGER` registers, and 0
+    /// when there is none.
+    fn find_npc(&self, race: u32) -> u32;
+
+    /// `CTargetManager::CreateTarget` (`G/target.cpp:134-238`) with `TARGET_TYPE_VID`: the
+    /// character's quest target `target`, which replaces the one its quest gave the same name.
+    fn create_target(&mut self, target: &Target);
+
+    /// `CTargetManager::DeleteTarget` (`G/target.cpp:240-282`): the character's targets of
+    /// quest `quest` named `name`, or all of them when `name` is `None`, end.
+    fn delete_target(&mut self, quest: u32, name: Option<&[u8]>);
+
+    /// `GetTargetEvent` (`G/target.cpp:284-315`): the VID the character's target of quest
+    /// `quest` named `name` points at, and 0 when there is no such target.
+    fn target_vid(&self, quest: u32, name: &[u8]) -> u32;
+}
+
+/// What `target.vid` asks `CTargetManager::CreateTarget` for (`G/questlua_target.cpp:45-66`):
+/// a target on a character.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    /// `GetCurrentQuestIndex()`: the number of the quest that runs, 0 for the chat menu's.
+    pub quest: u32,
+    /// The name the quest knows the target by, up to its first zero.
+    pub name: Vec<u8>,
+    /// The VID the target points at.
+    pub vid: u32,
+    /// The name the client shows, up to its first zero, when the script gave one.
+    pub desc: Option<Vec<u8>>,
+    /// `iSendFlag`: whether the client hears of the target.
+    pub send: bool,
 }
 
 /// What `SendQuestInfoPakcet` (`G/questpc.cpp:231-308`) sends when a script that changed its
@@ -721,6 +765,7 @@ impl Manager {
         // never while a bridge call holds the `RefCell`.
         let mut loaned = std::mem::take(&mut pc.flags);
         let host: &Host = host;
+        let npcs: &BTreeMap<u32, Npc> = npcs;
         let quest_indices = host.quest_indices();
         let cx = RefCell::new(Cx {
             output: Output::default(),
@@ -735,7 +780,12 @@ impl Manager {
             window: Window::default(),
             categories,
         });
-        let run = Run { host, cx: &cx };
+        let run = Run {
+            host,
+            cx: &cx,
+            no_npc: npcs.get(&QUEST_NO_NPC),
+            changes: Cell::new(0),
+        };
         let result = run.bridged(|| op(&run, pc, npcs));
         let cx = cx.into_inner();
         let unsent = cx.output.script.clone();
@@ -1335,6 +1385,10 @@ struct Cx<'g> {
 struct Run<'r, 'g> {
     host: &'r Host,
     cx: &'r RefCell<Cx<'g>>,
+    /// `m_mapNPC[QUEST_NO_NPC]`: the scripts no NPC owns, which a state change runs.
+    no_npc: Option<&'r Npc>,
+    /// How many state changes run inside one another now.
+    changes: Cell<u8>,
 }
 
 impl Run<'_, '_> {
@@ -1588,7 +1642,8 @@ impl Run<'_, '_> {
     /// refusal's and an error's too: the quest's window goes to the client when the script
     /// changed it (`SendQuestInfoPakcet`, `:342-346`), and then the quest of the script
     /// moves to the state its last `set_state` named, whichever step asked for it
-    /// (`quest_setstate` writes the running state at once, `G/questlua_quest.cpp:112-146`).
+    /// (`quest_setstate` writes the running state at once, `G/questlua_quest.cpp:112-146`),
+    /// running the scripts of the change ([`Run::goto_state`]).
     fn end_running(&self, pc: &mut Pc) {
         let asked = self.cx.borrow_mut().pending_state.take();
         let pending = asked.or_else(|| pc.pending_state.take());
@@ -1603,7 +1658,7 @@ impl Run<'_, '_> {
             }
         }
         if let Some(state) = pending {
-            self.goto_state(pc, running.quest, &state);
+            self.goto_state(pc, running.quest, running.state, &state);
         }
     }
 
@@ -1725,7 +1780,18 @@ impl Run<'_, '_> {
     /// `SetCurrentQuestStateName` (`questlua_quest.cpp:112`): the quest of the finished script
     /// moves to the named state. A name the quest does not have is legacy's index 0
     /// (`GetQuestStateIndex`), and the status flag follows the state.
-    fn goto_state(&self, pc: &mut Pc, quest: u32, state: &[u8]) {
+    ///
+    /// When the state is not `last`, the one the script started in (`m_iLastState`),
+    /// `EndRunning` runs the change (`G/questpc.cpp:352-371`): the old state's `leave` script
+    /// runs at `last`, then the quest and its flag move on for the new state's `enter` script,
+    /// and the new state's `letter` script runs when the flag still names the new state, which
+    /// an `enter` script that moved the quest on again changed. Each script runs as
+    /// `NPC::ExecuteEventScript` runs it (`G/questnpc.cpp:191-204`), nested inside this end,
+    /// so a script that ends runs its own `EndRunning` first. Legacy also puts the flag back to
+    /// `last` before the `leave`; `execute` writes it for the script it runs, as
+    /// `PC::SetQuest` does (`:140-164`), and nothing reads it when there is no script, so the
+    /// port has no such write.
+    fn goto_state(&self, pc: &mut Pc, quest: u32, last: i32, state: &[u8]) {
         let at = usize::try_from(quest.saturating_sub(1)).unwrap_or(usize::MAX);
         let number = self
             .host
@@ -1736,7 +1802,37 @@ impl Run<'_, '_> {
             .unwrap_or(0);
         pc.quests.insert(quest, number);
         let name = self.quest_name(quest);
-        pc.flags.insert([&name[..], b".__status"].concat(), number);
+        let status = [&name[..], b".__status"].concat();
+        pc.flags.insert(status.clone(), number);
+        if number == last {
+            return;
+        }
+        let depth = self.changes.get();
+        if depth >= STATE_CHANGE_DEPTH {
+            tracing::error!(
+                "QUEST {} changes state {depth} deep; its scripts do not run",
+                String::from_utf8_lossy(&name)
+            );
+            return;
+        }
+        self.changes.set(depth + 1);
+        self.state_script(pc, "leave", quest, last);
+        pc.quests.insert(quest, number);
+        pc.flags.insert(status.clone(), number);
+        self.state_script(pc, "enter", quest, number);
+        // The status flag is written only here and in `execute`, both into `pc.flags`; the
+        // bridge's half of the flags (`Cx::quest_flags`) never holds it.
+        if pc.flags.get(&status).copied().unwrap_or(0) == number {
+            self.state_script(pc, "letter", quest, number);
+        }
+        self.changes.set(depth);
+    }
+
+    /// `CQuestManager::EnterState`, `LeaveState` and `Letter` (`G/questmanager.cpp:474-514`):
+    /// the no-NPC script of quest `quest` for `event` at `state`, when there is one.
+    fn state_script(&self, pc: &mut Pc, event: &str, quest: u32, state: i32) -> bool {
+        self.no_npc
+            .is_some_and(|npc| self.event_script(pc, npc, event, quest, state))
     }
 
     /// `SendScript`: a bare `[DONE]` or `[NEXT]` closes the window once the client has
@@ -1877,8 +1973,10 @@ fn pc_api(
     lua: &Lua,
     cx: &mut Cx<'_>,
     name: &[u8],
-    (first, last): (&Value, &Value),
+    args: &MultiValue,
 ) -> mlua::Result<Option<MultiValue>> {
+    let first = &args.front().cloned().unwrap_or(Value::Nil);
+    let last = &args.back().cloned().unwrap_or(Value::Nil);
     let number = |value: u32| Some(Value::Number(f64::from(value)));
     let result = match name {
         b"pc.get_level" => number(u32::from(cx.game.level())),
@@ -1901,6 +1999,29 @@ fn pc_api(
                 .and_then(|flags| flags.get(&name).copied())
                 .unwrap_or(0);
             Some(Value::Number(f64::from(value)))
+        }
+        b"pc.setqf" => {
+            // `pc_set_quest_flag` (`G/questlua_pc.cpp:1215-1229`): text or a number names a
+            // flag of the quest that runs, and a number, rounded to even and cast to `int`,
+            // is its value (`int(rint(...))`); 0 deletes the flag (`quest::PC::SetFlag`,
+            // `G/questpc.cpp:52-76`). Anything else logs and changes nothing.
+            let second = args.get(1).cloned().unwrap_or(Value::Nil);
+            let flag = host::c_string(lua, first.clone())?;
+            let value = lua.coerce_number(second)?;
+            let (Some(flag), Some(value)) = (flag, value) else {
+                tracing::warn!("QUEST wrong set flag");
+                return Ok(Some(MultiValue::new()));
+            };
+            let value = host::c_int(lua, Value::Number(value.round_ties_even()))?;
+            let name = [&cx.quest[..], b".", &flag].concat();
+            if let Some(flags) = cx.quest_flags.as_deref_mut() {
+                if value == 0 {
+                    flags.remove(&name);
+                } else {
+                    flags.insert(name, value);
+                }
+            }
+            None
         }
         b"pc.learn_grand_master_skill" => {
             // `pc_learn_grand_master_skill` (`questlua_pc.cpp:121-133`): a non-number
@@ -2023,6 +2144,90 @@ fn guild_api(
     Ok(Some(pushed))
 }
 
+/// `find_npc_by_vnum` (`G/questlua_global.cpp:792-823`) and the `target.*` names
+/// (`G/questlua_target.cpp:45-134`), which mark a character on the client's map for the quest
+/// that runs (`GetCurrentQuestIndex`, the number of `m_stCurQuest`, 0 for the chat menu's).
+/// `target.pos` is not ported. Returns `None` for a name this table does not hold.
+fn target_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let arg = |at: usize| args.get(at).cloned().unwrap_or(Value::Nil);
+    let quest = cx
+        .quest_indices
+        .get(cx.quest.as_slice())
+        .copied()
+        .unwrap_or(0);
+    let result = match name {
+        b"find_npc_by_vnum" => {
+            // A number names a race, and the answer is the VID of a character of that race on
+            // the character's map, or 0; anything else logs and answers 0.
+            let vid = if let Some(race) = lua.coerce_number(arg(0))? {
+                cx.game.find_npc(dword(race))
+            } else {
+                tracing::warn!("QUEST invalid argument");
+                0
+            };
+            Some(Value::Number(f64::from(vid)))
+        }
+        b"target.vid" | b"target.npc" | b"target.pc" => {
+            // `target_vid`: text or a number names the target and a number is the VID it
+            // points at; else the call logs and does nothing. The VID is read as a `DWORD`,
+            // where legacy's `(int)` cast would clip the Rewrite's NPC VIDs, which start at
+            // 2^31 (a Divergence). The third argument, text or a number, is the name the
+            // client shows, and the fourth, a number cast to `int`, whether it hears of the
+            // target at all; without one it does.
+            let target = host::c_string(lua, arg(0))?;
+            let vid = lua.coerce_number(arg(1))?;
+            let (Some(target), Some(vid)) = (target, vid) else {
+                tracing::warn!("QUEST invalid argument, quest_index {quest}");
+                return Ok(Some(MultiValue::new()));
+            };
+            let send = match lua.coerce_number(arg(3))? {
+                Some(flag) => host::c_int(lua, Value::Number(flag))? != 0,
+                None => true,
+            };
+            cx.game.create_target(&Target {
+                quest,
+                name: target,
+                vid: dword(vid),
+                desc: host::c_string(lua, arg(2))?,
+                send,
+            });
+            None
+        }
+        b"target.delete" => {
+            // `target_delete`: text or a number names the target to end; else the call logs.
+            if let Some(target) = host::c_string(lua, arg(0))? {
+                cx.game.delete_target(quest, Some(&target));
+            } else {
+                tracing::warn!("QUEST invalid argument, quest_index {quest}");
+            }
+            None
+        }
+        b"target.clear" => {
+            // `target_clear`: every target of the quest ends.
+            cx.game.delete_target(quest, None);
+            None
+        }
+        b"target.id" => {
+            // `target_id`: the VID the named target points at, and 0 when there is none; a
+            // name that is neither text nor a number logs and answers 0.
+            let vid = if let Some(target) = host::c_string(lua, arg(0))? {
+                cx.game.target_vid(quest, &target)
+            } else {
+                tracing::warn!("QUEST invalid argument, quest_index {quest}");
+                0
+            };
+            Some(Value::Number(f64::from(vid)))
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(result.into_iter().collect()))
+}
+
 /// The names that change what the client's quest window shows of the running quest
 /// (`G/questlua_quest.cpp:17-45`). None answers anything; `false` means the name is not one of
 /// them.
@@ -2065,6 +2270,9 @@ fn window_api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], last: Value) -> mlua::Res
     Ok(true)
 }
 
+/// A family of API names that answers the names it backs and `None` for any other.
+type Family = fn(&Lua, &mut Cx<'_>, &[u8], &MultiValue) -> mlua::Result<Option<MultiValue>>;
+
 fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Result<MultiValue> {
     let first = args.front().cloned().unwrap_or(Value::Nil);
     let last = args.back().cloned().unwrap_or(Value::Nil);
@@ -2072,11 +2280,11 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
     if let TextOutcome::Hit(result) = text_api(lua, cx, name, args, last.clone())? {
         return Ok(result.into_iter().collect());
     }
-    if let Some(answered) = pc_api(lua, cx, name, (&first, &last))? {
-        return Ok(answered);
-    }
-    if let Some(answered) = guild_api(lua, cx, name, args)? {
-        return Ok(answered);
+    let families: [Family; 3] = [pc_api, target_api, guild_api];
+    for family in families {
+        if let Some(answered) = family(lua, cx, name, args)? {
+            return Ok(answered);
+        }
     }
     if window_api(lua, cx, name, last.clone())? {
         return Ok(MultiValue::new());
@@ -2205,6 +2413,14 @@ mod tests {
         any_war: f64,
         blocked: Vec<u8>,
         infos: Vec<QuestInfo>,
+        /// The VID `find_npc` answers for each race on the character's map.
+        npcs: BTreeMap<u32, u32>,
+        /// The live targets, in the order they were made.
+        targets: Vec<Target>,
+        /// Every `create_target` call, in order.
+        created: Vec<Target>,
+        /// Every `delete_target` call, in order.
+        deleted: Vec<(u32, Option<Vec<u8>>)>,
     }
 
     impl Fake {
@@ -2284,6 +2500,30 @@ mod tests {
 
         fn quest_info(&mut self, info: &QuestInfo) {
             self.infos.push(info.clone());
+        }
+
+        fn find_npc(&self, race: u32) -> u32 {
+            self.npcs.get(&race).copied().unwrap_or(0)
+        }
+
+        fn create_target(&mut self, target: &Target) {
+            self.created.push(target.clone());
+            self.targets
+                .retain(|old| old.quest != target.quest || old.name != target.name);
+            self.targets.push(target.clone());
+        }
+
+        fn delete_target(&mut self, quest: u32, name: Option<&[u8]>) {
+            self.deleted.push((quest, name.map(<[u8]>::to_vec)));
+            self.targets
+                .retain(|old| old.quest != quest || name.is_some_and(|name| old.name != name));
+        }
+
+        fn target_vid(&self, quest: u32, name: &[u8]) -> u32 {
+            self.targets
+                .iter()
+                .find(|target| target.quest == quest && target.name == name)
+                .map_or(0, |target| target.vid)
         }
     }
 
@@ -3084,9 +3324,28 @@ mod tests {
         }
     }
 
+    /// A level up moves the sash quest to `information` at 40 and the Yohara quest to
+    /// `information_new` at 120; each change runs the new state's `enter` and `letter`
+    /// scripts (`G/questpc.cpp:352-371`), and with no Theowahdan or statue on the map the
+    /// letters only send their buttons and windows.
     #[test]
     fn a_level_up_runs_the_no_target_scripts_and_misses_an_unknown_character() {
         let mut manager = manager().lock().unwrap();
+        let sash = manager.host().quest_index(b"sash_mission").expect("sash");
+        let yohara = manager
+            .host()
+            .quest_index(b"yohara_system")
+            .expect("yohara");
+        let letter = |quest: u32, title: &str| {
+            let script = format!("[QUESTBUTTON idx;{quest}|name;{title}][DONE]");
+            let info = QuestInfo {
+                index: u16::try_from(quest).expect("a small number"),
+                category: 0,
+                begin: None,
+                title: Some(title.as_bytes().to_vec()),
+            };
+            ((QUEST_SKIN_NOWINDOW, script), info)
+        };
         manager.logout(PID);
         let mut stranger = Fake::default();
         assert!(!manager.levelup(PID, &mut stranger));
@@ -3108,7 +3367,10 @@ mod tests {
             Some(0),
             "the yohara quest stayed in `start` below 120"
         );
-        assert!(game.scripts.is_empty(), "a `set_state` sends nothing");
+        let (script, info) = letter(sash, "A special cloth");
+        assert_eq!(game.take(), [script]);
+        assert_eq!(std::mem::take(&mut game.infos), [info]);
+        assert!(game.created.is_empty(), "no Theowahdan on the map");
         manager.logout(PID);
         manager.pcs.entry(PID).or_default();
         game.level = 120;
@@ -3118,7 +3380,405 @@ mod tests {
             Some(1_998_515_313),
             "at 120 the yohara quest moves to CRC32(`information_new`)"
         );
+        let (sash_script, sash_info) = letter(sash, "A special cloth");
+        let (yohara_script, yohara_info) = letter(yohara, "Statuia Razboinicului");
+        assert_eq!(game.take(), [sash_script, yohara_script]);
+        assert_eq!(game.infos, [sash_info, yohara_info]);
+        assert!(game.created.is_empty() && game.deleted.is_empty());
         manager.logout(PID);
+    }
+
+    /// The sash quest's state change at 40 (`G/questpc.cpp:352-371`): its `enter` script
+    /// clears two flags with `pc.setqf` (`SetFlag` deletes a zero), and its `letter` script
+    /// finds Theowahdan on the map (`find_npc_by_vnum`) and marks him with `target.vid` before
+    /// it sends its button; the window follows the button. A login at the new state runs only
+    /// the letter pass, whose target replaces the one of the same name.
+    #[test]
+    fn a_state_change_runs_the_new_states_enter_and_letter() {
+        const THEOWAHDAN: u32 = 0x8000_0007;
+        let mut manager = manager().lock().unwrap();
+        let sash = manager.host().quest_index(b"sash_mission").expect("sash");
+        manager.logout(PID);
+        let stored = [
+            (b"sash_mission.time_to_wait".to_vec(), 5),
+            (b"sash_mission.collect_count".to_vec(), 3),
+            (b"sash_mission.other".to_vec(), 9),
+        ];
+        manager.load_flags(PID, stored);
+        let mut game = Fake {
+            level: 40,
+            map_index: 1,
+            npcs: [(60003, THEOWAHDAN)].into_iter().collect(),
+            ..Fake::default()
+        };
+        assert!(manager.levelup(PID, &mut game));
+        assert_eq!(manager.quest_flag(PID, b"sash_mission.time_to_wait"), None);
+        assert_eq!(manager.quest_flag(PID, b"sash_mission.collect_count"), None);
+        assert_eq!(manager.quest_flag(PID, b"sash_mission.other"), Some(9));
+        let target = Target {
+            quest: sash,
+            name: b"theowahdan".to_vec(),
+            vid: THEOWAHDAN,
+            desc: Some(b"Theowahdan".to_vec()),
+            send: true,
+        };
+        assert_eq!(game.created, [target.clone()]);
+        let button = format!("[QUESTBUTTON idx;{sash}|name;A special cloth][DONE]");
+        assert_eq!(game.take(), [(QUEST_SKIN_NOWINDOW, button.clone())]);
+        assert_eq!(game.infos.len(), 1);
+
+        // The login finds the quest at `information`: no change, only the letter.
+        game.created.clear();
+        game.infos.clear();
+        let flags = manager.flags_of(PID);
+        manager.logout(PID);
+        manager.load_flags(PID, flags);
+        // The sash's own `login` script is `start`'s; other quests' run.
+        manager.login(PID, &mut game);
+        assert_eq!(game.created, [target.clone()]);
+        assert_eq!(game.targets, [target]);
+        let scripts: Vec<_> = game.take().into_iter().map(|(_, text)| text).collect();
+        assert!(scripts.contains(&button), "{scripts:?}");
+        manager.logout(PID);
+    }
+
+    /// A manager over a locale of the test's own: empty libraries and the one quest `source`.
+    fn synthetic(name: &str, source: &str) -> Manager {
+        let root =
+            std::env::temp_dir().join(format!("quest-manager-{}-{name}", std::process::id()));
+        let files = [
+            ("settings.lua", ""),
+            ("translate.lua", ""),
+            ("quest/questlib.lua", ""),
+            ("quest/locale.lua", ""),
+            ("quest/quest_list", ""),
+            ("quest/test/test.quest", source),
+        ];
+        for (path, text) in files {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        let host = Host::load(&root);
+        fs::remove_dir_all(&root).unwrap();
+        Manager::new(host.unwrap(), b"", b"")
+    }
+
+    /// `EndRunning`'s state change (`G/questpc.cpp:352-371`), nested as legacy nests it: the old
+    /// state's `leave`, then the new state's `enter`, then its `letter` only while the status
+    /// flag still names the new state, so an `enter` that moves the quest on again skips its
+    /// own letter, and a script that names its own state runs no change script. Changes that
+    /// keep moving the quest stop 16 deep (`STATE_CHANGE_DEPTH`, a Divergence: legacy recursed
+    /// until its stack ran out).
+    #[test]
+    fn a_state_change_leaves_enters_and_letters_in_legacys_nesting() {
+        const FLIP: &str = r#"
+quest flip begin
+    state start begin
+        when login begin
+            set_state("c")
+        end
+    end
+    state c begin
+        when leave begin chat("leave c") end
+        when enter begin
+            chat("enter c")
+            set_state("d")
+        end
+        when letter begin chat("letter c") end
+    end
+    state d begin
+        when leave begin chat("leave d") end
+        when enter begin chat("enter d") end
+        when letter begin chat("letter d") end
+        when kill begin
+            chat("kill d")
+            set_state("d")
+        end
+        when levelup begin set_state("a") end
+    end
+    state a begin
+        when leave begin chat("leave a") end
+        when enter begin
+            chat("enter a")
+            set_state("b")
+        end
+    end
+    state b begin
+        when leave begin chat("leave b") end
+        when enter begin
+            chat("enter b")
+            set_state("a")
+        end
+    end
+end
+"#;
+        let mut manager = synthetic("flip", FLIP);
+        let states = manager.host().quests()[0].states.clone();
+        let chats = |game: &mut Fake| -> Vec<String> {
+            game.chats
+                .drain(..)
+                .map(|(_, text)| String::from_utf8_lossy(&text).into_owned())
+                .collect()
+        };
+        manager.load_flags(PID, Vec::new());
+        let mut game = Fake::default();
+        assert!(manager.login(PID, &mut game));
+        // `start` has no `leave`; `enter c` moves on to `d`, so `c` gets no letter; the login's
+        // letter pass then runs `d`'s again.
+        let want = ["enter c", "leave c", "enter d", "letter d", "letter d"];
+        assert_eq!(chats(&mut game), want);
+        assert_eq!(
+            manager.quest_flag(PID, b"flip.__status"),
+            Some(states[&b"d"[..]])
+        );
+
+        // A script that names its own state changes nothing, so no change script runs.
+        assert!(manager.kill(PID, 101, None, &mut game));
+        assert_eq!(chats(&mut game), ["kill d"]);
+        assert_eq!(
+            manager.quest_flag(PID, b"flip.__status"),
+            Some(states[&b"d"[..]])
+        );
+
+        assert!(manager.levelup(PID, &mut game));
+        let mut want = vec!["leave d".to_owned(), "enter a".to_owned()];
+        for depth in 1..STATE_CHANGE_DEPTH {
+            let (from, to) = if depth % 2 == 1 {
+                ("a", "b")
+            } else {
+                ("b", "a")
+            };
+            want.push(format!("leave {from}"));
+            want.push(format!("enter {to}"));
+        }
+        assert_eq!(chats(&mut game), want);
+        assert_eq!(
+            manager.quest_flag(PID, b"flip.__status"),
+            Some(states[&b"a"[..]]),
+            "the change the guard stopped still lands"
+        );
+        assert!(!manager.is_running(PID));
+    }
+
+    /// `pc_set_quest_flag` (`G/questlua_pc.cpp:1215-1229`): text or a number names a flag of
+    /// the quest that runs and a number is its value, rounded half to even and cast to `int`
+    /// (`int(rint(...))`); 0 deletes the flag, and a missing name or value changes nothing.
+    #[test]
+    fn setqf_rounds_to_even_and_a_zero_deletes() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let string = |text: &[u8]| Value::String(lua.create_string(text).unwrap());
+        let table = Value::Table(lua.create_table().unwrap());
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            flags: BTreeMap::new(),
+            window: Window::default(),
+        };
+        let mut set = |name: Value, value: Value| {
+            let answer = probe.call("pc.setqf", &[name, value]).unwrap();
+            assert!(answer.is_empty());
+            probe.flags.get(b"q.a".as_slice()).copied()
+        };
+        assert_eq!(set(string(b"a"), Value::Number(2.5)), Some(2));
+        assert_eq!(set(string(b"a"), Value::Number(3.5)), Some(4));
+        assert_eq!(set(string(b"a"), Value::Number(-2.5)), Some(-2));
+        assert_eq!(set(string(b"a"), string(b"7")), Some(7));
+        assert_eq!(
+            set(string(b"a\0b"), Value::Number(8.0)),
+            Some(8),
+            "up to the zero"
+        );
+        assert_eq!(set(string(b"a"), Value::Number(f64::NAN)), Some(i32::MIN));
+        assert_eq!(set(string(b"a"), Value::Number(3e9)), Some(i32::MIN));
+        assert_eq!(set(string(b"a"), table.clone()), Some(i32::MIN), "no value");
+        assert_eq!(
+            set(table.clone(), Value::Number(1.0)),
+            Some(i32::MIN),
+            "no name"
+        );
+        assert_eq!(
+            set(string(b"a"), Value::Number(0.4)),
+            None,
+            "a zero deletes"
+        );
+        assert_eq!(set(Value::Number(1.0), Value::Number(6.0)), None);
+        assert_eq!(
+            probe.flags.get(b"q.1".as_slice()),
+            Some(&6),
+            "a number names"
+        );
+        assert_eq!(probe.flags.len(), 1);
+    }
+
+    /// `find_npc_by_vnum` (`G/questlua_global.cpp:792-823`): a number or numeric text names
+    /// the race, read as a `DWORD`, and a race with no spawned NPC, or no race, answers 0.
+    #[test]
+    fn find_npc_by_vnum_dwords_the_race_and_misses_as_zero() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let string = |text: &[u8]| Value::String(lua.create_string(text).unwrap());
+        let table = Value::Table(lua.create_table().unwrap());
+        let number = |value: f64| vec![Value::Number(value)];
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            flags: BTreeMap::new(),
+            window: Window::default(),
+        };
+        probe.game.npcs.insert(60003, 0x8000_0007);
+        let find =
+            |probe: &mut Probe, args: &[Value]| probe.call("find_npc_by_vnum", args).unwrap();
+        assert_eq!(find(&mut probe, &number(60003.9)), number(2_147_483_655.0));
+        assert_eq!(
+            find(&mut probe, &[string(b"60003")]),
+            number(2_147_483_655.0)
+        );
+        assert_eq!(
+            find(&mut probe, &number(60003.0 + 4_294_967_296.0)),
+            number(2_147_483_655.0),
+            "the race is dworded"
+        );
+        assert_eq!(find(&mut probe, &number(20433.0)), number(0.0));
+        assert_eq!(find(&mut probe, &[table.clone()]), number(0.0));
+        assert_eq!(find(&mut probe, &[]), number(0.0));
+    }
+
+    /// `target.vid`, `target.npc` and `target.pc` (`G/questlua_target.cpp:47-89`): a target
+    /// needs a name and a VID, read as a `DWORD`; the description is text or a number, and
+    /// the send flag a number cast to `int`, 1 without one. The probe's quest `q` has no
+    /// number, so every call is for quest 0.
+    #[test]
+    fn the_target_names_follow_legacys_argument_rules() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let string = |text: &[u8]| Value::String(lua.create_string(text).unwrap());
+        let table = Value::Table(lua.create_table().unwrap());
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            flags: BTreeMap::new(),
+            window: Window::default(),
+        };
+        let target = |name: &[u8], vid: u32, desc: Option<&[u8]>, send: bool| Target {
+            quest: 0,
+            name: name.to_vec(),
+            vid,
+            desc: desc.map(<[u8]>::to_vec),
+            send,
+        };
+        let vid = Value::Number(2_147_483_655.0);
+        for name in ["target.vid", "target.npc", "target.pc"] {
+            let made = probe
+                .call(name, &[string(b"t"), vid.clone(), string(b"T")])
+                .unwrap();
+            assert!(made.is_empty());
+            assert_eq!(
+                probe.game.created.pop(),
+                Some(target(b"t", 0x8000_0007, Some(b"T"), true))
+            );
+        }
+        let calls: [(&[Value], Target); 6] = [
+            (
+                &[Value::Number(5.0), string(b"12"), Value::Number(3.5)],
+                target(b"5", 12, Some(b"3.5"), true),
+            ),
+            (
+                &[
+                    string(b"t\0x"),
+                    Value::Number(12.9),
+                    table.clone(),
+                    Value::Number(0.9),
+                ],
+                target(b"t", 12, None, false),
+            ),
+            (
+                &[
+                    string(b"t"),
+                    Value::Number(12.0),
+                    Value::Nil,
+                    Value::Number(-1.0),
+                ],
+                target(b"t", 12, None, true),
+            ),
+            (
+                &[
+                    string(b"t"),
+                    Value::Number(12.0),
+                    Value::Nil,
+                    Value::Number(f64::NAN),
+                ],
+                target(b"t", 12, None, true),
+            ),
+            (
+                &[string(b"t"), Value::Number(12.0), Value::Nil, string(b"0")],
+                target(b"t", 12, None, false),
+            ),
+            (
+                &[string(b"t"), Value::Number(-1.0), Value::Nil, table.clone()],
+                target(b"t", u32::MAX, None, true),
+            ),
+        ];
+        for (args, want) in calls {
+            assert!(probe.call("target.vid", args).unwrap().is_empty());
+            assert_eq!(probe.game.created.pop(), Some(want));
+        }
+        for args in [
+            vec![string(b"t")],
+            vec![table.clone(), Value::Number(12.0)],
+            vec![string(b"t"), table.clone()],
+            vec![Value::Nil, Value::Number(12.0)],
+        ] {
+            assert!(probe.call("target.vid", &args).unwrap().is_empty());
+            assert!(probe.game.created.is_empty(), "{args:?}");
+        }
+    }
+
+    /// `target.id`, `target.delete` and `target.clear` (`G/questlua_target.cpp:91-134`): the
+    /// ID answers a named target's VID, else 0; `target.delete` needs a name, and
+    /// `target.clear` names none. `target.pos` stays refused.
+    #[test]
+    fn the_target_id_delete_and_clear_find_the_quests_targets() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let string = |text: &[u8]| Value::String(lua.create_string(text).unwrap());
+        let table = Value::Table(lua.create_table().unwrap());
+        let number = |value: f64| vec![Value::Number(value)];
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            flags: BTreeMap::new(),
+            window: Window::default(),
+        };
+        for (name, vid) in [(string(b"t"), -1.0), (Value::Number(5.0), 12.0)] {
+            probe
+                .call("target.vid", &[name, Value::Number(vid)])
+                .unwrap();
+        }
+        let id = |probe: &mut Probe, args: &[Value]| probe.call("target.id", args).unwrap();
+        assert_eq!(id(&mut probe, &[string(b"t")]), number(4_294_967_295.0));
+        assert_eq!(id(&mut probe, &[Value::Number(5.0)]), number(12.0));
+        assert_eq!(id(&mut probe, &[string(b"none")]), number(0.0));
+        assert_eq!(id(&mut probe, &[table.clone()]), number(0.0));
+
+        assert!(probe
+            .call("target.delete", &[table.clone()])
+            .unwrap()
+            .is_empty());
+        assert!(probe.game.deleted.is_empty(), "no name, no delete");
+        probe.call("target.delete", &[string(b"t\0x")]).unwrap();
+        assert_eq!(probe.game.deleted.pop(), Some((0, Some(b"t".to_vec()))));
+        assert_eq!(id(&mut probe, &[string(b"t")]), number(0.0));
+        probe.call("target.clear", &[string(b"5")]).unwrap();
+        assert_eq!(probe.game.deleted.pop(), Some((0, None)));
+        assert!(probe.game.targets.is_empty());
+        let error = probe.call("target.pos", &[]).unwrap_err().to_string();
+        assert!(error.contains("not ported: target.pos"), "{error}");
     }
 
     /// `send_letter` (`quest/questlib.lua:142`) at login: from level 30 `item_attr67add`'s
