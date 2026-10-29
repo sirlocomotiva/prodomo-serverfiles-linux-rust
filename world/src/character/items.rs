@@ -62,7 +62,7 @@ use super::inventory::{
     custom_inventory_category_of, inventory_page_by_pos, is_belt_inventory_position,
     is_custom_inventory_position, is_equip_position, stored_window,
 };
-use crate::item::{CountRejected, Item, ItemId, NO_ITEM};
+use crate::item::{CountRejected, Item, ItemId, SocketOutOfRange, NO_ITEM};
 
 /// `ATTR67_ADD_SLOT_MAX` = 1 (`length.h`): the attribute 67 window holds exactly
 /// one cell, so it is a single slot and not an array.
@@ -331,6 +331,26 @@ impl core::fmt::Display for CountRefused {
 
 impl std::error::Error for CountRefused {}
 
+/// Why a socket was not written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketRefused {
+    /// This storage does not hold the id.
+    NotHeld(ItemId),
+    /// The index is past the sockets.
+    Index(SocketOutOfRange),
+}
+
+impl core::fmt::Display for SocketRefused {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotHeld(id) => write!(f, "item {id} is not held here"),
+            Self::Index(reason) => reason.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for SocketRefused {}
+
 /// `CBeltInventoryHelper::GetAvailableRuleTableByGrade` (`belt_inventory_helper.h:53-58`):
 /// the belt grade a belt cell needs before it may hold an item, in cell order.
 const BELT_RULE_BY_CELL: [i32; 16] = [1, 2, 4, 6, 3, 3, 4, 6, 5, 5, 5, 6, 7, 7, 7, 7];
@@ -416,6 +436,24 @@ impl CharacterItems {
     pub fn set_count(&mut self, id: ItemId, count: u32) -> Result<u16, CountRefused> {
         let body = self.bodies.get_mut(&id).ok_or(CountRefused::NotHeld(id))?;
         body.set_count(count).map_err(CountRefused::Count)
+    }
+
+    /// Write one socket of a stored item and answer its sockets after the write.
+    ///
+    /// # Errors
+    ///
+    /// [`SocketRefused::NotHeld`] when this storage does not hold the id, and
+    /// [`SocketRefused::Index`] for an index past the sockets. Nothing changes on either.
+    pub fn set_socket(
+        &mut self,
+        id: ItemId,
+        index: usize,
+        value: i32,
+    ) -> Result<[i32; crate::item::SOCKETS], SocketRefused> {
+        let body = self.bodies.get_mut(&id).ok_or(SocketRefused::NotHeld(id))?;
+        body.set_socket(index, value)
+            .map_err(SocketRefused::Index)?;
+        Ok(body.sockets)
     }
 
     /// How many cells the flat array has.

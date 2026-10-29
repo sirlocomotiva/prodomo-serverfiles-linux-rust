@@ -1,7 +1,8 @@
 # Rewrite status
 
-Last reviewed: 2026-10-29, after ledger section 265 (`pc.get_job` and `pc.set_skill_level`).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 266 onwards. The
+Last reviewed: 2026-10-29, after ledger section 266 (`pc.give_item2_select` and
+`item.set_socket`). Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 267
+onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
 quest window (`GC_QUEST_INFO`), and since 259 a script's state change runs the `leave`,
@@ -27,9 +28,11 @@ ward reset book (71000) answers its early pages. Since 265 `pc.get_job` answers 
 `pc.set_skill_level` runs `SetSkillLevel` and `SkillLevelPacket` (`G/questlua_pc.cpp:2112-2123`,
 `G/char_skill.cpp:183-258`, with the 7/8th skills' `SkillCanUp` exclusion), stored like a
 GRAND climb, so the boost and ward books teach their chosen skill through `select_table` (which
-already ran through the `select` wait) and the reset book forgets it. The next slice is
-`pc.give_item2_select` and `item.set_socket`, then the GRAND book's alignment names
-(`pc.get_real_alignment`, `pc.change_alignment`, `pc.is_skill_book_no_delay`,
+already ran through the `select` wait) and the reset book forgets it. Since 266
+`pc.give_item2_select` gives and makes the given item the quest item, and `item.set_socket`
+writes its socket (`G/questlua_item.cpp:125-136`, `CItem::SetSocket`); their one caller, the sash
+quest's reward, stays unreachable while 85000 has no proto. The next slice is the GRAND book's
+alignment names (`pc.get_real_alignment`, `pc.change_alignment`, `pc.is_skill_book_no_delay`,
 `pc.remove_skill_book_no_delay`).
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
@@ -398,7 +401,7 @@ owner should know about (178.5):
 | A quest's flags and state live in the store with the character (ledger 244), so a flag outlives the session that set it. `set_state` moves its quest when the script ends, whichever step called it and however the script ends (ledger 257), `pc.learn_grand_master_skill` writes its read count, and the server writes its own flags: the guild's withdraw time, the war's member flag and `/setblockmode`'s seven `game_option.block_*` flags (ledger 256). `pc.getqf` reads a flag (ledger 257) and `pc.setqf` writes one (ledger 259); the rest are "not ported". A state change runs no `leave`, `enter` or `letter` script, and until the script ends the quest's flag holds the old state, so a character that leaves while the script waits keeps the old one (ledger 257). The load brings the flags with the character, so `Loading quest. Please wait a moment.` is never said, and a save writes a character's whole set of flags at once instead of the flags that changed. A call of an API the Rewrite does not back ends the script silently, so the client sees no `[DONE]` where a script error sends one. The event flags stay in memory (ADR-0006). | The `quest` table is loaded with the character and saved with it (`D/ClientManagerPlayer.cpp:352-394`, `D/ClientManager.cpp:692-698`), a quest waits, with that line, until the load arrives (`G/questmanager.cpp:920-931`), and a save writes only the flags that changed (`quest::PC::Save`, `G/questpc.cpp:519-590`). `quest_setstate` writes the state and its flag at once (`G/questlua_quest.cpp:112-146`), and `EndRunning` runs the old state's `leave`, the new one's `enter` and its `letter` (`G/questpc.cpp:352-371`). |
 | `_basic/change_empire.lua` is not loaded: an `end` on line 132 closes its `if` chain early, so `qc` refuses it (ADR-0006, ledger 227). This goes when the owner fixes the source. | The same: legacy's `qc` aborts on it and it never reached `object/`. |
 | Only an NPC's `click` and `chat` scripts run (ledger 227), the `kill` and `levelup` events reach the no-target quests (ledger 244), a war's `letter` and the letter's `button` run (ledger 239), and the `login` event runs when a character enters the game or comes back from a Warp (ledger 257). The login runs at once, behind the enter's records and the offline lines it read. The `logout`, `timer`, `target` and every other event is raised by no ported system, and the hide-and-seek reward of `OnClick` is not ported. | Each system raises its event through `CQuestManager`, and `CHARACTER::OnClick` gives the hide-and-seek reward while that event runs (`G/char.cpp:6299-6330`). When the quest load lands before the game phase, `quest_login_event` runs the login at the first one-second tick that finds the character in the game (`G/input_db.cpp:1005-1048`, `:1104-1115`). |
-| A quest API name whose system is not ported raises a "not ported" error, which ends the script silently: the client sees no `[DONE]`, where a Lua error sends one (ADR-0006, ledger 227, ledger 244). Of the 699 names 85 are backed (ledger 265); `pc.warp`, `game.set_safebox_level`, `q.set_title2` and `target.pos` are among the refused. | Every name runs. |
+| A quest API name whose system is not ported raises a "not ported" error, which ends the script silently: the client sees no `[DONE]`, where a Lua error sends one (ADR-0006, ledger 227, ledger 244). Of the 699 names 87 are backed (ledger 266); `pc.warp`, `game.set_safebox_level`, `q.set_title2` and `target.pos` are among the refused. | Every name runs. |
 | `find_npc_by_vnum` answers the first NPC of the race that spawned on the character's map (ledger 259). | It walks the race's `unordered_set` (`G/typedef.h:33`, `G/questlua_global.cpp:792-822`), in no defined order, so a map with two NPCs of the race may answer either. |
 | A quest target's VID is read as a `DWORD` (ledger 259). | `target_vid` casts the number to `int` (`G/questlua_target.cpp:58-67`). Legacy's VIDs fit, but the Rewrite numbers NPCs from 0x8000_0000, which would not. |
 | A click on a marked character while the clicker's script waits is taken and runs nothing; the waiting script keeps its place (ledger 260). | `NPC::OnTarget` runs the target script through `ExecuteQuestScript`, whose `PC::SetQuest` overwrites the running state (`G/questnpc.cpp:206-264`, `G/questpc.cpp`), a Defect. |

@@ -183,6 +183,11 @@ pub trait Game {
     /// when it holds none: what `item.get_vnum` reads through the quest item pointer.
     fn held_vnum(&self, id: u32) -> Option<u32>;
 
+    /// `CItem::SetSocket(index, value)` (`G/item.cpp:1643-1656`) of the item of ID `id`, the
+    /// quest item, with `index` below the six sockets: the item the character holds is updated
+    /// in its cell and saved, and one its give laid on the ground takes the value unseen.
+    fn set_socket(&mut self, id: u32, index: usize, value: i32);
+
     /// The race of the character `vid`, when it is in the world.
     fn race_of(&self, vid: u32) -> Option<u32>;
 
@@ -876,6 +881,7 @@ impl Manager {
         };
         let result = run.bridged(|| op(&run, pc, npcs));
         let cx = cx.into_inner();
+        pc.item = cx.item;
         let unsent = cx.output.script.clone();
         // The loaned map is the live one: the bridge's writes landed there, and
         // `pc.flags` stood empty meanwhile — except `execute`'s `__status`, which
@@ -2101,6 +2107,16 @@ fn give_item2(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<u32
     Ok(cx.game.give_item(vnum, count))
 }
 
+/// `pc_give_or_drop_item_and_select` (`G/questlua_pc.cpp:679-729`): `give_item2`'s reads and
+/// give, but nothing is pushed, and the item given becomes the quest item.
+fn give_item2_select(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<()> {
+    let given = give_item2(lua, cx, args)?;
+    if given != 0 {
+        cx.item = given;
+    }
+    Ok(())
+}
+
 /// `pc_count_item` (`G/questlua_pc.cpp:777-799`), `pc.count_item` and `pc.countitem`: a
 /// number-like last argument is the vnum, dworded. Text there makes the first argument a
 /// locale name's prefix (`ITEM_MANAGER::GetVnum`), and a name no proto has counts 0. Anything
@@ -2124,6 +2140,27 @@ fn count_item(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<i32
         return Ok(0);
     };
     Ok(cx.game.count_item(vnum))
+}
+
+/// `item_set_socket` (`G/questlua_item.cpp:125-136`): with a quest item and two number-like
+/// arguments, `(int)` of each, and an index of 0 to 5 (`ITEM_SOCKET_MAX_NUM`, under
+/// `ENABLE_EXTENDED_SOCKETS`) writes that socket. Anything else writes nothing, and nothing is
+/// pushed.
+fn set_socket(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<()> {
+    let first = args.front().cloned().unwrap_or(Value::Nil);
+    let second = args.get(1).cloned().unwrap_or(Value::Nil);
+    if cx.item == 0
+        || lua.coerce_number(first.clone())?.is_none()
+        || lua.coerce_number(second.clone())?.is_none()
+    {
+        return Ok(());
+    }
+    let index = host::c_int(lua, first)?;
+    let value = host::c_int(lua, second)?;
+    if let Ok(index @ 0..=5) = usize::try_from(index) {
+        cx.game.set_socket(cx.item, index, value);
+    }
+    Ok(())
 }
 
 /// `pc_set_skill_level` (`G/questlua_pc.cpp:2112-2123`): `(DWORD)` and `(BYTE)` of
@@ -2262,6 +2299,10 @@ fn pc_api(
         }
         b"pc.get_map_index" => Some(Value::Number(f64::from(cx.game.map_index()))),
         b"pc.give_item2" => number(give_item2(lua, cx, args)?),
+        b"pc.give_item2_select" => {
+            give_item2_select(lua, cx, args)?;
+            None
+        }
         b"pc.count_item" | b"pc.countitem" => {
             Some(Value::Number(f64::from(count_item(lua, cx, args)?)))
         }
@@ -2663,6 +2704,10 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
             let held = (cx.item != 0).then(|| cx.game.held_vnum(cx.item)).flatten();
             number(held.unwrap_or(0))
         }
+        b"item.set_socket" => {
+            set_socket(lua, cx, args)?;
+            None
+        }
         b"q.getcurrentquestindex" => {
             // `CQuestManager::GetQuestIndexByName` (`G/questmanager.cpp:1282-1290`): the
             // number of the quest that runs, and 0 for a name no quest has.
@@ -2734,6 +2779,8 @@ mod tests {
         levels: BTreeMap<u32, u8>,
         /// Every `set_skill_level` call, in order.
         set_levels: Vec<(u32, u8)>,
+        /// Every `set_socket` call, in order.
+        sockets: Vec<(u32, usize, i32)>,
         races: BTreeMap<u32, u32>,
         chats: Vec<(ChatKind, Vec<u8>)>,
         scripts: Vec<(u8, Vec<u8>)>,
@@ -2807,6 +2854,10 @@ mod tests {
 
         fn held_vnum(&self, id: u32) -> Option<u32> {
             self.held.get(&id).copied()
+        }
+
+        fn set_socket(&mut self, id: u32, index: usize, value: i32) {
+            self.sockets.push((id, index, value));
         }
 
         fn race_of(&self, vid: u32) -> Option<u32> {
@@ -3095,6 +3146,52 @@ mod tests {
         manager.answer(PID, 0, &mut game);
         assert_eq!(game.set_levels, [(243, 1), (243, 0)]);
         assert_eq!(game.removals, [(50_514, 1), (71_000, 1)]);
+        manager.logout(PID);
+    }
+
+    /// `pc.give_item2_select` gives as `pc.give_item2` reads, pushes nothing, and makes the item
+    /// it gave the quest item, which a later run still has; a give of nothing keeps the old one.
+    /// `item.set_socket` writes the quest item's socket only with two number-like arguments and
+    /// an index of 0 to 5, `(int)` of each.
+    #[test]
+    fn the_selected_give_becomes_the_quest_item_whose_socket_is_set() {
+        let mut manager = manager().lock().unwrap();
+        manager.logout(PID);
+        let mut game = Fake {
+            given: 77,
+            held: [(77, 85_005)].into_iter().collect(),
+            ..Fake::default()
+        };
+        let run = |manager: &mut Manager, game: &mut Fake, source: &[u8]| {
+            let code = host::load_chunk(manager.host.lua(), source, "=test");
+            manager.operate(PID, game, |run, pc, _| {
+                run.execute(pc, 0, b"q".to_vec(), 0, code, Vec::new())
+            });
+            game.take()
+        };
+        let said = run(
+            &mut manager,
+            &mut game,
+            b"item.set_socket(1, 1) \
+              say(pcall(type, pc.give_item2_select(85005, 1)) and 'one' or 'none') \
+              item.set_socket(1, 1) item.set_socket('2', 3.9) item.set_socket(-0.5, 8) \
+              item.set_socket(6, 1) item.set_socket(-1, 1) item.set_socket(1) \
+              item.set_socket(1, 'x') item.set_socket(5, -2147483649) say(item.get_vnum())",
+        );
+        assert_eq!(said, [(1, "none[ENTER]85005[ENTER][DONE]".to_owned())]);
+        assert_eq!(game.gives, [(85_005, 1)]);
+        assert_eq!(
+            game.sockets,
+            [(77, 1, 1), (77, 2, 3), (77, 0, 8), (77, 5, i32::MIN)]
+        );
+        game.given = 0;
+        let said = run(
+            &mut manager,
+            &mut game,
+            b"pc.give_item2_select(85005, 1) item.set_socket(4, 9) say(item.get_vnum())",
+        );
+        assert_eq!(said, [(1, "85005[ENTER][DONE]".to_owned())]);
+        assert_eq!(game.sockets.last(), Some(&(77, 4, 9)));
         manager.logout(PID);
     }
 

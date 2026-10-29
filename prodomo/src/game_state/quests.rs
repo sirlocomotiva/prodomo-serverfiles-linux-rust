@@ -629,6 +629,32 @@ impl Game for Session<'_> {
         self.card.0
     }
 
+    fn set_socket(&mut self, id: u32, index: usize, value: i32) {
+        if let Some(item) = self.laid.iter_mut().find(|item| item.id == id) {
+            // On the ground the item has no owner, so `UpdatePacket` sends nothing.
+            let _written = item.set_socket(index, value);
+            return;
+        }
+        let Some(giver) = self.giver.as_mut().filter(|giver| giver.stores) else {
+            warn!(
+                id,
+                index, "a quest set a socket where no descriptor stores it; none set"
+            );
+            return;
+        };
+        let done = world::character::set_item_socket(giver.items, id, (index, value));
+        let moved = crate::item_move::MovedItems::new(
+            giver.owner_id,
+            self.reader.raw(),
+            done,
+            self.mover,
+            self.items,
+            self.locale,
+        );
+        self.records.extend(moved.records);
+        self.item_rows.extend(moved.changes);
+    }
+
     fn count_item(&self, vnum: u32) -> i32 {
         self.giver.as_ref().map_or(0, |giver| {
             world::character::count_specify_item(giver.items, giver.rules.usable_cells, vnum)
@@ -1571,20 +1597,16 @@ mod tests {
         });
     }
 
-    /// `pc.give_item2`'s `AutoGiveItem` in a session that may give: a vnum with no proto
-    /// gives nothing and answers 0, as 85000 does on the owner's data; a sword is made with
-    /// the next ID, named, then set in the first free cell, and its row is answered for the
-    /// store; with every cell taken it is laid at the character's feet, still answering its
-    /// ID. The count reads the held swords and a removal takes one with its row. A session
-    /// whose rows are not stored counts but neither gives nor removes, and one with no
-    /// character answers 0 and sends nothing.
-    #[test]
-    fn a_give_names_sets_and_stores_the_item_or_lays_it() {
+    /// The test sword's vnum.
+    const SWORD: u32 = 19;
+
+    /// A session that may give and remove, for a character whose two unlocked cells are empty,
+    /// with the sword `SWORD` as its one item proto and item IDs from 1000.
+    fn with_giving_session<R>(f: impl FnOnce(&mut Session<'_>) -> R) -> R {
         use gamedata::item_proto::ItemProto;
         use world::character::{CharacterItems, Gauss, MoveRules, Quickslots};
         use world::item::{ItemIdRange, ItemIds};
 
-        const SWORD: u32 = 19;
         let items_protos = ItemProtos::from_rows(vec![ItemProto::for_category_rule(SWORD, 1, 0)]);
         let (protos, names) = (MobProtos::default(), MobNamesByLanguage::default());
         let item_names = ItemNamesByLanguage::default();
@@ -1644,52 +1666,108 @@ mod tests {
             item_rows: Vec::new(),
             laid: Vec::new(),
         };
-        assert_eq!(session.give_item(85_000, 1), 0);
-        assert!(session.records.is_empty() && session.item_rows.is_empty());
+        f(&mut session)
+    }
 
-        assert_eq!(session.give_item(SWORD, 1), 1000);
-        assert_eq!(session.records.len(), 2, "the name, then the item set");
-        assert_eq!(session.held_vnum(1000), Some(SWORD));
-        assert!(matches!(
-            session.item_rows.as_slice(),
-            [db::items::RowChange::Created(row)] if row.id == 1000 && row.owner_id == Some(42)
-        ));
-        assert_eq!(session.give_item(SWORD, 1), 1001);
-        assert!(session.laid.is_empty());
+    /// `pc.give_item2`'s `AutoGiveItem` in a session that may give: a vnum with no proto
+    /// gives nothing and answers 0, as 85000 does on the owner's data; a sword is made with
+    /// the next ID, named, then set in the first free cell, and its row is answered for the
+    /// store; with every cell taken it is laid at the character's feet, still answering its
+    /// ID. The count reads the held swords and a removal takes one with its row. A session
+    /// whose rows are not stored counts but neither gives nor removes, and one with no
+    /// character answers 0 and sends nothing.
+    #[test]
+    fn a_give_names_sets_and_stores_the_item_or_lays_it() {
+        with_giving_session(|session| {
+            assert_eq!(session.give_item(85_000, 1), 0);
+            assert!(session.records.is_empty() && session.item_rows.is_empty());
 
-        // Both unlocked cells are taken: the third is laid, with no record and no row.
-        assert_eq!(session.give_item(SWORD, 1), 1002);
-        assert_eq!(session.records.len(), 4);
-        assert_eq!(session.item_rows.len(), 2);
-        assert_eq!(
-            session.laid.iter().map(|item| item.id).collect::<Vec<_>>(),
-            [1002]
-        );
+            assert_eq!(session.give_item(SWORD, 1), 1000);
+            assert_eq!(session.records.len(), 2, "the name, then the item set");
+            assert_eq!(session.held_vnum(1000), Some(SWORD));
+            assert!(matches!(
+                session.item_rows.as_slice(),
+                [db::items::RowChange::Created(row)] if row.id == 1000 && row.owner_id == Some(42)
+            ));
+            assert_eq!(session.give_item(SWORD, 1), 1001);
+            assert!(session.laid.is_empty());
 
-        // The count reads the two held swords; the removal takes the first, sends its clear
-        // and answers its row.
-        assert_eq!(session.count_item(SWORD), 2);
-        session.remove_item(SWORD, 1);
-        assert_eq!(session.count_item(SWORD), 1);
-        assert_eq!(session.records.len(), 5);
-        assert!(matches!(
-            session.item_rows.last(),
-            Some(db::items::RowChange::Destroyed { id: 1000 })
-        ));
+            // Both unlocked cells are taken: the third is laid, with no record and no row.
+            assert_eq!(session.give_item(SWORD, 1), 1002);
+            assert_eq!(session.records.len(), 4);
+            assert_eq!(session.item_rows.len(), 2);
+            assert_eq!(
+                session.laid.iter().map(|item| item.id).collect::<Vec<_>>(),
+                [1002]
+            );
 
-        // A step whose rows no descriptor stores still counts, but neither gives nor removes.
-        if let Some(giver) = session.giver.as_mut() {
-            giver.stores = false;
-        }
-        assert_eq!(session.give_item(SWORD, 1), 0);
-        session.remove_item(SWORD, 1);
-        assert_eq!(session.count_item(SWORD), 1);
-        assert_eq!((session.records.len(), session.item_rows.len()), (5, 3));
+            // The count reads the two held swords; the removal takes the first, sends its clear
+            // and answers its row.
+            assert_eq!(session.count_item(SWORD), 2);
+            session.remove_item(SWORD, 1);
+            assert_eq!(session.count_item(SWORD), 1);
+            assert_eq!(session.records.len(), 5);
+            assert!(matches!(
+                session.item_rows.last(),
+                Some(db::items::RowChange::Destroyed { id: 1000 })
+            ));
 
-        session.giver = None;
-        assert_eq!(session.give_item(SWORD, 1), 0);
-        assert_eq!(session.count_item(SWORD), 0);
-        assert_eq!(session.records.len(), 5);
+            // A step whose rows no descriptor stores still counts, but neither gives nor removes.
+            if let Some(giver) = session.giver.as_mut() {
+                giver.stores = false;
+            }
+            assert_eq!(session.give_item(SWORD, 1), 0);
+            session.remove_item(SWORD, 1);
+            assert_eq!(session.count_item(SWORD), 1);
+            assert_eq!((session.records.len(), session.item_rows.len()), (5, 3));
+
+            session.giver = None;
+            assert_eq!(session.give_item(SWORD, 1), 0);
+            assert_eq!(session.count_item(SWORD), 0);
+            assert_eq!(session.records.len(), 5);
+        });
+    }
+
+    /// `item.set_socket`'s `SetSocket` in a session that may give: a held item's socket is
+    /// written, its cell updated (`GC_ITEM_UPDATE`, 0x19) and its sockets answered for the
+    /// store; a laid one takes the value and sends nothing; an ID the character has neither
+    /// held nor laid writes nothing. A step whose rows no descriptor stores writes nothing.
+    #[test]
+    fn a_socket_lands_on_the_held_or_laid_item_and_is_stored() {
+        with_giving_session(|session| {
+            let given = [0; 3].map(|_| session.give_item(SWORD, 1));
+            assert_eq!(given, [1000, 1001, 1002]);
+            let (records, rows) = (session.records.len(), session.item_rows.len());
+
+            session.set_socket(1000, 1, 0x0102_0304);
+            assert_eq!(session.records.len(), records + 1);
+            assert_eq!(session.records[records][0], 0x19);
+            assert!(matches!(
+                session.item_rows.last(),
+                Some(db::items::RowChange::Sockets { id: 1000, sockets })
+                    if sockets[..3] == [0, 0x0102_0304, 0]
+            ));
+            assert_eq!(session.item_rows.len(), rows + 1);
+
+            session.set_socket(1002, 2, 7);
+            session.set_socket(4242, 0, 1);
+            assert_eq!(session.laid[0].sockets[2], 7);
+            assert_eq!(
+                (session.records.len(), session.item_rows.len()),
+                (records + 1, rows + 1)
+            );
+
+            if let Some(giver) = session.giver.as_mut() {
+                giver.stores = false;
+            }
+            session.set_socket(1001, 0, 9);
+            assert_eq!(session.item_rows.len(), rows + 1);
+            let unchanged = session
+                .giver
+                .as_ref()
+                .and_then(|giver| giver.items.item(1001));
+            assert_eq!(unchanged.map(|item| item.sockets[0]), Some(0));
+        });
     }
 
     /// A laid `ANTI_DROP` give stays its taker's for 300 seconds, any other for 60, whatever

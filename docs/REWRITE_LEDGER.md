@@ -37021,3 +37021,130 @@ Gates:
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
 
 No ADR changed. No owner question added. V26 stays open.
+
+## 266. The selected give and its socket (`pc.give_item2_select`, `item.set_socket`)
+
+A quest can now give an item, make it the quest item, and write one of its sockets. The one caller
+on the owner's data, the sash quest's reward, stays unreachable, so both names are `partial`
+with unit tests.
+
+**Legacy** (`G/questlua_pc.cpp:679-729`, `G/questlua_item.cpp:125-136`, `G/item.cpp:1643-1656`):
+
+- `pc.give_item2_select` is registered as `pc_give_or_drop_item_and_select`
+  (`G/questlua_pc.cpp:3888`). It reads the vnum and the count as `pc_give_or_drop_item` does and
+  runs `AutoGiveItem`, but every path pushes nothing, and a given item becomes the quest item
+  (`SetCurrentItem`).
+  - Search: `give_item2_select` over `server/server` finds only the registration line.
+  - Control: `"give_item2"` finds its own registration at `:3862`.
+- Its gold-bar log runs `item->GetID()` for 80003-80007 even when `AutoGiveItem` gave nothing:
+  a null dereference, a Defect. The Rewrite writes no gold-bar log, so it has no counterpart.
+- `item_set_socket` needs the quest item and two `lua_isnumber` arguments. It takes `(int)` of
+  each, and an index of 0 to `ITEM_SOCKET_MAX_NUM - 1` calls `SetSocket`.
+  `ITEM_SOCKET_MAX_NUM` is 6 under `ENABLE_EXTENDED_SOCKETS` (`common/item_length.h:13-18`,
+  `prodomodefines.h:76`), as `common::constants` already holds.
+- `CItem::SetSocket` writes the socket, then `UpdatePacket` (the owner's `GC_ITEM_UPDATE`; none
+  for an item with no owner) and `Save`. Its item log runs only with `bLog`, which this call
+  leaves false.
+
+**The world** (`world/src/character/specify_item.rs`, `items.rs`, `item_move.rs`):
+
+- `CharacterItems::set_socket(id, index, value)` writes one socket of a stored item and answers
+  its sockets, or `SocketRefused` (`NotHeld`, `Index`).
+- `set_item_socket(items, id, (index, value))` answers a `MoveDone` of the new kind
+  `MoveKind::Socketed`. It holds the item's `GC_ITEM_UPDATE` and `ItemChange::Sockets`, or
+  nothing for an item not held or an index past the sockets.
+
+**The bridge** (`quest/src/manager.rs`, `quest/src/host.rs`):
+
+- `pc.give_item2_select` runs `give_item2`'s reads and give, pushes nothing, and sets `Cx::item`
+  to a non-zero ID. A give of nothing keeps the old quest item.
+- `operate` now writes `Cx::item` back to `Pc::item` after every run, so a later run (and its
+  `item.get_vnum`) sees the item a run selected.
+- `item.set_socket` (the helper `set_socket`) needs a quest item and two number-like arguments,
+  takes `c_int` of each (so -0.5 is index 0 and an out-of-range value is `INT_MIN`), and passes
+  an index of 0 to 5 to `Game::set_socket`.
+- `BRIDGED` has 87 names, in `api::NAMES` order.
+
+**The session** (`prodomo/src/game_state/quests.rs`):
+
+- `set_socket` finds a laid item first: a give no cell took lies in `laid` until after the step,
+  and a socket written there sends nothing, as a ground item has no owner.
+- Otherwise, on a step whose descriptor stores item rows, `set_item_socket` runs on the held
+  items. Its record joins the step's records and its `RowChange::Sockets` joins the step's rows,
+  which are stored in the step's one transaction before the client hears them.
+- A step that stores no rows writes nothing and logs, as the give and the removal do.
+
+**The caller.** `sash_mission.lua:204-215`: `__complete`'s click calls
+`pc.give_item2_select(85005, 1)` and `item.set_socket(1, 1)` only after
+`pc.count_item(85000) >= 40`.
+
+- Search: `^85000` in `legacy/gamedata/proto/item_proto.txt` finds nothing.
+- Control: the same search for `^85005` finds the sash's row (`ITEM_COSTUME`, `COSTUME_SASH`).
+
+85000 has no proto, so no character holds it and the branch never runs. The other `use`,
+click and dialog scripts call neither name (search of the quest folder, beside the library
+files: one hit each, both in `sash_mission.lua`).
+
+**The tests.**
+
+- `world`: `a_socket_write_updates_the_held_item_and_nothing_else`. The write lands with its
+  update record and its sockets change, the last socket takes a negative value, and an ID not
+  held or an index of 6 changes and sends nothing.
+- `quest`: `the_selected_give_becomes_the_quest_item_whose_socket_is_set`.
+  - A socket before any give writes nothing.
+  - The select pushes nothing (`pcall(type, ...)`), gives through `give_item`, and makes item 77
+    the quest item, which `item.get_vnum` reads.
+  - The four writes that land: `(1, 1)`, `('2', 3.9)` as (2, 3), `(-0.5, 8)` as (0, 8), and
+    `(5, -2147483649)` as (5, `INT_MIN`).
+  - The writes refused: index 6, index -1, one argument, and a text value.
+  - A second run with a give of nothing still writes to item 77.
+- `prodomo` lib:
+  - The setup of `a_give_names_sets_and_stores_the_item_or_lays_it` moved into
+    `with_giving_session`, so the new test shares it.
+  - The new `a_socket_lands_on_the_held_or_laid_item_and_is_stored`: a held sword's socket sends
+    0x19 and answers `RowChange::Sockets`; a laid sword takes its socket and sends nothing; an
+    unknown ID writes nothing; a step that stores no rows writes nothing.
+
+**Rows.**
+
+- `lua.pc.give_item2_select` and `lua.item.set_socket` are `partial`, with notes.
+- `quest.sash_mission` has a note.
+
+**STATUS.** The header names 266, with 87 backed names. The next slice is the GRAND book's
+alignment names.
+
+**Mutation sweep.** 14 mutants were applied to the pristine files, and each changed executable
+code. Every file was restored by checksum. All 14 were killed, semantically, with no
+compile-error kills:
+
+- W1-W3 were killed by the world test: no update record; no sockets change; the sockets
+  answered are zero.
+- Q1-Q6 were killed by the quest test: the select sets no quest item; the select pushes the ID;
+  `operate` does not write the quest item back; index 6 passes; the value need not be a number;
+  no quest item is needed. Their other failing quest tests are knock-ons of the manager mutex,
+  which the first panic poisons.
+- S1-S3 were killed by the session test: the laid item is skipped; a step that stores no rows
+  writes; the socket rows are dropped.
+- H1 and H2 (`BRIDGED` misnames either name) were killed by the host test.
+
+The Clippy fix below moved the select's give into a helper, so Q1 and Q2 were retargeted at the
+new text and run again; both were killed.
+
+**Clippy.** The first gate run failed with `too_many_lines` (103/100) on `pc_api`. The select's
+give became the helper `give_item2_select`, beside `give_item2`. It was fixed by refactoring,
+with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4246 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
+
+No ADR changed. No owner question added. V26 stays open.

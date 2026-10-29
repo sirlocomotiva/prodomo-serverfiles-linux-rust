@@ -165,6 +165,8 @@ pub enum MoveKind {
     /// An `ITEM_QUEST` passed the use checks and changed nothing; its quest runs next
     /// (`case ITEM_QUEST`, `G/char_item.cpp:2842-2888`).
     QuestUsed,
+    /// A quest wrote one socket of a held item (`CItem::SetSocket`, `G/item.cpp:1643-1656`).
+    Socketed,
 }
 
 /// A record the client is sent, in the order legacy sends it.

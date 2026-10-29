@@ -1,6 +1,6 @@
 //! Counting and taking away the items of one vnum: `CHARACTER::CountSpecifyItem` and
 //! `CHARACTER::RemoveSpecifyItem` (`G/char_item.cpp:8791-8940`), which `pc.count_item` and
-//! `pc.remove_item` call.
+//! `pc.remove_item` call; and `CItem::SetSocket` of one held item, which `item.set_socket` calls.
 //!
 //! Both read the base inventory up to `Inventory_Size()`, the unlocked cells
 //! (`ENABLE_EXTEND_INVEN_SYSTEM`), and then the custom banks (`ENABLE_CUSTOM_INVENTORY`), in
@@ -15,7 +15,7 @@ use protocol::item_pos::ItemPos;
 use super::item_move::{ItemChange, ItemRecord, MoveDone, MoveKind, MoveRecord};
 use super::items::CharacterItems;
 use super::quickslot::{chains_when_used_up, QuickslotSync, Quickslots, SyncTo};
-use crate::item::gc_item_clear;
+use crate::item::{gc_item_clear, ItemId};
 
 /// The cells both scans read, in their order: the unlocked base cells, then the custom banks.
 fn scanned_cells(usable_cells: u16) -> impl Iterator<Item = ItemPos> {
@@ -85,6 +85,31 @@ pub fn remove_specify_item(
             done.changes.push(ItemChange::Count { id, count: keeps });
         }
     }
+    done
+}
+
+/// `CItem::SetSocket(index, value)` (`G/item.cpp:1643-1656`) of the held item `id`: the socket
+/// takes the value, the client's cell is updated (`UpdatePacket`), and the row is saved. An
+/// item the character does not hold, or an index past the sockets, changes and sends nothing.
+#[must_use]
+pub fn set_item_socket(
+    items: &mut CharacterItems,
+    id: ItemId,
+    (index, value): (usize, i32),
+) -> MoveDone {
+    let mut done = MoveDone {
+        kind: MoveKind::Socketed,
+        records: Vec::new(),
+        changes: Vec::new(),
+    };
+    let Ok(sockets) = items.set_socket(id, index, value) else {
+        return done;
+    };
+    if let Some(item) = items.item(id) {
+        let update = ItemRecord::Update(item.gc_item_update());
+        done.records.push(MoveRecord::Item(update));
+    }
+    done.changes.push(ItemChange::Sockets { id, sockets });
     done
 }
 
@@ -293,5 +318,36 @@ mod tests {
                 MoveRecord::Quickslot(QuickslotRecord::Del { slot: 0 }),
             ]
         );
+    }
+
+    /// A socket write lands on the held item and updates its cell; another id or an index past
+    /// the sockets changes and sends nothing.
+    #[test]
+    fn a_socket_write_updates_the_held_item_and_nothing_else() {
+        let mut items = holding(&[(4, stack(9, ORE, 2))]);
+        let done = set_item_socket(&mut items, 9, (1, 0x0102_0304));
+        assert_eq!(done.kind, MoveKind::Socketed);
+        let item = items.item(9).expect("held");
+        assert_eq!(item.sockets[..3], [0, 0x0102_0304, 0]);
+        assert_eq!(
+            done.changes,
+            [ItemChange::Sockets {
+                id: 9,
+                sockets: item.sockets
+            }]
+        );
+        assert_eq!(
+            done.records,
+            [MoveRecord::Item(ItemRecord::Update(item.gc_item_update()))]
+        );
+        let last = crate::item::SOCKETS - 1;
+        let done = set_item_socket(&mut items, 9, (last, -5));
+        assert_eq!(items.item(9).expect("held").sockets[last], -5);
+        assert_eq!(done.changes.len(), 1);
+        for (id, index) in [(8, 0), (9, crate::item::SOCKETS)] {
+            let done = set_item_socket(&mut items, id, (index, 7));
+            assert!(done.records.is_empty() && done.changes.is_empty());
+        }
+        assert_eq!(items.item(9).expect("held").sockets[0], 0);
     }
 }
