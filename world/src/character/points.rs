@@ -295,6 +295,8 @@ pub struct PointsRow {
     pub hair_part: u16,
     /// The stored sash part, which a sash replaces.
     pub sash_part: u16,
+    /// `playtime`, the whole minutes the character has played.
+    pub playtime: i32,
 }
 
 /// The four sungma slots, in the order of [`PointsRow::sungma`].
@@ -623,6 +625,9 @@ impl Points {
         points.instant[point::POINT_SUB_SKILL] = row.sub_skill_point;
         points.instant[point::POINT_LEVEL_STEP] = row.level_step;
         points.real[point::POINT_LEVEL_STEP] = row.level_step;
+        // `SetRealPoint(POINT_PLAYTIME, t->playtime)` (`char.cpp:2296`): the real array only.
+        // Nothing sets the instant slot, so `PointsPacket`'s `GetPoint` sends 0 there.
+        points.real[point::POINT_PLAYTIME] = row.playtime;
         let _discarded = points.compute_points();
         points.hp = row.hp;
         points.sp = row.sp;
@@ -700,6 +705,12 @@ impl Points {
     #[must_use]
     pub fn real_point(&self, kind: usize) -> i32 {
         self.real.get(kind).copied().unwrap_or(0)
+    }
+
+    /// `SetRealPoint(POINT_PLAYTIME, minutes)`, which `CreatePlayerProto` writes when a save
+    /// banks the minutes played (`char.cpp:1542`). `pc.get_playtime` reads it back.
+    pub fn set_playtime(&mut self, minutes: i32) {
+        self.real[point::POINT_PLAYTIME] = minutes;
     }
 
     /// `GetLimitPoint` for a player character (`char.cpp:3725-3790`).
@@ -1745,6 +1756,7 @@ mod tests {
             part_base: 0,
             hair_part: 0,
             sash_part: 0,
+            playtime: 0,
         }
     }
 
@@ -2846,6 +2858,22 @@ mod tests {
         assert_eq!(points.inven_point(), 3);
         assert_eq!(points.level(), 1);
         assert_eq!(points.real_point(point::POINT_ST), 6);
+    }
+
+    /// `SetPlayerProto` puts the stored minutes in the real `POINT_PLAYTIME` alone
+    /// (`char.cpp:2296`), and a save's bank replaces them (`char.cpp:1542`); no computation
+    /// touches either array's slot.
+    #[test]
+    fn the_playtime_is_a_real_point_the_bank_replaces() {
+        let mut row = fresh(0);
+        row.playtime = 0x0102_0304;
+        let mut points = Points::load(&row);
+        assert_eq!(points.real_point(point::POINT_PLAYTIME), 0x0102_0304);
+        assert_eq!(points.get_point(point::POINT_PLAYTIME), 0);
+        points.set_playtime(0x0102_0306);
+        let _records = points.compute_points();
+        assert_eq!(points.real_point(point::POINT_PLAYTIME), 0x0102_0306);
+        assert_eq!(points.get_point(point::POINT_PLAYTIME), 0);
     }
 
     fn holding(level: u8, exp: i64) -> Points {

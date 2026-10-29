@@ -1658,6 +1658,7 @@ mod tests {
         let (reply, answer) = tokio::sync::oneshot::channel();
         world.apply(GameCommand::KeptOf {
             vid: Vid::new(7),
+            playtime: None,
             reply,
         });
         let kept: Option<Kept> = answer.blocking_recv().unwrap();

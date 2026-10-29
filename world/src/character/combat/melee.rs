@@ -1478,6 +1478,7 @@ mod tests {
             part_base: 0,
             hair_part: 0,
             sash_part: 0,
+            playtime: 0,
         })
     }
 
@@ -1813,6 +1814,7 @@ mod tests {
                     part_base: 0,
                     hair_part: 0,
                     sash_part: 0,
+                    playtime: 0,
                 });
                 let expected = if usize::from(race % 4) == job {
                     750
@@ -1851,6 +1853,7 @@ mod tests {
             part_base: 0,
             hair_part: 0,
             sash_part: 0,
+            playtime: 0,
         });
         // Map 373 asks for 15 strength; 10 halves the 322.
         let mut dice = Script::new(&[0]);

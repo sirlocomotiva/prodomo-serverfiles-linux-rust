@@ -355,6 +355,10 @@ pub enum GameCommand {
     KeptOf {
         /// The VID the character entered the world under.
         vid: common::vid::Vid,
+        /// The minutes played the save banks, which `CreatePlayerProto` writes into the real
+        /// `POINT_PLAYTIME` before it reads the points (`G/char.cpp:1519-1545`); `None`
+        /// leaves them.
+        playtime: Option<i32>,
         /// Where the game thread reports them, `None` when it does not hold the character.
         reply: oneshot::Sender<Option<Kept>>,
     },
@@ -2039,16 +2043,24 @@ impl GameLoopController {
     }
 
     /// Asks the world for the points and quickslots of the character online under `vid`,
-    /// which a save writes from.
+    /// which a save writes from, after it banks `playtime` minutes played when there are any.
     ///
     /// # Errors
     ///
     /// As [`Self::move_item`].
-    pub async fn kept_of(&self, vid: common::vid::Vid) -> Result<Option<Kept>, MoveItemError> {
+    pub async fn kept_of(
+        &self,
+        vid: common::vid::Vid,
+        playtime: Option<i32>,
+    ) -> Result<Option<Kept>, MoveItemError> {
         let (reply, answer) = oneshot::channel();
-        self.send_command(GameCommand::KeptOf { vid, reply })
-            .await
-            .map_err(|_| MoveItemError::NotSent)?;
+        self.send_command(GameCommand::KeptOf {
+            vid,
+            playtime,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 

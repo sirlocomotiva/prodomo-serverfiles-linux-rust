@@ -1184,6 +1184,7 @@ mod tests {
             part_base: 0,
             hair_part: 0,
             sash_part: 0,
+            playtime: 0,
         })
     }
 

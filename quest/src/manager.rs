@@ -151,6 +151,10 @@ pub trait Game {
     /// `GetLevel()` of the character the script runs for.
     fn level(&self) -> u8;
 
+    /// `GetRealPoint(POINT_PLAYTIME)` of the character the script runs for: the whole minutes
+    /// it has played, as the character's last save banked them.
+    fn playtime(&self) -> i32;
+
     /// The race of the character `vid`, when it is in the world.
     fn race_of(&self, vid: u32) -> Option<u32>;
 
@@ -2059,8 +2063,9 @@ fn text_api(
     Ok(TextOutcome::Hit(result))
 }
 
-/// The `pc.*` bridged names: the level, the map, the quest flags, the grand-master read, the
-/// skill level and the block mode. Returns `None` for a name this table does not hold.
+/// The `pc.*` bridged names: the level, the minutes played, the map, the quest flags, the
+/// grand-master read, the skill level and the block mode. Returns `None` for a name this table
+/// does not hold.
 fn pc_api(
     lua: &Lua,
     cx: &mut Cx<'_>,
@@ -2072,6 +2077,11 @@ fn pc_api(
     let number = |value: u32| Some(Value::Number(f64::from(value)));
     let result = match name {
         b"pc.get_level" => number(u32::from(cx.game.level())),
+        // `pc_get_playtime` (`G/questlua_pc.cpp:874-878`) under both names it is registered as
+        // (`:3841-3842`).
+        b"pc.getplaytime" | b"pc.get_playtime" => {
+            Some(Value::Number(f64::from(cx.game.playtime())))
+        }
         b"pc.get_map_index" => Some(Value::Number(f64::from(cx.game.map_index()))),
         b"pc.get_war_map" => Some(Value::Number(f64::from(cx.game.war_map()))),
         b"pc.is_gm" => Some(Value::Boolean(false)),
@@ -2507,6 +2517,7 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         level: u8,
+        playtime: i32,
         races: BTreeMap<u32, u32>,
         chats: Vec<(ChatKind, Vec<u8>)>,
         scripts: Vec<(u8, Vec<u8>)>,
@@ -2547,6 +2558,10 @@ mod tests {
     impl Game for Fake {
         fn level(&self) -> u8 {
             self.level
+        }
+
+        fn playtime(&self) -> i32 {
+            self.playtime
         }
 
         fn race_of(&self, vid: u32) -> Option<u32> {
@@ -3350,8 +3365,8 @@ mod tests {
         assert!(error.contains("not ported: guild.is_war"), "{error}");
     }
 
-    /// The `pc.*` arms: the level, the grand-master read (each numbered read bumps the
-    /// count in the flags, dworded), and the skill level.
+    /// The `pc.*` arms: the level, the minutes played under both names, the grand-master
+    /// read (each numbered read bumps the count in the flags, dworded), and the skill level.
     #[test]
     fn the_pc_names_answer_and_count_the_reads() {
         let manager = manager().lock().unwrap();
@@ -3366,6 +3381,15 @@ mod tests {
         };
         probe.game.level = 40;
         assert_eq!(probe.call("pc.get_level", &[]).unwrap(), number(40.0));
+        probe.game.playtime = -0x0102_0304;
+        assert_eq!(
+            probe.call("pc.get_playtime", &[]).unwrap(),
+            number(-16_909_060.0)
+        );
+        assert_eq!(
+            probe.call("pc.getplaytime", &[]).unwrap(),
+            number(-16_909_060.0)
+        );
         let table = Value::Table(lua.create_table().unwrap());
         // a non-number pushes nothing.
         let climbed = |probe: &mut Probe, args: &[Value]| {

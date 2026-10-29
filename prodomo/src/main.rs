@@ -787,8 +787,11 @@ async fn save_on_tick(context: &ConnectionContext, addr: SocketAddr, held: &mut 
     if let Some(event) = held.save.as_mut() {
         event.queued = true;
     }
-    hold_world_points(context, addr, held).await;
-    if save_held(context, &*held, std::time::Instant::now()).await {
+    // One instant for the bank the world takes and the row the save writes, so both hold the
+    // same minutes.
+    let at = std::time::Instant::now();
+    hold_world_points(context, addr, held, at).await;
+    if save_held(context, &*held, at).await {
         info!(%addr, "Save event wrote the character row");
     }
 }
@@ -993,11 +996,17 @@ fn hold_kept(held: &mut Held, kept: Kept) {
 /// the save writes from. The world changes them on its own (the potion recovery on its pulse, a
 /// trade the partner closes, every move), so the copy the last item step left can be stale. A world that
 /// cannot answer leaves the held copy, which is still a state the character was in.
-async fn hold_world_points(context: &ConnectionContext, addr: SocketAddr, held: &mut Held) {
+async fn hold_world_points(
+    context: &ConnectionContext,
+    addr: SocketAddr,
+    held: &mut Held,
+    at: std::time::Instant,
+) {
     let Some(vid) = held.world else {
         return;
     };
-    match context.game.kept_of(vid).await {
+    let banked = played(held, at).map(|played| played.minutes);
+    match context.game.kept_of(vid, banked).await {
         Ok(Some(kept)) => hold_kept(held, kept),
         Ok(None) => {}
         Err(error) => warn!(%addr, %error, "The world could not be asked for the points to save"),
@@ -5799,6 +5808,26 @@ async fn join_the_world(
     }
 }
 
+/// The minutes a save at `at` banks for the held character (`G/char.cpp:1519-1545`): the
+/// stored minutes and every whole minute since the session's play clock started, or `None`
+/// before the character is in the game.
+///
+/// The stored minutes are the row's as the session loaded it, never a later bank's, and the
+/// clock is never reset, so each save banks the whole session again. That is legacy's sum:
+/// its carry of the remainder makes the minutes banked so far the session's whole minutes.
+fn played(held: &Held, at: std::time::Instant) -> Option<prodomo::save::Playtime> {
+    let character = held.character.as_ref()?;
+    let event = held.save.as_ref()?;
+    // `get_dword_time() - m_dwPlayStartTime` is an unsigned 32-bit millisecond count
+    // (`server/server/libthecore/utils.cpp:467-472`), so an elapsed time that overflowed a
+    // 32-bit `DWORD` wraps in legacy and wraps here. `Instant` cannot go backwards, so this is
+    // the one value that is clamped rather than wrapped: a negative elapsed time is not a time
+    // travel, it is a clock this Rewrite does not have.
+    let elapsed = u32::try_from(at.saturating_duration_since(event.play_start).as_millis())
+        .unwrap_or(u32::MAX);
+    Some(prodomo::save::playtime(character.playtime_minutes, elapsed))
+}
+
 /// Write the character's row, the way `CHARACTER::SaveReal` does.
 ///
 /// Returns `false` when the character could not be written, which is either legacy's own
@@ -5817,19 +5846,12 @@ async fn save_held(context: &ConnectionContext, held: &Held, at: std::time::Inst
     ) else {
         return false;
     };
-    let Some(event) = held.save.as_ref() else {
+    let Some(played) = played(held, at) else {
         return false;
     };
     if prodomo::save::judge_save_real(false, true) != prodomo::save::SaveRealOutcome::Write {
         return false;
     }
-    // `get_dword_time() - m_dwPlayStartTime` is an unsigned 32-bit millisecond count
-    // (`server/server/libthecore/utils.cpp:467-472`), so an elapsed time that overflowed a
-    // 32-bit `DWORD` wraps in legacy and wraps here. `Instant` cannot go backwards, so this is
-    // the one value that is clamped rather than wrapped: a negative elapsed time is not a time
-    // travel, it is a clock this Rewrite does not have.
-    let elapsed = u32::try_from(at.saturating_duration_since(event.play_start).as_millis())
-        .unwrap_or(u32::MAX);
     // `CHARACTER::Save` writes the pending Warp destination, when there is one, instead of
     // the position (`G/char.cpp:1551-1565`). The map rides with it, as legacy's
     // `tab.lMapIndex` does (`G/char.cpp:1552-1564`): a private map's index names the copy
@@ -5852,7 +5874,7 @@ async fn save_held(context: &ConnectionContext, held: &Held, at: std::time::Inst
         character,
         prodomo::save::SavePosition { x, y, map_index },
         held.exit.unwrap_or_default(),
-        prodomo::save::playtime(character.playtime_minutes, elapsed),
+        played,
     );
     match db::players::save_character(&context.store, account.id, character.id, &save).await {
         // Legacy writes the quickslots in the player row (`G/char.cpp:1603-1604`); here they
@@ -9263,6 +9285,63 @@ mod tests {
         assert!(kept.random_sp >= 18 && kept.random_sp <= 22);
         assert_eq!(kept.stat_point, 3);
         assert_eq!(kept.level_step, 0);
+    }
+
+    /// A save banks the loaded minutes and the session's whole minutes (`G/char.cpp:1519-1545`),
+    /// strictly past each minute, and before the play clock starts it banks nothing. The row
+    /// the descriptor holds keeps the loaded minutes when the world's points come back with a
+    /// bank in them, so the next bank does not count the last one again.
+    #[tokio::test]
+    async fn a_save_banks_the_loaded_minutes_and_the_whole_session() {
+        let start = std::time::Instant::now();
+        let after = |millis| start + std::time::Duration::from_millis(millis);
+        let character = db::players::Character {
+            playtime_minutes: 300,
+            ..alice()
+        };
+        let mut held = Held {
+            character: Some(character.clone()),
+            ..Held::default()
+        };
+        assert_eq!(played(&held, after(90_000)), None, "no play clock yet");
+        held.save = Some(SaveEvent {
+            interval: tokio::time::interval(std::time::Duration::from_secs(120)),
+            play_start: start,
+            queued: false,
+        });
+        let minutes = |held: &Held, millis| played(held, after(millis)).map(|p| p.minutes);
+        assert_eq!(
+            minutes(&held, 60_000),
+            Some(300),
+            "a whole minute is not past it"
+        );
+        assert_eq!(minutes(&held, 60_001), Some(301));
+
+        let mut points = load_points(&character, 41);
+        points.set_playtime(301);
+        hold_points(&mut held, points);
+        assert_eq!(
+            held.character.as_ref().map(|held| held.playtime_minutes),
+            Some(300),
+            "the row keeps the loaded minutes"
+        );
+        assert_eq!(
+            minutes(&held, 150_000),
+            Some(302),
+            "the whole session, once"
+        );
+        assert_eq!(
+            played(
+                &Held {
+                    character: None,
+                    save: held.save.take(),
+                    ..Held::default()
+                },
+                after(150_000)
+            ),
+            None,
+            "no character"
+        );
     }
 
     /// The alignment the world holds is what the save writes: the row the descriptor holds

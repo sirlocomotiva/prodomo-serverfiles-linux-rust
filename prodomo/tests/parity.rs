@@ -4938,8 +4938,8 @@ fn the_quest_window_runs_the_letters_info_and_the_quest_moves_on() {
 const THEOWAHDAN_VNUM: u16 = 60_003;
 
 /// Send `CG_ENTER_GAME` from the loading phase and read the enter-game burst up to the quest
-/// login event, answering the VID of the one Theowahdan the view shows.
-fn enter_beside_theowahdan(keyed: &mut Keyed) -> u32 {
+/// login event, answering the VID of the one character of race `vnum` the view shows.
+fn enter_beside(keyed: &mut Keyed, vnum: u16) -> u32 {
     keyed.send_record(&client_enter_game());
     assert_eq!(keyed.read_game()[0], GC_CHARACTER_ADD);
     assert_eq!(keyed.read_game()[0], GC_CHAR_ADDITIONAL_INFO);
@@ -4948,10 +4948,10 @@ fn enter_beside_theowahdan(keyed: &mut Keyed) -> u32 {
     let seen: Vec<u32> = shown
         .inserts()
         .iter()
-        .filter(|insert| insert[22..24] == THEOWAHDAN_VNUM.to_le_bytes())
+        .filter(|insert| insert[22..24] == vnum.to_le_bytes())
         .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
         .collect();
-    assert_eq!(seen.len(), 1, "map 1 has one Theowahdan, in view");
+    assert_eq!(seen.len(), 1, "map 1 has one {vnum}, in view");
     assert_eq!(keyed.read_game(), [GC_PHASE, PHASE_GAME]);
     assert_eq!(keyed.read_game()[0], GC_TIME);
     assert_eq!(keyed.read_game(), [GC_CHANNEL, 1]);
@@ -5013,7 +5013,7 @@ fn the_sash_letter_marks_theowahdan_and_the_letter_pass_marks_him_again() {
           flag (name, value) WHERE player.name = 'Alpha'",
     );
     let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
-    let theowahdan = enter_beside_theowahdan(&mut alice);
+    let theowahdan = enter_beside(&mut alice, THEOWAHDAN_VNUM);
     read_login_lines(&mut alice, 0, None);
     read_letter(
         &mut alice,
@@ -5056,7 +5056,7 @@ fn the_sash_letter_marks_theowahdan_and_the_letter_pass_marks_him_again() {
 
     let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
     assert_eq!(
-        enter_beside_theowahdan(&mut alice),
+        enter_beside(&mut alice, THEOWAHDAN_VNUM),
         theowahdan,
         "the map keeps its NPCs"
     );
@@ -5179,7 +5179,7 @@ fn a_click_on_marked_theowahdan_runs_the_sash_quests_target_script() {
           player.name = 'Alpha'",
     );
     let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
-    let theowahdan = enter_beside_theowahdan(&mut alice);
+    let theowahdan = enter_beside(&mut alice, THEOWAHDAN_VNUM);
     read_login_lines(&mut alice, 0, None);
     read_letter(
         &mut alice,
@@ -5255,6 +5255,266 @@ fn a_click_on_marked_theowahdan_runs_the_sash_quests_target_script() {
         vec![vec![1_675_612_723]],
         "the CRC32 of `go_to_disciple`"
     );
+}
+
+/// The captain, vnum 20355, whose `target.click` the sash quest's `go_to_disciple` and
+/// `time_to_wait` states run.
+const CAPTAIN_VNUM: u16 = 20_355;
+
+/// What `sash_mission`'s `captain.target.click` says after its title and before its `wait()`
+/// (`_basic/sash_mission.lua:87-100`). `mob_name(60003)` is Theowahdan's name in
+/// `mob_names.txt`.
+const CAPTAIN_CLICK_FIRST: [&[u8]; 13] = [
+    b"",
+    b"Congratulations! teowahdan told me that you come to",
+    b"visit me. I recently discovered that Sung Mahi",
+    b"become more stronger.",
+    b"",
+    b"At least one of us must have its powers or Sung",
+    b"Mahi will destroy all.",
+    b"",
+    b"I can make a special coat but will not be so easy.",
+    b"",
+    b"Give me three hours, then I'll give you material",
+    b"you need.",
+    b"",
+];
+
+/// What it says after the `wait()` and before its `select("Yes", "No")` (`:102-109`).
+const CAPTAIN_CLICK_LAST: [&[u8]; 8] = [
+    b"",
+    b"If you come back in three hours, I will have",
+    b"the material ready for you.",
+    b"",
+    b"I promise you!",
+    b"",
+    b"Don't forget to visit me in three hours!",
+    b"",
+];
+
+/// Alpha, who has played 300 minutes, logs in 1000 from the captain with the Yohara quest at
+/// `information_new` and the sash flags `sash` (SQL row values), and reads the login burst:
+/// the lines, `item_attr67add`'s letter, the captain's mark with ID 1 and the two quests'
+/// letters, the sash's titled "Increase your power". Answers the captain's VID.
+fn enter_beside_the_captain(
+    server: &Server,
+    database: &ScratchDatabase,
+    sash: &str,
+) -> (Keyed, u32) {
+    create_account(server, "alice");
+    add_characters(database);
+    sql(
+        database,
+        "UPDATE player SET x = 466900, y = 950100, playtime_minutes = 300 WHERE name = 'Alpha'",
+    );
+    // The CRC32 of `information_new`.
+    sql(
+        database,
+        &format!(
+            "INSERT INTO quest_flag (player_id, name, value) SELECT player.id, flag.name, \
+             flag.value FROM player, (VALUES {sash}, ('yohara_system.__status'::bytea, \
+             1998515313)) AS flag (name, value) WHERE player.name = 'Alpha'"
+        ),
+    );
+    let (mut alice, _alpha, _items) = load_character(server, b"alice", 0);
+    let captain = enter_beside(&mut alice, CAPTAIN_VNUM);
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    assert_eq!(read_quest_target_create(&mut alice, 1, b"Captain"), captain);
+    read_letter(
+        &mut alice,
+        QUEST_SASH,
+        b"Increase your power",
+        "the sash's letter",
+    );
+    read_letter(
+        &mut alice,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the Yohara quest's letter",
+    );
+    (alice, captain)
+}
+
+/// `lua.pc.get_playtime`, `lua.pc.getplaytime`, `quest.sash_mission`: Alpha, level 154, has
+/// played 300 minutes and logs in on map 1 1000 from the captain with `sash_mission` at
+/// `go_to_disciple`, whose letter marks him with ID 1. The click runs the quest's
+/// `target.click`: the mark goes, the first page waits, and the second ends in
+/// `select("Yes", "No")` (`GotoSelectState`, `G/questlua.cpp:828-866`). "Yes" stores
+/// `60 * 3 + pc.get_playtime()`, which reads `GetRealPoint(POINT_PLAYTIME)`
+/// (`G/questlua_pc.cpp:874-878`), the minutes the row held (`SetPlayerProto`,
+/// `G/char.cpp:2296`); nothing is said after the answer, and `Select` set the done flag, so
+/// the end is `[DONE]` with no window (`G/questmanager.cpp:401-440`, `:1113-1130`). The new
+/// state's letter marks the captain again with ID 2. The quest window's entry runs
+/// `time_to_wait`'s `info`, which reads the play time twice: 480 less 300 is 180 minutes
+/// left. Less than a minute is played, so the save banks nothing: the row keeps 300 and
+/// stores the wait and the state.
+#[test]
+fn a_yes_to_the_captain_waits_three_hours_of_playtime() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    // The CRC32 of `go_to_disciple`.
+    let (mut alice, captain) = enter_beside_the_captain(
+        &server,
+        &database,
+        "('sash_mission.__status'::bytea, 1675612723)",
+    );
+    assert_eq!(
+        alice.read_game_marked(),
+        server_quest_target_update(1, CAPTAIN_SPOT.0, CAPTAIN_SPOT.1),
+        "the mark's event sends where the captain stands"
+    );
+
+    alice.send_record(&client_click(captain));
+    assert_eq!(alice.read_game_marked(), server_quest_target_delete(1));
+    assert_eq!(
+        alice.read_game_marked(),
+        server_script(1, &titled_page(b"Capitan", &CAPTAIN_CLICK_FIRST, b"[NEXT]"))
+    );
+    alice.send_record(&client_script_answer(254));
+    assert_eq!(
+        alice.read_game_marked(),
+        server_script(
+            1,
+            &titled_page(b"Capitan", &CAPTAIN_CLICK_LAST, b"[QUESTION 1;Yes|2;No]")
+        )
+    );
+    alice.still_marked_for("the menu waits for its answer", QUIET_WINDOW);
+    alice.send_record(&client_script_answer(0));
+    assert_eq!(
+        alice.read_game_marked(),
+        server_script(0, b"[DONE]"),
+        "nothing is said after the answer"
+    );
+    assert_eq!(read_quest_target_create(&mut alice, 2, b"Captain"), captain);
+    read_letter(
+        &mut alice,
+        QUEST_SASH,
+        b"Increase your power",
+        "the new state",
+    );
+    assert_eq!(
+        alice.read_game_marked(),
+        server_quest_target_update(2, CAPTAIN_SPOT.0, CAPTAIN_SPOT.1),
+        "the new mark's event"
+    );
+
+    alice.send_record(&client_script_button(u32::from(QUEST_SASH) | SELECT_QUEST));
+    assert_eq!(
+        alice.read_game_marked(),
+        server_script(
+            1,
+            &titled_page(
+                b"Increase your power",
+                &[
+                    b"",
+                    b"Find the Capitan for take the material.",
+                    b"",
+                    b"Remaining time: 180 minutes.",
+                    b"",
+                ],
+                b"[DONE]"
+            )
+        ),
+        "480 less the 300 minutes played"
+    );
+    alice.still_marked_for("nothing follows", Duration::from_millis(1_500));
+
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    let flags = support::rows(
+        database.url(),
+        "SELECT value FROM quest_flag WHERE player_id = (SELECT id FROM player WHERE name = \
+          'Alpha') AND name IN ('sash_mission.__status'::bytea, \
+          'sash_mission.time_to_wait'::bytea) ORDER BY name",
+        1,
+    );
+    // The CRC32 of `time_to_wait` is 3464966988, stored as the `int` it is.
+    assert_eq!(flags, vec![vec![-830_000_308], vec![480]]);
+    let played = support::rows(
+        database.url(),
+        "SELECT playtime_minutes FROM player WHERE name = 'Alpha'",
+        1,
+    );
+    assert_eq!(played, vec![vec![300]], "less than a minute banks nothing");
+}
+
+/// `time_to_wait`'s window (`_basic/sash_mission.lua:128-138`) for a wait with `left` minutes
+/// to go: the title, the captain's errand, and the minutes `pc.getqf("time_to_wait")` is past
+/// `pc.get_playtime()`.
+fn wait_page(left: &[u8]) -> Vec<u8> {
+    titled_page(
+        b"Increase your power",
+        &[
+            b"",
+            b"Find the Capitan for take the material.",
+            b"",
+            left,
+            b"",
+        ],
+        b"[DONE]",
+    )
+}
+
+/// `lua.pc.get_playtime`, `sys.char.save`: with the save cycle at a second, the first save
+/// past a minute of play banks the minute (`CreatePlayerProto`, `G/char.cpp:1519-1545`) into
+/// the real `POINT_PLAYTIME` that `pc.get_playtime` reads (`G/questlua_pc.cpp:874-878`).
+/// Alpha has played 300 minutes and waits at `time_to_wait` for 480, so the quest window says
+/// 180 minutes are left; 62 seconds after the entry, which started the play clock
+/// (`ResetPlayTime`, `G/input_login.cpp:653`), it says 179, and the logout stores 301. The
+/// ping cycle is set past the wait, so the silent client is not closed.
+#[test]
+fn a_save_past_a_minute_of_play_counts_the_captains_wait_down() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "save_event_second_cycle = 1\nping_event_second_cycle = 600",
+    );
+    // The CRC32 of `time_to_wait`, 3464966988, stored as the `int` it is, and the wait's end.
+    let (mut alice, _captain) = enter_beside_the_captain(
+        &server,
+        &database,
+        "('sash_mission.__status'::bytea, -830000308), \
+          ('sash_mission.time_to_wait'::bytea, 480)",
+    );
+    // The entry started the play clock a little before the letters' reads end.
+    let entered = std::time::Instant::now();
+
+    let button = client_script_button(u32::from(QUEST_SASH) | SELECT_QUEST);
+    alice.send_record(&button);
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &wait_page(b"Remaining time: 180 minutes.")),
+        "480 less the 300 minutes the row holds"
+    );
+    // A save strictly past 60 000 ms banks the minute, and the cycle saves every second.
+    std::thread::sleep(Duration::from_secs(62).saturating_sub(entered.elapsed()));
+    alice.send_record(&button);
+    assert_eq!(
+        alice.read_game(),
+        server_script(1, &wait_page(b"Remaining time: 179 minutes.")),
+        "the save banked the minute played"
+    );
+
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    let played = support::rows(
+        database.url(),
+        "SELECT playtime_minutes FROM player WHERE name = 'Alpha'",
+        1,
+    );
+    assert_eq!(played, vec![vec![301]], "the logout banks the same minute");
 }
 
 /// `npc.txt`'s keeper on map 3, vnum 20042, whose click trigger is the shop's. Its shop, 9,

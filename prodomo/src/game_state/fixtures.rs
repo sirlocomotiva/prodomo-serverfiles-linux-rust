@@ -128,6 +128,7 @@ pub(super) fn points_at(level: u8, stamina: i32, exp: i64) -> Points {
         part_base: 0,
         hair_part: 0,
         sash_part: 0,
+        playtime: 0,
     });
     let _ = points.compute_points();
     points

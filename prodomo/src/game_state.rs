@@ -935,7 +935,11 @@ impl GameState {
                 reply,
             } => self.answer_leave(vid, departure, reply),
             GameCommand::Quickslot { vid, step, reply } => self.answer_quickslot(vid, step, reply),
-            GameCommand::KeptOf { vid, reply } => self.answer_kept(vid, reply),
+            GameCommand::KeptOf {
+                vid,
+                playtime,
+                reply,
+            } => self.answer_kept(vid, playtime, reply),
             GameCommand::MapOf {
                 channel,
                 map_index,
@@ -1267,8 +1271,23 @@ impl GameState {
 
     /// Tell the caller what a save of the character under `vid` writes: its points, its
     /// quickslots, its quest flags and where its body stands, or `None` when it is not
-    /// online.
-    fn answer_kept(&self, vid: common::vid::Vid, reply: oneshot::Sender<Option<Kept>>) {
+    /// online. The minutes the save banks land in its points first, as `CreatePlayerProto`
+    /// banks them before it reads the points (`G/char.cpp:1519-1545`), so a quest's
+    /// `pc.get_playtime` reads them from then on.
+    fn answer_kept(
+        &mut self,
+        vid: common::vid::Vid,
+        playtime: Option<i32>,
+        reply: oneshot::Sender<Option<Kept>>,
+    ) {
+        let points = self
+            .characters
+            .find_by_vid_mut(vid)
+            .ok()
+            .and_then(|character| character.items_and_points_mut().1);
+        if let (Some(minutes), Some(points)) = (playtime, points) {
+            points.set_playtime(minutes);
+        }
         let place = self.kept_place(vid);
         let affects = self.saved_affects_of(vid);
         let kept = self.characters.find_by_vid(vid).ok().map(|character| Kept {
@@ -5046,6 +5065,7 @@ mod tests {
             part_base: 0,
             hair_part: 0,
             sash_part: 0,
+            playtime: 0,
         });
         let _ = points.compute_points();
         for kind in [common::point_slot::POINT_HP, common::point_slot::POINT_SP] {
@@ -5151,6 +5171,7 @@ mod tests {
         let (reply, answer) = tokio::sync::oneshot::channel();
         state.apply(GameCommand::KeptOf {
             vid: Vid::new(7),
+            playtime: None,
             reply,
         });
         let kept = answer
@@ -5171,6 +5192,7 @@ mod tests {
         let (reply, answer) = tokio::sync::oneshot::channel();
         state.apply(GameCommand::KeptOf {
             vid: Vid::new(7),
+            playtime: None,
             reply,
         });
         assert_eq!(answer.blocking_recv().unwrap(), None);

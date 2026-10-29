@@ -478,6 +478,12 @@ impl Game for Session<'_> {
         self.level
     }
 
+    fn playtime(&self) -> i32 {
+        self.points.as_deref().map_or(0, |points| {
+            points.real_point(common::point_slot::POINT_PLAYTIME)
+        })
+    }
+
     fn race_of(&self, vid: u32) -> Option<u32> {
         self.npcs?
             .npcs
@@ -1493,6 +1499,106 @@ mod tests {
             .quest(vid, &QuestStep::Button(999 | QUEST_INFO_BIT), place, mover)
             .expect("the world holds the character");
         assert!(records.is_empty(), "an unknown quest is quiet: {records:?}");
+    }
+
+    /// `pc.get_playtime` reads `GetRealPoint(POINT_PLAYTIME)` (`G/questlua_pc.cpp:874-878`):
+    /// the minutes the points loaded with, and once a save banks the minutes played
+    /// (`CreatePlayerProto`, `G/char.cpp:1519-1545`) the banked ones. The sash quest's
+    /// `time_to_wait` window says how many of its wait's minutes are left.
+    #[test]
+    fn the_sash_wait_counts_down_the_minutes_a_save_banks() {
+        use crate::game_loop_messages::GameCommand;
+        use crate::game_state::fixtures::{a_world, enter, points_at, TestClock, PLACE};
+
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let locale_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/locale/europe");
+        let manager = Manager::load(&locale_dir).unwrap_or_else(|error| panic!("{error}"));
+        let quest = manager
+            .host()
+            .quest_index(b"sash_mission")
+            .expect("the sash quest");
+        world.quests = Some(Quests::new(
+            manager,
+            Arc::default(),
+            MobNamesByLanguage::default(),
+        ));
+        let mut inbox = enter(&mut world, 1, (500, 500), 0);
+        while inbox.try_recv().is_ok() {}
+        let vid = Vid::new(1);
+        let mut points = points_at(154, 0, 0);
+        points.set_playtime(300);
+        world
+            .characters
+            .find_by_vid_mut(vid)
+            .expect("entered")
+            .set_points(Some(points));
+        if let Some(quests) = world.quests.as_mut() {
+            // The CRC32 of `time_to_wait`, 3464966988, stored as the `int` it is.
+            quests.manager_mut().load_flags(
+                1,
+                [
+                    (b"sash_mission.__status".to_vec(), -830_000_308),
+                    (b"sash_mission.time_to_wait".to_vec(), 480),
+                ],
+            );
+        }
+        let place = GroundPlace {
+            channel: PLACE.0,
+            map: PLACE.1,
+            x: 500,
+            y: 500,
+        };
+        let mover = world.own_mover(vid).expect("in the world");
+        let left = |world: &mut GameState, minutes: i32| {
+            let (records, _climbs, _stores) = world
+                .quest(
+                    vid,
+                    &QuestStep::Button(quest | QUEST_INFO_BIT),
+                    place,
+                    mover,
+                )
+                .expect("the world holds the character");
+            let info = records
+                .iter()
+                .find_map(|record| GcScript::decode(record).ok())
+                .expect("the info dialog");
+            let line = format!("Remaining time: {minutes} minutes.");
+            assert!(
+                info.script
+                    .windows(line.len())
+                    .any(|window| window == line.as_bytes()),
+                "{line} in {:?}",
+                String::from_utf8_lossy(&info.script)
+            );
+        };
+        let bank = |world: &mut GameState, playtime: Option<i32>| {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            world.apply(GameCommand::KeptOf {
+                vid,
+                playtime,
+                reply,
+            });
+            answer
+                .blocking_recv()
+                .expect("the world answers")
+                .and_then(|kept| kept.points)
+                .map(|points| points.real_point(common::point_slot::POINT_PLAYTIME))
+        };
+        left(&mut world, 180);
+        assert_eq!(
+            bank(&mut world, Some(302)),
+            Some(302),
+            "the save reads the bank"
+        );
+        left(&mut world, 178);
+        assert_eq!(
+            bank(&mut world, None),
+            Some(302),
+            "no bank leaves the minutes"
+        );
+        left(&mut world, 178);
     }
 
     fn proto(vnum: u32, mob_type: u8) -> gamedata::mob_proto::MobProto {

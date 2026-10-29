@@ -36263,3 +36263,110 @@ Gates:
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
 
 No ADR changed. No owner question added. V26 stays open.
+
+## 261. The captain's "Yes" and the play time (`lua.pc.get_playtime`, `lua.pc.getplaytime`)
+
+The sash quest's captain now answers his click. His `select("Yes", "No")` answered 1 stores
+`time_to_wait` at `60 * 3 + pc.get_playtime()` and moves the quest to `time_to_wait`, and that
+state's window counts the wait down in minutes played.
+
+**The play time in the world.** `PointsRow` gains `playtime`, and `Points::load` puts it in the
+real `POINT_PLAYTIME` only, as `SetPlayerProto` does (`SetRealPoint(POINT_PLAYTIME,
+t->playtime)`, `G/char.cpp:2296`). Nothing sets the instant slot, so the points record still
+sends 0 there (`PointsPacket` sends `GetPoint`, `G/char.cpp:2056-2057`). `load_points` passes the
+row's `playtime_minutes`. The new `Points::set_playtime` is `SetRealPoint(POINT_PLAYTIME, ...)`.
+Every full `PointsRow` literal in `world` and `prodomo` names the field; 14 were found by a
+script rather than by line number.
+
+**The bank.** `CreatePlayerProto` banks the minutes played into the real point before it reads
+the points (`G/char.cpp:1519-1545`). The save cycle now computes the bank once, at one instant,
+through the new `played(held, at)` in `prodomo/src/main.rs`. `GameCommand::KeptOf` carries it as
+`playtime: Option<i32>`, `answer_kept` sets it on the character's points before it reads them,
+and `save_held` writes the same minutes. The descriptor's row keeps the minutes it loaded:
+`hold_points` does not copy the bank back, because `played` adds the session's whole minutes to
+the loaded ones each time, which is what legacy's remainder carry amounts to. A Warp and the
+logout bank too, but the character leaves the world, and the next session loads the row.
+
+**The quest call.** `Game::playtime` is `GetRealPoint(POINT_PLAYTIME)`, and the `pc_api` arm
+answers it under both registered names, `pc.getplaytime` and `pc.get_playtime`
+(`pc_get_playtime`, `G/questlua_pc.cpp:874-878`, `:3841-3842`). `BRIDGED` has 76 names, in
+`api::NAMES` order. The session reads its points, and 0 without them.
+
+**Divergence.** Legacy banks at every `SaveReal`, which the delayed-save queue runs within 29
+Pulses of each `CHARACTER::Save()` (`G/char.cpp:1472-1476`): a level step (`:4001`, `:4241`), a
+quest reward (`G/questpc.cpp:332-337`), a skill change (`G/char_skill.cpp:716`, `:902`), a trade,
+a shop and more. The Rewrite's world sees only the save cycle's bank, so `pc.get_playtime` can be
+up to one cycle (120 seconds by default) late. Recorded in STATUS.
+
+**Not ported.** Each bank's alignment: 5 a minute, or 60 or 120 for a negative alignment, outside
+a `BANPK` cell (`UpdateAlignment`, `G/char.cpp:1529-1539`). It is noted in `sys.char.save` and in
+the STATUS Divergence row. The captain's click after the wait calls `pc.give_item2`, a refused
+name, and `__complete` needs `pc.count_item`, `pc.remove_item`, `pc.give_item2_select` and
+`item.set_socket`.
+
+**The tests.**
+
+- `world`: `the_playtime_is_a_real_point_the_bank_replaces`.
+- `prodomo` lib: `the_playtime_loads_as_a_real_point_the_points_record_does_not_send`
+  (`loading_phase`), and `the_sash_wait_counts_down_the_minutes_a_save_banks`
+  (`game_state::quests`). The second runs the owner's `sash_mission` at `time_to_wait` with a
+  wait ending at 480 and 300 minutes played: the window says 180, a `KeptOf` banking 302 says 178,
+  and a `KeptOf` with no bank leaves 302.
+- `prodomo` bin: `a_save_banks_the_loaded_minutes_and_the_whole_session`. No play clock means
+  no bank; 60 000 ms banks nothing and 60 001 banks a minute; a held row that took back points
+  holding 301 still banks 302 at 150 seconds, not 303.
+- `quest`: `the_pc_names_answer_and_count_the_reads` reads a negative play time under both
+  names.
+- Parity, `prodomo/tests/parity.rs`:
+  - `a_yes_to_the_captain_waits_three_hours_of_playtime`. Alpha has 300 minutes and stands
+    1000 from the captain at `go_to_disciple`. The login marks him with ID 1, and the update
+    follows. The click deletes the mark and says the first page up to its `wait()`. The answer
+    says the second page, ending in `[QUESTION 1;Yes|2;No]`. Answer 0 gets `[DONE]` with skin
+    0 (`Select` set the done flag, `G/questmanager.cpp:1113-1130`). Then the new state's letter
+    marks him with ID 2, and its update follows. The quest window says 180 minutes. The logout
+    stores the state's CRC32 (3464966988 as the `int` -830000308), the flag 480, and 300
+    minutes, since less than a minute was played.
+  - `a_save_past_a_minute_of_play_counts_the_captains_wait_down`. The save cycle is 1 second
+    and the ping cycle 600. The window says 180 minutes, then 179 at 62 seconds after the
+    entry. The logout stores 301. This scenario takes about 65 seconds.
+  - `enter_beside_theowahdan` became `enter_beside(keyed, vnum)` for both NPCs.
+
+**Rows.**
+
+- `lua.pc.get_playtime` is `ported`, with `a_yes_to_the_captain_waits_three_hours_of_playtime`.
+- `lua.pc.getplaytime` is `partial`: it is backed with unit tests only, and no quest calls it.
+  `questlib.lua`'s `pc_index_table` maps `playtime` to it, but no quest reads `pc.playtime`
+  (sweep of the quest folder: `pc.get_playtime` only in `sash_mission.lua`. Positive control:
+  10 files call `pc.get_level`).
+- Notes were added to `quest.sash_mission` and to `sys.char.save`. `sys.char.save` notes the
+  bank, the Divergence and the alignment that is not ported.
+
+**STATUS.** It has the next slice and the 76 backed names. It fixes the stale quest-flags row,
+which said `pc.setqf` was not ported though ledger 259 ported it. It adds the Divergence row.
+
+**Mutation sweep.** 13 mutants (P1-P13) were applied to the pristine files, and each changed
+executable code. Every file was restored by checksum. 12 were killed, all semantic, with no
+compile-error kills. P2 (the load sets the instant `POINT_PLAYTIME` too) survived as an
+equivalent mutant: `compute_points` clears the instant array (`points.rs:1133`), so the write
+is never seen. The class it hides, a points record that sends the play time, is pinned by the
+loading test's check of slot 31.
+
+**Clippy.** The first gate run failed `too_many_lines` (113/100) on the Yes scenario. The two
+captain scenarios' shared login (the account, the 300 minutes, the place, the quest flags and
+the login burst's letters and mark) moved into `enter_beside_the_captain`, so it was a
+refactor, not an `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4215 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
+
+No ADR changed. No owner question added. V26 stays open.

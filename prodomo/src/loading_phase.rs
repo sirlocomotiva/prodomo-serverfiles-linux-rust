@@ -510,6 +510,7 @@ pub fn load_points(character: &Character, map_index: i32) -> Points {
         part_base: character.part_base,
         hair_part: character.hair_part,
         sash_part: character.sash_part,
+        playtime: character.playtime_minutes,
     })
 }
 
@@ -1615,6 +1616,17 @@ mod tests {
         assert_eq!(slots[point::POINT_MAX_HP], 760);
         assert_eq!(slots[point::POINT_MAX_SP], 260);
         assert_eq!(slots[point::POINT_MAX_STAMINA], 820);
+    }
+
+    /// `SetPlayerProto` puts the stored minutes played in the real `POINT_PLAYTIME`
+    /// (`G/char.cpp:2296`), and `PointsPacket` sends `GetPoint`, the instant slot, which
+    /// nothing sets (`G/char.cpp:2056-2057`).
+    #[test]
+    fn the_playtime_loads_as_a_real_point_the_points_record_does_not_send() {
+        let hero = hero();
+        let state = load_points(&hero, 0);
+        assert_eq!(state.real_point(point::POINT_PLAYTIME), 0x0a0b_0c0d);
+        assert_eq!(points(&hero, &state)[point::POINT_PLAYTIME], 0);
     }
 
     /// The slots whose state the Rewrite does not store are what `GetPoint` answers for them,
