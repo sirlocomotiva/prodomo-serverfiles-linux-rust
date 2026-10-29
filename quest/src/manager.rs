@@ -173,6 +173,13 @@ pub trait Game {
     /// stack in cell order, or all it holds when that is less.
     fn remove_item(&mut self, vnum: u32, count: u32);
 
+    /// `GetSkillGroup()` of the character the script runs for.
+    fn skill_group(&self) -> u8;
+
+    /// The vnum of the item of ID `id` the character the script runs for holds, or `None`
+    /// when it holds none: what `item.get_vnum` reads through the quest item pointer.
+    fn held_vnum(&self, id: u32) -> Option<u32>;
+
     /// The race of the character `vid`, when it is in the world.
     fn race_of(&self, vid: u32) -> Option<u32>;
 
@@ -513,6 +520,19 @@ impl Manager {
             run.handle_event(pc, npc, "click")
         })
     }
+    /// `CQuestManager::UseItem` (`G/questmanager.cpp:819-860`): character `pid` used the
+    /// item of ID `item` and vnum `vnum`, an `ITEM_QUEST` with neither quest-use flag, so it
+    /// becomes the quest item (`SetCurrentItem`) and the item's own `use` scripts run
+    /// (`NPC::OnUseItem`, `G/questnpc.cpp:283-289`, then `HandleEvent`). Returns whether one
+    /// ran. Legacy's `GetPC` makes the record of a character it never saw, as a click does.
+    pub fn use_item(&mut self, pid: u32, (item, vnum): (u32, u32), game: &mut dyn Game) -> bool {
+        self.pcs.entry(pid).or_default().item = item;
+        self.operate(pid, game, |run, pc, npcs| match npcs.get(&vnum) {
+            Some(npc) => run.handle_event(pc, npc, "use"),
+            None => false,
+        })
+    }
+
     /// `CQuestManager::LevelUp`: character `pid` leveled up, so the no-target quests' `levelup`
     /// scripts run (`questmanager.cpp:667-681`) the way `NPC::OnLevelUp` runs them
     /// (`HandleReceiveAllEvent`, `G/questnpc.cpp:348-351`). Every owner script with a `levelup`
@@ -837,6 +857,7 @@ impl Manager {
             quest_flags: Some(&mut loaned),
             window: Window::default(),
             categories,
+            item: pc.item,
         });
         let run = Run {
             host,
@@ -1321,6 +1342,11 @@ struct Pc {
     /// bridge's `&mut Cx` never reaches the `Pc`.
     pending_state: Option<Vec<u8>>,
     npc_vid: u32,
+    /// `m_pQuestItem` (`G/char.cpp:7620-7633`): the ID of the item whose `use` ran last, or 0.
+    /// Legacy keeps a raw pointer that nothing clears when the item is destroyed, so a later
+    /// `item.get_vnum` reads freed memory (a Defect); the Rewrite keeps the ID and asks the
+    /// game whether the character still holds it.
+    item: u32,
 }
 
 /// A running script (`QuestState`).
@@ -1436,6 +1462,8 @@ struct Cx<'g> {
     window: Window,
     /// Each quest's category (`GetQuestCategoryByQuestIndex`).
     categories: &'g BTreeMap<u16, u32>,
+    /// The quest item's ID ([`Pc::item`]), which `item.get_vnum` reads.
+    item: u32,
 }
 
 /// One call into the manager. No `Cx` borrow is held across a call into Lua, which may call
@@ -2216,6 +2244,8 @@ fn pc_api(
             None
         }
         b"pc.get_war_map" => Some(Value::Number(f64::from(cx.game.war_map()))),
+        // `pc_get_skillgroup` (`G/questlua_pc.cpp:1339-1343`).
+        b"pc.get_skill_group" => number(u32::from(cx.game.skill_group())),
         b"pc.is_gm" => Some(Value::Boolean(false)),
         b"pc.getqf" => {
             // `pc_get_quest_flag` (`G/questlua_pc.cpp:1180-1197`): the last argument, text
@@ -2597,6 +2627,12 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
             Some(Value::Number(f64::from(value)))
         }
         b"npc.getrace" | b"npc.get_race" => number(cx.game.race_of(cx.npc_vid).unwrap_or(0)),
+        // `item_get_vnum` (`G/questlua_item.cpp:138-149`): the quest item's vnum, or 0 when
+        // there is none. One the character no longer holds answers 0 (the `Pc::item` Defect).
+        b"item.get_vnum" => {
+            let held = (cx.item != 0).then(|| cx.game.held_vnum(cx.item)).flatten();
+            number(held.unwrap_or(0))
+        }
         b"q.getcurrentquestindex" => {
             // `CQuestManager::GetQuestIndexByName` (`G/questmanager.cpp:1282-1290`): the
             // number of the quest that runs, and 0 for a name no quest has.
@@ -2660,6 +2696,9 @@ mod tests {
         counts: BTreeMap<u32, i32>,
         /// Every `remove_item` call, in order.
         removals: Vec<(u32, u32)>,
+        skill_group: u8,
+        /// The vnum `held_vnum` finds by item ID.
+        held: BTreeMap<u32, u32>,
         races: BTreeMap<u32, u32>,
         chats: Vec<(ChatKind, Vec<u8>)>,
         scripts: Vec<(u8, Vec<u8>)>,
@@ -2721,6 +2760,14 @@ mod tests {
 
         fn remove_item(&mut self, vnum: u32, count: u32) {
             self.removals.push((vnum, count));
+        }
+
+        fn skill_group(&self) -> u8 {
+            self.skill_group
+        }
+
+        fn held_vnum(&self, id: u32) -> Option<u32> {
+            self.held.get(&id).copied()
         }
 
         fn race_of(&self, vid: u32) -> Option<u32> {
@@ -2929,6 +2976,73 @@ mod tests {
         assert!(!manager.click(PID, VID, LAND_SELLER, &mut game));
         assert!(game.take().is_empty());
         assert!(manager.is_running(PID));
+        manager.logout(PID);
+    }
+
+    /// A used quest item runs its own `use` scripts (`NPC::OnUseItem`): the 71000 book asks
+    /// for the skill group first, and a character with none hears it has no apprenticeship.
+    /// A vnum with no script runs nothing, and a waiting script starts no other.
+    #[test]
+    fn a_used_quest_item_runs_its_use_script() {
+        const RESET_BOOK: u32 = 71_000;
+        let mut manager = manager().lock().unwrap();
+        manager.logout(PID);
+        let mut game = Fake::default();
+        assert!(manager.use_item(PID, (5, RESET_BOOK), &mut game));
+        let said = game.take();
+        assert_eq!(said.len(), 1);
+        assert!(said[0]
+            .1
+            .ends_with("[ENTER]You didn't start an apprenticeship yet.[ENTER][DONE]"));
+        assert!(!manager.is_running(PID));
+        assert!(!manager.use_item(PID, (6, 27_001), &mut game));
+        assert!(game.take().is_empty());
+        // A group and no boost or ward skill: the other early answer.
+        game.skill_group = 1;
+        assert!(manager.use_item(PID, (5, RESET_BOOK), &mut game));
+        assert!(game.take()[0]
+            .1
+            .contains("You didn't learn any boost or ward skill yet."));
+        // A learned boost skill reaches the confirmation, which waits.
+        game.learned.insert(236);
+        assert!(manager.use_item(PID, (5, RESET_BOOK), &mut game));
+        assert!(game.take()[0].1.contains("[QUESTION"));
+        assert!(manager.is_running(PID));
+        assert!(!manager.use_item(PID, (5, RESET_BOOK), &mut game));
+        assert!(game.take().is_empty());
+        manager.logout(PID);
+    }
+
+    /// `item.get_vnum` reads the item the last `use` named while the character holds it, and
+    /// 0 before any use and once the item is gone (the `Pc::item` Defect).
+    #[test]
+    fn the_quest_item_is_the_used_one_while_it_is_held() {
+        let mut manager = manager().lock().unwrap();
+        manager.logout(PID);
+        let mut game = Fake::default();
+        let source = b"say(item.get_vnum())";
+        let read = |manager: &mut Manager, game: &mut Fake| {
+            let code = host::load_chunk(manager.host.lua(), source, "=test");
+            manager.operate(PID, game, |run, pc, _| {
+                run.execute(pc, 0, b"q".to_vec(), 0, code, Vec::new())
+            });
+            game.take()
+        };
+        assert_eq!(
+            read(&mut manager, &mut game),
+            [(1, "0[ENTER][DONE]".to_owned())]
+        );
+        game.held.insert(9, 72_347);
+        assert!(!manager.use_item(PID, (9, 50_000), &mut game));
+        assert_eq!(
+            read(&mut manager, &mut game),
+            [(1, "72347[ENTER][DONE]".to_owned())]
+        );
+        game.held.clear();
+        assert_eq!(
+            read(&mut manager, &mut game),
+            [(1, "0[ENTER][DONE]".to_owned())]
+        );
         manager.logout(PID);
     }
 
@@ -3355,6 +3469,7 @@ mod tests {
                 quest_flags: Some(&mut self.flags),
                 window: std::mem::take(&mut self.window),
                 categories: &self.manager.categories,
+                item: 0,
             };
             let args: MultiValue = args.iter().cloned().collect();
             let result = api(self.manager.host.lua(), &mut cx, name.as_bytes(), &args);

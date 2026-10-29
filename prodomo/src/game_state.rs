@@ -2001,9 +2001,12 @@ impl GameState {
                 climbed = Some((slot, level, i32::from_ne_bytes(stamp.to_ne_bytes())));
             }
         }
-        let moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
+        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, _protos| {
             use_item(items, at, rules, gear)
         })?;
+        if moved.kind == world::character::MoveKind::QuestUsed {
+            self.use_quest_item(vid, at, actor, &mut moved);
+        }
         // `StartAffectEvent`: a potion that left recovery starts the event, one second out,
         // unless it already runs.
         if moved
@@ -2013,7 +2016,6 @@ impl GameState {
         {
             self.start_affect_event(vid);
         }
-        let mut moved = moved;
         moved.climbed = climbed;
         Ok(moved)
     }

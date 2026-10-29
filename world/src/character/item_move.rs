@@ -162,6 +162,9 @@ pub enum MoveKind {
     Given,
     /// A quest took items of one vnum away, stack by stack (`RemoveSpecifyItem`).
     Removed,
+    /// An `ITEM_QUEST` passed the use checks and changed nothing; its quest runs next
+    /// (`case ITEM_QUEST`, `G/char_item.cpp:2842-2888`).
+    QuestUsed,
 }
 
 /// A record the client is sent, in the order legacy sends it.

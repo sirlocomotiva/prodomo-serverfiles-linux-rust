@@ -9554,6 +9554,52 @@ fn an_armour_is_worn_swapped_and_taken_off_and_the_store_follows() {
     );
 }
 
+/// Ledger 264: `CG_ITEM_USE` of an `ITEM_QUEST` runs the item's own `use` script
+/// (`case ITEM_QUEST`, `G/char_item.cpp:2842-2888`, then `CQuestManager::UseItem`).
+///
+/// Alpha has a skill group and no boost or ward skill, so the reset book
+/// (`_basic/7and8th_skills.lua:300-322`) passes `pc.get_skill_group`, reads the 18 skills'
+/// levels, says none is learned, and returns. The book stays.
+#[test]
+fn a_used_reset_book_runs_its_quest_and_stays() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+
+    // Given: Alpha, in a skill group with no boost or ward skill, holds the reset book.
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    let _add = enter_game_burst(&mut alpha);
+    Server::write_console(&console, "item give Alpha 71000 1");
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 71_000, 1));
+
+    // When: Alpha uses it.
+    alpha.send_record(&client_item_use(0));
+    // Then: its script titles the page with the book's name and ends at the first answer.
+    let lines: [&[u8]; 2] = [b"", b"You didn't learn any boost or ward skill yet."];
+    assert_eq!(
+        alpha.read_game(),
+        server_script(1, &titled_page(b"Rolle des Lehrwandels", &lines, b"[DONE]"))
+    );
+    alpha.still("the script returned and the book is not used up");
+    check(
+        &database,
+        "(SELECT (vnum, count, window_type, pos) = (71000, 1, 1, 0) FROM item)",
+    );
+
+    // And: a second use runs it again, as no script waits.
+    alpha.send_record(&client_item_use(0));
+    assert_eq!(
+        alpha.read_game(),
+        server_script(1, &titled_page(b"Rolle des Lehrwandels", &lines, b"[DONE]"))
+    );
+}
+
 /// Ledger 216: `CG_ITEM_USE` of an equippable item puts it on, and a use of the worn item takes
 /// it off (`CHARACTER::UseItemEx`, `G/char_item.cpp:3040-3053`).
 ///

@@ -897,6 +897,10 @@ pub fn is_skill_book(proto: &ItemProto) -> bool {
     proto.item_type == ITEM_USE && proto.sub_type == USE_SPECIAL && BOOK_VNUMS.contains(&proto.vnum)
 }
 
+/// The `ITEM_QUEST` the `RENEWAL_PICKUP_AFFECT` arm of `UseItemEx` takes
+/// (`G/char_item.cpp:2852-2872`).
+const PICKUP_AFFECT_ITEM: u32 = 70_002;
+
 /// Run one `CG_ITEM_USE` on an item that is worn by using it: `CHARACTER::UseItem` and the
 /// equip arm of `UseItemEx` (`G/char_item.cpp:7168-7400`, `:2718-3053`). An item that is
 /// not worn goes on (`EquipItem`), and a worn one comes off (`UnequipItem`).
@@ -905,7 +909,8 @@ pub fn is_skill_book(proto: &ItemProto) -> bool {
 /// silently), the job (`CanUsedBy`), the sex, a script of the character that waits for its
 /// client (`@fixme150`, `G/char_item.cpp:7350`), the level and conqueror level limits, and the
 /// belt cell the item is used from. Then `EquipItem` or `UnequipItem` run their own checks as
-/// a move's do. Legacy's checks for states this build does not have (a shop, a cube, a stun,
+/// a move's do. An `ITEM_QUEST` stops after the checks with `MoveKind::QuestUsed` and changes
+/// nothing; the caller runs its quest. Legacy's checks for states this build does not have (a shop, a cube, a stun,
 /// the secured account, the stack attribute flood, whose file the owner's data lacks) never
 /// refuse here.
 ///
@@ -943,10 +948,11 @@ pub fn use_item(
         .ok_or(MoveRefused::UnknownVnum(item.vnum))?;
     let potion = super::potion::is_potion(proto);
     let book = is_skill_book(proto);
+    let quest = proto.item_type == gamedata::item_kind::ITEM_QUEST;
     if !potion && !book && proto.item_type == gamedata::item_kind::ITEM_USE {
         return Err(MoveRefused::NotPorted(Unported::UseSubType(proto.sub_type)));
     }
-    if !potion && !book && !USED_BY_WEARING.contains(&proto.item_type) {
+    if !potion && !book && !quest && !USED_BY_WEARING.contains(&proto.item_type) {
         return Err(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
     }
     let race = gear.points.race();
@@ -986,6 +992,15 @@ pub fn use_item(
         .any(|limit| limit.kind == LIMIT_REAL_TIME_START_FIRST_USE)
     {
         return Err(MoveRefused::NotPorted(Unported::Worn(WornSystem::Timer)));
+    }
+    if quest {
+        // `RENEWAL_PICKUP_AFFECT` (`prodomodefines.h:151`) gives 70002 its own arm, which
+        // adds the pick-up affect; it is not ported.
+        if item.vnum == PICKUP_AFFECT_ITEM {
+            return Err(MoveRefused::NotPorted(Unported::Use(proto.item_type)));
+        }
+        // `case ITEM_QUEST` changes nothing here: the caller runs the item's quest.
+        return Ok(done(MoveKind::QuestUsed, Trail::default()));
     }
     if potion {
         return super::potion::use_potion(items, &item, proto, &mut *gear.points);
@@ -1057,6 +1072,9 @@ mod tests {
     const TIMED_SWORD: u32 = 51;
     const MALE_ONLY_HIGH: u32 = 11_250;
     const COSTUME_BLADE: u32 = 40_001;
+    /// An `ITEM_QUEST`, the boost and ward reset book, and one with a level limit.
+    const QUEST_BOOK: u32 = 71_000;
+    const HIGH_QUEST_BOOK: u32 = 71_001_000;
 
     const RULES: MoveRules = MoveRules {
         count_limit: 200,
@@ -1133,8 +1151,16 @@ mod tests {
         // A costume weapon for a weapon sub type other than the sword's 0.
         let mut costume_blade = proto(COSTUME_BLADE, ITEM_COSTUME, COSTUME_WEAPON, 0);
         costume_blade.values[3] = 1;
+        let mut high_quest = proto(HIGH_QUEST_BOOK, gamedata::item_kind::ITEM_QUEST, 0, 0);
+        high_quest.limits[0] = ItemValue {
+            kind: LIMIT_LEVEL,
+            value: 30,
+        };
         ItemProtos::from_rows(vec![
             proto(SWORD, ITEM_WEAPON, 0, WEARABLE_WEAPON),
+            proto(QUEST_BOOK, gamedata::item_kind::ITEM_QUEST, 0, 0),
+            proto(PICKUP_AFFECT_ITEM, gamedata::item_kind::ITEM_QUEST, 0, 0),
+            high_quest,
             armour,
             heavy,
             high,
@@ -1753,6 +1779,32 @@ mod tests {
         assert_eq!(done.kind, MoveKind::Swapped);
         assert_eq!(case.at(wear_pos(BODY)), Some(9));
         assert_eq!(case.at(inv(5)), Some(8));
+    }
+
+    /// `case ITEM_QUEST` (`G/char_item.cpp:2842-2888`): a quest item passes the use checks and
+    /// changes nothing, for its quest to run; the pick-up item's own arm is not ported.
+    #[test]
+    fn a_quest_item_passes_the_checks_and_changes_nothing() {
+        let mut case = Case::new(&[(inv(3), Item::new(7, QUEST_BOOK))]);
+        let items = case.items.clone();
+        let done = case.use_at(inv(3)).expect("the checks pass");
+        assert_eq!(done.kind, MoveKind::QuestUsed);
+        assert!(done.records.is_empty());
+        assert!(done.changes.is_empty());
+        assert_eq!(case.items, items);
+        let questing = MoveRules {
+            questing: true,
+            ..RULES
+        };
+        let refused = case.use_with(inv(3), &questing);
+        assert_eq!(refused, Err(MoveRefused::UsedWhileQuesting));
+        let mut case = Case::new(&[(inv(3), Item::new(7, HIGH_QUEST_BOOK))]);
+        assert_eq!(case.use_refused(inv(3)), MoveRefused::UseLevelTooLow);
+        let mut case = Case::new(&[(inv(3), Item::new(7, PICKUP_AFFECT_ITEM))]);
+        assert_eq!(
+            case.use_refused(inv(3)),
+            MoveRefused::NotPorted(Unported::Use(gamedata::item_kind::ITEM_QUEST))
+        );
     }
 
     /// `UseItem` (`@fixme150`, `G/char_item.cpp:7349-7354`): while a script waits nothing is

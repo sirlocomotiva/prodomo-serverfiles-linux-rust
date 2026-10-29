@@ -42,6 +42,12 @@ use world::character::{number, Pcg32};
 use world::npc::MapNpcs;
 
 use super::quest_target::QuestTargets;
+
+/// `ITEM_FLAG_QUEST_USE` and `ITEM_FLAG_QUEST_USE_MULTIPLE` (`common/item_length.h:369-370`):
+/// an `ITEM_QUEST` with either runs no quest when used. The text protos' `QUEST_USE` name sets
+/// bit 9, not 10 (`ProtoReader.cpp:398-400`); legacy tests the bits, and so does the Rewrite.
+const ITEM_FLAG_QUEST_USE: u32 = 1 << 10;
+const ITEM_FLAG_QUEST_USE_MULTIPLE: u32 = 1 << 11;
 use super::GameState;
 use crate::chat_line::{chat_packet, Arg};
 use crate::game_loop_messages::GroundPlace;
@@ -595,6 +601,15 @@ impl Game for Session<'_> {
         }
     }
 
+    fn skill_group(&self) -> u8 {
+        self.card.1
+    }
+
+    fn held_vnum(&self, id: u32) -> Option<u32> {
+        let giver = self.giver.as_ref()?;
+        giver.items.item(id).map(|item| item.vnum)
+    }
+
     fn count_item(&self, vnum: u32) -> i32 {
         self.giver.as_ref().map_or(0, |giver| {
             world::character::count_specify_item(giver.items, giver.rules.usable_cells, vnum)
@@ -938,6 +953,68 @@ impl GameState {
             stores.extend(judged.stores);
         }
         (taken, (records, climbs, stores, items))
+    }
+
+    /// `case ITEM_QUEST` of `UseItemEx` (`G/char_item.cpp:2842-2888`) after the world's checks
+    /// passed for the item at `at` of the character under `vid`: unless the item's proto carries
+    /// a quest-use flag, `CQuestManager::UseItem` runs its `use` scripts. What they sent and
+    /// changed joins `step`, whose descriptor stores and sends it. The quickslots are taken
+    /// again, since a removal may have synced them.
+    ///
+    /// `GetSIGVnum()` is 0 for every item on the owner's data, whose one special item group has
+    /// no `quest` type, so `SIGUse` never runs.
+    pub(super) fn use_quest_item(
+        &mut self,
+        vid: Vid,
+        at: protocol::item_pos::ItemPos,
+        mover: Mover,
+        step: &mut crate::item_move::MovedItems,
+    ) {
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return;
+        };
+        let Some(item) = character.items().item_at(at) else {
+            return;
+        };
+        let (id, vnum) = (item.id, item.vnum);
+        let flags = self.protos.get(vnum).map_or(0, |proto| proto.flags);
+        if flags & (ITEM_FLAG_QUEST_USE | ITEM_FLAG_QUEST_USE_MULTIPLE) != 0 {
+            return;
+        }
+        let pid = character.player_id();
+        let level = character
+            .points()
+            .map_or(1, world::character::Points::level);
+        let Some((channel, map)) = self.place_of(vid.raw()) else {
+            return;
+        };
+        let (x, y) = self
+            .spot_of(vid.raw())
+            .map_or((0, 0), |spot| (spot.x, spot.y));
+        let place = GroundPlace { channel, map, x, y };
+        let Some(((), (records, climbs, ops, block_mode), items)) =
+            self.run_quests_giving(place, (mover, level, pid), true, |manager, game| {
+                manager.use_item(pid, (id, vnum), game);
+            })
+        else {
+            return;
+        };
+        if let Some(mode) = block_mode {
+            self.block_modes.insert(vid, mode);
+        }
+        step.records.extend(records);
+        step.changes.extend(items);
+        let now = quest_now();
+        let mut stores = Vec::new();
+        for op in &ops {
+            let judged = self.answer_guild_quest(vid, &op.name, &op.args, now);
+            step.records.extend(judged.own);
+            stores.extend(judged.stores);
+        }
+        step.quest = (climbs, stores);
+        if let Ok(character) = self.characters.find_by_vid(vid) {
+            step.quickslots = Some(character.quickslots().clone());
+        }
     }
 
     /// `CQuestManager::GetPCForce(pid)->IsRunning()` for the character under `vid`: whether a
@@ -1386,6 +1463,18 @@ mod tests {
         f(&mut session)
     }
 
+    /// `pc.get_skill_group` reads the card's group, and with no character in the world the
+    /// quest item is never held.
+    #[test]
+    fn the_session_reads_the_group_and_holds_no_item_without_a_character() {
+        let (protos, names) = (MobProtos::default(), MobNamesByLanguage::default());
+        let (items, item_names) = (ItemProtos::default(), ItemNamesByLanguage::default());
+        with_session((&protos, &names), (&items, &item_names), |session| {
+            assert_eq!(session.skill_group(), 1);
+            assert_eq!(session.held_vnum(1000), None);
+        });
+    }
+
     /// `pc.give_item2`'s `AutoGiveItem` in a session that may give: a vnum with no proto
     /// gives nothing and answers 0, as 85000 does on the owner's data; a sword is made with
     /// the next ID, named, then set in the first free cell, and its row is answered for the
@@ -1464,6 +1553,7 @@ mod tests {
 
         assert_eq!(session.give_item(SWORD, 1), 1000);
         assert_eq!(session.records.len(), 2, "the name, then the item set");
+        assert_eq!(session.held_vnum(1000), Some(SWORD));
         assert!(matches!(
             session.item_rows.as_slice(),
             [db::items::RowChange::Created(row)] if row.id == 1000 && row.owner_id == Some(42)

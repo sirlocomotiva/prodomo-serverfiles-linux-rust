@@ -125,6 +125,9 @@ pub struct MovedItems {
     pub climbed: Option<(u8, u8, i32)>,
     /// Where the step's rows stand among another descriptor's on the same item.
     pub store_order: StoreOrder,
+    /// What a used quest item's scripts landed besides the records and rows above: the GRAND
+    /// climbs and the `guild.*` stores, for the descriptor to store before it sends.
+    pub quest: (Vec<(u8, u8, i32)>, Vec<crate::game_state::GuildQuestStore>),
 }
 
 /// Where a step's store stands among another descriptor's on the same item: a drop tells the
@@ -285,6 +288,7 @@ impl MovedItems {
             gold: None,
             climbed: None,
             store_order: StoreOrder::default(),
+            quest: (Vec::new(), Vec::new()),
         }
     }
 

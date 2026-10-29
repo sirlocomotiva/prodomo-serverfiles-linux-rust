@@ -1,8 +1,8 @@
 # Rewrite status
 
-Last reviewed: 2026-10-29, after ledger section 263 (the quest's count and removal,
-`pc.count_item` and `pc.remove_item`). Steps 1, 2 and 3 are done; step 4 is in progress, and its
-next work is 264 onwards. The
+Last reviewed: 2026-10-29, after ledger section 264 (an item's quest `use` event,
+`item.get_vnum` and `pc.get_skill_group`). Steps 1, 2 and 3 are done; step 4 is in progress, and
+its next work is 265 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
 quest window (`GC_QUEST_INFO`), and since 259 a script's state change runs the `leave`,
@@ -21,9 +21,12 @@ the stacks, a free cell or the ground, stored before the client hears of it, so
 data, so the sash quest's material never arrives. Since 263 `pc.count_item` reads
 `CountSpecifyItem` and `pc.remove_item` runs `RemoveSpecifyItem` (`G/char_item.cpp:8791-8940`),
 so a seeded `__complete` sends the player back to the captain for the material. The removal takes
-items only where the give gives them, and no caller on the owner's data reaches it yet. The next
-slice is `pc.give_item2_select` and `item.set_socket`, then the names the removal's callers wait
-for (`item.get_vnum` and an item's `use`, `select_table`, `pc.warp`).
+items only where the give gives them, and no caller on the owner's data reaches it yet. Since 264
+a used `ITEM_QUEST` runs its own `use` scripts (`case ITEM_QUEST`, `G/char_item.cpp:2842-2888`,
+`CQuestManager::UseItem`) and becomes the quest item that `item.get_vnum` reads, so the boost and
+ward reset book (71000) answers its early pages. The next slice is `pc.set_skill_level`,
+`pc.get_job` and `select_table`, which the skill books' confirmed choices wait for, then
+`pc.give_item2_select` and `item.set_socket`.
 
 This page records where the Rewrite stands, the build order, and the next step. Rules live in
 `AGENTS.md`, terms in `CONTEXT.md`, and the change history in `docs/REWRITE_LEDGER.md`. When this page
@@ -391,7 +394,7 @@ owner should know about (178.5):
 | A quest's flags and state live in the store with the character (ledger 244), so a flag outlives the session that set it. `set_state` moves its quest when the script ends, whichever step called it and however the script ends (ledger 257), `pc.learn_grand_master_skill` writes its read count, and the server writes its own flags: the guild's withdraw time, the war's member flag and `/setblockmode`'s seven `game_option.block_*` flags (ledger 256). `pc.getqf` reads a flag (ledger 257) and `pc.setqf` writes one (ledger 259); the rest are "not ported". A state change runs no `leave`, `enter` or `letter` script, and until the script ends the quest's flag holds the old state, so a character that leaves while the script waits keeps the old one (ledger 257). The load brings the flags with the character, so `Loading quest. Please wait a moment.` is never said, and a save writes a character's whole set of flags at once instead of the flags that changed. A call of an API the Rewrite does not back ends the script silently, so the client sees no `[DONE]` where a script error sends one. The event flags stay in memory (ADR-0006). | The `quest` table is loaded with the character and saved with it (`D/ClientManagerPlayer.cpp:352-394`, `D/ClientManager.cpp:692-698`), a quest waits, with that line, until the load arrives (`G/questmanager.cpp:920-931`), and a save writes only the flags that changed (`quest::PC::Save`, `G/questpc.cpp:519-590`). `quest_setstate` writes the state and its flag at once (`G/questlua_quest.cpp:112-146`), and `EndRunning` runs the old state's `leave`, the new one's `enter` and its `letter` (`G/questpc.cpp:352-371`). |
 | `_basic/change_empire.lua` is not loaded: an `end` on line 132 closes its `if` chain early, so `qc` refuses it (ADR-0006, ledger 227). This goes when the owner fixes the source. | The same: legacy's `qc` aborts on it and it never reached `object/`. |
 | Only an NPC's `click` and `chat` scripts run (ledger 227), the `kill` and `levelup` events reach the no-target quests (ledger 244), a war's `letter` and the letter's `button` run (ledger 239), and the `login` event runs when a character enters the game or comes back from a Warp (ledger 257). The login runs at once, behind the enter's records and the offline lines it read. The `logout`, `timer`, `target` and every other event is raised by no ported system, and the hide-and-seek reward of `OnClick` is not ported. | Each system raises its event through `CQuestManager`, and `CHARACTER::OnClick` gives the hide-and-seek reward while that event runs (`G/char.cpp:6299-6330`). When the quest load lands before the game phase, `quest_login_event` runs the login at the first one-second tick that finds the character in the game (`G/input_db.cpp:1005-1048`, `:1104-1115`). |
-| A quest API name whose system is not ported raises a "not ported" error, which ends the script silently: the client sees no `[DONE]`, where a Lua error sends one (ADR-0006, ledger 227, ledger 244). Of the 699 names 81 are backed (ledger 263); `pc.warp`, `game.set_safebox_level`, `q.set_title2` and `target.pos` are among the refused. | Every name runs. |
+| A quest API name whose system is not ported raises a "not ported" error, which ends the script silently: the client sees no `[DONE]`, where a Lua error sends one (ADR-0006, ledger 227, ledger 244). Of the 699 names 83 are backed (ledger 264); `pc.warp`, `game.set_safebox_level`, `q.set_title2` and `target.pos` are among the refused. | Every name runs. |
 | `find_npc_by_vnum` answers the first NPC of the race that spawned on the character's map (ledger 259). | It walks the race's `unordered_set` (`G/typedef.h:33`, `G/questlua_global.cpp:792-822`), in no defined order, so a map with two NPCs of the race may answer either. |
 | A quest target's VID is read as a `DWORD` (ledger 259). | `target_vid` casts the number to `int` (`G/questlua_target.cpp:58-67`). Legacy's VIDs fit, but the Rewrite numbers NPCs from 0x8000_0000, which would not. |
 | A click on a marked character while the clicker's script waits is taken and runs nothing; the waiting script keeps its place (ledger 260). | `NPC::OnTarget` runs the target script through `ExecuteQuestScript`, whose `PC::SetQuest` overwrites the running state (`G/questnpc.cpp:206-264`, `G/questpc.cpp`), a Defect. |
@@ -839,6 +842,10 @@ owner should know about (178.5):
   `server/server/db/ProtoReader.cpp:676`; `G/char_state.cpp:331-349`; `G/trigger.cpp:114-131`).
   It reaches 12 protos, none spawned on Channel 1 or 99, so it is dormant. The Rewrite takes
   the proto text's meaning: bit 4 spares empire 2, bit 5 empire 3 (ledger 229l).
+- The quest item is a raw pointer (`m_pQuestItem`, `G/char.cpp:7620-7633`) that `UseItem` sets
+  and nothing clears when the item is destroyed, so an `item.get_vnum` after the item is used
+  up, sold or removed reads freed memory (`G/questlua_item.cpp:138-149`). The Rewrite keeps the
+  item's ID and answers 0 once the character no longer holds it (ledger 264).
 
 ## Environment
 

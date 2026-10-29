@@ -1108,6 +1108,15 @@ where
             }
             info!(%addr, vnum, level, "Skill read from a book");
         }
+        // A used quest item's scripts: their GRAND climbs and `guild.*` stores, as a click's
+        // are stored. Their item rows are among the step's own.
+        let (climbs, stores) = &moved.quest;
+        if !store_quest_climbs(addr, context, held, climbs).await {
+            return false;
+        }
+        if !store_quest_guild_stores(session, addr, context, held, stores).await {
+            return false;
+        }
     }
     finish_item_step(session, addr, context, held, actor, answer).await
 }

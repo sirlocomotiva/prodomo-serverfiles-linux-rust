@@ -236,7 +236,7 @@ pub const BRIDGE: &str = "quest bridge";
 /// The API names that reach the game through [`BRIDGE`], in [`crate::api::NAMES`] order: the
 /// dialog (`say`, `raw_script`, the skins and the images), the chat lines, the quest window's
 /// title and begin byte, the quest targets, and the lookups the ported systems can answer.
-pub const BRIDGED: [&str; 81] = [
+pub const BRIDGED: [&str; 83] = [
     "game.get_event_flag",
     "set_state",
     "set_skin",
@@ -287,6 +287,7 @@ pub const BRIDGED: [&str; 81] = [
     "guild.get_exp_level0",
     "guild.offer_exp0",
     "guild.give_exp0",
+    "item.get_vnum",
     "npc.getrace",
     "npc.get_race",
     "pc.get_level",
@@ -300,6 +301,7 @@ pub const BRIDGED: [&str; 81] = [
     "pc.remove_item",
     "pc.countitem",
     "pc.removeitem",
+    "pc.get_skill_group",
     "pc.learn_grand_master_skill",
     "pc.get_war_map",
     "pc.get_skill_level",

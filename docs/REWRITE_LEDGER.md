@@ -36690,3 +36690,196 @@ Gates:
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
 
 No ADR changed. No owner question added. V26 stays open.
+
+## 264. An item's quest `use` event (`item.get_vnum`, `lua.pc.get_skill_group`)
+
+A used `ITEM_QUEST` now runs its own `use` scripts and becomes the quest item. The boost and
+ward reset book (71000) answers its early pages over the wire.
+
+**Legacy** (`G/char_item.cpp:2842-2888`, `G/questmanager.cpp:819-860`, `G/questnpc.cpp:283-289`):
+
+- `UseItemEx`'s `case ITEM_QUEST` runs after `UseItem`'s checks and the limit loop.
+- An item with neither `ITEM_FLAG_QUEST_USE` (`1 << 10`) nor `ITEM_FLAG_QUEST_USE_MULTIPLE`
+  (`1 << 11`, `common/item_length.h:369-370`) calls `CQuestManager::UseItem`, or `SIGUse` when
+  `GetSIGVnum() != 0`. The arm returns true and consumes nothing.
+- `UseItem` makes the quest item `SetCurrentItem(item)`, then runs
+  `m_mapNPC[vnum].OnUseItem`, which is `HandleEvent(pc, QUEST_ITEM_USE_EVENT)`.
+- The text protos' `QUEST_USE` name sets bit 9, not 10 (`ProtoReader.cpp:398-400`). Legacy
+  tests the bits, and so does the Rewrite. No `ITEM_QUEST` row on the owner's data names
+  `QUEST_USE_MULTIPLE` or `QUEST_GIVE`, the two names that set those bits.
+
+**The world** (`world/src/character/equip.rs`):
+
+- `use_item` lets an `ITEM_QUEST` through the same checks as the other uses, in the same order:
+  - the job and sex flags;
+  - the running script (`@fixme150`);
+  - the level and champion limits;
+  - the belt cell;
+  - the timer refusal.
+- It then answers the new `MoveKind::QuestUsed` with no record and no change.
+- 70002 is refused as not ported: `RENEWAL_PICKUP_AFFECT` (`prodomodefines.h:151`) gives it an
+  affect arm (`:2852-2872`).
+- The arena check of 50051-50053 waits for the arena.
+
+**The bridge** (`quest/src/manager.rs`):
+
+- `Manager::use_item(pid, (item, vnum), game)`:
+  - It records the item's ID as the character's quest item (`Pc::item`, `m_pQuestItem`).
+  - It runs the vnum's `use` scripts through `handle_event`.
+  - A character the manager never saw gets a record, as a click does (`GetPC`).
+- `Cx::item` carries the quest item into the bridge.
+- `item.get_vnum` (`G/questlua_item.cpp:138-149`) answers the vnum of the item the character
+  still holds under that ID, or 0.
+- `pc.get_skill_group` (`G/questlua_pc.cpp:1339-1343`) answers `GetSkillGroup()`.
+- The `Game` trait gains `skill_group` and `held_vnum`. `BRIDGED` has 83 names, in
+  `api::NAMES` order.
+- `pc.give_item2` is `pc_give_or_drop_item`, which never sets the quest item
+  (`G/questlua_pc.cpp:540-590`). Only the `use` event sets it.
+
+**A Defect not reproduced.** `m_pQuestItem` is a raw pointer that nothing clears when the item
+is destroyed (`G/char.cpp:7620-7633`; the only `ClearQuestItemPtr` caller is
+`ClearCurrentItem`). An `item.get_vnum` after the item is used up, sold or removed reads freed
+memory. The Rewrite keeps the ID and answers 0 once the character no longer holds it. It is
+recorded among the Defects in STATUS.
+
+**The session** (`prodomo/src/game_state/quests.rs`):
+
+- `GameState::use_item` calls `use_quest_item` when the world answers `QuestUsed`.
+- It skips an item whose proto carries a quest-use bit.
+- It runs the manager on a storing step (`run_quests_giving` with `stores_items`), so a `use`
+  script may give and remove.
+- Its records join the step's records, and its item rows join the step's row changes, stored in
+  the step's one transaction before the client hears them.
+- Its `guild.*` calls are answered as a click's are.
+- The quickslots are taken again after the scripts, since a removal may have synced them.
+- `MovedItems::quest` carries the GRAND climbs and the guild stores. The descriptor's
+  `use_an_item` stores them before `finish_item_step`, with the click's `store_quest_climbs`
+  and `store_quest_guild_stores`.
+- `skill_group` reads the card's group, and `held_vnum` reads the character's items by ID.
+
+**`SIGUse`.** `GetSIGVnum()` is set for an `ITEM_QUEST` only by a special item group of type
+`quest` (`G/item_manager.cpp:412-420`). The owner's `special_item_group.txt` holds one group
+(`Cufar_Lumina_Lunii`, vnum 50011) with no `type` line, so it is not quest-typed.
+
+- Search: `quest` (case-insensitive) in that file finds nothing.
+- Control: `Group` finds the one group.
+
+`SIGUse` never runs, and it is not ported.
+
+**The callers on the owner's data.** The `use` triggers (search `when [0-9]+\.use|\.use or`
+under the quest folder) are:
+
+- the four skill books of `7and8th_skills.lua`;
+- `TeleportRing.lua` (70058);
+- `item_attr67add.quest` (72347-72350);
+- `change_empire.lua` (71054);
+- `battle_pass.lua` (25150-25162, whose vnums have no proto).
+
+The reachable path is 71000's early answers.
+
+- A character with no skill group hears that it has no apprenticeship.
+- One with a group and no boost or ward skill hears that it learned none.
+- One with a learned skill reaches the confirmation, whose "Yes" calls `pc.set_skill_level`
+  before `pc.remove_item(item.get_vnum(), 1)`.
+
+The other scripts wait for other names:
+
+- The boost books need `pc.get_job` and `select_table`.
+- The teleport ring needs `TeleportRing.MainWindow`.
+- `item_attr67add` needs `pc.getf`.
+- `change_empire` needs `get_time`'s flag and `pc.change_empire`.
+
+So `item.get_vnum` stays `partial`, with unit tests.
+
+**The tests.**
+
+- `world`: `a_quest_item_passes_the_checks_and_changes_nothing`. The use answers `QuestUsed`
+  and changes nothing. A waiting script refuses it, and so does a level limit. 70002 is refused
+  as not ported.
+- `quest`:
+  - `a_used_quest_item_runs_its_use_script` runs the real 71000 script. With no group it gives
+    the apprenticeship answer. With a group it gives the no-skill answer. With a learned skill
+    it reaches the waiting confirmation, and a second use then runs nothing. A vnum with no
+    script runs nothing.
+  - `the_quest_item_is_the_used_one_while_it_is_held`: `item.get_vnum` answers 0 before any
+    use, the held item's vnum after one, and 0 once the item is gone.
+- `prodomo` lib:
+  - `a_give_names_sets_and_stores_the_item_or_lays_it` also reads `held_vnum` for the given
+    sword.
+  - The new `the_session_reads_the_group_and_holds_no_item_without_a_character` reads
+    `skill_group` from the card, and `held_vnum` with no character.
+- Parity: `a_used_reset_book_runs_its_quest_and_stays`.
+  - Alpha (skill group set, no boost or ward skill) is given 71000 by the console and uses it.
+  - The script titles the page "Rolle des Lehrwandels", says no skill is learned, and ends in
+    `[DONE]`.
+  - The book stays in its row, and a second use runs the script again.
+  - An earlier draft expected the apprenticeship answer. It failed because `add_characters`
+    seeds Alpha with a group, which is why the scenario now asserts the richer branch, through
+    `pc.get_skill_group` and 18 `pc.get_skill_level` reads.
+
+**Rows.**
+
+- `lua.pc.get_skill_group` is `ported`, with the scenario.
+- `lua.item.get_vnum` is `partial`, with its callers in the note.
+- Notes were added to `cg.game.item_use`, `quest.7and8th_skills` and `sys.quest.runtime`.
+
+**STATUS.**
+
+- The header names 264. The next slice is `pc.set_skill_level`, `pc.get_job` and
+  `select_table`, then `pc.give_item2_select` and `item.set_socket`.
+- It has 83 backed names.
+- The quest item Defect joins the list.
+
+**Mutation sweep.** 14 mutants (U1-U14) were applied to the pristine files, and each changed
+executable code. Every file was restored by checksum. All 14 were killed, semantically, with no
+compile-error kills:
+
+- U1-U3 were killed by the world test:
+  - no quest item passes;
+  - 70002 passes;
+  - the quest stop runs before the questing check and the limits.
+- U4-U8 were killed by the quest tests:
+  - the use runs the `click` scripts;
+  - the use sets no quest item;
+  - `item.get_vnum` skips the held check;
+  - `pc.get_skill_group` answers 0;
+  - `operate` drops the quest item.
+
+  U7 also failed `the_quest_item_is_the_used_one_while_it_is_held`. That is most likely a
+  knock-on, not a second witness: both tests share the manager's mutex, which the first test's
+  panic poisons.
+- U9 (the quest-use bits inverted), U12 (no quest after the step) and U13 (the script's
+  records dropped) were killed by the parity scenario alone.
+- U10 (the group read from the job) and U11 (the session holds nothing) were killed by the
+  session tests. Both were run again after the Clippy split below moved their asserts, and the
+  new tests killed them.
+- U14 (`BRIDGED` misnames `pc.get_skill_group`) was killed by the host test.
+
+The driver refuses a mutant that changes the line count. U3 was first written as three
+inserted lines, and the run stopped at it with the file restored. It was rewritten on one line
+and run again with U4-U14.
+
+**Clippy.** The first gate run failed twice:
+
+- `similar_names`: `use_quest_item`'s `moved` parameter beside `mover`. It is now `step`.
+- `too_many_lines` (102/100): `a_give_names_sets_and_stores_the_item_or_lays_it`, after its
+  new reads. It keeps one `held_vnum` line. The group read and the no-character read moved to
+  the new `the_session_reads_the_group_and_holds_no_item_without_a_character`, built on
+  `with_session`.
+
+Both were fixed by refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4239 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
+
+No ADR changed. No owner question added. V26 stays open.
