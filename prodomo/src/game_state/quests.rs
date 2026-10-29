@@ -210,8 +210,8 @@ pub(super) struct Session<'s> {
     pub(super) affects: Option<&'s mut super::affect::AffectEvent>,
     /// Its points, which the GRAND read's 141 recompute rewrites.
     pub(super) points: Option<&'s mut world::character::Points>,
-    /// What the GRAND read climbed, for the store's `store_skill`: the slot, level
-    /// and stamp of each climb, in order.
+    /// What the GRAND read climbed and `pc.set_skill_level` set, for the store's
+    /// `store_skill`: the slot, level and stamp of each, in order.
     pub(super) climbs: Vec<(u8, u8, i32)>,
     /// The `guild.*` calls the scripts made, in order, each for
     /// [`GameState::answer_guild_quest`] after the step.
@@ -513,6 +513,21 @@ impl<'s> Session<'s> {
     }
 }
 
+/// `SkillCanUp` (`G/char_skill.cpp:907-1110`, `__7AND8TH_SKILLS__`): a ward skill (221-228)
+/// rises only while every other ward skill is at 0, and a boost skill (236-243) only while every
+/// other boost skill is (the `__WOLFMAN_CHARACTER__` term of 239 is not compiled). Any other vnum
+/// never rises.
+fn skill_can_up(vnum: u32, level: impl Fn(u32) -> u8) -> bool {
+    let family = match vnum {
+        221..=228 => 221..=228,
+        236..=243 => 236..=243,
+        _ => return false,
+    };
+    family
+        .filter(|other| *other != vnum)
+        .all(|other| level(other) == 0)
+}
+
 impl Game for Session<'_> {
     fn level(&self) -> u8 {
         self.level
@@ -608,6 +623,10 @@ impl Game for Session<'_> {
     fn held_vnum(&self, id: u32) -> Option<u32> {
         let giver = self.giver.as_ref()?;
         giver.items.item(id).map(|item| item.vnum)
+    }
+
+    fn job(&self) -> u8 {
+        self.card.0
     }
 
     fn count_item(&self, vnum: u32) -> i32 {
@@ -711,6 +730,33 @@ impl Game for Session<'_> {
             .copied()
             .unwrap_or(0)
             .min(40)
+    }
+
+    fn set_skill_level(&mut self, vnum: u32, level: u8) {
+        // `SetSkillLevel` (`G/char_skill.cpp:183-258`): a vnum past the 255 slots logs and sets
+        // nothing, and so does a 7/8th skill `SkillCanUp` refuses a level above 0. The slot takes
+        // the level up to 40; the master type is the ladder's (`master_of`). No point is
+        // recomputed, as legacy recomputes none here. The `ENABLE_REWARD_SYSTEM` tail waits for
+        // the reward missions (`sys.custom.reward`).
+        let slot = u8::try_from(vnum)
+            .ok()
+            .filter(|slot| usize::from(*slot) < self.slots.levels.len());
+        match slot {
+            None => tracing::warn!(vnum, "vnum overflow"),
+            Some(_)
+                if (221..=243).contains(&vnum)
+                    && level != 0
+                    && !skill_can_up(vnum, |other| self.slot(other)) => {}
+            Some(slot) => {
+                let level = level.min(40);
+                let index = usize::from(slot);
+                self.slots.levels[index] = level;
+                let stamp = self.slots.next_read[index];
+                self.climbs
+                    .push((slot, level, i32::from_ne_bytes(stamp.to_ne_bytes())));
+            }
+        }
+        self.send_skill_levels();
     }
 
     fn send_block_mode(&mut self, mode: u8) {
@@ -1442,7 +1488,7 @@ mod tests {
             tables: &tables,
             dice: &mut dice,
             reader: Vid::new(1),
-            card: (0, 1),
+            card: (3, 1),
             pc_level: 10,
             caller: None,
             slots: &mut slots,
@@ -1471,7 +1517,57 @@ mod tests {
         let (items, item_names) = (ItemProtos::default(), ItemNamesByLanguage::default());
         with_session((&protos, &names), (&items, &item_names), |session| {
             assert_eq!(session.skill_group(), 1);
+            assert_eq!(session.job(), 3);
             assert_eq!(session.held_vnum(1000), None);
+        });
+    }
+
+    /// `pc.set_skill_level`'s `SetSkillLevel` then `SkillLevelPacket`: the slot takes the level
+    /// up to 40 with its read stamp for the store; a boost or ward skill rises only while the
+    /// rest of its family is at 0, its own level aside, though 0 always lands and 244 has no
+    /// family; slot 254 is the last, a vnum past it sets nothing; and every call sends byte 76.
+    #[test]
+    fn a_set_skill_level_lands_within_the_slots_and_the_exclusions() {
+        let (protos, names) = (MobProtos::default(), MobNamesByLanguage::default());
+        let (items, item_names) = (ItemProtos::default(), ItemNamesByLanguage::default());
+        with_session((&protos, &names), (&items, &item_names), |session| {
+            session.slots.next_read[1] = 0x8102_0304;
+            let calls = [
+                (239, 1),
+                (243, 1),
+                (236, 3),
+                (221, 2),
+                (222, 1),
+                (221, 3),
+                (244, 5),
+                (1, 60),
+                (254, 7),
+                (255, 1),
+                (239, 0),
+                (243, 1),
+            ];
+            for (vnum, level) in calls {
+                session.set_skill_level(vnum, level);
+            }
+            let stamp = i32::from_ne_bytes(0x8102_0304_u32.to_ne_bytes());
+            assert_eq!(
+                session.climbs,
+                [
+                    (239, 1, 0),
+                    (221, 2, 0),
+                    (221, 3, 0),
+                    (244, 5, 0),
+                    (1, 40, stamp),
+                    (254, 7, 0),
+                    (239, 0, 0),
+                    (243, 1, 0),
+                ]
+            );
+            let levels =
+                [239, 243, 236, 221, 222, 244, 1, 254].map(|vnum| session.skill_level(vnum));
+            assert_eq!(levels, [0, 1, 0, 3, 0, 5, 40, 7]);
+            assert_eq!(session.records.len(), calls.len());
+            assert!(session.records.iter().all(|record| record[0] == 76));
         });
     }
 

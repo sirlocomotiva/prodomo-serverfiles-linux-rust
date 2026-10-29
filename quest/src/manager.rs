@@ -176,6 +176,9 @@ pub trait Game {
     /// `GetSkillGroup()` of the character the script runs for.
     fn skill_group(&self) -> u8;
 
+    /// `GetJob()` of the character the script runs for.
+    fn job(&self) -> u8;
+
     /// The vnum of the item of ID `id` the character the script runs for holds, or `None`
     /// when it holds none: what `item.get_vnum` reads through the quest item pointer.
     fn held_vnum(&self, id: u32) -> Option<u32>;
@@ -210,6 +213,12 @@ pub trait Game {
 
     /// `GetSkillLevel(vnum)` of the character the script runs for (230g).
     fn skill_level(&self, vnum: u32) -> u8;
+
+    /// `SetSkillLevel(vnum, level)` then `SkillLevelPacket()` of the character the script
+    /// runs for (`G/questlua_pc.cpp:2112-2123`): the slot takes the level, up to 40, unless
+    /// the vnum is past the slots or a 7/8th skill's exclusion refuses it, and the client
+    /// hears every slot either way.
+    fn set_skill_level(&mut self, vnum: u32, level: u8);
 
     /// `SetBlockModeForce(mode)` of the character the script runs for
     /// (`G/questlua_pc.cpp:2190-2197`): the byte becomes the character's own
@@ -2117,6 +2126,21 @@ fn count_item(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<i32
     Ok(cx.game.count_item(vnum))
 }
 
+/// `pc_set_skill_level` (`G/questlua_pc.cpp:2112-2123`): `(DWORD)` and `(BYTE)` of
+/// `lua_tonumber`, so a missing or non-number argument is 0. It pushes nothing.
+fn set_skill_level(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<()> {
+    let number = |at: usize| -> mlua::Result<u32> {
+        match args.get(at) {
+            Some(value) => Ok(lua.coerce_number(value.clone())?.map_or(0, dword)),
+            None => Ok(0),
+        }
+    };
+    let vnum = number(0)?;
+    let level = number(1)?;
+    cx.game.set_skill_level(vnum, level.to_le_bytes()[0]);
+    Ok(())
+}
+
 /// `pc_remove_item` (`G/questlua_pc.cpp:801-860`), `pc.remove_item` and `pc.removeitem`. With
 /// one argument, one of the vnum is taken; with two, the second, dworded, is the count, and a
 /// count that is not a number is 0, which takes nothing. Any other number of arguments takes
@@ -2229,6 +2253,8 @@ fn pc_api(
     let number = |value: u32| Some(Value::Number(f64::from(value)));
     let result = match name {
         b"pc.get_level" => number(u32::from(cx.game.level())),
+        // `pc_get_job` (`G/questlua_pc.cpp:915-919`).
+        b"pc.get_job" => number(u32::from(cx.game.job())),
         // `pc_get_playtime` (`G/questlua_pc.cpp:874-878`) under both names it is registered as
         // (`:3841-3842`).
         b"pc.getplaytime" | b"pc.get_playtime" => {
@@ -2247,6 +2273,10 @@ fn pc_api(
         // `pc_get_skillgroup` (`G/questlua_pc.cpp:1339-1343`).
         b"pc.get_skill_group" => number(u32::from(cx.game.skill_group())),
         b"pc.is_gm" => Some(Value::Boolean(false)),
+        b"pc.set_skill_level" => {
+            set_skill_level(lua, cx, args)?;
+            None
+        }
         b"pc.getqf" => {
             // `pc_get_quest_flag` (`G/questlua_pc.cpp:1180-1197`): the last argument, text
             // or a number, names a flag of the quest that runs (`GetCurrentQuestName() + "."
@@ -2699,6 +2729,11 @@ mod tests {
         skill_group: u8,
         /// The vnum `held_vnum` finds by item ID.
         held: BTreeMap<u32, u32>,
+        job: u8,
+        /// The levels `set_skill_level` set, which `skill_level` then reads.
+        levels: BTreeMap<u32, u8>,
+        /// Every `set_skill_level` call, in order.
+        set_levels: Vec<(u32, u8)>,
         races: BTreeMap<u32, u32>,
         chats: Vec<(ChatKind, Vec<u8>)>,
         scripts: Vec<(u8, Vec<u8>)>,
@@ -2766,6 +2801,10 @@ mod tests {
             self.skill_group
         }
 
+        fn job(&self) -> u8 {
+            self.job
+        }
+
         fn held_vnum(&self, id: u32) -> Option<u32> {
             self.held.get(&id).copied()
         }
@@ -2804,7 +2843,15 @@ mod tests {
         }
 
         fn skill_level(&self, vnum: u32) -> u8 {
-            u8::from(self.learned.contains(&vnum)) * 40
+            self.levels
+                .get(&vnum)
+                .copied()
+                .unwrap_or(u8::from(self.learned.contains(&vnum)) * 40)
+        }
+
+        fn set_skill_level(&mut self, vnum: u32, level: u8) {
+            self.levels.insert(vnum, level);
+            self.set_levels.push((vnum, level));
         }
 
         fn send_block_mode(&mut self, mode: u8) {
@@ -3010,6 +3057,66 @@ mod tests {
         assert!(manager.is_running(PID));
         assert!(!manager.use_item(PID, (5, RESET_BOOK), &mut game));
         assert!(game.take().is_empty());
+        manager.logout(PID);
+    }
+
+    /// The boost book (50514) offers the job's boost skill of the group through `select_table`,
+    /// and its "Yes" removes the book and sets the skill to 1; the reset book (71000) then
+    /// sets it back to 0 and removes itself (`7and8th_skills.lua`).
+    #[test]
+    fn the_boost_book_teaches_the_chosen_skill_and_the_reset_book_forgets_it() {
+        let mut manager = manager().lock().unwrap();
+        manager.logout(PID);
+        let mut game = Fake {
+            job: 3,
+            skill_group: 2,
+            held: [(5, 50_514), (6, 71_000)].into_iter().collect(),
+            ..Fake::default()
+        };
+        assert!(manager.use_item(PID, (5, 50_514), &mut game));
+        let said = game.take();
+        assert!(said[0]
+            .1
+            .ends_with("[QUESTION 1;Summon Lightning Boost|2;Cancel]"));
+        manager.answer(PID, 0, &mut game);
+        let said = game.take();
+        assert!(said[0]
+            .1
+            .contains("You choose to learn Summon Lightning Boost.[ENTER]"));
+        assert!(game.set_levels.is_empty());
+        manager.answer(PID, 0, &mut game);
+        assert_eq!(game.removals, [(50_514, 1)]);
+        assert_eq!(game.set_levels, [(243, 1)]);
+        assert!(!manager.is_running(PID));
+
+        assert!(manager.use_item(PID, (6, 71_000), &mut game));
+        let said = game.take();
+        assert!(said[said.len() - 1].1.contains("[QUESTION 1;Yes|2;No]"));
+        manager.answer(PID, 0, &mut game);
+        assert_eq!(game.set_levels, [(243, 1), (243, 0)]);
+        assert_eq!(game.removals, [(50_514, 1), (71_000, 1)]);
+        manager.logout(PID);
+    }
+
+    /// `pc.get_job` answers the job, and `pc.set_skill_level` passes `(DWORD)` and `(BYTE)` of
+    /// its numbers, 0 for a missing or non-number one, and pushes nothing.
+    #[test]
+    fn the_job_reads_and_the_skill_level_sets_its_numbers() {
+        let mut manager = manager().lock().unwrap();
+        manager.logout(PID);
+        let mut game = Fake {
+            job: 2,
+            ..Fake::default()
+        };
+        let source = b"say(pc.get_job()) \
+            say(pcall(type, pc.set_skill_level('239', 300)) and 'one' or 'none') \
+            pc.set_skill_level() pc.set_skill_level(4.9, 'x') pc.set_skill_level(141, 40.7)";
+        let code = host::load_chunk(manager.host.lua(), source, "=test");
+        manager.operate(PID, &mut game, |run, pc, _| {
+            run.execute(pc, 0, b"q".to_vec(), 0, code, Vec::new())
+        });
+        assert_eq!(game.take(), [(1, "2[ENTER]none[ENTER][DONE]".to_owned())]);
+        assert_eq!(game.set_levels, [(239, 44), (0, 0), (4, 0), (141, 40)]);
         manager.logout(PID);
     }
 

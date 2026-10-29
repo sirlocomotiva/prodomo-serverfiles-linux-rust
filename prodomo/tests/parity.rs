@@ -9600,6 +9600,119 @@ fn a_used_reset_book_runs_its_quest_and_stays() {
     );
 }
 
+/// Ledger 265: `pc.get_job`, `select_table` and `pc.set_skill_level` over the wire
+/// (`_basic/7and8th_skills.lua`). The boost book (50514) offers a shaman of the second group its
+/// one boost skill, 243, through `select_table`; the "Yes" removes the book and sets the skill to
+/// 1 (`SetSkillLevel` then `SkillLevelPacket`, `G/questlua_pc.cpp:2112-2123`), and the store
+/// keeps it. The reset book (71000) then finds it learned, and its "Yes" sets it back to 0 and
+/// removes itself, and the store drops the row.
+#[test]
+fn the_boost_book_teaches_a_skill_and_the_reset_book_forgets_it() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, console) =
+        Server::start_with_console(binary(), database.url(), &default_channels());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET skill_group = 2 WHERE name = 'Alpha'",
+    );
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+
+    // Given: Alpha, a shaman (job 3) of the second group, holds the boost book.
+    let (mut alpha, _character, _items) = load_character(&server, b"alice", 0);
+    let _add = enter_game_burst(&mut alpha);
+    Server::write_console(&console, "item give Alpha 50514 1");
+    server.wait_for("id 100000000; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 50_514, 1));
+
+    // When: Alpha uses it.
+    alpha.send_record(&client_item_use(0));
+    // Then: `select_table` offers the job and group's boost skill and a cancel.
+    let offer: [&[u8]; 5] = [
+        b"",
+        b"This ancient book seems to be very powerful! It is",
+        b"the key to tremendous skills. But first you must",
+        b"decide! Fighters can only master a single skill.",
+        b"Choose wisely",
+    ];
+    assert_eq!(
+        alpha.read_game(),
+        server_script(
+            1,
+            &titled_page(
+                b"Lehrbuch Boost",
+                &offer,
+                b"[QUESTION 1;Summon Lightning Boost|2;Cancel]"
+            )
+        )
+    );
+
+    // When: Alpha picks the skill. Then: the script asks for the confirmation.
+    alpha.send_record(&client_script_answer(0));
+    let confirm: [&[u8]; 3] = [
+        b"",
+        b"You choose to learn Summon Lightning Boost.",
+        b"You're sure about your decision?",
+    ];
+    assert_eq!(
+        alpha.read_game(),
+        server_script(
+            1,
+            &titled_page(b"Lehrbuch Boost", &confirm, b"[QUESTION 1;Yes|2;No]")
+        )
+    );
+    alpha.still("the confirmation waits");
+
+    // When: Alpha says yes.
+    alpha.send_record(&client_script_answer(0));
+    // Then: the book leaves its cell, the skill reaches level 1 at master type 0, and the
+    // script ends.
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 0, 0));
+    let skills = alpha.read_game();
+    assert_eq!(skills.len(), SKILL_LEVEL_LEN);
+    assert_eq!(skills[0], GC_SKILL_LEVEL_NEW);
+    assert_eq!(&skills[1 + 243 * 6..][..6], &[0, 1, 0, 0, 0, 0]);
+    assert_eq!(alpha.read_game(), server_script(0, b"[DONE]"));
+    alpha.still("the script ended");
+    check(&database, "(SELECT count(*) = 0 FROM item)");
+    wait_for(
+        &database,
+        "(SELECT (vnum, level, next_read) = (243, 1, 0) FROM player_skill)",
+    );
+
+    // Given: the reset book, in the freed cell.
+    Server::write_console(&console, "item give Alpha 71000 1");
+    server.wait_for("id 100000001; the client has it");
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 71_000, 1));
+    // When: Alpha uses it. Then: it finds the learned skill and asks.
+    alpha.send_record(&client_item_use(0));
+    let forget: [&[u8]; 3] = [
+        b"",
+        b"You will forgot anything you learn about boost",
+        b"and ward, are you sure about your decision?",
+    ];
+    assert_eq!(
+        alpha.read_game(),
+        server_script(
+            1,
+            &titled_page(b"Rolle des Lehrwandels", &forget, b"[QUESTION 1;Yes|2;No]")
+        )
+    );
+    // When: Alpha says yes. Then: the skill is back at 0, the book leaves, and the row goes.
+    alpha.send_record(&client_script_answer(0));
+    let skills = alpha.read_game();
+    assert_eq!(skills[0], GC_SKILL_LEVEL_NEW);
+    assert_eq!(&skills[1 + 243 * 6..][..6], &[0; 6]);
+    assert_eq!(set_fields(&alpha.read_game()), (inventory, 0, 0, 0));
+    assert_eq!(alpha.read_game(), server_script(0, b"[DONE]"));
+    alpha.still("the script ended");
+    check(&database, "(SELECT count(*) = 0 FROM item)");
+    wait_for(&database, "(SELECT count(*) = 0 FROM player_skill)");
+}
+
 /// Ledger 216: `CG_ITEM_USE` of an equippable item puts it on, and a use of the worn item takes
 /// it off (`CHARACTER::UseItemEx`, `G/char_item.cpp:3040-3053`).
 ///

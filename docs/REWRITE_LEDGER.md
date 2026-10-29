@@ -36883,3 +36883,141 @@ Gates:
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
 
 No ADR changed. No owner question added. V26 stays open.
+
+## 265. The skill books' choice (`pc.get_job`, `pc.set_skill_level`, `select_table`)
+
+The boost and ward books now teach the skill a player picks, and the reset book forgets it, over
+the wire.
+
+**Legacy** (`G/questlua_pc.cpp:915-919`, `:2112-2123`; `G/char_skill.cpp:183-258`, `:907-1110`):
+
+- `pc_get_job` pushes `GetJob()`.
+- `pc_set_skill_level` reads `(DWORD)lua_tonumber(L, 1)` and `(BYTE)lua_tonumber(L, 2)`, calls
+  `SetSkillLevel`, then `SkillLevelPacket()` whatever `SetSkillLevel` did, and pushes nothing.
+- `SetSkillLevel`:
+  - a vnum at or past `SKILL_MAX_NUM` (255, `common/length.h:72`) logs and returns;
+  - under `__7AND8TH_SKILLS__` (`prodomodefines.h:165`), a vnum in 221..=243 with a level above 0
+    returns when `SkillCanUp` refuses it;
+  - the slot takes `MIN(40, bLev)`, and the master type follows the ladder (40, 30, 20);
+  - the `ENABLE_REWARD_SYSTEM` tail then runs the reward missions.
+- `SkillCanUp`: a ward skill (221-228) rises only while every other ward skill is at 0, and a
+  boost skill (236-243) only while every other boost skill is. Any other vnum is refused, but
+  only 221..=243 ever asks. The extra `SKILL_HELP_SALPOONG` term of 239 sits behind
+  `__WOLFMAN_CHARACTER__`, which nothing defines.
+  - Search: `WOLFMAN_CHARACTER` under `server/server/common` and `premake5.lua` finds nothing.
+  - Control: `define __7AND8TH` finds `prodomodefines.h:165`.
+  - `SKILL_HELP_SALPOONG` itself has no definition anywhere in `server/` (control:
+    `SKILL_HELP_BYEURAK` is defined at `G/skill.h:197`), so the gated term could not compile.
+- `select_table(t)` is `questlib.lua`'s `q.yield('select', t)`, the same wait as `select(...)`.
+  The Rewrite already read its table through `host::getn`, so it needed nothing new.
+
+**The bridge** (`quest/src/manager.rs`, `quest/src/host.rs`):
+
+- `pc.get_job` answers `Game::job`.
+- `pc.set_skill_level` reads both numbers through `coerce_number` and `dword`, so a missing or
+  non-number argument is 0, and passes the level's low byte, as the block mode's byte is read.
+  It pushes nothing.
+- The `Game` trait gains `job` and `set_skill_level`. `BRIDGED` has 85 names, in `api::NAMES`
+  order.
+
+**The session** (`prodomo/src/game_state/quests.rs`):
+
+- `job` reads the card's job.
+- `set_skill_level`:
+  - a vnum past the 255 slots logs `vnum overflow` and sets nothing;
+  - a 7/8th skill above 0 obeys `skill_can_up`, the family exclusion;
+  - otherwise the slot takes the level up to 40, and the slot, level and read stamp join the
+    step's `climbs`, which the descriptor stores with `store_skill` as it stores a GRAND climb
+    (a 0 deletes the row);
+  - byte 76 is sent either way.
+- No point is recomputed, as legacy recomputes none here. No owner script sets 141, the one
+  passive skill the Rewrite caches.
+- The reward missions' tail waits for `sys.custom.reward`.
+
+**The callers on the owner's data.** `pc.set_skill_level` and `pc.get_job` are called only by
+`_basic/7and8th_skills.lua` (search of the quest folder; control: the same search finds the
+`select_table` callers in the guild quests and the teleport ring).
+
+- 50514 (boost) and 50515 (ward) run to the end: the offer, the choice, the confirmation, and
+  `pc.remove_item(item.get_vnum(), 1)` then `pc.set_skill_level(vnum, 1)`.
+- 71000 (reset) runs to the end: each learned skill back to 0, then the removal.
+- 50525 (GRAND) still needs `pc.is_skill_book_no_delay`, `pc.get_real_alignment`,
+  `pc.remove_skill_book_no_delay` and `pc.change_alignment`.
+- Alpha's seeded skill group is 49, which indexes nothing in 50514's table, so its script would
+  end in a Lua error, as legacy's would. The scenario sets the group to 2.
+
+**The tests.**
+
+- `quest`:
+  - `the_boost_book_teaches_the_chosen_skill_and_the_reset_book_forgets_it` runs the real
+    50514 and 71000 scripts against the fake: a shaman of group 2 is offered 243 and a cancel,
+    the two "Yes" answers remove the book and set 243 to 1, and 71000 sets it back to 0 and
+    removes itself.
+  - `the_job_reads_and_the_skill_level_sets_its_numbers`: the job; a text vnum and a level of
+    300 (low byte 44); no arguments (0, 0); a fraction and a text level (4, 0); 40.7 (40); and
+    `pcall(type, ...)` proves the call pushes nothing.
+- `prodomo` lib:
+  - `the_session_reads_the_group_and_holds_no_item_without_a_character` also reads the job
+    (`with_session`'s card is now (3, 1), so the job and the group differ).
+  - The new `a_set_skill_level_lands_within_the_slots_and_the_exclusions`: the family
+    exclusion both ways, a re-raise of a learned ward skill, 0 always landing, 244 with no
+    family, the cap at 40 with the read stamp, slot 254, a refused 255, and byte 76 on every call.
+- Parity: `the_boost_book_teaches_a_skill_and_the_reset_book_forgets_it`.
+  - Alpha (job 3, group 2) is given 50514 by the console and uses it.
+  - `select_table` offers "Summon Lightning Boost" and "Cancel"; the first answer brings the
+    confirmation; "Yes" clears the cell, sends byte 76 with slot 243 at level 1 and master type
+    0, and ends with `[DONE]`.
+  - The store holds no item and one `player_skill` row (243, 1, 0).
+  - The console gives 71000 into the freed cell. Its use asks; "Yes" sends byte 76 with slot 243
+    at 0, clears the cell and ends. The store holds no item and no skill row.
+
+**Rows.**
+
+- `lua.pc.get_job` and `lua.pc.set_skill_level` are `ported`, with the scenario.
+- `lua.item.get_vnum` is `ported`: the books reach it over the wire.
+- `lua.pc.remove_item` stays `partial` (a step that stores no rows still takes nothing); it names
+  the scenario.
+- `quest.7and8th_skills` stays `partial`, for 50525.
+
+**STATUS.** The header names 265, with 85 backed names. The next slice is `pc.give_item2_select`
+and `item.set_socket`, then the GRAND book's alignment names.
+
+**Mutation sweep.** 15 mutants (V1-V15) were applied to the pristine files, and each changed
+executable code. Every file was restored by checksum. All 15 were killed, semantically, with no
+compile-error kills:
+
+- V1-V4 were killed by the quest tests: `pc.get_job` answers the group; the level is the vnum;
+  the level keeps its high byte; a missing level is 1. Their other failing quest tests are
+  knock-ons of the manager mutex, which the first panic poisons.
+- V5-V14 were killed by the session tests: the session's job is the group; no cap at 40; no
+  exclusion; a 0 is excluded too; the two families are one; the vnum's own level counts; the
+  stamp is dropped; no climb is kept; a refused vnum sends no byte 76; slot 254 is refused.
+- V15 (`BRIDGED` misnames `pc.set_skill_level`) was killed by the host test.
+
+The Clippy fix below moved the bridge's reads into `set_skill_level`, so V2-V4 were retargeted
+at the new text and run again; all three were killed.
+
+**The first gate run failed twice.**
+
+- `inventory_rows_keep_the_rules`: the `partial` row `lua.pc.remove_item` named the scenario. The
+  scenario now sits in its note instead.
+- Clippy `too_many_lines` (101/100) on `pc_api`, and `range_plus_one` on the scenario's slot
+  slices. The arm's reads became the helper `set_skill_level`, beside `remove_item`, and the
+  slices are `[1 + 243 * 6..][..6]`.
+
+Both were fixed by refactoring, with no `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4243 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
+
+No ADR changed. No owner question added. V26 stays open.
