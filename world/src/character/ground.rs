@@ -529,6 +529,145 @@ pub fn pickup_item(
     })
 }
 
+/// What [`auto_give_item`] did with the vnum it was asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoGiven {
+    /// The vnum has no proto: `AutoGiveItem` answers `NULL` before anything changes.
+    NoProto,
+    /// The item could not be made (`CreateItem` answered `NULL`): `AutoGiveItem` answers
+    /// `NULL`, and the merges it already made stand.
+    NotMade,
+    /// The whole count went onto the stacks; this is the stack topped up last.
+    Merged(crate::item::ItemId),
+    /// A new item went into this free cell.
+    Placed {
+        /// The new item.
+        id: crate::item::ItemId,
+        /// Its cell.
+        pos: ItemPos,
+    },
+    /// No cell was free: the made item goes to the ground at the character's feet, which the
+    /// caller lays with its ownership.
+    Unplaced(Item),
+}
+
+/// `CHARACTER::AutoGiveItem(vnum, count)` with `bMsg` set (`G/char_item.cpp:9081-9223`), the
+/// give of `pc.give_item2` among others.
+///
+/// A stackable item that is neither `ITEM_BLEND` nor `ITEM_TOGGLE` first tops up every stack
+/// of its vnum whose sockets are the proto's, in cell order, up to the stack limit; the
+/// `MAKECOUNT` arm raises the count to the proto's `value1` at each such stack. Taken whole
+/// that way, the name is sent and the give ends. Otherwise `make` is asked for an item of
+/// what is left, which goes to the first free cell of its banks, then of the unlocked base
+/// inventory: the name is sent, then the item is set, and a potion fills the first empty
+/// quickslot. With no free cell the made item is answered unplaced, for the ground.
+///
+/// Unlike the pick-up, the stack check is the proto's `STACKABLE` flag alone, with no
+/// `ANTI_STACK` check. The proto sockets of the text protos are all 0, so a stack matches
+/// when its sockets are all 0. `make` is never asked for an `ITEM_BLEND`: the made-item
+/// paths refuse it, so legacy's blend merge after `CreateItem` is unreachable here.
+///
+/// Two differences from legacy, both Defects there. The base search stops at the unlocked
+/// cells, as the pick-up's does (ledger 198.3). And legacy's quickslot names the cell as a
+/// `BYTE`, so a potion placed in a bank cell past 255 would fill a slot naming the wrong
+/// base cell; no slot is filled for such a cell.
+pub fn auto_give_item(
+    items: &mut CharacterItems,
+    slots: &mut super::quickslot::Quickslots,
+    rules: &MoveRules,
+    protos: &ItemProtos,
+    (vnum, count): (u32, u16),
+    make: impl FnOnce(u16) -> Option<Item>,
+) -> (AutoGiven, MoveDone) {
+    use gamedata::item_kind::{ITEM_BLEND, ITEM_TOGGLE, ITEM_USE, USE_POTION};
+    let mut done = MoveDone {
+        kind: MoveKind::Given,
+        records: Vec::new(),
+        changes: Vec::new(),
+    };
+    let Some(proto) = protos.get(vnum) else {
+        return (AutoGiven::NoProto, done);
+    };
+    let mut left = count;
+    if proto.flags & ITEM_FLAG_STACKABLE != 0
+        && proto.item_type != ITEM_BLEND
+        && proto.item_type != ITEM_TOGGLE
+    {
+        for cell in merge_cells() {
+            let pos = ItemPos::new(EWindows::Inventory as u8, cell);
+            let Some(stack) = items.item_at(pos) else {
+                continue;
+            };
+            if stack.vnum != vnum || stack.sockets != proto.sockets {
+                continue;
+            }
+            if proto.flags & super::drop_item::ITEM_FLAG_MAKECOUNT != 0 {
+                let floor = u16::try_from(proto.values[1].max(0)).unwrap_or(u16::MAX);
+                left = left.max(floor);
+            }
+            let (id, held) = (stack.id, stack.count);
+            let taken = rules.count_limit.saturating_sub(held).min(left);
+            left -= taken;
+            let Ok(count) = items.set_count(id, u32::from(held + taken)) else {
+                continue;
+            };
+            if let Some(stack) = items.item(id) {
+                done.records
+                    .push(MoveRecord::Item(ItemRecord::Update(stack.gc_item_update())));
+            }
+            done.changes.push(ItemChange::Count { id, count });
+            if left == 0 {
+                done.records.push(MoveRecord::PickedUp { vnum });
+                return (AutoGiven::Merged(id), done);
+            }
+        }
+    }
+    let Some(mut item) = make(left) else {
+        return (AutoGiven::NotMade, done);
+    };
+    let size = item.size;
+    let cell = (0..CATEGORY_NUM)
+        .filter(|bank| is_custom_category(proto, *bank))
+        .find_map(|bank| items.find_free_custom_cell(bank, size))
+        .or_else(|| items.find_free_inventory_cell(rules.usable_cells, size));
+    let Some(cell) = cell else {
+        return (AutoGiven::Unplaced(item), done);
+    };
+    let pos = ItemPos::new(EWindows::Inventory as u8, cell);
+    item.pos = pos;
+    if items.set(pos, &item).is_err() {
+        return (AutoGiven::Unplaced(item), done);
+    }
+    done.records.push(MoveRecord::PickedUp { vnum });
+    // A fresh item was never held, so `AddToCharacter` highlights its cell.
+    done.records
+        .push(MoveRecord::Item(ItemRecord::Set(item.gc_item_set(pos, 1))));
+    let id = item.id;
+    done.changes.push(ItemChange::Created(item));
+    if proto.item_type == ITEM_USE && proto.sub_type == USE_POTION {
+        if let Ok(byte) = u8::try_from(cell) {
+            let empty = (0_u8..)
+                .take(super::quickslot::QUICKSLOT_MAX_NUM)
+                .find(|slot| {
+                    slots
+                        .get(*slot)
+                        .is_some_and(super::quickslot::Quickslot::is_empty)
+                });
+            if let Some(slot) = empty {
+                let mut out = Vec::new();
+                let quickslot = super::quickslot::Quickslot {
+                    kind: common::enums::EQuickSlotType::Item as u8,
+                    pos: byte,
+                };
+                let _set = slots.set(slot, quickslot, &mut out);
+                done.records
+                    .extend(out.into_iter().map(MoveRecord::Quickslot));
+            }
+        }
+    }
+    (AutoGiven::Placed { id, pos }, done)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1113,5 +1252,208 @@ mod tests {
             done.records,
             vec![MoveRecord::Ground(GroundRecord::Del { vid: 9 })]
         );
+    }
+
+    /// The protos the gives read: stackable arrows, a stackable `MAKECOUNT` item whose
+    /// `value1` is 50, a sword and a potion.
+    fn give_protos() -> ItemProtos {
+        use gamedata::item_kind::{ITEM_USE, USE_POTION};
+        let mut arrow = ItemProto::for_category_rule(ARROW, 1, 0);
+        arrow.flags = ITEM_FLAG_STACKABLE;
+        let mut counted = ItemProto::for_category_rule(MADE_IN_FIFTIES, 1, 0);
+        counted.flags = ITEM_FLAG_STACKABLE | crate::character::drop_item::ITEM_FLAG_MAKECOUNT;
+        counted.values[1] = 50;
+        let mut potion = ItemProto::for_category_rule(POTION, ITEM_USE, USE_POTION);
+        potion.flags = ITEM_FLAG_STACKABLE;
+        ItemProtos::from_rows(vec![
+            arrow,
+            counted,
+            ItemProto::for_category_rule(SWORD, 1, 0),
+            potion,
+        ])
+    }
+
+    /// A stackable `MAKECOUNT` item.
+    const MADE_IN_FIFTIES: u32 = 8_100;
+    /// An `ITEM_USE` `USE_POTION`.
+    const POTION: u32 = 27_001;
+
+    /// A made item of `vnum` and `count` with id 900, as `make` answers.
+    fn made(vnum: u32, count: u16) -> Item {
+        let mut item = Item::new(900, vnum);
+        item.count = count;
+        item.size = 1;
+        item
+    }
+
+    fn give(
+        items: &mut CharacterItems,
+        slots: &mut crate::character::Quickslots,
+        vnum: u32,
+        count: u16,
+        asked: &mut Vec<u16>,
+    ) -> (AutoGiven, MoveDone) {
+        auto_give_item(
+            items,
+            slots,
+            &RULES,
+            &give_protos(),
+            (vnum, count),
+            |left| {
+                asked.push(left);
+                Some(made(vnum, left))
+            },
+        )
+    }
+
+    #[test]
+    fn a_give_without_a_proto_changes_nothing_and_makes_nothing() {
+        let mut items = holding(&[]);
+        let mut slots = crate::character::Quickslots::default();
+        let mut asked = Vec::new();
+        let (given, done) = give(&mut items, &mut slots, 85_000, 1, &mut asked);
+        assert_eq!(given, AutoGiven::NoProto);
+        assert!(done.records.is_empty() && done.changes.is_empty() && asked.is_empty());
+    }
+
+    /// Every stack of the vnum with the proto's sockets tops up in cell order; a socketed
+    /// stack is passed over. The whole count merged, the name follows the updates and
+    /// nothing is made.
+    #[test]
+    fn a_stackable_give_tops_up_the_stacks_in_cell_order() {
+        let mut socketed = arrows(10, 5);
+        socketed.sockets[0] = 1;
+        let mut items = holding(&[(2, socketed), (3, arrows(11, 190)), (7, arrows(12, 50))]);
+        let mut slots = crate::character::Quickslots::default();
+        let mut asked = Vec::new();
+        let (given, done) = give(&mut items, &mut slots, ARROW, 30, &mut asked);
+        assert_eq!(given, AutoGiven::Merged(12));
+        assert!(asked.is_empty());
+        assert_eq!(items.item(10).map(|item| item.count), Some(5));
+        assert_eq!(items.item(11).map(|item| item.count), Some(200));
+        assert_eq!(items.item(12).map(|item| item.count), Some(70));
+        assert_eq!(
+            done.changes,
+            vec![
+                ItemChange::Count { id: 11, count: 200 },
+                ItemChange::Count { id: 12, count: 70 },
+            ]
+        );
+        assert_eq!(done.records.len(), 3);
+        assert_eq!(done.records[2], MoveRecord::PickedUp { vnum: ARROW });
+    }
+
+    /// What the stacks could not take is made, then placed in the first free cell: the
+    /// name, then the item with its cell highlighted.
+    #[test]
+    fn what_the_stacks_leave_is_made_into_the_first_free_cell() {
+        let mut items = holding(&[(0, arrows(11, 195))]);
+        let mut slots = crate::character::Quickslots::default();
+        let mut asked = Vec::new();
+        let (given, done) = give(&mut items, &mut slots, ARROW, 20, &mut asked);
+        assert_eq!(asked, vec![15]);
+        assert_eq!(
+            given,
+            AutoGiven::Placed {
+                id: 900,
+                pos: inv(1)
+            }
+        );
+        assert_eq!(items.item(11).map(|item| item.count), Some(200));
+        assert_eq!(items.item_at(inv(1)).map(|item| item.count), Some(15));
+        let mut placed = made(ARROW, 15);
+        placed.pos = inv(1);
+        assert_eq!(
+            done.records[1..],
+            [
+                MoveRecord::PickedUp { vnum: ARROW },
+                MoveRecord::Item(ItemRecord::Set(placed.gc_item_set(inv(1), 1))),
+            ]
+        );
+        assert_eq!(done.changes[1], ItemChange::Created(placed));
+    }
+
+    /// `MAKECOUNT` raises the count to the proto's `value1` at a matching stack, so one
+    /// asked for becomes 50.
+    #[test]
+    fn a_makecount_stack_takes_the_protos_count() {
+        let mut stack = Item::new(11, MADE_IN_FIFTIES);
+        stack.count = 10;
+        let mut items = holding(&[(0, stack)]);
+        let mut slots = crate::character::Quickslots::default();
+        let mut asked = Vec::new();
+        let (given, _) = give(&mut items, &mut slots, MADE_IN_FIFTIES, 1, &mut asked);
+        assert_eq!(given, AutoGiven::Merged(11));
+        assert_eq!(items.item(11).map(|item| item.count), Some(60));
+    }
+
+    /// With no free cell the made item is answered for the ground, and the merges stand.
+    #[test]
+    fn a_full_inventory_answers_the_made_item_for_the_ground() {
+        let mut placed: Vec<(u16, Item)> = (0..90)
+            .map(|cell| (cell, Item::new(u32::from(cell) + 1, SWORD)))
+            .collect();
+        placed[0].1 = arrows(1, 199);
+        let mut items = holding(&placed);
+        let mut slots = crate::character::Quickslots::default();
+        let mut asked = Vec::new();
+        let (given, done) = give(&mut items, &mut slots, ARROW, 3, &mut asked);
+        assert_eq!(given, AutoGiven::Unplaced(made(ARROW, 2)));
+        assert_eq!(items.item(1).map(|item| item.count), Some(200));
+        assert_eq!(done.changes, vec![ItemChange::Count { id: 1, count: 200 }]);
+    }
+
+    /// A refused make answers no item; the merges made before it stand.
+    #[test]
+    fn a_refused_make_gives_nothing_more() {
+        let mut items = holding(&[(0, arrows(11, 199))]);
+        let mut slots = crate::character::Quickslots::default();
+        let (given, done) = auto_give_item(
+            &mut items,
+            &mut slots,
+            &RULES,
+            &give_protos(),
+            (ARROW, 3),
+            |_| None,
+        );
+        assert_eq!(given, AutoGiven::NotMade);
+        assert_eq!(done.changes, vec![ItemChange::Count { id: 11, count: 200 }]);
+    }
+
+    /// A placed potion fills the first empty quickslot with its cell; a slot already set is
+    /// passed over.
+    #[test]
+    fn a_placed_potion_fills_the_first_empty_quickslot() {
+        use crate::character::{Quickslot, QuickslotRecord};
+        let item_slot = |pos| Quickslot {
+            kind: common::enums::EQuickSlotType::Item as u8,
+            pos,
+        };
+        let mut items = holding(&[(0, Item::new(5, SWORD))]);
+        let mut slots = crate::character::Quickslots::default();
+        let _ = slots.set(0, item_slot(0), &mut Vec::new());
+        let mut asked = Vec::new();
+        let (given, done) = give(&mut items, &mut slots, POTION, 1, &mut asked);
+        assert_eq!(
+            given,
+            AutoGiven::Placed {
+                id: 900,
+                pos: inv(1)
+            }
+        );
+        assert_eq!(slots.get(1), Some(item_slot(1)));
+        assert_eq!(
+            done.records.last(),
+            Some(&MoveRecord::Quickslot(QuickslotRecord::Add {
+                slot: 1,
+                quickslot: item_slot(1),
+            }))
+        );
+        // A sword is no potion: no slot is filled.
+        let (_, done) = give(&mut items, &mut slots, SWORD, 1, &mut asked);
+        assert!(!done
+            .records
+            .iter()
+            .any(|record| matches!(record, MoveRecord::Quickslot(_))));
     }
 }

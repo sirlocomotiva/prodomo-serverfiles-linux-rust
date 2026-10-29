@@ -4581,12 +4581,15 @@ mod tests {
             pid: 0,
             targets: &mut super::super::quest_target::QuestTargets::default(),
             pulse: 0,
+            giver: None,
+            item_rows: Vec::new(),
+            laid: Vec::new(),
         };
         let climbed = session.learn_grand_master_skill(vnum, total);
         let super::super::quests::Session {
             records, climbs, ..
         } = session;
-        (climbed, (records, climbs, Vec::new()))
+        (climbed, (records, climbs, Vec::new(), Vec::new()))
     }
 
     /// The GRAND read climbs past its max: vnum 1 at 30, the count already at 6 (max 5
@@ -4598,7 +4601,7 @@ mod tests {
         world.bodies.get_mut(&Vid::new(1)).unwrap().card.skill_group = 1;
         world.set_pc_skill_level(1, 1, 30);
         std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
-        let (climbed, (records, climbs, _)) = grand_read(&mut world, 1, 6);
+        let (climbed, (records, climbs, _, _)) = grand_read(&mut world, 1, 6);
         assert!(climbed);
         assert_eq!(world.pc_skill_level(1, 1), 31);
         assert_eq!(climbs.len(), 1, "the climb is queued for the store");
@@ -4635,7 +4638,7 @@ mod tests {
         let (mut world, mut inbox) = a_reader(50301, 25_000);
         world.set_pc_skill_level(1, SKILL_LEADERSHIP, 30);
         std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
-        let (climbed, (records, climbs, _)) = grand_read(&mut world, SKILL_LEADERSHIP, 1);
+        let (climbed, (records, climbs, _, _)) = grand_read(&mut world, SKILL_LEADERSHIP, 1);
         assert!(!climbed);
         assert!(climbs.is_empty(), "no climb, no store");
         assert_eq!(texts(&records), [b"[LS;949]".to_vec()]);

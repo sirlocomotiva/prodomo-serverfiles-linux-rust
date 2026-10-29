@@ -157,6 +157,9 @@ pub enum MoveKind {
     Retrieved,
     /// A guild was made: the fee and one 70101 item left (`AnswerMakeGuild`).
     GuildMade,
+    /// A quest gave an item: onto the stacks, into a free cell, or to the ground
+    /// (`AutoGiveItem`).
+    Given,
 }
 
 /// A record the client is sent, in the order legacy sends it.

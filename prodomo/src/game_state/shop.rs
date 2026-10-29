@@ -219,6 +219,8 @@ pub enum ShopAnswer {
         climbs: Vec<(u8, u8, i32)>,
         /// The `guild.*` writers the scripts ran, each for the descriptor to drain.
         guild_ops: Vec<super::guild::GuildQuestStore>,
+        /// The item rows the scripts' gives changed, for the descriptor to store.
+        items: Vec<db::items::RowChange>,
     },
 }
 
@@ -318,13 +320,15 @@ impl GameState {
         if self.trading.contains_key(&vid) {
             return ShopAnswer::silent(ShopDeclined::Trading);
         }
-        let (taken, (mut records, climbs, guild_ops)) =
+        let (taken, (mut records, climbs, guild_ops, items)) =
             self.quest_click(vid, (target, race), place, mover);
-        if taken {
+        // A give's rows are stored even when no script took the click.
+        if taken || !items.is_empty() {
             return ShopAnswer::Quest {
                 records,
                 climbs,
                 guild_ops,
+                items,
             };
         }
         match self.open_window(vid, target, place, mover) {
@@ -1314,6 +1318,7 @@ mod tests {
             records: vec![menu],
             climbs: Vec::new(),
             guild_ops: Vec::new(),
+            items: Vec::new(),
         };
         assert_eq!(click(&mut state, SCRIPTED, at(0)), declined);
         assert!(state.browsing.is_empty());

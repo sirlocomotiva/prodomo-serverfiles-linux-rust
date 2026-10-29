@@ -4933,6 +4933,78 @@ fn the_quest_window_runs_the_letters_info_and_the_quest_moves_on() {
     alice.still("the letter is not sent again");
 }
 
+/// `lua.pc.give_item2`, `quest.guild_create`: Alpha's `guild_create` stands at `reward`, so
+/// the login's letter pass sends its letter, "Ai luat Cartea Intelepciunii". The quest
+/// window's entry runs its `button or info` page, whose `pc.give_item2(70101)` is
+/// `AutoGiveItem` (`G/char_item.cpp:9081-9223`): 70101 is no stack, so it is made and goes to
+/// the first free cell, legacy's line naming it first (`[LS;444;%s]`, `:9177-9182`) and then
+/// the item set, both before the page, which the script sends as it ends. The row is stored
+/// before either is sent, and `set_state(start)`, the state 0, deletes the flag at the logout.
+#[test]
+fn guild_creates_reward_page_gives_the_book_into_the_first_free_cell() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    // The CRC32 of `reward`.
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
+          'guild_create.__status'::bytea, 1322349139 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha) = enter_world_reading(&server, b"alice", 0);
+    read_login_lines(&mut alice, 0, None);
+    let mut letters = Vec::new();
+    while let Some(record) = alice.read_game_until(std::time::Instant::now() + QUIET_WINDOW) {
+        letters.push(record);
+    }
+    let title = b"Ai luat Cartea Intelepciunii";
+    let button = letters
+        .iter()
+        .find(|record| is_letter_of(record, title))
+        .expect("guild_create's letter");
+    let text = String::from_utf8_lossy(&button[6..]).into_owned();
+    let quest: u32 = text
+        .split("[QUESTBUTTON idx;")
+        .nth(1)
+        .and_then(|rest| rest.split('|').next())
+        .and_then(|idx| idx.parse().ok())
+        .expect("the button names its quest");
+
+    alice.send_record(&client_script_button(quest | SELECT_QUEST));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"[LS;444;Cartea Intelepciunii]"),
+        "the give names the item first"
+    );
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    assert_eq!(set_fields(&alice.read_game()), (inventory, 0, 70_101, 1));
+    let page = alice.read_game();
+    assert!(
+        is_letter_of(&page, b"Ai primit cartea") && page.ends_with(b"[DONE]"),
+        "the page follows the give: {page:02x?}"
+    );
+    check(
+        &database,
+        &format!(
+            "(SELECT count(*) FROM item WHERE vnum = 70101 AND count = 1 AND window_type = \
+             {inventory} AND pos = 0 AND owner_id = (SELECT id FROM player WHERE name = \
+             'Alpha')) = 1"
+        ),
+    );
+    alice.quiet("the page is the press's last record");
+
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    // `start` is the state 0, and a flag set to 0 is deleted (`quest::PC::SetFlag`).
+    check(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM quest_flag WHERE name = 'guild_create.__status'::bytea)",
+    );
+}
+
 /// Theowahdan, the sash quest's NPC: `npc.txt:11` of map 1 stands vnum 60003 at cell
 /// (732, 479), point (482800, 943900) past the map's base.
 const THEOWAHDAN_VNUM: u16 = 60_003;

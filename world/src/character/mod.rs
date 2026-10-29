@@ -63,8 +63,8 @@ pub use equipment::{
 };
 pub use grant::{grant, GrantRefused, Granted, GRANT_WINDOW};
 pub use ground::{
-    drop_gold, drop_item, drop_penalty_item, pickup_gold, pickup_item, DropAt, GroundItem, Picker,
-    DROPPED_NOTICE, GOLD_DROPPED_NOTICE,
+    auto_give_item, drop_gold, drop_item, drop_penalty_item, pickup_gold, pickup_item, AutoGiven,
+    DropAt, GroundItem, Picker, DROPPED_NOTICE, GOLD_DROPPED_NOTICE,
 };
 pub use inventory::{
     character_cell_bound, custom_inventory_category_of, custom_inventory_position,

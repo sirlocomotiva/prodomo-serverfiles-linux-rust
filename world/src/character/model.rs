@@ -216,6 +216,15 @@ impl Character {
         (&mut self.items, self.points.as_mut())
     }
 
+    /// The character's items, its points (or `None` without them) and its quickslots, to change
+    /// together: a quest's give sets an item and fills a slot while the script holds the
+    /// points.
+    pub fn items_points_and_quickslots_mut(
+        &mut self,
+    ) -> (&mut CharacterItems, Option<&mut Points>, &mut Quickslots) {
+        (&mut self.items, self.points.as_mut(), &mut self.quickslots)
+    }
+
     /// The character's quickslots (`m_quickslot`).
     pub const fn quickslots(&self) -> &Quickslots {
         &self.quickslots

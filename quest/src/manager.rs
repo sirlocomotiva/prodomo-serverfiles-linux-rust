@@ -155,6 +155,15 @@ pub trait Game {
     /// it has played, as the character's last save banked them.
     fn playtime(&self) -> i32;
 
+    /// `ITEM_MANAGER::GetVnum` (`G/item_manager.cpp:722-738`): the vnum of the first proto
+    /// whose locale name `name` prefixes, ignoring case.
+    fn item_vnum(&self, name: &[u8]) -> Option<u32>;
+
+    /// `AutoGiveItem(vnum, count)` for the character the script runs for
+    /// (`G/char_item.cpp:9081-9223`): the ID of the item it gave or topped up last, or 0
+    /// when it gave none.
+    fn give_item(&mut self, vnum: u32, count: u16) -> u32;
+
     /// The race of the character `vid`, when it is in the world.
     fn race_of(&self, vid: u32) -> Option<u32>;
 
@@ -1999,6 +2008,53 @@ fn combine(lua: &Lua, args: &MultiValue) -> mlua::Result<Vec<u8>> {
     Ok(text)
 }
 
+/// `pc_give_or_drop_item` (`G/questlua_pc.cpp:540-587`), `pc.give_item2`: the item's ID, or
+/// 0 when none was given.
+///
+/// A number, or text that reads as one, is the vnum as `(int)` then `DWORD`; other text is a
+/// locale name's prefix (`ITEM_MANAGER::GetVnum`); anything else, or a name no proto has,
+/// gives nothing. A positive second number is the count, rounded to even, and one that rounds
+/// to 0 gives nothing; otherwise the count is 1. The rewards log and the gold-bar log are not
+/// ported. The count reaches `AutoGiveItem` as a `WORD`, which legacy wraps; the Rewrite
+/// stops it at 65535, which the stack limit then bounds.
+fn give_item2(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<u32> {
+    let first = args.front().cloned().unwrap_or(Value::Nil);
+    let vnum = if lua.coerce_number(first.clone())?.is_some() {
+        let vnum = host::c_int(lua, first)?;
+        Some(u32::from_le_bytes(vnum.to_le_bytes()))
+    } else if let Value::String(name) = &first {
+        let name = host::c_string(lua, Value::String(name.clone()))?.unwrap_or_default();
+        let vnum = cx.game.item_vnum(&name);
+        if vnum.is_none() {
+            tracing::warn!(
+                name = %String::from_utf8_lossy(&name),
+                "QUEST Make item call error : wrong item name"
+            );
+        }
+        vnum
+    } else {
+        tracing::warn!("QUEST Make item call error : wrong argument");
+        None
+    };
+    let Some(vnum) = vnum else {
+        return Ok(0);
+    };
+    let second = args.get(1).cloned().unwrap_or(Value::Nil);
+    let count = match lua.coerce_number(second)? {
+        Some(asked) if asked > 0.0 => {
+            let count = host::c_int(lua, Value::Number(asked.round_ties_even()))?;
+            if count <= 0 {
+                tracing::warn!(asked, "QUEST Make item call error : wrong item count");
+                return Ok(0);
+            }
+            count
+        }
+        _ => 1,
+    };
+    let count = u16::try_from(count).unwrap_or(u16::MAX);
+    Ok(cx.game.give_item(vnum, count))
+}
+
 /// `(DWORD)lua_tonumber(L, n)` on x86-64: the fraction dropped, then the low 32 bits of the
 /// 64-bit conversion, which is 0 where the conversion has no answer (out of range or NaN).
 fn dword(number: f64) -> u32 {
@@ -2083,6 +2139,7 @@ fn pc_api(
             Some(Value::Number(f64::from(cx.game.playtime())))
         }
         b"pc.get_map_index" => Some(Value::Number(f64::from(cx.game.map_index()))),
+        b"pc.give_item2" => number(give_item2(lua, cx, args)?),
         b"pc.get_war_map" => Some(Value::Number(f64::from(cx.game.war_map()))),
         b"pc.is_gm" => Some(Value::Boolean(false)),
         b"pc.getqf" => {
@@ -2518,6 +2575,12 @@ mod tests {
     struct Fake {
         level: u8,
         playtime: i32,
+        /// Every `give_item` call, in order.
+        gives: Vec<(u32, u16)>,
+        /// What `give_item` answers.
+        given: u32,
+        /// The vnums `item_vnum` finds by name.
+        item_vnums: BTreeMap<Vec<u8>, u32>,
         races: BTreeMap<u32, u32>,
         chats: Vec<(ChatKind, Vec<u8>)>,
         scripts: Vec<(u8, Vec<u8>)>,
@@ -2562,6 +2625,15 @@ mod tests {
 
         fn playtime(&self) -> i32 {
             self.playtime
+        }
+
+        fn item_vnum(&self, name: &[u8]) -> Option<u32> {
+            self.item_vnums.get(name).copied()
+        }
+
+        fn give_item(&mut self, vnum: u32, count: u16) -> u32 {
+            self.gives.push((vnum, count));
+            self.given
         }
 
         fn race_of(&self, vid: u32) -> Option<u32> {
@@ -3389,6 +3461,51 @@ mod tests {
         assert_eq!(
             probe.call("pc.getplaytime", &[]).unwrap(),
             number(-16_909_060.0)
+        );
+        // `pc.give_item2`: a vnum, a count rounded to even, 1 without one, nothing for a
+        // count that rounds to 0, a name's vnum, and nothing for an unknown name or a table.
+        probe.game.given = 0x0102_0304;
+        probe.game.item_vnums.insert(b"Okey".to_vec(), 79_506);
+        let text = |text: &str| Value::String(lua.create_string(text).unwrap());
+        let give = |probe: &mut Probe, args: &[Value]| probe.call("pc.give_item2", args).unwrap();
+        assert_eq!(
+            give(&mut probe, &[Value::Number(70_101.9)]),
+            number(16_909_060.0)
+        );
+        assert_eq!(
+            give(&mut probe, &[text("85000"), Value::Number(2.5)]),
+            number(16_909_060.0)
+        );
+        assert_eq!(
+            give(&mut probe, &[Value::Number(50_033.0), Value::Number(3.5)]),
+            number(16_909_060.0)
+        );
+        assert_eq!(
+            give(&mut probe, &[Value::Number(1.0), Value::Number(0.4)]),
+            number(0.0)
+        );
+        assert_eq!(
+            give(&mut probe, &[Value::Number(2.0), Value::Number(-3.0)]),
+            number(16_909_060.0)
+        );
+        assert_eq!(
+            give(&mut probe, &[Value::Number(3.0), Value::Number(70_000.0)]),
+            number(16_909_060.0)
+        );
+        assert_eq!(give(&mut probe, &[text("Okey")]), number(16_909_060.0));
+        assert_eq!(give(&mut probe, &[text("Nothing")]), number(0.0));
+        let table = Value::Table(lua.create_table().unwrap());
+        assert_eq!(give(&mut probe, &[table]), number(0.0));
+        assert_eq!(
+            probe.game.gives,
+            [
+                (70_101, 1),
+                (85_000, 2),
+                (50_033, 4),
+                (2, 1),
+                (3, u16::MAX),
+                (79_506, 1),
+            ]
         );
         let table = Value::Table(lua.create_table().unwrap());
         // a non-number pushes nothing.

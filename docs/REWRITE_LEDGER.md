@@ -36370,3 +36370,151 @@ Gates:
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
 
 No ADR changed. No owner question added. V26 stays open.
+
+## 262. The quest's give (`lua.pc.give_item2`)
+
+`pc.give_item2` now gives. `guild_create`'s reward page hands over its book, and every
+other quest that calls it on a dialog step or a click gets `AutoGiveItem`.
+
+**The bridge.** `pc_give_or_drop_item` (`G/questlua_pc.cpp:540-587`) is `give_item2` in
+`quest/src/manager.rs`. A number, or text that reads as one, is the vnum, as `(int)` then
+`DWORD`. Other text is a locale name's case-insensitive prefix (`ITEM_MANAGER::GetVnum`,
+`G/item_manager.cpp:722-738`, through the existing `ItemProtos::vnum_by_locale_name`). Anything
+else, or a name no proto has, gives nothing and answers 0. A positive second number is the
+count, rounded to even (`rint`), and one that rounds to 0 gives nothing. Otherwise the count is
+1. The `Game` trait gains `item_vnum` and `give_item`, and `BRIDGED` has 77 names, in
+`api::NAMES` order.
+
+**The give.** `world::character::auto_give_item`, in `ground.rs`, is `AutoGiveItem(vnum, count)`
+with `bMsg` set (`G/char_item.cpp:9081-9223`):
+
+- No proto answers `NoProto`, and nothing changes.
+- An item flagged `STACKABLE` that is neither `ITEM_BLEND` nor `ITEM_TOGGLE` first tops up
+  every stack of its vnum whose sockets are the proto's (`FN_check_item_socket`, `:172-181`),
+  in cell order (the base cells, then the bank cells, as the pick-up's `merge_cells`), up to
+  the stack limit. `MAKECOUNT` raises the count to `value1` at each such stack. There is no
+  `ANTI_STACK` check, unlike the pick-up. Taken whole, legacy's `[LS;444;%s]` line ends it.
+- Otherwise `make` is asked for what is left. A placed item sends the line, then the item set
+  with its cell highlighted, then a potion's quickslot (`:9175-9200`). With no free cell the
+  item is answered `Unplaced`, for the ground.
+- `ENABLE_SPECIAL_DROP_CHAT_RENEWAL` is not defined, so the line is the `ChatPacket` arm.
+  Search: no `#define` of it under `server/server` or `legacy/config`. Positive control:
+  `#define ENABLE_CUSTOM_INVENTORY` is found at `prodomodefines.h:202` by the same search.
+- The text protos' sockets are all 0 (`ItemProto::sockets`), so a stack matches when its
+  sockets are all 0.
+- The blend merge after `CreateItem` (`:9145-9171`) is unreachable: `make_drop_item` refuses
+  `ITEM_BLEND`, as it refuses `ITEM_QUEST` and `ITEM_RING`, so such a give makes nothing.
+
+`MoveKind::Given` names the outcome, and `ITEM_FLAG_MAKECOUNT` is now `pub(crate)`.
+
+**The session.** `Session::give_item` makes the item with the drop's `make_drop_item`, using
+the proto's magic percent (`CreateItem(vnum, count, 0, true)`). It encodes the records
+through `MovedItems::new`, in the script's records at once, so they reach the client ahead of
+the page the script sends when it ends. The rows go to `item_rows`, and an unplaced item goes
+to `laid`.
+
+- `GameState::run_quests_giving` arms the new `Giver` (the character's items and quickslots
+  through the new `Character::items_points_and_quickslots_mut`, the unlocked cells, the IDs,
+  the Gaussian, the attributes and the masks). It answers the rows, and it lays each unplaced
+  item at the character's feet (`lay_given`): the 300-second destroy event, then ownership
+  for 300 seconds for an `ANTI_DROP` item and 60 otherwise (`:9203-9218`). Such an item has no
+  row until it is picked up, as a monster's drop has none.
+- `run_quests` keeps its signature and gives nothing. Only `quest` (a dialog step) and
+  `quest_click` give.
+- `QuestStepOutcome` and `ShopAnswer::Quest` carry the rows. A click with rows returns as a
+  quest even when no script took it.
+- The descriptor stores them with `store_quest_items` (`db::items::apply_row_changes`, one
+  transaction) before the climbs, the guild stores and the records. A failure closes the
+  connection.
+
+**Divergences and Defects** (one new STATUS row):
+
+- A letter, the login, a level, a kill or a target's event gives nothing and answers 0. No
+  descriptor stores their rows, and an item the store never sees would be lost.
+- The count reaches `AutoGiveItem` as a `WORD`, which legacy wraps. The Rewrite stops it at
+  65535, and the stack limit then bounds it.
+- The quickslot names the cell as a `BYTE`, so legacy's potion in a bank cell past 255 names
+  the wrong base cell. The Rewrite fills no slot then.
+- For 80003 to 80007 legacy's gold-bar log reads the item before its `NULL` check
+  (`G/questlua_pc.cpp:584-589`). Neither the log nor the rewards log is written.
+- The base search stops at the unlocked cells, as the pick-up's does (ledger 198.3).
+
+**The owner's data.** The sash captain gives 85000, which has no row in `item_proto.txt`, and
+no range row covers it. Search: the 180 range rows, and `^85000\t`. Positive control:
+85001-85008 are found by the same search. So on the owner's data the captain's material never
+arrives, `pc.count_item(85000) < 40` always holds, and `__complete` cannot be reached.
+`guild_create` gives 70101 (`ITEM_SPECIAL`), `cards_event` 79506 and `fishing_event` 50033.
+`guild_create`'s `run` state is set by no quest and no C++ source (a search of the quest folder
+and `server/server/game/*.cpp` finds only its own file, `guild_manage.lua`'s unrelated local and
+`locale.lua`), so the scenario seeds `reward`.
+
+**The tests.**
+
+- `world` (ground):
+  - `a_give_without_a_proto_changes_nothing_and_makes_nothing`
+  - `a_stackable_give_tops_up_the_stacks_in_cell_order`
+  - `what_the_stacks_leave_is_made_into_the_first_free_cell`
+  - `a_makecount_stack_takes_the_protos_count`
+  - `a_full_inventory_answers_the_made_item_for_the_ground`
+  - `a_refused_make_gives_nothing_more`
+  - `a_placed_potion_fills_the_first_empty_quickslot`
+- `quest`: `the_pc_names_answer_and_count_the_reads` gives:
+  - by vnum, by numeric text and by name;
+  - rounds 2.5 to 2 and 3.5 to 4;
+  - refuses a count of 0.4, an unknown name and a table;
+  - takes 1 for a negative count;
+  - stops 70000 at 65535.
+- `prodomo` lib: `a_give_names_sets_and_stores_the_item_or_lays_it`. 85000 gives nothing. Two
+  swords take IDs 1000 and 1001, each a line and a set, with a `Created` row owned by the
+  reader. A third, with both unlocked cells taken, is laid with no record and no row. With no
+  giver the answer is 0. `a_laid_undroppable_give_stays_its_takers_five_minutes` pins the
+  lay's ownership.
+- Parity: `guild_creates_reward_page_gives_the_book_into_the_first_free_cell`. Alpha's
+  `guild_create` stands at `reward` (CRC32 1322349139), and the login sends its letter. The
+  window's entry sends `[LS;444;Cartea Intelepciunii]`, then the item set of 70101 at cell 0,
+  then the page. The row is in the store before the page is read. At the logout
+  `set_state(start)`, the state 0, has deleted the flag.
+
+**Rows.**
+
+- `lua.pc.give_item2` is `ported`, with the scenario.
+- A note was added to `quest.guild_create`.
+
+**STATUS.** The header names 262 and the next slice: `pc.count_item` and `pc.remove_item`, then
+`pc.give_item2_select` and `item.set_socket`. It has 77 backed names and the new row.
+
+**Mutation sweep.** 15 mutants (G1-G15) were applied to the pristine files, and each changed
+executable code. Every file was restored by checksum. In the first run 13 were killed, all
+semantic, with no compile-error kills:
+
+- G4 (the placement sends no name) was not applied: its text is also a substring of the
+  merge's line. Anchored on the preceding newline it was re-run and killed.
+- G15 (the lay's ownership is always 60) survived: no test reached the ground lay's
+  ownership. The rule moved into `given_ownership_secs`, which `lay_given` calls, and the new
+  `a_laid_undroppable_give_stays_its_takers_five_minutes` pins 60 and 300 with and without
+  `ANTI_GIVE`. Re-run against the function, G15 was killed.
+
+So all 15 were killed, semantically.
+
+**Clippy.** The first gate run failed `similar_names` four times and `too_many_lines`
+(113/100) on `run_quests_giving`. The fixes are refactors, not `#[allow]`s:
+
+- The bindings were renamed (`drop_rules`, `create`, `outcome`, `stores_items`,
+  `item_giver`, `armed`).
+- The reader's job and skill group, level, player ID, map and war map moved into
+  `reader_context`, which answers a `ReaderContext`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4225 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
+
+No ADR changed. No owner question added. V26 stays open.

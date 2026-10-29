@@ -888,7 +888,7 @@ impl GameState {
     /// Answers the ground VID for `SetOwnership`. A point with no sectree drops the item
     /// unseen, its draws kept (OQ10: legacy's `AddToGround` fails the same way but keeps
     /// the failed item for 300 s where nothing can observe it).
-    fn lay_drop_hit(
+    pub(super) fn lay_drop_hit(
         &mut self,
         channel: u8,
         map: i32,

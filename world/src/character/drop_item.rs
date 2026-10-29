@@ -47,7 +47,7 @@ use common::item_slots::ITEM_COUNT_LIMIT;
 
 /// `ITEM_FLAG_MAKECOUNT` (`item_length.h:366`): the flag whose stackable items with a
 /// count of 1 take the proto's `VALUE1` as their count.
-const ITEM_FLAG_MAKECOUNT: u32 = 1 << 7;
+pub(crate) const ITEM_FLAG_MAKECOUNT: u32 = 1 << 7;
 
 /// `APPLY_SKILL_DAMAGE_BONUS`, the addon table's skill bonus (`length.h:567`).
 const APPLY_SKILL_DAMAGE_BONUS: u8 = 71;

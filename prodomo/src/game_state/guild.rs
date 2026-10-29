@@ -9291,7 +9291,7 @@ mod tests {
         // The letter asks the client for the button.
         world.quest_letter(Vid::new(MASTER_VID), quest);
         // The button runs the quest's button event, which asks the player to confirm.
-        let (records, _climbs, _stores) = world
+        let (records, _climbs, _stores, _items) = world
             .quest(
                 Vid::new(MASTER_VID),
                 &QuestStep::Button(quest),

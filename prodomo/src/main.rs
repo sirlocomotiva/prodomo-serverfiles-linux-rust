@@ -4309,8 +4309,12 @@ where
             records,
             climbs,
             guild_ops,
+            items,
         })) => {
             info!(%addr, ?step, "A quest took the click");
+            if !store_quest_items(addr, context, held, &items).await {
+                return false;
+            }
             if !store_quest_climbs(addr, context, held, &climbs).await {
                 return false;
             }
@@ -4340,6 +4344,27 @@ fn is_quest_step(header: u8) -> bool {
 /// The world runs the character's quest step and answers the dialog and the chat lines its
 /// script sent; a malformed record closes the connection. A GRAND read that climbed is
 /// stored before the dialog is sent, as a book read's is.
+/// Store the item rows a quest step's gives changed, in one transaction: a failure closes, as
+/// an item step's does. Answers whether the step may be sent.
+async fn store_quest_items(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &Held,
+    items: &[db::items::RowChange],
+) -> bool {
+    if items.is_empty() {
+        return true;
+    }
+    let Some(character) = held.character.as_ref() else {
+        return true;
+    };
+    if let Err(error) = db::items::apply_row_changes(&context.store, character.id, items).await {
+        warn!(%addr, %error, rows = items.len(), "A quest's gives could not be stored; closing");
+        return false;
+    }
+    true
+}
+
 /// Store each GRAND climb a quest step landed, in order: a failure closes, as a
 /// book read's does. Answers whether the step may be sent.
 async fn store_quest_climbs(
@@ -4577,7 +4602,10 @@ where
     };
 
     match context.game.quest(vid, step, place, item_actor(held)).await {
-        Ok(Ok((records, climbs, stores))) => {
+        Ok(Ok((records, climbs, stores, items))) => {
+            if !store_quest_items(addr, context, held, &items).await {
+                return false;
+            }
             if !store_quest_climbs(addr, context, held, &climbs).await {
                 return false;
             }
