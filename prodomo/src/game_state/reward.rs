@@ -961,24 +961,14 @@ impl GameState {
             .map_or(1, |&(_, adjust)| adjust)
     }
 
-    /// `CHARACTER::CountSpecifyItem` over the INVENTORY cells (`G/char_item.cpp:8791-8830`):
-    /// how many of `vnum` the player under `vid` holds. No shops exist, so nothing is
-    /// excluded; the custom inventory (`ENABLE_CUSTOM_INVENTORY` is undefined) is not read.
+    /// `CHARACTER::CountSpecifyItem` ([`world::character::count_specify_item`]): how many of
+    /// `vnum` the player under `vid` holds in its unlocked cells and its custom banks.
     fn count_specify_item(&self, vid: Vid, vnum: u32) -> i32 {
-        use protocol::item_pos::ItemPos;
         let Ok(character) = self.characters.find_by_vid(vid) else {
             return 0;
         };
-        let mut count = 0;
-        for cell in 0..common::item_slots::INVENTORY_MAX_NUM {
-            let pos = ItemPos::new(common::item_slots::EWindows::Inventory as u8, cell);
-            if let Some(item) = character.items().item_at(pos) {
-                if item.vnum == vnum {
-                    count += i32::from(item.count);
-                }
-            }
-        }
-        count
+        let usable = common::item_slots::usable_inventory_cells(character.inven_point());
+        world::character::count_specify_item(character.items(), usable, vnum)
     }
 
     /// `GetDropPct` (`G/item_manager.cpp:870-912`): the delta percent and the fixed

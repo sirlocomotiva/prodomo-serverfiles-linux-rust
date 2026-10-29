@@ -22,6 +22,7 @@ mod quickslot;
 mod recovery;
 mod safebox;
 mod shop;
+mod specify_item;
 mod state;
 mod trade;
 
@@ -103,6 +104,7 @@ pub use shop::{
     buy_item, sale_price, sell_item, unported_creation, ShopRefused, UnportedCreation,
     GOLD_MAX_MAX, SALE_TAX_NOTICE, WORN_NOTICE,
 };
+pub use specify_item::{count_specify_item, remove_specify_item};
 pub use state::{Activity, CoreState, Posture};
 pub use trade::{
     settle, Accepted, Offered, Said, Settled, Side, Trade, TradeRecord, Trader, Unsettled,

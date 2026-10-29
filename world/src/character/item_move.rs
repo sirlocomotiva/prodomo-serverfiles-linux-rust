@@ -160,6 +160,8 @@ pub enum MoveKind {
     /// A quest gave an item: onto the stacks, into a free cell, or to the ground
     /// (`AutoGiveItem`).
     Given,
+    /// A quest took items of one vnum away, stack by stack (`RemoveSpecifyItem`).
+    Removed,
 }
 
 /// A record the client is sent, in the order legacy sends it.

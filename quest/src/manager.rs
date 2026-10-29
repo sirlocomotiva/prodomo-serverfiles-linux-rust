@@ -164,6 +164,15 @@ pub trait Game {
     /// when it gave none.
     fn give_item(&mut self, vnum: u32, count: u16) -> u32;
 
+    /// `CountSpecifyItem(vnum)` of the character the script runs for
+    /// (`G/char_item.cpp:8791-8846`): how many of `vnum` its inventory holds.
+    fn count_item(&self, vnum: u32) -> i32;
+
+    /// `RemoveSpecifyItem(vnum, count)` of the character the script runs for
+    /// (`G/char_item.cpp:8848-8940`): `count` of `vnum` taken from its inventory, stack by
+    /// stack in cell order, or all it holds when that is less.
+    fn remove_item(&mut self, vnum: u32, count: u32);
+
     /// The race of the character `vid`, when it is in the world.
     fn race_of(&self, vid: u32) -> Option<u32>;
 
@@ -2055,6 +2064,65 @@ fn give_item2(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<u32
     Ok(cx.game.give_item(vnum, count))
 }
 
+/// `pc_count_item` (`G/questlua_pc.cpp:777-799`), `pc.count_item` and `pc.countitem`: a
+/// number-like last argument is the vnum, dworded. Text there makes the first argument a
+/// locale name's prefix (`ITEM_MANAGER::GetVnum`), and a name no proto has counts 0. Anything
+/// else counts 0. A first argument that is not text either counts 0, where legacy hands
+/// `GetVnum` a null name (a Defect).
+fn count_item(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<i32> {
+    let last = args.back().cloned().unwrap_or(Value::Nil);
+    if let Some(vnum) = lua.coerce_number(last.clone())? {
+        return Ok(cx.game.count_item(dword(vnum)));
+    }
+    if !matches!(last, Value::String(_)) {
+        return Ok(0);
+    }
+    let first = args.front().cloned().unwrap_or(Value::Nil);
+    let name = host::c_string(lua, first)?.unwrap_or_default();
+    let Some(vnum) = cx.game.item_vnum(&name) else {
+        tracing::warn!(
+            name = %String::from_utf8_lossy(&name),
+            "QUEST count_item call error : wrong item name"
+        );
+        return Ok(0);
+    };
+    Ok(cx.game.count_item(vnum))
+}
+
+/// `pc_remove_item` (`G/questlua_pc.cpp:801-860`), `pc.remove_item` and `pc.removeitem`. With
+/// one argument, one of the vnum is taken; with two, the second, dworded, is the count, and a
+/// count that is not a number is 0, which takes nothing. Any other number of arguments takes
+/// nothing. The first argument, number-like, is the vnum, dworded; text is a locale name's
+/// prefix, and a name no proto has, or anything else, takes nothing. It pushes nothing.
+fn remove_item(lua: &Lua, cx: &mut Cx<'_>, args: &MultiValue) -> mlua::Result<()> {
+    if !(1..=2).contains(&args.len()) {
+        return Ok(());
+    }
+    let first = args.front().cloned().unwrap_or(Value::Nil);
+    let vnum = if let Some(vnum) = lua.coerce_number(first.clone())? {
+        dword(vnum)
+    } else if let Value::String(name) = &first {
+        let name = host::c_string(lua, Value::String(name.clone()))?.unwrap_or_default();
+        let Some(vnum) = cx.game.item_vnum(&name) else {
+            tracing::warn!(
+                name = %String::from_utf8_lossy(&name),
+                "QUEST remove_item call error : wrong item name"
+            );
+            return Ok(());
+        };
+        vnum
+    } else {
+        tracing::warn!("QUEST remove_item wrong argument");
+        return Ok(());
+    };
+    let count = match args.get(1) {
+        None => 1,
+        Some(count) => lua.coerce_number(count.clone())?.map_or(0, dword),
+    };
+    cx.game.remove_item(vnum, count);
+    Ok(())
+}
+
 /// `(DWORD)lua_tonumber(L, n)` on x86-64: the fraction dropped, then the low 32 bits of the
 /// 64-bit conversion, which is 0 where the conversion has no answer (out of range or NaN).
 fn dword(number: f64) -> u32 {
@@ -2140,6 +2208,13 @@ fn pc_api(
         }
         b"pc.get_map_index" => Some(Value::Number(f64::from(cx.game.map_index()))),
         b"pc.give_item2" => number(give_item2(lua, cx, args)?),
+        b"pc.count_item" | b"pc.countitem" => {
+            Some(Value::Number(f64::from(count_item(lua, cx, args)?)))
+        }
+        b"pc.remove_item" | b"pc.removeitem" => {
+            remove_item(lua, cx, args)?;
+            None
+        }
         b"pc.get_war_map" => Some(Value::Number(f64::from(cx.game.war_map()))),
         b"pc.is_gm" => Some(Value::Boolean(false)),
         b"pc.getqf" => {
@@ -2581,6 +2656,10 @@ mod tests {
         given: u32,
         /// The vnums `item_vnum` finds by name.
         item_vnums: BTreeMap<Vec<u8>, u32>,
+        /// What `count_item` answers, by vnum.
+        counts: BTreeMap<u32, i32>,
+        /// Every `remove_item` call, in order.
+        removals: Vec<(u32, u32)>,
         races: BTreeMap<u32, u32>,
         chats: Vec<(ChatKind, Vec<u8>)>,
         scripts: Vec<(u8, Vec<u8>)>,
@@ -2634,6 +2713,14 @@ mod tests {
         fn give_item(&mut self, vnum: u32, count: u16) -> u32 {
             self.gives.push((vnum, count));
             self.given
+        }
+
+        fn count_item(&self, vnum: u32) -> i32 {
+            self.counts.get(&vnum).copied().unwrap_or(0)
+        }
+
+        fn remove_item(&mut self, vnum: u32, count: u32) {
+            self.removals.push((vnum, count));
         }
 
         fn race_of(&self, vid: u32) -> Option<u32> {
@@ -3437,10 +3524,9 @@ mod tests {
         assert!(error.contains("not ported: guild.is_war"), "{error}");
     }
 
-    /// The `pc.*` arms: the level, the minutes played under both names, the grand-master
-    /// read (each numbered read bumps the count in the flags, dworded), and the skill level.
+    /// The `pc.*` item arms: the give, and the count under both names.
     #[test]
-    fn the_pc_names_answer_and_count_the_reads() {
+    fn the_pc_item_names_give_count_and_remove() {
         let manager = manager().lock().unwrap();
         let lua = manager.host.lua();
         let number = |value: f64| vec![Value::Number(value)];
@@ -3451,17 +3537,6 @@ mod tests {
             flags: BTreeMap::new(),
             window: Window::default(),
         };
-        probe.game.level = 40;
-        assert_eq!(probe.call("pc.get_level", &[]).unwrap(), number(40.0));
-        probe.game.playtime = -0x0102_0304;
-        assert_eq!(
-            probe.call("pc.get_playtime", &[]).unwrap(),
-            number(-16_909_060.0)
-        );
-        assert_eq!(
-            probe.call("pc.getplaytime", &[]).unwrap(),
-            number(-16_909_060.0)
-        );
         // `pc.give_item2`: a vnum, a count rounded to even, 1 without one, nothing for a
         // count that rounds to 0, a name's vnum, and nothing for an unknown name or a table.
         probe.game.given = 0x0102_0304;
@@ -3506,6 +3581,112 @@ mod tests {
                 (3, u16::MAX),
                 (79_506, 1),
             ]
+        );
+        // `pc.count_item` under both names: the last argument's number, dworded, or the
+        // first argument's name when the last is text; 0 for anything else.
+        probe.game.counts.insert(79_506, -0x0102_0304);
+        probe.game.counts.insert(27_001, 0x0a0b);
+        for name in ["pc.count_item", "pc.countitem"] {
+            let count = |probe: &mut Probe, args: &[Value]| probe.call(name, args).unwrap();
+            assert_eq!(count(&mut probe, &[text("Okey")]), number(-16_909_060.0));
+            assert_eq!(count(&mut probe, &[text("27001")]), number(2571.0));
+            assert_eq!(
+                count(&mut probe, &[Value::Number(27_001.7)]),
+                number(2571.0)
+            );
+            assert_eq!(
+                count(&mut probe, &[text("Okey"), Value::Number(27_001.0)]),
+                number(2571.0),
+                "the last argument is the number"
+            );
+            assert_eq!(
+                count(&mut probe, &[text("Okey"), text("anything")]),
+                number(-16_909_060.0),
+                "text last: the first names it"
+            );
+            assert_eq!(count(&mut probe, &[text("Nothing")]), number(0.0));
+            let table = Value::Table(lua.create_table().unwrap());
+            assert_eq!(count(&mut probe, &[table.clone()]), number(0.0));
+            assert_eq!(count(&mut probe, &[table, text("Okey")]), number(0.0));
+            assert_eq!(count(&mut probe, &[]), number(0.0));
+        }
+    }
+
+    /// `pc.remove_item` and `pc.removeitem`.
+    #[test]
+    fn the_pc_removal_names_take_one_or_the_count() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            flags: BTreeMap::new(),
+            window: Window::default(),
+        };
+        probe.game.item_vnums.insert(b"Okey".to_vec(), 79_506);
+        let text = |text: &str| Value::String(lua.create_string(text).unwrap());
+        // `pc.remove_item` under both names pushes nothing: one argument takes 1, a second
+        // is the count, dworded, or 0 when it is no number; a bad vnum or argument count
+        // takes nothing.
+        for name in ["pc.remove_item", "pc.removeitem"] {
+            let remove = |probe: &mut Probe, args: &[Value]| probe.call(name, args).unwrap();
+            assert_eq!(remove(&mut probe, &[Value::Number(85_000.0)]), []);
+            assert_eq!(
+                remove(&mut probe, &[text("90010"), Value::Number(10.9)]),
+                []
+            );
+            assert_eq!(remove(&mut probe, &[text("Okey"), Value::Number(-1.0)]), []);
+            assert_eq!(remove(&mut probe, &[Value::Number(5.0), text("x")]), []);
+            assert_eq!(
+                remove(&mut probe, &[text("Nothing"), Value::Number(1.0)]),
+                []
+            );
+            let table = Value::Table(lua.create_table().unwrap());
+            assert_eq!(remove(&mut probe, &[table, Value::Number(1.0)]), []);
+            assert_eq!(remove(&mut probe, &[]), []);
+            let three = [Value::Number(6.0), Value::Number(1.0), Value::Number(1.0)];
+            assert_eq!(remove(&mut probe, &three), []);
+        }
+        assert_eq!(
+            probe.game.removals,
+            [
+                (85_000, 1),
+                (90_010, 10),
+                (79_506, u32::MAX),
+                (5, 0),
+                (85_000, 1),
+                (90_010, 10),
+                (79_506, u32::MAX),
+                (5, 0),
+            ]
+        );
+    }
+
+    /// The `pc.*` arms: the level, the minutes played under both names, the grand-master read
+    /// (each numbered read bumps the count in the flags, dworded), and the skill level.
+    #[test]
+    fn the_pc_names_answer_and_count_the_reads() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let number = |value: f64| vec![Value::Number(value)];
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            flags: BTreeMap::new(),
+            window: Window::default(),
+        };
+        probe.game.level = 40;
+        assert_eq!(probe.call("pc.get_level", &[]).unwrap(), number(40.0));
+        probe.game.playtime = -0x0102_0304;
+        assert_eq!(
+            probe.call("pc.get_playtime", &[]).unwrap(),
+            number(-16_909_060.0)
+        );
+        assert_eq!(
+            probe.call("pc.getplaytime", &[]).unwrap(),
+            number(-16_909_060.0)
         );
         let table = Value::Table(lua.create_table().unwrap());
         // a non-number pushes nothing.

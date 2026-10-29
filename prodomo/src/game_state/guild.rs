@@ -30,9 +30,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::warn;
 
 use common::cfloat::f64_to_i32;
-use common::item_slots::{
-    usable_inventory_cells, EWindows, CUSTOM_INVENTORY_SLOT_END, CUSTOM_INVENTORY_SLOT_START,
-};
+use common::item_slots::usable_inventory_cells;
 use common::point_slot as point;
 use common::vid::Vid;
 use gamedata::server_attr::SectreeGrid;
@@ -48,11 +46,7 @@ use protocol::gc_guild::{
     GcGuildSkillInfo, GUILD_COMMENT_MAX_LEN, GUILD_GRADE_COUNT, GUILD_GRADE_NAME_MAX_LEN,
     GUILD_NAME_MAX_LEN, GUILD_SKILL_COUNT,
 };
-use protocol::item_pos::ItemPos;
-use world::character::{
-    Character, ItemChange, ItemRecord, MoveDone, MoveKind, MoveRecord, PointRecord,
-};
-use world::item::gc_item_clear;
+use world::character::{Character, MoveDone, MoveKind, MoveRecord, PointRecord};
 
 use super::affect::{affect_remove_frame, Affect};
 use super::fight::AFF_STUN_WORD;
@@ -5508,7 +5502,7 @@ impl GameState {
         };
         if let Ok(character) = self.characters.find_by_vid_mut(vid) {
             character.set_gold(after);
-            item_done = remove_create_item(character);
+            item_done = remove_create_item(character, &self.protos);
         }
         let fee = MoveDone {
             kind: MoveKind::GuildMade,
@@ -6689,54 +6683,19 @@ fn parse_war_long(word: &[u8]) -> i64 {
     }
 }
 
-/// `RemoveSpecifyItem(GUILD_CREATE_ITEM_VNUM, 1)` (`CHARACTER::RemoveSpecifyItem`,
-/// `G/char_item.cpp:8848-8900`): the first cell in slot order holding the vnum loses one;
-/// a stack of one is destroyed (`SetCount(0)`, `G/item.cpp:296-344`), a deeper stack is
-/// decremented. The scan covers `Inventory_Size()` cells (`:8859`) and then the custom
-/// range (`:8902-8922`); the shop arms pass (no shops: nothing is on sale) and the gold-bar
-/// log arm is dead (70101 is not 80003-80007). No quickslot sync is emitted: 70101 is
-/// `ITEM_SPECIAL/SPECIAL_MAP` (`G/item.cpp:309`), which no slot can name.
-fn remove_create_item(character: &mut Character) -> MoveDone {
+/// `RemoveSpecifyItem(GUILD_CREATE_ITEM_VNUM, 1)` ([`world::character::remove_specify_item`]):
+/// the first cell in slot order holding the vnum loses one, a stack of one being used up. The
+/// gold-bar log arm is dead (70101 is not 80003-80007).
+fn remove_create_item(
+    character: &mut Character,
+    protos: &gamedata::item_proto::ItemProtos,
+) -> MoveDone {
     let usable = usable_inventory_cells(character.inven_point());
-    let found = (0..usable)
-        .chain(CUSTOM_INVENTORY_SLOT_START..CUSTOM_INVENTORY_SLOT_END)
-        .find_map(|cell| {
-            let pos = ItemPos::new(EWindows::Inventory as u8, cell);
-            let item = character.items().item_at(pos)?;
-            (item.vnum == GUILD_CREATE_ITEM_VNUM).then_some((item.id, item.count, pos))
-        });
-    let mut records = Vec::new();
-    let mut changes = Vec::new();
-    let Some((id, count, pos)) = found else {
-        return MoveDone {
-            kind: MoveKind::GuildMade,
-            records,
-            changes,
-        };
-    };
-    if count <= 1 {
-        if character.items_mut().release(id).is_ok() {
-            records.push(MoveRecord::Item(ItemRecord::Set(gc_item_clear(pos))));
-            changes.push(ItemChange::Destroyed { id });
-        }
-    } else if character
-        .items_mut()
-        .set_count(id, u32::from(count - 1))
-        .is_ok()
-    {
-        if let Some(item) = character.items().item(id) {
-            records.push(MoveRecord::Item(ItemRecord::Update(item.gc_item_update())));
-        }
-        changes.push(ItemChange::Count {
-            id,
-            count: count - 1,
-        });
-    }
-    MoveDone {
-        kind: MoveKind::GuildMade,
-        records,
-        changes,
-    }
+    let (items, _, slots) = character.items_points_and_quickslots_mut();
+    let wanted = (GUILD_CREATE_ITEM_VNUM, 1);
+    let mut done = world::character::remove_specify_item(items, slots, protos, usable, wanted);
+    done.kind = MoveKind::GuildMade;
+    done
 }
 
 impl Guild {

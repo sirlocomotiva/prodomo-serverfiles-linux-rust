@@ -224,8 +224,9 @@ pub(super) struct Session<'s> {
     pub(super) targets: &'s mut QuestTargets,
     /// The Pulse the step runs at, from which a new target's event counts.
     pub(super) pulse: u64,
-    /// What `pc.give_item2` reaches, on the steps whose rows the descriptor stores; `None`
-    /// elsewhere, where a give gives nothing.
+    /// The character's items, which `pc.count_item` reads, and which `pc.give_item2` and
+    /// `pc.remove_item` change only on the steps whose rows the descriptor stores
+    /// ([`Giver::stores`]). `None` when the character is not in the world.
     pub(super) giver: Option<Giver<'s>>,
     /// The item rows the gives changed, in order, for the descriptor to store.
     pub(super) item_rows: Vec<db::items::RowChange>,
@@ -233,9 +234,12 @@ pub(super) struct Session<'s> {
     pub(super) laid: Vec<world::item::Item>,
 }
 
-/// What a give reaches: the character's items and quickslots, the rules its cells follow,
-/// and what `CreateItem` makes an item with.
+/// What a give, a count and a removal reach: the character's items and quickslots, the rules
+/// its cells follow, and what `CreateItem` makes an item with.
 pub(super) struct Giver<'s> {
+    /// Whether the step's descriptor stores the item rows, so the step may give and remove;
+    /// without it the step only counts.
+    pub(super) stores: bool,
     /// The character's items.
     pub(super) items: &'s mut world::character::CharacterItems,
     /// Its quickslots, which a given potion fills.
@@ -526,7 +530,7 @@ impl Game for Session<'_> {
     /// gives nothing.
     fn give_item(&mut self, vnum: u32, count: u16) -> u32 {
         use world::character::{auto_give_item, make_drop_item, AutoGiven, DropAsk, DropMade};
-        let Some(giver) = self.giver.as_mut() else {
+        let Some(giver) = self.giver.as_mut().filter(|giver| giver.stores) else {
             warn!(
                 vnum,
                 count, "a quest gave an item where no descriptor stores it; none given"
@@ -589,6 +593,42 @@ impl Game for Session<'_> {
                 id
             }
         }
+    }
+
+    fn count_item(&self, vnum: u32) -> i32 {
+        self.giver.as_ref().map_or(0, |giver| {
+            world::character::count_specify_item(giver.items, giver.rules.usable_cells, vnum)
+        })
+    }
+
+    /// `RemoveSpecifyItem(vnum, count)` for the reader. Its records reach the client at once,
+    /// as `SetCount` sends them, and its rows are answered for the store. A step whose rows no
+    /// descriptor stores takes nothing.
+    fn remove_item(&mut self, vnum: u32, count: u32) {
+        let Some(giver) = self.giver.as_mut().filter(|giver| giver.stores) else {
+            warn!(
+                vnum,
+                count, "a quest removed items where no descriptor stores it; none removed"
+            );
+            return;
+        };
+        let done = world::character::remove_specify_item(
+            giver.items,
+            giver.slots,
+            self.items,
+            giver.rules.usable_cells,
+            (vnum, count),
+        );
+        let moved = crate::item_move::MovedItems::new(
+            giver.owner_id,
+            self.reader.raw(),
+            done,
+            self.mover,
+            self.items,
+            self.locale,
+        );
+        self.records.extend(moved.records);
+        self.item_rows.extend(moved.changes);
     }
 
     fn race_of(&self, vid: u32) -> Option<u32> {
@@ -1050,7 +1090,8 @@ impl GameState {
                 let usable_cells =
                     common::item_slots::usable_inventory_cells(character.inven_point());
                 let (items, points, slots) = character.items_points_and_quickslots_mut();
-                let armed = stores_items.then(|| Giver {
+                let armed = Some(Giver {
+                    stores: stores_items,
                     items,
                     slots,
                     rules: world::character::MoveRules {
@@ -1349,7 +1390,9 @@ mod tests {
     /// gives nothing and answers 0, as 85000 does on the owner's data; a sword is made with
     /// the next ID, named, then set in the first free cell, and its row is answered for the
     /// store; with every cell taken it is laid at the character's feet, still answering its
-    /// ID. A session that may not give answers 0 and sends nothing.
+    /// ID. The count reads the held swords and a removal takes one with its row. A session
+    /// whose rows are not stored counts but neither gives nor removes, and one with no
+    /// character answers 0 and sends nothing.
     #[test]
     fn a_give_names_sets_and_stores_the_item_or_lays_it() {
         use gamedata::item_proto::ItemProto;
@@ -1398,6 +1441,7 @@ mod tests {
             targets: &mut targets,
             pulse: 0,
             giver: Some(Giver {
+                stores: true,
                 items: &mut held,
                 slots: &mut quickslots,
                 rules: MoveRules {
@@ -1436,9 +1480,30 @@ mod tests {
             [1002]
         );
 
+        // The count reads the two held swords; the removal takes the first, sends its clear
+        // and answers its row.
+        assert_eq!(session.count_item(SWORD), 2);
+        session.remove_item(SWORD, 1);
+        assert_eq!(session.count_item(SWORD), 1);
+        assert_eq!(session.records.len(), 5);
+        assert!(matches!(
+            session.item_rows.last(),
+            Some(db::items::RowChange::Destroyed { id: 1000 })
+        ));
+
+        // A step whose rows no descriptor stores still counts, but neither gives nor removes.
+        if let Some(giver) = session.giver.as_mut() {
+            giver.stores = false;
+        }
+        assert_eq!(session.give_item(SWORD, 1), 0);
+        session.remove_item(SWORD, 1);
+        assert_eq!(session.count_item(SWORD), 1);
+        assert_eq!((session.records.len(), session.item_rows.len()), (5, 3));
+
         session.giver = None;
         assert_eq!(session.give_item(SWORD, 1), 0);
-        assert_eq!(session.records.len(), 4);
+        assert_eq!(session.count_item(SWORD), 0);
+        assert_eq!(session.records.len(), 5);
     }
 
     /// A laid `ANTI_DROP` give stays its taker's for 300 seconds, any other for 60, whatever

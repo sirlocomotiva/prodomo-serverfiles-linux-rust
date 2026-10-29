@@ -36518,3 +36518,175 @@ Gates:
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
 
 No ADR changed. No owner question added. V26 stays open.
+
+## 263. The quest's count and removal (`lua.pc.count_item`, `lua.pc.remove_item`)
+
+`pc.count_item` and `pc.countitem` now answer `CountSpecifyItem`. `pc.remove_item` and
+`pc.removeitem` now run `RemoveSpecifyItem`. A seeded `__complete` of the sash quest counts
+the material, finds none, and sends the player back to the captain.
+
+**The world.** The new `world/src/character/specify_item.rs` holds both
+(`G/char_item.cpp:8791-8940`):
+
+- **The scan.** Both read the base inventory up to `Inventory_Size()`, the unlocked cells
+  (`ENABLE_EXTEND_INVEN_SYSTEM`, `prodomodefines.h:60`), then the custom banks
+  (`ENABLE_CUSTOM_INVENTORY`, `:202`), in cell order. Legacy skips an item its owner sells
+  in a personal shop or a premium private shop (`__PREMIUM_PRIVATE_SHOP__`, `:176`). The
+  Rewrite has neither, so nothing is skipped.
+- **`count_specify_item(items, usable_cells, vnum)`** sums the counts.
+- **`remove_specify_item(items, slots, protos, usable_cells, (vnum, count))`** takes stacks
+  in order:
+  - A count of 0 takes nothing.
+  - Each stack the rest covers is `SetCount(0)`.
+  - The first stack the rest does not cover is updated (`UpdatePacket`).
+  - A count past what is held takes everything.
+- **A used-up stack** syncs its slots as `SetCount(0)` does (`G/item.cpp:303-330`):
+  - One that chains (`chains_when_used_up`) is cleared first, and its slots then follow the
+    next item of its vnum.
+  - Any other has its slots deleted before the clear.
+  - The chain's `FindSpecifyItem` runs at once, before the next stack is taken. So a slot
+    that follows a stack the same removal then uses up is deleted in its turn.
+- `MoveKind::Removed` names the outcome. The gold-bar log is not written.
+
+**The bridge** (`quest/src/manager.rs`):
+
+- `count_item` is `pc_count_item` (`G/questlua_pc.cpp:777-799`):
+  - A number-like last argument is the vnum, dworded.
+  - Text there makes the first argument a locale name's prefix (`GetVnum`), as legacy reads
+    index -1 for the test and index 1 for the name.
+  - A name no proto has counts 0, and so does anything else.
+  - A first argument that is not text counts 0, where legacy hands `GetVnum` a null name (a
+    Defect).
+- `remove_item` is `pc_remove_item` (`:801-860`):
+  - It acts on one argument or two, and on any other count it takes nothing.
+  - The first argument, number-like, is the vnum, dworded. Text is a name's prefix. A name no
+    proto has, or anything else, logs and takes nothing.
+  - With one argument the count is 1. With two, the second is dworded, and one that is not a
+    number is 0.
+  - It pushes nothing.
+- The `Game` trait gains `count_item` and `remove_item`. `BRIDGED` has 81 names, in
+  `api::NAMES` order.
+
+**The session.**
+
+- `run_quests_giving` now arms the `Giver` on every step whose character is in the world.
+  The new `Giver::stores` says whether the step's descriptor stores the rows (a dialog step
+  or a click, as in ledger 262).
+- `pc.count_item` counts on every step.
+- `pc.give_item2` and `pc.remove_item` change the items only where `stores` is set.
+- A removal's records reach the client at once, as `SetCount` sends them. Its rows go out
+  with the step's, and the descriptor stores them before it sends (ledger 262's
+  `store_quest_items`).
+- Quickslot changes reach the store through the save cycle's `KeptOf`, as every other
+  item step's do.
+
+**Two callers now share the world's functions:**
+
+- `GameState::count_specify_item` (the `new_xmas_event` carry check, `reward.rs`) read all
+  180 base cells and no bank. Its doc said `ENABLE_CUSTOM_INVENTORY` was undefined; it is
+  defined (`prodomodefines.h:202`). It now calls `count_specify_item` with the unlocked
+  cells. No test observes the change: the check matters only while `new_xmas_event` is set,
+  and nothing sets it. The function is pinned by the world's tests.
+- The guild's `remove_create_item` now calls `remove_specify_item` for one 70101 and keeps
+  `MoveKind::GuildMade`. Its records are unchanged: no slot can name a 70101 cell, since
+  `QuickslotAdd` takes only `ITEM_USE` items.
+
+**The callers on the owner's data.** The sweep of the quest folder for the four names found
+51 calls in 18 files. An earlier listing of it stopped at 40 lines, so the sweep was run
+again whole. The control: 10 files call `pc.get_level`. The reachable ones:
+
+- `sash_mission`'s `__complete` click counts 85000. The scenario takes the `< 40` branch.
+  That is the only branch the owner's data allows: 85000 has no proto (ledger 262).
+- `cards_event`'s "Card set" (count, remove, give) belongs to NPC 20417, which stands in no
+  `npc.txt`. Search: `20417` under `legacy/gamedata` finds only the protos and the name
+  files. Control: 20011 is found in three `npc.txt`.
+- The fishing and Tanaka events need an event flag nothing sets.
+- The forest and the ship defense need a party or a dungeon.
+- The teleport ring needs `select_table` and `pc.warp`.
+- The skill books and `item_attr67add` need an item's `use` and `item.get_vnum`.
+- `change_empire` needs `pc.change_empire`, and the altar of power needs guild land.
+- `guild_manage.lua:128` is short-circuited by `guild_create_item = false` (`:98`).
+- `questlib.lua:439-440` is the horse menu, which waits for `horse.*`.
+
+So `pc.remove_item`, `pc.countitem` and `pc.removeitem` stay `partial`, with unit tests.
+
+**The tests.**
+
+- `world` (`specify_item`):
+  - `the_count_sums_the_unlocked_cells_and_the_banks`
+  - `a_removal_uses_up_stacks_in_cell_order_and_trims_the_last`
+  - `a_removal_past_what_is_held_takes_everything_and_zero_takes_nothing`
+  - `a_removal_skips_the_locked_cells`
+  - `a_used_up_stack_deletes_its_slot_before_the_clear`
+  - `a_used_up_potion_chains_its_slot_to_the_next_then_deletes_it`
+- `quest`: `the_pc_item_names_give_count_and_remove` takes ledger 262's give checks and
+  covers both counting names:
+  - by name, numeric text and a dworded number;
+  - the last argument's number against the first's name;
+  - a table, an unknown name and no argument count 0.
+
+  `the_pc_removal_names_take_one_or_the_count` covers both removing names:
+  - one argument takes 1, and a second is dworded (-1 is `u32::MAX`, text is 0);
+  - an unknown name, a table, no argument and three arguments take nothing.
+- `prodomo` lib: `a_give_names_sets_and_stores_the_item_or_lays_it` now also counts the two
+  held swords. A removal takes one with its clear and its `Destroyed` row. With `stores`
+  unset the session counts but neither gives nor removes, and with no character it counts 0.
+- Parity: `a_complete_sash_quest_without_the_material_goes_back_to_the_captain`.
+  - Alpha logs in 1000 from Theowahdan at `__complete` (CRC32 557528158). The letter pass
+    marks him as `theowahdan_reward` with ID 1, and his spot follows.
+  - The click deletes the mark and says the first page up to its `wait()`.
+  - The answer says the material is short, ending in `[DONE]`.
+  - `go_to_disciple`'s letter marks the captain with ID 2, and his spot follows.
+  - The logout stores `go_to_disciple`.
+
+**Rows.**
+
+- `lua.pc.count_item` is `ported`, with the scenario.
+- `lua.pc.remove_item`, `lua.pc.countitem` and `lua.pc.removeitem` are `partial`, with
+  their callers in the notes.
+- A note was added to `quest.sash_mission`.
+
+**STATUS.**
+
+- The header names 263. The next slice is `pc.give_item2_select` and `item.set_socket`,
+  then the names the removal's callers wait for.
+- It has 81 backed names.
+- The give's Divergence row now covers the removal: legacy runs both on every event.
+
+**Mutation sweep.** 15 mutants (S1-S15) were applied to the pristine files, and each changed
+executable code. Every file was restored by checksum. All 15 were killed, semantically, with no
+compile-error kills:
+
+- S1-S7 (the world's scan, the boundary of a used-up stack, the chain, the delete sync, and a
+  count of 0) were killed by the world's tests.
+- S8-S10 (the count's argument, one argument's count of 1, and the argument count) were
+  killed by the quest test. The sweep ran before Clippy's split, below, which moved those
+  assertions unchanged into the two new tests.
+- S11-S12 (a removal where nothing is stored, and the session's count) were killed by the
+  session test.
+- S13 (the count answers 40 more) was killed by the parity scenario alone. That is the
+  scenario's negative control: with the count changed, the script takes the other branch.
+- S14 (`BRIDGED` drops `pc.count_item`) was killed by the host test.
+- S15 (the guild takes 0 of 70101) was killed by four guild parity scenarios.
+
+No mutant was put on the reward's carry count, for the reason given above.
+
+**Clippy.** The first gate run failed `too_many_lines` (143/100) on
+`the_pc_names_answer_and_count_the_reads`. The item checks moved, unchanged, into
+`the_pc_item_names_give_count_and_remove` (the give and the count) and
+`the_pc_removal_names_take_one_or_the_count`, so it was a refactor, not an `#[allow]`.
+
+Gates:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo build --workspace --locked --offline`: pass.
+- `cargo test --workspace --all-targets --locked --offline --no-fail-fast` with
+  `DATABASE_URL` set: 4234 passed, 0 failed, 40 targets. Afterwards no `prodomo\_%` scratch
+  database remained.
+- `cargo test --workspace --doc --locked --offline`: pass.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: pass.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`: pass.
+
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair. No width was measured.
+
+No ADR changed. No owner question added. V26 stays open.

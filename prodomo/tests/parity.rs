@@ -5329,6 +5329,126 @@ fn a_click_on_marked_theowahdan_runs_the_sash_quests_target_script() {
     );
 }
 
+/// What `sash_mission`'s `theowahdan_reward.target.click` says after its title and before its
+/// `wait()` (`_basic/sash_mission.lua:194-201`). `mob_name(20355)` is the captain's name in
+/// `mob_names.txt`.
+const SASH_REWARD_FIRST: [&[u8]; 6] = [
+    b"",
+    b"Ah, here you are! The Capitan tell me",
+    b"now you have enough material.",
+    b"",
+    b"Let me see...",
+    b"",
+];
+
+/// What it says after the `wait()` when `pc.count_item(85000) < 40` (`:203-209`).
+const SASH_REWARD_SHORT: [&[u8]; 5] = [
+    b"",
+    b"What? You don't have enough material!",
+    b"",
+    b"Go back and talk to the Captain!",
+    b"",
+];
+
+/// `lua.pc.count_item`, `quest.sash_mission`: Alpha, level 154, logs in on map 1 1000 from
+/// Theowahdan with `sash_mission` at `__complete` and the Yohara quest at `information_new`.
+/// The letter pass runs `__complete`'s `letter`, which marks him as `theowahdan_reward` with
+/// ID 1, and his spot follows a second later. The click runs the quest's `target.click`: the
+/// mark goes, the first page waits, and after the answer `pc.count_item(85000)` reads
+/// `CountSpecifyItem` (`G/questlua_pc.cpp:777-799`, `G/char_item.cpp:8791-8846`). Alpha holds
+/// none, so the page says the material is short and the script moves the quest back to
+/// `go_to_disciple`, whose letter marks the captain with ID 2. The new state is stored.
+///
+/// On the owner's data this is the only branch: 85000 has no proto, so the captain's
+/// `pc.give_item2(85000, 40)` gives nothing and no character can hold 40 of it.
+#[test]
+fn a_complete_sash_quest_without_the_material_goes_back_to_the_captain() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET x = 482800, y = 944900 WHERE name = 'Alpha'",
+    );
+    // The CRC32s of `__complete` and of `information_new`.
+    sql(
+        &database,
+        "INSERT INTO quest_flag (player_id, name, value) SELECT player.id, flag.name, \
+          flag.value FROM player, (VALUES ('sash_mission.__status'::bytea, 557528158), \
+          ('yohara_system.__status'::bytea, 1998515313)) AS flag (name, value) WHERE \
+          player.name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _items) = load_character(&server, b"alice", 0);
+    let theowahdan = enter_beside(&mut alice, THEOWAHDAN_VNUM);
+    read_login_lines(&mut alice, 0, None);
+    read_letter(
+        &mut alice,
+        QUEST_ATTR67ADD,
+        b"Sixth and Seventh Bonus",
+        "item_attr67add",
+    );
+    assert_eq!(
+        read_quest_target_create(&mut alice, 1, b"Theowahdan"),
+        theowahdan
+    );
+    read_sash_and_yohara_letters(&mut alice, "letter");
+    assert_eq!(
+        alice.read_game_marked(),
+        server_quest_target_update(1, THEOWAHDAN_SPOT.0, THEOWAHDAN_SPOT.1),
+        "the mark's event sends where Theowahdan stands"
+    );
+
+    alice.send_record(&client_click(theowahdan));
+    assert_eq!(
+        alice.read_game_marked(),
+        server_quest_target_delete(1),
+        "the script's `target.delete` comes first"
+    );
+    assert_eq!(
+        alice.read_game_marked(),
+        server_script(1, &titled_page(b"teowahdan", &SASH_REWARD_FIRST, b"[NEXT]"))
+    );
+    alice.still_marked_for("the script waits", QUIET_WINDOW);
+    alice.send_record(&client_script_answer(254));
+    assert_eq!(
+        alice.read_game_marked(),
+        server_script(1, &titled_page(b"teowahdan", &SASH_REWARD_SHORT, b"[DONE]"))
+    );
+    assert_ne!(
+        read_quest_target_create(&mut alice, 2, b"Captain"),
+        theowahdan
+    );
+    read_letter(
+        &mut alice,
+        QUEST_SASH,
+        b"Increase your power",
+        "the new state",
+    );
+    assert_eq!(
+        alice.read_game_marked(),
+        server_quest_target_update(2, CAPTAIN_SPOT.0, CAPTAIN_SPOT.1),
+        "the captain's spot, a second after his mark"
+    );
+    alice.still_marked_for("nothing follows", Duration::from_millis(1_500));
+
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    let flags = support::rows(
+        database.url(),
+        "SELECT value FROM quest_flag WHERE player_id = (SELECT id FROM player WHERE name = \
+          'Alpha') AND name = 'sash_mission.__status'::bytea",
+        1,
+    );
+    assert_eq!(
+        flags,
+        vec![vec![1_675_612_723]],
+        "the CRC32 of `go_to_disciple`"
+    );
+}
+
 /// The captain, vnum 20355, whose `target.click` the sash quest's `go_to_disciple` and
 /// `time_to_wait` states run.
 const CAPTAIN_VNUM: u16 = 20_355;
