@@ -2600,6 +2600,8 @@ pub enum GmLine {
     Flush,
     /// `/observer` (`do_observer`), an implementor's line.
     Observer,
+    /// `/user_horse_feed` (`do_user_horse_feed`), a player's line.
+    UserHorseFeed,
 }
 
 /// Which restart a dead player asks for.

@@ -198,6 +198,7 @@ impl GameState {
                 self.run_observer(vid);
                 None
             }
+            GmLine::UserHorseFeed => self.user_horse_feed(vid, mover),
         }
     }
 

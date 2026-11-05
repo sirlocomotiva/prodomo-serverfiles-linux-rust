@@ -217,6 +217,7 @@ impl CommandEntry {
             "do_move_channel" => Command::GmLine(GmLine::MoveChannel),
             "do_flush" => Command::GmLine(GmLine::Flush),
             "do_observer" => Command::GmLine(GmLine::Observer),
+            "do_user_horse_feed" => Command::GmLine(GmLine::UserHorseFeed),
             "do_forgetme" => Command::ForgetMe,
             "do_aggregate" => Command::Aggregate,
             "do_attract_ranger" => Command::AttractRanger,

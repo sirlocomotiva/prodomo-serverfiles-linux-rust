@@ -34123,3 +34123,69 @@ fn a_stale_horse_name_goes_at_the_tick(alice: &mut Keyed, vein: u32) {
     read.extend(read_until_headed(alice, GC_CHAR_ADDITIONAL_INFO, horse));
     let _ = added_horse_named(&read, b"Alpha's \0");
 }
+
+/// `/user_horse_feed` (`G/cmd_general.cpp:105-133`): without a horse summoned the caller hears
+/// `[LS;501]`; with one, each line spends one of the grade's food (50056 at level 25) and
+/// the horse gains a point of health, until the food runs out and the line names it.
+#[test]
+fn a_summoned_horse_is_fed_by_its_rider_until_the_food_runs_out() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, _digger) = vein_stage(&database, HORSE_SUMMON_PROBE);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, \
+         1, 50059 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1, \
+         2, 50056 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _entered) = enter_equipped_world_with(&server, b"alice", 2);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/user_horse_feed"));
+    assert_eq!(alice.read_game(), an_info_line(b"[LS;501]"), "no horse");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_level Alpha 25"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"horse level set (Alpha: 25)")
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_summon"));
+    let read = read_until_all(&mut alice, &[a_command_line(b"horse_state 25 3 3")]);
+    let (horse, _) = added_horse_named(&read, b"Alpha's \0");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_set_stat 20 140"));
+    assert_eq!(alice.read_game(), a_command_line(b"horse_state 25 2 3"));
+    // Two lines eat both: the stack's update, then its clearing set, each before the
+    // line naming the food. The health stays in its grade, so no state line goes.
+    for (kind, count) in [(ITEM_UPDATE, 1u8), (ITEM_SET, 0)] {
+        alice.send_record(&client_chat(CHAT_TALKING, b"/user_horse_feed"));
+        let item = alice.read_game();
+        assert_eq!(
+            (item[0], &item[1..4], item[4]),
+            (kind, &[1, 1, 0][..], count)
+        );
+        assert_eq!(alice.read_game(), an_info_line(b"[LS;506;Ginseng rosu;]"));
+    }
+    alice.send_record(&client_chat(CHAT_TALKING, b"/user_horse_feed"));
+    assert_eq!(alice.read_game(), an_info_line(b"[LS;507;Ginseng rosu]"));
+    // A rider has no horse standing: the ride unsummons it.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/user_horse_ride"));
+    read_until_all(
+        &mut alice,
+        &[header_and_vid_record(GC_CHARACTER_DEL, horse)],
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/user_horse_feed"));
+    read_until_all(&mut alice, &[an_info_line(b"[LS;505]")]);
+    drop(alice);
+    wait_for(
+        &database,
+        "NOT EXISTS (SELECT 1 FROM item WHERE id = 61) AND (SELECT horse_hp = 22 FROM player \
+         WHERE name = 'Alpha')",
+    );
+}

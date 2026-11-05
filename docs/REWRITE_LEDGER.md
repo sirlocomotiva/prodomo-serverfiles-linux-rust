@@ -45605,3 +45605,46 @@ above. `cargo test --workspace --doc`: 1 passed. `cargo clippy --workspace --all
 --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
 --no-deps --locked --offline` are clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
 (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 396. The rider's feed line
+
+`/user_horse_feed` is ported (`do_user_horse_feed`, `G/cmd_general.cpp:105-133`) as the
+player line `GmLine::UserHorseFeed`, run by `GameState::user_horse_feed`
+(`prodomo/src/game_state/horse_summon.rs`). Its answer carries the item rows, which the
+descriptor stores, as `/sort_inventory`'s does.
+
+- With no horse summoned (`GetHorse() == NULL`), the caller hears `[LS;501]`, or
+  `[LS;505]` while riding, since the ride unsummons the horse.
+- With a horse summoned, the food is `50054 + grade - 1`, which is 50056 at grade 3. If the
+  caller holds none (`CountSpecifyItem`), it hears `[LS;507;%s]` with the proto's locale
+  name.
+- Otherwise `RemoveSpecifyItem(food, 1)` takes one and its records go out first.
+  `FeedHorse` runs next: a living horse gains a point of health and its drop time moves on,
+  while a dead horse eats nothing although the food is spent, as legacy does. The horse
+  then settles, so a crossed grade sends its state line, and the caller hears
+  `[LS;506;%s;%s]` with the name and an empty second argument.
+- The private-shop gate (`GetMyShop`) is not ported (`sort_inventory.rs` records the same
+  gap), so it never refuses.
+
+Scenario `a_summoned_horse_is_fed_by_its_rider_until_the_food_runs_out`:
+- Without a horse the line hears `[LS;501]`.
+- At level 25 the far summon stands the horse, and `/horse_set_stat 20 140` says
+  `horse_state 25 2 3`.
+- Two lines eat the stack of two 50056: first the stack's update to 1, then its clearing
+  set, each followed by `[LS;506;Ginseng rosu;]`. The health stays in grade 2, so no state
+  line goes.
+- The third line hears `[LS;507;Ginseng rosu]`.
+- `/user_horse_ride` deletes the standing horse, and the line then hears `[LS;505]`.
+- The store ends without item 61 and with `horse_hp` 22.
+
+Eight runs passed. Four mutants were applied to the pristine file and restored by
+checksum; all four are semantic kills: the 501 and 505 swap, the food without its `- 1`,
+the dropped `FeedHorse`, and the count gate at `< 0`.
+
+Gates (2026-11-05): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4741 passed, 0 failed in 41 targets. `cargo test --workspace --doc`: 1 passed.
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

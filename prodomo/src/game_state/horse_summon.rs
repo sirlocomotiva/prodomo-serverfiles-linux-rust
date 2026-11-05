@@ -39,6 +39,8 @@ use super::mob_ai::delta_by_degree;
 use super::motion::rotation_to_xy;
 use super::view::EntityKey;
 use super::GameState;
+use super::GmRows;
+use crate::chat_line::Arg;
 use crate::item_move::{MovedItems, Mover};
 use crate::save::PASSES_PER_SEC;
 use crate::sync_position::distance_approx;
@@ -63,6 +65,14 @@ const NO_HORSE: &[u8] = b"[LS;501]";
 const HORSE_SENT_BACK: &[u8] = b"[LS;502]";
 /// `/user_horse_back` while riding.
 const HORSE_RIDDEN: &[u8] = b"[LS;504]";
+/// `/user_horse_feed` while riding, with no horse summoned.
+const FEED_RIDDEN: &[u8] = b"[LS;505]";
+/// `/user_horse_feed` fed the horse: the food's name and an empty second argument.
+const FEED_DONE: &[u8] = b"[LS;506;%s;%s]";
+/// `/user_horse_feed` without the food: its name.
+const FEED_MISSING: &[u8] = b"[LS;507;%s]";
+/// The grade-1 food (`G/cmd_general.cpp:119`): grade `g` eats `50054 + g - 1`.
+const FIRST_FOOD: u32 = 50_054;
 /// A revive herb given to a horse.
 const REVIVED_LINE: &[u8] = b"[LS;452]";
 /// A feed given to a horse.
@@ -354,6 +364,59 @@ impl GameState {
         } else {
             self.tell(vid, mover, CHAT_TYPE_INFO, NO_HORSE, &[]);
         }
+    }
+
+    /// `do_user_horse_feed` (`G/cmd_general.cpp:105-133`): with a horse summoned, one of the
+    /// grade's food goes and the horse eats it (`FeedHorse`, which a dead horse ignores
+    /// while the food is still spent); without the food the caller hears its name. No
+    /// summoned horse hears `[LS;501]`, or `[LS;505]` while riding. The private-shop gate
+    /// (`GetMyShop`) is not ported, so it never refuses. Answers the rows for the store.
+    pub(super) fn user_horse_feed(&mut self, vid: Vid, mover: Mover) -> Option<GmRows> {
+        let horse = self.pc_points_mut(vid.raw())?.horse();
+        let (summoned, riding, grade) = (horse.summoned(), horse.riding(), horse.grade());
+        if !summoned {
+            let line = if riding { FEED_RIDDEN } else { NO_HORSE };
+            self.tell(vid, mover, CHAT_TYPE_INFO, line, &[]);
+            return None;
+        }
+        let food = FIRST_FOOD + u32::from(grade) - 1;
+        let name = self
+            .protos
+            .get(food)
+            .map(|proto| proto.locale_name.clone())
+            .unwrap_or_default();
+        if self.count_specify_item(vid, food) <= 0 {
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_INFO,
+                FEED_MISSING,
+                &[Arg::Text(&name)],
+            );
+            return None;
+        }
+        let protos = std::sync::Arc::clone(&self.protos);
+        let character = self.characters.find_by_vid_mut(vid).ok()?;
+        let pid = character.player_id();
+        let usable = common::item_slots::usable_inventory_cells(character.inven_point());
+        let (items, _, slots) = character.items_points_and_quickslots_mut();
+        let done = world::character::remove_specify_item(items, slots, &protos, usable, (food, 1));
+        let packed = MovedItems::new(pid, vid.raw(), done, mover, &self.protos, &self.locale);
+        for record in packed.records {
+            let _sent = self.write_to_client(vid, record);
+        }
+        let now = Self::global_time();
+        if let Some(points) = self.pc_points_mut(vid.raw()) {
+            let _fed = points.horse_mut().feed(now);
+        }
+        self.settle_horse(vid);
+        let args = [Arg::Text(&name), Arg::Text(b"")];
+        self.tell(vid, mover, CHAT_TYPE_INFO, FEED_DONE, &args);
+        Some(GmRows {
+            pid,
+            changes: packed.changes,
+            cleared_skills: Vec::new(),
+        })
     }
 
     /// `IsRidingMount` (`G/char.cpp:11228-11231`): a mount costume worn or `AFFECT_MOUNT`.
