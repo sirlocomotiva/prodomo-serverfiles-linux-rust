@@ -24,8 +24,8 @@
 //! # Not ported
 //!
 //! - The horse names (`CHorseNameManager`): every horse carries its rider's name.
-//! - `IsRidingMount` reads the mount costume's wear cell and `AFFECT_MOUNT`, but nothing in
-//!   the Rewrite mounts a character yet, and no map is an arena map (`sys.event.arena`).
+//! - `IsRidingMount` reads the mount costume's wear cell and `AFFECT_MOUNT`, and no map is
+//!   an arena map (`sys.event.arena`).
 
 use common::cfloat::{f32_to_i32, i32_to_f32};
 use common::vid::Vid;
@@ -91,6 +91,10 @@ pub(crate) enum HorseOp {
     Unsummon,
     /// `horse.revive` and `pc.revive_horse`: `ReviveHorse`.
     Revive,
+    /// `horse.ride`: `StartRiding`.
+    Ride,
+    /// `horse.unride`: `StopRiding`.
+    Unride,
 }
 
 impl GameState {
@@ -166,7 +170,7 @@ impl GameState {
 
     /// `GetMyHorseVnum` (`G/char_horse.cpp:278-291`): the level's race, one more in a guild
     /// and one more again for the guild's master.
-    fn my_horse_vnum(&self, vid: Vid, level: u8) -> u32 {
+    pub(super) fn my_horse_vnum(&self, vid: Vid, level: u8) -> u32 {
         let pid = self
             .characters
             .find_by_vid(vid)
@@ -370,6 +374,8 @@ impl GameState {
                 }
                 HorseOp::Unsummon => self.horse_unsummon(vid, false),
                 HorseOp::Revive => self.revive_horse(vid),
+                HorseOp::Ride => self.start_riding(vid),
+                HorseOp::Unride => self.stop_riding(vid),
             }
         }
     }

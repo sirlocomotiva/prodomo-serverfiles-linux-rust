@@ -178,6 +178,11 @@ pub struct Horse {
     /// Whether the horse died since the world last asked ([`Horse::take_died`]):
     /// `CHARACTER::HorseDie` unsummons it.
     died: bool,
+    /// Whether the horse's ride ended by a stamina or health update rather than an
+    /// explicit [`Horse::stop_riding`] ([`Horse::take_stopped`]): the world finishes
+    /// `CHARACTER::StopRiding`, since those call the virtual stop (`G/horse_rider.h:74`,
+    /// `G/char.h:1664`).
+    stopped: bool,
     timer: HorseTimer,
     /// Whether [`Horse::timer`] was created since the world last scheduled it.
     new_timer: bool,
@@ -259,6 +264,11 @@ impl Horse {
     /// Whether the horse died since the last call.
     pub fn take_died(&mut self) -> bool {
         std::mem::take(&mut self.died)
+    }
+
+    /// Whether the ride ended by an update since the last call.
+    pub fn take_stopped(&mut self) -> bool {
+        std::mem::take(&mut self.stopped)
     }
 
     /// The level's row of `c_aHorseStat`. The store keeps the level within 0 to 30; a wider
@@ -496,6 +506,7 @@ impl Horse {
         self.info.stamina = i16::try_from(clamped).unwrap_or(0);
         if self.info.stamina == 0 && self.info.riding {
             let _stopped = self.stop_riding();
+            self.stopped = true;
         }
         if send {
             self.send_info();
@@ -665,6 +676,8 @@ mod tests {
         assert!(!horse.riding(), "no stamina left");
         assert_eq!(horse.timer(), HorseTimer::Regen);
         assert!(horse.take_new_timer());
+        assert!(horse.take_stopped(), "the world finishes the stop");
+        assert!(!horse.take_stopped(), "reported once");
     }
 
     /// The line speaks only while ridden or summoned, and only on a move of the level or a

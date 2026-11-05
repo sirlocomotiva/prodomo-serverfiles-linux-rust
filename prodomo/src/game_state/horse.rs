@@ -19,9 +19,6 @@
 //!
 //! # Not ported
 //!
-//! - A row stored while ridden: legacy's `EnterHorse` mounts again (`StartRiding`), which
-//!   needs the summon and riding rules (`sys.char.horse`'s later slices). The flag is
-//!   cleared and the horse enters unridden, regenerating.
 //! - `HEADER_GD_REQ_HORSE_NAME` at entry (`G/input_login.cpp:891-892`): the horse names wait
 //!   for the name slice.
 
@@ -74,6 +71,14 @@ impl GameState {
                 self.user_horse_back(vid);
                 None
             }
+            HorseLine::Ride => {
+                self.run_horse_ride(vid);
+                None
+            }
+            HorseLine::UserRide => {
+                self.user_horse_ride(vid);
+                None
+            }
         };
         if reply.send(landed).is_err() {
             tracing::debug!(?vid, "nobody was left to hear a horse line's answer");
@@ -94,7 +99,9 @@ impl GameState {
             return;
         }
         if horse.enter(now) {
-            tracing::info!(?vid, "a horse stored while ridden enters unridden");
+            // A row stored while ridden mounts again (`StartRiding`, `G/horse_rider.
+            // cpp:96-101`), past the FIX refresh like `EnterHorse` runs it.
+            self.start_riding(vid);
         }
         self.sync_horse_timer(vid);
         let _planted = self.plant_horse_level(vid, i32::from(level));
@@ -240,11 +247,17 @@ impl GameState {
         self.settle_horse(vid);
     }
 
-    /// After a step that moved the horse: its stamina event follows, a death unsummons the
-    /// summoned horse (`CHARACTER::HorseDie`, `G/char_horse.cpp:300-305`), and the queued
-    /// lines go out.
+    /// After a step that moved the horse: its stamina event follows; a ride the update
+    /// ended finishes stopping, a death unsummons the summoned horse
+    /// (`CHARACTER::HorseDie`, `G/char_horse.cpp:300-305`), and the queued lines go out.
     pub(super) fn settle_horse(&mut self, vid: Vid) {
         self.sync_horse_timer(vid);
+        let stopped = self
+            .pc_points_mut(vid.raw())
+            .is_some_and(|points| points.horse_mut().take_stopped());
+        if stopped {
+            self.finish_riding_stop(vid);
+        }
         let died = self
             .pc_points_mut(vid.raw())
             .is_some_and(|points| points.horse_mut().take_died());

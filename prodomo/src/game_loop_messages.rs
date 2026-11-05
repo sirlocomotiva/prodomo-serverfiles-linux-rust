@@ -2554,6 +2554,10 @@ pub enum HorseLine {
     Unsummon,
     /// `/user_horse_back` (`do_user_horse_back`).
     Back,
+    /// `/horse_ride` (`do_horse_ride`).
+    Ride,
+    /// `/user_horse_ride` (`do_user_horse_ride`).
+    UserRide,
 }
 
 /// The small GM lines `game_state::gm_lines` runs, and the player's `/conqueror_point`,

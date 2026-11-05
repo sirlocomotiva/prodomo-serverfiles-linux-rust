@@ -304,8 +304,9 @@ impl MovedItems {
 /// `CHARACTER::UpdatePacket` (`G/char.cpp:1277-1340`) for the look a move left, with the
 /// mover's PK mode (`:1315`), alignment (`:1320`), and the descriptor's language (`:1321`).
 ///
-/// The mount and the premium come from systems this build does not have, and are 0. The
-/// guild, the affect words and the dead bit of the state flags come from the mover.
+/// The premium comes from a system this build does not have, and is 0. The mount rides
+/// in the look. The guild, the affect words and the dead bit of the state flags come
+/// from the mover.
 pub(crate) fn character_update(vid: u32, look: &CharacterLook, mover: Mover) -> GcCharacterUpdate {
     GcCharacterUpdate {
         dw_vid: vid,
@@ -319,7 +320,7 @@ pub(crate) fn character_update(vid: u32, look: &CharacterLook, mover: Mover) -> 
         dw_level: look.level,
         dw_conqueror_level: look.conqueror_level,
         b_pk_mode: mover.pk_mode,
-        dw_mount_vnum: 0,
+        dw_mount_vnum: look.mount_vnum,
         b_refine_element_type: look.refine_element_type,
         dw_new_is_guild_name: mover.view_guild.1,
         by_premium: 0,
@@ -764,6 +765,7 @@ mod tests {
             level: 9,
             conqueror_level: 0,
             refine_element_type: 0,
+            mount_vnum: 0,
         };
         let done = MoveDone {
             kind: MoveKind::Moved,

@@ -45485,3 +45485,68 @@ which still pinned the old horse stub). `cargo test --workspace --doc`: 1 passed
 cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the
 `/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No
 ADR changed.
+
+## 394. The ride
+
+The rider mounts: `CHARACTER::StartRiding` and `StopRiding` (`G/horse_rider.cpp:14-219`),
+`GetMountVnum` (`G/char.cpp:3464-3472`, `G/char.h:276-280`), the mounted arms of `ComputePoints`
+(`G/char.cpp:3026-3076`), `horse_stamina_consume_event`'s finish, and the re-show's mount field
+(`TPacketGCCharacterAdditionalInfo::dwMountVnum`, `C/packet.h:1082-1157`).
+
+- `world`: `Points` keeps a riding VNUM mounted by `SetMountVnum` semantics: the mount leaves
+  `mount_vnum` set (legacy's member stays one past `GetMountVnum`'s match), and
+  `set_mount_vnum` takes the state the caller saw. The recompute floored each attribute below
+  the horse row's (a new `mount_floor` step, `G/char.cpp:3030-3044`), floored the attack term
+  at twice strength (`G/char.cpp:3067-3071`, jobs and guild war read through the existing
+  helpers), and paid the horse bonus (`G/char.cpp:3076`). The stop's four `PointChange` writes
+  of the bare stats (`G/char.cpp:3123-3130`) are the recompute's own records. `recompute`'s
+  pool clamp is now `clamp_pools`, so both Clippy's `too_many_lines` and the unit test's mount
+  floor case fit. A costume mount applies no floor and no bonus (`G/char.cpp:3026`,
+  `G/MountSystem.cpp`).
+- `prodomo`: the new `game_state::horse_ride` module. `StartRiding` passes the gates: level 1
+  or more, a level 2 rider carrying no normal mount, alive, still, unmounted, outside the guild
+  war and untouched by polymorph (`IsRiding` in the same file), unsummons its horse from near,
+  and rides: the mount shows in the re-show's `dwMountVnum` and the look update, and the
+  compute's records carry the changes. `StopRiding` dismounts (the member and `GetMountVnum`
+  disagree past the end, legacy's shape), recomputes with the old floor, sends the four zero
+  changes, and summons the horse back near with the old VNUM. Death, damage-polymorph and the
+  stamina finish stop the ride; enter-game remounts the saved rider that still looks mounted.
+  `/horse_ride`, `/user_horse_ride` (with the state line's flush) and the death and polymorph
+  arms say `horse_state`; the consume event's own stamina half is unchanged.
+- `quest`: `horse.ride` and `horse.unride` call the rider's start and stop through the move
+  queue with `is_mine`-style truth; `horse.is_riding` and `pc.is_mount` answer the VNUM
+  (`BRIDGED` is 211 names).
+- Inventory: `cmd.horse_ride`, `cmd.user_horse_ride`, `lua.horse.ride`, `lua.horse.unride`,
+  `lua.horse.is_riding`, `lua.pc.is_mount` and `event.horse_rider.horse_stamina_consume_event`
+  are `ported`; the `gc.character_update` and `sys.char.horse` notes name the slice (the riding
+  gates in skills, items and emotes, the arena and war silences, the feed line and the names
+  wait). Counts: commands 216 ported / 49 missing / 1 partial / 1 unused; quest-api 133 ported
+  / 82 partial / 483 missing / 1 unused; timed-events 15 ported / 5 partial / 79 missing.
+
+Scenario: `a_rider_mounts_by_line_and_quest_and_the_mount_shows_and_pays` (the GM line mounts
+with the state line, the re-show's mount VNUM, the update's mount and the attack floor; the
+player's line stops with the four zero changes in ST DX HT IQ order, the unmounted re-show and
+the horse summoned back; the probe quest's ride and unride say whether the clicker rode, with
+the quest ride's re-show mounted; the store keeps the riding flag cleared). Eight runs passed.
+Four mutants were applied to pristine files and restored by checksum, three semantic kills:
+the stop's re-show reading the mount back, the bonus at `(div + 30)`, and the attack floor's
+removal. The floor-easing mutant
+(`3 * st`) survives both the suite and the unit test: the term of every case lies below twice
+strength, so the mutant binds nothing. The unit test's floor case went through three shapes in
+this slice: a warrior whose floor never bound, an assassin whose ST 26 raised the term past
+twice strength, and the shaman the lemma needs (`fresh()` starts at 60/80, not at the job's
+initial points). New unit tests: the three mount cases in `points.rs` and the `horse.ride`
+argument test in `quest`.
+
+The harness fix: `Keyed::quiet_for` sized only a ping, so a ping cycle landing inside a long
+quiet window panicked on the cycle's handshake (`HEADER_GC_HANDSHAKE`, 255). It now sizes the
+handshake and the time-sync ack and answers the handshake, like `read_past_pings` does. The
+fishing scenario that caught it passes alone and in the suite below.
+Gates (2026-11-05): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4737 passed, 0 failed in 41 targets (an earlier run failed the fishing take scenario on a
+ping cycle's handshake inside its bite window; the harness now answers it). `cargo test
+--workspace --doc`: 1 passed; `cargo clippy --workspace --all-targets --locked --offline -- -D
+warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
+clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -3153,7 +3153,10 @@ impl Keyed {
                 GC_MOVE | GC_WALK_MODE | GC_CHAT => {
                     chatter_width(&plain[at..]).unwrap_or(plain.len() - at)
                 }
-                GC_PING => 1,
+                GC_PING | TIME_SYNC_ACK => 1,
+                // The ping cycle sends a handshake with the ping (`G/desc.cpp:179-184`); a
+                // minute-long `quiet_for` sits inside one. It is answered below, not here.
+                HANDSHAKE => HANDSHAKE_LEN,
                 GC_AFFECT_REMOVE => AFFECT_REMOVE_LEN,
                 GC_CHARACTER_UPDATE => CHARACTER_UPDATE_LEN,
                 GC_CHARACTER_ADD => CHARACTER_ADD_LEN,
@@ -3172,8 +3175,11 @@ impl Keyed {
                 "a record still arriving when the window closed ({note})"
             );
             let record = &plain[at..at + width];
+            if header == HANDSHAKE {
+                self.answer_heartbeat(record);
+            }
             assert!(
-                header == GC_PING
+                is_heartbeat_record(record)
                     || self.monster_record(record)
                     || self.timer_record(record)
                     || self.timer_restate(record)
@@ -33516,6 +33522,20 @@ fn header_and_vid_record(header: u8, vid: u32) -> Vec<u8> {
     record
 }
 
+/// Reads records until one starts with `header` and names `vid`, answering every record
+/// read: for records whose tail varies, like the insert and the update.
+fn read_until_headed(keyed: &mut Keyed, header: u8, vid: u32) -> Vec<Vec<u8>> {
+    let mut read = Vec::new();
+    loop {
+        let record = keyed.read_game();
+        let claimed = record[0] == header && record[1..5] == vid.to_le_bytes();
+        read.push(record);
+        if claimed {
+            return read;
+        }
+    }
+}
+
 /// `/horse_summon` calls the horse from far: it stands 2000 to 2500 from `digger` on each
 /// axis, and a second summon does nothing while it stands. `/horse_unsummon` hides the state
 /// and sends it running off; it goes on its next Idle, finding no rider, and
@@ -33734,4 +33754,195 @@ fn quest_unsummons_and_revives(alice: &mut Keyed, vein: u32, revived: u32) {
             );
         }
     }
+}
+
+/// A ride probe: by the click count, `horse.ride`, then `horse.unride`, saying the count and
+/// whether the clicker rides.
+const HORSE_RIDE_PROBE: &[u8] = b"quest horse_ride_probe begin\n\
+    state start begin\n\
+    when 20047.click begin\n\
+    local n = pc.getqf(\"n\") + 1\n\
+    pc.setqf(\"n\", n)\n\
+    syschat(\"r \" .. n .. \" \" .. horse.is_riding())\n\
+    if n == 1 then\n\
+    horse.ride()\n\
+    else\n\
+    horse.unride()\n\
+    end\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// The mount vnum of a `GC_CHAR_ADDITIONAL_INFO` (header, VID, 25 name bytes, six parts,
+/// empire, guild, level, conqueror level, alignment, PK mode, then the mount).
+fn additional_mount(info: &[u8]) -> u32 {
+    u32::from_le_bytes(info[58..62].try_into().expect("four bytes"))
+}
+
+/// The mount vnum of a `GC_CHARACTER_UPDATE` (header, VID, six parts, two speeds, state,
+/// two affects, guild, alignment, level, conqueror level, PK mode, then the mount).
+fn update_mount(update: &[u8]) -> u32 {
+    u32::from_le_bytes(update[43..47].try_into().expect("four bytes"))
+}
+
+/// The value of point slot `slot` in a `GC_CHARACTER_POINT_CHANGE` for `vid`.
+fn point_value(change: &[u8], vid: u32, slot: u8) -> Option<i64> {
+    if change[0] == GC_POINT_CHANGE && change[4..8] == vid.to_le_bytes() && change[8] == slot {
+        Some(i64::from_le_bytes(
+            change[17..25].try_into().expect("eight bytes"),
+        ))
+    } else {
+        None
+    }
+}
+
+/// The rider's latest additional record among `read`: its mount vnum.
+fn shown_mount(read: &[Vec<u8>], vid: u32) -> u32 {
+    let additional = read
+        .iter()
+        .filter(|record| record[0] == GC_CHAR_ADDITIONAL_INFO && record[1..5] == vid.to_le_bytes())
+        .last()
+        .expect("an additional record of the rider");
+    additional_mount(additional)
+}
+
+/// `/user_horse_ride` stops the ride: the stop's line leads, the four zero changes close
+/// it in ST DX HT IQ order, the re-show unmounts, and the horse is summoned back.
+fn user_ride_stops(alice: &mut Keyed, vid: u32) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/user_horse_ride"));
+    let flush = a_command_line(b"horse_state 25 3 3");
+    let mut read = vec![alice.read_game()];
+    assert_eq!(read[0], flush, "the stop's line leads");
+    read.extend(read_until_headed(alice, GC_CHARACTER_UPDATE, vid));
+    loop {
+        let record = alice.read_game();
+        read.push(record);
+        let tail: Vec<(u8, i64)> = read
+            .iter()
+            .rev()
+            .filter(|record| record[0] == GC_POINT_CHANGE && record[4..8] == vid.to_le_bytes())
+            .filter(|record| record[9..17] == [0; 8])
+            .take(4)
+            .map(|record| {
+                (
+                    record[8],
+                    i64::from_le_bytes(record[17..25].try_into().expect("eight bytes")),
+                )
+            })
+            .collect();
+        if tail == [(15, 20), (23, 180), (22, 348), (20, 172)] {
+            break;
+        }
+    }
+    let kinds: Vec<u8> = read
+        .iter()
+        .filter(|record| record[0] == GC_POINT_CHANGE && record[4..8] == vid.to_le_bytes())
+        .filter(|record| record[9..17] == [0; 8])
+        .map(|record| record[8])
+        .collect();
+    let mut at = 0;
+    for want in [12u8, 14, 13, 15] {
+        let found = kinds[at..]
+            .iter()
+            .position(|&kind| kind == want)
+            .expect("each arm");
+        at += found + 1;
+    }
+    assert_eq!(shown_mount(&read, vid), 0, "the stop's re-show unmounts");
+    let (_back, _) = added_horse(&read);
+}
+
+/// The quest's ride and unride: each click says whether the clicker rode when the step
+/// began, and the quest ride's re-show mounts.
+fn quest_rides_and_unrides(alice: &mut Keyed, vein: u32, vid: u32) {
+    alice.send_record(&client_click(vein));
+    assert_eq!(alice.read_game(), an_info_line(b"r 1 0"));
+    let read = read_until_headed(alice, GC_CHARACTER_UPDATE, vid);
+    assert_eq!(shown_mount(&read, vid), 20_107, "the quest ride's re-show");
+    alice.send_record(&client_click(vein));
+    assert_eq!(alice.read_game(), an_info_line(b"r 2 1"));
+    read_until_headed(alice, GC_CHARACTER_UPDATE, vid);
+}
+
+/// `cmd.horse_ride`, `cmd.user_horse_ride`, `lua.horse.ride`, `lua.horse.unride`,
+/// `lua.horse.is_riding`, `lua.pc.is_mount`: the ride by the GM line, the player's line and
+/// the quest names; the mount vnum in the re-show's additional record and in the update;
+/// the horse stat floor and the mounted attack in the compute; the dismount's four zero
+/// changes, its re-show and the horse summoned back; and the riding save.
+#[test]
+fn a_rider_mounts_by_line_and_quest_and_the_mount_shows_and_pays() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, _) = vein_stage(&database, HORSE_RIDE_PROBE);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let vein = shown_vein(&entered);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_level Alpha 25"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"horse level set (Alpha: 25)")
+    );
+    // The caller hears the compute's point changes and the planted byte 76 before the
+    // next answer.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_state"));
+    let between = read_up_to(&mut alice, &an_info_line(b"Horse Information:"));
+    assert_eq!(horse_skills(&between), [25]);
+    for line in [
+        &b"    Level  25"[..],
+        b"    Health 40/40 (100%)",
+        b"    Stam   140/140 (100%)",
+    ] {
+        assert_eq!(alice.read_game(), an_info_line(line));
+    }
+    // With no horse summoned, `/user_horse_ride` names none; `/horse_ride` mounts anyway.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/user_horse_ride"));
+    assert_eq!(alice.read_game(), an_info_line(b"[LS;501]"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_ride"));
+    let read = read_until_headed(&mut alice, GC_CHARACTER_UPDATE, vid);
+    // The floor speaks through the attack grade alone: the stat floor lands silently in
+    // the compute, and the raised HT and IQ move only the maxima's bases.
+    let attack = read
+        .iter()
+        .filter_map(|record| point_value(record, vid, 18))
+        .last()
+        .expect("the compute's attack grade");
+    let floored = 2 * 154 + 2 * 60;
+    assert_eq!(attack, floored + floored * 25 / 30, "the mounted attack");
+    let additional = read
+        .iter()
+        .filter(|record| record[0] == GC_CHAR_ADDITIONAL_INFO && record[1..5] == vid.to_le_bytes())
+        .last()
+        .expect("the re-show's additional record");
+    assert_eq!(additional_mount(additional), 20_107);
+    let positions: Vec<usize> = read
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| record[0] == GC_CHARACTER_ADD && record[1..5] == vid.to_le_bytes())
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(positions.len(), 1, "one re-show of the rider: {read:02x?}");
+    assert!(
+        !read
+            .iter()
+            .any(|record| { record[0] == GC_CHARACTER_DEL && record[1..5] == vid.to_le_bytes() }),
+        "no removal before the re-show"
+    );
+    let update = read
+        .iter()
+        .find(|record| record[0] == GC_CHARACTER_UPDATE && record[1..5] == vid.to_le_bytes())
+        .expect("the compute's update");
+    assert_eq!(update_mount(update), 20_107);
+    user_ride_stops(&mut alice, vid);
+    quest_rides_and_unrides(&mut alice, vein, vid);
+    drop(alice);
+    wait_for(
+        &database,
+        "SELECT NOT horse_riding FROM player WHERE name = 'Alpha'",
+    );
 }

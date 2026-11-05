@@ -938,6 +938,7 @@ impl GameState {
             level: u32::from(npc.fight.level),
             conqueror_level: 0,
             refine_element_type: 0,
+            mount_vnum: 0,
         };
         let mover = Mover {
             recently_fought: false,

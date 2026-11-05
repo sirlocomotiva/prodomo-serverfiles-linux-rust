@@ -84,6 +84,7 @@ mod gm_lines;
 mod guild;
 mod guild_mark;
 mod horse;
+mod horse_ride;
 mod horse_summon;
 mod item_penalty;
 mod item_purge;

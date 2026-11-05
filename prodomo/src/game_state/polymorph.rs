@@ -52,7 +52,8 @@ impl GameState {
         if !points.set_polymorph(vnum, maintain) {
             return;
         }
-        // `StopRiding` (`:7697-7698`): the Rewrite never rides, so nothing stops.
+        // `StopRiding` (`:7697-7698`).
+        self.stop_riding(vid);
         self.reencode_with_spawn(vid);
         if !maintain {
             for kind in [

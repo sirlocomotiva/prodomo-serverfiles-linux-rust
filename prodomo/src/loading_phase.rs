@@ -969,8 +969,8 @@ fn speed_byte(speed: i32) -> u8 {
     u8::try_from(speed).unwrap_or(u8::MAX)
 }
 
-/// A player's `GC_CHAR_ADDITIONAL_INFO`, with no mount
-/// (`G/char.cpp:1111-1200`). `bPKMode` is `m_bPKMode` (`G/char.cpp:1128`). `guild` is the
+/// A player's `GC_CHAR_ADDITIONAL_INFO` (`G/char.cpp:1111-1200`). `bPKMode` is `m_bPKMode`
+/// (`G/char.cpp:1128`). `dwMountVnum` is the mounted vnum (`:1129`). `guild` is the
 /// pair the world's `view_guild` computes (`dwGuildID` and `dwNewIsGuildName`,
 /// `G/char.cpp:1176-1199`): the guild id, and 3 for the master, 2 for a general, 1 for a
 /// plain member, 0 with no guild.
@@ -997,7 +997,7 @@ pub fn character_additional(
         u32::from(card.conqueror_level),
         i16::try_from(card.alignment / 10).unwrap_or(i16::MAX),
         card.pk_mode,
-        0,
+        state.mount_vnum(),
         0,
         guild.1,
         0,

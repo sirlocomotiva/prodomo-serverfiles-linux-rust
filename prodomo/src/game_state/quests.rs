@@ -1274,9 +1274,8 @@ impl Game for Session<'_> {
     }
 
     fn is_mount(&self) -> bool {
-        // No ported path mounts: the mount quest, the summon and the ride wait for
-        // their systems, so `GetMountVnum()` is 0.
-        false
+        self.run_points()
+            .is_some_and(|points| points.mount_vnum() != 0)
     }
 
     fn is_party(&self) -> bool {
@@ -1607,6 +1606,14 @@ impl Game for Session<'_> {
 
     fn revive_horse(&mut self) {
         self.horse_ops.push(super::horse_summon::HorseOp::Revive);
+    }
+
+    fn ride_horse(&mut self) {
+        self.horse_ops.push(super::horse_summon::HorseOp::Ride);
+    }
+
+    fn unride_horse(&mut self) {
+        self.horse_ops.push(super::horse_summon::HorseOp::Unride);
     }
 
     fn number(&mut self, from: i32, to: i32) -> i32 {

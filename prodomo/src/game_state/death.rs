@@ -740,6 +740,14 @@ impl GameState {
         // and the draws choose. The call is outside the player-killer arm, because legacy's
         // is: a monster's kill reaches it too, and only the war and the agreed duel skip it.
         self.item_drop_penalty(vid, killer, agreed_pvp);
+        // `IsHorseRiding() → StopRiding()` (`:1242-1245`): the ride ends while the rider is
+        // still up, so the horse is summoned back. A mount costume is a gap.
+        if self
+            .pc_points_mut(raw)
+            .is_some_and(|points| points.horse().riding())
+        {
+            self.stop_riding(vid);
+        }
         // `SetPosition(POS_DEAD)`. `ClearAffect(true)` uncomputes every affect but the
         // no-save and no-clear ones (`G/char_affect.cpp:259-337`): of the affects a player
         // can hold, the revive-invisible stays and the poison, stun, slow and 263's slow

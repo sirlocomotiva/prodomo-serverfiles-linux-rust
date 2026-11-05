@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-05, after ledger section 393 (the summoned horse).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 394
+Last reviewed: 2026-11-05, after ledger section 394 (the ride).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 395
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -376,7 +376,13 @@ horse is summoned and sent off by `/horse_summon`, `/horse_unsummon`, `/user_hor
 the quest's `horse.summon` and `horse.unsummon`, follows and wanders by `StateHorse`, lies a
 minute when summoned dead, goes when it dies, and is revived by `horse.revive`,
 `pc.revive_horse` and the herb and fed by a gift, so those rows and
-`event.char_horse.horse_dead_event` are `ported` (riding and the names wait). The
+`event.char_horse.horse_dead_event` are `ported` (riding and the names wait). Since 394 the
+horse is ridden by `/horse_ride`, `/user_horse_ride`, `horse.ride` and `horse.unride`: the
+mount shows in the re-show and the update, the compute pays the horse floor and bonus, the
+stop sends the four zero changes and the far summon back, and death, polymorph and the
+stamina end stop the ride, so those rows, `lua.horse.is_riding`,
+`event.horse_rider.horse_stamina_consume_event` and a live `lua.pc.is_mount` are `ported`
+(the riding gates, the arena and war silences, the feed line and the names wait). The
 next slice is the owner's call: the forest's leader branch waits on the `d.*` manager names,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

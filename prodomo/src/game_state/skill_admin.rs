@@ -68,8 +68,7 @@ const ALWAYS_USABLE: [u8; 18] = [
 
 /// The horse skills the `do_all_skill_master` else-switch grants
 /// (`G/cmd_gm.cpp:4745-4753`): wild attack, charge, escape, and the ranged
-/// wild attack. `IsRiding` never holds on a ported path, so the switch (not
-/// `CanUseSkill`'s riding arm) is what grants them.
+/// wild attack. The switch (not `CanUseSkill`'s riding arm) is what grants them.
 const HORSE_USABLE: [u8; 4] = [137, 138, 139, 140];
 
 /// `SKILL_MAX_LEVEL` (`C/length.h:75`): the level the master line plants.

@@ -73,9 +73,10 @@
 //! the death penalty's loss changes it ([`Points::lose_exp`]): a gain is the level-up chain.
 //!
 //! Also not ported: the party broadcast after a hit-point change, the walking switch
-//! after a stamina change, the polymorph and mount branches of the battle points, and the
-//! parts of `ComputePoints` that read affects, skills, the horse, the dragon-soul deck and the
-//! attribute buffs (`BuffOnAttr`). The passive-skill bonuses are an input
+//! after a stamina change, the polymorph arm of the battle points (the mount arms are
+//! ported: the stat floor in [`Points::compute_points_with`] and the attack floor and
+//! horse bonus in [`Points::compute_battle_points`]), and the parts of `ComputePoints`
+//! that read affects, skills, the dragon-soul deck and the attribute buffs (`BuffOnAttr`).
 //! ([`Points::set_passive_bonuses`]) so the skill system can supply them; today they are zero,
 //! which is exact for a character with no skill level. The worn items are computed: see
 //! [`Points::compute_points_with`].
@@ -571,6 +572,13 @@ pub struct Points {
     /// The hit points and their maximum each time the `POINT_HP` arm ran, oldest first: what
     /// `BroadcastTargetPacket` sends the characters targeting this one (`char.cpp:4259`).
     target_broadcasts: Vec<(i32, i32)>,
+    /// `m_dwMountVnum` (`G/char.h:801`): the vnum the character is mounted on, or 0.
+    /// Mounting is `MountVnum`'s state half (`G/char.cpp:7861`); the wire and the points
+    /// recomputes run above. Set at mount time, not stored.
+    mount_vnum: u32,
+    /// `GetSkillGroup()` as the mount's arms read it (`G/char.cpp:2750`): the world's rider
+    /// group at mount time. Points owns no group, so this snapshots it.
+    mount_group: u8,
     /// The character's horse (`CHorseRider`, which `CHARACTER` derives from).
     horse: Horse,
 }
@@ -631,6 +639,8 @@ impl Points {
             polymorph_race: 0,
             poly_maintain_stat: false,
             target_broadcasts: Vec::new(),
+            mount_vnum: 0,
+            mount_group: 0,
             horse: Horse::default(),
         };
         // `SetPlayerProto` sets the base part, the hair and the sash from the row before it
@@ -752,6 +762,20 @@ impl Points {
         self.horse = horse;
         self.real[point::POINT_HORSE_SKILL] = skill_point;
         self.instant[point::POINT_HORSE_SKILL] = skill_point;
+    }
+
+    /// `GetMountVnum` (`G/char.h:813`): the mounted vnum, or 0 (`IsMount`).
+    #[must_use]
+    pub const fn mount_vnum(&self) -> u32 {
+        self.mount_vnum
+    }
+
+    /// `MountVnum`'s state half (`G/char.cpp:7861`): mounts on `vnum` with the world's rider
+    /// group in hand, or unmounts on 0. The insert re-pair, the update and the recomputes
+    /// run above.
+    pub fn set_mount_vnum(&mut self, vnum: u32, group: u8) {
+        self.mount_vnum = vnum;
+        self.mount_group = group;
     }
 
     /// The character's horse.
@@ -1846,6 +1870,26 @@ impl Points {
         narrow(base + from_percent + i64::from(self.instant[pool]) + i64::from(self.instant[party]))
     }
 
+    /// The mount's stat floor (`G/char.cpp:3030-3044`): while mounted without a mount
+    /// costume, each attribute below the horse row's rises to it, silently — legacy's
+    /// `PointChange` reads the floored slot but the recompute's own writes come later.
+    fn mount_floor(&mut self, equipment: &Equipment<'_>) {
+        if self.mount_vnum == 0 || wears_mount_costume(equipment) {
+            return;
+        }
+        for (kind, stat) in [
+            (point::POINT_ST, self.horse.stat().st),
+            (point::POINT_DX, self.horse.stat().dx),
+            (point::POINT_HT, self.horse.stat().ht),
+            (point::POINT_IQ, self.horse.stat().iq),
+        ] {
+            let own = self.instant[kind];
+            if stat > own {
+                self.instant[kind] = stat;
+            }
+        }
+    }
+
     fn battle_points(&mut self, records: &mut Vec<PointRecord>) {
         self.instant[point::POINT_ATT_GRADE] = 0;
         self.instant[point::POINT_DEF_GRADE] = 0;
@@ -1858,12 +1902,25 @@ impl Points {
         let ht = i64::from(self.instant[point::POINT_HT]);
         let dx = i64::from(self.instant[point::POINT_DX]);
         let iq = i64::from(self.instant[point::POINT_IQ]);
-        let stat_attack = match race_to_job(self.race) {
+        let mut stat_attack = match race_to_job(self.race) {
             1 => (4 * st + 2 * dx) / 3,
             3 => (4 * st + 2 * iq) / 3,
             _ => 2 * st,
         };
-        let attack = 2 * level + stat_attack + self.bonus(point::POINT_ATT_GRADE_BONUS);
+        if self.mount_vnum != 0 && stat_attack < 2 * st {
+            stat_attack = 2 * st;
+        }
+        let mut attack = 2 * level + stat_attack;
+        if self.mount_vnum != 0 {
+            let horse = i64::from(self.horse.level());
+            let div = if race_to_job(self.race) == 2 && self.mount_group == 1 {
+                60
+            } else {
+                30
+            };
+            attack += attack * horse / div;
+        }
+        attack += self.bonus(point::POINT_ATT_GRADE_BONUS);
         self.nested(point::POINT_ATT_GRADE, narrow(attack), records);
 
         let shown_defence = level + ht;
@@ -1887,6 +1944,25 @@ impl Points {
 
     fn bonus(&self, kind: usize) -> i64 {
         i64::from(self.instant[kind])
+    }
+
+    /// The pools clamped to their new maxima (`CheckMaximumPoints`,
+    /// `G/char.cpp:3863-3870`), after the worn bonuses landed.
+    fn clamp_pools(&mut self, records: &mut Vec<PointRecord>) {
+        if self.hp > self.max_hp() {
+            self.nested(
+                point::POINT_HP,
+                self.max_hp().saturating_sub(self.hp),
+                records,
+            );
+        }
+        if self.sp > self.max_sp {
+            self.nested(
+                point::POINT_SP,
+                self.max_sp.saturating_sub(self.sp),
+                records,
+            );
+        }
     }
 
     fn recompute(&mut self, equipment: &Equipment<'_>, records: &mut Vec<PointRecord>) {
@@ -1958,6 +2034,7 @@ impl Points {
         self.nested(point::POINT_ATTBONUS_METIN, passive.stone, records);
         self.nested(point::POINT_ATTBONUS_BOSS, passive.boss, records);
 
+        self.mount_floor(equipment);
         self.armour = equipment.armour();
         self.battle_points(records);
 
@@ -1980,20 +2057,7 @@ impl Points {
             self.apply(apply, value, records);
         }
 
-        if self.hp > self.max_hp() {
-            self.nested(
-                point::POINT_HP,
-                self.max_hp().saturating_sub(self.hp),
-                records,
-            );
-        }
-        if self.sp > self.max_sp {
-            self.nested(
-                point::POINT_SP,
-                self.max_sp.saturating_sub(self.sp),
-                records,
-            );
-        }
+        self.clamp_pools(records);
         // `@fixme118`: legacy puts back whatever the affects took (`char.cpp:3150-3156`). The
         // Rewrite has no affects, so this only ever meets the clamp above, which it cannot
         // undo because a change is bounded by the maximum.
@@ -2024,6 +2088,14 @@ pub fn apply_is_ported(apply: u8) -> bool {
 /// Narrow a 64-bit total to the `int` legacy keeps it in, saturating rather than wrapping.
 fn narrow(value: i64) -> i32 {
     i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
+}
+
+/// `GetWear(WEAR_COSTUME_MOUNT)`: whether a mount costume is worn, which exempts the
+/// rider from the horse stat floor (`G/char.cpp:3031`).
+fn wears_mount_costume(equipment: &Equipment<'_>) -> bool {
+    equipment
+        .wear(common::enums::EWearPositions::CostumeMount as u16)
+        .is_some()
 }
 
 #[cfg(test)]
@@ -2229,6 +2301,83 @@ mod tests {
         let mut points = warrior();
         assert_eq!(points.compute_battle_points(), warrior_battle_records());
         assert_eq!(grades(&points), [14, 4, 5, 8, 5]);
+    }
+
+    /// A mounted warrior takes the horse's stat floor, never lowering what is higher:
+    /// level 25's row is ST 60, DX 80, HT 40, IQ 20 (`horse_rider.cpp:15-62`).
+    #[test]
+    fn a_mount_raises_the_stats_to_the_horse_row() {
+        let mut points = Points::load(&fresh(0));
+        points.horse_mut().set_level(25, 0);
+        points.set_mount_vnum(20_107, 0);
+        let _records = points.compute_points();
+        assert_eq!(
+            (
+                points.get_point(point::POINT_ST),
+                points.get_point(point::POINT_DX),
+                points.get_point(point::POINT_HT),
+                points.get_point(point::POINT_IQ),
+            ),
+            (60, 80, 40, 20)
+        );
+        points.set_mount_vnum(0, 0);
+        let _records = points.compute_points();
+        assert_eq!(
+            (
+                points.get_point(point::POINT_ST),
+                points.get_point(point::POINT_DX),
+                points.get_point(point::POINT_HT),
+                points.get_point(point::POINT_IQ),
+            ),
+            (
+                i32::from(fresh(0).st),
+                i32::from(fresh(0).dx),
+                i32::from(fresh(0).ht),
+                i32::from(fresh(0).iq),
+            )
+        );
+    }
+
+    /// The mounted attack: the stat floor at `2 * ST`, then `iAtk * horse / 30` (`/ 60`
+    /// for a blade sura), before the grade bonus (`G/char.cpp:2741-2764`).
+    #[test]
+    fn a_mount_floors_and_bonuses_the_attack() {
+        let mut points = Points::load(&fresh(0));
+        points.horse_mut().set_level(25, 0);
+        points.set_mount_vnum(20_107, 0);
+        let _records = points.compute_points();
+        let floored = 2 + 2 * 60;
+        assert_eq!(points.get_point(18), floored + floored * 25 / 30);
+        let row = PointsRow {
+            race: 2,
+            ..fresh(2)
+        };
+        let mut sura = Points::load(&row);
+        sura.horse_mut().set_level(25, 0);
+        sura.set_mount_vnum(20_107, 1);
+        let _records = sura.compute_points();
+        let floored = 2 + 2 * 60;
+        assert_eq!(sura.get_point(18), floored + floored * 25 / 60);
+        // The floor binds a shaman, whose term reads intelligence: ST 3 and IQ 6 give
+        // (4 x 3 + 2 x 6) / 3 = 8, below 2 x 26, and a level-1 horse's floor (ST 26,
+        // IQ 9) leaves the term at (4 x 26 + 2 x 9) / 3 = 40, still below 2 x 26, so
+        // the mounted attack floors to 2 + 52 plus its bonus and the bare one is 2 + 8.
+        let mut priest = Points::load(&PointsRow {
+            race: 3,
+            st: 3,
+            ht: 4,
+            dx: 3,
+            iq: 6,
+            ..fresh(3)
+        });
+        priest.horse_mut().set_level(1, 0);
+        priest.set_mount_vnum(20_101, 0);
+        let _records = priest.compute_points();
+        let floored = 2 + 2 * 26;
+        assert_eq!(priest.get_point(18), floored + floored / 30);
+        priest.set_mount_vnum(0, 0);
+        let _records = priest.compute_points();
+        assert_eq!(priest.get_point(18), 2 + (4 * 3 + 2 * 6) / 3);
     }
 
     #[test]

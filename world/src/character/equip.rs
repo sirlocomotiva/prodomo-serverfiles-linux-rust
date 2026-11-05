@@ -115,7 +115,7 @@ impl core::fmt::Debug for Gear<'_> {
 /// What `UpdatePacket` sends of a character whose look changed (`G/char.cpp:1277-1340`).
 ///
 /// The other fields of `GC_CHARACTER_UPDATE` (the state flags, the affects, the guild, the
-/// alignment, the PK mode, the mount and the premium) come from systems this build does not
+/// alignment, the PK mode and the premium) come from systems this build does not
 /// have, and are sent as 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CharacterLook {
@@ -131,6 +131,8 @@ pub struct CharacterLook {
     pub conqueror_level: u32,
     /// `GetRefineElementType`.
     pub refine_element_type: u8,
+    /// `GetMountVnum` (`G/char.cpp:1354`): the mounted vnum, or 0.
+    pub mount_vnum: u32,
 }
 
 /// A system that wearing an item starts, which this build has not ported.
@@ -481,7 +483,7 @@ impl Trail {
 }
 
 /// What `UpdatePacket` sends for a character with `items`, `points` and `protos`: its parts,
-/// move and attack speeds, levels, and the refine element of its worn gear. It reads the
+/// move and attack speeds, levels, the refine element of its worn gear and its mount. It reads the
 /// character only, so the game state can send it without the steps' gear.
 pub fn look_of(items: &CharacterItems, points: &Points, protos: &ItemProtos) -> CharacterLook {
     let byte = |kind: usize| u8::try_from(points.limit_point(kind) & 0xff).unwrap_or(0);
@@ -492,6 +494,7 @@ pub fn look_of(items: &CharacterItems, points: &Points, protos: &ItemProtos) -> 
         level: u32::from(points.level()),
         conqueror_level: u32::from(points.conqueror_level()),
         refine_element_type: Equipment::of(items, protos).refine_element_type(),
+        mount_vnum: points.mount_vnum(),
     }
 }
 

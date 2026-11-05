@@ -332,6 +332,14 @@ pub trait Game {
     /// `ReviveHorse` (`horse.revive`, `pc.revive_horse`), run when the step ends.
     fn revive_horse(&mut self);
 
+    /// `horse.ride` (`G/questlua_horse.cpp:53-64`): `StartRiding`, run when the step
+    /// ends, unless it rides a mount or stands on the OX map or an arena.
+    fn ride_horse(&mut self);
+
+    /// `horse.unride` (`G/questlua_horse.cpp:66-71`): `StopRiding`, run when the step
+    /// ends.
+    fn unride_horse(&mut self);
+
     /// `GetEmpire()` of the character the script runs for (`G/questlua_pc.cpp:1304-1308`).
     fn empire(&self) -> u8;
 
@@ -3766,6 +3774,18 @@ fn horse_api(
             cx.game.unsummon_horse();
             None
         }
+        b"horse.ride" => {
+            // The OX map is 113 (`G/questlua_horse.cpp:59`); no map is an arena map
+            // (`sys.event.arena`).
+            if !cx.game.is_mount() && cx.game.map_index() != 113 {
+                cx.game.ride_horse();
+            }
+            None
+        }
+        b"horse.unride" => {
+            cx.game.unride_horse();
+            None
+        }
         b"horse.revive" => {
             if horse.level > 0 && horse.health <= 0 {
                 cx.game.revive_horse();
@@ -4674,6 +4694,14 @@ mod tests {
 
         fn revive_horse(&mut self) {
             self.horse_calls.push(("revive", false, 0));
+        }
+
+        fn ride_horse(&mut self) {
+            self.horse_calls.push(("ride", false, 0));
+        }
+
+        fn unride_horse(&mut self) {
+            self.horse_calls.push(("unride", false, 0));
         }
 
         fn empire(&self) -> u8 {
@@ -6523,8 +6551,9 @@ mod tests {
     }
 
     /// The summon names: `horse.summon` reads a boolean and a number, `horse.revive` revives
-    /// only a dead horse with a level, `pc.revive_horse` always asks, and `is_summon` and
-    /// `is_mine` read the summoned horse against the quest's NPC.
+    /// only a dead horse with a level, `pc.revive_horse` always asks, `horse.ride` rides
+    /// except on the OX map, `horse.unride` always asks, and `is_summon` and `is_mine`
+    /// read the summoned horse against the quest's NPC.
     #[test]
     fn the_horse_summon_names_read_their_arguments_and_the_npc() {
         let manager = manager().lock().unwrap();
@@ -6559,6 +6588,10 @@ mod tests {
         probe.game.horse.health = 0;
         probe.call("horse.revive", &[]).unwrap();
         probe.call("pc.revive_horse", &[]).unwrap();
+        probe.call("horse.ride", &[]).unwrap();
+        probe.call("horse.unride", &[]).unwrap();
+        probe.game.map_index = 113;
+        probe.call("horse.ride", &[]).unwrap();
         assert_eq!(
             probe.game.horse_calls,
             [
@@ -6567,6 +6600,8 @@ mod tests {
                 ("unsummon", false, 0),
                 ("revive", false, 0),
                 ("revive", false, 0),
+                ("ride", false, 0),
+                ("unride", false, 0),
             ]
         );
         assert_eq!(
