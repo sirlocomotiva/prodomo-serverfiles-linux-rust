@@ -684,7 +684,7 @@ impl GameState {
     /// (`G/battle.cpp:99-152`): the victim is alive, neither cell is `ATTR_BANPK`, the attacker
     /// is neither stunned nor dead (`:122`), and the victim is no fake hydra. No castle, arena
     /// or ship-defence map is hosted, and `CPVPManager::CanAttack` lets a player hit every
-    /// non-player that reaches here.
+    /// non-player that reaches here unless it rides a grade-1 horse (`G/pvp.cpp:394-398`).
     pub(super) fn is_attackable(
         &self,
         attacker: Vid,
@@ -696,6 +696,7 @@ impl GameState {
             && !self.is_banpk(map, npc.x, npc.y)
             && !self.is_down(attacker.raw())
             && !FAKE_HYDRAS.contains(&npc.vnum)
+            && !self.rides_a_grade_one_horse(attacker.raw())
     }
 
     /// `battle_hit` of the player under `vid` on the non-player under `target`.
@@ -766,6 +767,10 @@ impl GameState {
         if !self.guild_war_allows(vid, victim) {
             // `CanAttack`'s duel tail (`G/pvp.cpp:508-528`): the live fight of the two
             // PIDs, with its fresh fight touch.
+            // `CanAttack`'s horse gate (`G/pvp.cpp:394-398`): a grade-1 rider hits no one.
+            if self.rides_a_grade_one_horse(vid.raw()) {
+                return AttackAnswer::default();
+            }
             let fight = self.pvp_is_fight(self.pvp_pid_of(vid), self.pvp_pid_of(victim));
             let mut attacker = self.pk_actor(vid, empire, false);
             attacker.consensual_fight = fight;
@@ -2092,6 +2097,56 @@ mod tests {
         hit(&mut world, 101, 102);
         let after = world.pc_points_mut(102).unwrap().hp();
         assert_eq!(after, before, "the protected attacker lands nothing");
+    }
+
+    /// Puts the player under `vid` on its horse at `level`.
+    fn ride_at(world: &mut GameState, vid: u32, level: i32) {
+        let horse = world.pc_points_mut(vid).unwrap().horse_mut();
+        horse.set_level(level, 0);
+        assert!(
+            horse.riding() || horse.start_riding(),
+            "level {level} rides"
+        );
+    }
+
+    /// `CanAttack`'s horse gate (`G/pvp.cpp:394-398`): a walker with a grade-1 horse hits; on
+    /// that horse it lands nothing on a monster and draws nothing; on a grade-2 horse it hits.
+    #[test]
+    fn a_grade_one_rider_hits_no_monster() {
+        let (_clock, mut world, _alpha) = a_fight(a_monster(10_000), NEAR);
+        let hp = |world: &GameState| world.npc_by_vid(ME).unwrap().hp;
+        world.pc_points_mut(1).unwrap().horse_mut().set_level(10, 0);
+        hit(&mut world, 1, ME);
+        let walked = hp(&world);
+        assert!(walked < 10_000, "a walker with a grade-1 horse hits");
+        ride_at(&mut world, 1, 10);
+        let dice = world.dice.clone();
+        hit(&mut world, 1, ME);
+        assert_eq!(hp(&world), walked);
+        assert_eq!(world.dice, dice, "refused before any draw");
+        ride_at(&mut world, 1, 11);
+        hit(&mut world, 1, ME);
+        assert!(hp(&world) < walked, "grade 2 hits");
+    }
+
+    /// The same gate between players: the peaceful pair of
+    /// `a_player_hits_a_player_of_another_empire_and_the_victim_loses_hit_points`, with the
+    /// attacker on a grade-1 horse, lands nothing.
+    #[test]
+    fn a_grade_one_rider_hits_no_player() {
+        let (_clock, mut world, _inbox) = a_fight(a_monster(100), (0, 0));
+        let _attacker = a_player(&mut world, 101, (0, 0));
+        let _victim = a_player(&mut world, 102, (1, 0));
+        for (vid, empire) in [(101, 1), (102, 2)] {
+            let card = &mut world.bodies.get_mut(&Vid::new(vid)).unwrap().card;
+            card.empire = empire;
+            card.pk_mode = PK_MODE_PEACE;
+            world.start_pc_recovery(Vid::new(vid));
+        }
+        ride_at(&mut world, 101, 1);
+        let before = world.pc_points_mut(102).unwrap().hp();
+        hit(&mut world, 101, 102);
+        assert_eq!(world.pc_points_mut(102).unwrap().hp(), before);
     }
 
     /// `npc` on open cells, entered and pulsed as [`a_fight`], with the monster's experience

@@ -218,6 +218,15 @@ impl GameState {
             .is_some_and(|points| points.horse().riding())
     }
 
+    /// `CanAttack`'s horse gate (`G/pvp.cpp:394-398`): a player riding its horse at grade 1
+    /// attacks nothing, monsters included.
+    pub(super) fn rides_a_grade_one_horse(&self, vid: u32) -> bool {
+        self.points_of(vid).is_some_and(|points| {
+            let horse = points.horse();
+            horse.riding() && horse.level() > 0 && horse.grade() == 1
+        })
+    }
+
     /// `CanUseHorseSkill` (`G/char_horse.cpp:369-393`): riding on a grade-3 horse. The mount
     /// arms after the grade's `return` never run.
     pub(super) fn can_use_horse_skill(&self, vid: u32) -> bool {

@@ -45743,3 +45743,46 @@ set: 4749 passed, 0 failed in 41 targets. `cargo test --workspace --doc`: 1 pass
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 398. The grade-1 rider's attack
+
+`CPVPManager::CanAttack`'s horse gate (`G/pvp.cpp:394-398`) is ported. A player riding its
+horse with a level above 0 and grade 1 attacks nothing. The gate stands ahead of the NPC
+`return true`, so monsters are covered as well as players.
+
+- `GameState::rides_a_grade_one_horse` (`prodomo/src/game_state/horse_ride.rs`) reads the
+  points.
+- **PvE:** `fight.rs` `is_attackable` refuses such a rider. That covers its four callers: the
+  melee swing, the sync-position owner, and the two skill victims, which in legacy all pass
+  through `battle_is_attackable`.
+- **PvP:** `attack_player` refuses such a rider inside the non-war branch. In legacy the guild
+  war arm returns `true` before `CanAttack` (`G/battle.cpp:125-135`), so warring guilds still
+  fight from a grade-1 horse.
+
+The other riding reads named in 397 stay where they were:
+- The attack speed's riding bonus (`G/battle.cpp:828`) and `ani_combo_speed` (`G/ani.cpp:360`)
+  belong to the speed and combo checks, which are not ported.
+- The stamina drain (`G/char_state.cpp:823`) belongs to the stamina consumption, which is
+  not ported (`sys.world.move`, V3).
+
+Unit tests in `fight.rs`:
+- `a_grade_one_rider_hits_no_monster`:
+  - a walker with a level-10 horse hits;
+  - on that grade-1 horse it lands nothing and draws no dice;
+  - at level 11 (grade 2) it hits again.
+- `a_grade_one_rider_hits_no_player`: the peaceful pair of the existing PvP test, with the
+  attacker on a level-1 horse, lands nothing.
+
+Four mutants were applied to the pristine files and restored by checksum. All four are
+semantic kills: the PvE gate dropped, the PvP gate dropped, grade `<= 2`, and the riding term
+dropped. The last one first survived and was killed once the walker's hit was added. The
+`level() > 0` term is an equivalent mutant (`grade()` is 0 at level 0) and is kept as legacy
+spells it.
+
+Gates (2026-11-05): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4751 passed, 0 failed in 41 targets. `cargo test --workspace --doc`: 1 passed.
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

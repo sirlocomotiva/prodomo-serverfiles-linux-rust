@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-05, after ledger section 397 (the riding gates).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 398
+Last reviewed: 2026-11-05, after ledger section 398 (the grade-1 rider's attack).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 399
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -394,7 +394,8 @@ wait). Since 397 the riding gates read the ride: a rider neither emotes nor is k
 past the walker's limit, draws for the horse book, casts and computes only what its horse
 grade allows, and puts on no body armour, costume body or ride item; a morph wears nothing
 but arrows; and `pc.is_riding` is bridged, so its row is `ported`. A target-less emotion's
-`[LS;436]` now ends the line, as legacy's does. The
+`[LS;436]` now ends the line, as legacy's does. Since 398 a rider on a grade-1 horse hits
+no monster and, outside a guild war, no player (`CanAttack`'s horse gate). The
 next slice is the owner's call: the forest's leader branch waits on the `d.*` manager names,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
