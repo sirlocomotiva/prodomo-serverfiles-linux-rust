@@ -718,6 +718,9 @@ impl GameState {
         }
         let stamina_full = points.stamina() == points.max_stamina();
         let sp = points.sp();
+        // `CHorseNameManager::Validate` (`G/horsename_manager.cpp:58-75`) runs before the
+        // countdown, like `ProcessAffect` runs it on its hair arm's heels.
+        self.validate_horse_name(vid);
         let Some(event) = self.affect_events.get_mut(&vid) else {
             return;
         };

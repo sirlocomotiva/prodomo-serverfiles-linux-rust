@@ -83,7 +83,7 @@ pub(super) struct HorseNpc {
 
 /// What a quest step asked of its character's horse, which the world runs when the step
 /// ends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HorseOp {
     /// `horse.summon(from_far, vnum)`.
     Summon { from_far: bool, vnum: u32 },
@@ -95,6 +95,8 @@ pub(crate) enum HorseOp {
     Ride,
     /// `horse.unride`: `StopRiding`.
     Unride,
+    /// `horse.set_name`: the manager rewrite with the re-summon around it.
+    SetName(Vec<u8>),
 }
 
 impl GameState {
@@ -134,12 +136,23 @@ impl GameState {
             return;
         };
         let horse_vid = stood.vid;
-        let mut name = self
+        // The named horse carries the manager's name (`G/char_horse.cpp:206-216`); any
+        // other carries its rider's name with `'s `.
+        let named = self
             .characters
             .find_by_vid(vid)
-            .map_or_else(|_| Vec::new(), |rider| rider.name().as_bytes().to_vec());
-        name.extend_from_slice(b"'s ");
-        stood.name = name;
+            .ok()
+            .and_then(|rider| self.horse_names.get(&rider.player_id()))
+            .filter(|name| !name.is_empty())
+            .cloned();
+        stood.name = named.unwrap_or_else(|| {
+            let mut name = self
+                .characters
+                .find_by_vid(vid)
+                .map_or_else(|_| Vec::new(), |rider| rider.name().as_bytes().to_vec());
+            name.extend_from_slice(b"'s ");
+            name
+        });
         stood.dead = dead;
         let pulse = self.last_pulse;
         self.stand_runtime(place, vec![stood], pulse);
@@ -376,6 +389,7 @@ impl GameState {
                 HorseOp::Revive => self.revive_horse(vid),
                 HorseOp::Ride => self.start_riding(vid),
                 HorseOp::Unride => self.stop_riding(vid),
+                HorseOp::SetName(name) => self.name_horse(vid, &name),
             }
         }
     }
@@ -438,6 +452,96 @@ impl GameState {
         moved.changes.extend(spent.changes);
         moved.points = points;
         moved.quickslots = Some(quickslots);
+    }
+
+    /// `CHorseNameManager::Validate` (`G/horsename_manager.cpp:58-75`): with the
+    /// `AFFECT_HORSE_NAME` row and a flag at or past now, the row lives one tick more;
+    /// with the flag gone stale, the horse is unsummoned, the row removed, the name
+    /// emptied, and the horse summoned back, so the nameless summon stands where the
+    /// named one stood. No compute runs: legacy's resummon does not recompute either.
+    pub(super) fn validate_horse_name(&mut self, vid: Vid) {
+        let Some(event) = self.affect_events.get_mut(&vid) else {
+            return;
+        };
+        let Some(slot) = event
+            .affects
+            .iter_mut()
+            .find(|affect| affect.kind == crate::loading_phase::AFFECT_HORSE_NAME)
+        else {
+            return;
+        };
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return;
+        };
+        let pid = character.player_id();
+        let till = self
+            .quests
+            .as_ref()
+            .and_then(|quests| quests.manager().quest_flag(pid, b"horse_name.valid_till"))
+            .unwrap_or(0);
+        if till >= i32::from_ne_bytes(Self::global_time().to_ne_bytes()) {
+            slot.remaining = slot.remaining.saturating_add(1);
+            return;
+        }
+        let Some(event) = self.affect_events.get_mut(&vid) else {
+            return;
+        };
+        let removed = super::affect::take_affects_of_kind(
+            &mut event.affects,
+            crate::loading_phase::AFFECT_HORSE_NAME,
+        );
+        for affect in &removed {
+            self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
+            let frame = super::affect::affect_remove_frame(affect);
+            let _gone = self.write_to_client(vid, frame);
+        }
+        let _emptied = self.horse_names.insert(pid, Vec::new());
+        self.horse_unsummon(vid, true);
+        self.horse_summon(vid, true, 0);
+    }
+    /// The `horse.set_name` write (`G/questlua_horse.cpp:250-266`): the flag, the month
+    /// affect, the manager's rewrite, and the summon back after the unsummon. The sync
+    /// and compute run while the rewrite holds, before the unsummon: the summon back
+    /// never computes, so only this compute prices the name's 20. The caller judged the
+    /// name; `name` holds no zero byte and fits the field.
+    pub(super) fn name_horse(&mut self, vid: Vid, name: &[u8]) {
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return;
+        };
+        let pid = character.player_id();
+        let month = if self.test_server {
+            60 * 5
+        } else {
+            60 * 60 * 24 * 30
+        };
+        let till = Self::global_time().saturating_add(month);
+        if let Some(quests) = self.quests.as_mut() {
+            quests.manager_mut().set_quest_flag(
+                pid,
+                b"horse_name.valid_till",
+                i32::from_ne_bytes(till.to_ne_bytes()),
+            );
+        }
+        self.add_pc_affect(
+            vid,
+            super::affect::Affect {
+                kind: crate::loading_phase::AFFECT_HORSE_NAME,
+                apply_on: 0,
+                value: 0,
+                flag: 0,
+                remaining: i32::try_from(month * PASSES_PER_SEC).unwrap_or(i32::MAX),
+                sp_cost: 0,
+            },
+            true,
+        );
+        let _named = self.horse_names.insert(pid, name.to_vec());
+        self.sync_horse_named(vid);
+        if let Some(points) = self.pc_points_mut(vid.raw()) {
+            let computed = points.compute_points();
+            self.send_point_records(vid, &computed);
+        }
+        self.horse_unsummon(vid, true);
+        self.horse_summon(vid, true, 0);
     }
 }
 

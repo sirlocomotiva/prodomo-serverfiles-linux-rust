@@ -33497,8 +33497,8 @@ fn position_of(records: &[Vec<u8>], want: &[u8]) -> usize {
 }
 
 /// The one grade-three horse (race 20107) `records` add: its VID and point, after checking
-/// that its additional record names it after Alpha.
-fn added_horse(records: &[Vec<u8>]) -> (u32, (i32, i32)) {
+/// that its additional record names it `want`.
+fn added_horse_named(records: &[Vec<u8>], want: &[u8]) -> (u32, (i32, i32)) {
     let adds: Vec<&Vec<u8>> = records
         .iter()
         .filter(|record| record[0] == GC_CHARACTER_ADD && record[22..24] == 20_107u16.to_le_bytes())
@@ -33510,7 +33510,7 @@ fn added_horse(records: &[Vec<u8>]) -> (u32, (i32, i32)) {
         .iter()
         .find(|record| record[0] == GC_CHAR_ADDITIONAL_INFO && record[1..5] == add[1..5])
         .expect("the horse's additional record");
-    assert_eq!(&info[5..14], b"Alpha's \0", "named after its rider");
+    assert_eq!(&info[5..5 + want.len()], want, "the horse's name");
     let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
     (vid, inserted_at(add))
 }
@@ -33543,7 +33543,7 @@ fn read_until_headed(keyed: &mut Keyed, header: u8, vid: u32) -> Vec<Vec<u8>> {
 fn summons_and_sends_off_from_far(alice: &mut Keyed, digger: (i32, i32)) {
     alice.send_record(&client_chat(CHAT_TALKING, b"/horse_summon"));
     let read = read_until_all(alice, &[a_command_line(b"horse_state 25 3 3")]);
-    let (far, at) = added_horse(&read);
+    let (far, at) = added_horse_named(&read, b"Alpha's \0");
     for offset in [at.0 - digger.0, at.1 - digger.1] {
         assert!(
             (2000..=2500).contains(&offset.abs()),
@@ -33587,7 +33587,7 @@ fn summons_and_sends_off_from_far(alice: &mut Keyed, digger: (i32, i32)) {
 fn a_summoned_horse_dies(alice: &mut Keyed) {
     alice.send_record(&client_chat(CHAT_TALKING, b"/horse_summon"));
     let read = read_until_all(alice, &[a_command_line(b"horse_state 25 3 3")]);
-    let (summoned, _) = added_horse(&read);
+    let (summoned, _) = added_horse_named(&read, b"Alpha's \0");
     alice.send_record(&client_chat(CHAT_TALKING, b"/horse_set_stat 0 5"));
     let read = read_until_all(
         alice,
@@ -33609,7 +33609,7 @@ fn a_summoned_horse_dies(alice: &mut Keyed) {
 fn a_dead_horse_goes_after_a_minute(alice: &mut Keyed) {
     alice.send_record(&client_chat(CHAT_TALKING, b"/horse_summon"));
     let read = read_until_all(alice, &[a_command_line(b"horse_state 25 0 0")]);
-    let (dead, _) = added_horse(&read);
+    let (dead, _) = added_horse_named(&read, b"Alpha's \0");
     assert!(read.contains(&header_and_vid_record(GC_DEAD, dead)));
     let summoned = std::time::Instant::now();
     alice.quiet("a dead horse lies still");
@@ -33642,7 +33642,7 @@ fn a_quest_summons_the_dead_horse_and_gifts_revive_it(
     alice.send_record(&client_click(vein));
     assert_eq!(alice.read_game(), an_info_line(b"q 1 false false"));
     let read = read_until_all(alice, &[a_command_line(b"horse_state 25 0 0")]);
-    let (dead, at) = added_horse(&read);
+    let (dead, at) = added_horse_named(&read, b"Alpha's \0");
     assert!(read.contains(&header_and_vid_record(GC_DEAD, dead)));
     for offset in [at.0 - digger.0, at.1 - digger.1] {
         assert!(offset.abs() <= 100, "a dead horse stands near: {at:?}");
@@ -33660,7 +33660,7 @@ fn a_quest_summons_the_dead_horse_and_gifts_revive_it(
             an_info_line(b"[LS;452]"),
         ],
     );
-    let (revived, _) = added_horse(&read);
+    let (revived, _) = added_horse_named(&read, b"Alpha's \0");
     alice.send_record(&client_give(revived, 1));
     let mut effect = Vec::new();
     protocol::gc_vid::GcSpecialEffect {
@@ -33741,7 +33741,7 @@ fn quest_unsummons_and_revives(alice: &mut Keyed, vein: u32, revived: u32) {
         alice.send_record(&client_click(vein));
         assert_eq!(alice.read_game(), an_info_line(killed), "click {count}");
         let read = read_until_all(alice, &[a_command_line(b"horse_state 25 3 3")]);
-        let (standing, _) = added_horse(&read);
+        let (standing, _) = added_horse_named(&read, b"Alpha's \0");
         if count == 3 {
             alice.send_record(&client_chat(CHAT_TALKING, b"/horse_set_stat 0 5"));
             read_until_all(
@@ -33849,7 +33849,7 @@ fn user_ride_stops(alice: &mut Keyed, vid: u32) {
         at += found + 1;
     }
     assert_eq!(shown_mount(&read, vid), 0, "the stop's re-show unmounts");
-    let (_back, _) = added_horse(&read);
+    let (_back, _) = added_horse_named(&read, b"Alpha's \0");
 }
 
 /// The quest's ride and unride: each click says whether the clicker rode when the step
@@ -33945,4 +33945,181 @@ fn a_rider_mounts_by_line_and_quest_and_the_mount_shows_and_pays() {
         &database,
         "SELECT NOT horse_riding FROM player WHERE name = 'Alpha'",
     );
+}
+
+const HORSE_NAME_PROBE: &[u8] = b"quest horse_name_probe begin\n\
+    state start begin\n\
+    when 20047.click begin\n\
+    local n = pc.getqf(\"n\") + 1\n\
+    pc.setqf(\"n\", n)\n\
+    if n == 1 then\n\
+    local a = horse.set_name(\"Shadowfax\")\n\
+    syschat(\"n \" .. a .. \" \" .. horse.get_name())\n\
+    elseif n == 2 then\n\
+    local a = horse.set_name(\" x\")\n\
+    syschat(\"n \" .. a .. \" \" .. horse.get_name())\n\
+    local b = horse.set_name(\"q\")\n\
+    syschat(\"m \" .. b .. \" \" .. horse.get_name())\n\
+    elseif n == 3 then\n\
+    local a = horse.set_name(7)\n\
+    if a == nil then a = \"nil\" end\n\
+    syschat(\"n \" .. a .. \" \" .. horse.get_name())\n\
+    elseif n == 4 then\n\
+    pc.setf(\"horse_name\", \"valid_till\", 0)\n\
+    syschat(\"stale\")\n\
+    end\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// The `AFFECT_HORSE_NAME` add among `read`: its duration (the type, point, value and flag
+/// lead).
+fn horse_name_add(read: &[Vec<u8>]) -> i32 {
+    let add = read
+        .iter()
+        .find(|record| {
+            record[0] == GC_AFFECT_ADD
+                && u32::from_le_bytes(record[1..5].try_into().expect("four bytes")) == 531
+        })
+        .expect("the name month's add");
+    assert_eq!(
+        &add[5..14],
+        &[0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "point, value, flag"
+    );
+    i32::from_le_bytes(add[14..18].try_into().expect("four bytes"))
+}
+
+/// The defence grade of `vid` among `read`: its latest `GC_POINT_CHANGE` of slot 16.
+fn defence_of(read: &[Vec<u8>], vid: u32) -> i64 {
+    read.iter()
+        .filter_map(|record| point_value(record, vid, 16))
+        .last()
+        .expect("the compute's defence grade")
+}
+
+/// `lua.horse.set_name`, `lua.horse.get_name`: the naming answers 2 with the name, the
+/// month's add rides the summon back, the summoned horse carries the name, and the mount
+/// pays the floor and the 20; a bad name answers 1, a number nothing; the store keeps
+/// the name.
+#[test]
+fn a_horse_is_named_bad_names_refused_and_the_mount_pays() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, _) = vein_stage(&database, HORSE_NAME_PROBE);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let vein = shown_vein(&entered);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_level Alpha 25"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"horse level set (Alpha: 25)")
+    );
+    // The ride first, so the naming's compute prices the name while mounted: the 54
+    // floor without the 20.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_ride"));
+    let read = read_until_headed(&mut alice, GC_CHARACTER_UPDATE, vid);
+    assert_eq!(defence_of(&read, vid), 154 + 40 * 4 / 5 + 54);
+    // The naming: 2 with the name, the month's add, and the naming compute's own
+    // defence line. Nothing is summoned back, since a ridden horse admits no summon:
+    // the wire after the answer carries the add and the compute's 12 changes (the
+    // defence deeper in), and then quiet.
+    alice.send_record(&client_click(vein));
+    let mut read = read_until_all(&mut alice, &[an_info_line(b"n 2 Shadowfax")]);
+    let mut taken = 0;
+    while taken < 13 {
+        let record = alice.read_game();
+        taken += usize::from(record[0] == GC_AFFECT_ADD || record[0] == GC_POINT_CHANGE);
+        read.push(record);
+    }
+    assert_eq!(
+        read[read.len() - 13][0],
+        GC_AFFECT_ADD,
+        "the month's add leads"
+    );
+    // The parity server is a test server, so the month is five minutes, laid in Pulses
+    // where the affect counts seconds (`G/questlua_horse.cpp:252-255`).
+    assert_eq!(horse_name_add(&read), 60 * 5 * 25, "the month's duration");
+    assert_eq!(
+        defence_of(&read, vid),
+        154 + 40 * 4 / 5 + 54 + 20,
+        "the naming's compute prices the name"
+    );
+    // The horse stands summoned back under the name once the ride ends: the stop's
+    // line leads, the summon far stands the horse under the manager's name, and the
+    // four zero changes close the stop.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/user_horse_ride"));
+    assert_eq!(
+        alice.read_game(),
+        a_command_line(b"horse_state 25 3 3"),
+        "the stop's line leads"
+    );
+    let mut read = read_until_headed(&mut alice, GC_CHARACTER_UPDATE, vid);
+    loop {
+        let record = alice.read_game();
+        read.push(record);
+        let tail: Vec<u8> = read
+            .iter()
+            .rev()
+            .filter(|record| record[0] == GC_POINT_CHANGE && record[4..8] == vid.to_le_bytes())
+            .filter(|record| record[9..17] == [0; 8])
+            .take(4)
+            .map(|record| record[8])
+            .collect();
+        if tail == [15, 23, 22, 20] {
+            break;
+        }
+    }
+    let (_horse, _) = added_horse_named(&read, b"Shadowfax\0");
+    // A bad name answers 1 with the old name kept, and a one-letter one too; a number
+    // pushes nothing, so the script says nil with the name still there.
+    alice.send_record(&client_click(vein));
+    assert_eq!(alice.read_game(), an_info_line(b"n 1 Shadowfax"));
+    assert_eq!(alice.read_game(), an_info_line(b"m 1 Shadowfax"));
+    alice.send_record(&client_click(vein));
+    assert_eq!(alice.read_game(), an_info_line(b"n nil Shadowfax"));
+    a_stale_horse_name_goes_at_the_tick(&mut alice, vein);
+    drop(alice);
+    wait_for(
+        &database,
+        "SELECT horse_name = '\\x' FROM player WHERE name = 'Alpha'",
+    );
+}
+
+/// `Validate` with a stale flag (`G/horsename_manager.cpp:58-75`): once the quest sets
+/// `horse_name.valid_till` to 0, the next affect tick removes the month's affect, empties the
+/// name, and summons the horse back under its rider's name.
+fn a_stale_horse_name_goes_at_the_tick(alice: &mut Keyed, vein: u32) {
+    alice.send_record(&client_click(vein));
+    assert_eq!(alice.read_game(), an_info_line(b"stale"));
+    let removed = loop {
+        let record = alice.read_game();
+        if record[0] == GC_AFFECT_REMOVE {
+            break record;
+        }
+    };
+    assert_eq!(removed.len(), AFFECT_REMOVE_LEN);
+    assert_eq!(
+        &removed[1..5],
+        &531u32.to_le_bytes(),
+        "the month's affect goes"
+    );
+    let mut read = Vec::new();
+    let horse = loop {
+        let record = alice.read_game();
+        let horse = (record[0] == GC_CHARACTER_ADD && record[22..24] == 20_107u16.to_le_bytes())
+            .then(|| u32::from_le_bytes(record[1..5].try_into().expect("four bytes")));
+        read.push(record);
+        if let Some(horse) = horse {
+            break horse;
+        }
+    };
+    read.extend(read_until_headed(alice, GC_CHAR_ADDITIONAL_INFO, horse));
+    let _ = added_horse_named(&read, b"Alpha's \0");
 }

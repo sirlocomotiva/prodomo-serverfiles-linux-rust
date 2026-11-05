@@ -570,6 +570,11 @@ pub struct GameState {
     /// Each summoned horse standing, by its VID (`m_chRider`, its `m_pkDeadEvent` and its
     /// wander clock).
     horse_npcs: HashMap<u32, horse_summon::HorseNpc>,
+    /// `CHorseNameManager::m_mapHorseNames` (`G/horsename_manager.h:10`): each rider's
+    /// horse name by its player id, empty for a rider the store read nameless. The
+    /// summon and the compute read it; the enter-game load installs it, `horse.set_name`
+    /// rewrites it, and the save writes it back.
+    horse_names: HashMap<u32, Vec<u8>>,
     /// The dragon soul table, which `/ds_change_attr` redraws a stone's attributes from.
     dragon_soul_table: Arc<gamedata::dragon_soul_table::DragonSoulTable>,
     /// The cached second Gaussian of the next `gauss_random` call, if one waits.
@@ -785,6 +790,7 @@ impl GameState {
             mining_events: HashMap::new(),
             horse_timers: HashMap::new(),
             horse_npcs: HashMap::new(),
+            horse_names: HashMap::new(),
             dragon_soul_table: Arc::default(),
             gauss: world::character::Gauss::new(),
             shop_price_3x_disabled: false,
@@ -2408,13 +2414,22 @@ impl GameState {
         }
         let place = self.kept_place(vid);
         let affects = self.saved_affects_of(vid);
-        let kept = self.characters.find_by_vid(vid).ok().map(|character| Kept {
-            points: character.points().cloned(),
-            quickslots: character.quickslots().clone(),
-            place,
-            alignment: self.real_alignment_of(vid.raw()),
-            quest_flags: self.quest_flags_of(character.player_id()),
-            affects,
+        let kept = self.characters.find_by_vid(vid).ok().map(|character| {
+            let player_id = character.player_id();
+            Kept {
+                points: character.points().cloned(),
+                quickslots: character.quickslots().clone(),
+                place,
+                alignment: self.real_alignment_of(vid.raw()),
+                quest_flags: self.quest_flags_of(player_id),
+                affects,
+                horse_name: character.points().map(|_| {
+                    self.horse_names
+                        .get(&player_id)
+                        .cloned()
+                        .unwrap_or_default()
+                }),
+            }
         });
         if reply.send(kept).is_err() {
             debug!(?vid, "nobody was left to hear a character's points");
@@ -2822,6 +2837,9 @@ impl GameState {
                 .manager_mut()
                 .load_flags(player_id, loaded.quest_flags);
         }
+        // `HEADER_GD_REQ_HORSE_NAME`'s answer (`G/input_login.cpp:891-892`): the stored
+        // horse name is what the manager holds for the rider from the admission on.
+        let _installed = self.horse_names.insert(player_id, loaded.horse_name);
         if !loaded.skills.is_empty() {
             let state = self.pc_skills.entry(vid.raw()).or_default();
             for slot in &loaded.skills {
@@ -3074,6 +3092,12 @@ impl GameState {
             alignment,
             quest_flags,
             affects,
+            horse_name: character.points().map(|_| {
+                self.horse_names
+                    .get(&character.player_id())
+                    .cloned()
+                    .unwrap_or_default()
+            }),
         };
         self.characters.destroy(vid).ok()?;
         Some(kept)
@@ -7204,6 +7228,7 @@ mod tests {
                 messenger_team: Vec::new(),
                 messenger_levels: std::collections::BTreeMap::new(),
                 affects: Vec::new(),
+                horse_name: Vec::new(),
             }),
             outbox,
             reply,
@@ -7254,6 +7279,7 @@ mod tests {
                 messenger_team: Vec::new(),
                 messenger_levels: std::collections::BTreeMap::new(),
                 affects: Vec::new(),
+                horse_name: Vec::new(),
             }),
             outbox,
             reply,

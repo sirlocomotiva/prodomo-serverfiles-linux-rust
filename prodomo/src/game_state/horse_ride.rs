@@ -250,6 +250,7 @@ impl GameState {
 
     /// `ComputePoints` with its records, then `UpdatePacket` to the neighbourhood.
     fn recompute_and_update(&mut self, vid: Vid) {
+        self.sync_horse_named(vid);
         let Some(points) = self.pc_points_mut(vid.raw()) else {
             return;
         };

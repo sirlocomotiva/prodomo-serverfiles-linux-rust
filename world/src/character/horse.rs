@@ -169,12 +169,9 @@ pub enum HorseLine {
     Hide,
 }
 
-/// A character's horse (`CHorseRider`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Horse {
-    info: HorseInfo,
-    /// `m_chHorse`: the VID of the summoned horse, when one stands. Not stored.
-    summoned: Option<u32>,
+/// One-shot reports of a horse, which the world takes once.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct HorseReports {
     /// Whether the horse died since the world last asked ([`Horse::take_died`]):
     /// `CHARACTER::HorseDie` unsummons it.
     died: bool,
@@ -183,9 +180,24 @@ pub struct Horse {
     /// `CHARACTER::StopRiding`, since those call the virtual stop (`G/horse_rider.h:74`,
     /// `G/char.h:1664`).
     stopped: bool,
-    timer: HorseTimer,
     /// Whether [`Horse::timer`] was created since the world last scheduled it.
     new_timer: bool,
+}
+
+/// A character's horse (`CHorseRider`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Horse {
+    info: HorseInfo,
+    /// `m_chHorse`: the VID of the summoned horse, when one stands. Not stored.
+    summoned: Option<u32>,
+    /// Whether `CHorseNameManager` holds a non-empty name for the rider
+    /// (`G/char.cpp:2828-2832`): the manager lives in the world, which sets this before a
+    /// compute. Not stored.
+    named: bool,
+    /// One-shot reports the world takes once ([`Horse::take_died`], [`Horse::take_stopped`],
+    /// [`Horse::take_new_timer`]): the death, the implicit stop, and the fresh timer.
+    reported: HorseReports,
+    timer: HorseTimer,
     /// `m_bSendHorseLevel`, `m_bSendHorseHealthGrade`, `m_bSendHorseStaminaGrade`
     /// (`G/char.cpp:364-366`): what the last `horse_state` line said.
     sent: HorseInfoLine,
@@ -232,6 +244,17 @@ impl Horse {
         self.info.stamina
     }
 
+    /// Whether the rider holds a non-empty horse name ([`Horse::set_named`]).
+    #[must_use]
+    pub const fn named(&self) -> bool {
+        self.named
+    }
+
+    /// The manager's answer for the rider: `true` when it holds a non-empty name.
+    pub const fn set_named(&mut self, named: bool) {
+        self.named = named;
+    }
+
     /// Whether the horse stands summoned.
     #[must_use]
     pub const fn summoned(&self) -> bool {
@@ -263,12 +286,12 @@ impl Horse {
 
     /// Whether the horse died since the last call.
     pub fn take_died(&mut self) -> bool {
-        std::mem::take(&mut self.died)
+        std::mem::take(&mut self.reported.died)
     }
 
     /// Whether the ride ended by an update since the last call.
     pub fn take_stopped(&mut self) -> bool {
-        std::mem::take(&mut self.stopped)
+        std::mem::take(&mut self.reported.stopped)
     }
 
     /// The level's row of `c_aHorseStat`. The store keeps the level within 0 to 30; a wider
@@ -288,6 +311,12 @@ impl Horse {
     #[must_use]
     pub fn max_stamina(&self) -> i16 {
         self.stat().max_stamina
+    }
+
+    /// `GetHorseArmor` (`G/horse_rider.h:48`): the level's row `iArmor`.
+    #[must_use]
+    pub fn level_armor(&self) -> i32 {
+        self.stat().armor
     }
 
     /// `GetHorseGrade` (`G/horse_rider.cpp:378-386`): 0 without a horse, else 1 for levels 1
@@ -310,7 +339,7 @@ impl Horse {
     /// Whether the running event was created since the last call, which the world answers by
     /// scheduling it one period from now.
     pub fn take_new_timer(&mut self) -> bool {
-        std::mem::take(&mut self.new_timer)
+        std::mem::take(&mut self.reported.new_timer)
     }
 
     /// The command lines queued since the last call, oldest first.
@@ -506,7 +535,7 @@ impl Horse {
         self.info.stamina = i16::try_from(clamped).unwrap_or(0);
         if self.info.stamina == 0 && self.info.riding {
             let _stopped = self.stop_riding();
-            self.stopped = true;
+            self.reported.stopped = true;
         }
         if send {
             self.send_info();
@@ -533,8 +562,8 @@ impl Horse {
     fn die(&mut self) {
         self.update_stamina(-i32::from(self.info.stamina), true);
         self.timer = HorseTimer::None;
-        self.new_timer = false;
-        self.died = true;
+        self.reported.new_timer = false;
+        self.reported.died = true;
     }
 
     /// `StartStaminaConsumeEvent` (`G/horse_rider.cpp:285-303`).
@@ -555,7 +584,7 @@ impl Horse {
         }
         if self.timer != timer {
             self.timer = timer;
-            self.new_timer = true;
+            self.reported.new_timer = true;
         }
     }
 
@@ -563,7 +592,7 @@ impl Horse {
     fn end_timer(&mut self, timer: HorseTimer) {
         if self.timer == timer {
             self.timer = HorseTimer::None;
-            self.new_timer = false;
+            self.reported.new_timer = false;
         }
     }
 

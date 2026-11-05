@@ -45550,3 +45550,58 @@ ping cycle's handshake inside its bite window; the harness now answers it). `car
 warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline`
 clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 395. The horse's names
+
+`horse.set_name` and `horse.get_name` are ported (`G/questlua_horse.cpp:231-283`), with the
+name manager (`CHorseNameManager`, `G/horsename_manager.cpp`) as the world's
+`horse_names` map keyed on the player id.
+
+- `set_name` answers 0 without a horse and 1 for a name the europe rules refuse: two to 24
+  bytes, ASCII letters and digits, and the banword and mob-name judge the guild name uses.
+  Otherwise it answers 2 and queues `HorseOp::SetName`, which the world runs after the step.
+  The world sets the `horse_name.valid_till` flag a month on (five minutes on a test server),
+  adds `AFFECT_HORSE_NAME` (531) with the Pulse count legacy passes as its duration, and
+  rewrites the name. It then syncs the named flag and runs the compute. The unsummon and the
+  far summon back follow, and the summon back never computes, so only this compute prices
+  the name. A number argument pushes nothing, as `lua_isstring` fails it.
+- `get_name` pushes the manager's name, empty with none.
+- The summoned horse carries the manager's name when it is not empty, otherwise
+  `"<rider>'s "` (`G/char_horse.cpp:206-216`).
+- `ComputeBattlePoints` floors the rider's armour to the horse row's `iArmor` and adds 20
+  for a named horse before the grade bonuses (`G/char.cpp:2822-2838`). `Horse::named` is
+  the manager's answer, which the world sets before each compute. The item-shop defence
+  bonus still scales the sum. A draft of this slice dropped that term, which the
+  `points` unit test `the_armour_and_the_item_shop_defence_bonus_raise_every_defence`
+  caught in the full suite, and the term is back in place.
+- `Validate` (`G/horsename_manager.cpp:58-75`) runs on each affect tick, ahead of the
+  countdown. While the flag is current, the affect lives one tick more. Once the flag is
+  stale, it removes the affect, empties the name, and unsummons and re-summons the horse.
+- The store keeps the name in `player.horse_name`, a `bytea` of at most 24 bytes, empty for
+  none (migration `0025_player_horse_name.sql`; legacy keeps the `horse_name` table). It is
+  read at load and written on every save from the manager.
+- Refactor: `Horse`'s one-shot reports (died, stopped, new timer) moved into
+  `HorseReports`, to keep the struct under Clippy's bool limit.
+
+Scenario `a_horse_is_named_bad_names_refused_and_the_mount_pays`:
+- The naming answers 2, the month's add (300 seconds as Pulses on the test server) leads 12
+  point changes, and the defence grade carries the 54 floor plus 20.
+- The ride's stop summons the horse back as `Shadowfax`.
+- A bad name and a one-letter name answer 1, and a number answers nil, each with the name
+  kept.
+- Once the probe stales the flag with `pc.setf`, the next tick removes affect 531 and
+  summons the horse back as `Alpha's `, and the store ends with an empty name.
+
+Eight runs passed. Five mutants were applied to pristine files and restored by checksum; all
+five are semantic kills: the 20 bonus to 0, the inverted `Validate` comparison, the dropped
+emptying, the inverted summon-name filter, and the naming without the manager rewrite. The
+inverted comparison at first survived, because the scenario never staled the flag. The stale
+step was added for it, and the mutant now fails.
+
+Gates (2026-11-05): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4740 passed, 0 failed in 41 targets. The first run had 1 failure, the item-shop term
+above. `cargo test --workspace --doc`: 1 passed. `cargo clippy --workspace --all-targets
+--locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
+--no-deps --locked --offline` are clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair
+(1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

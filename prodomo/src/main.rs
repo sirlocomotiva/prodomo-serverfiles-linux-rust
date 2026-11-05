@@ -1039,8 +1039,10 @@ fn hold_points(held: &mut Held, points: world::character::Points) {
         held_character.hair_part = parts[EParts::Hair as usize];
         held_character.sash_part = parts[EParts::Sash as usize];
         // `tab.horse = GetHorseData()` and `tab.horse_skill_point` (`G/char.cpp:1590`,
-        // `:1617`).
+        // `:1617`); the name stays, since the points do not carry it and its own `Kept`
+        // field lands after this call.
         let horse = points.horse().info();
+        let name = std::mem::take(&mut held_character.horse.name);
         held_character.horse = db::players::PlayerHorse {
             level: horse.level,
             riding: horse.riding,
@@ -1049,6 +1051,7 @@ fn hold_points(held: &mut Held, points: world::character::Points) {
             stamina: horse.stamina,
             skill_point: i16::try_from(points.get_point(point_slot::POINT_HORSE_SKILL))
                 .unwrap_or(i16::MAX),
+            name,
         };
     }
     held.points = Some(points);
@@ -1061,6 +1064,9 @@ fn hold_kept(held: &mut Held, kept: Kept) {
     }
     if let Some(held_character) = held.character.as_mut() {
         held_character.alignment = kept.alignment;
+        if let Some(horse_name) = kept.horse_name {
+            held_character.horse.name = horse_name;
+        }
     }
     held.quickslots = kept.quickslots;
     held.quest_flags = kept.quest_flags;
@@ -6585,6 +6591,10 @@ fn loaded_state(
         messenger_team: messenger.team,
         messenger_levels: messenger.levels,
         affects: held.affects.clone(),
+        horse_name: held
+            .character
+            .as_ref()
+            .map_or_else(Vec::new, |character| character.horse.name.clone()),
     }
 }
 
@@ -14062,6 +14072,7 @@ mod tests {
                 alignment: -250,
                 quest_flags: Vec::new(),
                 affects: Vec::new(),
+                horse_name: None,
             },
         );
         assert_eq!(

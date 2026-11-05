@@ -266,7 +266,7 @@ pub fn player_save(
         sungma_move: character.sungma_move,
         sungma_immune: character.sungma_immune,
         gaya: character.gaya,
-        horse: character.horse,
+        horse: character.horse.clone(),
     }
 }
 

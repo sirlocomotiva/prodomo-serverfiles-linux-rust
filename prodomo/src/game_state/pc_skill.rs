@@ -4729,12 +4729,10 @@ mod tests {
         total: i32,
     ) -> (bool, super::super::quests::QuestStepOutcome) {
         use quest::manager::Game;
-        let mover = world.own_mover(Vid::new(1)).expect("the body stands");
         let reader = Vid::new(1);
-        let card = world
-            .bodies
-            .get(&reader)
-            .map_or((0, 0), |body| (body.card.job, body.card.skill_group));
+        let mover = world.own_mover(reader).expect("the body stands");
+        let body = world.bodies.get(&reader);
+        let card = body.map_or((0, 0), |b| (b.card.job, b.card.skill_group));
         let pc_level = world
             .characters
             .find_by_vid(reader)
@@ -4782,6 +4780,8 @@ mod tests {
             slots: pc_skills.entry(reader.raw()).or_default(),
             affects: affect_events.get_mut(&reader),
             alignment: bodies.get(&reader).map_or(0, |body| body.card.alignment),
+            horse_name: Vec::new(),
+            name_rules: crate::select_phase::NameRules::default(),
             alignment_changes: Vec::new(),
             gold_changes: Vec::new(),
             hides: Vec::new(),

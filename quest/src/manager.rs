@@ -340,6 +340,16 @@ pub trait Game {
     /// ends.
     fn unride_horse(&mut self);
 
+    /// `horse.get_name` (`G/questlua_horse.cpp:273-291`): the manager's name for the
+    /// character the script runs for, empty with none.
+    fn horse_name(&self) -> Vec<u8>;
+
+    /// `horse.set_name` (`G/questlua_horse.cpp:231-271`): names the character's horse
+    /// `name` — the flag, the month affect and the re-summon around the rewrite — and
+    /// answers 2, 1 for a bad name, 0 without a horse. The world runs it when the step
+    /// ends; `name` holds no zero byte.
+    fn set_horse_name(&mut self, name: Vec<u8>) -> u8;
+
     /// `GetEmpire()` of the character the script runs for (`G/questlua_pc.cpp:1304-1308`).
     fn empire(&self) -> u8;
 
@@ -3702,11 +3712,10 @@ fn party_api(
     Ok(Some(result.into_iter().collect()))
 }
 
-/// The `horse.*` calls but riding and the names (`G/questlua_horse.cpp:24-228`), and
-/// `pc.get_horse_level`, `pc.is_horse_alive` and `pc.revive_horse`
-/// (`G/questlua_pc.cpp:1491-1531`). The pools and their percentages read 0 without a horse;
-/// the summon, unsummon and revive run in the world when the step ends. Returns `None` for
-/// a name this table does not hold.
+/// The `horse.*` calls (`G/questlua_horse.cpp:24-291`), and `pc.get_horse_level`,
+/// `pc.is_horse_alive` and `pc.revive_horse` (`G/questlua_pc.cpp:1491-1531`). The pools and
+/// their percentages read 0 without a horse; the summon, unsummon, revive, ride and naming
+/// run in the world when the step ends. Returns `None` for a name this table does not hold.
 fn horse_api(
     lua: &Lua,
     cx: &mut Cx<'_>,
@@ -3796,6 +3805,18 @@ fn horse_api(
             cx.game.revive_horse();
             None
         }
+        // `horse_set_name`: nothing is pushed for a non-string last argument
+        // (`lua_isstring`, which a number fails); else the world names and answers 2,
+        // 1 or 0. `horse_get_name` pushes the manager's name, empty with none.
+        b"horse.set_name" => {
+            let last = args.back().cloned().unwrap_or(Value::Nil);
+            if !matches!(last, Value::String(_)) {
+                return Ok(Some(MultiValue::new()));
+            }
+            let text = host::c_string(lua, last)?.unwrap_or_default();
+            number(i32::from(cx.game.set_horse_name(text)))
+        }
+        b"horse.get_name" => Some(Value::String(lua.create_string(cx.game.horse_name())?)),
         _ => return Ok(None),
     };
     Ok(Some(result.into_iter().collect()))
@@ -4472,6 +4493,8 @@ mod tests {
         horse_feeds: u32,
         /// The `summon_horse`, `unsummon_horse` and `revive_horse` calls, in order.
         horse_calls: Vec<(&'static str, bool, u32)>,
+        /// What `horse_name` answers, which `set_horse_name` rewrites.
+        horse_names: Vec<u8>,
         /// Whether the character rides a mount.
         mounted: bool,
         /// Whether the character stands in a party.
@@ -4702,6 +4725,16 @@ mod tests {
 
         fn unride_horse(&mut self) {
             self.horse_calls.push(("unride", false, 0));
+        }
+
+        fn horse_name(&self) -> Vec<u8> {
+            self.horse_names.clone()
+        }
+
+        fn set_horse_name(&mut self, name: Vec<u8>) -> u8 {
+            self.horse_names = name;
+            self.horse_calls.push(("set_name", false, 0));
+            2
         }
 
         fn empire(&self) -> u8 {
@@ -6612,6 +6645,47 @@ mod tests {
             probe.call("horse.is_mine", &[]).unwrap(),
             [Value::Boolean(false)]
         );
+    }
+
+    /// The name names: `horse.set_name` pushes nothing for a non-string, else the world's
+    /// answer, and `horse.get_name` pushes the manager's name.
+    #[test]
+    fn the_horse_name_names_push_the_worlds_answers() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        assert!(probe
+            .call("horse.set_name", &[Value::Number(7.0)])
+            .unwrap()
+            .is_empty());
+        assert!(probe.game.horse_calls.is_empty(), "no string, no naming");
+        let shadow = lua.create_string(b"Shadowfax").unwrap();
+        assert_eq!(
+            probe
+                .call("horse.set_name", &[Value::String(shadow)])
+                .unwrap(),
+            [Value::Number(2.0)]
+        );
+        assert_eq!(probe.game.horse_names, b"Shadowfax");
+        assert_eq!(
+            probe.game.horse_calls,
+            [("set_name", false, 0)],
+            "the name is queued"
+        );
+        let pushed = probe.call("horse.get_name", &[]).unwrap();
+        assert_eq!(pushed.len(), 1);
+        let Value::String(name) = &pushed[0] else {
+            panic!("a string, not {pushed:?}");
+        };
+        assert_eq!(name.as_bytes(), b"Shadowfax");
     }
 
     /// The character-reader names: gold under its four spellings, empire, hp/sp and their

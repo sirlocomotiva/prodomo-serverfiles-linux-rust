@@ -703,6 +703,7 @@ fn whole_save() -> PlayerSave {
             health_drop_time: 0xfedc_ba98,
             stamina: 0x0304,
             skill_point: 0x0506,
+            name: b"Shadowfax".to_vec(),
         },
     }
 }

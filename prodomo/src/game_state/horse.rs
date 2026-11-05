@@ -215,6 +215,7 @@ impl GameState {
             &[Arg::Text(shown.as_bytes()), Arg::Int(i64::from(level))],
         );
         let set = self.plant_horse_level(victim, level)?;
+        self.sync_horse_named(victim);
         let computed = self.pc_points_mut(victim.raw())?.compute_points();
         self.send_point_records(victim, &computed);
         self.send_skill_levels(victim);
@@ -265,6 +266,20 @@ impl GameState {
             self.horse_unsummon(vid, false);
         }
         self.flush_horse(vid);
+    }
+
+    /// The manager's answer for the rider before a compute: `true` when it holds a
+    /// non-empty name (`G/char.cpp:2828-2832`).
+    pub(super) fn sync_horse_named(&mut self, vid: Vid) {
+        let named = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|rider| self.horse_names.get(&rider.player_id()))
+            .is_some_and(|name| !name.is_empty());
+        if let Some(points) = self.pc_points_mut(vid.raw()) {
+            points.horse_mut().set_named(named);
+        }
     }
 
     /// Schedule the horse's stamina event after a step that may have started, switched or

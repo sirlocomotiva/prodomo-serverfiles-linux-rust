@@ -175,6 +175,12 @@ pub const AFFECT_PREMIUM_END: u32 = 509;
 /// `/hair` reads.
 pub const AFFECT_HAIR: u32 = 514;
 
+/// `AFFECT_HORSE_NAME` (`G/affect.h:99`): the affect `horse.set_name` lays for the name's
+/// month (`G/questlua_horse.cpp:252-256`), which `HorseNameManager::Validate` watches
+/// (`G/horsename_manager.cpp:58-75`). 531: the 519-to-530 cube row and the blend fill the
+/// gap past `AFFECT_UNIQUE_ABILITY` (518).
+pub const AFFECT_HORSE_NAME: u32 = 531;
+
 /// `SKILL_MUYEONG` (`G/skill.h:100`): the one saved affect `LoadAffect` never
 /// restores (`G/char_affect.cpp:598-599`).
 pub const SKILL_MUYEONG: u32 = 78;

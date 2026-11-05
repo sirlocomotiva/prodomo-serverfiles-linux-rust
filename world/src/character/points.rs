@@ -1927,7 +1927,17 @@ impl Points {
         // `(int)(HT / 1.25)` is `HT * 4 / 5` truncated: the double quotient of an `int` by
         // 1.25 is never within rounding of the next integer.
         let defence = level + ht * 4 / 5;
-        let mut armour = i64::from(self.armour)
+        // The rider's armour floors to the horse row's and rises 20 for a named horse
+        // (`G/char.cpp:2822-2832`), before the grade bonuses join it; `wears_mount_costume`
+        // stays out, since legacy reads the ride, not the costume gate, here.
+        let mut base = self.armour;
+        if self.mount_vnum != 0 {
+            base = base.max(self.horse.level_armor());
+            if self.horse.named() {
+                base += 20;
+            }
+        }
+        let mut armour = i64::from(base)
             + self.bonus(point::POINT_DEF_GRADE_BONUS)
             + self.bonus(point::POINT_PARTY_DEFENDER_BONUS);
         armour += armour * self.bonus(point::POINT_MALL_DEFBONUS) / 100;
@@ -2378,6 +2388,25 @@ mod tests {
         priest.set_mount_vnum(0, 0);
         let _records = priest.compute_points();
         assert_eq!(priest.get_point(18), 2 + (4 * 3 + 2 * 6) / 3);
+    }
+
+    /// The mounted armour: the floor at the horse row's `iArmor`, then 20 for a named
+    /// horse, before the grade bonuses (`G/char.cpp:2822-2832`).
+    #[test]
+    fn a_named_mount_floors_and_bonuses_the_armour() {
+        let mut points = Points::load(&fresh(0));
+        points.horse_mut().set_level(25, 0);
+        points.set_mount_vnum(20_107, 0);
+        let _records = points.compute_points();
+        // The warrior rides at the level-25 floor: level 1, HT 40, no worn armour, so the
+        // defence is 1 + 40 x 4 / 5 and the armour is the row's 54.
+        assert_eq!(points.get_point(16), 1 + 40 * 4 / 5 + 54);
+        points.horse_mut().set_named(true);
+        let _records = points.compute_points();
+        assert_eq!(points.get_point(16), 1 + 40 * 4 / 5 + 54 + 20);
+        points.set_mount_vnum(0, 0);
+        let _records = points.compute_points();
+        assert_eq!(points.get_point(16), 1 + 4 * 4 / 5);
     }
 
     #[test]

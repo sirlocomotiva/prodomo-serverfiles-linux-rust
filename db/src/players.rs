@@ -387,9 +387,9 @@ pub async fn save_position(
     Ok(updated.rows_affected() == 1)
 }
 
-/// The horse columns of one character row: `THorseInfo` (`C/tables.h:473-480`) and
-/// `horse_skill_point`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// The horse columns of one character row: `THorseInfo` (`C/tables.h:473-480`),
+/// `horse_skill_point`, and the `horse_name` row's name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlayerHorse {
     /// `horse_level`, 0 to 30.
     pub level: u8,
@@ -403,6 +403,8 @@ pub struct PlayerHorse {
     pub stamina: i16,
     /// `horse_skill_point`, `POINT_HORSE_SKILL`.
     pub skill_point: i16,
+    /// `horse_name`: the horse name, empty for none. At most 24 bytes.
+    pub name: Vec<u8>,
 }
 
 /// The mutable columns of one character row, which is what a save writes.
@@ -542,7 +544,7 @@ pub async fn save_character(
          alignment = $33, sungma_str = $35, sungma_hp = $36, sungma_move = $37, \
          sungma_immune = $38, gaya = $39, conqueror_level_step = $40, conqueror_point = $41, \
          horse_level = $42, horse_riding = $43, horse_hp = $44, horse_hp_droptime = $45, \
-         horse_stamina = $46, horse_skill_point = $47, last_play_at = now() \
+         horse_stamina = $46, horse_skill_point = $47, horse_name = $48, last_play_at = now() \
          WHERE account_id = $1 AND id = $2",
     )
     .bind(account.to_column()?)
@@ -592,6 +594,7 @@ pub async fn save_character(
     .bind(i64::from(save.horse.health_drop_time))
     .bind(save.horse.stamina)
     .bind(save.horse.skill_point)
+    .bind(save.horse.name.as_slice())
     .execute(store.pool())
     .await?;
     Ok(updated.rows_affected() == 1)
@@ -1005,7 +1008,7 @@ pub async fn load_character(
          p.part_hair, p.part_sash, p.x, p.y, p.map_index, p.exit_x, p.exit_y, p.exit_map_index, \
          p.skill_group, p.playtime_minutes, \
          p.horse_level, p.horse_riding, p.horse_hp, p.horse_hp_droptime, p.horse_stamina, \
-         p.horse_skill_point, \
+         p.horse_skill_point, p.horse_name, \
          COALESCE(EXTRACT(EPOCH FROM now() - p.last_play_at), 0)::bigint AS logoff_interval, \
          p.change_name, a.empire \
          FROM player AS p JOIN account AS a ON a.id = p.account_id \
@@ -1073,6 +1076,7 @@ pub async fn load_character(
             )?,
             stamina: row.try_get("horse_stamina")?,
             skill_point: row.try_get("horse_skill_point")?,
+            name: row.try_get("horse_name")?,
         },
         // A clock set back past the save reads as no time away.
         logoff_interval: u32::try_from(row.try_get::<i64, _>("logoff_interval")?.max(0))

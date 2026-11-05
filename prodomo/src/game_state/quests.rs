@@ -425,6 +425,11 @@ pub(super) struct Session<'s> {
     /// Every `pc.hide_costume` hide, in order, for [`GameState::apply_hidden_changes`]
     /// after the step (legacy sends `UpdatePacket` in the setter).
     pub(super) hides: Vec<(u8, bool)>,
+    /// The manager's name for the reader, which `horse.get_name` pushes and whose
+    /// non-emptiness the horse arms' computes read (`G/char.cpp:2828-2832`).
+    pub(super) horse_name: Vec<u8>,
+    /// The Name rules, which `horse.set_name` judges by.
+    pub(super) name_rules: crate::select_phase::NameRules,
     /// Its points, which the GRAND read's 141 recompute rewrites.
     pub(super) points: Option<&'s mut world::character::Points>,
     /// What the GRAND read climbed and `pc.set_skill_level` set, for the store's
@@ -1573,6 +1578,7 @@ impl Game for Session<'_> {
         };
         points.horse_mut().set_level(level, now);
         let landed = points.horse().level();
+        points.horse_mut().set_named(!self.horse_name.is_empty());
         let records = points.compute_points();
         self.send_horse_lines();
         let skill = super::horse::SKILL_HORSE;
@@ -1614,6 +1620,34 @@ impl Game for Session<'_> {
 
     fn unride_horse(&mut self) {
         self.horse_ops.push(super::horse_summon::HorseOp::Unride);
+    }
+
+    fn horse_name(&self) -> Vec<u8> {
+        self.horse_name.clone()
+    }
+
+    fn set_horse_name(&mut self, name: Vec<u8>) -> u8 {
+        // `horse_set_name` (`G/questlua_horse.cpp:231-271`): 0 without a horse; 1 for a
+        // name the europe rules refuse (`check_name_alphabet` with the banwords and the
+        // mob names, and the 24-byte field); else the naming is queued and 2 answers.
+        let level = self
+            .points
+            .as_deref()
+            .map_or(0, |points| points.horse().level());
+        if level == 0 {
+            return 0;
+        }
+        let ok = name.len() >= 2
+            && name.len() <= common::constants::CHARACTER_NAME_MAX_LEN as usize
+            && name.iter().all(u8::is_ascii_alphanumeric)
+            && self.name_rules.guild_name_ok(&name);
+        if !ok {
+            return 1;
+        }
+        self.horse_ops
+            .push(super::horse_summon::HorseOp::SetName(name.clone()));
+        self.horse_name = name;
+        2
     }
 
     fn number(&mut self, from: i32, to: i32) -> i32 {
@@ -2541,11 +2575,21 @@ impl GameState {
             item_attrs,
             item_masks,
             gauss,
+            horse_names,
+            name_rules,
             ..
         } = self;
         let quests = quests.as_mut()?;
         let mut context = reader_context(
-            characters, bodies, war_maps, maps, pc_skills, guilds, parties, reader,
+            characters,
+            horse_names,
+            bodies,
+            war_maps,
+            maps,
+            pc_skills,
+            guilds,
+            parties,
+            reader,
         );
         if hacked {
             context.gates.set_hack(true);
@@ -2587,6 +2631,7 @@ impl GameState {
             item_masks,
             quest_targets,
             stores_items,
+            name_rules.clone(),
         ));
         Some(ArmedSession {
             manager,
@@ -3117,6 +3162,8 @@ struct ReaderContext {
     party_leader: Option<u32>,
     party_flags: std::collections::HashMap<Vec<u8>, i32>,
     party_member_pids: Vec<u32>,
+    /// The manager's name for the reader.
+    horse_name: Vec<u8>,
 }
 
 /// Every borrow [`GameState::arm_quest_session`] threads into its [`Session`], as
@@ -3150,6 +3197,7 @@ struct SessionInputs<'s> {
     masks: &'s gamedata::item_mask::ItemMasks,
     targets: &'s mut QuestTargets,
     stores: bool,
+    name_rules: crate::select_phase::NameRules,
 }
 /// The reader's job and skill group, level and player ID, and `GetMapIndex()` and `GetWarMap()`
 /// (`G/input_login.cpp:780`): the map the character stands on, and the war map it stands on,
@@ -3160,6 +3208,7 @@ struct SessionInputs<'s> {
 #[allow(clippy::too_many_arguments)]
 fn reader_context(
     characters: &world::character::CharacterManager,
+    horse_names: &std::collections::HashMap<u32, Vec<u8>>,
     bodies: &std::collections::HashMap<Vid, super::motion::Body>,
     war_maps: &BTreeMap<i32, super::war_map::WarMap>,
     maps: &BTreeMap<(u8, i32), super::view::MapIndex>,
@@ -3231,6 +3280,10 @@ fn reader_context(
         party_leader,
         party_flags,
         party_member_pids,
+        horse_name: caller
+            .and_then(|pid| horse_names.get(&pid))
+            .cloned()
+            .unwrap_or_default(),
     }
 }
 
@@ -3355,6 +3408,7 @@ fn session_inputs<'s>(
     masks: &'s gamedata::item_mask::ItemMasks,
     targets: &'s mut QuestTargets,
     stores: bool,
+    name_rules: crate::select_phase::NameRules,
 ) -> SessionInputs<'s> {
     SessionInputs {
         place,
@@ -3385,6 +3439,7 @@ fn session_inputs<'s>(
         masks,
         targets,
         stores,
+        name_rules,
     }
 }
 
@@ -3420,6 +3475,7 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
         masks,
         targets,
         stores,
+        name_rules,
     } = inputs;
     session_head(
         place,
@@ -3450,6 +3506,7 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
         masks,
         targets,
         stores,
+        name_rules,
     )
 }
 
@@ -3485,6 +3542,7 @@ fn session_head<'s>(
     masks: &'s gamedata::item_mask::ItemMasks,
     targets: &'s mut QuestTargets,
     stores: bool,
+    name_rules: crate::select_phase::NameRules,
 ) -> Session<'s> {
     let alignment = bodies.get(&reader).map_or(0, |body| body.card.alignment);
     let pcs = quest_step_pcs(characters);
@@ -3529,6 +3587,8 @@ fn session_head<'s>(
         online,
         affects: affects.get_mut(&reader),
         alignment,
+        horse_name: context.horse_name,
+        name_rules,
         alignment_changes: Vec::new(),
         gold_changes: Vec::new(),
         hides: Vec::new(),
@@ -3573,6 +3633,8 @@ fn session_head<'s>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use world::character::{CharacterItems, Gauss, MoveRules, Quickslots};
+    use world::item::{ItemIdRange, ItemIds};
 
     fn input(msg: &[u8]) -> QuestStep {
         let mut field = [0; CG_QUEST_TEXT_FIELD_SIZE];
@@ -3619,6 +3681,8 @@ mod tests {
             card: (3, 1),
             pc_level: 10,
             caller: None,
+            horse_name: Vec::new(),
+            name_rules: crate::select_phase::NameRules::default(),
             gold: 0,
             empire: 0,
             char_name: Vec::new(),
@@ -3997,6 +4061,8 @@ mod tests {
             card: (3, 1),
             pc_level: 10,
             caller: None,
+            horse_name: Vec::new(),
+            name_rules: crate::select_phase::NameRules::default(),
             gold: 0,
             empire: 0,
             char_name: Vec::new(),
@@ -4153,9 +4219,6 @@ mod tests {
         protos: Vec<gamedata::item_proto::ItemProto>,
         f: impl FnOnce(&mut Session<'_>) -> R,
     ) -> R {
-        use world::character::{CharacterItems, Gauss, MoveRules, Quickslots};
-        use world::item::{ItemIdRange, ItemIds};
-
         let items_protos = ItemProtos::from_rows(protos);
         let (mobs, names) = (MobProtos::default(), MobNamesByLanguage::default());
         let item_names = ItemNamesByLanguage::default();
@@ -4186,6 +4249,8 @@ mod tests {
             card: (0, 1),
             pc_level: 10,
             caller: None,
+            horse_name: Vec::new(),
+            name_rules: crate::select_phase::NameRules::default(),
             gold: 0,
             empire: 0,
             char_name: Vec::new(),
@@ -4599,6 +4664,8 @@ mod tests {
             card: (0, 1),
             pc_level: 10,
             caller: None,
+            horse_name: Vec::new(),
+            name_rules: crate::select_phase::NameRules::default(),
             gold: 0,
             empire: 0,
             char_name: Vec::new(),
@@ -4714,6 +4781,8 @@ mod tests {
             card: (0, 1),
             pc_level: 10,
             caller: None,
+            horse_name: Vec::new(),
+            name_rules: crate::select_phase::NameRules::default(),
             gold: 0,
             empire: 0,
             char_name: Vec::new(),

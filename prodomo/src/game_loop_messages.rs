@@ -3068,6 +3068,9 @@ pub struct Loaded {
     /// as the character's timed affects from the admission on. Legacy restores
     /// them with the character (`LoadAffect`, `G/char_affect.cpp:573-666`).
     pub affects: Vec<db::player_affects::StoredAffect>,
+    /// The horse name the load read (`player.horse_name`), which the world holds from the
+    /// admission on (`HEADER_GD_REQ_HORSE_NAME`, `G/input_login.cpp:891-892`).
+    pub horse_name: Vec<u8>,
 }
 
 /// What the world holds of a character that a save writes: asked for before a save, and
@@ -3091,6 +3094,9 @@ pub struct Kept {
     /// The saved affects the world holds, which a save writes: the silence rows
     /// (`AFFECT_BLOCK_CHAT`) the character still carries.
     pub affects: Vec<db::player_affects::StoredAffect>,
+    /// The horse name the world holds (`CHorseNameManager`), which a save writes with the
+    /// character row. `None` for a character that entered without points.
+    pub horse_name: Option<Vec<u8>>,
 }
 
 /// Why installing the item id allocator did not succeed.
