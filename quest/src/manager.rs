@@ -344,6 +344,17 @@ pub trait Game {
     /// character the script runs for, empty with none.
     fn horse_name(&self) -> Vec<u8>;
 
+    /// `pc.mount(vnum, seconds)` (`G/questlua_pc.cpp:1392-1458`): the mount affect for
+    /// `seconds`, run when the step ends.
+    fn mount(&mut self, vnum: u32, seconds: i32);
+
+    /// `pc.unmount` (`G/questlua_pc.cpp:1481-1489`), run when the step ends.
+    fn unmount(&mut self);
+
+    /// `pc.mount_bonus(apply, value, seconds)` (`G/questlua_pc.cpp:1461-1479`), run when
+    /// the step ends.
+    fn mount_bonus(&mut self, apply: u8, value: i32, seconds: i32);
+
     /// `horse.set_name` (`G/questlua_horse.cpp:231-271`): names the character's horse
     /// `name` — the flag, the month affect and the re-summon around the rewrite — and
     /// answers 2, 1 for a bad name, 0 without a horse. The world runs it when the step
@@ -3824,6 +3835,52 @@ fn horse_api(
     Ok(Some(result.into_iter().collect()))
 }
 
+/// `pc.mount`, `pc.mount_bonus` and `pc.unmount` (`G/questlua_pc.cpp:1392-1489`), run in the
+/// world when the step ends. Returns `None` for a name this table does not hold.
+fn mount_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    match name {
+        // `pc_mount` (`G/questlua_pc.cpp:1392-1458`): nothing without a number first; the
+        // seconds are the second number, 60 without one or below 0.
+        b"pc.mount" => {
+            let first = args.front().cloned().unwrap_or(Value::Nil);
+            if lua.coerce_number(first.clone())?.is_none() {
+                return Ok(Some(MultiValue::new()));
+            }
+            let second = args.get(1).cloned().unwrap_or(Value::Nil);
+            let seconds = if lua.coerce_number(second.clone())?.is_some() {
+                host::c_int(lua, second)?
+            } else {
+                60
+            };
+            let vnum = host::c_int(lua, first)?;
+            cx.game.mount(
+                u32::from_ne_bytes(vnum.to_ne_bytes()),
+                if seconds < 0 { 60 } else { seconds },
+            );
+            Ok(Some(MultiValue::new()))
+        }
+        b"pc.unmount" => {
+            cx.game.unmount();
+            Ok(Some(MultiValue::new()))
+        }
+        // `pc_mount_bonus` (`G/questlua_pc.cpp:1461-1479`): the apply type as `(BYTE)`, the
+        // value and the seconds as `(long)`.
+        b"pc.mount_bonus" => {
+            let apply = host::c_int(lua, args.front().cloned().unwrap_or(Value::Nil))?;
+            let value = host::c_int(lua, args.get(1).cloned().unwrap_or(Value::Nil))?;
+            let seconds = host::c_int(lua, args.get(2).cloned().unwrap_or(Value::Nil))?;
+            cx.game.mount_bonus(apply.to_le_bytes()[0], value, seconds);
+            Ok(Some(MultiValue::new()))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// The `d.*` and `ds.*` bridged calls: the dungeon pair answer whether a dungeon
 /// lives under `(DWORD)` of the first argument; the `ds.*` names read and grant the
 /// dragon-soul qualification and open its windows. Returns `None` for a name this
@@ -4235,7 +4292,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
     if let TextOutcome::Hit(result) = text_api(lua, cx, name, args, last.clone())? {
         return Ok(result.into_iter().collect());
     }
-    let families: [Family; 9] = [
+    let families: [Family; 10] = [
         look_api,
         pc_api,
         item_api,
@@ -4245,6 +4302,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
         dungeon_api,
         quest_api,
         horse_api,
+        mount_api,
     ];
     for family in families {
         if let Some(answered) = family(lua, cx, name, args)? {
@@ -4495,6 +4553,8 @@ mod tests {
         horse_feeds: u32,
         /// The `summon_horse`, `unsummon_horse` and `revive_horse` calls, in order.
         horse_calls: Vec<(&'static str, bool, u32)>,
+        /// `pc.mount`, `pc.unmount` and `pc.mount_bonus`, with their three numbers.
+        mount_calls: Vec<(&'static str, u32, i32, i32)>,
         /// What `horse_name` answers, which `set_horse_name` rewrites.
         horse_names: Vec<u8>,
         /// Whether the character rides a mount.
@@ -4731,6 +4791,19 @@ mod tests {
 
         fn horse_name(&self) -> Vec<u8> {
             self.horse_names.clone()
+        }
+
+        fn mount(&mut self, vnum: u32, seconds: i32) {
+            self.mount_calls.push(("mount", vnum, seconds, 0));
+        }
+
+        fn unmount(&mut self) {
+            self.mount_calls.push(("unmount", 0, 0, 0));
+        }
+
+        fn mount_bonus(&mut self, apply: u8, value: i32, seconds: i32) {
+            self.mount_calls
+                .push(("mount_bonus", u32::from(apply), value, seconds));
         }
 
         fn set_horse_name(&mut self, name: Vec<u8>) -> u8 {
@@ -6688,6 +6761,50 @@ mod tests {
             panic!("a string, not {pushed:?}");
         };
         assert_eq!(name.as_bytes(), b"Shadowfax");
+    }
+
+    /// The mount names: `pc.mount` queues nothing without a number first, 60 seconds
+    /// without a second number or below 0, and the vnum as a `DWORD`; `pc.mount_bonus`
+    /// keeps the low byte of its apply type; `pc.unmount` queues the dismount.
+    #[test]
+    fn the_mount_names_read_their_arguments() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::default(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let word = Value::String(lua.create_string(b"horse").unwrap());
+        let numeric = Value::String(lua.create_string(b"20205").unwrap());
+        let calls: [(&str, Vec<Value>); 6] = [
+            ("pc.mount", vec![word.clone(), Value::Number(5.0)]),
+            ("pc.mount", vec![Value::Number(20_201.0)]),
+            ("pc.mount", vec![numeric, Value::Number(-1.0)]),
+            ("pc.mount", vec![Value::Number(-1.0), Value::Number(45.0)]),
+            (
+                "pc.mount_bonus",
+                vec![Value::Number(264.0), Value::Number(10.0)],
+            ),
+            ("pc.unmount", vec![word]),
+        ];
+        for (name, args) in calls {
+            assert!(probe.call(name, &args).unwrap().is_empty(), "{name}");
+        }
+        assert_eq!(
+            probe.game.mount_calls,
+            [
+                ("mount", 20_201, 60, 0),
+                ("mount", 20_205, 60, 0),
+                ("mount", u32::MAX, 45, 0),
+                ("mount_bonus", 8, 10, 0),
+                ("unmount", 0, 0, 0),
+            ]
+        );
     }
 
     /// The character-reader names: gold under its four spellings, empire, hp/sp and their

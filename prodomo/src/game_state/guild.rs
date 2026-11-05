@@ -4320,7 +4320,7 @@ impl GameState {
         // `ComputeAffect(pkAff, false)` (`G/char_affect.cpp:838`): the affect's value goes
         // back to the point it was added to.
         for affect in &removed {
-            self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
+            self.compute_affect(vid, affect, false);
         }
         let flags_after = self.affect_flags_of(vid);
         if flags_after != flags_before {

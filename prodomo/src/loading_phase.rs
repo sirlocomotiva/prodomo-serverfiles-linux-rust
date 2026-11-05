@@ -181,6 +181,10 @@ pub const AFFECT_HAIR: u32 = 514;
 /// gap past `AFFECT_UNIQUE_ABILITY` (518).
 pub const AFFECT_HORSE_NAME: u32 = 531;
 
+/// `AFFECT_MOUNT_BONUS` (`G/affect.h:100`): the bonus `pc.mount_bonus` lays beside a
+/// mount, the member after [`AFFECT_HORSE_NAME`].
+pub const AFFECT_MOUNT_BONUS: u32 = 532;
+
 /// `SKILL_MUYEONG` (`G/skill.h:100`): the one saved affect `LoadAffect` never
 /// restores (`G/char_affect.cpp:598-599`).
 pub const SKILL_MUYEONG: u32 = 78;

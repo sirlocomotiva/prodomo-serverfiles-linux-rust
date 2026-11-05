@@ -2848,40 +2848,7 @@ impl GameState {
                     u32::from_ne_bytes(slot.next_read.to_ne_bytes());
             }
         }
-        // `LoadAffect` (`G/char_affect.cpp:573-666`): the saved affects the store read
-        // are the character's timed affects again. Every row restores but `SKILL_MUYEONG`
-        // (78), the two auto-recovery rows without their item, and a row whose point
-        // is past `POINT_MAX_NUM` (255). A row that would fire no tick is gone instead
-        // (`ProcessAffect` ends it on its first run, `G/char_affect.cpp:424-442`).
-        // Each add packet the burst carries, behind the update, as the load's adds ride
-        // the queue they found.
-        let mut silence = Vec::new();
-        for saved in &loaded.affects {
-            let orphaned = (saved.affect_type == crate::loading_phase::AFFECT_AUTO_HP_RECOVERY
-                || saved.affect_type == crate::loading_phase::AFFECT_AUTO_SP_RECOVERY)
-                && self
-                    .characters
-                    .find_by_vid(vid)
-                    .ok()
-                    .and_then(|character| character.items().item(saved.flag))
-                    .is_none();
-            let kept = saved.affect_type != crate::loading_phase::SKILL_MUYEONG
-                && !orphaned
-                && usize::from(saved.apply_on) < crate::loading_phase::POINT_MAX_NUM
-                && saved.duration > 0;
-            if kept {
-                let revived = crate::game_state::affect::Affect {
-                    kind: saved.affect_type,
-                    apply_on: saved.apply_on,
-                    value: saved.apply_value,
-                    flag: saved.flag,
-                    remaining: saved.duration,
-                    sp_cost: saved.sp_cost,
-                };
-                self.add_affect(vid, revived);
-                silence.push(crate::game_state::affect::affect_add_frame(&revived));
-            }
-        }
+        let silence = self.load_affects(vid, &loaded.affects);
         let (records, update) = match loaded.show {
             Some(show) => {
                 let records = self.place_body(vid, show.place, show.card);
@@ -2915,6 +2882,75 @@ impl GameState {
             letters_event,
             observer: self.is_observing(vid),
         }
+    }
+
+    /// `LoadAffect` (`G/char_affect.cpp:573-666`) for the character under `vid`: the saved
+    /// affects the store read are its timed affects again, and the add packets the burst
+    /// carries behind the update, as the load's adds ride the queue they found, are
+    /// returned.
+    ///
+    /// Every row restores but `SKILL_MUYEONG` (78), the two auto-recovery rows without
+    /// their item, and a row whose point is past `POINT_MAX_NUM` (255). A row that would
+    /// fire no tick is gone instead (`ProcessAffect` ends it on its first run,
+    /// `G/char_affect.cpp:424-442`). A restored row joins the list `RefreshAffect` reads;
+    /// its load-time `ComputeAffect` is not run, because its point records would reach the
+    /// client ahead of the burst, so the point waits for the next computation.
+    ///
+    /// `ENABLE_MOUNT_COSTUME_SYSTEM`'s `RemoveAffect(AFFECT_MOUNT)` and
+    /// `RemoveAffect(AFFECT_MOUNT_BONUS)` (`:644-645`) end the load: a mount row and a mount
+    /// bonus row send their add packet in load order and their remove packet after every
+    /// add, the mounts' first, and neither is restored.
+    fn load_affects(
+        &mut self,
+        vid: common::vid::Vid,
+        saved_rows: &[db::player_affects::StoredAffect],
+    ) -> Vec<Vec<u8>> {
+        use crate::loading_phase::{AFFECT_MOUNT, AFFECT_MOUNT_BONUS};
+        let mut frames = Vec::new();
+        let mut dropped = Vec::new();
+        for saved in saved_rows {
+            let orphaned = (saved.affect_type == crate::loading_phase::AFFECT_AUTO_HP_RECOVERY
+                || saved.affect_type == crate::loading_phase::AFFECT_AUTO_SP_RECOVERY)
+                && self
+                    .characters
+                    .find_by_vid(vid)
+                    .ok()
+                    .and_then(|character| character.items().item(saved.flag))
+                    .is_none();
+            let kept = saved.affect_type != crate::loading_phase::SKILL_MUYEONG
+                && !orphaned
+                && usize::from(saved.apply_on) < crate::loading_phase::POINT_MAX_NUM
+                && saved.duration > 0;
+            if !kept {
+                continue;
+            }
+            let revived = crate::game_state::affect::Affect {
+                kind: saved.affect_type,
+                apply_on: saved.apply_on,
+                value: saved.apply_value,
+                flag: saved.flag,
+                remaining: saved.duration,
+                sp_cost: saved.sp_cost,
+            };
+            frames.push(crate::game_state::affect::affect_add_frame(&revived));
+            if revived.kind == AFFECT_MOUNT || revived.kind == AFFECT_MOUNT_BONUS {
+                dropped.push(revived);
+                continue;
+            }
+            self.add_affect(vid, revived);
+            if let Some(points) = self.pc_points_mut(vid.raw()) {
+                points.affect_point_added(revived.apply_on, revived.value);
+            }
+        }
+        for kind in [AFFECT_MOUNT, AFFECT_MOUNT_BONUS] {
+            frames.extend(
+                dropped
+                    .iter()
+                    .filter(|row| row.kind == kind)
+                    .map(crate::game_state::affect::affect_remove_frame),
+            );
+        }
+        frames
     }
 
     /// As [`GameState::enter_world`], and [`EnterWorldRefused::ItemRefused`] when an

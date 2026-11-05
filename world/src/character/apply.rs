@@ -231,6 +231,13 @@ pub enum ApplyArm {
     Point(usize),
 }
 
+/// `aApplyInfo[apply].bPointType` (`constants.cpp:717-864`): the point slot `apply` names, or
+/// `None` past the table, which legacy reads out of bounds.
+#[must_use]
+pub fn point_type(apply: u8) -> Option<usize> {
+    APPLY_POINT.get(usize::from(apply)).copied()
+}
+
 impl ApplyArm {
     /// The arm `ApplyPoint` takes for `apply`.
     pub fn of(apply: u8) -> Self {

@@ -270,7 +270,7 @@ impl GameState {
                 None => Vec::new(),
             };
             for affect in &removed {
-                self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
+                self.compute_affect(vid, affect, false);
                 let frame = super::affect::affect_remove_frame(affect);
                 let _retired = self.write_to_client(vid, frame);
             }

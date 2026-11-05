@@ -45786,3 +45786,91 @@ set: 4751 passed, 0 failed in 41 targets. `cargo test --workspace --doc`: 1 pass
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 399. `RefreshAffect` and the quest mount
+
+`CHARACTER::RefreshAffect` (`G/char_affect.cpp:769-778`) now ends `ComputePoints`, as at
+`G/char.cpp:3150`: after the pool clamp and before the `@fixme118` restore, every held affect's
+point is laid again. Before this, a recomputation (an equip, a level, a ride) dropped every
+buff's point until the buff ended, which then took back a value it no longer held.
+
+- `Points` (`world/src/character/points.rs`) keeps `affect_points`, the `(apply_on, value)` of
+  each held affect, through `affect_point_added` (point 0 is skipped) and `affect_point_removed`
+  (the first equal entry goes). `recompute` runs the list through `nested`.
+- `GameState::compute_affect` (`prodomo/src/game_state/affect.rs`) is `ComputeAffect`: it updates
+  the list, then changes the point. The twelve `change_pc_point(±affect.value)` sites in
+  `alignment.rs`, `dragon_soul.rs`, `guild.rs`, `horse_summon.rs`, `death.rs`, `affect.rs` and
+  `pc_skill.rs` call it. The quest host's `take_affect` removes the entry before its own point
+  change.
+- `POINT_MOUNT` (109) moves from `NOT_PORTED` to `PLAIN`. `change_pc_point` runs its arm
+  (`G/char.cpp:4711-4715`): after the records it calls `mount_vnum` with the new total.
+- A login's restore (`GameState::load_affects`, split out of the admission) pushes each restored
+  row into the list without applying its point, so the point lands at the next computation. A
+  saved `AFFECT_MOUNT` or `AFFECT_MOUNT_BONUS` row (the mount is saved: `IS_NO_SAVE_AFFECT` names
+  neither) sends its add in load order and its remove after every add, the mounts' first, and is
+  not restored (`ENABLE_MOUNT_COSTUME_SYSTEM`'s `RemoveAffect` pair, `G/char_affect.cpp:644-645`).
+  The skipped load-time `ComputeAffect` and the mount's two re-shows are a recorded Divergence.
+
+The quest mount is ported (`quest/src/manager.rs` `mount_api`, three new `BRIDGED` names, now
+217; three `HorseOp` variants run in `horse_ride.rs`):
+- `pc.mount(vnum, seconds)` (`G/questlua_pc.cpp:1392-1458`): nothing without a number first;
+  the seconds default to 60 and a negative one is 60. The mount and its bonus go, and a summoned
+  horse goes (`HorseSummon(false)`). Then `AFFECT_MOUNT` lays `POINT_MOUNT` for the vnum. The
+  eighteen mount races of the three bands add 30, 40 or 50 movement speed as a second
+  `AFFECT_MOUNT` row. That row is added with `IsCube`, so `add_pc_affect_keyed` finds the row it
+  overrides by kind **and** point (`FindAffect(dwType, bApplyOn)`). `g_NoMountAtGuildWar`'s arm
+  never runs: no war map is hosted.
+- `pc.mount_bonus(apply, value, seconds)` (`:1461-1479`): with a mount only,
+  `AFFECT_MOUNT_BONUS` (532, new in `loading_phase`) replaces the old one on
+  `aApplyInfo[apply].bPointType` (`world::character::point_type`). An apply type at or above
+  130 reads past the table in legacy (`:1475`), a Defect; the Rewrite refuses it.
+- `pc.unmount` (`:1481-1489`) and `/unmount` (`G/cmd_general.cpp:2313-2368`): the mount and its
+  bonus go and a horse ride stops. `/unmount`'s costume arm and `UnEquipSpecialRideUniqueItem`
+  never act: every mount costume in the owner's data carries the first-use timer the item use
+  refuses, so none is ever worn.
+
+Scenario `a_quest_mounts_and_unmounts_and_a_login_takes_the_mount_off`:
+- The quest mounts: its three adds are `(221, 109, 20201)`, `(221, 19, 30)` and `(532, 19, 10)`;
+  the re-show carries 20201; the speed ends at 140 (100, the band's 30, the bonus's 10). The band's
+  30 thus survives the mount's own recomputation.
+- `pc.unmount` and `/unmount` each send the three removes, the mounts' first, and re-show the
+  character unmounted.
+- `/unmount` on a horse rider stops the ride and moves no affect.
+- After a logout with the mount on, the three rows are saved. The next login's burst sends
+  their adds and then their removes in `RemoveAffect` order, and the character is not mounted.
+
+Unit tests:
+- `a_computation_puts_the_held_affects_back` (world): a speed and a mount point survive
+  `compute_points`, a point-0 row adds nothing, and a removed row does not come back.
+- `the_mount_names_read_their_arguments` (quest): the non-number first argument, the numeric
+  string, the default and negative seconds, the `DWORD` vnum and the apply byte's low 8 bits.
+
+Ten mutants were applied to the pristine files and restored by checksum. All ten are semantic
+kills:
+- the refresh loop dropped;
+- `affect_point_removed` and `affect_point_added` made no-ops;
+- the `IsCube` key ignored;
+- the bonus's mount gate flipped;
+- the first band at 40;
+- the `POINT_MOUNT` arm dropped;
+- the load's mount arm made dead;
+- `/unmount` keeping the bonus;
+- `/unmount` keeping the ride. This one first survived and was killed once the horse-ride leg
+  was added.
+
+The load arm's first spelling was a compile-error mutant and is not counted. Dropping the quest
+host's `affect_point_removed` is equivalent for the owner's data: the two kinds that path takes,
+the book rows 512 and 513, carry no point, and no owner quest calls `affect.add*`. The scenario
+passed 8 of 8 parallel runs.
+
+Inventory: `lua.pc.mount`, `lua.pc.mount_bonus`, `lua.pc.unmount` and `cmd.unmount` are ported.
+The `sys.char.horse` and `sys.char.points` notes name the slice. Quest-api: 139 ported, 477
+missing. Commands: 218 ported, 47 missing.
+
+Gates (2026-11-05): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4754 passed, 0 failed in 41 targets. `cargo test --workspace --doc`: 1 passed.
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

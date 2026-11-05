@@ -673,6 +673,7 @@ impl<'s> Session<'s> {
             self.records
                 .push(super::affect::affect_remove_frame(affect));
             if let Some(points) = self.points.as_deref_mut() {
+                points.affect_point_removed(affect.apply_on, affect.value);
                 let records = points
                     .point_change(usize::from(affect.apply_on), -affect.value, false, false)
                     .unwrap_or_default();
@@ -1620,6 +1621,24 @@ impl Game for Session<'_> {
 
     fn unride_horse(&mut self) {
         self.horse_ops.push(super::horse_summon::HorseOp::Unride);
+    }
+
+    fn mount(&mut self, vnum: u32, seconds: i32) {
+        self.horse_ops
+            .push(super::horse_summon::HorseOp::Mount { vnum, seconds });
+    }
+
+    fn unmount(&mut self) {
+        self.horse_ops.push(super::horse_summon::HorseOp::Unmount);
+    }
+
+    fn mount_bonus(&mut self, apply: u8, value: i32, seconds: i32) {
+        self.horse_ops
+            .push(super::horse_summon::HorseOp::MountBonus {
+                apply,
+                value,
+                seconds,
+            });
     }
 
     fn horse_name(&self) -> Vec<u8> {

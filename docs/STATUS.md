@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-05, after ledger section 398 (the grade-1 rider's attack).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 399
+Last reviewed: 2026-11-05, after ledger section 399 (`RefreshAffect` and the quest mount).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 400
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -395,7 +395,10 @@ past the walker's limit, draws for the horse book, casts and computes only what 
 grade allows, and puts on no body armour, costume body or ride item; a morph wears nothing
 but arrows; and `pc.is_riding` is bridged, so its row is `ported`. A target-less emotion's
 `[LS;436]` now ends the line, as legacy's does. Since 398 a rider on a grade-1 horse hits
-no monster and, outside a guild war, no player (`CanAttack`'s horse gate). The
+no monster and, outside a guild war, no player (`CanAttack`'s horse gate). Since 399 a
+computation lays every held affect's point again (`RefreshAffect`), and `pc.mount`,
+`pc.mount_bonus`, `pc.unmount` and `/unmount` mount and dismount; a login takes a saved mount
+off again. The
 next slice is the owner's call: the forest's leader branch waits on the `d.*` manager names,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -813,6 +816,7 @@ owner should know about (178.5):
 | V26. A quest reads the character's stored GM level even in the test-server mode (ledger 272). `pc.is_gm` and `pc.get_gm_level` answer the points' level, which rode the admission; the sash quest's `not pc.is_gm()` gate opens for players and no GM panel letter lands at login, as the death penalty's and the restart's production arms already judge. | `GetGMLevel` answers `GM_IMPLEMENTOR` for every character while the mode is on (`G/char.cpp:6355-6356`), and the owner's `CONFIG` files never turn it off, so on the deployment every character was a GM, the sash quest never fired, and every login lettered the GM event panel. The `test_server` audit (owner question 5) settles the silence. |
 | `/reload`'s `t` and `m` arms read their files before they swap, so a bad file keeps the live tables (ledger 358.1). | `do_reload` destroys the live maps and groups first (`G/cmd_gm.cpp:2683-2715`), so a bad `special_item_group.txt` or `mob_drop_item.txt` empties them until the next good reload. The caller hears the same Romanian miss lines either way. |
 | V27. A `/shutdown` after the bar restarts nothing, and a `/shutdown` mid-countdown restarts it at 10 (ledger 360). The game thread must not kill the process, so the operator stops it with SIGTERM, which the graceful path already serves; the bar never clears. | `Shutdown()` past the bar calls `thecore_shutdown()` (`G/cmd_general.cpp:246-249`), exiting the process at once; mid-countdown it starts a second concurrent event, whose notices double the first's (`:250-261`). |
+| A login's loaded affects lay their points at the next computation, not while they load, and a saved mount sends no `MountVnum` re-show (ledger 399). The adds, and the mount's and its bonus's removes, ride the burst as legacy's do. | `LoadAffect` runs `ComputeAffect` on each row it loads (`G/char_affect.cpp:633`), so a saved mount re-shows the character mounted and `RemoveAffect(AFFECT_MOUNT)` re-shows it unmounted (`:644-645`); the Rewrite's restore runs before the burst, where point records and a re-show would reach the client ahead of the character it describes. |
 
 ## Legacy defects not to reproduce
 
@@ -1316,6 +1320,9 @@ owner should know about (178.5):
 - `fishing::DetermineFish` takes `lower_bound` over the cumulative odds without checking the
   end (`G/fishing.cpp:389-390`), so a roll past the last entry reads `fish_info[MAX_FISH]`. The
   Rewrite treats it as the empty catch: `FISH` names vnum 0 and nothing lands (ledger 389).
+- `pc_mount_bonus` indexes `aApplyInfo` with the script's apply byte unchecked
+  (`G/questlua_pc.cpp:1475`), so a type at or above `MAX_APPLY_NUM` (130) reads past the table and
+  lays the bonus on whatever point byte it finds. The Rewrite refuses such a bonus (ledger 399).
 
 ## Environment
 

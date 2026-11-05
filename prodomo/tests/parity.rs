@@ -33947,6 +33947,177 @@ fn a_rider_mounts_by_line_and_quest_and_the_mount_shows_and_pays() {
     );
 }
 
+/// A mount probe: the second click runs `pc.unmount`; every other click runs
+/// `pc.mount(20201, 30)` and `pc.mount_bonus(APPLY_MOV_SPEED, 10, 30)`.
+const MOUNT_PROBE: &[u8] = b"quest mount_probe begin\n\
+    state start begin\n\
+    when 20047.click begin\n\
+    local n = pc.getqf(\"n\") + 1\n\
+    pc.setqf(\"n\", n)\n\
+    if n == 2 then\n\
+    pc.unmount()\n\
+    else\n\
+    pc.mount(20201, 30)\n\
+    pc.mount_bonus(8, 10, 30)\n\
+    end\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// An affect add's `(type, point, value)`.
+type AffectAdded = (u32, u8, i32);
+
+/// An affect remove's `(type, point)`.
+type AffectRemoved = (u32, u8);
+
+/// The add of each `GC_AFFECT_ADD` in `read`, and the remove of each `GC_AFFECT_REMOVE`.
+fn affect_moves(read: &[Vec<u8>]) -> (Vec<AffectAdded>, Vec<AffectRemoved>) {
+    let kind = |record: &[u8]| u32::from_le_bytes(record[1..5].try_into().expect("four bytes"));
+    let added = read
+        .iter()
+        .filter(|record| record[0] == GC_AFFECT_ADD)
+        .map(|record| {
+            let value = i32::from_le_bytes(record[6..10].try_into().expect("four bytes"));
+            (kind(record), record[5], value)
+        })
+        .collect();
+    let removed = read
+        .iter()
+        .filter(|record| record[0] == GC_AFFECT_REMOVE)
+        .map(|record| (kind(record), record[5]))
+        .collect();
+    (added, removed)
+}
+
+/// Reads until `count` affect records of `header` have landed, answering everything read:
+/// each row's point changes, re-show and update ride ahead of its affect record.
+fn read_affect_moves(alice: &mut Keyed, header: u8, count: usize) -> Vec<Vec<u8>> {
+    let mut read = Vec::new();
+    while read
+        .iter()
+        .filter(|record: &&Vec<u8>| record[0] == header)
+        .count()
+        < count
+    {
+        read.push(alice.read_game());
+    }
+    read
+}
+
+/// The mount's three rows land in order, its re-show and update carry the mount, and the
+/// speed takes the band's 30 and the bonus's 10.
+fn quest_mounts(alice: &mut Keyed, vein: u32, vid: u32) {
+    alice.send_record(&client_click(vein));
+    let read = read_affect_moves(alice, GC_AFFECT_ADD, 3);
+    let (added, removed) = affect_moves(&read);
+    assert_eq!(
+        added,
+        [(221, 109, 20_201), (221, 19, 30), (532, 19, 10)],
+        "the mount, its speed band and the bonus"
+    );
+    assert!(removed.is_empty());
+    assert_eq!(shown_mount(&read, vid), 20_201, "the mount's re-show");
+    let speed = read
+        .iter()
+        .filter_map(|record| point_value(record, vid, 19))
+        .last();
+    assert_eq!(speed, Some(MOUNTED_SPEED), "the band and the bonus");
+}
+
+/// Alpha's movement speed on 20201 with the bonus: the base 100, the band's 30 and the
+/// bonus's 10.
+const MOUNTED_SPEED: i64 = 140;
+
+/// A dismount, by the quest or the line: the three rows go, the mounts' first, and the
+/// re-show unmounts.
+fn dismounts(alice: &mut Keyed, vid: u32) {
+    let read = read_affect_moves(alice, GC_AFFECT_REMOVE, 3);
+    let (_, removed) = affect_moves(&read);
+    assert_eq!(removed, [(221, 109), (221, 19), (532, 19)]);
+    assert_eq!(shown_mount(&read, vid), 0, "the dismount's re-show");
+}
+
+/// `/unmount` on a horse rider: no mount row is there to go, the ride stops, and its
+/// re-show unmounts.
+fn unmount_stops_the_ride(alice: &mut Keyed, vid: u32) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_level Alpha 25"));
+    let _dismount_tail = read_up_to(alice, &an_info_line(b"horse level set (Alpha: 25)"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_ride"));
+    let read = read_until_headed(alice, GC_CHARACTER_UPDATE, vid);
+    assert_eq!(shown_mount(&read, vid), 20_107, "the ride");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/unmount"));
+    let read = read_until_headed(alice, GC_CHARACTER_UPDATE, vid);
+    assert_eq!(shown_mount(&read, vid), 0, "the ride stops");
+    let (added, removed) = affect_moves(&read);
+    assert!(added.is_empty() && removed.is_empty(), "no affect moves");
+}
+
+/// `lua.pc.mount`, `lua.pc.mount_bonus`, `lua.pc.unmount`, `cmd.unmount`: the quest mounts
+/// and dismounts, `/unmount` dismounts, and a mount saved at logout is loaded and taken
+/// off again by the next login (`ENABLE_MOUNT_COSTUME_SYSTEM`'s `LoadAffect`).
+#[test]
+fn a_quest_mounts_and_unmounts_and_a_login_takes_the_mount_off() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, _) = vein_stage(&database, MOUNT_PROBE);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let vein = shown_vein(&entered);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    quest_mounts(&mut alice, vein, vid);
+    alice.send_record(&client_click(vein));
+    dismounts(&mut alice, vid);
+    quest_mounts(&mut alice, vein, vid);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/unmount"));
+    dismounts(&mut alice, vid);
+    unmount_stops_the_ride(&mut alice, vid);
+    quest_mounts(&mut alice, vein, vid);
+    drop(alice);
+    wait_for(
+        &database,
+        "(SELECT count(*) FROM player_affect WHERE affect_type IN (221, 532)) = 3",
+    );
+    let (mut alice, _listed, _items) = load_character(&server, b"alice", 0);
+    alice.send_record(&client_enter_game());
+    assert_eq!(alice.read_game()[0], GC_CHARACTER_ADD);
+    let info = alice.read_game();
+    assert_eq!(additional_mount(&info), 0, "no mount survives the login");
+    let (_shown, first) = read_shown(&mut alice);
+    let mut burst = vec![first];
+    while burst
+        .last()
+        .is_some_and(|record| record[0] == GC_AFFECT_ADD)
+    {
+        burst.push(alice.read_game());
+    }
+    burst.extend((0..2).map(|_| alice.read_game()));
+    let (added, removed) = affect_moves(&burst);
+    let loaded: Vec<AffectAdded> = added
+        .into_iter()
+        .filter(|row| [221, 532].contains(&row.0))
+        .collect();
+    let mut rows = loaded.clone();
+    rows.sort_unstable();
+    assert_eq!(
+        rows,
+        [(221, 19, 30), (221, 109, 20_201), (532, 19, 10)],
+        "each saved row's add"
+    );
+    // `RemoveAffect(AFFECT_MOUNT)`, then `RemoveAffect(AFFECT_MOUNT_BONUS)`, each walking
+    // the list in load order.
+    let expected: Vec<AffectRemoved> = [221, 532]
+        .iter()
+        .flat_map(|kind| loaded.iter().filter(move |row| row.0 == *kind))
+        .map(|row| (row.0, row.1))
+        .collect();
+    assert_eq!(removed, expected, "then the removes");
+}
+
 const HORSE_NAME_PROBE: &[u8] = b"quest horse_name_probe begin\n\
     state start begin\n\
     when 20047.click begin\n\

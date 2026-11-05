@@ -444,7 +444,12 @@ impl GameState {
         let records = points
             .point_change(kind, amount, show_amount, false)
             .unwrap_or_default();
+        let mount = (kind == point::POINT_MOUNT).then(|| points.get_point(point::POINT_MOUNT));
         self.send_point_records(vid, &records);
+        // `POINT_MOUNT`'s arm (`G/char.cpp:4711-4715`): `MountVnum` with the new total.
+        if let Some(mount) = mount {
+            self.mount_vnum(vid, u32::from_ne_bytes(mount.to_ne_bytes()));
+        }
     }
 
     /// `PointChange(POINT_HP, hp - GetHP())`: sets the hit points of the player under `vid`.
@@ -1215,7 +1220,7 @@ impl GameState {
             return;
         }
         for affect in &cleared {
-            self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
+            self.compute_affect(vid, affect, false);
             let frame = affect_remove_frame(affect);
             let _cleared = self.write_to_client(vid, frame);
         }

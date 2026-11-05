@@ -166,6 +166,7 @@ impl CommandEntry {
             "do_user_horse_back" => Command::Horse(HorseLine::Back),
             "do_horse_ride" => Command::Horse(HorseLine::Ride),
             "do_user_horse_ride" => Command::Horse(HorseLine::UserRide),
+            "do_unmount" => Command::Horse(HorseLine::Unmount),
             _ => self.mid_name(),
         }
     }

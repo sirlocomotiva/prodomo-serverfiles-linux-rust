@@ -79,6 +79,13 @@ impl GameState {
                 self.user_horse_ride(vid);
                 None
             }
+            // `do_unmount` (`G/cmd_general.cpp:2313-2368`): no mount costume is ever worn
+            // (each carries the first-use timer the use refuses) and no unique is, so
+            // `UnEquipSpecialRideUniqueItem` answers true and the line is `pc.unmount`'s.
+            HorseLine::Unmount => {
+                self.unmount(vid);
+                None
+            }
         };
         if reply.send(landed).is_err() {
             tracing::debug!(?vid, "nobody was left to hear a horse line's answer");

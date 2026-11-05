@@ -26,8 +26,10 @@ use common::point_slot as point;
 use common::vid::Vid;
 use protocol::gc_chat::CHAT_TYPE_INFO;
 
+use super::affect::Affect;
 use super::view::{Effect, EntityKey};
 use super::GameState;
+use crate::loading_phase::{AFFECT_MOUNT, AFFECT_MOUNT_BONUS};
 
 impl GameState {
     /// `do_user_horse_ride` (`G/cmd_general.cpp:58-86`): an observer, the dead and the
@@ -165,7 +167,7 @@ impl GameState {
     /// itself and to each entity it sees (`MountVnum` sends no removals and no return
     /// inserts, unlike `ViewReencode`), and the points recompute with their update. An
     /// unchanged vnum sends nothing, as a rider in no sectree sends nothing either.
-    fn mount_vnum(&mut self, vid: Vid, vnum: u32) {
+    pub(super) fn mount_vnum(&mut self, vid: Vid, vnum: u32) {
         let changed = self
             .pc_points_mut(vid.raw())
             .is_some_and(|points| points.mount_vnum() != vnum);
@@ -203,6 +205,79 @@ impl GameState {
         ] {
             self.change_pc_point(vid, kind, 0, false);
         }
+    }
+
+    /// `pc_mount` (`G/questlua_pc.cpp:1392-1458`) for the player under `vid`: the mount
+    /// affect and its bonus go, and a summoned horse goes (`HorseSummon(false)`). Then, for
+    /// a vnum, `AFFECT_MOUNT` lays `POINT_MOUNT` for `seconds`, whose `MountVnum` mounts;
+    /// the eighteen mount races of the three speed bands add 30, 40 or 50 movement speed
+    /// as a second `AFFECT_MOUNT` row, which `IsCube` keys on its point. No war map is
+    /// hosted, so the `g_NoMountAtGuildWar` arm never runs.
+    pub(super) fn quest_mount(&mut self, vid: Vid, vnum: u32, seconds: i32) {
+        let _mount = self.remove_pc_affect(vid, AFFECT_MOUNT);
+        let _bonus = self.remove_pc_affect(vid, AFFECT_MOUNT_BONUS);
+        if self
+            .pc_points_mut(vid.raw())
+            .is_some_and(|points| points.horse().summoned())
+        {
+            self.horse_unsummon(vid, false);
+        }
+        if vnum == 0 {
+            return;
+        }
+        let row = |apply_on: usize, value: i32| Affect {
+            kind: AFFECT_MOUNT,
+            apply_on: u8::try_from(apply_on).unwrap_or(0),
+            value,
+            flag: 0,
+            remaining: seconds,
+            sp_cost: 0,
+        };
+        let mount = row(point::POINT_MOUNT, i32::from_ne_bytes(vnum.to_ne_bytes()));
+        self.add_pc_affect(vid, mount, true);
+        let speed = match vnum {
+            20_201..=20_204 | 20_213 | 20_216 => 30,
+            20_205..=20_208 | 20_214 | 20_217 => 40,
+            20_209..=20_212 | 20_215 | 20_218 => 50,
+            _ => return,
+        };
+        self.add_pc_affect_keyed(vid, row(point::POINT_MOV_SPEED, speed), true, true);
+    }
+
+    /// `pc_unmount` (`G/questlua_pc.cpp:1481-1489`) for the player under `vid`: the mount
+    /// affect and its bonus go, and a horse ride stops.
+    pub(super) fn unmount(&mut self, vid: Vid) {
+        let _mount = self.remove_pc_affect(vid, AFFECT_MOUNT);
+        let _bonus = self.remove_pc_affect(vid, AFFECT_MOUNT_BONUS);
+        if self.is_horse_riding(vid.raw()) {
+            self.stop_riding(vid);
+        }
+    }
+
+    /// `pc_mount_bonus` (`G/questlua_pc.cpp:1461-1479`) for the player under `vid`: without
+    /// a mount nothing (`@fixme134`); else the bonus goes and comes back as
+    /// `AFFECT_MOUNT_BONUS` on `aApplyInfo[apply].bPointType` for `seconds`. An apply type
+    /// past the table is refused: legacy reads `aApplyInfo` out of bounds there, a Defect.
+    pub(super) fn mount_bonus(&mut self, vid: Vid, apply: u8, value: i32, seconds: i32) {
+        if self
+            .pc_points_mut(vid.raw())
+            .is_none_or(|points| points.mount_vnum() == 0)
+        {
+            return;
+        }
+        let Some(point) = world::character::point_type(apply) else {
+            return;
+        };
+        let _bonus = self.remove_pc_affect(vid, AFFECT_MOUNT_BONUS);
+        let bonus = Affect {
+            kind: AFFECT_MOUNT_BONUS,
+            apply_on: u8::try_from(point).unwrap_or(0),
+            value,
+            flag: 0,
+            remaining: seconds,
+            sp_cost: 0,
+        };
+        self.add_pc_affect(vid, bonus, false);
     }
 
     /// `CHARACTER::IsRiding` (`G/char.cpp:8783-8786`) of the player under `vid`: its horse

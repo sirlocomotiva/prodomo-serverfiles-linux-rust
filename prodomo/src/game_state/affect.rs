@@ -266,6 +266,22 @@ impl GameState {
         }
     }
 
+    /// `CHARACTER::ComputeAffect`'s point arm (`G/char_affect.cpp:799-802`) for the player
+    /// under `vid`: `affect` joins (`add`) or leaves the list `RefreshAffect` reads first,
+    /// as legacy's list changes before its `ComputeAffect` runs, then its value goes onto
+    /// or comes off its point.
+    pub(super) fn compute_affect(&mut self, vid: Vid, affect: &Affect, add: bool) {
+        if let Some(points) = self.pc_points_mut(vid.raw()) {
+            if add {
+                points.affect_point_added(affect.apply_on, affect.value);
+            } else {
+                points.affect_point_removed(affect.apply_on, affect.value);
+            }
+        }
+        let amount = if add { affect.value } else { -affect.value };
+        self.change_pc_point(vid, usize::from(affect.apply_on), amount, false);
+    }
+
     /// `CHARACTER::AddAffect` on the player under `vid` (`G/char_affect.cpp:668-760`): a
     /// zero duration runs one tick; a moving body stops for the stun. With `over` and an
     /// affect of the same kind, the old row is uncomputed, its remove packet sent, and
@@ -275,7 +291,20 @@ impl GameState {
     /// update when the flag is set or either speed moved (a set flag always updates),
     /// the event starts, and the add packet goes to the player. No STUN/SLOW/POISON/263
     /// kind is realtime, and the DB packet is the retired peer's.
-    pub(super) fn add_pc_affect(&mut self, vid: Vid, mut affect: Affect, over: bool) {
+    pub(super) fn add_pc_affect(&mut self, vid: Vid, affect: Affect, over: bool) {
+        self.add_pc_affect_keyed(vid, affect, over, false);
+    }
+
+    /// [`GameState::add_pc_affect`] with `AddAffect`'s `IsCube`: when `by_apply` holds, the
+    /// row `over` replaces is the one of the same kind **and** point (`FindAffect(dwType,
+    /// bApplyOn)`, `G/char_affect.cpp:686-689`).
+    pub(super) fn add_pc_affect_keyed(
+        &mut self,
+        vid: Vid,
+        mut affect: Affect,
+        over: bool,
+        by_apply: bool,
+    ) {
         if affect.remaining == 0 {
             affect.remaining = 1;
         }
@@ -292,7 +321,9 @@ impl GameState {
                 event
                     .affects
                     .iter_mut()
-                    .find(|slot| slot.kind == affect.kind)
+                    .find(|slot| {
+                        slot.kind == affect.kind && (!by_apply || slot.apply_on == affect.apply_on)
+                    })
                     .map(|slot| {
                         let retired = *slot;
                         *slot = affect;
@@ -302,7 +333,7 @@ impl GameState {
         });
         let placed = retired.is_some();
         if let Some(retired) = retired {
-            self.change_pc_point(vid, usize::from(retired.apply_on), -retired.value, false);
+            self.compute_affect(vid, &retired, false);
             let frame = affect_remove_frame(&retired);
             let _retired = self.write_to_client(vid, frame);
         }
@@ -312,7 +343,7 @@ impl GameState {
                 event.affects.push(affect);
             }
         }
-        self.change_pc_point(vid, usize::from(affect.apply_on), affect.value, false);
+        self.compute_affect(vid, &affect, true);
         let flags_after = self.affect_flags_of(vid);
         if affect.flag != 0
             || mov_before != self.move_speed_of(vid.raw())
@@ -495,7 +526,7 @@ impl GameState {
             None => Vec::new(),
         };
         for affect in &removed {
-            self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
+            self.compute_affect(vid, affect, false);
             let frame = affect_remove_frame(affect);
             let _retired = self.write_to_client(vid, frame);
         }
@@ -595,7 +626,7 @@ impl GameState {
             return;
         }
         for affect in &removed {
-            self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
+            self.compute_affect(vid, affect, false);
             let frame = affect_remove_frame(affect);
             let _retired = self.write_to_client(vid, frame);
         }
@@ -640,7 +671,7 @@ impl GameState {
         for affect in &taken {
             let frame = affect_remove_frame(affect);
             let _retired = self.write_to_client(vid, frame);
-            self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
+            self.compute_affect(vid, affect, false);
         }
         let flags_after = self.affect_flags_of(vid);
         if flags_after != flags_before
@@ -750,7 +781,7 @@ impl GameState {
         // remove packet); the drain spends after them, so a starved SP row cannot
         // cover itself.
         for affect in starved.iter().chain(expired.iter()) {
-            self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
+            self.compute_affect(vid, affect, false);
             let _delivered = self.write_to_client(vid, affect_remove_frame(affect));
         }
         if drained > 0 {

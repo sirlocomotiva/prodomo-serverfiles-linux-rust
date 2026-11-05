@@ -107,6 +107,12 @@ pub(crate) enum HorseOp {
     Unride,
     /// `horse.set_name`: the manager rewrite with the re-summon around it.
     SetName(Vec<u8>),
+    /// `pc.mount(vnum, seconds)`.
+    Mount { vnum: u32, seconds: i32 },
+    /// `pc.unmount`.
+    Unmount,
+    /// `pc.mount_bonus(apply, value, seconds)`.
+    MountBonus { apply: u8, value: i32, seconds: i32 },
 }
 
 impl GameState {
@@ -453,6 +459,13 @@ impl GameState {
                 HorseOp::Ride => self.start_riding(vid),
                 HorseOp::Unride => self.stop_riding(vid),
                 HorseOp::SetName(name) => self.name_horse(vid, &name),
+                HorseOp::Mount { vnum, seconds } => self.quest_mount(vid, vnum, seconds),
+                HorseOp::Unmount => self.unmount(vid),
+                HorseOp::MountBonus {
+                    apply,
+                    value,
+                    seconds,
+                } => self.mount_bonus(vid, apply, value, seconds),
             }
         }
     }
@@ -554,7 +567,7 @@ impl GameState {
             crate::loading_phase::AFFECT_HORSE_NAME,
         );
         for affect in &removed {
-            self.change_pc_point(vid, usize::from(affect.apply_on), -affect.value, false);
+            self.compute_affect(vid, affect, false);
             let frame = super::affect::affect_remove_frame(affect);
             let _gone = self.write_to_client(vid, frame);
         }

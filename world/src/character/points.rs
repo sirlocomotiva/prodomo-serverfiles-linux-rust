@@ -61,8 +61,8 @@
 //!   level-up chains run through [`Points::gain_exp`] and [`Points::gain_conqueror_exp`],
 //!   whose callers own the quest trigger, guild and party updates, and save.
 //! - `POINT_GOLD`, `POINT_GAYA` and `POINT_INVEN`: the currencies and the inventory unlocks.
-//! - `POINT_POLYMORPH`, `POINT_MOUNT`, `POINT_ENERGY`, `POINT_COSTUME_ATTR_BONUS`, the three
-//!   biologist arms and the two protected-inventory arms: each drives its own system.
+//! - `POINT_POLYMORPH`, `POINT_ENERGY`, `POINT_COSTUME_ATTR_BONUS`, the three biologist arms
+//!   and the two protected-inventory arms: each drives its own system.
 //!
 //! The random hit and spell points a level-up adds (`iRandomHP` and `iRandomSP`) are 0: they
 //! grow only at a level-up, and the store gains their columns when the level-up is ported.
@@ -76,10 +76,11 @@
 //! after a stamina change, the polymorph arm of the battle points (the mount arms are
 //! ported: the stat floor in [`Points::compute_points_with`] and the attack floor and
 //! horse bonus in [`Points::compute_battle_points`]), and the parts of `ComputePoints`
-//! that read affects, skills, the dragon-soul deck and the attribute buffs (`BuffOnAttr`).
-//! ([`Points::set_passive_bonuses`]) so the skill system can supply them; today they are zero,
-//! which is exact for a character with no skill level. The worn items are computed: see
-//! [`Points::compute_points_with`].
+//! that read skills, the dragon-soul deck and the attribute buffs (`BuffOnAttr`). The skill
+//! bonuses are set from outside ([`Points::set_passive_bonuses`]) so the skill system can
+//! supply them; today they are zero, which is exact for a character with no skill level. The
+//! worn items are computed: see [`Points::compute_points_with`]. The held affects are laid
+//! again at the end (`RefreshAffect`, from the list [`Points::affect_point_added`] keeps).
 //!
 //! `ComputePoints` also ORs each worn item's `dwImmuneFlag` into the character's immunity bits
 //! (`char.cpp:3078`). The two use different bit orders: the proto's are the `IMMUNE` column's
@@ -328,7 +329,10 @@ const SUNGMA_SLOTS: [usize; 4] = [
 /// tree does not define, so neither is a slot here. Five attack bonuses are **not** in the
 /// list: `POINT_ATTBONUS_INSECT`, `_FIRE`, `_ICE`, `_DESERT` and `_TREE` fall to the
 /// unknown-type arm.
-const PLAIN: [usize; 120] = [
+const PLAIN: [usize; 121] = [
+    // `POINT_MOUNT`'s arm adds and sends (`char.cpp:4711-4715`); its `MountVnum` call
+    // re-shows the rider, which the world runs (`GameState::change_pc_point`).
+    point::POINT_MOUNT,
     point::POINT_ST,
     point::POINT_HT,
     point::POINT_DX,
@@ -475,7 +479,7 @@ const COUNTERS: [usize; 5] = [
 ];
 
 /// The arms whose side effects are not ported. See the module note.
-const NOT_PORTED: [usize; 17] = [
+const NOT_PORTED: [usize; 16] = [
     point::POINT_CONQUEROR_LEVEL,
     point::POINT_CONQUEROR_EXP,
     point::POINT_CONQUEROR_LEVEL_STEP,
@@ -485,7 +489,6 @@ const NOT_PORTED: [usize; 17] = [
     point::POINT_INVEN,
     point::POINT_GOLD,
     point::POINT_POLYMORPH,
-    point::POINT_MOUNT,
     point::POINT_ENERGY,
     point::POINT_COSTUME_ATTR_BONUS,
     point::POINT_BIOLOGIST_STATE,
@@ -581,6 +584,11 @@ pub struct Points {
     mount_group: u8,
     /// The character's horse (`CHorseRider`, which `CHARACTER` derives from).
     horse: Horse,
+    /// The point and value of each affect the character holds, in `m_list_pkAffect`
+    /// order: what `RefreshAffect` (`G/char_affect.cpp:769-778`) puts back at the end of
+    /// `ComputePoints`. The world owns the affects and keeps this list beside them
+    /// ([`Points::affect_point_added`], [`Points::affect_point_removed`]).
+    affect_points: Vec<(u8, i32)>,
 }
 
 /// One call of the `PointChange(POINT_EXP, iExpBalance)` recursion, as a loop frame: each
@@ -642,6 +650,7 @@ impl Points {
             mount_vnum: 0,
             mount_group: 0,
             horse: Horse::default(),
+            affect_points: Vec::new(),
         };
         // `SetPlayerProto` sets the base part, the hair and the sash from the row before it
         // computes (`char.cpp:2258-2265`); the computation then puts the base part in the
@@ -776,6 +785,26 @@ impl Points {
     pub fn set_mount_vnum(&mut self, vnum: u32, group: u8) {
         self.mount_vnum = vnum;
         self.mount_group = group;
+    }
+
+    /// An affect joined the list with `value` on point `apply_on`: `RefreshAffect` puts it
+    /// back at every computation from now on. A zero point (`POINT_NONE`) changes nothing
+    /// and is not kept.
+    pub fn affect_point_added(&mut self, apply_on: u8, value: i32) {
+        if apply_on != 0 {
+            self.affect_points.push((apply_on, value));
+        }
+    }
+
+    /// An affect with `value` on point `apply_on` left the list: the first such entry goes.
+    pub fn affect_point_removed(&mut self, apply_on: u8, value: i32) {
+        if let Some(at) = self
+            .affect_points
+            .iter()
+            .position(|&entry| entry == (apply_on, value))
+        {
+            let _gone = self.affect_points.remove(at);
+        }
     }
 
     /// The character's horse.
@@ -2068,9 +2097,16 @@ impl Points {
         }
 
         self.clamp_pools(records);
-        // `@fixme118`: legacy puts back whatever the affects took (`char.cpp:3150-3156`). The
-        // Rewrite has no affects, so this only ever meets the clamp above, which it cannot
-        // undo because a change is bounded by the maximum.
+        // `RefreshAffect` (`char.cpp:3150`, `G/char_affect.cpp:769-778`): each affect's
+        // `ComputeAffect(pkAff, true)` changes its point again. `ComputeAffect`'s guild-skill
+        // arm never runs: no guild skill lays an affect here.
+        let affects = std::mem::take(&mut self.affect_points);
+        for &(apply_on, value) in &affects {
+            self.nested(usize::from(apply_on), value, records);
+        }
+        self.affect_points = affects;
+        // `@fixme118` (`char.cpp:3152-3158`): whatever the clamp and the affects took from
+        // the hit and spell points goes back, as far as the maxima allow.
         if self.hp != hp_before {
             self.nested(point::POINT_HP, hp_before.saturating_sub(self.hp), records);
         }
@@ -3232,7 +3268,31 @@ mod tests {
             assert_eq!(written.value, expected, "{kind}");
             assert_eq!(points.get_point(kind), start + 7);
         }
-        assert_eq!(PLAIN.len(), 120);
+        assert_eq!(PLAIN.len(), 121);
+    }
+
+    /// `RefreshAffect` at the end of `ComputePoints` (`char.cpp:3150`): a held affect's point
+    /// survives a computation, the mount slot keeps its vnum, a point-less row adds nothing,
+    /// and a row that left the list does not come back.
+    #[test]
+    fn a_computation_puts_the_held_affects_back() {
+        const SPEED: usize = point::POINT_MOV_SPEED;
+        const MOUNT: usize = point::POINT_MOUNT;
+        let mut points = warrior();
+        let _ = points.compute_points();
+        let speed = points.get_point(SPEED);
+        for (kind, value) in [(SPEED, 30), (MOUNT, 20_201), (0, 5)] {
+            points.affect_point_added(u8::try_from(kind).unwrap(), value);
+            let _ = points.point_change(kind, value, false, false);
+        }
+        let _ = points.compute_points();
+        assert_eq!(points.get_point(SPEED), speed + 30);
+        assert_eq!(points.get_point(MOUNT), 20_201);
+        points.affect_point_removed(u8::try_from(SPEED).unwrap(), 30);
+        let _ = points.point_change(SPEED, -30, false, false);
+        let _ = points.compute_points();
+        assert_eq!(points.get_point(SPEED), speed);
+        assert_eq!(points.get_point(MOUNT), 20_201);
     }
 
     #[test]
