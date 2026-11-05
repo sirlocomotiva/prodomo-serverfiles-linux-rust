@@ -421,6 +421,9 @@ struct Held {
     /// The saved affects the load read (`player_affect`), which the world holds as the
     /// character's timed affects from the admission on, and which the save writes back.
     affects: Vec<db::player_affects::StoredAffect>,
+    /// The character's global rank row as the world last held it, with the generation to
+    /// save it under, which the save writes; `None` before it ever scored.
+    rank: Option<(i64, db::rank_global::StoredRank)>,
     /// The channel the client logged in through, which is `g_bChannel` on the descriptor.
     ///
     /// It is held from the Channel login rather than read from the listener, because a
@@ -1071,6 +1074,7 @@ fn hold_kept(held: &mut Held, kept: Kept) {
     held.quickslots = kept.quickslots;
     held.quest_flags = kept.quest_flags;
     held.affects = kept.affects;
+    held.rank = kept.rank;
     if let (Some((map, x, y)), Some(avatar)) = (kept.place, held.avatar.as_mut()) {
         avatar.map = map;
         avatar.x = x;
@@ -4999,9 +5003,10 @@ where
             guild_ops,
             items,
             gold,
+            claimed,
         })) => {
             info!(%addr, ?step, "A quest took the click");
-            if !store_quest_items(addr, context, held, &items, gold).await {
+            if !store_quest_items(addr, context, held, &items, (gold, claimed)).await {
                 return false;
             }
             if !store_quest_climbs(addr, context, held, &climbs).await {
@@ -5047,21 +5052,26 @@ async fn store_quest_items(
     context: &ConnectionContext,
     held: &Held,
     items: &[db::items::RowChange],
-    gold: Option<u64>,
+    (gold, claimed): (Option<u64>, bool),
 ) -> bool {
-    if items.is_empty() && gold.is_none() {
+    if items.is_empty() && gold.is_none() && !claimed {
         return true;
     }
     let Some(character) = held.character.as_ref() else {
         return true;
     };
-    let stored = match gold {
-        Some(gold) => {
-            let before = u64::try_from(character.gold.max(0)).unwrap_or(0);
-            let delta = prodomo::item_move::gold_delta(before, gold);
+    let delta = gold.map(|gold| {
+        let before = u64::try_from(character.gold.max(0)).unwrap_or(0);
+        prodomo::item_move::gold_delta(before, gold)
+    });
+    // A claim of the global rank's prizes is stored with the items it gave
+    // (`db::rank_global::claim`), so neither lands without the other.
+    let stored = match (claimed, delta) {
+        (true, delta) => db::rank_global::claim(&context.store, character.id, items, delta).await,
+        (false, Some(delta)) => {
             db::items::apply_transfer(&context.store, character.id, items, delta).await
         }
-        None => db::items::apply_row_changes(&context.store, character.id, items).await,
+        (false, None) => db::items::apply_row_changes(&context.store, character.id, items).await,
     };
     if let Err(error) = stored {
         warn!(%addr, %error, rows = items.len(), "A quest's gives could not be stored; closing");
@@ -5360,8 +5370,8 @@ where
         return true;
     };
     match context.game.quest(vid, step, place, item_actor(held)).await {
-        Ok(Ok((records, climbs, stores, items, gold))) => {
-            if !store_quest_items(addr, context, held, &items, gold).await {
+        Ok(Ok((records, climbs, stores, items, gold, claimed))) => {
+            if !store_quest_items(addr, context, held, &items, (gold, claimed)).await {
                 return false;
             }
             if !store_quest_climbs(addr, context, held, &climbs).await {
@@ -6835,6 +6845,17 @@ async fn save_held(context: &ConnectionContext, held: &Held, at: std::time::Inst
                 warn!(player = character.id, %error, "Could not save the affects");
                 return false;
             }
+            // Legacy's DB process wrote the counters every 20 minutes and at shutdown
+            // (`D/ClientManager.cpp:5225-5247`, `:425`); here the row rides the character's
+            // save. A row of an ended season's generation is not written.
+            if let Some((generation, row)) = &held.rank {
+                if let Err(error) =
+                    db::rank_global::save_row(&context.store, *generation, row).await
+                {
+                    warn!(player = character.id, %error, "Could not save the rank row");
+                    return false;
+                }
+            }
             true
         }
         Ok(false) => {
@@ -7729,6 +7750,7 @@ async fn run_accept_loop(
                         // The event calendar rides the same ordering: a world without it
                         // answers every event board empty.
                         install_events(game_loop, store).await?;
+                        install_rank(game_loop, store).await?;
                        ready = true;
                        ready_gate.open();
                        info!("Accepting clients");
@@ -8762,6 +8784,26 @@ async fn install_events(
     }
 }
 
+/// The global rank `serve` moves into the game thread once the store is up.
+///
+/// Every failure here stops the server instead of opening the gate: a world without its
+/// counters would show an empty board and start every character's row anew.
+async fn install_rank(game_loop: &mut GameLoopHandle, store: &Store) -> Result<(), Box<dyn Error>> {
+    let boot = db::rank_global::load(store)
+        .await
+        .map_err(|error| format!("Stored global rank is unusable: {error}"))?;
+    info!(
+        rows = boot.rows.len(),
+        prizes = boot.rewards.len(),
+        "Stored global rank loaded"
+    );
+    game_loop
+        .controller()
+        .install_rank(boot)
+        .await
+        .map_err(|error| format!("The world refused the global rank: {error}").into())
+}
+
 /// The stored guilds `serve` moves into the game thread once the store is up.
 ///
 /// Every failure here stops the server instead of opening the gate, as a missing
@@ -9132,7 +9174,6 @@ where
         LineCommand::EventFlag => event_flag_step(addr, context, held, rest).await,
         LineCommand::GetEventFlag => get_event_flag_step(addr, context, held).await,
         LineCommand::EventLine(line) => event_line_step(addr, context, held, line, rest).await,
-        LineCommand::GiveReward => give_reward_step(session, addr, context, held).await,
         LineCommand::LettersOpen => letters_open_step(addr, context, held).await,
         other => run_line_command_tail(session, other, addr, context, held, rest).await,
     }
@@ -9191,6 +9232,8 @@ where
         | LineCommand::SetStat(_)
         | LineCommand::StatReset) => stat_line_step(command, addr, context, held, rest).await,
         LineCommand::PkMode => pkmode_step(addr, context, held, rest).await,
+        LineCommand::GiveReward => give_reward_step(session, addr, context, held).await,
+        LineCommand::RankLine(line) => rank_line_step(addr, context, held, line).await,
         LineCommand::Horse(line) => horse_line_step(addr, context, held, line, rest).await,
         LineCommand::WalkMode(walk) => walk_mode_step(addr, context, held, walk).await,
         LineCommand::CanDead(can) => can_dead_step(addr, context, held, can).await,
@@ -9572,6 +9615,44 @@ where
         return false;
     }
     info!(%addr, "Reward traded");
+    true
+}
+
+/// `/open_global_rank` and `/rank_end_season` (`G/cmd_general.cpp:4118-4134`): the world runs
+/// the line, whose lines rode the outbox already; a season's end is stored in one
+/// transaction, and a failure closes.
+async fn rank_line_step(
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    line: prodomo::game_loop_messages::RankLine,
+) -> bool {
+    let Some(vid) = held.world else {
+        info!(%addr, "Rank line without a character in the world; ignoring");
+        return true;
+    };
+    let ended = match context.game.rank_line(vid, line, item_actor(held)).await {
+        Ok(ended) => ended,
+        Err(error) => {
+            warn!(%addr, %error, "The world could not be asked for a rank line; closing");
+            return false;
+        }
+    };
+    let Some(ended) = ended else {
+        return true;
+    };
+    if let Err(error) = db::rank_global::end_season(
+        &context.store,
+        ended.season,
+        ended.generation,
+        &ended.winners,
+    )
+    .await
+    {
+        warn!(%addr, %error, "The season's end could not be stored; closing");
+        return false;
+    }
+    info!(%addr, season = ended.season, winners = ended.winners.len(), "Rank season ended");
     true
 }
 
@@ -14111,6 +14192,7 @@ mod tests {
                 quest_flags: Vec::new(),
                 affects: Vec::new(),
                 horse_name: None,
+                rank: None,
             },
         );
         assert_eq!(

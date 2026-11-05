@@ -72,10 +72,11 @@ The row's note says why no binary scenario proves it.
   `IsEmptyAdminPage` (`G/input.cpp:24-37`) have no callers; the password is only set and logged
   in `G/config.cpp`. Row `sys.adminpage`. If the owner agrees, it is `unused`, and the decision
   that it stays off until configured is moot.
-- **`BlueDragon.lua` and `monkey_dungeon.lua` are never loaded,** so `G/BlueDragon_Binder.cpp`
-  always runs on its fallbacks. `MapProperty.txt`, `charset.txt`, and `pet_skill_names.txt`
-  have no reader either. Rows `data.lua.unread`, `data.map.property`, `data.locale.charset`,
-  `data.locale.names`.
+- **`monkey_dungeon.lua` is never loaded** (row `data.lua.unread` covers only that file since
+  ledger 402, which found `BlueDragon.lua` is dofiled by `settings.lua:174` and so is the
+  `BlueDragonSetting` the binder reads). `MapProperty.txt`, `charset.txt`, and
+  `pet_skill_names.txt` have no reader either. Rows `data.map.property`,
+  `data.locale.charset`, `data.locale.names`.
 - **`questlib_extra.lua` and `questing.lua` are never loaded, and only `qc` reads
   `quest_functions`** (ledger 227). Rows `questlib.questlib_extra`, `questlib.questing`,
   `questlib.quest_functions`. `questlib_extra.lua` holds the only setter of

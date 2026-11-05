@@ -1150,6 +1150,20 @@ async fn apply_sides(
     sides: &[TransferSide<'_>],
     gold: bool,
 ) -> Result<(), ItemError> {
+    let mut transaction = store.pool().begin().await?;
+    write_sides(store, &mut transaction, sides, gold).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// The writes and checks of [`apply_sides`] on `transaction`, which the caller commits: a
+/// refusal returns before the commit, and dropping the transaction rolls every write back.
+pub(crate) async fn write_sides(
+    store: &Store,
+    transaction: &mut sqlx::PgConnection,
+    sides: &[TransferSide<'_>],
+    gold: bool,
+) -> Result<(), ItemError> {
     let owners: Vec<u32> = sides.iter().map(|side| side.owner_id).collect();
     for (index, side) in sides.iter().enumerate() {
         if owners[..index].contains(&side.owner_id) {
@@ -1172,20 +1186,16 @@ async fn apply_sides(
     );
     let set_sockets = set_sockets_statement();
     let set_attributes = set_attributes_statement();
-    let mut transaction = store.pool().begin().await?;
     sqlx::query(DEFER_CELL_KEYS)
         .execute(&mut *transaction)
         .await?;
     for side in sides {
-        if let Err(error) = check_accounts(&mut transaction, side).await {
-            transaction.rollback().await?;
-            return Err(error);
-        }
+        check_accounts(&mut *transaction, side).await?;
     }
     for side in sides {
         for change in side.changes {
             let (id, touched) = write_change(
-                &mut transaction,
+                &mut *transaction,
                 side.owner_id,
                 change,
                 &insert,
@@ -1194,17 +1204,13 @@ async fn apply_sides(
             )
             .await?;
             if touched == 0 {
-                transaction.rollback().await?;
                 return Err(missing(store, id).await);
             }
         }
     }
     if gold {
         for side in sides {
-            if let Err(error) = add_gold(&mut transaction, side.owner_id, side.gold).await {
-                transaction.rollback().await?;
-                return Err(error);
-            }
+            add_gold(&mut *transaction, side.owner_id, side.gold).await?;
         }
     }
     for &owner_id in &owners {
@@ -1216,7 +1222,6 @@ async fn apply_sides(
         .fetch_all(&mut *transaction)
         .await?;
         if !shared.is_empty() {
-            transaction.rollback().await?;
             return Err(taken_cell(owner_id, sides, &shared));
         }
     }
@@ -1232,13 +1237,11 @@ async fn apply_sides(
     accounts.sort_unstable();
     accounts.dedup();
     for account in accounts {
-        let shared = shared_account_cells(&mut transaction, account).await?;
+        let shared = shared_account_cells(&mut *transaction, account).await?;
         if !shared.is_empty() {
-            transaction.rollback().await?;
             return Err(taken_account_cell(account, &stored, &shared));
         }
     }
-    transaction.commit().await?;
     Ok(())
 }
 

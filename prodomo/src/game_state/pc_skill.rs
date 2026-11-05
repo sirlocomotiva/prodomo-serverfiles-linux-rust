@@ -4868,22 +4868,30 @@ mod tests {
     /// Build a [`Game`] session for the reader at 1 and run one GRAND read of `vnum`
     /// at count `total`: whether it climbed, the records it queued, and the climbs.
     /// The live borrows split like `run_quests` does.
-    fn grand_read(
-        world: &mut GameState,
-        vnum: u32,
-        total: i32,
-    ) -> (bool, super::super::quests::QuestStepOutcome) {
-        use quest::manager::Game;
+    /// The GRAND helper's reader, its descriptor view, its job card and its level.
+    fn grand_card(world: &GameState) -> (Vid, crate::item_move::Mover, (u8, u8), u8) {
         let reader = Vid::new(1);
         let mover = world.own_mover(reader).expect("the body stands");
-        let body = world.bodies.get(&reader);
-        let card = body.map_or((0, 0), |b| (b.card.job, b.card.skill_group));
+        let card = world
+            .bodies
+            .get(&reader)
+            .map_or((0, 0), |b| (b.card.job, b.card.skill_group));
         let pc_level = world
             .characters
             .find_by_vid(reader)
             .ok()
             .and_then(|character| character.points())
             .map_or(0, world::character::Points::level);
+        (reader, mover, card, pc_level)
+    }
+
+    fn grand_read(
+        world: &mut GameState,
+        vnum: u32,
+        total: i32,
+    ) -> (bool, super::super::quests::QuestStepOutcome) {
+        use quest::manager::Game;
+        let (reader, mover, card, pc_level) = grand_card(world);
         let GameState {
             characters,
             locale,
@@ -4954,6 +4962,7 @@ mod tests {
             switched: false,
             confirm_records: Vec::new(),
             confirm_timeouts: Vec::new(),
+            rank: crate::game_state::rank_global::RankStep::default(),
             party_flags: std::collections::HashMap::new(),
             party_sets: Vec::new(),
             channel: 1,
@@ -4971,7 +4980,10 @@ mod tests {
         };
         let climbed = session.learn_grand_master_skill(vnum, total);
         let (records, climbs) = (session.records, session.climbs);
-        (climbed, (records, climbs, Vec::new(), Vec::new(), None))
+        (
+            climbed,
+            (records, climbs, Vec::new(), Vec::new(), None, false),
+        )
     }
 
     /// The GRAND read climbs past its max: vnum 1 at 30, the count already at 6 (max 5
@@ -4983,7 +4995,7 @@ mod tests {
         world.bodies.get_mut(&Vid::new(1)).unwrap().card.skill_group = 1;
         world.set_pc_skill_level(1, 1, 30);
         std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
-        let (climbed, (records, climbs, _, _, _)) = grand_read(&mut world, 1, 6);
+        let (climbed, (records, climbs, _, _, _, _)) = grand_read(&mut world, 1, 6);
         assert!(climbed);
         assert_eq!(world.pc_skill_level(1, 1), 31);
         assert_eq!(climbs.len(), 1, "the climb is queued for the store");
@@ -5020,7 +5032,7 @@ mod tests {
         let (mut world, mut inbox) = a_reader(50301, 25_000);
         world.set_pc_skill_level(1, SKILL_LEADERSHIP, 30);
         std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
-        let (climbed, (records, climbs, _, _, _)) = grand_read(&mut world, SKILL_LEADERSHIP, 1);
+        let (climbed, (records, climbs, _, _, _, _)) = grand_read(&mut world, SKILL_LEADERSHIP, 1);
         assert!(!climbed);
         assert!(climbs.is_empty(), "no climb, no store");
         assert_eq!(texts(&records), [b"[LS;949]".to_vec()]);

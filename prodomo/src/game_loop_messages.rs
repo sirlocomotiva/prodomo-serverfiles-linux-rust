@@ -222,6 +222,14 @@ pub enum GameCommand {
         /// Where the game thread reports whether it installed.
         reply: oneshot::Sender<bool>,
     },
+    /// Installs the global rank boot read (`db::rank_global::load`): the season, the
+    /// counters, the prizes and the unclaimed awards. See `game_state::rank_global`.
+    InstallRank {
+        /// What boot read.
+        boot: db::rank_global::RankBoot,
+        /// Where the game thread reports that it installed.
+        reply: oneshot::Sender<()>,
+    },
     /// Takes a granted item back out of the world after its row could not be written.
     ///
     /// The world is mutated before the row exists, because only the world can choose a
@@ -1484,6 +1492,18 @@ pub enum GameCommand {
         /// Where the game thread reports the line ran.
         reply: oneshot::Sender<()>,
     },
+    /// Run one `/open_global_rank` or `/rank_end_season` line. Answers the season's end the
+    /// descriptor stores, or `None`. See `game_state::rank_global`.
+    RankLine {
+        /// The VID of the character that typed the line.
+        vid: common::vid::Vid,
+        /// Which line.
+        line: RankLine,
+        /// What the descriptor knows of the character.
+        mover: crate::item_move::Mover,
+        /// Where the game thread reports the season's end.
+        reply: oneshot::Sender<Option<crate::game_state::SeasonEnd>>,
+    },
     /// Run one `/give_reward` line: the busy, event and letter gates first, then the
     /// six letters go and the box draw lands. Answers the stored rows, or `None`
     /// for a refusal the caller already heard. See `game_state::letters`.
@@ -2484,6 +2504,7 @@ impl GameCommand {
                 | GameCommand::EventFlag { .. }
                 | GameCommand::GetEventFlag { .. }
                 | GameCommand::EventLine { .. }
+                | GameCommand::RankLine { .. }
                 | GameCommand::GiveReward { .. }
                 | GameCommand::SocketItem { .. }
                 | GameCommand::GmLine { .. }
@@ -2533,6 +2554,15 @@ pub enum Departure {
     Disconnect,
     /// Its client warps, which takes the body out of its sectree first (`G/char.cpp:6751-6752`).
     Warp,
+}
+
+/// The global rank's lines (`G/cmd.cpp:308-309`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RankLine {
+    /// `/open_global_rank` (`do_open_global_rank`): the board.
+    Open,
+    /// `/rank_end_season` (`do_global_rank_end_season`): the season's end.
+    EndSeason,
 }
 
 /// The commands that set one named flag, or spawn the event helpers.
@@ -3112,6 +3142,9 @@ pub struct Kept {
     /// The horse name the world holds (`CHorseNameManager`), which a save writes with the
     /// character row. `None` for a character that entered without points.
     pub horse_name: Option<Vec<u8>>,
+    /// The character's global rank row and the generation to save it under, which a save
+    /// writes (`db::rank_global::save_row`). `None` for a character that never scored.
+    pub rank: Option<(i64, db::rank_global::StoredRank)>,
 }
 
 /// Why installing the item id allocator did not succeed.
@@ -5467,6 +5500,44 @@ impl GameLoopController {
         .await
         .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one rank line. What the line shows rides the outbox before the
+    /// answer, which is the season's end to store, or `None`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn rank_line(
+        &self,
+        vid: common::vid::Vid,
+        line: RankLine,
+        mover: crate::item_move::Mover,
+    ) -> Result<Option<crate::game_state::SeasonEnd>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::RankLine {
+            vid,
+            line,
+            mover,
+            reply,
+        })
+        .await
+        .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Installs the global rank boot read.
+    ///
+    /// # Errors
+    ///
+    /// [`InstallError::NotSent`] when the command never reached the game thread and
+    /// [`InstallError::NoAnswer`] when it closed the reply without sending.
+    pub async fn install_rank(&self, boot: db::rank_global::RankBoot) -> Result<(), InstallError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::InstallRank { boot, reply })
+            .await
+            .map_err(|_| InstallError::NotSent)?;
+        answer.await.map_err(|_| InstallError::NoAnswer)
     }
 
     /// Asks the world to run one `/give_reward` line. What the line shows rides the

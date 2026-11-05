@@ -34,8 +34,9 @@ owner answers.
 
 5. **Earlier findings.** `.scratch/parity/spec.md` ("Findings for the owner") lists:
    - the adminpage that legacy never reaches (row `sys.adminpage`);
-   - `BlueDragon.lua` and `monkey_dungeon.lua`, which are never loaded, and the data files with
-     no reader (`MapProperty.txt`, `charset.txt`, `pet_skill_names.txt`);
+   - `monkey_dungeon.lua`, which is never loaded, and the data files with
+     no reader (`MapProperty.txt`, `charset.txt`, `pet_skill_names.txt`) (ledger 402 corrects
+     the `BlueDragon.lua` half: `settings.lua:174` dofiles it, so `BlueDragonSetting` is set);
    - `HEADER_CG_STATE_CHECKER` served before auth;
    - the `ENVANTER_BLACK` header.
 

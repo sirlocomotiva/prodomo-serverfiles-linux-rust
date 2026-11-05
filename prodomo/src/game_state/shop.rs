@@ -223,6 +223,8 @@ pub enum ShopAnswer {
         items: Vec<db::items::RowChange>,
         /// The gold the scripts' moves left the character holding, for the same store.
         gold: Option<u64>,
+        /// Whether a script claimed the global rank's prizes, for the same store.
+        claimed: bool,
     },
 }
 
@@ -342,16 +344,17 @@ impl GameState {
         if self.trading.contains_key(&vid) {
             return ShopAnswer::silent(ShopDeclined::Trading);
         }
-        let (taken, (mut records, climbs, guild_ops, items, gold)) =
+        let (taken, (mut records, climbs, guild_ops, items, gold, claimed)) =
             self.quest_click(vid, (target, race), place, mover);
         // A give's rows are stored even when no script took the click.
-        if taken || !items.is_empty() || gold.is_some() {
+        if taken || !items.is_empty() || gold.is_some() || claimed {
             return ShopAnswer::Quest {
                 records,
                 climbs,
                 guild_ops,
                 items,
                 gold,
+                claimed,
             };
         }
         match self.open_window(vid, target, place, mover) {
@@ -1343,6 +1346,7 @@ mod tests {
             guild_ops: Vec::new(),
             items: Vec::new(),
             gold: None,
+            claimed: false,
         };
         assert_eq!(click(&mut state, SCRIPTED, at(0)), declined);
         assert!(state.browsing.is_empty());

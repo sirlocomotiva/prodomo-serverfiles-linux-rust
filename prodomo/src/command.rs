@@ -19,7 +19,7 @@
 //!
 //! - **A command this build does not port answers nothing.** Legacy runs its handler.
 
-use crate::game_loop_messages::{EventLine, ExitKind, GmLine, HorseLine, RestartKind};
+use crate::game_loop_messages::{EventLine, ExitKind, GmLine, HorseLine, RankLine, RestartKind};
 
 mod table;
 
@@ -168,6 +168,8 @@ impl CommandEntry {
             "do_user_horse_ride" => Command::Horse(HorseLine::UserRide),
             "do_unmount" => Command::Horse(HorseLine::Unmount),
             "do_ride" => Command::Ride,
+            "do_open_global_rank" => Command::RankLine(RankLine::Open),
+            "do_global_rank_end_season" => Command::RankLine(RankLine::EndSeason),
             _ => self.mid_name(),
         }
     }
@@ -745,6 +747,8 @@ pub enum Command {
     Horse(HorseLine),
     /// `give_reward`: the six letters are traded for the box's draw.
     GiveReward,
+    /// `/open_global_rank` or `/rank_end_season`: the global rank's lines.
+    RankLine(RankLine),
     /// `letters_open`: the caller hears the box's table and opens the window.
     LettersOpen,
     /// `do_stat`: the line's attribute rises by 1 for a stat point.

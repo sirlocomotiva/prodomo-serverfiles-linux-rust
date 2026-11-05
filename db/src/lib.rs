@@ -18,6 +18,7 @@ pub mod player_top;
 pub mod players;
 pub mod quest_flags;
 pub mod quickslots;
+pub mod rank_global;
 pub mod safebox;
 pub mod store;
 

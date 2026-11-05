@@ -42,6 +42,7 @@ use world::character::{number, Pcg32};
 use world::npc::MapNpcs;
 
 use super::quest_target::QuestTargets;
+use super::rank_global::{Prizes, RankStep};
 
 /// `ITEM_FLAG_QUEST_USE` and `ITEM_FLAG_QUEST_USE_MULTIPLE` (`common/item_length.h:369-370`):
 /// an `ITEM_QUEST` with either runs no quest when used. The text protos' `QUEST_USE` name sets
@@ -173,7 +174,23 @@ pub type QuestStepOutcome = (
     Vec<super::guild::GuildQuestStore>,
     Vec<db::items::RowChange>,
     Option<u64>,
+    bool,
 );
+
+/// `MOB_RANK_KNIGHT` (`common/length.h:458-466`), the rank `GetMobRank` gives a PC.
+const MOB_RANK_KNIGHT: u8 = 3;
+
+/// What a quest step may give, which decides how its descriptor stores it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Giving {
+    /// Nothing: no descriptor stores the step's rows.
+    Nothing,
+    /// Items, which the descriptor stores with the step.
+    Items,
+    /// Items and the global rank's prizes, whose claim the descriptor stores with the items
+    /// (`db::rank_global::claim`).
+    ItemsAndPrizes,
+}
 
 /// What a quest run reports: the records, the GRAND climbs, the `guild.*`
 /// calls the scripts made (each for [`GameState::answer_guild_quest`] after the step),
@@ -334,6 +351,7 @@ struct WorldMoves {
     party_sets: Vec<(Vec<u8>, i32)>,
     confirm_records: Vec<(u32, Vec<u8>)>,
     confirm_timeouts: Vec<(u32, i32)>,
+    rank_points: Vec<(u8, i32)>,
 }
 
 impl WorldMoves {
@@ -353,6 +371,7 @@ impl WorldMoves {
             party_sets: std::mem::take(&mut session.party_sets),
             confirm_records: std::mem::take(&mut session.confirm_records),
             confirm_timeouts: std::mem::take(&mut session.confirm_timeouts),
+            rank_points: std::mem::take(&mut session.rank.points),
         }
     }
 }
@@ -537,6 +556,10 @@ pub(super) struct Session<'s> {
     /// Every confirm timeout a script armed, with its waiter's PID, in order: the world
     /// counts each down in Pulses after the step.
     pub(super) confirm_timeouts: Vec<(u32, i32)>,
+    /// The step's rank points, in order, for [`GameState::add_rank_point`] after the step,
+    /// and the reader's prizes, open when the step's descriptor stores a claim
+    /// ([`Giving::ItemsAndPrizes`]).
+    pub(super) rank: RankStep,
 }
 
 /// A blocked PC's snapshot: the fields a script in its block reads, cloned at the
@@ -1645,6 +1668,58 @@ impl Game for Session<'_> {
         self.horse_name.clone()
     }
 
+    fn global_rank_add_point(&mut self, kind: u8, count: i32) {
+        self.rank.points.push((kind, count));
+    }
+
+    /// `pc_global_rank_get_reward` (`G/questlua_pc.cpp:3680-3721`): each unclaimed prize by
+    /// `AutoGiveItem`, then all of them claimed. A step whose descriptor stores no claim
+    /// gives nothing and claims nothing.
+    fn global_rank_get_reward(&mut self) -> bool {
+        if matches!(&self.rank.prizes, Prizes::Closed) {
+            warn!("a quest claimed rank prizes where no descriptor stores the claim; none given");
+            return false;
+        }
+        let Prizes::Open(prizes) = std::mem::replace(&mut self.rank.prizes, Prizes::Claimed) else {
+            return false;
+        };
+        if prizes.is_empty() {
+            self.rank.prizes = Prizes::Open(prizes);
+            return false;
+        }
+        for (vnum, count) in prizes {
+            let _given = self.give_item(vnum, count);
+        }
+        true
+    }
+
+    fn npc_is_pc(&self, vid: u32) -> bool {
+        self.pcs.iter().any(|(_, pc)| *pc == vid)
+    }
+
+    /// A PC is no stone, and `GetMobRank` answers `MOB_RANK_KNIGHT` for it
+    /// (`G/char.cpp:2640-2646`).
+    fn npc_stone_and_rank(&self, vid: u32) -> Option<(bool, u8)> {
+        if self.npc_is_pc(vid) {
+            return Some((false, MOB_RANK_KNIGHT));
+        }
+        self.npcs?
+            .npcs
+            .iter()
+            .find(|npc| npc.vid == vid)
+            .map(|npc| {
+                (
+                    npc.char_type == gamedata::mob_proto::CHAR_TYPE_STONE,
+                    npc.fight.rank,
+                )
+            })
+    }
+
+    /// No dungeon is ported, so no character stands in one.
+    fn in_dungeon(&self) -> bool {
+        false
+    }
+
     fn set_horse_name(&mut self, name: Vec<u8>) -> u8 {
         // `horse_set_name` (`G/questlua_horse.cpp:231-271`): 0 without a horse; 1 for a
         // name the europe rules refuse (`check_name_alphabet` with the banwords and the
@@ -2072,29 +2147,29 @@ impl GameState {
         let level = character
             .points()
             .map_or(1, world::character::Points::level);
-        let answered =
-            self.run_quests_giving(
-                place,
-                (mover, level, pid),
-                true,
-                |manager, game| match step {
-                    QuestStep::Answer(answer) => manager.answer(pid, *answer, game),
-                    QuestStep::Input(text) => manager.input(pid, text, game),
-                    QuestStep::Button(quest) if quest & QUEST_INFO_BIT != 0 => {
-                        manager.info(pid, quest & !QUEST_INFO_BIT, game);
-                    }
-                    QuestStep::Button(quest) => {
-                        manager.button(pid, *quest, game);
-                    }
-                    QuestStep::SelectItem(selection) => {
-                        manager.select_item(pid, *selection, game);
-                    }
-                    QuestStep::EventQuest(name) => {
-                        manager.event_quest(pid, name, game);
-                    }
-                },
-            );
-        let Some(((), (mut records, climbs, ops, block_mode, _, gold_moves, _), items)) = answered
+        let answered = self.run_quests_giving(
+            place,
+            (mover, level, pid),
+            Giving::ItemsAndPrizes,
+            |manager, game| match step {
+                QuestStep::Answer(answer) => manager.answer(pid, *answer, game),
+                QuestStep::Input(text) => manager.input(pid, text, game),
+                QuestStep::Button(quest) if quest & QUEST_INFO_BIT != 0 => {
+                    manager.info(pid, quest & !QUEST_INFO_BIT, game);
+                }
+                QuestStep::Button(quest) => {
+                    manager.button(pid, *quest, game);
+                }
+                QuestStep::SelectItem(selection) => {
+                    manager.select_item(pid, *selection, game);
+                }
+                QuestStep::EventQuest(name) => {
+                    manager.event_quest(pid, name, game);
+                }
+            },
+        );
+        let Some(((), (mut records, climbs, ops, block_mode, _, gold_moves, _), items, claimed)) =
+            answered
         else {
             return Ok(QuestStepOutcome::default());
         };
@@ -2116,7 +2191,7 @@ impl GameState {
             records.extend(judged.own);
             stores.extend(judged.stores);
         }
-        Ok((records, climbs, stores, items, gold))
+        Ok((records, climbs, stores, items, gold, claimed))
     }
 
     /// `CQuestManager::Letter` (`G/questmanager.cpp:502-514`) for the character under
@@ -2193,10 +2268,13 @@ impl GameState {
         let level = character
             .points()
             .map_or(1, world::character::Points::level);
-        let Some((taken, (mut records, climbs, ops, block_mode, _, gold_moves, _), items)) = self
-            .run_quests_giving(place, (mover, level, pid), true, |manager, game| {
-                manager.click(pid, target, u32::from(race), game)
-            })
+        let Some((taken, (mut records, climbs, ops, block_mode, _, gold_moves, _), items, claimed)) =
+            self.run_quests_giving(
+                place,
+                (mover, level, pid),
+                Giving::ItemsAndPrizes,
+                |manager, game| manager.click(pid, target, u32::from(race), game),
+            )
         else {
             return (false, QuestStepOutcome::default());
         };
@@ -2215,7 +2293,7 @@ impl GameState {
             records.extend(judged.own);
             stores.extend(judged.stores);
         }
-        (taken, (records, climbs, stores, items, gold))
+        (taken, (records, climbs, stores, items, gold, claimed))
     }
 
     /// `case ITEM_QUEST` of `UseItemEx` (`G/char_item.cpp:2842-2888`) after the world's checks
@@ -2264,10 +2342,15 @@ impl GameState {
             .spot_of(vid.raw())
             .map_or((0, 0), |spot| (spot.x, spot.y));
         let place = GroundPlace { channel, map, x, y };
-        let Some(((), (records, climbs, ops, block_mode, _, _, _), items)) = self
-            .run_quests_giving(place, (mover, level, pid), true, |manager, game| {
-                manager.use_item(pid, (id, vnum), game);
-            })
+        let Some(((), (records, climbs, ops, block_mode, _, _, _), items, _)) = self
+            .run_quests_giving(
+                place,
+                (mover, level, pid),
+                Giving::Items,
+                |manager, game| {
+                    manager.use_item(pid, (id, vnum), game);
+                },
+            )
         else {
             return;
         };
@@ -2470,8 +2553,8 @@ impl GameState {
         pid: u32,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
     ) -> Option<(R, QuestRun)> {
-        self.run_quests_giving(place, (mover, level, pid), false, op)
-            .map(|(answer, run, _)| (answer, run))
+        self.run_quests_giving(place, (mover, level, pid), Giving::Nothing, op)
+            .map(|(answer, run, _, _)| (answer, run))
     }
 
     /// [`Self::run_quests`], with `pc.give_item2` able to give when `stores_items`: the step's
@@ -2485,11 +2568,11 @@ impl GameState {
         &mut self,
         place: GroundPlace,
         (mover, level, pid): (Mover, u8, u32),
-        stores_items: bool,
+        giving: Giving,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
-    ) -> Option<(R, QuestRun, Vec<db::items::RowChange>)> {
-        let (answer, mut run, rows) =
-            self.run_quests_giving_raw(place, (mover, level, pid), stores_items, op)?;
+    ) -> Option<(R, QuestRun, Vec<db::items::RowChange>, bool)> {
+        let (answer, mut run, rows, claimed) =
+            self.run_quests_giving_raw(place, (mover, level, pid), giving, op)?;
         let vid = self
             .characters
             .find_by_pid(pid)
@@ -2502,19 +2585,20 @@ impl GameState {
             self.packet_around(me, &frame, Some(me));
             run.0.push(frame);
         }
-        Some((answer, run, rows))
+        Some((answer, run, rows, claimed))
     }
 
     /// The step behind [`Self::run_quests_giving`], which then applies the alignment amounts.
+    /// The `bool` answers whether the step claimed the reader's prizes, which it forgets.
     fn run_quests_giving_raw<R>(
         &mut self,
         place: GroundPlace,
         (mover, level, pid): (Mover, u8, u32),
-        stores_items: bool,
+        giving: Giving,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
-    ) -> Option<(R, QuestRun, Vec<db::items::RowChange>)> {
-        let (answer, run, item_rows, queued, reader, takes) = {
-            let mut armed = self.arm_quest_session(place, (mover, level, pid), stores_items)?;
+    ) -> Option<(R, QuestRun, Vec<db::items::RowChange>, bool)> {
+        let (answer, run, item_rows, queued, reader, takes, claimed) = {
+            let mut armed = self.arm_quest_session(place, (mover, level, pid), giving)?;
             let answer = op(armed.manager, &mut armed.session);
             let queued = WorldMoves::take(&mut armed.session);
             let Session {
@@ -2527,6 +2611,7 @@ impl GameState {
                 gold_changes,
                 hides,
                 blocked,
+                rank: rank_step,
                 ..
             } = armed.session;
             let mut takes: Vec<(u32, u32, u32)> = Vec::new();
@@ -2544,8 +2629,19 @@ impl GameState {
                 gold_changes,
                 hides,
             );
-            (answer, run, item_rows, queued, armed.reader, takes)
+            (
+                answer,
+                run,
+                item_rows,
+                queued,
+                armed.reader,
+                takes,
+                rank_step.prizes == Prizes::Claimed,
+            )
         };
+        if claimed {
+            self.rank.forget_prizes(pid);
+        }
         self.apply_world_moves(reader, place, mover, pid, queued);
         let mut blocked_rows = Vec::new();
         for (take_pid, vnum, count) in takes {
@@ -2553,7 +2649,7 @@ impl GameState {
         }
         let mut item_rows = item_rows;
         item_rows.extend(blocked_rows);
-        Some((answer, run, item_rows))
+        Some((answer, run, item_rows, claimed))
     }
 
     /// A [`Session`] borrowed from the world, with its manager and reader: the split-out
@@ -2564,7 +2660,7 @@ impl GameState {
         &mut self,
         place: GroundPlace,
         (mover, level, pid): (Mover, u8, u32),
-        stores_items: bool,
+        giving: Giving,
     ) -> Option<ArmedSession<'_>> {
         let reader = self
             .characters
@@ -2596,6 +2692,7 @@ impl GameState {
             gauss,
             horse_names,
             name_rules,
+            rank,
             ..
         } = self;
         let quests = quests.as_mut()?;
@@ -2621,7 +2718,7 @@ impl GameState {
             item_names,
             goto_info: _,
         } = &mut *quests;
-        let session = build_session(session_inputs(
+        let mut session = build_session(session_inputs(
             place,
             mover,
             level,
@@ -2649,9 +2746,12 @@ impl GameState {
             item_attrs,
             item_masks,
             quest_targets,
-            stores_items,
+            giving != Giving::Nothing,
             name_rules.clone(),
         ));
+        if giving == Giving::ItemsAndPrizes {
+            session.rank.prizes = Prizes::Open(rank.prizes_of(pid));
+        }
         Some(ArmedSession {
             manager,
             session,
@@ -3012,6 +3112,9 @@ impl GameState {
         }
         for (waiter, timeout) in queued.confirm_timeouts {
             self.arm_confirm_timeout(waiter, timeout);
+        }
+        for (kind, count) in queued.rank_points {
+            self.add_rank_point(reader, kind, count);
         }
         for (x, y, private) in queued.warps {
             self.order_quest_warp(reader, x, y, private, mover);
@@ -3646,6 +3749,7 @@ fn session_head<'s>(
         switched: false,
         confirm_records: Vec::new(),
         confirm_timeouts: Vec::new(),
+        rank: RankStep::default(),
     }
 }
 
@@ -3739,6 +3843,7 @@ mod tests {
             switched: false,
             confirm_records: Vec::new(),
             confirm_timeouts: Vec::new(),
+            rank: RankStep::default(),
             party_flags: std::collections::HashMap::new(),
             party_sets: Vec::new(),
             channel: 1,
@@ -4119,6 +4224,7 @@ mod tests {
             switched: false,
             confirm_records: Vec::new(),
             confirm_timeouts: Vec::new(),
+            rank: RankStep::default(),
             party_flags: std::collections::HashMap::new(),
             party_sets: Vec::new(),
             channel: 1,
@@ -4231,6 +4337,31 @@ mod tests {
     /// The test sword's vnum.
     const SWORD: u32 = 19;
 
+    /// The giving `Session`'s giver: a storing giver over `held` and `quickslots`.
+    fn giving_giver<'s>(
+        held: &'s mut CharacterItems,
+        quickslots: &'s mut Quickslots,
+        ids: &'s mut ItemIds,
+        gauss: &'s mut Gauss,
+    ) -> Giver<'s> {
+        Giver {
+            stores: true,
+            items: held,
+            slots: quickslots,
+            rules: MoveRules {
+                count_limit: 200,
+                usable_cells: 2,
+                belt_grade: None,
+                questing: true,
+            },
+            ids: Some(ids),
+            gauss,
+            attrs: &[],
+            masks: &[],
+            owner_id: 42,
+        }
+    }
+
     /// A session that may give and remove, for a character whose two unlocked cells are
     /// empty, with the rows `protos` as its item protos and item IDs from 1000. The
     /// reader is a god, so the GM level answers without further setup.
@@ -4295,22 +4426,12 @@ mod tests {
             pid: 1,
             targets: &mut targets,
             pulse: 0,
-            giver: Some(Giver {
-                stores: true,
-                items: &mut held,
-                slots: &mut quickslots,
-                rules: MoveRules {
-                    count_limit: 200,
-                    usable_cells: 2,
-                    belt_grade: None,
-                    questing: true,
-                },
-                ids: Some(&mut ids),
-                gauss: &mut gauss,
-                attrs: &[],
-                masks: &[],
-                owner_id: 42,
-            }),
+            giver: Some(giving_giver(
+                &mut held,
+                &mut quickslots,
+                &mut ids,
+                &mut gauss,
+            )),
             item_rows: Vec::new(),
             laid: Vec::new(),
             gates: WarpGates::armed(),
@@ -4322,6 +4443,7 @@ mod tests {
             switched: false,
             confirm_records: Vec::new(),
             confirm_timeouts: Vec::new(),
+            rank: RankStep::default(),
             party_flags: std::collections::HashMap::new(),
             party_sets: Vec::new(),
             channel: 1,
@@ -4722,6 +4844,7 @@ mod tests {
             switched: false,
             confirm_records: Vec::new(),
             confirm_timeouts: Vec::new(),
+            rank: RankStep::default(),
             party_flags: std::collections::HashMap::new(),
             party_sets: Vec::new(),
             channel: 1,
@@ -4839,6 +4962,7 @@ mod tests {
             switched: false,
             confirm_records: Vec::new(),
             confirm_timeouts: Vec::new(),
+            rank: RankStep::default(),
             party_flags: std::collections::HashMap::new(),
             party_sets: Vec::new(),
             channel: 1,
@@ -4958,7 +5082,7 @@ mod tests {
         let mover = world.own_mover(vid).expect("in the world");
         // Before the login no state names the quest, so the window's entry runs nothing,
         // where the letter's own button would have started it (`NPC::OnInfo`).
-        let (records, _climbs, _stores, _items, _gold) = world
+        let (records, _climbs, _stores, _items, _gold, _claimed) = world
             .quest(
                 vid,
                 &QuestStep::Button(quest | QUEST_INFO_BIT),
@@ -4997,7 +5121,7 @@ mod tests {
             "the title follows its button"
         );
 
-        let (records, _climbs, _stores, _items, _gold) = world
+        let (records, _climbs, _stores, _items, _gold, _claimed) = world
             .quest(
                 vid,
                 &QuestStep::Button(quest | QUEST_INFO_BIT),
@@ -5016,7 +5140,7 @@ mod tests {
             "{info:?}"
         );
         // The dialog moved the quest to `talk`; a second press finds no script there.
-        let (records, _climbs, _stores, _items, _gold) = world
+        let (records, _climbs, _stores, _items, _gold, _claimed) = world
             .quest(
                 vid,
                 &QuestStep::Button(quest | QUEST_INFO_BIT),
@@ -5025,7 +5149,7 @@ mod tests {
             )
             .expect("the world holds the character");
         assert!(records.is_empty(), "{records:?}");
-        let (records, _climbs, _stores, _items, _gold) = world
+        let (records, _climbs, _stores, _items, _gold, _claimed) = world
             .quest(vid, &QuestStep::Button(999 | QUEST_INFO_BIT), place, mover)
             .expect("the world holds the character");
         assert!(records.is_empty(), "an unknown quest is quiet: {records:?}");
@@ -5082,7 +5206,7 @@ mod tests {
         };
         let mover = world.own_mover(vid).expect("in the world");
         let left = |world: &mut GameState, minutes: i32| {
-            let (records, _climbs, _stores, _items, _gold) = world
+            let (records, _climbs, _stores, _items, _gold, _claimed) = world
                 .quest(
                     vid,
                     &QuestStep::Button(quest | QUEST_INFO_BIT),
@@ -5434,7 +5558,7 @@ mod tests {
         let (mut world, _inbox, _records, sash) = marked_theowahdan(&clock);
         let vid = Vid::new(1);
         let mover = world.own_mover(vid).expect("in the world");
-        let (taken, (records, _climbs, _stores, _items, _gold)) =
+        let (taken, (records, _climbs, _stores, _items, _gold, _claimed)) =
             world.quest_click(vid, (THEOWAHDAN, 60_003), beside(), mover);
         assert!(taken);
         assert_eq!(records[0], [124, 1, 0, 0, 0], "{records:?}");

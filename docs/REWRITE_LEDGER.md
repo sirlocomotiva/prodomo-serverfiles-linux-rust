@@ -45989,3 +45989,96 @@ set: 4756 passed, 0 failed in 41 targets. `cargo test --workspace --doc`: 1 pass
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 402. The global rank
+
+`napierdalator`'s kill scores, the board mails, the season ends, and the prize claims.
+
+What legacy does. Nine counters per player live in `stRankGlobal_player.count[9]`
+(`C/tables.h:1855-1867`); the game's `rank_vec` is the snapshot the DB process mailed,
+sorted per counter descending (`SortVec`, `G/RankGlobal.cpp:36-42`, `:147-175`). The
+login ends with `RankGlobal_send_players` and `RankGlobal_send_items`
+(`G/input_login.cpp:946-949`): the two `clear` lines, `GlobalRankData ref_season|<flag>`
+off the `RankGlobalSeason` event flag, `GlobalRankData <type>|<name>|<count>|<lv>|<empire>`
+for each counter's first ten places, `GlobalRankMyChar <type>|<name>|<pos>|...` for the
+reader's own place (`:38-73`), then `GlobalRankDataItem` `clear_items` and one line per
+prize (`:75-88`). `/open_global_rank` resends the board; `/rank_end_season` bumps the flag
+and mails `HEADER_DG_RANKGLOBAL_LOAD_STATE` with `option = 1`
+(`G/cmd_general.cpp:4118-4134`, `G/RankGlobal.cpp:90-104`), which the DB answers by
+sorting, writing the winners for the listed (type, pos) prizes, and truncating
+`rank_global` (`D/ClientManager.cpp:5382-5455`, `RankGlobal_state` `:5457-5471`). The DB
+reads `rank_global` and `rank_global_reward` at boot (`:5249-5304`), takes
+`HEADER_DG_RANKGLOBAL_ADD_POINT` per add (`:5473-5509`), and saves the counters every
+`RANKGLOBAL_DB_SAVE_TIME` (`:5341-5380`). The chat quest
+(`rank/rank_global_reward.lua`) claims by `pc.global_rank_get_reward`
+(`G/questlua_pc.cpp:3680-3721`): each unclaimed prize is `AutoGiveItem`'d, then every
+unclaimed row of the pid is marked `done`, and the answer is 1 if anything was won, 0
+otherwise. `pc.global_rank_add_point` needs both arguments numbers and takes the counter
+as `(BYTE)` (`G/questlua_pc.cpp:3723-3736`); a counter past the ninth is refused, game-side
+(`G/RankGlobal.cpp:106-128`) and DB-side, with the same `sys_err`. The kill script
+(`rank/rank_global.lua`, quest `napierdalator`) scores metin 0, dungeon boss 4, other
+boss 1, plain monster 2, and PC 3 off `npc.is_metin`, `npc.is_boss`, `npc.is_pc`
+(`G/questlua_npc.cpp:32-41`, `:400-428`, with `GetMobRank() >= MOB_RANK_BOSS` and the
+PC default `MOB_RANK_KNIGHT`, `G/char.cpp:2640-2646`) and `pc.in_dungeon`
+(`G/questlua_pc.cpp:318-323`). The killer's `kill` scripts run from `Reward`
+(`G/char_battle.cpp:810-811`), the victim staged by `SetQuestNPCID`.
+
+What the Rewrite ports. One migration, `0026_rank_global.sql`: `rank_global` (the pid, the generation, Name,
+level, empire, nine counters), `rank_global_reward` (the Operator's prizes by counter and
+place), `rank_global_winner` (each award with its `done`), and `rank_global_state` (the
+season and the guard generation a season's end raises, so a save taken before it cannot
+put an old row back after). `db/src/rank_global.rs` loads the boot, saves a row under its
+generation, ends a season in one transaction, and claims with the items the claim gave.
+`prodomo/src/game_state/rank_global.rs` holds the counters and the snapshot: the board is
+installed before any client is accepted (a recorded Divergence — legacy's first snapshot
+came 20 s after boot off the retired DB peer), a kill counts at once and shows at the
+next 20-minute refresh, `rank_login` mails the board and the prizes at the end of
+`Entergame`, and the season's end awards each counter's first ten listed places, empties
+the counters and the snapshot, and raises the generation. The scenario
+`a_kill_scores_the_killer_and_the_season_awards_and_empties` covers it end to end: Alpha
+punches the dog dead, the logout writes `counts[3] = 1`, a reboot shows the board and the
+prize lines, `/open_global_rank` lists them, `/rank_end_season` writes the winner and
+empties the counters, and 20016's chat claims the Sword+9 once (`[LS;444;Sabie+9]`, the
+item set, `done`), with a second visit hearing "there is no reward for you".
+
+The quest side. Five names leave `missing` through `rank_api` in `quest/src/manager.rs`: `npc.is_pc`,
+which answers whether the session's victim VID is a PC; `npc.is_metin` and `npc.is_boss`,
+which read the stone flag and the rank off the victim and answer `nil` with no victim
+(legacy pushes a 0 it never returns); `pc.global_rank_add_point`, which needs both
+arguments numbers, takes the counter as `(BYTE)`, queues the point for the step's end,
+and refuses past the ninth with legacy's line; and `pc.global_rank_get_reward`, which
+gives each unclaimed prize by the session's `give_item` and answers 1 won, 0 none, with
+the claim stored beside the items (`Giving::ItemsAndPrizes`). `pc.in_dungeon` goes
+`partial` at always false: no dungeon is ported, so no character stands in one.
+`sys.char.top_players` goes `partial`: the global rank is ported, the top-player effect
+is not. The kill's quest run stages the victim by `set_quest_npc` before `kill`
+(`quests.rs` `quest_kill`), as `Reward` stages `SetQuestNPCID`; the no-target scripts'
+`kill` always runs, which is where `napierdalator`'s lives.
+
+Corrections. `data.lua.unread` covered `BlueDragon.lua` on the claim that nothing loads it; the
+claim was wrong. `locale/europe/settings.lua:174` dofiles `BlueDragon.lua`,
+`CQuestManager::InitializeLua` loads `settings.lua` (`G/questlua.cpp:736-746`), and the
+Rewrite already runs that chain (`quest/src/host.rs` `LIBRARIES` with `dofile` below the
+locale directory), so `BlueDragonSetting` is set and the binder reads it in both. The row
+now covers `monkey_dungeon.lua` alone, and the `spec.md` finding and owner question 5's
+bullet are corrected the same way.
+
+Quirks kept. Ties keep board order (legacy's `std::sort` leaves them unspecified); the snapshot
+lags the counters until the 20-minute refresh; the season's end empties the snapshot, so
+the board stays empty until the next one, as the DB's `option = 4` clear does. A boot at
+season 0 leaves the `RankGlobalSeason` flag unset, as legacy only writes it at a season's
+end, so `/geteventflag` does not list it.
+
+Gates (2026-11-05): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; the suite `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` passed 4767 in 42 targets with 0 failed; `cargo test --workspace --doc
+--locked --offline` clean; `cargo clippy --workspace --all-targets --locked --offline --
+-D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+--offline` clean. Mutants: the board sort ascending (killed by the pair in
+`the_sort_lists_each_counters_nonzero_best_first`), the ten-place cap as `<` (killed by
+`the_board_lists_ten_places_and_the_eleventh_reads_its_own`), the `>=`/`>` boss bound
+(killed by the quest probe), the counter bound `>=`/`>` (killed), the generation guard
+flip (killed by the store test), the snapshot `clear` removal (killed by the scenario),
+and the `add_point` call removal (killed by the scenario). The scenario passed 8/8
+parallel runs. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width
+was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

@@ -2195,6 +2195,45 @@ fn read_login_event_blocking(keyed: &mut Keyed, block: u8, said: Option<&[u8]>) 
     read_login_update(keyed);
     marks
 }
+/// The global rank's lines that close every `Entergame` (`G/input_login.cpp:946-949`): the
+/// clears, `ref_season` of `season`, `entries`, and the refresh. No prizes are listed on a
+/// scratch database, so none follow. The empire byte is the first line's own. `entries`
+/// are the board lines: the counters in order, the character's own place behind its
+/// counter's line. `prizes` are the `GlobalRankDataItem` lines behind the refresh: the
+/// clear and one line per listed prize, or none when no prize is listed.
+fn read_rank_login(keyed: &mut Keyed, season: i32, entries: &[&[u8]], prizes: &[&[u8]]) {
+    let first = keyed.read_game();
+    let empire = first[8];
+    assert_eq!(
+        first,
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"GlobalRankData clear_rank")
+    );
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"GlobalRankMyChar clear")
+    );
+    let season_line = format!("GlobalRankData ref_season|{season}");
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, empire, season_line.as_bytes())
+    );
+    for text in entries {
+        assert_eq!(
+            keyed.read_game(),
+            chat_packet(CHAT_TYPE_COMMAND, empire, text)
+        );
+    }
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"GlobalRankRefresh")
+    );
+    for text in prizes {
+        assert_eq!(
+            keyed.read_game(),
+            chat_packet(CHAT_TYPE_COMMAND, empire, text)
+        );
+    }
+}
 /// The login step's batched `GC_CHARACTER_UPDATE`: `costume_option` always hides all five
 /// parts, and each `pc_hide_costume` call sends `UpdatePacket` (`G/questlua_pc.cpp:3598`),
 /// which the step batches into one frame behind its records.
@@ -2213,6 +2252,7 @@ fn read_login_update(keyed: &mut Keyed) {
 
 /// The command and info lines that lead the quest login event ([`read_login_event_blocking`]).
 fn read_login_lines(keyed: &mut Keyed, block: u8, said: Option<&[u8]>) {
+    read_rank_login(keyed, 0, &[], &[]);
     read_login_lines_hiding(keyed, block, said, [false; 5], None);
 }
 /// The enter-game hide restore's five `SetXCostumeHidden` lines
@@ -19714,6 +19754,7 @@ fn a_hide_is_refused_in_the_move_window_then_stored_and_restored_on_relogin() {
     assert_eq!(alice.read_game(), [GC_CHANNEL, 1]);
     assert_eq!(alice.read_game()[0], GC_CHAT);
     enter_war_list(&mut alice);
+    read_rank_login(&mut alice, 0, &[], &[]);
     read_login_lines_hiding(
         &mut alice,
         0,
@@ -21568,6 +21609,7 @@ fn a_gm_sets_a_flag_and_a_late_login_reads_it() {
         messenger_team_list(b"Alpha"),
         "zulu hears the GM team"
     );
+    read_rank_login(&mut zulu, 0, &[], &[]);
     let first = zulu.read_game();
     assert_eq!(
         first,
@@ -21792,6 +21834,7 @@ fn a_player_trades_the_six_letters_for_the_box_draw() {
         "zulu hears the GM team"
     );
     // `event_info` reads the letters flag too: `letters_event` is the first word.
+    read_rank_login(&mut zulu, 0, &[], &[]);
     let first = zulu.read_game();
     assert_eq!(
         first,
@@ -22873,9 +22916,30 @@ fn enter_world_as_god(server: &Server) -> (Keyed, Listed) {
 /// login event with `event_panel`'s GM-gated letter, which rides in quest
 /// order between `dungeon_info`'s line and `costume_option`'s hides.
 fn enter_world_as_implementor(server: &Server) -> (Keyed, Listed) {
+    enter_world_as_implementor_ranked(server, &[], &[])
+}
+
+/// [`enter_world_as_implementor`] with `entries` rank board lines and `prizes` prize
+/// lines on the login.
+fn enter_world_as_implementor_ranked(
+    server: &Server,
+    entries: &[&[u8]],
+    prizes: &[&[u8]],
+) -> (Keyed, Listed) {
+    let (keyed, character, _) = enter_world_as_implementor_shown(server, entries, prizes);
+    (keyed, character)
+}
+
+/// [`enter_world_as_implementor_ranked`], also answering the enter-game view.
+fn enter_world_as_implementor_shown(
+    server: &Server,
+    entries: &[&[u8]],
+    prizes: &[&[u8]],
+) -> (Keyed, Listed, Entered) {
     let (mut keyed, character, _quickslots, _items) =
         load_with_quickslots_on(server, 1, b"alice", 0, ENGLISH);
-    let _entered = enter_game_shown(&mut keyed);
+    let entered = enter_game_shown(&mut keyed);
+    read_rank_login(&mut keyed, 0, entries, prizes);
     let first = keyed.read_game();
     assert_eq!(
         first,
@@ -22887,7 +22951,7 @@ fn enter_world_as_implementor(server: &Server) -> (Keyed, Listed) {
     let _marks = read_login_letters(&mut keyed, true);
     read_login_update(&mut keyed);
     keyed.still("nothing follows");
-    (keyed, character)
+    (keyed, character, entered)
 }
 
 /// Each `/kill` and `/poison` usage, each miss, and the exact-match miss:
@@ -24317,6 +24381,7 @@ fn read_respawns_past_purge(keyed: &mut Keyed) {
 /// GM-gated letter (a god clears its `pc.get_gm_level() >= 4` gate), the
 /// hides, the letters, and the update.
 fn read_god_login_event(keyed: &mut Keyed) {
+    read_rank_login(keyed, 0, &[], &[]);
     let first = keyed.read_game();
     assert_eq!(
         first,
@@ -26308,6 +26373,7 @@ fn qf_fixture() -> Option<(ScratchDatabase, Server)> {
 fn qf_runs_against(server: &Server) {
     let (mut alice, _listed, _items) = load_character(server, b"alice", 0);
     let theowahdan = enter_beside(&mut alice, THEOWAHDAN_VNUM);
+    read_rank_login(&mut alice, 0, &[], &[]);
     let first = alice.read_game();
     assert_eq!(
         first,
@@ -26755,6 +26821,7 @@ fn a_cannot_dead_player_keeps_its_hit_points_until_it_can() {
         messenger_team_list_many(&[(b"Yankee".as_slice(), false)]),
         "the wizard's list leads the login event"
     );
+    read_rank_login(&mut keyed, 0, &[], &[]);
     let first = keyed.read_game();
     assert_eq!(
         first,
@@ -34552,4 +34619,200 @@ fn a_kiss_at_nobody_or_at_a_rider_is_refused() {
     );
     alice.still("nothing follows");
     yankee.quiet("neither kiss reaches the rider");
+}
+
+/// Alpha targets the dog and punches it twice: the first punch stuns, the second kills.
+fn kill_the_dog(alpha: &mut Keyed, alpha_vid: u32, dog: u32) {
+    alpha.send_record(&client_target(dog));
+    assert_eq!(alpha.read_game(), target_of(dog, 100, DOG_HP, DOG_HP, 0));
+    alpha.send_record(&client_attack(dog));
+    assert_eq!(
+        alpha.read_fight(),
+        damage_info(dog, DAMAGE_NORMAL, PUNCH_ON_THE_DOG)
+    );
+    assert_eq!(alpha.read_fight(), target_of(dog, 0, 0, DOG_HP, 0));
+    assert_eq!(alpha.read_fight(), stun_of(dog));
+    assert_eq!(alpha.read_fight(), ownership_of(alpha_vid, dog));
+    alpha.send_record(&client_attack(dog));
+    assert_eq!(alpha.read_fight(), target_of(0, 0, 0, 0, 0));
+    assert_eq!(alpha.read_fight(), ownership_of(0, dog));
+    assert_eq!(alpha.read_fight(), point_change(alpha_vid, POINT_EXP, 0, 0));
+    assert_eq!(alpha.read_fight(), fly_of(FLY_EXP, dog, alpha_vid));
+    assert_eq!(alpha.read_fight(), dead_of(dog));
+    assert_eq!(alpha.read_fight(), ownership_of(0, dog));
+    assert_eq!(alpha.read_fight(), removal_of(dog));
+}
+
+/// The rank stage: the dog for the kill and a smith 200 north for the claim, on a
+/// server that wanders nothing. Answers the server and the staged `npc.txt`.
+fn rank_stage(database: &ScratchDatabase) -> (Server, String, Vec<u8>) {
+    let npc = "locale/europe/map/metin2_map_a1/npc.txt";
+    let mut npc_text = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata")
+            .join(npc),
+    )
+    .expect("the owner's npc.txt");
+    npc_text.extend_from_slice(
+        format!("{DOG_AT_ALPHA}m\t605\t538\t0\t0\t0\t1\t1000s\t100\t1\t20016\n").as_bytes(),
+    );
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[(npc, &npc_text)],
+        "no_wander = true",
+    );
+    (server, npc.to_string(), npc_text)
+}
+
+/// The claim on the smith: its menu names the weekly reward, taking it sets the prize in
+/// the first free cell and says `done`, and a second visit hears there is none.
+fn claim_the_prize(alpha: &mut Keyed, smith: u32) {
+    alpha.send_record(&client_click(smith));
+    assert_eq!(
+        alpha.read_game(),
+        server_script(1, b"[QUESTION 1;Get Reward(Weekly Rank)|2;Inchide]"),
+        "the menu names the weekly reward"
+    );
+    alpha.send_record(&client_script_answer(0));
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"[LS;444;Sabie+9]"),
+        "the prize's pickup line"
+    );
+    let set = alpha.read_game();
+    assert_eq!(set[0], ITEM_SET);
+    assert_eq!(set[1], 1, "the inventory");
+    assert_eq!(
+        u16::from_le_bytes([set[2], set[3]]),
+        0,
+        "the first free cell"
+    );
+    assert_eq!(u32::from_le_bytes([set[4], set[5], set[6], set[7]]), 19);
+    assert_eq!(alpha.read_game(), server_script(1, b"done[ENTER][DONE]"));
+    alpha.still("the claim ends with the word");
+    alpha.send_record(&client_click(smith));
+    assert_eq!(
+        alpha.read_game(),
+        server_script(1, b"[QUESTION 1;Get Reward(Weekly Rank)|2;Inchide]")
+    );
+    alpha.send_record(&client_script_answer(0));
+    assert_eq!(
+        alpha.read_game(),
+        server_script(1, b"there is no reward for you[ENTER][DONE]")
+    );
+    alpha.still("no second prize");
+}
+
+/// `/open_global_rank`'s answer: the clears, the season, `entries` board lines, and the
+/// refresh. Answers the board lines.
+fn read_rank_board(alpha: &mut Keyed, entries: usize) -> Vec<Vec<u8>> {
+    let empire = 1;
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"GlobalRankData clear_rank")
+    );
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"GlobalRankMyChar clear")
+    );
+    let season_line = alpha.read_game();
+    assert!(season_line[10..].starts_with(b"GlobalRankData ref_season|"));
+    let mut board = Vec::new();
+    for _ in 0..entries {
+        board.push(alpha.read_game()[10..].to_vec());
+    }
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, empire, b"GlobalRankRefresh")
+    );
+    board
+}
+
+/// `sys.char.top_players`, `cmd.open_global_rank`, `cmd.rank_end_season`,
+/// `lua.npc.is_pc`, `lua.npc.is_metin`, `lua.npc.is_boss`, `lua.pc.in_dungeon`,
+/// `lua.pc.global_rank_add_point`, `lua.pc.global_rank_get_reward`: killing the dog runs
+/// `napierdalator`'s `kill` script, which reads the victim through the `npc.is_*` names,
+/// finds no dungeon, and adds a point to counter 2. The point counts at once (the logout
+/// writes the row) but shows at the next snapshot, which a reboot reads back.
+/// `/rank_end_season` writes the winner and empties the counters, and 20016's chat claims
+/// the listed counter-2 prize once by `pc.global_rank_get_reward`.
+#[test]
+fn a_kill_scores_the_killer_and_the_season_awards_and_empties() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, npc, npc_text) = rank_stage(&database);
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO rank_global_reward (type, pos, vnum, count) VALUES (2, 1, 19, 1)",
+    );
+    // Alpha enters and kills the dog: `napierdalator` scores counter 2.
+    let (mut alpha, _alpha_listed, entered) = enter_equipped_world_with(&server, b"alice", 0);
+    let alpha_vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    let dog = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    kill_the_dog(&mut alpha, alpha_vid, dog);
+    // The point counts at once: the logout writes the row.
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(
+        &database,
+        "(SELECT counts[3] FROM rank_global WHERE name = 'Alpha') = 1",
+    );
+    // The reboot reads the row back and shows it; the season is still 0. The IMPLEMENTOR
+    // grant lands between the boots, so the second login reads the GM letter.
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    drop(server);
+    let (server, _data2) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[(npc.as_str(), &npc_text)],
+        "no_wander = true",
+    );
+    let (mut alpha, _listed, entered) = enter_world_as_implementor_shown(
+        &server,
+        &[
+            b"GlobalRankData 2|Alpha|1|154|1".as_slice(),
+            b"GlobalRankMyChar 2|Alpha|1|1|154|1",
+        ],
+        &[
+            b"GlobalRankDataItem clear_items".as_slice(),
+            b"GlobalRankDataItem 2|1|19|1",
+        ],
+    );
+    let smith = vid_shown_at(entered.shown.inserts(), (470_100, 949_800));
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/open_global_rank"));
+    let board = read_rank_board(&mut alpha, 2);
+    assert_eq!(board[0], b"GlobalRankData 2|Alpha|1|154|1");
+    assert_eq!(board[1], b"GlobalRankMyChar 2|Alpha|1|1|154|1");
+    // `/rank_end_season` tells the season is over, writes the winner, and empties the
+    // counters; the board is empty after.
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/rank_end_season"));
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_INFO, 1, b"RankGlobal - Season is over.")
+    );
+    wait_for(
+        &database,
+        "(SELECT COUNT(*) FROM rank_global_winner WHERE NOT done) = 1",
+    );
+    wait_for(&database, "(SELECT COUNT(*) FROM rank_global) = 0");
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/open_global_rank"));
+    let board = read_rank_board(&mut alpha, 0);
+    assert!(board.is_empty());
+    claim_the_prize(&mut alpha, smith);
+    wait_for(
+        &database,
+        "(SELECT COUNT(*) FROM rank_global_winner WHERE NOT done) = 0",
+    );
+    wait_for(&database, "(SELECT COUNT(*) FROM item WHERE owner_id = (SELECT id FROM player WHERE name = 'Alpha') AND vnum = 19) = 1");
 }

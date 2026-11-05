@@ -355,6 +355,26 @@ pub trait Game {
     /// the step ends.
     fn mount_bonus(&mut self, apply: u8, value: i32, seconds: i32);
 
+    /// `pc.global_rank_add_point(type, count)` (`G/questlua_pc.cpp:3723-3736`): `count`
+    /// onto counter `kind` of the character the script runs for, run when the step ends.
+    fn global_rank_add_point(&mut self, kind: u8, count: i32);
+
+    /// `pc.global_rank_get_reward` (`G/questlua_pc.cpp:3680-3721`): every prize the character
+    /// won and has not claimed, each given by `AutoGiveItem`. Answers whether it had any.
+    fn global_rank_get_reward(&mut self) -> bool;
+
+    /// `npc.is_pc` (`G/questlua_npc.cpp:32-41`): whether the character under `vid` is a PC.
+    fn npc_is_pc(&self, vid: u32) -> bool;
+
+    /// What `npc.is_metin` and `npc.is_boss` read of the character under `vid`
+    /// (`G/questlua_npc.cpp:400-428`): whether it is a stone and its `GetMobRank()`, or
+    /// `None` with no such character.
+    fn npc_stone_and_rank(&self, vid: u32) -> Option<(bool, u8)>;
+
+    /// `pc.in_dungeon` (`G/questlua_pc.cpp:318-323`): whether the character the script runs
+    /// for is in a dungeon.
+    fn in_dungeon(&self) -> bool;
+
     /// `horse.set_name` (`G/questlua_horse.cpp:231-271`): names the character's horse
     /// `name` — the flag, the month affect and the re-summon around the rewrite — and
     /// answers 2, 1 for a bad name, 0 without a horse. The world runs it when the step
@@ -3881,6 +3901,61 @@ fn mount_api(
     }
 }
 
+/// The global rank's calls (`ENABLE_GLOBAL_RANK`) and the three `npc.is_*` reads its kill
+/// script makes. Returns `None` for a name this table does not hold.
+fn rank_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let boolean = |value: bool| Ok(Some(MultiValue::from_vec(vec![Value::Boolean(value)])));
+    match name {
+        // `pc_add_globalrank_point` (`G/questlua_pc.cpp:3723-3736`): nothing unless both are
+        // numbers; the type as `(BYTE)` and the count as `(int)`.
+        b"pc.global_rank_add_point" => {
+            let first = args.front().cloned().unwrap_or(Value::Nil);
+            let second = args.get(1).cloned().unwrap_or(Value::Nil);
+            if lua.coerce_number(first.clone())?.is_none()
+                || lua.coerce_number(second.clone())?.is_none()
+            {
+                return Ok(Some(MultiValue::new()));
+            }
+            let kind = host::c_int(lua, first)?.to_le_bytes()[0];
+            let count = host::c_int(lua, second)?;
+            cx.game.global_rank_add_point(kind, count);
+            Ok(Some(MultiValue::new()))
+        }
+        b"pc.global_rank_get_reward" => {
+            let won = cx.game.global_rank_get_reward();
+            Ok(Some(MultiValue::from_vec(vec![Value::Number(f64::from(
+                u8::from(won),
+            ))])))
+        }
+        b"pc.in_dungeon" => boolean(cx.game.in_dungeon()),
+        b"npc.is_pc" => boolean(cx.npc_vid != 0 && cx.game.npc_is_pc(cx.npc_vid)),
+        // `npc_is_metin`, `npc_is_boss`: with no NPC the 0 they push is never returned, so
+        // the script reads `nil`.
+        b"npc.is_metin" | b"npc.is_boss" => {
+            let read = (cx.npc_vid != 0)
+                .then(|| cx.game.npc_stone_and_rank(cx.npc_vid))
+                .flatten();
+            let Some((stone, rank)) = read else {
+                return Ok(Some(MultiValue::new()));
+            };
+            if name == b"npc.is_metin" {
+                boolean(stone)
+            } else {
+                boolean(rank >= MOB_RANK_BOSS)
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `MOB_RANK_BOSS` (`common/length.h:458-466`).
+const MOB_RANK_BOSS: u8 = 4;
+
 /// The `d.*` and `ds.*` bridged calls: the dungeon pair answer whether a dungeon
 /// lives under `(DWORD)` of the first argument; the `ds.*` names read and grant the
 /// dragon-soul qualification and open its windows. Returns `None` for a name this
@@ -4292,7 +4367,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
     if let TextOutcome::Hit(result) = text_api(lua, cx, name, args, last.clone())? {
         return Ok(result.into_iter().collect());
     }
-    let families: [Family; 10] = [
+    let families: [Family; 11] = [
         look_api,
         pc_api,
         item_api,
@@ -4303,6 +4378,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
         quest_api,
         horse_api,
         mount_api,
+        rank_api,
     ];
     for family in families {
         if let Some(answered) = family(lua, cx, name, args)? {
@@ -4555,6 +4631,10 @@ mod tests {
         horse_calls: Vec<(&'static str, bool, u32)>,
         /// `pc.mount`, `pc.unmount` and `pc.mount_bonus`, with their three numbers.
         mount_calls: Vec<(&'static str, u32, i32, i32)>,
+        rank_points: Vec<(u8, i32)>,
+        rank_reward: bool,
+        npc_pc: u32,
+        npc_kinds: std::collections::HashMap<u32, (bool, u8)>,
         /// What `horse_name` answers, which `set_horse_name` rewrites.
         horse_names: Vec<u8>,
         /// Whether the character rides a mount.
@@ -4804,6 +4884,26 @@ mod tests {
         fn mount_bonus(&mut self, apply: u8, value: i32, seconds: i32) {
             self.mount_calls
                 .push(("mount_bonus", u32::from(apply), value, seconds));
+        }
+
+        fn global_rank_add_point(&mut self, kind: u8, count: i32) {
+            self.rank_points.push((kind, count));
+        }
+
+        fn global_rank_get_reward(&mut self) -> bool {
+            std::mem::take(&mut self.rank_reward)
+        }
+
+        fn npc_is_pc(&self, vid: u32) -> bool {
+            vid == self.npc_pc
+        }
+
+        fn npc_stone_and_rank(&self, vid: u32) -> Option<(bool, u8)> {
+            self.npc_kinds.get(&vid).copied()
+        }
+
+        fn in_dungeon(&self) -> bool {
+            false
         }
 
         fn set_horse_name(&mut self, name: Vec<u8>) -> u8 {
@@ -6805,6 +6905,98 @@ mod tests {
                 ("unmount", 0, 0, 0),
             ]
         );
+    }
+
+    /// The rank names: `pc.global_rank_add_point` queues nothing unless both arguments
+    /// are numbers, and keeps the low byte of the counter (`(BYTE)`); a reward answers 1
+    /// when the game pays and 0 when it does not; `pc.in_dungeon` is always false; the
+    /// `npc.is_*` reads push `nil` with no NPC, and `is_pc`, `is_metin` and `is_boss`
+    /// answer what the game holds of the NPC.
+    #[test]
+    fn the_rank_names_read_their_arguments() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::default(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        for args in [
+            vec![],
+            vec![Value::Number(1.0)],
+            vec![
+                Value::String(lua.create_string(b"two").unwrap()),
+                Value::Number(1.0),
+            ],
+        ] {
+            assert!(probe
+                .call("pc.global_rank_add_point", &args)
+                .unwrap()
+                .is_empty());
+        }
+        probe
+            .call(
+                "pc.global_rank_add_point",
+                &[Value::Number(258.0), Value::Number(3.0)],
+            )
+            .unwrap();
+        assert_eq!(probe.game.rank_points, [(2, 3)]);
+        assert_eq!(
+            probe.call("pc.global_rank_get_reward", &[]).unwrap(),
+            [Value::Number(0.0)]
+        );
+        probe.game.rank_reward = true;
+        assert_eq!(
+            probe.call("pc.global_rank_get_reward", &[]).unwrap(),
+            [Value::Number(1.0)]
+        );
+        probe.game.rank_reward = false;
+        assert_eq!(
+            probe.call("pc.global_rank_get_reward", &[]).unwrap(),
+            [Value::Number(0.0)]
+        );
+        assert_eq!(
+            probe.call("pc.in_dungeon", &[]).unwrap(),
+            [Value::Boolean(false)]
+        );
+        // The probe always reads the NPC at `VID`: a PC is no stone, a knight is no
+        // boss, a stone is no PC, and a boss reads as one.
+        probe.game.npc_pc = VID;
+        probe.game.npc_kinds.insert(VID, (false, 3));
+        assert_eq!(
+            probe.call("npc.is_pc", &[]).unwrap(),
+            [Value::Boolean(true)]
+        );
+        assert_eq!(
+            probe.call("npc.is_metin", &[]).unwrap(),
+            [Value::Boolean(false)]
+        );
+        assert_eq!(
+            probe.call("npc.is_boss", &[]).unwrap(),
+            [Value::Boolean(false)]
+        );
+        probe.game.npc_pc = 0;
+        probe.game.npc_kinds.insert(VID, (true, 0));
+        assert_eq!(
+            probe.call("npc.is_pc", &[]).unwrap(),
+            [Value::Boolean(false)]
+        );
+        assert_eq!(
+            probe.call("npc.is_metin", &[]).unwrap(),
+            [Value::Boolean(true)]
+        );
+        probe.game.npc_kinds.insert(VID, (false, 4));
+        assert_eq!(
+            probe.call("npc.is_boss", &[]).unwrap(),
+            [Value::Boolean(true)]
+        );
+        probe.game.npc_kinds.remove(&VID);
+        assert!(probe.call("npc.is_boss", &[]).unwrap().is_empty());
+        assert!(probe.call("npc.is_metin", &[]).unwrap().is_empty());
     }
 
     /// The character-reader names: gold under its four spellings, empire, hp/sp and their

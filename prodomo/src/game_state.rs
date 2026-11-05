@@ -109,6 +109,7 @@ mod polymorph;
 mod pvp;
 mod quest_target;
 mod quests;
+mod rank_global;
 mod regen;
 mod reload;
 mod reward;
@@ -147,6 +148,7 @@ pub use guild::{
 pub use letters::LettersTrade;
 pub use level::{AdvanceLanded, LevelHeld, ResetHeld};
 pub use quests::{QuestStep, QuestStepOutcome, Quests};
+pub use rank_global::SeasonEnd;
 pub use reload::ReloadRead;
 pub use safebox::{
     SafeboxAnswer, SafeboxStep, ALREADY_OPEN_NOTICE, LOAD_WAIT_PULSES, MALL_WAIT_NOTICE,
@@ -575,6 +577,8 @@ pub struct GameState {
     /// summon and the compute read it; the enter-game load installs it, `horse.set_name`
     /// rewrites it, and the save writes it back.
     horse_names: HashMap<u32, Vec<u8>>,
+    /// The global rank's board (`rank_global`), which boot installs.
+    rank: rank_global::RankBoard,
     /// The dragon soul table, which `/ds_change_attr` redraws a stone's attributes from.
     dragon_soul_table: Arc<gamedata::dragon_soul_table::DragonSoulTable>,
     /// The cached second Gaussian of the next `gauss_random` call, if one waits.
@@ -791,6 +795,7 @@ impl GameState {
             horse_timers: HashMap::new(),
             horse_npcs: HashMap::new(),
             horse_names: HashMap::new(),
+            rank: rank_global::RankBoard::default(),
             dragon_soul_table: Arc::default(),
             gauss: world::character::Gauss::new(),
             shop_price_3x_disabled: false,
@@ -830,10 +835,7 @@ impl GameState {
             pc_combat: HashMap::new(),
             pc_skills: HashMap::new(),
             parties: party::Parties::default(),
-            exp_limits: world::character::ExpLimits {
-                max_level: DEFAULT_MAX_LEVEL,
-                status_point_get_level_limit: DEFAULT_STATUS_POINT_GET_LEVEL_LIMIT,
-            },
+            exp_limits: DEFAULT_EXP_LIMITS,
             stat_max: DEFAULT_STATUS_POINT_SET_MAX_VALUE,
             max_conqueror_level: DEFAULT_MAX_CONQUEROR_LEVEL,
             recall: death::Recall::default(),
@@ -1083,18 +1085,10 @@ impl GameState {
             GameCommand::GrantItem { request, reply } => {
                 self.answer_grant(&request, reply);
             }
-            GameCommand::InstallItemIdRange { range, reply } => {
-                self.answer_install(range, reply);
-            }
-            GameCommand::InstallGuilds {
-                stored,
-                marks,
-                symbols,
-                reply,
-            } => self.answer_install_guilds(&stored, &marks, &symbols, reply),
-            GameCommand::InstallEvents { events, reply } => {
-                self.answer_install_events(events, reply);
-            }
+            command @ (GameCommand::InstallItemIdRange { .. }
+            | GameCommand::InstallGuilds { .. }
+            | GameCommand::InstallEvents { .. }
+            | GameCommand::InstallRank { .. }) => self.apply_install(command),
             GameCommand::RevokeGrant { target, id, reply } => {
                 self.answer_revoke(&target, id, reply);
             }
@@ -1185,9 +1179,34 @@ impl GameState {
     /// a disconnect, a transfer, a kill, or a poison. The flag, letters, stat, PK
     /// and walk lines run through [`GameState::apply_chat_flag`]. Split out so the
     /// dispatch does not trip the line lint.
+    /// Run one rank line (`/open_global_rank`, `/rank_end_season`), answering its season's
+    /// end.
+    ///
+    /// Split out so [`GameState::apply_chat_line`] does not trip the line lint.
+    fn apply_rank_command(&mut self, command: GameCommand) {
+        let GameCommand::RankLine {
+            vid,
+            line,
+            mover,
+            reply,
+        } = command
+        else {
+            debug_assert!(false, "the dispatch routes only rank lines here");
+            return;
+        };
+        let ended = self.run_rank_line(vid, line, mover);
+        if reply.send(ended).is_err() {
+            debug!(?vid, "nobody was left to hear a rank line's answer");
+        }
+    }
+
     fn apply_chat_line(&mut self, command: GameCommand) {
         if Self::is_chat_mode_line(&command) {
             self.apply_chat_mode(command);
+            return;
+        }
+        if matches!(command, GameCommand::RankLine { .. }) {
+            self.apply_rank_command(command);
             return;
         }
         if matches!(
@@ -2129,6 +2148,33 @@ impl GameState {
 
     /// Runs one command owned by a subsystem handler (items, ground, motion or
     /// picks). Returns the command unhandled when no subsystem claims it.
+    /// Install what boot read from the store: the item ids, the guilds, the event calendar
+    /// and the global rank. Split out so [`GameState::apply_command`] does not trip the line
+    /// lint.
+    fn apply_install(&mut self, command: GameCommand) {
+        match command {
+            GameCommand::InstallItemIdRange { range, reply } => {
+                self.answer_install(range, reply);
+            }
+            GameCommand::InstallGuilds {
+                stored,
+                marks,
+                symbols,
+                reply,
+            } => self.answer_install_guilds(&stored, &marks, &symbols, reply),
+            GameCommand::InstallEvents { events, reply } => {
+                self.answer_install_events(events, reply);
+            }
+            GameCommand::InstallRank { boot, reply } => {
+                self.install_rank(boot);
+                if reply.send(()).is_err() {
+                    debug!("nobody was left to hear the rank install");
+                }
+            }
+            _ => debug_assert!(false, "the dispatch routes only installs here"),
+        }
+    }
+
     fn apply_delegated(&mut self, command: GameCommand) -> Option<GameCommand> {
         match command {
             command @ (GameCommand::MoveItem { .. }
@@ -2339,6 +2385,9 @@ impl GameState {
             // `EnterHorse` (`G/input_login.cpp:647-650`) and the `__FIX_NIVEL_CAL__` horse
             // refresh (`:887-897`), the last `Entergame` lines before the quest login.
             self.enter_horse(vid);
+            // `RankGlobal_send_players` and `RankGlobal_send_items` close `Entergame`
+            // (`G/input_login.cpp:946-949`).
+            self.rank_login(vid);
             // `CQuestManager::Login` (`G/input_db.cpp:1005-1048`) runs once the
             // descriptor is in `PHASE_GAME`, after everything `Entergame` sent; its
             // records ride the outbox, which the descriptor drains after the burst.
@@ -2435,6 +2484,7 @@ impl GameState {
                         .cloned()
                         .unwrap_or_default()
                 }),
+                rank: self.rank_row(player_id),
             }
         });
         if reply.send(kept).is_err() {
@@ -3140,6 +3190,7 @@ impl GameState {
                     .cloned()
                     .unwrap_or_default()
             }),
+            rank: self.rank_row(character.player_id()),
         };
         self.characters.destroy(vid).ok()?;
         Some(kept)
@@ -4930,6 +4981,7 @@ impl PulseProcessor for GameState {
         self.run_duel_sweep(pulse);
         self.run_war_map_ticks(pulse);
         self.run_party_ticks(pulse);
+        self.run_rank_refresh(pulse);
         self.expire_empire_privs();
         self.run_minds(pulse);
         self.broadcast_targets();
@@ -4950,6 +5002,12 @@ const DEFAULT_VIEW_RANGE: i32 = 5000;
 
 /// `gPlayerMaxLevel`'s default (`G/config.cpp:143`), the configured `game.max_level`'s too.
 const DEFAULT_MAX_LEVEL: i32 = 99;
+
+/// The level caps a world starts with, before the configured ones replace them.
+const DEFAULT_EXP_LIMITS: world::character::ExpLimits = world::character::ExpLimits {
+    max_level: DEFAULT_MAX_LEVEL,
+    status_point_get_level_limit: DEFAULT_STATUS_POINT_GET_LEVEL_LIMIT,
+};
 
 /// `gPlayerMaxConquerorLevel`'s default, the configured `game.max_conqueror_level`'s too.
 const DEFAULT_MAX_CONQUEROR_LEVEL: i32 = 30;
