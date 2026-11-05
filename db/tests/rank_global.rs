@@ -196,7 +196,7 @@ async fn a_claim_writes_the_done_flag_and_the_items_together() {
     .await
     .unwrap();
     // A claim with no items still marks the prize done.
-    claim(store, pid, &[], None).await.unwrap();
+    claim(store, pid, &[], None, &[]).await.unwrap();
     assert!(load(store).await.unwrap().unclaimed.is_empty());
     // A claim with items stores both in one transaction: the row lands.
     end_season(
@@ -215,7 +215,7 @@ async fn a_claim_writes_the_done_flag_and_the_items_together() {
     .await
     .unwrap();
     let change = RowChange::Created(row(7, pid, 1, 0));
-    claim(store, pid, std::slice::from_ref(&change), None)
+    claim(store, pid, std::slice::from_ref(&change), None, &[])
         .await
         .unwrap();
     let items: i64 = db::sqlx::query_scalar("SELECT COUNT(*) FROM item WHERE owner_id = $1")
@@ -242,7 +242,7 @@ async fn a_claim_writes_the_done_flag_and_the_items_together() {
     .await
     .unwrap();
     let clash = RowChange::Created(row(8, pid, 1, 0));
-    assert!(claim(store, pid, std::slice::from_ref(&clash), None)
+    assert!(claim(store, pid, std::slice::from_ref(&clash), None, &[])
         .await
         .is_err());
     assert_eq!(load(store).await.unwrap().unclaimed, [(pid, 19, 1)]);

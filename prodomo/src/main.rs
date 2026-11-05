@@ -5004,9 +5004,10 @@ where
             items,
             gold,
             claimed,
+            takes,
         })) => {
             info!(%addr, ?step, "A quest took the click");
-            if !store_quest_items(addr, context, held, &items, (gold, claimed)).await {
+            if !store_quest_items(addr, context, held, &items, &takes, (gold, claimed)).await {
                 return false;
             }
             if !store_quest_climbs(addr, context, held, &climbs).await {
@@ -5046,15 +5047,18 @@ fn is_quest_step(header: u8) -> bool {
 /// Store the item rows a quest step's gives changed with the gold its moves left, in one
 /// transaction: a failure closes, as an item step's does. Answers whether the step may be
 /// sent. Only a Transfer writes the gold, as the shop's does; the save leaves the column
-/// alone.
+/// alone. The blocked takes' rows ride along, each side under its own owner, as an
+/// exchange's do: storing another character's take under the reader would touch no row
+/// and close.
 async fn store_quest_items(
     addr: SocketAddr,
     context: &ConnectionContext,
     held: &Held,
     items: &[db::items::RowChange],
+    takes: &[(u32, Vec<db::items::RowChange>)],
     (gold, claimed): (Option<u64>, bool),
 ) -> bool {
-    if items.is_empty() && gold.is_none() && !claimed {
+    if items.is_empty() && gold.is_none() && !claimed && takes.is_empty() {
         return true;
     }
     let Some(character) = held.character.as_ref() else {
@@ -5064,14 +5068,49 @@ async fn store_quest_items(
         let before = u64::try_from(character.gold.max(0)).unwrap_or(0);
         prodomo::item_move::gold_delta(before, gold)
     });
+    let mut own: Vec<db::items::RowChange> = items.to_vec();
+    let sides: Vec<db::items::TransferSide<'_>> = takes
+        .iter()
+        .filter_map(|(pid, changes)| {
+            if *pid == character.id {
+                own.extend(changes.iter().cloned());
+                return None;
+            }
+            Some(db::items::TransferSide {
+                owner_id: *pid,
+                changes,
+                gold: 0,
+            })
+        })
+        .collect();
+    let items = own.as_slice();
     // A claim of the global rank's prizes is stored with the items it gave
     // (`db::rank_global::claim`), so neither lands without the other.
     let stored = match (claimed, delta) {
-        (true, delta) => db::rank_global::claim(&context.store, character.id, items, delta).await,
-        (false, Some(delta)) => {
-            db::items::apply_transfer(&context.store, character.id, items, delta).await
+        (true, delta) => {
+            db::rank_global::claim(&context.store, character.id, items, delta, &sides).await
         }
-        (false, None) => db::items::apply_row_changes(&context.store, character.id, items).await,
+        (false, Some(delta)) => {
+            let mut all = vec![db::items::TransferSide {
+                owner_id: character.id,
+                changes: items,
+                gold: delta,
+            }];
+            all.extend(sides);
+            db::items::apply_exchange(&context.store, &all).await
+        }
+        (false, None) if sides.is_empty() => {
+            db::items::apply_row_changes(&context.store, character.id, items).await
+        }
+        (false, None) => {
+            let mut all = vec![db::items::TransferSide {
+                owner_id: character.id,
+                changes: items,
+                gold: 0,
+            }];
+            all.extend(sides);
+            db::items::apply_exchange(&context.store, &all).await
+        }
     };
     if let Err(error) = stored {
         warn!(%addr, %error, rows = items.len(), "A quest's gives could not be stored; closing");
@@ -5370,8 +5409,8 @@ where
         return true;
     };
     match context.game.quest(vid, step, place, item_actor(held)).await {
-        Ok(Ok((records, climbs, stores, items, gold, claimed))) => {
-            if !store_quest_items(addr, context, held, &items, (gold, claimed)).await {
+        Ok(Ok((records, climbs, stores, items, gold, claimed, takes))) => {
+            if !store_quest_items(addr, context, held, &items, &takes, (gold, claimed)).await {
                 return false;
             }
             if !store_quest_climbs(addr, context, held, &climbs).await {

@@ -4890,7 +4890,6 @@ mod tests {
         vnum: u32,
         total: i32,
     ) -> (bool, super::super::quests::QuestStepOutcome) {
-        use quest::manager::Game;
         let (reader, mover, card, pc_level) = grand_card(world);
         let GameState {
             characters,
@@ -4902,13 +4901,20 @@ mod tests {
             bodies,
             ..
         } = world;
-        let points = characters
-            .find_by_vid_mut(reader)
-            .ok()
-            .and_then(|character| character.items_and_points_mut().1);
-        let mut session = super::super::quests::Session {
+        let session = super::super::quests::Session {
             map_index: 0,
             war_map: 0,
+            dungeon: 0,
+            dungeon_flags: std::collections::BTreeMap::new(),
+            dungeon_sets: Vec::new(),
+            dungeon_jumps: Vec::new(),
+            dungeon_notices: Vec::new(),
+            dungeon_warps: Vec::new(),
+            dungeon_exits: Vec::new(),
+            dungeon_spawns: Vec::new(),
+            server_timer_ops: Vec::new(),
+            event_sets: Vec::new(),
+            takes: Vec::new(),
             level: pc_level,
             npcs: None,
             protos: &gamedata::mob_proto::MobProtos::default(),
@@ -4938,7 +4944,10 @@ mod tests {
             alignment_changes: Vec::new(),
             gold_changes: Vec::new(),
             hides: Vec::new(),
-            points,
+            points: characters
+                .find_by_vid_mut(reader)
+                .ok()
+                .and_then(|character| character.items_and_points_mut().1),
             climbs: Vec::new(),
             guild_ops: Vec::new(),
             test_server: true,
@@ -4978,11 +4987,29 @@ mod tests {
             ds_refines: 0,
             ds_attrs: 0,
         };
+        grand_outcome(session, vnum, total)
+    }
+
+    /// The read's answer: whether it climbed, and the store rows the climb queues.
+    fn grand_outcome(
+        mut session: super::super::quests::Session<'_>,
+        vnum: u32,
+        total: i32,
+    ) -> (bool, super::super::quests::QuestStepOutcome) {
+        use quest::manager::Game;
         let climbed = session.learn_grand_master_skill(vnum, total);
         let (records, climbs) = (session.records, session.climbs);
         (
             climbed,
-            (records, climbs, Vec::new(), Vec::new(), None, false),
+            (
+                records,
+                climbs,
+                Vec::new(),
+                Vec::new(),
+                None,
+                false,
+                Vec::new(),
+            ),
         )
     }
 
@@ -4995,7 +5022,7 @@ mod tests {
         world.bodies.get_mut(&Vid::new(1)).unwrap().card.skill_group = 1;
         world.set_pc_skill_level(1, 1, 30);
         std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
-        let (climbed, (records, climbs, _, _, _, _)) = grand_read(&mut world, 1, 6);
+        let (climbed, (records, climbs, _, _, _, _, _)) = grand_read(&mut world, 1, 6);
         assert!(climbed);
         assert_eq!(world.pc_skill_level(1, 1), 31);
         assert_eq!(climbs.len(), 1, "the climb is queued for the store");
@@ -5032,7 +5059,8 @@ mod tests {
         let (mut world, mut inbox) = a_reader(50301, 25_000);
         world.set_pc_skill_level(1, SKILL_LEADERSHIP, 30);
         std::iter::from_fn(|| inbox.try_recv().ok()).for_each(drop);
-        let (climbed, (records, climbs, _, _, _, _)) = grand_read(&mut world, SKILL_LEADERSHIP, 1);
+        let (climbed, (records, climbs, _, _, _, _, _)) =
+            grand_read(&mut world, SKILL_LEADERSHIP, 1);
         assert!(!climbed);
         assert!(climbs.is_empty(), "no climb, no store");
         assert_eq!(texts(&records), [b"[LS;949]".to_vec()]);

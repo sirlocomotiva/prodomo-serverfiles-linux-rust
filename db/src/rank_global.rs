@@ -239,8 +239,8 @@ pub async fn end_season(
 }
 
 /// Write a claim of `owner_id`'s prizes in one transaction: the items its quest gave, the gold
-/// its quest moved when `gold` is `Some`, and every unclaimed prize of it marked `done`
-/// (`G/questlua_pc.cpp:3690-3707`).
+/// its quest moved when `gold` is `Some`, the blocked takes' sides, and every unclaimed
+/// prize of it marked `done` (`G/questlua_pc.cpp:3690-3707`).
 ///
 /// # Errors
 ///
@@ -250,6 +250,7 @@ pub async fn claim(
     owner_id: u32,
     changes: &[RowChange],
     gold: Option<i64>,
+    takes: &[TransferSide<'_>],
 ) -> Result<(), ItemError> {
     let pid = i32::try_from(owner_id).map_err(|_| ItemError::NoSuchOwner(owner_id))?;
     let side = TransferSide {
@@ -257,8 +258,10 @@ pub async fn claim(
         changes,
         gold: gold.unwrap_or(0),
     };
+    let mut sides = vec![side];
+    sides.extend_from_slice(takes);
     let mut transaction = store.pool().begin().await?;
-    crate::items::write_sides(store, &mut transaction, &[side], gold.is_some()).await?;
+    crate::items::write_sides(store, &mut transaction, &sides, gold.is_some()).await?;
     sqlx::query("UPDATE rank_global_winner SET done = true WHERE player_id = $1 AND NOT done")
         .bind(pid)
         .execute(&mut *transaction)

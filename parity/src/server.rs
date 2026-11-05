@@ -188,6 +188,35 @@ impl Server {
         Self::start_with_files_configured(binary, store_url, files, "")
     }
 
+    /// [`Server::start_with_files`] with `game` as the `[game]` table's keys, on
+    /// `channels` instead of [`default_channels`].
+    ///
+    /// # Panics
+    ///
+    /// As [`Server::start_with_files`].
+    #[must_use]
+    pub fn start_with_files_channels(
+        binary: &Path,
+        store_url: &str,
+        files: &[(&str, &[u8])],
+        channels: &[ChannelSpec],
+        game: &str,
+    ) -> (Self, PathBuf) {
+        let root = unique_root();
+        let owner = legacy_dir().join("gamedata");
+        let data = root.join("gamedata");
+        for (path, bytes) in files {
+            let path = Path::new(path);
+            link_all_but(&owner, &data, path);
+            let target = data.join(path);
+            drop(fs::remove_file(&target));
+            fs::write(&target, bytes).expect("the replaced file should be writable");
+        }
+        let config = config_text_on(&data, store_url, channels, game);
+        let server = Self::start_in(root, binary, &config);
+        (server, data)
+    }
+
     /// [`Server::start_with_files`] with `game` as the `[game]` table's keys.
     ///
     /// # Panics

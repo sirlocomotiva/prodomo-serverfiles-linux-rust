@@ -70,6 +70,7 @@ mod detail_log;
 mod dice;
 mod dragon_soul;
 mod duel;
+mod dungeons;
 mod emotion;
 mod empire_priv;
 mod event_calendar;
@@ -698,6 +699,9 @@ pub struct GameState {
     /// The war maps the live wars are fought on, keyed by the private map index
     /// (`CWarMapManager::m_mapWarMap`, `G/war_map.cpp:166`). See [`war_map`].
     war_maps: BTreeMap<i32, war_map::WarMap>,
+    /// The live dungeons and the server timers (`CDungeonManager`, `CQuestManager`'s
+    /// `m_mapServerTimer`). See [`dungeons`].
+    dungeons: dungeons::Dungeons,
     /// The guild mark images and their mark-id allocator. See [`guild_mark`].
     marks: guild_mark::MarkManager,
     /// The guild symbols by guild id (`m_mapSymbol`, `G/MarkManager.h`). See
@@ -843,6 +847,7 @@ impl GameState {
             guilds: guild::Guilds::default(),
             messenger: messenger::Relations::default(),
             war_maps: BTreeMap::new(),
+            dungeons: dungeons::Dungeons::default(),
             marks: guild_mark::MarkManager::default(),
             symbols: std::collections::BTreeMap::new(),
             name_rules: crate::select_phase::NameRules::default(),
@@ -3147,6 +3152,7 @@ impl GameState {
         // after it: a member that left the map is no member of the war.
         let war_map = self.bodies.get(&vid).map_or(0, |body| body.map);
         self.leave_war_map(vid, war_map);
+        self.leave_dungeon(vid, war_map);
         // A disconnect runs the `logout` scripts before the flags are taken, and drops
         // the record after: `CHARACTER::Disconnect` runs `CQuestManager::LogoutPC`
         // (`G/char.cpp:1773`), writes the character with its quest flags
@@ -4980,6 +4986,7 @@ impl PulseProcessor for GameState {
         self.run_horse_dead_events(pulse);
         self.run_duel_sweep(pulse);
         self.run_war_map_ticks(pulse);
+        self.run_dungeon_ticks(pulse);
         self.run_party_ticks(pulse);
         self.run_rank_refresh(pulse);
         self.expire_empire_privs();

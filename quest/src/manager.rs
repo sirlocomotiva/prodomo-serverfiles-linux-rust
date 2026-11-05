@@ -615,6 +615,51 @@ pub trait Game {
     /// (`G/questlua_dungeon.cpp:1540-1563`): whether a dungeon lives under the
     /// map index.
     fn dungeon_lives(&self, index: u32) -> bool;
+    /// `CDungeonManager::Create(map)` (`G/dungeon.cpp:470-501`) then the party's jump:
+    /// `d.new_jump_party` (`G/questlua_dungeon.cpp:407-432`) for the character the script
+    /// runs for. The leader's on-map party jumps to `map`'s first free private index at
+    /// (`x`, `y`); quiet with a bad map, a taken dungeon set, or no party.
+    fn dungeon_new_jump_party(&mut self, map: i32, x: i32, y: i32);
+    /// `d.get_map_index` of the script's dungeon (`G/questlua_dungeon.cpp:184-201`):
+    /// its private map index, 0 with none.
+    fn dungeon_map_index(&self) -> i32;
+    /// `d.setf` on the script's dungeon (`G/questlua_dungeon.cpp:106-130`): `name`
+    /// takes `value`. Quiet with none.
+    fn dungeon_set_flag(&mut self, name: Vec<u8>, value: i32);
+    /// `d.getf` on the script's dungeon (`G/questlua_dungeon.cpp:131-153`): the flag
+    /// `name`, 0 with none or no such flag.
+    fn dungeon_get_flag(&self, name: &[u8]) -> i32;
+    /// `d.getf_from_map_index` (`G/questlua_dungeon.cpp:155-182`): the flag `name`
+    /// of the dungeon under `index`, 0 with none, no such dungeon, or no such flag.
+    fn dungeon_flag_from_index(&self, name: &[u8], index: u32) -> i32;
+    /// `d.notice` to the script's dungeon (`G/questlua_dungeon.cpp:52-86`,
+    /// `G/dungeon.cpp:1154-1176`): the notice `text` to its PCs. Quiet with none.
+    fn dungeon_notice(&mut self, text: Vec<u8>);
+    /// `d.set_warp_location` on the script's dungeon (`G/questlua_dungeon.cpp:1603-1622`):
+    /// every member PC's pending warp becomes (`map`, `x`, `y`). Quiet with none.
+    fn dungeon_set_warp_location(&mut self, map: i32, x: i32, y: i32);
+    /// `d.exit_all` on the script's dungeon (`G/questlua_dungeon.cpp:1257-1266`,
+    /// `G/dungeon.cpp:1109-1123`): every PC on its map exits to its saved place.
+    /// Quiet with none.
+    fn dungeon_exit_all(&mut self);
+    /// `d.spawn_mob` in the script's dungeon (`G/questlua_dungeon.cpp`,
+    /// `G/dungeon.cpp:762-781`): `vnum` at (`x`, `y`). Quiet with none.
+    fn dungeon_spawn_mob(&mut self, vnum: u32, x: i32, y: i32);
+    /// `d.select`'s adoption (`G/questmanager.cpp:1252-1264`): the session's dungeon
+    /// becomes `index`, or 0 with `None`. The bridge calls it only while no
+    /// character runs (PID 0), because the selection is ignored with one; a fresh
+    /// step arms 0.
+    fn dungeon_select(&mut self, index: Option<i32>);
+    /// `game.set_event_flag` (`G/questlua_game.cpp:29-37`): the flag `name` takes
+    /// `value`. Quiet unless the name is a string and the value a number, which the
+    /// bridge checks.
+    fn set_event_flag(&mut self, name: Vec<u8>, value: i32);
+    /// `server_timer(name, secs, arg)` (`G/questlua_global.cpp:147-171`): the
+    /// `server_timer` event fires in `secs` seconds with `arg`.
+    fn set_server_timer(&mut self, name: Vec<u8>, secs: f64, arg: u32);
+    /// `clear_server_timer(name, arg)` (`G/questlua_global.cpp:197-206`): the
+    /// named timer with `arg` never fires.
+    fn clear_server_timer(&mut self, name: &[u8], arg: u32);
 
     /// `DragonSoul_IsQualified()` of the character the script runs for
     /// (`G/questlua_dragonsoul.cpp:57-70`): whether it holds
@@ -740,6 +785,15 @@ pub struct Manager {
     quest_npc_vid: u32,
     /// `QuestCategoryIndexMap` (`G/questmanager.h:308`): each quest's category, by number.
     categories: BTreeMap<u16, u32>,
+    /// `m_mapTimerID` (`G/questmanager.cpp:1202-1218`): each server-timer name's NPC id,
+    /// counted down from `u32::MAX`.
+    timer_ids: BTreeMap<Vec<u8>, u32>,
+    /// `m_dwServerTimerArg` (`G/questmanager.cpp:2014-2017`): the firing timer's
+    /// argument, which `get_server_timer_arg` pushes.
+    timer_arg: u32,
+    /// `m_pSelectedDungeon` (`G/questmanager.cpp:1252-1264`): the private index
+    /// `d.select` named, which the `d.*` names read when no character runs.
+    selected: Option<u32>,
 }
 
 impl Manager {
@@ -800,6 +854,9 @@ impl Manager {
             pcs: BTreeMap::new(),
             quest_npc_vid: 0,
             categories,
+            timer_ids: BTreeMap::new(),
+            timer_arg: 0,
+            selected: None,
         }
     }
 
@@ -1104,6 +1161,56 @@ impl Manager {
             run.handle_receive_all(pc, npc, "letter", Wait::Kept);
             ran
         })
+    }
+
+    /// `CQuestManager::ServerTimer` (`G/questmanager.cpp:635-643`): the timer `name`
+    /// fires with `arg`, so the timer NPC's `server_timer` scripts run for PID 0, which
+    /// `GetPCForce` makes when unseen. The dungeon selection clears and `arg` becomes
+    /// what `get_server_timer_arg` pushes. Returns whether a script ran; a suspended
+    /// PC 0 keeps the pass from running, as `HandleReceiveAllEvent`'s `IsRunning`
+    /// check does.
+    pub fn server_timer(&mut self, name: &[u8], arg: u32, game: &mut dyn Game) -> bool {
+        let id = self.load_timer_script(name);
+        self.timer_arg = arg;
+        self.selected = None;
+        self.operate(0, game, |run, pc, npcs| match npcs.get(&id) {
+            Some(npc) => run.handle_receive_all(pc, npc, "server_timer", Wait::Kept),
+            None => false,
+        })
+    }
+
+    /// `CQuestManager::LoadTimerScript` (`G/questmanager.cpp:1202-1218`): the NPC id
+    /// of the timer `name`, counted down from `u32::MAX`, indexing the timer's
+    /// scripts under `object/NAME` on first use.
+    fn load_timer_script(&mut self, name: &[u8]) -> u32 {
+        if let Some(id) = self.timer_ids.get(name) {
+            return *id;
+        }
+        let id = u32::MAX - u32::try_from(self.timer_ids.len()).unwrap_or(u32::MAX);
+        self.timer_ids.insert(name.to_vec(), id);
+        let mut files = NpcFiles::default();
+        files.read(&self.host, name);
+        self.npcs.insert(id, files.build(&self.host));
+        id
+    }
+
+    /// `CQuestManager::GetServerTimerArg` (`G/questmanager.cpp:2014-2017`): the firing
+    /// timer's argument, 0 outside one.
+    pub fn server_timer_arg(&self) -> u32 {
+        self.timer_arg
+    }
+
+    /// `CQuestManager::SelectDungeon` (`G/questmanager.cpp:2019-2022`): the `d.*`
+    /// names read the dungeon under `index` while no character runs; `None` with
+    /// none. What `d.select` writes.
+    pub fn select_dungeon(&mut self, index: Option<u32>) {
+        self.selected = index;
+    }
+
+    /// The selected dungeon `d.select` named, which the `d.*` names read while no
+    /// character runs.
+    pub fn selected_dungeon(&self) -> Option<u32> {
+        self.selected
     }
 
     /// `CHARACTER::SetQuestNPCID` (`G/char.cpp:7610-7613`): records `victim` as the quest NPC
@@ -1437,6 +1544,9 @@ impl Manager {
             pcs,
             quest_npc_vid,
             categories,
+            timer_ids: _,
+            timer_arg,
+            selected,
         } = self;
         let (npc_vid, current, item) = {
             let pc = pcs.entry(pid).or_default();
@@ -1468,6 +1578,8 @@ impl Manager {
             npc_ids,
             quest_indices,
             npc_vid,
+            timer_arg: *timer_arg,
+            selected: *selected,
             quest: current,
             pending_state: None,
             borrowed: Some(&mut borrowed),
@@ -1492,6 +1604,7 @@ impl Manager {
         let cx = cell.into_inner();
         let pc = pcs.entry(pid).or_default();
         pc.item = cx.item;
+        *selected = cx.selected;
         let unsent = cx.output.script.clone();
         // The borrowed maps are the live ones: the bridge's writes landed there, and
         // every `pc.flags` stood empty meanwhile — except `execute`'s `__status`,
@@ -2084,6 +2197,11 @@ struct Cx<'g> {
     /// `G/questmanager.cpp:1284-1289`), which `q.getcurrentquestindex` answers.
     quest_indices: &'g BTreeMap<Vec<u8>, u32>,
     npc_vid: u32,
+    /// `m_dwServerTimerArg`, which `get_server_timer_arg` pushes.
+    timer_arg: u32,
+    /// `m_pSelectedDungeon`'s private index, which the `d.*` names read when no
+    /// character runs, and which `d.select` writes (read back after the step).
+    selected: Option<u32>,
     /// The quest that runs, for error messages (`GetCurrentQuestName`).
     quest: Vec<u8>,
     /// What `set_state` asked for in this step, which [`Run::end_running`] moves the `Pc` to
@@ -3956,10 +4074,60 @@ fn rank_api(
 /// `MOB_RANK_BOSS` (`common/length.h:458-466`).
 const MOB_RANK_BOSS: u8 = 4;
 
-/// The `d.*` and `ds.*` bridged calls: the dungeon pair answer whether a dungeon
-/// lives under `(DWORD)` of the first argument; the `ds.*` names read and grant the
-/// dragon-soul qualification and open its windows. Returns `None` for a name this
-/// table does not hold.
+/// The `d.*` bridged calls (the jump, the map index, the flags, the notice, the warp
+/// spot, the exit and the spawn) and the `ds.*` names, which read and grant the
+/// dragon-soul qualification and open its windows. Returns `None` for a name this table
+/// does not hold.
+/// `dungeon_spawn_mob`: three numbers, the vnum as `(DWORD)`. Pushes nothing.
+fn dungeon_spawn_mob(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let vnum = args.front().cloned().unwrap_or(Value::Nil);
+    let x = args.get(1).cloned().unwrap_or(Value::Nil);
+    let y = args.get(2).cloned().unwrap_or(Value::Nil);
+    let (Some(vnum), Some(_), Some(_)) = (
+        lua.coerce_number(vnum.clone())?,
+        lua.coerce_number(x.clone())?,
+        lua.coerce_number(y.clone())?,
+    ) else {
+        return Ok(Some(MultiValue::new()));
+    };
+    cx.game
+        .dungeon_spawn_mob(dword(vnum), host::c_int(lua, x)?, host::c_int(lua, y)?);
+    Ok(Some(MultiValue::new()))
+}
+
+/// `dungeon_select` (`G/questlua_dungeon.cpp:1540-1563`) and `dungeon_find`
+/// (`:1565-1585`): `(DWORD)lua_tonumber`, false with no number or index 0.
+/// `d.select` names the dungeon for the `d.*` names while no character runs;
+/// `d.find` only asks.
+fn dungeon_select_find(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<MultiValue> {
+    let first = args.front().cloned().unwrap_or(Value::Nil);
+    let index = match lua.coerce_number(first)? {
+        Some(index) => dword(index),
+        None => 0,
+    };
+    let lives = index != 0 && cx.game.dungeon_lives(index);
+    if name == b"d.select" {
+        cx.selected = lives.then_some(index);
+        // `GetCurrentDungeon` (`G/questmanager.cpp:1252-1264`) ignores the
+        // selection while a character runs; with none (PID 0, a server
+        // timer's step) the session adopts it, or 0 when the select missed.
+        if cx.current == 0 {
+            let adopted = lives.then(|| i32::try_from(index).ok()).flatten();
+            cx.game.dungeon_select(adopted);
+        }
+    }
+    Ok(MultiValue::from_iter([Value::Boolean(lives)]))
+}
+
 fn dungeon_api(
     lua: &Lua,
     cx: &mut Cx<'_>,
@@ -3967,15 +4135,114 @@ fn dungeon_api(
     args: &MultiValue,
 ) -> mlua::Result<Option<MultiValue>> {
     if matches!(name, b"d.select" | b"d.find") {
-        let first = args.front().cloned().unwrap_or(Value::Nil);
-        // `dungeon_select`/`dungeon_find` (`G/questlua_dungeon.cpp:1540-1563`):
-        // `(DWORD)lua_tonumber`, false with no number.
-        let lives = match lua.coerce_number(first)? {
-            Some(index) => cx.game.dungeon_lives(dword(index)),
-            None => false,
-        };
-        return Ok(Some(MultiValue::from_iter([Value::Boolean(lives)])));
+        return dungeon_select_find(lua, cx, name, args).map(Some);
     }
+    match name {
+        // `dungeon_new_jump_party` (`G/questlua_dungeon.cpp:407-432`): three numbers, the
+        // map as `(long)`. Pushes nothing.
+        b"d.new_jump_party" => {
+            let numbers = [
+                args.front().cloned().unwrap_or(Value::Nil),
+                args.get(1).cloned().unwrap_or(Value::Nil),
+                args.get(2).cloned().unwrap_or(Value::Nil),
+            ];
+            let mut checked = [0; 3];
+            for (slot, value) in checked.iter_mut().zip(numbers) {
+                if lua.coerce_number(value.clone())?.is_none() {
+                    return Ok(Some(MultiValue::new()));
+                }
+                *slot = host::c_int(lua, value)?;
+            }
+            cx.game
+                .dungeon_new_jump_party(checked[0], checked[1], checked[2]);
+            Ok(Some(MultiValue::new()))
+        }
+        // `dungeon_get_map_index` (`G/questlua_dungeon.cpp:184-201`).
+        b"d.get_map_index" => {
+            let index = cx.game.dungeon_map_index();
+            Ok(Some(MultiValue::from_vec(vec![Value::Number(f64::from(
+                index,
+            ))])))
+        }
+        // `dungeon_set_flag` (`G/questlua_dungeon.cpp:106-130`): a string name and a
+        // number value. Pushes nothing.
+        b"d.setf" => {
+            let name = args.front().cloned().unwrap_or(Value::Nil);
+            let value = args.get(1).cloned().unwrap_or(Value::Nil);
+            if let (Some(name), Some(_)) = (
+                host::c_string(lua, name)?,
+                lua.coerce_number(value.clone())?,
+            ) {
+                cx.game.dungeon_set_flag(name, host::c_int(lua, value)?);
+            }
+            Ok(Some(MultiValue::new()))
+        }
+        // `dungeon_get_flag` (`G/questlua_dungeon.cpp:131-153`).
+        b"d.getf" => {
+            let name = args.front().cloned().unwrap_or(Value::Nil);
+            let flag = host::c_string(lua, name)?.map_or(0, |name| cx.game.dungeon_get_flag(&name));
+            Ok(Some(MultiValue::from_vec(vec![Value::Number(f64::from(
+                flag,
+            ))])))
+        }
+        // `dungeon_get_flag_from_map_index` (`G/questlua_dungeon.cpp:155-182`): a
+        // boolean false for a map index of 0, else the flag's number.
+        b"d.getf_from_map_index" => {
+            let name = args.front().cloned().unwrap_or(Value::Nil);
+            let index = args.get(1).cloned().unwrap_or(Value::Nil);
+            let index = match lua.coerce_number(index.clone())? {
+                Some(index) => dword(index),
+                None => 0,
+            };
+            if index == 0 {
+                return Ok(Some(MultiValue::from_vec(vec![Value::Boolean(false)])));
+            }
+            let flag = host::c_string(lua, name)?
+                .map_or(0, |name| cx.game.dungeon_flag_from_index(&name, index));
+            Ok(Some(MultiValue::from_vec(vec![Value::Number(f64::from(
+                flag,
+            ))])))
+        }
+        // `dungeon_notice` (`G/questlua_dungeon.cpp:52-86`): a string. Pushes nothing.
+        b"d.notice" => {
+            if let Some(text) = host::c_string(lua, args.front().cloned().unwrap_or(Value::Nil))? {
+                cx.game.dungeon_notice(text);
+            }
+            Ok(Some(MultiValue::new()))
+        }
+        // `dungeon_set_warp_location` (`G/questlua_dungeon.cpp:1603-1622`): three
+        // numbers. Pushes nothing.
+        b"d.set_warp_location" => {
+            let numbers = [
+                args.front().cloned().unwrap_or(Value::Nil),
+                args.get(1).cloned().unwrap_or(Value::Nil),
+                args.get(2).cloned().unwrap_or(Value::Nil),
+            ];
+            let mut checked = [0; 3];
+            for (slot, value) in checked.iter_mut().zip(numbers) {
+                if lua.coerce_number(value.clone())?.is_none() {
+                    return Ok(Some(MultiValue::new()));
+                }
+                *slot = host::c_int(lua, value)?;
+            }
+            cx.game
+                .dungeon_set_warp_location(checked[0], checked[1], checked[2]);
+            Ok(Some(MultiValue::new()))
+        }
+        // `dungeon_exit_all` (`G/questlua_dungeon.cpp:1257-1266`). Pushes nothing.
+        b"d.exit_all" => {
+            cx.game.dungeon_exit_all();
+            Ok(Some(MultiValue::new()))
+        }
+        // `dungeon_spawn_mob`: three numbers, the vnum as `(DWORD)`. Pushes nothing.
+        b"d.spawn_mob" => dungeon_spawn_mob(lua, cx, args),
+        _ => Ok(ds_calls(cx, name)),
+    }
+}
+
+/// The `ds.*` bridged calls: the dragon soul qualification and its windows.
+/// Returns `None` for a name this table does not hold.
+fn ds_calls(cx: &mut Cx<'_>, name: &[u8]) -> Option<MultiValue> {
     let result: Option<Value> = match name {
         // `ds_is_qualified` (`G/questlua_dragonsoul.cpp:57-70`): a Lua number, 1 or 0.
         b"ds.is_qualified" => Some(Value::Number(f64::from(u8::from(
@@ -3995,6 +4262,79 @@ fn dungeon_api(
         // Pushes nothing.
         b"ds.open_attr_change_window" => {
             cx.game.open_ds_attr_change();
+            None
+        }
+        _ => return None,
+    };
+    Some(result.into_iter().collect())
+}
+
+/// The bridged server-timer calls (`G/questlua_global.cpp:147-229`): the arms, the
+/// clears, and the firing argument. Returns `None` for a name this table does not
+/// hold.
+fn timer_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let result: Option<Value> = match name {
+        // `_set_server_timer` (`G/questlua_global.cpp:147-171`): a string name, a
+        // number of seconds, and a number argument or none (0). Pushes nothing.
+        b"server_timer" => {
+            let name = args.front().cloned().unwrap_or(Value::Nil);
+            let secs = args.get(1).cloned().unwrap_or(Value::Nil);
+            let arg = args.get(2).cloned().unwrap_or(Value::Nil);
+            if let (Some(name), Some(secs)) = (host::c_string(lua, name)?, lua.coerce_number(secs)?)
+            {
+                let arg = match lua.coerce_number(arg)? {
+                    Some(arg) => dword(arg),
+                    None => 0,
+                };
+                cx.game.set_server_timer(name, secs, arg);
+            }
+            None
+        }
+        // `_clear_server_timer` (`G/questlua_global.cpp:197-206`): the name as
+        // `lua_tostring` reads it (empty for no string) and `(DWORD)` of the
+        // argument. Pushes nothing.
+        b"clear_server_timer" => {
+            let name = host::c_string(lua, args.front().cloned().unwrap_or(Value::Nil))?
+                .unwrap_or_default();
+            let arg = match lua.coerce_number(args.get(1).cloned().unwrap_or(Value::Nil))? {
+                Some(arg) => dword(arg),
+                None => 0,
+            };
+            cx.game.clear_server_timer(&name, arg);
+            None
+        }
+        // `_get_server_timer_arg` (`G/questlua_global.cpp:225-229`).
+        b"get_server_timer_arg" => Some(Value::Number(f64::from(cx.timer_arg))),
+        _ => return Ok(None),
+    };
+    Ok(Some(result.into_iter().collect()))
+}
+
+/// The `game.*` bridged calls that write the world's flags. Returns `None` for a name
+/// this table does not hold.
+fn game_api(
+    lua: &Lua,
+    cx: &mut Cx<'_>,
+    name: &[u8],
+    args: &MultiValue,
+) -> mlua::Result<Option<MultiValue>> {
+    let first = args.front().cloned().unwrap_or(Value::Nil);
+    let last = args.back().cloned().unwrap_or(Value::Nil);
+    let result: Option<Value> = match name {
+        // `game_set_event_flag` (`G/questlua_game.cpp:29-37`): a string name and a
+        // number value. Pushes nothing.
+        b"game.set_event_flag" => {
+            if let (Some(name), Some(_)) = (
+                host::c_string(lua, first.clone())?,
+                lua.coerce_number(last.clone())?,
+            ) {
+                cx.game.set_event_flag(name, host::c_int(lua, last)?);
+            }
             None
         }
         _ => return Ok(None),
@@ -4367,7 +4707,7 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
     if let TextOutcome::Hit(result) = text_api(lua, cx, name, args, last.clone())? {
         return Ok(result.into_iter().collect());
     }
-    let families: [Family; 11] = [
+    let families: [Family; 13] = [
         look_api,
         pc_api,
         item_api,
@@ -4379,6 +4719,8 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
         horse_api,
         mount_api,
         rank_api,
+        timer_api,
+        game_api,
     ];
     for family in families {
         if let Some(answered) = family(lua, cx, name, args)? {
@@ -4434,6 +4776,8 @@ fn api(lua: &Lua, cx: &mut Cx<'_>, name: &[u8], args: &MultiValue) -> mlua::Resu
                 .unwrap_or(0);
             Some(Value::Number(f64::from(value)))
         }
+        // `game_set_event_flag` (`G/questlua_game.cpp:29-37`): a string name and a
+        // number value. Pushes nothing.
         // `game_request_make_guild` (`G/questlua_game.cpp:51-62`): the client hears
         // `HEADER_GC_REQUEST_MAKE_GUILD`. It pushes nothing.
         b"game.request_make_guild" => {
@@ -4657,6 +5001,28 @@ mod tests {
         switched: bool,
         /// Whether a dungeon lives under any map index.
         dungeon: bool,
+        /// Every `dungeon_new_jump_party` call, in order.
+        dungeon_jumps: Vec<(i32, i32, i32)>,
+        /// What `dungeon_map_index` answers.
+        dungeon_index: i32,
+        /// The flags `dungeon_set_flag` set, which `dungeon_get_flag` reads.
+        dungeon_flags: BTreeMap<Vec<u8>, i32>,
+        /// The flags `dungeon_flag_from_index` answers, by (index, name).
+        dungeon_indexed: BTreeMap<(u32, Vec<u8>), i32>,
+        /// Every `dungeon_notice` text, in order.
+        dungeon_notices: Vec<Vec<u8>>,
+        /// Every `dungeon_set_warp_location` call, in order.
+        dungeon_warps: Vec<(i32, i32, i32)>,
+        /// Every `dungeon_exit_all` call.
+        dungeon_exits: u32,
+        /// Every `dungeon_spawn_mob` call, in order.
+        dungeon_spawns: Vec<(u32, i32, i32)>,
+        /// Every `set_event_flag` call, in order.
+        event_sets: Vec<(Vec<u8>, i32)>,
+        /// Every `set_server_timer` call, in order.
+        server_timers: Vec<(Vec<u8>, f64, u32)>,
+        /// Every `clear_server_timer` call, in order.
+        server_clears: Vec<(Vec<u8>, u32)>,
         /// Whether `is_ds_qualified` answers true.
         ds_qualified: bool,
         /// Every `give_ds_qualification` call.
@@ -5146,6 +5512,48 @@ mod tests {
 
         fn dungeon_lives(&self, _index: u32) -> bool {
             self.dungeon
+        }
+        fn dungeon_new_jump_party(&mut self, map: i32, x: i32, y: i32) {
+            self.dungeon_jumps.push((map, x, y));
+        }
+        fn dungeon_map_index(&self) -> i32 {
+            self.dungeon_index
+        }
+        fn dungeon_set_flag(&mut self, name: Vec<u8>, value: i32) {
+            self.dungeon_flags.insert(name, value);
+        }
+        fn dungeon_get_flag(&self, name: &[u8]) -> i32 {
+            self.dungeon_flags.get(name).copied().unwrap_or(0)
+        }
+        fn dungeon_flag_from_index(&self, name: &[u8], index: u32) -> i32 {
+            self.dungeon_indexed
+                .get(&(index, name.to_vec()))
+                .copied()
+                .unwrap_or(0)
+        }
+        fn dungeon_notice(&mut self, text: Vec<u8>) {
+            self.dungeon_notices.push(text);
+        }
+        fn dungeon_set_warp_location(&mut self, map: i32, x: i32, y: i32) {
+            self.dungeon_warps.push((map, x, y));
+        }
+        fn dungeon_exit_all(&mut self) {
+            self.dungeon_exits += 1;
+        }
+        fn dungeon_spawn_mob(&mut self, vnum: u32, x: i32, y: i32) {
+            self.dungeon_spawns.push((vnum, x, y));
+        }
+        fn dungeon_select(&mut self, index: Option<i32>) {
+            self.dungeon_index = index.unwrap_or(0);
+        }
+        fn set_event_flag(&mut self, name: Vec<u8>, value: i32) {
+            self.event_sets.push((name, value));
+        }
+        fn set_server_timer(&mut self, name: Vec<u8>, secs: f64, arg: u32) {
+            self.server_timers.push((name, secs, arg));
+        }
+        fn clear_server_timer(&mut self, name: &[u8], arg: u32) {
+            self.server_clears.push((name.to_vec(), arg));
         }
 
         fn is_ds_qualified(&self) -> bool {
@@ -6129,6 +6537,8 @@ mod tests {
                 npc_ids: &self.manager.npc_ids,
                 quest_indices: self.manager.host.quest_indices(),
                 npc_vid: VID,
+                timer_arg: 0,
+                selected: None,
                 quest: b"q".to_vec(),
                 pending_state: None,
                 borrowed: Some(&mut self.borrowed),
@@ -6905,6 +7315,45 @@ mod tests {
                 ("unmount", 0, 0, 0),
             ]
         );
+    }
+
+    /// `d.select`'s adoption (`G/questmanager.cpp:1252-1264`): with a character the
+    /// select answers but the session keeps its own dungeon; with none (PID 0) the
+    /// session adopts the living index, or 0 when the select missed.
+    #[test]
+    fn the_select_adopts_only_with_no_character() {
+        let manager = manager().lock().unwrap();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake {
+                dungeon: true,
+                dungeon_index: 11,
+                ..Fake::default()
+            },
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        let index = vec![Value::Number(2_100_000.0)];
+        assert_eq!(
+            probe.call("d.select", &index).unwrap(),
+            [Value::Boolean(true)]
+        );
+        assert_eq!(probe.game.dungeon_index, 11, "a character keeps its own");
+        probe.current = 0;
+        assert_eq!(
+            probe.call("d.select", &index).unwrap(),
+            [Value::Boolean(true)]
+        );
+        assert_eq!(probe.game.dungeon_index, 2_100_000, "PID 0 adopts");
+        probe.game.dungeon = false;
+        assert_eq!(
+            probe.call("d.select", &index).unwrap(),
+            [Value::Boolean(false)]
+        );
+        assert_eq!(probe.game.dungeon_index, 0, "a miss clears");
     }
 
     /// The rank names: `pc.global_rank_add_point` queues nothing unless both arguments

@@ -46082,3 +46082,61 @@ flip (killed by the store test), the snapshot `clear` removal (killed by the sce
 and the `add_point` call removal (killed by the scenario). The scenario passed 8/8
 parallel runs. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width
 was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 403. The dungeon names
+
+Thirteen quest-api rows are `ported`, all through one scenario:
+`a_party_enters_the_forest_and_its_timer_sends_it_home`. A party of two forms on
+channel 1, the leader clicks the forest guardian, and the dialog spends both members'
+tickets (`pc.remove_item` on the blocked takes, stored under each owner's PID) before
+`d.new_jump_party` creates the dungeon and jumps the party to its entry. Both reenter
+on the private map index. A server timer's report then selects the dungeon by the
+timer's argument (`d.select` by `get_server_timer_arg`) and notices back the index
+(`d.get_map_index`), the stored leader (both `d.setf`/`d.getf` and
+`d.getf_from_map_index`), and a `game.set_event_flag` write; a `d.spawn_mob` dog stands
+at the party's feet. The first exit was cleared (`clear_server_timer`) and never
+fires — both hear only the second — and `d.exit_all` sends both home to the warp
+`d.set_warp_location` named. The rows: `lua.d.new_jump_party`, `lua.d.get_map_index`,
+`lua.d.setf`, `lua.d.getf`, `lua.d.getf_from_map_index`, `lua.d.notice`,
+`lua.d.set_warp_location`, `lua.d.exit_all`, `lua.d.spawn_mob`,
+`lua.game.set_event_flag`, `lua.server_timer`, `lua.clear_server_timer`,
+`lua.get_server_timer_arg`. `BRIDGED` grows 223 to 236.
+
+The game side is a new `dungeons` module (`CDungeonManager`'s live dungeons and
+`CQuestManager`'s `m_mapServerTimer`): the create names the first free private index,
+the timers fire on the pulse tick (`rint(PASSES_PER_SEC(when))`), and the exits,
+notices, flags, warp spots and spawns run against the staged indices a step's
+`DungeonMoves` remaps (`GetDungeonForce`). The bridge's `dungeon_api` family holds
+the nine `d.*` arms with the argument rules (three checked numbers, the map as
+`(long)`, the vnum as `(DWORD)`, false for a map index of 0); the `ds.*` arms move
+into a plain `ds_calls` helper, and the timers and `game.set_event_flag` into
+`timer_api` and `game_api` families, so no function trips the line lint. `Session`
+grows the staging vectors, `takes`, and the blocked takes' sides; `store_quest_items`
+writes another character's take as its own exchange side, folding the reader's own
+back in, and `db::rank_global::claim` takes the sides along so a claim and its takes
+land in one transaction. A disconnect leaves its dungeon (`leave_dungeon`), and the
+pulse runs the dungeon ticks.
+
+Unit tests: `a_staged_server_timer_fires_in_its_seconds_pulses` pins the delay (149
+quiet, 150 fires); the `grand_read` tail moves into `grand_outcome`, the smith's
+protos into `smith_protos`, and the quest-info pair and records into their helpers,
+as the `takes` field tips each fixture past the line lint. Two faults found while
+gating: the probe's `quest` had been blanked to `Vec::new()` instead of `b"q"`,
+failing every `pc.setqf` test through the shared manager, and `BRIDGED` listed the
+`d.*` names out of `api::NAMES` order (`d.exit_all`, `d.spawn_mob` sort first).
+
+Gates (2026-11-05): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; the suite `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` passed 4776 in 42 targets with 0 failed; `cargo test --workspace --doc
+--locked --offline` clean; `cargo clippy --workspace --all-targets --locked --offline --
+-D warnings` clean; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+--offline` clean. Mutants: the set value +1 (killed by the scenario), the
+`server_timer` name (killed), the fire channel +100 (killed), the jump y +1 (killed),
+the timer rate +100 (survived the scenario — its reads have no timeout — then killed
+by `a_staged_server_timer_fires_in_its_seconds_pulses`), the `d.notice` name (killed),
+the `d.spawn_mob` name (killed), the timer argument +1 (killed), the
+`game.set_event_flag` name (killed), the `d.exit_all` name (killed), the
+`clear_server_timer` name (killed), the `d.set_warp_location` name (killed), and the
+sides guard flip (killed). The scenario passed 8/8 parallel runs. `rustfmt` and
+`cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
+`prodomo\_%` database remained. No ADR changed.

@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-05, after ledger section 402 (the global rank).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 403
+Last reviewed: 2026-11-05, after ledger section 403 (the dungeon names).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 404
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -403,8 +403,13 @@ ride item or seal it holds. Since 401 the 366 quest-api names no Lua file refere
 `unused`, pending owner question 37; 111 called names remain. Since 402 a kill scores its
 counter through `napierdalator`, the board mails at login, `/open_global_rank` lists it,
 `/rank_end_season` awards and empties it, and 20016's chat claims the prize once (also
-correcting the `data.lua.unread` finding: `settings.lua:174` dofiles `BlueDragon.lua`). The
-next slice is the owner's call: the forest's leader branch waits on the `d.*` manager names,
+correcting the `data.lua.unread` finding: `settings.lua:174` dofiles `BlueDragon.lua`). Since 403
+a party enters its forest through `d.new_jump_party`, and the report reads back the index, the
+flags, the event flag, a notice and a spawned dog; the cleared exit never fires and the second
+sends both home (`d.get_map_index`, `d.setf`, `d.getf`, `d.getf_from_map_index`, `d.notice`,
+`d.set_warp_location`, `d.exit_all`, `d.spawn_mob`, `game.set_event_flag`, `server_timer`,
+`clear_server_timer`, `get_server_timer_arg`). The
+next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
 kill waits on the kill event reaching quest scripts with a target.

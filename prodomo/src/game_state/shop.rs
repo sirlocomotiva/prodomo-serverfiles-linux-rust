@@ -225,6 +225,8 @@ pub enum ShopAnswer {
         gold: Option<u64>,
         /// Whether a script claimed the global rank's prizes, for the same store.
         claimed: bool,
+        /// The blocked takes' rows by owner PID, for the same store.
+        takes: Vec<(u32, Vec<db::items::RowChange>)>,
     },
 }
 
@@ -344,10 +346,10 @@ impl GameState {
         if self.trading.contains_key(&vid) {
             return ShopAnswer::silent(ShopDeclined::Trading);
         }
-        let (taken, (mut records, climbs, guild_ops, items, gold, claimed)) =
+        let (taken, (mut records, climbs, guild_ops, items, gold, claimed, take_sides)) =
             self.quest_click(vid, (target, race), place, mover);
         // A give's rows are stored even when no script took the click.
-        if taken || !items.is_empty() || gold.is_some() || claimed {
+        if taken || !items.is_empty() || gold.is_some() || claimed || !take_sides.is_empty() {
             return ShopAnswer::Quest {
                 records,
                 climbs,
@@ -355,6 +357,7 @@ impl GameState {
                 items,
                 gold,
                 claimed,
+                takes: take_sides,
             };
         }
         match self.open_window(vid, target, place, mover) {
@@ -445,7 +448,7 @@ impl GameState {
     ) -> Result<ShopAnswer, MoveItemRefused> {
         let browsing = match self.trading(vid, place, mover) {
             Ok(browsing) => browsing,
-            Err(declined) => return Ok(declined),
+            Err(declined) => return Ok(*declined),
         };
         self.set_shop_time(vid);
         let slot = usize::from(pos);
@@ -512,7 +515,7 @@ impl GameState {
         mover: Mover,
     ) -> Result<ShopAnswer, MoveItemRefused> {
         if let Err(declined) = self.trading(vid, place, mover) {
-            return Ok(declined);
+            return Ok(*declined);
         }
         let character = self
             .characters
@@ -534,19 +537,24 @@ impl GameState {
 
     /// The keeper the character under `vid` trades with, or the answer when it has none in
     /// reach.
-    fn trading(&self, vid: Vid, place: GroundPlace, mover: Mover) -> Result<Browsing, ShopAnswer> {
+    fn trading(
+        &self,
+        vid: Vid,
+        place: GroundPlace,
+        mover: Mover,
+    ) -> Result<Browsing, Box<ShopAnswer>> {
         let Some(browsing) = self.browsing.get(&vid).copied() else {
-            return Err(ShopAnswer::silent(ShopDeclined::NotBrowsing));
+            return Err(Box::new(ShopAnswer::silent(ShopDeclined::NotBrowsing)));
         };
         let distance = distance_approx(
             place.x.saturating_sub(browsing.x),
             place.y.saturating_sub(browsing.y),
         );
         if distance > SHOP_TRADE_DISTANCE {
-            return Err(ShopAnswer::Declined {
+            return Err(Box::new(ShopAnswer::Declined {
                 reason: ShopDeclined::TooFar { distance },
                 records: vec![notice(TOO_FAR_NOTICE, mover, &self.locale)],
-            });
+            }));
         }
         Ok(browsing)
     }
@@ -1347,6 +1355,7 @@ mod tests {
             items: Vec::new(),
             gold: None,
             claimed: false,
+            takes: Vec::new(),
         };
         assert_eq!(click(&mut state, SCRIPTED, at(0)), declined);
         assert!(state.browsing.is_empty());

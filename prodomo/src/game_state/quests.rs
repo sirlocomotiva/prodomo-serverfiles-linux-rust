@@ -163,11 +163,24 @@ impl QuestStep {
     }
 }
 
+/// What a giving quest step answers: the `op`'s answer, the run, the reader's item
+/// rows, whether the step claimed the reader's prizes, and the blocked takes'
+/// rows by owner PID.
+type GivingOutcome<R> = (
+    R,
+    QuestRun,
+    Vec<db::items::RowChange>,
+    bool,
+    Vec<(u32, Vec<db::items::RowChange>)>,
+);
+
 /// What a quest step reports: the records its scripts sent for the client, the GRAND
 /// climbs its reads landed (each for the store's `store_skill`), the `guild.*`
 /// writers the scripts ran (each for the descriptor to drain after the step, in order),
-/// the item rows its gives changed (for the descriptor to store before it sends), and
-/// the gold its `pc.change_money` moves and its melts left the character holding.
+/// the item rows its gives changed (for the descriptor to store before it sends), the
+/// gold its `pc.change_money` moves and its melts left the character holding, whether
+/// the step claimed the reader's prizes, and the blocked takes' rows by owner PID (for
+/// the descriptor to store with the reader's, in one transaction).
 pub type QuestStepOutcome = (
     Vec<Vec<u8>>,
     Vec<(u8, u8, i32)>,
@@ -175,6 +188,7 @@ pub type QuestStepOutcome = (
     Vec<db::items::RowChange>,
     Option<u64>,
     bool,
+    Vec<(u32, Vec<db::items::RowChange>)>,
 );
 
 /// `MOB_RANK_KNIGHT` (`common/length.h:458-466`), the rank `GetMobRank` gives a PC.
@@ -349,6 +363,14 @@ struct WorldMoves {
     ds_refines: u32,
     ds_attrs: u32,
     party_sets: Vec<(Vec<u8>, i32)>,
+    dungeon_sets: Vec<(i32, Vec<u8>, i32)>,
+    dungeon_jumps: Vec<(i32, i32, i32, i32)>,
+    dungeon_notices: Vec<(i32, Vec<u8>)>,
+    dungeon_warps: Vec<(i32, i32, i32, i32)>,
+    dungeon_exits: Vec<i32>,
+    dungeon_spawns: Vec<(i32, u32, i32, i32)>,
+    server_timer_ops: Vec<super::dungeons::ServerTimerOp>,
+    event_sets: Vec<(Vec<u8>, i32)>,
     confirm_records: Vec<(u32, Vec<u8>)>,
     confirm_timeouts: Vec<(u32, i32)>,
     rank_points: Vec<(u8, i32)>,
@@ -369,6 +391,14 @@ impl WorldMoves {
             ds_refines: session.ds_refines,
             ds_attrs: session.ds_attrs,
             party_sets: std::mem::take(&mut session.party_sets),
+            dungeon_sets: std::mem::take(&mut session.dungeon_sets),
+            dungeon_jumps: std::mem::take(&mut session.dungeon_jumps),
+            dungeon_notices: std::mem::take(&mut session.dungeon_notices),
+            dungeon_warps: std::mem::take(&mut session.dungeon_warps),
+            dungeon_exits: std::mem::take(&mut session.dungeon_exits),
+            dungeon_spawns: std::mem::take(&mut session.dungeon_spawns),
+            server_timer_ops: std::mem::take(&mut session.server_timer_ops),
+            event_sets: std::mem::take(&mut session.event_sets),
             confirm_records: std::mem::take(&mut session.confirm_records),
             confirm_timeouts: std::mem::take(&mut session.confirm_timeouts),
             rank_points: std::mem::take(&mut session.rank.points),
@@ -400,6 +430,39 @@ pub(super) struct Session<'s> {
     /// The war map the character stands on, and 0 when it stands on none
     /// (`CWarMapManager::Find(GetMapIndex())`, `G/input_login.cpp:780`).
     pub(super) war_map: i32,
+    /// The private index the reader stands in a dungeon under, and 0 when it stands
+    /// in none: what `pc.in_dungeon` and `d.get_map_index` read (`m_pkDungeon`,
+    /// `G/input_login.cpp:788`).
+    pub(super) dungeon: i32,
+    /// The living dungeons' flags at the step's start, by private index, so `d.getf`
+    /// and `d.getf_from_map_index` answer what the world would judge: the flags as
+    /// `d.setf` leaves them. The world applies the sets after the step.
+    pub(super) dungeon_flags:
+        std::collections::BTreeMap<i32, std::collections::BTreeMap<Vec<u8>, i32>>,
+    /// Every `d.setf` call's index, name and value, in order, for the world's flags
+    /// after the step (legacy writes in the call).
+    pub(super) dungeon_sets: Vec<(i32, Vec<u8>, i32)>,
+    /// Every `d.new_jump_party` call's staged index and its (map, x, y), in
+    /// order, for the creates and jumps after the step: the `d.*` calls in the same
+    /// step already see the staged index (`GetDungeonForce`, `G/char.cpp:7635-7641`).
+    pub(super) dungeon_jumps: Vec<(i32, i32, i32, i32)>,
+    /// Every `d.notice` call's index and text, in order, for the notices after the
+    /// step.
+    pub(super) dungeon_notices: Vec<(i32, Vec<u8>)>,
+    /// Every `d.set_warp_location` call's index and (map, x, y), in order, for the
+    /// warp spots after the step.
+    pub(super) dungeon_warps: Vec<(i32, i32, i32, i32)>,
+    /// Every `d.exit_all` call's index, in order, for the exits after the step.
+    pub(super) dungeon_exits: Vec<i32>,
+    /// Every `d.spawn_mob` call's index, vnum and (x, y), in order, for the spawns
+    /// after the step.
+    pub(super) dungeon_spawns: Vec<(i32, u32, i32, i32)>,
+    /// Every `server_timer` and `clear_server_timer` call, in call order, for the
+    /// timers and clears after the step.
+    pub(super) server_timer_ops: Vec<super::dungeons::ServerTimerOp>,
+    /// Every `game.set_event_flag` call's name and value, in order, for the world's
+    /// flags after the step.
+    pub(super) event_sets: Vec<(Vec<u8>, i32)>,
     /// The skill rows, for the GRAND read's gates.
     pub(super) tables: &'s gamedata::pc_skill_data::PcSkills,
     /// `number()`'s draw, and the GRAND read's.
@@ -550,6 +613,10 @@ pub(super) struct Session<'s> {
     /// Whether the last `begin_other_pc` switched: false when the named
     /// character is not online.
     pub(super) switched: bool,
+    /// Every blocked PC's removals, oldest first, as (`pid`, `vnum`, `count`): they
+    /// live on the step, not on the frame, because `q.end_other_pc_block` pops the
+    /// frame while the world's take still waits for the step's end.
+    pub(super) takes: Vec<(u32, u32, u32)>,
     /// Every `GC_QUEST_CONFIRM` a script asked for another character, with its PID, in
     /// order: the world writes each after the step, as `ConfirmWithMsg` sends it.
     pub(super) confirm_records: Vec<(u32, Vec<u8>)>,
@@ -582,8 +649,6 @@ pub(super) struct BlockedPc {
     pub(super) items: world::character::CharacterItems,
     /// Its usable cells, as the step's rules read them.
     pub(super) usable_cells: u16,
-    /// Its removals, in order, for the world after the step.
-    pub(super) takes: Vec<(u32, u32)>,
 }
 
 /// What a give, a count and a removal reach: the character's items and quickslots, the rules
@@ -1364,8 +1429,101 @@ impl Game for Session<'_> {
     fn end_other_pc(&mut self) {
         self.blocked.pop();
     }
-    fn dungeon_lives(&self, _index: u32) -> bool {
-        false
+    fn dungeon_lives(&self, index: u32) -> bool {
+        i32::try_from(index)
+            .ok()
+            .is_some_and(|index| self.dungeon_flags.contains_key(&index))
+    }
+    /// Staged now and queued for the create and the party's jump after the step:
+    /// the staged index becomes the reader's dungeon at once (`GetDungeonForce`,
+    /// `G/char.cpp:7635-7641`), so the `d.*` calls after it in the same step see the
+    /// dungeon the jump lands on.
+    fn dungeon_new_jump_party(&mut self, map: i32, x: i32, y: i32) {
+        let staged = -1 - i32::try_from(self.dungeon_jumps.len()).unwrap_or(i32::MAX);
+        self.dungeon_jumps.push((staged, map, x, y));
+        self.dungeon = staged;
+        self.dungeon_flags.entry(staged).or_default();
+    }
+    fn dungeon_map_index(&self) -> i32 {
+        self.dungeon
+    }
+    /// Written to the snapshot now, so a later `d.getf` in the same step reads
+    /// it back, and queued for the world after the step.
+    fn dungeon_set_flag(&mut self, name: Vec<u8>, value: i32) {
+        if self.dungeon != 0 {
+            self.dungeon_flags
+                .entry(self.dungeon)
+                .or_default()
+                .insert(name.clone(), value);
+            self.dungeon_sets.push((self.dungeon, name, value));
+        }
+    }
+    fn dungeon_get_flag(&self, name: &[u8]) -> i32 {
+        (self.dungeon != 0)
+            .then(|| {
+                self.dungeon_flags
+                    .get(&self.dungeon)
+                    .and_then(|flags| flags.get(name).copied())
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
+    }
+    fn dungeon_flag_from_index(&self, name: &[u8], index: u32) -> i32 {
+        i32::try_from(index)
+            .ok()
+            .and_then(|index| self.dungeon_flags.get(&index))
+            .and_then(|flags| flags.get(name).copied())
+            .unwrap_or(0)
+    }
+    /// Queued with the reader's dungeon for the notices after the step; quiet
+    /// with none.
+    fn dungeon_notice(&mut self, text: Vec<u8>) {
+        if self.dungeon != 0 {
+            self.dungeon_notices.push((self.dungeon, text));
+        }
+    }
+    /// Queued with the reader's dungeon for the warp spots after the step; quiet
+    /// with none.
+    fn dungeon_set_warp_location(&mut self, map: i32, x: i32, y: i32) {
+        if self.dungeon != 0 {
+            self.dungeon_warps.push((self.dungeon, map, x, y));
+        }
+    }
+    /// Queued with the reader's dungeon for the exits after the step; quiet
+    /// with none.
+    fn dungeon_exit_all(&mut self) {
+        if self.dungeon != 0 {
+            self.dungeon_exits.push(self.dungeon);
+        }
+    }
+    /// Queued with the reader's dungeon for the spawns after the step; quiet
+    /// with none.
+    fn dungeon_spawn_mob(&mut self, vnum: u32, x: i32, y: i32) {
+        if self.dungeon != 0 {
+            self.dungeon_spawns.push((self.dungeon, vnum, x, y));
+        }
+    }
+    /// The `d.select` adoption while no character runs: the session's dungeon
+    /// becomes the selection, or 0 when the select missed.
+    fn dungeon_select(&mut self, index: Option<i32>) {
+        self.dungeon = index.unwrap_or(0);
+    }
+    /// Queued for the world's flags after the step.
+    fn set_event_flag(&mut self, name: Vec<u8>, value: i32) {
+        self.event_sets.push((name, value));
+    }
+    /// Queued in call order with the clears for the timers after the step.
+    fn set_server_timer(&mut self, name: Vec<u8>, secs: f64, arg: u32) {
+        self.server_timer_ops
+            .push(super::dungeons::ServerTimerOp::Set { name, secs, arg });
+    }
+    /// Queued in call order with the arms for the clears after the step.
+    fn clear_server_timer(&mut self, name: &[u8], arg: u32) {
+        self.server_timer_ops
+            .push(super::dungeons::ServerTimerOp::Clear {
+                name: name.to_vec(),
+                arg,
+            });
     }
 
     fn is_ds_qualified(&self) -> bool {
@@ -1489,6 +1647,7 @@ impl Game for Session<'_> {
                 return;
             };
             let mut slots = world::character::Quickslots::default();
+            let pid = frame.pid;
             let done = world::character::remove_specify_item(
                 &mut frame.items,
                 &mut slots,
@@ -1496,10 +1655,11 @@ impl Game for Session<'_> {
                 frame.usable_cells,
                 (vnum, count),
             );
-            if !done.records.is_empty() {
-                frame.takes.push((vnum, count));
+            let took = !done.records.is_empty();
+            drop(done);
+            if took {
+                self.takes.push((pid, vnum, count));
             }
-            let _ = done;
             return;
         }
         let Some(giver) = self.giver.as_mut().filter(|giver| giver.stores) else {
@@ -1715,9 +1875,10 @@ impl Game for Session<'_> {
             })
     }
 
-    /// No dungeon is ported, so no character stands in one.
+    /// `m_pkDungeon != NULL` (`G/questlua_pc.cpp:318-323`): the reader's map is a
+    /// living dungeon's index.
     fn in_dungeon(&self) -> bool {
-        false
+        self.dungeon != 0
     }
 
     fn set_horse_name(&mut self, name: Vec<u8>) -> u8 {
@@ -2168,8 +2329,13 @@ impl GameState {
                 }
             },
         );
-        let Some(((), (mut records, climbs, ops, block_mode, _, gold_moves, _), items, claimed)) =
-            answered
+        let Some((
+            (),
+            (mut records, climbs, ops, block_mode, _, gold_moves, _),
+            items,
+            claimed,
+            take_sides,
+        )) = answered
         else {
             return Ok(QuestStepOutcome::default());
         };
@@ -2191,7 +2357,7 @@ impl GameState {
             records.extend(judged.own);
             stores.extend(judged.stores);
         }
-        Ok((records, climbs, stores, items, gold, claimed))
+        Ok((records, climbs, stores, items, gold, claimed, take_sides))
     }
 
     /// `CQuestManager::Letter` (`G/questmanager.cpp:502-514`) for the character under
@@ -2268,13 +2434,18 @@ impl GameState {
         let level = character
             .points()
             .map_or(1, world::character::Points::level);
-        let Some((taken, (mut records, climbs, ops, block_mode, _, gold_moves, _), items, claimed)) =
-            self.run_quests_giving(
-                place,
-                (mover, level, pid),
-                Giving::ItemsAndPrizes,
-                |manager, game| manager.click(pid, target, u32::from(race), game),
-            )
+        let Some((
+            taken,
+            (mut records, climbs, ops, block_mode, _, gold_moves, _),
+            items,
+            claimed,
+            take_sides,
+        )) = self.run_quests_giving(
+            place,
+            (mover, level, pid),
+            Giving::ItemsAndPrizes,
+            |manager, game| manager.click(pid, target, u32::from(race), game),
+        )
         else {
             return (false, QuestStepOutcome::default());
         };
@@ -2293,7 +2464,10 @@ impl GameState {
             records.extend(judged.own);
             stores.extend(judged.stores);
         }
-        (taken, (records, climbs, stores, items, gold, claimed))
+        (
+            taken,
+            (records, climbs, stores, items, gold, claimed, take_sides),
+        )
     }
 
     /// `case ITEM_QUEST` of `UseItemEx` (`G/char_item.cpp:2842-2888`) after the world's checks
@@ -2342,7 +2516,7 @@ impl GameState {
             .spot_of(vid.raw())
             .map_or((0, 0), |spot| (spot.x, spot.y));
         let place = GroundPlace { channel, map, x, y };
-        let Some(((), (records, climbs, ops, block_mode, _, _, _), items, _)) = self
+        let Some(((), (records, climbs, ops, block_mode, _, _, _), items, _, take_sides)) = self
             .run_quests_giving(
                 place,
                 (mover, level, pid),
@@ -2357,6 +2531,14 @@ impl GameState {
         if let Some(mode) = block_mode {
             self.block_modes.insert(vid, mode);
         }
+        if !take_sides.is_empty() {
+            warn!(
+                pid,
+                sides = take_sides.len(),
+                "a quest took blocked items in a use-item step; their rows are dropped"
+            );
+        }
+        debug_assert!(take_sides.is_empty(), "take rows in a use-item step");
         step.records.extend(records);
         step.changes.extend(items);
         let now = quest_now();
@@ -2553,8 +2735,17 @@ impl GameState {
         pid: u32,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
     ) -> Option<(R, QuestRun)> {
-        self.run_quests_giving(place, (mover, level, pid), Giving::Nothing, op)
-            .map(|(answer, run, _, _)| (answer, run))
+        let (answer, run, _, _, take_sides) =
+            self.run_quests_giving(place, (mover, level, pid), Giving::Nothing, op)?;
+        if !take_sides.is_empty() {
+            warn!(
+                pid,
+                sides = take_sides.len(),
+                "a quest took blocked items outside a dialog step; their rows are dropped"
+            );
+        }
+        debug_assert!(take_sides.is_empty(), "take rows outside a dialog step");
+        Some((answer, run))
     }
 
     /// [`Self::run_quests`], with `pc.give_item2` able to give when `stores_items`: the step's
@@ -2570,8 +2761,8 @@ impl GameState {
         (mover, level, pid): (Mover, u8, u32),
         giving: Giving,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
-    ) -> Option<(R, QuestRun, Vec<db::items::RowChange>, bool)> {
-        let (answer, mut run, rows, claimed) =
+    ) -> Option<GivingOutcome<R>> {
+        let (answer, mut run, rows, claimed, take_sides) =
             self.run_quests_giving_raw(place, (mover, level, pid), giving, op)?;
         let vid = self
             .characters
@@ -2585,7 +2776,7 @@ impl GameState {
             self.packet_around(me, &frame, Some(me));
             run.0.push(frame);
         }
-        Some((answer, run, rows, claimed))
+        Some((answer, run, rows, claimed, take_sides))
     }
 
     /// The step behind [`Self::run_quests_giving`], which then applies the alignment amounts.
@@ -2596,7 +2787,7 @@ impl GameState {
         (mover, level, pid): (Mover, u8, u32),
         giving: Giving,
         op: impl FnOnce(&mut Manager, &mut dyn Game) -> R,
-    ) -> Option<(R, QuestRun, Vec<db::items::RowChange>, bool)> {
+    ) -> Option<GivingOutcome<R>> {
         let (answer, run, item_rows, queued, reader, takes, claimed) = {
             let mut armed = self.arm_quest_session(place, (mover, level, pid), giving)?;
             let answer = op(armed.manager, &mut armed.session);
@@ -2610,16 +2801,10 @@ impl GameState {
                 alignment_changes,
                 gold_changes,
                 hides,
-                blocked,
+                takes,
                 rank: rank_step,
                 ..
             } = armed.session;
-            let mut takes: Vec<(u32, u32, u32)> = Vec::new();
-            for snap in blocked.iter().flatten() {
-                for (vnum, count) in &snap.takes {
-                    takes.push((snap.pid, *vnum, *count));
-                }
-            }
             let run = (
                 records,
                 climbs,
@@ -2643,13 +2828,18 @@ impl GameState {
             self.rank.forget_prizes(pid);
         }
         self.apply_world_moves(reader, place, mover, pid, queued);
-        let mut blocked_rows = Vec::new();
+        let mut take_sides: Vec<(u32, Vec<db::items::RowChange>)> = Vec::new();
         for (take_pid, vnum, count) in takes {
-            self.apply_blocked_take(&mut blocked_rows, take_pid, (vnum, count));
+            let rows = self.apply_blocked_take(take_pid, (vnum, count));
+            if rows.is_empty() {
+                continue;
+            }
+            match take_sides.iter_mut().find(|(pid, _)| *pid == take_pid) {
+                Some((_, side)) => side.extend(rows),
+                None => take_sides.push((take_pid, rows)),
+            }
         }
-        let mut item_rows = item_rows;
-        item_rows.extend(blocked_rows);
-        Some((answer, run, item_rows, claimed))
+        Some((answer, run, item_rows, claimed, take_sides))
     }
 
     /// A [`Session`] borrowed from the world, with its manager and reader: the split-out
@@ -2676,6 +2866,7 @@ impl GameState {
             dice,
             bodies,
             war_maps,
+            dungeons,
             maps,
             pc_skills,
             affect_events,
@@ -2701,6 +2892,7 @@ impl GameState {
             horse_names,
             bodies,
             war_maps,
+            dungeons,
             maps,
             pc_skills,
             guilds,
@@ -2719,6 +2911,7 @@ impl GameState {
             goto_info: _,
         } = &mut *quests;
         let mut session = build_session(session_inputs(
+            dungeons.flags_snapshot(),
             place,
             mover,
             level,
@@ -2823,22 +3016,21 @@ impl GameState {
     /// character is gone or its descriptor stores nothing.
     fn apply_blocked_take(
         &mut self,
-        rows: &mut Vec<db::items::RowChange>,
         take_pid: u32,
         (vnum, count): (u32, u32),
-    ) {
+    ) -> Vec<db::items::RowChange> {
         let Ok(vid) = self
             .characters
             .find_by_pid(take_pid)
             .map(world::character::Character::vid)
         else {
-            return;
+            return Vec::new();
         };
         let Some(mover) = self.own_mover(vid) else {
-            return;
+            return Vec::new();
         };
         let Ok(character) = self.characters.find_by_vid_mut(vid) else {
-            return;
+            return Vec::new();
         };
         let usable = common::item_slots::usable_inventory_cells(character.inven_point());
         let (items, _, slots) = character.items_points_and_quickslots_mut();
@@ -2860,7 +3052,7 @@ impl GameState {
         for record in taken.records {
             let _sent = self.write_to_client(vid, record);
         }
-        rows.extend(taken.changes);
+        taken.changes
     }
 
     /// `AddToGround` at the character's feet for a given item no cell took, with the
@@ -3079,44 +3271,91 @@ impl GameState {
         pid: u32,
         queued: WorldMoves,
     ) {
-        for item in queued.laid {
+        let WorldMoves {
+            laid,
+            warps,
+            drops,
+            villages,
+            conquerors,
+            sash_opens,
+            changelooks,
+            minings,
+            horse_ops,
+            ds_refines,
+            ds_attrs,
+            party_sets,
+            dungeon_sets,
+            dungeon_jumps,
+            dungeon_notices,
+            dungeon_warps,
+            dungeon_exits,
+            dungeon_spawns,
+            server_timer_ops,
+            event_sets,
+            confirm_records,
+            confirm_timeouts,
+            rank_points,
+        } = queued;
+        for item in laid {
             self.lay_given(reader, place, item);
         }
-        for (vnum, count, secs) in queued.drops {
+        for (vnum, count, secs) in drops {
             self.lay_drop_owned(reader, place, vnum, count, secs, mover);
         }
-        for _ in 0..queued.villages {
+        for _ in 0..villages {
             self.order_village_warp(reader, mover);
         }
-        for _ in 0..queued.conquerors {
+        for _ in 0..conquerors {
             self.make_conqueror(reader, mover);
         }
-        for combination in queued.sash_opens {
+        for combination in sash_opens {
             self.open_sash(reader, mover, combination);
         }
-        for _ in 0..queued.changelooks {
+        for _ in 0..changelooks {
             self.open_changelook(reader, mover);
         }
-        for npc in queued.minings {
+        for npc in minings {
             self.mining(reader, npc, mover);
         }
-        self.apply_horse_ops(reader, queued.horse_ops);
-        self.apply_ds_calls(reader, queued.ds_refines, queued.ds_attrs);
-        for (flag, value) in queued.party_sets {
+        self.apply_horse_ops(reader, horse_ops);
+        self.apply_ds_calls(reader, ds_refines, ds_attrs);
+        let staged = self.apply_dungeon_moves(
+            reader,
+            super::dungeons::DungeonMoves {
+                sets: dungeon_sets,
+                jumps: dungeon_jumps,
+                notices: dungeon_notices,
+                warps: dungeon_warps,
+                exits: dungeon_exits,
+                spawns: dungeon_spawns,
+                timer_ops: server_timer_ops,
+                event_sets,
+            },
+        );
+        // A party flag set to a staged slot reads the created index: the step saw the
+        // jump's index before the create ran (`GetDungeonForce`), and the flag keeps
+        // what the script read. A slot whose create failed reads the reader's own
+        // dungeon, as the calls after it did.
+        let (staged, home) = staged;
+        for (flag, value) in party_sets {
+            let value = staged
+                .get(&value)
+                .copied()
+                .unwrap_or(if value < 0 { home } else { value });
             self.parties.set_flag(pid, flag, value);
         }
-        for (to_pid, record) in queued.confirm_records {
+        for (to_pid, record) in confirm_records {
             if let Ok(target) = self.characters.find_by_pid(to_pid) {
                 let _sent = self.write_to_client(target.vid(), record);
             }
         }
-        for (waiter, timeout) in queued.confirm_timeouts {
+        for (waiter, timeout) in confirm_timeouts {
             self.arm_confirm_timeout(waiter, timeout);
         }
-        for (kind, count) in queued.rank_points {
+        for (kind, count) in rank_points {
             self.add_rank_point(reader, kind, count);
         }
-        for (x, y, private) in queued.warps {
+        for (x, y, private) in warps {
             self.order_quest_warp(reader, x, y, private, mover);
         }
     }
@@ -3131,6 +3370,110 @@ impl GameState {
         for _ in 0..attrs {
             self.open_ds_attr_change(reader);
         }
+    }
+    /// A step's [`super::dungeons::DungeonMoves`]: the creates first, because the
+    /// `d.*` calls staged against the jumps they follow (`GetDungeonForce`,
+    /// `G/char.cpp:7635-7641`) are remapped onto the created indices, and then the
+    /// rest in legacy's call order within each kind: the flag sets, the notices, the
+    /// warp spots, the exits, the spawns, the timers and clears, and the event-flag
+    /// sets. Answers the staged slots' created indices with the reader's own
+    /// dungeon, so the party flags set to a staged slot read what the script read.
+    fn apply_dungeon_moves(
+        &mut self,
+        reader: Vid,
+        moves: super::dungeons::DungeonMoves,
+    ) -> (std::collections::BTreeMap<i32, i32>, i32) {
+        let mut staged: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
+        let mut slots: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
+        for (slot, map, x, y) in moves.jumps {
+            slots.insert(slot);
+            let created = self.dungeon_jump_party(reader, map, x, y);
+            if let Some(created) = created {
+                staged.insert(slot, created);
+            }
+        }
+        // A staged slot whose create failed falls back to the reader's own dungeon:
+        // legacy never set the pending warp, so the calls after it read the old one
+        // (`GetDungeonForce`, `G/char.cpp:7635-7641`).
+        let home = self
+            .bodies
+            .get(&reader)
+            .map(|body| body.map)
+            .filter(|map| u32::try_from(*map).is_ok_and(|map| self.dungeons.lives(map)))
+            .unwrap_or(0);
+        let at = |staged: &std::collections::BTreeMap<i32, i32>, index: i32| {
+            staged
+                .get(&index)
+                .copied()
+                .unwrap_or(if index < 0 { home } else { index })
+        };
+        for (index, name, value) in moves.sets {
+            self.dungeons.set_flag(at(&staged, index), name, value);
+        }
+        for (index, text) in moves.notices {
+            self.dungeon_notice(at(&staged, index), &text);
+        }
+        for (index, map, x, y) in moves.warps {
+            self.dungeon_set_warp_location(at(&staged, index), map, x, y);
+        }
+        for index in moves.exits {
+            self.dungeon_exit_all(at(&staged, index));
+        }
+        for (index, vnum, x, y) in moves.spawns {
+            self.dungeon_spawn_mob(at(&staged, index), vnum, x, y);
+        }
+        // A timer argument is `(DWORD)` of what the script read, so a staged slot
+        // arrives as its word; it reads the created index, or the reader's own
+        // dungeon when the create failed.
+        let words: std::collections::BTreeMap<u32, u32> = staged
+            .iter()
+            .map(|(slot, created)| {
+                (
+                    u32::from_ne_bytes(slot.to_ne_bytes()),
+                    u32::from_ne_bytes(created.to_ne_bytes()),
+                )
+            })
+            .collect();
+        let home_word = u32::from_ne_bytes(home.to_ne_bytes());
+        // A staged slot whose create failed reads the reader's own dungeon; any other
+        // word passes through.
+        let arg_at = |arg: u32| {
+            words.get(&arg).copied().unwrap_or_else(|| {
+                if slots.contains(&i32::from_ne_bytes(arg.to_ne_bytes())) {
+                    home_word
+                } else {
+                    arg
+                }
+            })
+        };
+        for op in moves.timer_ops {
+            match op {
+                super::dungeons::ServerTimerOp::Clear { name, arg } => {
+                    self.dungeons.clear_timer(&name, arg_at(arg));
+                }
+                super::dungeons::ServerTimerOp::Set { name, secs, arg } => {
+                    // `rint(PASSES_PER_SEC(when))` (`G/questevent.cpp:126`): the seconds
+                    // in Pulses, rounded. Quest timers are whole seconds, so the tie
+                    // rule never fires.
+                    let pulses = (secs * f64::from(crate::save::PASSES_PER_SEC))
+                        .round()
+                        .max(0.0);
+                    let pulses: u64 = if pulses < 18_446_744_073_709_551_616.0 {
+                        format!("{pulses:.0}").parse().unwrap_or(0)
+                    } else {
+                        u64::MAX
+                    };
+                    let due = self.last_pulse.saturating_add(pulses);
+                    self.dungeons.add_timer(name, arg_at(arg), due);
+                }
+            }
+        }
+        for (name, value) in moves.event_sets {
+            if let Some(quests) = self.quests.as_mut() {
+                quests.manager_mut().set_event_flag(&name, value);
+            }
+        }
+        (staged, home)
     }
 
     /// One `ds.open_refine_window` call: with the qualification the reader's client
@@ -3271,6 +3614,9 @@ struct ReaderContext {
     caller: Option<u32>,
     map_index: i32,
     war_map: i32,
+    /// The private index the reader stands in a dungeon under, when its map is one
+    /// (`m_pkDungeon`, `G/input_login.cpp:788`).
+    dungeon: i32,
     gold: u64,
     empire: u8,
     char_name: Vec<u8>,
@@ -3291,6 +3637,8 @@ struct ReaderContext {
 /// Every borrow [`GameState::arm_quest_session`] threads into its [`Session`], as
 /// one struct so the builder stays under the argument lint.
 struct SessionInputs<'s> {
+    /// The living dungeons' flags at the step's start, by private index.
+    dungeon_flags: std::collections::BTreeMap<i32, std::collections::BTreeMap<Vec<u8>, i32>>,
     place: GroundPlace,
     mover: Mover,
     level: u8,
@@ -3333,6 +3681,7 @@ fn reader_context(
     horse_names: &std::collections::HashMap<u32, Vec<u8>>,
     bodies: &std::collections::HashMap<Vid, super::motion::Body>,
     war_maps: &BTreeMap<i32, super::war_map::WarMap>,
+    dungeons: &super::dungeons::Dungeons,
     maps: &BTreeMap<(u8, i32), super::view::MapIndex>,
     pc_skills: &std::collections::HashMap<u32, super::pc_skill::PcSkillState>,
     guilds: &super::guild::Guilds,
@@ -3350,6 +3699,10 @@ fn reader_context(
     let body = bodies.get(&reader);
     let map_index = body.map_or(0, |body| body.map);
     let war_map = war_maps.get(&map_index).map_or(0, |war| war.map_index);
+    let dungeon = u32::try_from(map_index)
+        .ok()
+        .filter(|index| dungeons.lives(*index))
+        .map_or(0, |_| map_index);
     let gold = character.map_or(0, world::character::Character::gold);
     let empire = body.map_or(0, |body| body.card.empire);
     let char_name = character.map_or(Vec::new(), |character| character.name().as_bytes().to_vec());
@@ -3389,6 +3742,7 @@ fn reader_context(
         caller,
         map_index,
         war_map,
+        dungeon,
         gold,
         empire,
         char_name,
@@ -3429,7 +3783,6 @@ fn block_snapshot(
         points: character.points().cloned(),
         usable_cells: common::item_slots::usable_inventory_cells(character.inven_point()),
         items: character.items().clone(),
-        takes: Vec::new(),
     })
 }
 
@@ -3502,6 +3855,7 @@ fn arm_item_giver<'s>(
 /// stays under the line lint.
 #[allow(clippy::too_many_arguments)]
 fn session_inputs<'s>(
+    dungeon_flags: std::collections::BTreeMap<i32, std::collections::BTreeMap<Vec<u8>, i32>>,
     place: GroundPlace,
     mover: Mover,
     level: u8,
@@ -3533,6 +3887,7 @@ fn session_inputs<'s>(
     name_rules: crate::select_phase::NameRules,
 ) -> SessionInputs<'s> {
     SessionInputs {
+        dungeon_flags,
         place,
         mover,
         level,
@@ -3569,6 +3924,7 @@ fn session_inputs<'s>(
 /// emptied per-step vectors.
 fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
     let SessionInputs {
+        dungeon_flags,
         place,
         mover,
         level,
@@ -3600,6 +3956,7 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
         name_rules,
     } = inputs;
     session_head(
+        dungeon_flags,
         place,
         mover,
         level,
@@ -3636,6 +3993,7 @@ fn build_session(inputs: SessionInputs<'_>) -> Session<'_> {
 /// item giver, before the literal fills the per-step vectors.
 #[allow(clippy::too_many_arguments)]
 fn session_head<'s>(
+    dungeon_flags: std::collections::BTreeMap<i32, std::collections::BTreeMap<Vec<u8>, i32>>,
     place: GroundPlace,
     mover: Mover,
     level: u8,
@@ -3690,6 +4048,16 @@ fn session_head<'s>(
         mover,
         map_index: context.map_index,
         war_map: context.war_map,
+        dungeon: context.dungeon,
+        dungeon_flags,
+        dungeon_sets: Vec::new(),
+        dungeon_jumps: Vec::new(),
+        dungeon_notices: Vec::new(),
+        dungeon_warps: Vec::new(),
+        dungeon_exits: Vec::new(),
+        dungeon_spawns: Vec::new(),
+        server_timer_ops: Vec::new(),
+        event_sets: Vec::new(),
         tables,
         dice,
         reader,
@@ -3747,6 +4115,7 @@ fn session_head<'s>(
         ds_attrs: 0,
         blocked: Vec::new(),
         switched: false,
+        takes: Vec::new(),
         confirm_records: Vec::new(),
         confirm_timeouts: Vec::new(),
         rank: RankStep::default(),
@@ -3790,6 +4159,16 @@ mod tests {
         let mut session = Session {
             map_index: 0,
             war_map: 0,
+            dungeon: 0,
+            dungeon_flags: std::collections::BTreeMap::new(),
+            dungeon_sets: Vec::new(),
+            dungeon_jumps: Vec::new(),
+            dungeon_notices: Vec::new(),
+            dungeon_warps: Vec::new(),
+            dungeon_exits: Vec::new(),
+            dungeon_spawns: Vec::new(),
+            server_timer_ops: Vec::new(),
+            event_sets: Vec::new(),
             level: 1,
             npcs: None,
             protos,
@@ -3841,6 +4220,7 @@ mod tests {
             party_member_pids: Vec::new(),
             blocked: Vec::new(),
             switched: false,
+            takes: Vec::new(),
             confirm_records: Vec::new(),
             confirm_timeouts: Vec::new(),
             rank: RankStep::default(),
@@ -4125,7 +4505,6 @@ mod tests {
                     points: None,
                     items: blocked_items,
                     usable_cells: common::item_slots::usable_inventory_cells(0),
-                    takes: Vec::new(),
                 },
             );
             session.begin_other_pc(99);
@@ -4171,6 +4550,16 @@ mod tests {
         let mut session = Session {
             map_index: 0,
             war_map: 0,
+            dungeon: 0,
+            dungeon_flags: std::collections::BTreeMap::new(),
+            dungeon_sets: Vec::new(),
+            dungeon_jumps: Vec::new(),
+            dungeon_notices: Vec::new(),
+            dungeon_warps: Vec::new(),
+            dungeon_exits: Vec::new(),
+            dungeon_spawns: Vec::new(),
+            server_timer_ops: Vec::new(),
+            event_sets: Vec::new(),
             level: 1,
             npcs: None,
             protos: &protos,
@@ -4222,6 +4611,7 @@ mod tests {
             party_member_pids: Vec::new(),
             blocked: Vec::new(),
             switched: false,
+            takes: Vec::new(),
             confirm_records: Vec::new(),
             confirm_timeouts: Vec::new(),
             rank: RankStep::default(),
@@ -4240,18 +4630,22 @@ mod tests {
             ds_refines: 0,
             ds_attrs: 0,
         };
-        assert!(!Game::is_ds_qualified(&session));
-        Game::give_ds_qualification(&mut session);
-        Game::open_ds_refine(&mut session);
-        Game::open_ds_attr_change(&mut session);
+        grant_ds_and_open(&mut session);
+        assert_ds_grant(&session);
+    }
+
+    /// The grant, the two opens, and the reads around them: unqualified before, the
+    /// infinite row and its add packet after, so a later read in the same step answers
+    /// true.
+    fn grant_ds_and_open(session: &mut Session<'_>) {
+        assert!(!Game::is_ds_qualified(session));
+        Game::give_ds_qualification(session);
+        Game::open_ds_refine(session);
+        Game::open_ds_attr_change(session);
         assert_eq!(session.ds_gives, 1);
         assert_eq!(session.ds_refines, 1);
         assert_eq!(session.ds_attrs, 1);
-        // The grant landed in the call: the infinite row sits in the event, and its add
-        // packet joined the step's records, so a later read in the same step answers
-        // true.
-        assert!(Game::is_ds_qualified(&session));
-        assert_ds_grant(&session);
+        assert!(Game::is_ds_qualified(session));
     }
 
     /// The infinite 540 row the grant pushed, and its add packet in the step's records.
@@ -4365,13 +4759,28 @@ mod tests {
     /// A session that may give and remove, for a character whose two unlocked cells are
     /// empty, with the rows `protos` as its item protos and item IDs from 1000. The
     /// reader is a god, so the GM level answers without further setup.
+    /// The protos a giving session reads: the item rows, and empty mob and name tables.
+    fn giving_protos(
+        protos: Vec<gamedata::item_proto::ItemProto>,
+    ) -> (
+        ItemProtos,
+        MobProtos,
+        MobNamesByLanguage,
+        ItemNamesByLanguage,
+    ) {
+        (
+            ItemProtos::from_rows(protos),
+            MobProtos::default(),
+            MobNamesByLanguage::default(),
+            ItemNamesByLanguage::default(),
+        )
+    }
+
     fn with_giving_session<R>(
         protos: Vec<gamedata::item_proto::ItemProto>,
         f: impl FnOnce(&mut Session<'_>) -> R,
     ) -> R {
-        let items_protos = ItemProtos::from_rows(protos);
-        let (mobs, names) = (MobProtos::default(), MobNamesByLanguage::default());
-        let item_names = ItemNamesByLanguage::default();
+        let (items_protos, mobs, names, item_names) = giving_protos(protos);
         let (locale, mut dice) = (LocaleStrings::default(), Pcg32::new(1, 1));
         let tables = gamedata::pc_skill_data::PcSkills::default();
         let mut slots = super::super::pc_skill::PcSkillState::default();
@@ -4385,6 +4794,16 @@ mod tests {
         let mut session = Session {
             map_index: 0,
             war_map: 0,
+            dungeon: 0,
+            dungeon_flags: std::collections::BTreeMap::new(),
+            dungeon_sets: Vec::new(),
+            dungeon_jumps: Vec::new(),
+            dungeon_notices: Vec::new(),
+            dungeon_warps: Vec::new(),
+            dungeon_exits: Vec::new(),
+            dungeon_spawns: Vec::new(),
+            server_timer_ops: Vec::new(),
+            event_sets: Vec::new(),
             level: 1,
             npcs: None,
             protos: &mobs,
@@ -4441,6 +4860,7 @@ mod tests {
             party_member_pids: Vec::new(),
             blocked: Vec::new(),
             switched: false,
+            takes: Vec::new(),
             confirm_records: Vec::new(),
             confirm_timeouts: Vec::new(),
             rank: RankStep::default(),
@@ -4791,6 +5211,16 @@ mod tests {
         let mut session = Session {
             map_index: 0,
             war_map: 0,
+            dungeon: 0,
+            dungeon_flags: std::collections::BTreeMap::new(),
+            dungeon_sets: Vec::new(),
+            dungeon_jumps: Vec::new(),
+            dungeon_notices: Vec::new(),
+            dungeon_warps: Vec::new(),
+            dungeon_exits: Vec::new(),
+            dungeon_spawns: Vec::new(),
+            server_timer_ops: Vec::new(),
+            event_sets: Vec::new(),
             level: 1,
             npcs: None,
             protos: &protos,
@@ -4842,6 +5272,7 @@ mod tests {
             party_member_pids: Vec::new(),
             blocked: Vec::new(),
             switched: false,
+            takes: Vec::new(),
             confirm_records: Vec::new(),
             confirm_timeouts: Vec::new(),
             rank: RankStep::default(),
@@ -4860,6 +5291,12 @@ mod tests {
             ds_refines: 0,
             ds_attrs: 0,
         };
+        send_quest_info_pair(&mut session);
+        assert_quest_info_records(&session.records);
+    }
+
+    /// The window's pair: a titled begin, then an untitled end.
+    fn send_quest_info_pair(session: &mut Session<'_>) {
         session.quest_info(&QuestInfo {
             index: 0x0128,
             category: 0x0203,
@@ -4872,22 +5309,23 @@ mod tests {
             begin: Some(false),
             title: None,
         });
+    }
+
+    /// The window's two records: the titled begin and the untitled end.
+    fn assert_quest_info_records(records: &[Vec<u8>]) {
         let mut titled = vec![81, 40, 0, 0x28, 0x01, 0x03, 0x02, 0b11, 1];
         let mut title = [0; 31];
         title[..5].copy_from_slice(b"Bonus");
         titled.extend_from_slice(&title);
-        assert_eq!(
-            session.records,
-            [titled, vec![81, 9, 0, 0x28, 0x01, 0, 0, 0b01, 0]]
-        );
+        assert_eq!(records, [titled, vec![81, 9, 0, 0x28, 0x01, 0, 0, 0b01, 0]]);
     }
 
     /// `SetBlockModeForce` (`G/char.cpp:7658-7661`): the byte lands now, the
     /// client hears `setblockmode %d` in this step's records, the last call
     /// winning, and no quest flag moves — the pending byte rides the session.
-    #[test]
-    fn send_block_mode_lands_the_line_and_the_last_byte_wins() {
-        use gamedata::mob_locale_names::{MobLocaleNames, MobNamesByLanguage};
+    /// The smith's protos and names: vnum 20016, an NPC named Smith.
+    fn smith_protos() -> (MobProtos, MobNamesByLanguage) {
+        use gamedata::mob_locale_names::MobLocaleNames;
         use gamedata::mob_proto::MobProto;
         use gamedata::mob_proto::CHAR_TYPE_NPC;
         use gamedata::records::MobTableRecord;
@@ -4901,7 +5339,12 @@ mod tests {
             },
         }]);
         let english = MobLocaleNames::parse(b"VNUM\tNAME\n20016\tSmith\n").unwrap();
-        let names = MobNamesByLanguage::from_tables(vec![english]);
+        (protos, MobNamesByLanguage::from_tables(vec![english]))
+    }
+
+    #[test]
+    fn send_block_mode_lands_the_line_and_the_last_byte_wins() {
+        let (protos, names) = smith_protos();
         let locale = LocaleStrings::default();
         let mut dice = Pcg32::new(1, 1);
         let tables = gamedata::pc_skill_data::PcSkills::default();
@@ -4909,6 +5352,16 @@ mod tests {
         let mut session = Session {
             map_index: 0,
             war_map: 0,
+            dungeon: 0,
+            dungeon_flags: std::collections::BTreeMap::new(),
+            dungeon_sets: Vec::new(),
+            dungeon_jumps: Vec::new(),
+            dungeon_notices: Vec::new(),
+            dungeon_warps: Vec::new(),
+            dungeon_exits: Vec::new(),
+            dungeon_spawns: Vec::new(),
+            server_timer_ops: Vec::new(),
+            event_sets: Vec::new(),
             level: 1,
             npcs: None,
             protos: &protos,
@@ -4960,6 +5413,7 @@ mod tests {
             party_member_pids: Vec::new(),
             blocked: Vec::new(),
             switched: false,
+            takes: Vec::new(),
             confirm_records: Vec::new(),
             confirm_timeouts: Vec::new(),
             rank: RankStep::default(),
@@ -4987,6 +5441,39 @@ mod tests {
         assert_eq!(
             session.records[1],
             chat_packet(to, CHAT_TYPE_COMMAND, b"setblockmode %d", &[Arg::Int(24)]),
+        );
+    }
+
+    /// A staged server timer fires in its seconds' Pulses: 6 seconds lands due at 150,
+    /// so pulse 149 leaves it standing and 150 fires it.
+    #[test]
+    fn a_staged_server_timer_fires_in_its_seconds_pulses() {
+        use crate::game_state::fixtures::{a_world, enter, TestClock};
+
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut inbox = enter(&mut world, 1, (500, 500), 0);
+        while inbox.try_recv().is_ok() {}
+        let moves = crate::game_state::dungeons::DungeonMoves {
+            sets: Vec::new(),
+            jumps: Vec::new(),
+            notices: Vec::new(),
+            warps: Vec::new(),
+            exits: Vec::new(),
+            spawns: Vec::new(),
+            timer_ops: vec![crate::game_state::dungeons::ServerTimerOp::Set {
+                name: b"probe".to_vec(),
+                secs: 6.0,
+                arg: 0,
+            }],
+            event_sets: Vec::new(),
+        };
+        world.apply_dungeon_moves(Vid::new(1), moves);
+        assert!(world.dungeons.timers_due(149).is_empty());
+        assert_eq!(
+            world.dungeons.timers_due(150),
+            [(b"probe".to_vec(), 0)],
+            "rint(6 * 25)"
         );
     }
 
@@ -5082,7 +5569,7 @@ mod tests {
         let mover = world.own_mover(vid).expect("in the world");
         // Before the login no state names the quest, so the window's entry runs nothing,
         // where the letter's own button would have started it (`NPC::OnInfo`).
-        let (records, _climbs, _stores, _items, _gold, _claimed) = world
+        let (records, _climbs, _stores, _items, _gold, _claimed, _takes) = world
             .quest(
                 vid,
                 &QuestStep::Button(quest | QUEST_INFO_BIT),
@@ -5121,7 +5608,7 @@ mod tests {
             "the title follows its button"
         );
 
-        let (records, _climbs, _stores, _items, _gold, _claimed) = world
+        let (records, _climbs, _stores, _items, _gold, _claimed, _takes) = world
             .quest(
                 vid,
                 &QuestStep::Button(quest | QUEST_INFO_BIT),
@@ -5140,7 +5627,7 @@ mod tests {
             "{info:?}"
         );
         // The dialog moved the quest to `talk`; a second press finds no script there.
-        let (records, _climbs, _stores, _items, _gold, _claimed) = world
+        let (records, _climbs, _stores, _items, _gold, _claimed, _takes) = world
             .quest(
                 vid,
                 &QuestStep::Button(quest | QUEST_INFO_BIT),
@@ -5149,7 +5636,7 @@ mod tests {
             )
             .expect("the world holds the character");
         assert!(records.is_empty(), "{records:?}");
-        let (records, _climbs, _stores, _items, _gold, _claimed) = world
+        let (records, _climbs, _stores, _items, _gold, _claimed, _takes) = world
             .quest(vid, &QuestStep::Button(999 | QUEST_INFO_BIT), place, mover)
             .expect("the world holds the character");
         assert!(records.is_empty(), "an unknown quest is quiet: {records:?}");
@@ -5206,7 +5693,7 @@ mod tests {
         };
         let mover = world.own_mover(vid).expect("in the world");
         let left = |world: &mut GameState, minutes: i32| {
-            let (records, _climbs, _stores, _items, _gold, _claimed) = world
+            let (records, _climbs, _stores, _items, _gold, _claimed, _takes) = world
                 .quest(
                     vid,
                     &QuestStep::Button(quest | QUEST_INFO_BIT),
@@ -5558,7 +6045,7 @@ mod tests {
         let (mut world, _inbox, _records, sash) = marked_theowahdan(&clock);
         let vid = Vid::new(1);
         let mover = world.own_mover(vid).expect("in the world");
-        let (taken, (records, _climbs, _stores, _items, _gold, _claimed)) =
+        let (taken, (records, _climbs, _stores, _items, _gold, _claimed, _takes)) =
             world.quest_click(vid, (THEOWAHDAN, 60_003), beside(), mover);
         assert!(taken);
         assert_eq!(records[0], [124, 1, 0, 0, 0], "{records:?}");
