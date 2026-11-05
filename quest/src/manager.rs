@@ -620,6 +620,11 @@ pub trait Game {
     /// runs for. The leader's on-map party jumps to `map`'s first free private index at
     /// (`x`, `y`); quiet with a bad map, a taken dungeon set, or no party.
     fn dungeon_new_jump_party(&mut self, map: i32, x: i32, y: i32);
+    /// `CDungeonManager::Create(map)` (`G/dungeon.cpp:470-501`) then the reader's jump:
+    /// `d.new_jump` (`G/questlua_dungeon.cpp:318-348`) for the character the script
+    /// runs for. The reader alone jumps to `map`'s first free private index at
+    /// (`x`, `y`); quiet with a bad map, a taken dungeon set, or no reader.
+    fn dungeon_new_jump(&mut self, map: i32, x: i32, y: i32);
     /// `d.get_map_index` of the script's dungeon (`G/questlua_dungeon.cpp:184-201`):
     /// its private map index, 0 with none.
     fn dungeon_map_index(&self) -> i32;
@@ -645,6 +650,21 @@ pub trait Game {
     /// `d.spawn_mob` in the script's dungeon (`G/questlua_dungeon.cpp`,
     /// `G/dungeon.cpp:762-781`): `vnum` at (`x`, `y`). Quiet with none.
     fn dungeon_spawn_mob(&mut self, vnum: u32, x: i32, y: i32);
+    /// `d.clear_regen` on the script's dungeon (`G/questlua_dungeon.cpp:235-243`,
+    /// `G/dungeon.cpp:895-904`): its regens go. Quiet with none.
+    fn dungeon_clear_regen(&mut self);
+    /// `d.kill_all` on the script's dungeon (`G/questlua_dungeon.cpp:1491-1499`,
+    /// `G/dungeon.cpp:996-1008`): every non-player on its map dies. Quiet with
+    /// none.
+    fn dungeon_kill_all(&mut self);
+    /// `d.set_damage_from_race` (`G/questlua_dungeon.cpp:902-919`): the character
+    /// under `vid` refuses damage from attackers of race `flag`. No dungeon is
+    /// needed: legacy finds the character by VID.
+    fn dungeon_set_damage_from_race(&mut self, flag: u32, vid: u32);
+    /// `d.set_damage_from_affect` (`G/questlua_dungeon.cpp:921-938`): the character
+    /// under `vid` takes damage only from attackers holding affect flag `flag`.
+    /// No dungeon is needed: legacy finds the character by VID.
+    fn dungeon_set_damage_from_affect(&mut self, flag: u32, vid: u32);
     /// `d.select`'s adoption (`G/questmanager.cpp:1252-1264`): the session's dungeon
     /// becomes `index`, or 0 with `None`. The bridge calls it only while no
     /// character runs (PID 0), because the selection is ignored with one; a fresh
@@ -4099,6 +4119,40 @@ fn dungeon_spawn_mob(
     Ok(Some(MultiValue::new()))
 }
 
+/// Three checked numbers, each as `(int)`: what `d.new_jump_party`, `d.new_jump`
+/// and `d.set_warp_location` read (`G/questlua_dungeon.cpp:407-432`, `:318-348`,
+/// `:1603-1622`). `None` unless all three are numbers.
+fn dungeon_triple(lua: &Lua, args: &MultiValue) -> mlua::Result<Option<[i32; 3]>> {
+    let numbers = [
+        args.front().cloned().unwrap_or(Value::Nil),
+        args.get(1).cloned().unwrap_or(Value::Nil),
+        args.get(2).cloned().unwrap_or(Value::Nil),
+    ];
+    let mut checked = [0; 3];
+    for (slot, value) in checked.iter_mut().zip(numbers) {
+        if lua.coerce_number(value.clone())?.is_none() {
+            return Ok(None);
+        }
+        *slot = host::c_int(lua, value)?;
+    }
+    Ok(Some(checked))
+}
+
+/// Two checked numbers, each as `(DWORD)`: what `d.set_damage_from_race` and
+/// `d.set_damage_from_affect` read (`G/questlua_dungeon.cpp:902-938`). `None`
+/// unless both are numbers.
+fn dungeon_dword_pair(lua: &Lua, args: &MultiValue) -> mlua::Result<Option<(u32, u32)>> {
+    let first = args.front().cloned().unwrap_or(Value::Nil);
+    let second = args.get(1).cloned().unwrap_or(Value::Nil);
+    match (
+        lua.coerce_number(first.clone())?,
+        lua.coerce_number(second.clone())?,
+    ) {
+        (Some(first), Some(second)) => Ok(Some((dword(first), dword(second)))),
+        _ => Ok(None),
+    }
+}
+
 /// `dungeon_select` (`G/questlua_dungeon.cpp:1540-1563`) and `dungeon_find`
 /// (`:1565-1585`): `(DWORD)lua_tonumber`, false with no number or index 0.
 /// `d.select` names the dungeon for the `d.*` names while no character runs;
@@ -4141,20 +4195,18 @@ fn dungeon_api(
         // `dungeon_new_jump_party` (`G/questlua_dungeon.cpp:407-432`): three numbers, the
         // map as `(long)`. Pushes nothing.
         b"d.new_jump_party" => {
-            let numbers = [
-                args.front().cloned().unwrap_or(Value::Nil),
-                args.get(1).cloned().unwrap_or(Value::Nil),
-                args.get(2).cloned().unwrap_or(Value::Nil),
-            ];
-            let mut checked = [0; 3];
-            for (slot, value) in checked.iter_mut().zip(numbers) {
-                if lua.coerce_number(value.clone())?.is_none() {
-                    return Ok(Some(MultiValue::new()));
-                }
-                *slot = host::c_int(lua, value)?;
+            if let Some(checked) = dungeon_triple(lua, args)? {
+                cx.game
+                    .dungeon_new_jump_party(checked[0], checked[1], checked[2]);
             }
-            cx.game
-                .dungeon_new_jump_party(checked[0], checked[1], checked[2]);
+            Ok(Some(MultiValue::new()))
+        }
+        // `dungeon_new_jump` (`G/questlua_dungeon.cpp:318-348`): three numbers, the
+        // map as `(long)`. Pushes nothing.
+        b"d.new_jump" => {
+            if let Some(checked) = dungeon_triple(lua, args)? {
+                cx.game.dungeon_new_jump(checked[0], checked[1], checked[2]);
+            }
             Ok(Some(MultiValue::new()))
         }
         // `dungeon_get_map_index` (`G/questlua_dungeon.cpp:184-201`).
@@ -4213,20 +4265,10 @@ fn dungeon_api(
         // `dungeon_set_warp_location` (`G/questlua_dungeon.cpp:1603-1622`): three
         // numbers. Pushes nothing.
         b"d.set_warp_location" => {
-            let numbers = [
-                args.front().cloned().unwrap_or(Value::Nil),
-                args.get(1).cloned().unwrap_or(Value::Nil),
-                args.get(2).cloned().unwrap_or(Value::Nil),
-            ];
-            let mut checked = [0; 3];
-            for (slot, value) in checked.iter_mut().zip(numbers) {
-                if lua.coerce_number(value.clone())?.is_none() {
-                    return Ok(Some(MultiValue::new()));
-                }
-                *slot = host::c_int(lua, value)?;
+            if let Some(checked) = dungeon_triple(lua, args)? {
+                cx.game
+                    .dungeon_set_warp_location(checked[0], checked[1], checked[2]);
             }
-            cx.game
-                .dungeon_set_warp_location(checked[0], checked[1], checked[2]);
             Ok(Some(MultiValue::new()))
         }
         // `dungeon_exit_all` (`G/questlua_dungeon.cpp:1257-1266`). Pushes nothing.
@@ -4236,6 +4278,32 @@ fn dungeon_api(
         }
         // `dungeon_spawn_mob`: three numbers, the vnum as `(DWORD)`. Pushes nothing.
         b"d.spawn_mob" => dungeon_spawn_mob(lua, cx, args),
+        // `dungeon_clear_regen` (`G/questlua_dungeon.cpp:235-243`). Pushes nothing.
+        b"d.clear_regen" => {
+            cx.game.dungeon_clear_regen();
+            Ok(Some(MultiValue::new()))
+        }
+        // `dungeon_kill_all` (`G/questlua_dungeon.cpp:1491-1499`). Pushes nothing.
+        b"d.kill_all" => {
+            cx.game.dungeon_kill_all();
+            Ok(Some(MultiValue::new()))
+        }
+        // `dungeon_set_damage_from_race` (`G/questlua_dungeon.cpp:902-919`): two
+        // numbers, the flag then the VID, each as `(DWORD)`. Pushes nothing.
+        b"d.set_damage_from_race" => {
+            if let Some((flag, vid)) = dungeon_dword_pair(lua, args)? {
+                cx.game.dungeon_set_damage_from_race(flag, vid);
+            }
+            Ok(Some(MultiValue::new()))
+        }
+        // `dungeon_set_damage_from_affect` (`G/questlua_dungeon.cpp:921-938`): two
+        // numbers, the flag then the VID, each as `(DWORD)`. Pushes nothing.
+        b"d.set_damage_from_affect" => {
+            if let Some((flag, vid)) = dungeon_dword_pair(lua, args)? {
+                cx.game.dungeon_set_damage_from_affect(flag, vid);
+            }
+            Ok(Some(MultiValue::new()))
+        }
         _ => Ok(ds_calls(cx, name)),
     }
 }
@@ -5017,6 +5085,16 @@ mod tests {
         dungeon_exits: u32,
         /// Every `dungeon_spawn_mob` call, in order.
         dungeon_spawns: Vec<(u32, i32, i32)>,
+        /// Every `dungeon_new_jump` call, in order.
+        dungeon_singles: Vec<(i32, i32, i32)>,
+        /// Every `dungeon_clear_regen` call.
+        dungeon_clears: u32,
+        /// Every `dungeon_kill_all` call.
+        dungeon_kills: u32,
+        /// Every `dungeon_set_damage_from_race` call, in order.
+        dungeon_damage_race: Vec<(u32, u32)>,
+        /// Every `dungeon_set_damage_from_affect` call, in order.
+        dungeon_damage_affect: Vec<(u32, u32)>,
         /// Every `set_event_flag` call, in order.
         event_sets: Vec<(Vec<u8>, i32)>,
         /// Every `set_server_timer` call, in order.
@@ -5542,6 +5620,21 @@ mod tests {
         }
         fn dungeon_spawn_mob(&mut self, vnum: u32, x: i32, y: i32) {
             self.dungeon_spawns.push((vnum, x, y));
+        }
+        fn dungeon_new_jump(&mut self, map: i32, x: i32, y: i32) {
+            self.dungeon_singles.push((map, x, y));
+        }
+        fn dungeon_clear_regen(&mut self) {
+            self.dungeon_clears += 1;
+        }
+        fn dungeon_kill_all(&mut self) {
+            self.dungeon_kills += 1;
+        }
+        fn dungeon_set_damage_from_race(&mut self, flag: u32, vid: u32) {
+            self.dungeon_damage_race.push((flag, vid));
+        }
+        fn dungeon_set_damage_from_affect(&mut self, flag: u32, vid: u32) {
+            self.dungeon_damage_affect.push((flag, vid));
         }
         fn dungeon_select(&mut self, index: Option<i32>) {
             self.dungeon_index = index.unwrap_or(0);
@@ -7657,6 +7750,45 @@ mod tests {
             "the Channel"
         );
         the_party_flags(probe);
+        the_dungeon_tail_names(probe);
+    }
+
+    /// The dungeon tail: `d.new_jump` stages its three numbers and pushes
+    /// nothing, quiet without a number; `d.clear_regen` and `d.kill_all` run
+    /// and push nothing; the two damage setters take the flag then the VID as
+    /// `(DWORD)` and push nothing, quiet without a number.
+    fn the_dungeon_tail_names(probe: &mut Probe<'_>) {
+        let triple = [
+            Value::Number(210.0),
+            Value::Number(7824.0),
+            Value::Number(15021.0),
+        ];
+        assert!(probe.call("d.new_jump", &triple).unwrap().is_empty());
+        assert_eq!(probe.game.dungeon_singles, [(210, 7824, 15021)]);
+        assert!(probe
+            .call(
+                "d.new_jump",
+                &[Value::Number(210.0), Value::Nil, Value::Nil]
+            )
+            .unwrap()
+            .is_empty());
+        assert_eq!(probe.game.dungeon_singles.len(), 1, "quiet without numbers");
+        assert!(probe.call("d.clear_regen", &[]).unwrap().is_empty());
+        assert_eq!(probe.game.dungeon_clears, 1);
+        assert!(probe.call("d.kill_all", &[]).unwrap().is_empty());
+        assert_eq!(probe.game.dungeon_kills, 1);
+        for name in ["d.set_damage_from_race", "d.set_damage_from_affect"] {
+            assert!(probe
+                .call(name, &[Value::Number(3.0), Value::Number(777.0)])
+                .unwrap()
+                .is_empty());
+            assert!(probe
+                .call(name, &[Value::Number(3.0), Value::Nil])
+                .unwrap()
+                .is_empty());
+        }
+        assert_eq!(probe.game.dungeon_damage_race, [(3, 777)]);
+        assert_eq!(probe.game.dungeon_damage_affect, [(3, 777)]);
     }
 
     /// The party flags: `party.get_leader_pid` answers the leader PID,

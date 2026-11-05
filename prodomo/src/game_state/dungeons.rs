@@ -275,6 +275,20 @@ impl super::GameState {
     /// remembered, and its client is ordered the warp to (`x`, `y`) on the private
     /// map, on the Channel that hosts it.
     fn dungeon_jump_member(&mut self, index: i32, channel: u8, vid: Vid, x: i32, y: i32) {
+        self.dungeon_jump_member_scaled(index, channel, vid, x, y, true);
+    }
+
+    /// The member jump with (`d.new_jump_party`) or without (`d.new_jump`) `JumpParty`'s
+    /// hundredfold scale: the exit save, then the warp order for the finished point.
+    fn dungeon_jump_member_scaled(
+        &mut self,
+        index: i32,
+        channel: u8,
+        vid: Vid,
+        x: i32,
+        y: i32,
+        map_units: bool,
+    ) {
         let raw = vid.raw();
         let Some((_, from)) = self.place_of(raw) else {
             return;
@@ -293,6 +307,11 @@ impl super::GameState {
                 dungeon.present.insert(vid);
             }
         }
+        let (x, y) = if map_units {
+            (x.saturating_mul(100), y.saturating_mul(100))
+        } else {
+            (x, y)
+        };
         let Some(clients) = self.clients.as_ref() else {
             return;
         };
@@ -305,8 +324,8 @@ impl super::GameState {
                     channel,
                     id,
                     crate::client_registry::ClientOrder::Warp {
-                        x: x.saturating_mul(100),
-                        y: y.saturating_mul(100),
+                        x,
+                        y,
                         private_map_index: index,
                         channel: Some(channel),
                         exit,
@@ -568,6 +587,126 @@ impl super::GameState {
         }
         self.maps.remove(&(channel, index));
     }
+
+    /// `d.new_jump(map, x, y)` (`G/questlua_dungeon.cpp:318-348`): a dungeon of
+    /// `map` is created on the reader's Channel, and the reader alone jumps in at
+    /// (`x`, `y`), answering the created index. Unlike the party jump no party
+    /// binds and no member list is read: the current character warps (`WarpSet`).
+    ///
+    /// Legacy dereferences the current character unchecked (`ch->WarpSet`), so a
+    /// server timer's script calling `d.new_jump` crashes it; the Rewrite is quiet
+    /// with no reader instead (a Defect, never reproduced). The create stands even
+    /// then, as the party jump's does.
+    pub(super) fn dungeon_jump_single(
+        &mut self,
+        reader: Vid,
+        map: i32,
+        x: i32,
+        y: i32,
+    ) -> Option<i32> {
+        let (channel, _) = self.place_of(reader.raw())?;
+        let hosted = |base: i32| self.recall.hosts(channel, base);
+        let taken: Vec<i32> = self.maps.keys().map(|&(_, map)| map).collect();
+        let index = self.dungeons.create(map, hosted, &taken)?;
+        let Some(grid) = self
+            .recall
+            .atlas()
+            .and_then(|atlas| atlas.region(map))
+            .and_then(gamedata::server_attr::SectreeGrid::of)
+        else {
+            self.dungeons.destroy(index);
+            return None;
+        };
+        self.host_map(channel, index, grid);
+        if self.characters.find_by_vid(reader).is_err() {
+            return Some(index);
+        }
+        self.dungeon_jump_member_raw(index, channel, reader, x, y);
+        self.dungeons.member_entered(index);
+        Some(index)
+    }
+
+    /// As [`GameState::dungeon_jump_member`], for `d.new_jump`, whose `WarpSet` takes the
+    /// script's numbers as they are (`G/questlua_dungeon.cpp:345`): the solo caller already
+    /// multiplied by 100 (`dungeonFunctions.lua:262`), while `JumpParty` multiplies its own
+    /// (`G/dungeon.cpp:398-399`), so the shared member jump's scale would land the solo
+    /// jumper a hundredfold past the entry.
+    fn dungeon_jump_member_raw(&mut self, index: i32, channel: u8, vid: Vid, x: i32, y: i32) {
+        self.dungeon_jump_member_scaled(index, channel, vid, x, y, false);
+    }
+
+    /// `d.clear_regen()` (`G/questlua_dungeon.cpp:235-243`): the dungeon's regens go.
+    /// Quiet with none. No ported path creates a dungeon regen — `d.regen_file` and
+    /// `d.set_regen_file` are `unused`, and `d.spawn_mob` stands one-shot — so there
+    /// is nothing to cancel yet; the call exists so the name bridges.
+    pub(super) fn dungeon_clear_regen(&mut self, index: i32) {
+        if self.dungeons.get(index).is_some() {
+            // Nothing to cancel: no ported path creates a dungeon regen.
+        }
+    }
+
+    /// `d.kill_all()` (`G/questlua_dungeon.cpp:1491-1499`, `G/dungeon.cpp:996-1008`):
+    /// every non-player on the dungeon's map dies (`Dead()`, no killer), in VID
+    /// order. Players are spared structurally, as `FKillSectree` spares them; the
+    /// pet, mount and auto-shaman gates are dead, as the purge's are (no ported
+    /// path sets them). Quiet with none.
+    pub(super) fn dungeon_kill_all(&mut self, index: i32) {
+        let Some(channel) = self
+            .maps
+            .keys()
+            .find(|(_, map)| *map == index)
+            .map(|(channel, _)| *channel)
+        else {
+            return;
+        };
+        let mut vids: Vec<u32> = self
+            .npc_of
+            .iter()
+            .filter(|(_, place)| place.0 == channel && place.1 == index)
+            .map(|(vid, _)| *vid)
+            .collect();
+        vids.sort_unstable();
+        for vid in vids {
+            self.dead_npc(vid, None);
+        }
+    }
+
+    /// `d.set_damage_from_race(flag, vid)` (`G/questlua_dungeon.cpp:902-919`): the
+    /// character under `vid` refuses damage from attackers of race `flag`
+    /// (`SetNoDamageRaceFlag`, `G/char.cpp:100-105`). A flag at or past
+    /// `MAIN_RACE_MAX_NUM` is refused, and a set bit stays set. Quiet with no
+    /// such character, player or not.
+    pub(super) fn dungeon_set_damage_race(&mut self, flag: u32, vid: u32) {
+        if flag >= 8 {
+            return;
+        }
+        if let Some(npc) = self.npc_mut(vid) {
+            npc.ndr |= 1 << flag;
+            return;
+        }
+        if self.bodies.contains_key(&Vid::new(vid)) {
+            self.no_damage.entry(Vid::new(vid)).or_default().race |= 1 << flag;
+        }
+    }
+
+    /// `d.set_damage_from_affect(flag, vid)` (`G/questlua_dungeon.cpp:921-938`): the
+    /// character under `vid` takes damage only from attackers holding affect flag
+    /// `flag` (`SetNoDamageAffectFlag`, `G/char.cpp:124-127`). Any flag inserts;
+    /// the read bounds-checks (`TAffectFlag::IsSet`). Quiet with no such
+    /// character, player or not.
+    pub(super) fn dungeon_set_damage_affect(&mut self, flag: u32, vid: u32) {
+        if let Some(npc) = self.npc_mut(vid) {
+            npc.nda.insert(flag);
+            return;
+        }
+        if self.bodies.contains_key(&Vid::new(vid)) {
+            self.no_damage
+                .entry(Vid::new(vid))
+                .or_default()
+                .affects
+                .insert(flag);
+        }
+    }
 }
 
 /// One `server_timer` or `clear_server_timer` call, in call order with the other
@@ -609,6 +748,16 @@ pub(super) struct DungeonMoves {
     pub exits: Vec<i32>,
     /// Every `d.spawn_mob` call's index, vnum and (x, y), in order.
     pub spawns: Vec<(i32, u32, i32, i32)>,
+    /// Every `d.new_jump` call's staged index and its (map, x, y), in order.
+    pub singles: Vec<(i32, i32, i32, i32)>,
+    /// Every `d.clear_regen` call's index, in order.
+    pub clears: Vec<i32>,
+    /// Every `d.kill_all` call's index, in order.
+    pub kills: Vec<i32>,
+    /// Every `d.set_damage_from_race` call's flag and VID, in order.
+    pub damage_race: Vec<(u32, u32)>,
+    /// Every `d.set_damage_from_affect` call's flag and VID, in order.
+    pub damage_affect: Vec<(u32, u32)>,
     /// Every `server_timer` and `clear_server_timer` call, in call order.
     pub timer_ops: Vec<ServerTimerOp>,
     /// Every `game.set_event_flag` call's name and value, in order.
@@ -621,6 +770,74 @@ mod tests {
 
     fn hosted(_: i32) -> bool {
         true
+    }
+
+    /// `d.kill_all` (`G/dungeon.cpp:996-1008`): every non-player on the dungeon's
+    /// map dies, while the player standing beside it lives.
+    #[test]
+    fn a_kill_all_kills_the_dungeons_monsters_and_spares_its_players() {
+        use crate::game_state::fixtures::{a_world, enter, region, TestClock};
+
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut map = region();
+        map.index = 2_100_000;
+        world.host_map(
+            1,
+            2_100_000,
+            gamedata::server_attr::SectreeGrid {
+                x: 0,
+                y: 0,
+                columns: 10,
+                rows: 10,
+            },
+        );
+        let npc = world::npc::Npc {
+            vid: 1001,
+            vnum: 101,
+            race: 101,
+            hp: 100,
+            max_hp: 100,
+            ..world::npc::Npc::default()
+        };
+        world.stand_npcs(
+            1,
+            &map,
+            world::npc::MapNpcs {
+                npcs: vec![npc],
+                positions: Vec::new(),
+                regens: Vec::new(),
+            },
+        );
+        let mut inbox = enter(&mut world, 1, (100, 100), 12_345);
+        while inbox.try_recv().is_ok() {}
+        world.dungeon_kill_all(2_100_000);
+        assert!(world.npc_by_vid(1001).unwrap().dead);
+        assert!(!world.is_dead(1));
+        assert!(world.npc_by_vid(1001).is_some());
+    }
+
+    /// The dungeon damage flags ride the character: a warp keeps them, a disconnect
+    /// drops them (`SetNoDamageRaceFlag` writes its fields, `G/char.cpp:100-127`, and
+    /// the fields go with the character).
+    #[test]
+    fn the_damage_flags_survive_a_warp_and_die_on_disconnect() {
+        use crate::game_loop_messages::Departure;
+        use crate::game_state::fixtures::{a_world, enter, TestClock};
+
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut inbox = enter(&mut world, 1, (100, 100), 12_345);
+        while inbox.try_recv().is_ok() {}
+        world.dungeon_set_damage_race(3, 1);
+        world.leave_world_by(Vid::new(1), Departure::Warp);
+        world.leave_world_by(Vid::new(1), Departure::Disconnect);
+        assert!(!world.no_damage.contains_key(&Vid::new(1)));
+        let mut inbox = enter(&mut world, 1, (100, 100), 12_345);
+        while inbox.try_recv().is_ok() {}
+        world.dungeon_set_damage_race(3, 1);
+        world.leave_world_by(Vid::new(1), Departure::Warp);
+        assert_eq!(world.no_damage.get(&Vid::new(1)).unwrap().race, 1 << 3);
     }
 
     #[test]

@@ -286,6 +286,10 @@ pub const AFF_SLOW: u32 = 6;
 /// `AFF_STUN` (`G/affect.h:216`), numbered from 1.
 pub const AFF_STUN: u32 = 7;
 
+/// `AFF_BITS_MAX` (`G/affect.h:275`): 43 plain bits, 3 top-player bits, 4 statue bits
+/// and the laser bit, all gated on (`G/prodomodefines.h:38`, `:43-50`, `:125`).
+pub const AFF_BITS_MAX: u32 = 51;
+
 /// `AFF_SPAWN` (`G/affect.h:212`), numbered from 1: the bit a spawn-motion `Show` and
 /// `SetPolymorph` set (`G/char.cpp:1887`, `:7701`) and nothing resets (D5).
 pub const AFF_SPAWN: u32 = 3;

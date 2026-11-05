@@ -369,6 +369,11 @@ struct WorldMoves {
     dungeon_warps: Vec<(i32, i32, i32, i32)>,
     dungeon_exits: Vec<i32>,
     dungeon_spawns: Vec<(i32, u32, i32, i32)>,
+    dungeon_singles: Vec<(i32, i32, i32, i32)>,
+    dungeon_clears: Vec<i32>,
+    dungeon_kills: Vec<i32>,
+    damage_race_sets: Vec<(u32, u32)>,
+    damage_affect_sets: Vec<(u32, u32)>,
     server_timer_ops: Vec<super::dungeons::ServerTimerOp>,
     event_sets: Vec<(Vec<u8>, i32)>,
     confirm_records: Vec<(u32, Vec<u8>)>,
@@ -397,6 +402,11 @@ impl WorldMoves {
             dungeon_warps: std::mem::take(&mut session.dungeon_warps),
             dungeon_exits: std::mem::take(&mut session.dungeon_exits),
             dungeon_spawns: std::mem::take(&mut session.dungeon_spawns),
+            dungeon_singles: std::mem::take(&mut session.dungeon_singles),
+            dungeon_clears: std::mem::take(&mut session.dungeon_clears),
+            dungeon_kills: std::mem::take(&mut session.dungeon_kills),
+            damage_race_sets: std::mem::take(&mut session.damage_race_sets),
+            damage_affect_sets: std::mem::take(&mut session.damage_affect_sets),
             server_timer_ops: std::mem::take(&mut session.server_timer_ops),
             event_sets: std::mem::take(&mut session.event_sets),
             confirm_records: std::mem::take(&mut session.confirm_records),
@@ -446,6 +456,9 @@ pub(super) struct Session<'s> {
     /// order, for the creates and jumps after the step: the `d.*` calls in the same
     /// step already see the staged index (`GetDungeonForce`, `G/char.cpp:7635-7641`).
     pub(super) dungeon_jumps: Vec<(i32, i32, i32, i32)>,
+    /// Every `d.new_jump` call's staged index and its (map, x, y), in order, for the
+    /// creates and jumps after the step, staged like the party jumps.
+    pub(super) dungeon_singles: Vec<(i32, i32, i32, i32)>,
     /// Every `d.notice` call's index and text, in order, for the notices after the
     /// step.
     pub(super) dungeon_notices: Vec<(i32, Vec<u8>)>,
@@ -457,6 +470,15 @@ pub(super) struct Session<'s> {
     /// Every `d.spawn_mob` call's index, vnum and (x, y), in order, for the spawns
     /// after the step.
     pub(super) dungeon_spawns: Vec<(i32, u32, i32, i32)>,
+    /// Every `d.clear_regen` call's index, in order, for the clears after the step.
+    pub(super) dungeon_clears: Vec<i32>,
+    /// Every `d.kill_all` call's index, in order, for the kills after the step.
+    pub(super) dungeon_kills: Vec<i32>,
+    /// Every `d.set_damage_from_race` call's flag and VID, in order, for the world's
+    /// flags after the step.
+    pub(super) damage_race_sets: Vec<(u32, u32)>,
+    /// Every `d.set_damage_from_affect` call's flag and VID, in order.
+    pub(super) damage_affect_sets: Vec<(u32, u32)>,
     /// Every `server_timer` and `clear_server_timer` call, in call order, for the
     /// timers and clears after the step.
     pub(super) server_timer_ops: Vec<super::dungeons::ServerTimerOp>,
@@ -1439,7 +1461,9 @@ impl Game for Session<'_> {
     /// `G/char.cpp:7635-7641`), so the `d.*` calls after it in the same step see the
     /// dungeon the jump lands on.
     fn dungeon_new_jump_party(&mut self, map: i32, x: i32, y: i32) {
-        let staged = -1 - i32::try_from(self.dungeon_jumps.len()).unwrap_or(i32::MAX);
+        let staged = -1
+            - i32::try_from(self.dungeon_jumps.len() + self.dungeon_singles.len())
+                .unwrap_or(i32::MAX);
         self.dungeon_jumps.push((staged, map, x, y));
         self.dungeon = staged;
         self.dungeon_flags.entry(staged).or_default();
@@ -1502,6 +1526,41 @@ impl Game for Session<'_> {
         if self.dungeon != 0 {
             self.dungeon_spawns.push((self.dungeon, vnum, x, y));
         }
+    }
+    /// Staged like the party jump: the slot, the create's (map, x, y), and the
+    /// staged index becomes the reader's dungeon at once. The single jump shares
+    /// the slot count, so a step's party and single jumps never share a slot.
+    fn dungeon_new_jump(&mut self, map: i32, x: i32, y: i32) {
+        let staged = -1
+            - i32::try_from(self.dungeon_jumps.len() + self.dungeon_singles.len())
+                .unwrap_or(i32::MAX);
+        self.dungeon_singles.push((staged, map, x, y));
+        self.dungeon = staged;
+        self.dungeon_flags.entry(staged).or_default();
+    }
+    /// Queued with the reader's dungeon for the clears after the step; quiet
+    /// with none.
+    fn dungeon_clear_regen(&mut self) {
+        if self.dungeon != 0 {
+            self.dungeon_clears.push(self.dungeon);
+        }
+    }
+    /// Queued with the reader's dungeon for the kills after the step; quiet
+    /// with none.
+    fn dungeon_kill_all(&mut self) {
+        if self.dungeon != 0 {
+            self.dungeon_kills.push(self.dungeon);
+        }
+    }
+    /// Queued for the world's flags after the step. No dungeon is needed: legacy
+    /// finds the character by VID.
+    fn dungeon_set_damage_from_race(&mut self, flag: u32, vid: u32) {
+        self.damage_race_sets.push((flag, vid));
+    }
+    /// Queued for the world's flags after the step. No dungeon is needed: legacy
+    /// finds the character by VID.
+    fn dungeon_set_damage_from_affect(&mut self, flag: u32, vid: u32) {
+        self.damage_affect_sets.push((flag, vid));
     }
     /// The `d.select` adoption while no character runs: the session's dungeon
     /// becomes the selection, or 0 when the select missed.
@@ -3290,6 +3349,11 @@ impl GameState {
             dungeon_warps,
             dungeon_exits,
             dungeon_spawns,
+            dungeon_singles,
+            dungeon_clears,
+            dungeon_kills,
+            damage_race_sets,
+            damage_affect_sets,
             server_timer_ops,
             event_sets,
             confirm_records,
@@ -3328,6 +3392,11 @@ impl GameState {
                 warps: dungeon_warps,
                 exits: dungeon_exits,
                 spawns: dungeon_spawns,
+                singles: dungeon_singles,
+                clears: dungeon_clears,
+                kills: dungeon_kills,
+                damage_race: damage_race_sets,
+                damage_affect: damage_affect_sets,
                 timer_ops: server_timer_ops,
                 event_sets,
             },
@@ -3392,6 +3461,13 @@ impl GameState {
                 staged.insert(slot, created);
             }
         }
+        for (slot, map, x, y) in moves.singles {
+            slots.insert(slot);
+            let created = self.dungeon_jump_single(reader, map, x, y);
+            if let Some(created) = created {
+                staged.insert(slot, created);
+            }
+        }
         // A staged slot whose create failed falls back to the reader's own dungeon:
         // legacy never set the pending warp, so the calls after it read the old one
         // (`GetDungeonForce`, `G/char.cpp:7635-7641`).
@@ -3421,6 +3497,18 @@ impl GameState {
         }
         for (index, vnum, x, y) in moves.spawns {
             self.dungeon_spawn_mob(at(&staged, index), vnum, x, y);
+        }
+        for index in moves.clears {
+            self.dungeon_clear_regen(at(&staged, index));
+        }
+        for index in moves.kills {
+            self.dungeon_kill_all(at(&staged, index));
+        }
+        for (flag, vid) in moves.damage_race {
+            self.dungeon_set_damage_race(flag, vid);
+        }
+        for (flag, vid) in moves.damage_affect {
+            self.dungeon_set_damage_affect(flag, vid);
         }
         // A timer argument is `(DWORD)` of what the script read, so a staged slot
         // arrives as its word; it reads the created index, or the reader's own
@@ -4025,8 +4113,7 @@ fn session_head<'s>(
     name_rules: crate::select_phase::NameRules,
 ) -> Session<'s> {
     let alignment = bodies.get(&reader).map_or(0, |body| body.card.alignment);
-    let pcs = quest_step_pcs(characters);
-    let online = quest_step_online(characters);
+    let (pcs, online) = (quest_step_pcs(characters), quest_step_online(characters));
     let (points, item_giver) = arm_item_giver(
         characters.find_by_vid_mut(reader).ok(),
         count_limit,
@@ -4056,6 +4143,11 @@ fn session_head<'s>(
         dungeon_warps: Vec::new(),
         dungeon_exits: Vec::new(),
         dungeon_spawns: Vec::new(),
+        dungeon_singles: Vec::new(),
+        dungeon_clears: Vec::new(),
+        dungeon_kills: Vec::new(),
+        damage_race_sets: Vec::new(),
+        damage_affect_sets: Vec::new(),
         server_timer_ops: Vec::new(),
         event_sets: Vec::new(),
         tables,
@@ -4167,6 +4259,11 @@ mod tests {
             dungeon_warps: Vec::new(),
             dungeon_exits: Vec::new(),
             dungeon_spawns: Vec::new(),
+            dungeon_singles: Vec::new(),
+            dungeon_clears: Vec::new(),
+            dungeon_kills: Vec::new(),
+            damage_race_sets: Vec::new(),
+            damage_affect_sets: Vec::new(),
             server_timer_ops: Vec::new(),
             event_sets: Vec::new(),
             level: 1,
@@ -4252,6 +4349,35 @@ mod tests {
             assert_eq!(session.skill_group(), 1);
             assert_eq!(session.job(), 3);
             assert_eq!(session.held_vnum(1000), None);
+        });
+    }
+
+    /// `d.new_jump` stages its slot and adopts it at once, sharing the slot count
+    /// with the party jumps; the clears, kills and damage sets queue, the clears and
+    /// kills quiet with no dungeon, the damage sets needing none.
+    #[test]
+    fn the_single_jump_stages_its_slot_and_the_tail_queues() {
+        use quest::manager::Game;
+        let (protos, names) = (MobProtos::default(), MobNamesByLanguage::default());
+        let (items, item_names) = (ItemProtos::default(), ItemNamesByLanguage::default());
+        with_session((&protos, &names), (&items, &item_names), |session| {
+            session.dungeon_clear_regen();
+            session.dungeon_kill_all();
+            assert!(session.dungeon_clears.is_empty());
+            assert!(session.dungeon_kills.is_empty());
+            session.dungeon_set_damage_from_race(3, 777);
+            session.dungeon_set_damage_from_affect(7, 778);
+            session.dungeon_new_jump(210, 7824, 15021);
+            assert_eq!(session.dungeon, -1);
+            assert_eq!(session.dungeon_singles, [(-1, 210, 7824, 15021)]);
+            session.dungeon_new_jump_party(107, 1, 2);
+            assert_eq!(session.dungeon_jumps, [(-2, 107, 1, 2)]);
+            session.dungeon_clear_regen();
+            session.dungeon_kill_all();
+            assert_eq!(session.dungeon_clears, [-2]);
+            assert_eq!(session.dungeon_kills, [-2]);
+            assert_eq!(session.damage_race_sets, [(3, 777)]);
+            assert_eq!(session.damage_affect_sets, [(7, 778)]);
         });
     }
 
@@ -4533,6 +4659,15 @@ mod tests {
 
     /// `ds.is_qualified` reads the 540 affect: the grant lands in its call (the infinite
     /// row and its add packet), and the two window opens queue for the apply.
+    /// A fresh affect event: nothing due, no sequence, no rows.
+    fn fresh_affect_event() -> super::super::affect::AffectEvent {
+        super::super::affect::AffectEvent {
+            due: 0,
+            sequence: 0,
+            affects: Vec::new(),
+        }
+    }
+
     #[test]
     fn the_session_grants_the_ds_qualification_in_its_call_and_queues_the_opens() {
         let (protos, names) = (MobProtos::default(), MobNamesByLanguage::default());
@@ -4542,11 +4677,7 @@ mod tests {
         let tables = gamedata::pc_skill_data::PcSkills::default();
         let mut slots = super::super::pc_skill::PcSkillState::default();
         let mut targets = QuestTargets::default();
-        let mut event = super::super::affect::AffectEvent {
-            due: 0,
-            sequence: 0,
-            affects: Vec::new(),
-        };
+        let mut event = fresh_affect_event();
         let mut session = Session {
             map_index: 0,
             war_map: 0,
@@ -4558,6 +4689,11 @@ mod tests {
             dungeon_warps: Vec::new(),
             dungeon_exits: Vec::new(),
             dungeon_spawns: Vec::new(),
+            dungeon_singles: Vec::new(),
+            dungeon_clears: Vec::new(),
+            dungeon_kills: Vec::new(),
+            damage_race_sets: Vec::new(),
+            damage_affect_sets: Vec::new(),
             server_timer_ops: Vec::new(),
             event_sets: Vec::new(),
             level: 1,
@@ -4776,21 +4912,38 @@ mod tests {
         )
     }
 
+    /// The locale, dice, skill tables and item IDs a giving session reads.
+    fn giving_tables() -> (
+        LocaleStrings,
+        Pcg32,
+        gamedata::pc_skill_data::PcSkills,
+        ItemIds,
+    ) {
+        (
+            LocaleStrings::default(),
+            Pcg32::new(1, 1),
+            gamedata::pc_skill_data::PcSkills::default(),
+            ItemIds::new(ItemIdRange::new(1000, 2000, 1000).unwrap()),
+        )
+    }
+
+    /// A god's points at level 10, as a giving session reads them.
+    fn god_points() -> world::character::Points {
+        let mut points = crate::game_state::fixtures::points_at(10, 10_000, 0);
+        points.set_gm_level(crate::command::GM_GOD);
+        points
+    }
+
     fn with_giving_session<R>(
         protos: Vec<gamedata::item_proto::ItemProto>,
         f: impl FnOnce(&mut Session<'_>) -> R,
     ) -> R {
         let (items_protos, mobs, names, item_names) = giving_protos(protos);
-        let (locale, mut dice) = (LocaleStrings::default(), Pcg32::new(1, 1));
-        let tables = gamedata::pc_skill_data::PcSkills::default();
+        let (locale, mut dice, tables, mut ids) = giving_tables();
         let mut slots = super::super::pc_skill::PcSkillState::default();
         let mut targets = QuestTargets::default();
-        let mut held = CharacterItems::new();
-        let mut quickslots = Quickslots::default();
-        let mut ids = ItemIds::new(ItemIdRange::new(1000, 2000, 1000).unwrap());
-        let mut gauss = Gauss::new();
-        let mut points = crate::game_state::fixtures::points_at(10, 10_000, 0);
-        points.set_gm_level(crate::command::GM_GOD);
+        let (mut held, mut quickslots) = (CharacterItems::new(), Quickslots::default());
+        let (mut gauss, mut points) = (Gauss::new(), god_points());
         let mut session = Session {
             map_index: 0,
             war_map: 0,
@@ -4802,6 +4955,11 @@ mod tests {
             dungeon_warps: Vec::new(),
             dungeon_exits: Vec::new(),
             dungeon_spawns: Vec::new(),
+            dungeon_singles: Vec::new(),
+            dungeon_clears: Vec::new(),
+            dungeon_kills: Vec::new(),
+            damage_race_sets: Vec::new(),
+            damage_affect_sets: Vec::new(),
             server_timer_ops: Vec::new(),
             event_sets: Vec::new(),
             level: 1,
@@ -5219,6 +5377,11 @@ mod tests {
             dungeon_warps: Vec::new(),
             dungeon_exits: Vec::new(),
             dungeon_spawns: Vec::new(),
+            dungeon_singles: Vec::new(),
+            dungeon_clears: Vec::new(),
+            dungeon_kills: Vec::new(),
+            damage_race_sets: Vec::new(),
+            damage_affect_sets: Vec::new(),
             server_timer_ops: Vec::new(),
             event_sets: Vec::new(),
             level: 1,
@@ -5342,6 +5505,14 @@ mod tests {
         (protos, MobNamesByLanguage::from_tables(vec![english]))
     }
 
+    /// Two block-mode sends, 8 then 24: the byte starts unset and the last call wins.
+    fn send_block_mode_twice(session: &mut Session<'_>) {
+        assert_eq!(session.block_mode, None);
+        session.send_block_mode(8);
+        session.send_block_mode(24);
+        assert_eq!(session.block_mode, Some(24), "the last call wins");
+    }
+
     #[test]
     fn send_block_mode_lands_the_line_and_the_last_byte_wins() {
         let (protos, names) = smith_protos();
@@ -5360,6 +5531,11 @@ mod tests {
             dungeon_warps: Vec::new(),
             dungeon_exits: Vec::new(),
             dungeon_spawns: Vec::new(),
+            dungeon_singles: Vec::new(),
+            dungeon_clears: Vec::new(),
+            dungeon_kills: Vec::new(),
+            damage_race_sets: Vec::new(),
+            damage_affect_sets: Vec::new(),
             server_timer_ops: Vec::new(),
             event_sets: Vec::new(),
             level: 1,
@@ -5432,10 +5608,7 @@ mod tests {
             ds_refines: 0,
             ds_attrs: 0,
         };
-        assert_eq!(session.block_mode, None);
-        session.send_block_mode(8);
-        session.send_block_mode(24);
-        assert_eq!(session.block_mode, Some(24), "the last call wins");
+        send_block_mode_twice(&mut session);
         assert_eq!(session.records.len(), 2);
         let to = test_place::MOVER.recipient(&locale);
         assert_eq!(
@@ -5461,6 +5634,11 @@ mod tests {
             warps: Vec::new(),
             exits: Vec::new(),
             spawns: Vec::new(),
+            singles: Vec::new(),
+            clears: Vec::new(),
+            kills: Vec::new(),
+            damage_race: Vec::new(),
+            damage_affect: Vec::new(),
             timer_ops: vec![crate::game_state::dungeons::ServerTimerOp::Set {
                 name: b"probe".to_vec(),
                 secs: 6.0,

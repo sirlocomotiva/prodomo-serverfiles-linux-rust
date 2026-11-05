@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-05, after ledger section 403 (the dungeon names).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 404
+Last reviewed: 2026-11-05, after ledger section 404 (the dungeon tail).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 405
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -408,7 +408,11 @@ a party enters its forest through `d.new_jump_party`, and the report reads back 
 flags, the event flag, a notice and a spawned dog; the cleared exit never fires and the second
 sends both home (`d.get_map_index`, `d.setf`, `d.getf`, `d.getf_from_map_index`, `d.notice`,
 `d.set_warp_location`, `d.exit_all`, `d.spawn_mob`, `game.set_event_flag`, `server_timer`,
-`clear_server_timer`, `get_server_timer_arg`). The
+`clear_server_timer`, `get_server_timer_arg`). Since 404 a solo login takes its own
+dungeon at the entry (`d.new_jump`, unscaled where the party jump scales), the tail clears
+nothing and kills the dog (`d.clear_regen`, `d.kill_all`), and the flagged hit is silent
+(`d.set_damage_from_race`, `d.set_damage_from_affect`, which ride the character past a
+warp and die on disconnect). The
 next slice is the owner's call: the forest's leader branch is ported,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra
@@ -1333,6 +1337,9 @@ owner should know about (178.5):
 - `pc_mount_bonus` indexes `aApplyInfo` with the script's apply byte unchecked
   (`G/questlua_pc.cpp:1475`), so a type at or above `MAX_APPLY_NUM` (130) reads past the table and
   lays the bonus on whatever point byte it finds. The Rewrite refuses such a bonus (ledger 399).
+- `d.new_jump` dereferences the current character without checking it
+  (`G/questlua_dungeon.cpp:342-345`), so a reader-less call (a server timer's step) crashes the
+  core. The Rewrite lets the create stand and jumps nobody (ledger 404).
 
 ## Environment
 

@@ -46140,3 +46140,61 @@ the `d.spawn_mob` name (killed), the timer argument +1 (killed), the
 sides guard flip (killed). The scenario passed 8/8 parallel runs. `rustfmt` and
 `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured. Afterwards no
 `prodomo\_%` database remained. No ADR changed.
+
+## 404. The dungeon tail (`d.new_jump`, `d.clear_regen`, `d.kill_all`, the damage flags)
+
+No owner quest calls these five names: `d.new_jump`'s only caller is the library's
+`warpToDungeon` (`quest/luaLibrary/dungeonFunctions.lua:262`), which no quest calls;
+`d.clear_regen` and `d.kill_all` sit only in the uncalled `ClearDungeon`; and the
+`d.set_damage_from_*` pair sits only in `questlib_extra.lua`'s uncalled `setDFR/DFA_from_table`
+(a file nothing loads). They stay `missing`-class by reference, so two probes call them
+instead: `SOLO_PROBE` jumps itself at a login outside the dungeon, and `TAIL_PROBE` flags
+Alpha at its dungeon login (all eight race bits plus the polymorph affect), then spawns
+one dog, clears the empty regen list, kills the dog, and exits everybody home.
+
+The bridge's `dungeon_api` family gains the five arms with the argument rules (three
+checked numbers for the jump, two `(DWORD)`s for the setters, nothing for the tail pair);
+`BRIDGED` grows 236 to 241. `Session` stages the singles, clears, kills and flag sets;
+`apply_dungeon_moves` adopts the singles through `dungeon_jump_single` (a reader-less
+create stands and jumps nobody — legacy dereferences the NULL character,
+`G/questlua_dungeon.cpp:342-345`, a Defect recorded in `docs/STATUS.md`) and applies the
+tail queues in the established notices-before-spawns order. The solo jump does not scale:
+legacy's `WarpSet` takes the script's numbers as they are (`:345`) while `JumpParty`
+multiplies its own (`G/dungeon.cpp:398-399`), so the shared member jump splits into the
+scaled and the raw halves. `d.clear_regen` is an accepted quiet: no ported path creates a
+dungeon regen (`d.regen_file` and `d.set_regen_file` are `unused`). `d.kill_all` runs
+`Dead()` with no killer over the dungeon map's NPCs in VID order, sparing players
+structurally. The setters write the target's race bits and affect set (`m_dwNDRFlag` and
+`m_setNDAFlag`, new `Npc` fields; a player's live in `GameState::no_damage`), and
+`attack_player` answers `battle_is_icedamage` (`G/battle.cpp:114-127`) before the PK
+policy: a set race bit refuses the attacker's job-shaped race (a polymorphed attacker
+answers its own vnum bit), and every required affect flag must be held. The flags ride
+the character, so a warp keeps them and only the disconnect drops them
+(`leave_world_by`).
+
+Scenarios: `a_solo_login_takes_its_own_dungeon_at_the_entry` (the probe plants the
+`dungeon_enter` flag the dialog plants, or the forest's login trigger corrects the warp
+to (816700, 1505000)) and `the_tail_kills_the_dog_and_the_flagged_hit_is_silent`, which
+relogs Yankee onto the second empire (the PK policy runs in its peaceful form, so only
+empires apart let a hit through), enters through the real dialog, reads the notices, the
+dog's insert, release and death, goes home, lands one control hit on the unflagged
+Yankee, and stays silent on the flagged Alpha. The relog reads the disconnect to its
+removal before the new key logs in, so the logon claim is released with no race; the
+home reenter reads the letter pass's re-sends (a warp departure keeps the marks, while
+a logout forgets them). Unit tests: the session staging, the PvP/PvE icedamage gates,
+the kill-all sparing, and the flags surviving a warp and dying on disconnect.
+
+Gates (2026-11-05): `cargo fmt --all -- --check` clean; `cargo build --workspace --locked
+--offline` clean; the suite `cargo test --workspace --all-targets --locked --offline
+--no-fail-fast` passed 4784 in 42 targets with 0 failed; `cargo test --workspace --doc
+--locked --offline` clean; `cargo clippy --workspace --all-targets --locked --offline --
+-D warnings` clean (`yankee_id` became `yankee_listed`, the relog and the home reenter
+split out, one `contains_key`); `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
+--no-deps --locked --offline` clean. Mutants: the icedamage read (killed by the tail
+scenario), the kill-all loop (killed), the kill dispatch (killed), the solo scale
+(killed by the solo scenario), the always-remove flags (killed by the unit test), the
+never-remove flags (survived the scenario — no scenario disconnects a flagged character
+— then killed by the unit test), and the clear staging (killed by the session test);
+the clear's game body is vacuous (an empty `if`: no regen store). Both scenarios passed
+8/8 parallel runs. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No
+width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.

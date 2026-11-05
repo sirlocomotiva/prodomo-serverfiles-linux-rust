@@ -504,6 +504,11 @@ pub struct GameState {
     /// the `EBlockAction` bits `SetBlockMode` wrote and the quest flags persist. A
     /// session's own: the leave forgets it.
     block_modes: HashMap<common::vid::Vid, u8>,
+    /// The no-damage flags of each player (`m_dwNDRFlag` and `m_setNDAFlag`,
+    /// `G/char.h:2128-2140`), which `d.set_damage_from_race` and
+    /// `d.set_damage_from_affect` write and `battle_is_icedamage` reads. A
+    /// session's own: the leave forgets it, as a new `CHARACTER` would.
+    no_damage: HashMap<common::vid::Vid, fight::NoDamage>,
     /// The characters whose detail flag is on (`m_bDetailLog`, `G/char.h:1739`), which
     /// the damage log line reads. A session's own: the leave forgets it.
     detail_logs: std::collections::HashSet<common::vid::Vid>,
@@ -771,6 +776,7 @@ impl GameState {
             offline_messages: HashMap::new(),
             last_offline_pm: HashMap::new(),
             block_modes: HashMap::new(),
+            no_damage: HashMap::new(),
             detail_logs: std::collections::HashSet::new(),
             monster_logs: std::collections::HashSet::new(),
             affect_events: HashMap::new(),
@@ -3175,6 +3181,10 @@ impl GameState {
             // `CHARACTER::Disconnect` cancels the timed event (`G/char.cpp:717`); a
             // warp keeps it, and the re-entered character resumes the countdown.
             self.timed_events.remove(&vid);
+            // The dungeon damage flags are the character's own (`SetNoDamageRaceFlag`
+            // and `SetNoDamageAffectFlag` write its fields, `G/char.cpp:100-127`), so
+            // a warp keeps them and only the disconnect drops them with the rest.
+            let _damage = self.no_damage.remove(&vid);
         }
         self.forget_portal_times(vid);
         self.refining.remove(&vid);

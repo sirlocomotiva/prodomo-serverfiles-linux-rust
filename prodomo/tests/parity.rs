@@ -8333,8 +8333,8 @@ fn a_sync_batch_is_relayed_around_the_claimer_only() {
     stamina(&database, "Charlie", 12_345);
 
     let (mut alice, alpha) = enter_world(&server, b"alice", 0);
-    let (mut yankee, yankee_id) = enter_world(&server, b"bob", 0);
-    alice.sees_enter(yankee_id.id, false, None);
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, false, None);
     let (mut charlie, _) = enter_world(&server, b"carol", 0);
 
     // A claim on Yankee from a position 10 units away, inside every limit.
@@ -8342,17 +8342,25 @@ fn a_sync_batch_is_relayed_around_the_claimer_only() {
     // `SetSyncOwner` writes `TPacketGCOwnership` with a plain `PacketAround` as it judges
     // the claim, so the victim sees its own ownership. The position batch follows and
     // excepts the claimer.
-    alice.send_record(&client_sync_position(&[(yankee_id.id, 470_010, 950_010)]));
+    alice.send_record(&client_sync_position(&[(
+        yankee_listed.id,
+        470_010,
+        950_010,
+    )]));
     let claimed = yankee.read_game();
     assert_eq!(claimed.len(), OWNERSHIP_LEN, "TPacketGCOwnership");
     assert_eq!(claimed[0], GC_OWNERSHIP);
     assert_eq!(&claimed[1..5], &alpha.id.to_le_bytes(), "dwOwnerVID");
-    assert_eq!(&claimed[5..9], &yankee_id.id.to_le_bytes(), "dwVictimVID");
+    assert_eq!(
+        &claimed[5..9],
+        &yankee_listed.id.to_le_bytes(),
+        "dwVictimVID"
+    );
     let relayed = yankee.read_game();
     assert_eq!(relayed[0], GC_SYNC_POSITION);
     assert_eq!(word_sized(&relayed), Some(relayed.len()));
     assert_eq!(relayed.len(), SYNC_POSITION_LEN);
-    assert_eq!(&relayed[3..7], &yankee_id.id.to_le_bytes(), "dwVID");
+    assert_eq!(&relayed[3..7], &yankee_listed.id.to_le_bytes(), "dwVID");
     assert_eq!(&relayed[7..11], &470_010i32.to_le_bytes(), "lX");
     assert_eq!(&relayed[11..15], &950_010i32.to_le_bytes(), "lY");
 
@@ -8383,7 +8391,7 @@ fn a_sync_batch_is_relayed_around_the_claimer_only() {
     assert_eq!(seen[0], GC_OWNERSHIP);
     assert_eq!(
         &seen[1..5],
-        &yankee_id.id.to_le_bytes(),
+        &yankee_listed.id.to_le_bytes(),
         "dwOwnerVID is Yankee"
     );
     assert_eq!(&seen[5..9], &alpha.id.to_le_bytes(), "dwVictimVID is Alpha");
@@ -8716,7 +8724,7 @@ fn a_walk_into_view_inserts_both_ways_at_the_sample_and_a_walk_out_removes_both(
     let server = view_cast(&database, [GOTO_TARGET, ROW_147, VIEW_C], 12_345);
     let (mut alice, alpha, alpha_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
-    let yankee_id = yankee_listed.id;
+    let yankee_listed = yankee_listed.id;
     alice.quiet("out of view");
 
     let row_146 = (444_100, 940_000);
@@ -8725,7 +8733,7 @@ fn a_walk_into_view_inserts_both_ways_at_the_sample_and_a_walk_out_removes_both(
     let (_, add, info) = yankee.sees_arrive(alpha.id, false, None);
     assert_eq!(insert_body(&add), insert_body(&alpha_entered.add));
     assert_eq!(info, alpha_entered.info);
-    let (_, add, info) = alice.sees_arrive(yankee_id, false, None);
+    let (_, add, info) = alice.sees_arrive(yankee_listed, false, None);
     let (x, y) = inserted_at(&add);
     assert_eq!(x, 444_100);
     assert!(
@@ -8733,10 +8741,10 @@ fn a_walk_into_view_inserts_both_ways_at_the_sample_and_a_walk_out_removes_both(
         "the live point in row 146: {y}"
     );
     assert_eq!(info, yankee_entered.info);
-    assert_insert_move(&alice.read_game(), yankee_id, row_146, LONG_WALK_MS);
+    assert_insert_move(&alice.read_game(), yankee_listed, row_146, LONG_WALK_MS);
     assert_eq!(
         alice.read_game(),
-        walk_mode_of(&yankee_id.to_le_bytes()),
+        walk_mode_of(&yankee_listed.to_le_bytes()),
         "a moving insert's mode"
     );
     alice.quiet("one insert");
@@ -8745,13 +8753,13 @@ fn a_walk_into_view_inserts_both_ways_at_the_sample_and_a_walk_out_removes_both(
     wait_out_walk(sent, LONG_WALK_MS);
     yankee.send_record(&client_move(FUNC_MOVE, 2, 30, ROW_147.0, ROW_147.1, 0x6001));
     let mut relay = vec![GC_MOVE, FUNC_MOVE, 2, 30];
-    relay.extend_from_slice(&yankee_id.to_le_bytes());
+    relay.extend_from_slice(&yankee_listed.to_le_bytes());
     relay.extend_from_slice(&ROW_147.0.to_le_bytes());
     relay.extend_from_slice(&ROW_147.1.to_le_bytes());
     relay.extend_from_slice(&0x6001u32.to_le_bytes());
     relay.extend_from_slice(&LONG_WALK_MS.to_le_bytes());
     assert_eq!(alice.read_game(), relay, "from where the first walk ended");
-    alice.sees_leave(yankee_id);
+    alice.sees_leave(yankee_listed);
     yankee.sees_leave(alpha.id);
     alice.quiet("one removal");
     yankee.quiet("one removal");
@@ -8803,7 +8811,7 @@ fn a_step_never_recomputes_the_view_and_a_goto_does_at_its_sample() {
     let server = view_cast(&database, [GOTO_TARGET, ROW_147, VIEW_C], 12_345);
     let (mut alice, alpha, alpha_entered) = enter_world_seeing(&server, b"alice", 0);
     let (mut yankee, yankee_listed, yankee_entered) = enter_world_seeing(&server, b"bob", 0);
-    let yankee_id = yankee_listed.id;
+    let yankee_listed = yankee_listed.id;
 
     yankee.send_record(&client_move(FUNC_COMBO, 0, 0, 444_100, 940_000, 0x6200));
     yankee.quiet("a step shows the stepper nobody");
@@ -8811,13 +8819,16 @@ fn a_step_never_recomputes_the_view_and_a_goto_does_at_its_sample() {
 
     let dest = (444_100, 938_400);
     yankee.send_record(&client_move(FUNC_MOVE, 0, 0, dest.0, dest.1, 0x6201));
-    let (_, add, info) = alice.sees_arrive(yankee_id, false, None);
+    let (_, add, info) = alice.sees_arrive(yankee_listed, false, None);
     let (x, y) = inserted_at(&add);
     assert_eq!(x, 444_100);
     assert!((dest.1..=940_000).contains(&y), "the live point: {y}");
     assert_eq!(info, yankee_entered.info);
-    assert_insert_move(&alice.read_game(), yankee_id, dest, LONG_WALK_MS);
-    assert_eq!(alice.read_game(), walk_mode_of(&yankee_id.to_le_bytes()));
+    assert_insert_move(&alice.read_game(), yankee_listed, dest, LONG_WALK_MS);
+    assert_eq!(
+        alice.read_game(),
+        walk_mode_of(&yankee_listed.to_le_bytes())
+    );
     let (_, add, info) = yankee.sees_arrive(alpha.id, false, None);
     assert_eq!(insert_body(&add), insert_body(&alpha_entered.add));
     assert_eq!(info, alpha_entered.info);
@@ -8955,7 +8966,7 @@ fn a_claim_on_a_character_who_has_left_finds_nobody() {
     // The leave reaches the game thread after the socket closes, so Yankee enters once the
     // world has let Alpha go, and is never shown it.
     server.wait_for("Character left the world");
-    let (mut yankee, _yankee_id) = enter_world(&server, b"bob", 0);
+    let (mut yankee, _yankee_listed) = enter_world(&server, b"bob", 0);
 
     // `if (!victim) continue;` skips an element whose VID is not in the world, so the batch
     // ends up empty and no record is written at all.
@@ -20716,6 +20727,11 @@ fn the_leaders_click_on_the_forest_room_is_refused_for_want_of_a_ticket() {
 /// and a dog stands at the party's feet. The first exit was cleared and never fires;
 /// the second notices and sends both home to (470000, 950000).
 fn forest_world() -> Option<(Server, ScratchDatabase, PathBuf)> {
+    forest_world_with_probe(DUNGEON_PROBE)
+}
+
+/// [`forest_world`] with the probe bytes it installs, for a quest that arms its own timers.
+fn forest_world_with_probe(probe: &[u8]) -> Option<(Server, ScratchDatabase, PathBuf)> {
     let database = ScratchDatabase::create()?;
     let npc = "locale/europe/map/metin2_map_a1/npc.txt";
     let mut npc_text = std::fs::read(
@@ -20742,10 +20758,7 @@ fn forest_world() -> Option<(Server, ScratchDatabase, PathBuf)> {
         database.url(),
         &[
             (npc, &npc_text),
-            (
-                "locale/europe/quest/zz_probe/dungeon_probe.lua",
-                DUNGEON_PROBE,
-            ),
+            ("locale/europe/quest/zz_probe/dungeon_probe.lua", probe),
         ],
         &channels,
         "no_wander = true",
@@ -20781,6 +20794,7 @@ struct ForestParty {
     alice: Keyed,
     yankee: Keyed,
     alpha: Listed,
+    yankee_listed: Listed,
     alice_key: u32,
     yankee_key: u32,
     alpha_vid: u32,
@@ -20801,7 +20815,7 @@ fn forest_party_forms(server: &Server) -> (ForestParty, u32) {
     let mut yankee = Keyed::channel(server.channel(1));
     let (_empire, list) =
         login_by_key(&mut yankee, b"bob", yankee_key, CLIENT_KEY).expect("yankee logs in");
-    let (_yankee, quickslots, _yankee_items) = load_selected(&mut yankee, &list, 0);
+    let (yankee_listed, quickslots, _yankee_items) = load_selected(&mut yankee, &list, 0);
     assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
     let (yankee_vid, guardian) = enter_beside_shown(&mut yankee, 20412);
     alice.read_game();
@@ -20825,6 +20839,7 @@ fn forest_party_forms(server: &Server) -> (ForestParty, u32) {
             alice,
             yankee,
             alpha,
+            yankee_listed,
             alice_key,
             yankee_key,
             alpha_vid,
@@ -20835,11 +20850,138 @@ fn forest_party_forms(server: &Server) -> (ForestParty, u32) {
     )
 }
 
+/// Ledger 404: Yankee's disconnect, read to its removal. The removal proves the
+/// disconnect was processed, so the logon claim is released and the new key logs in
+/// with no race.
+fn forest_yankee_disconnects(alice: &mut Keyed, yankee: Keyed, yankee_vid: u32) {
+    drop(yankee);
+    let mut removal = vec![GC_CHARACTER_DEL];
+    removal.extend_from_slice(&yankee_vid.to_le_bytes());
+    loop {
+        let record = alice.read_game();
+        if record[0] == GC_CHARACTER_DEL {
+            assert_eq!(record, removal, "Yankee disconnects");
+            break;
+        }
+        assert!(
+            matches!(
+                record[0],
+                GC_PARTY_ADD
+                    | GC_PARTY_LINK
+                    | GC_PARTY_UNLINK
+                    | GC_PARTY_UPDATE
+                    | GC_PARTY_PARAMETER
+                    | GC_OWNERSHIP
+                    | GC_CHARACTER_UPDATE
+            ),
+            "the trailing fan and the release first: {record:02x?}"
+        );
+    }
+}
+
+/// Ledger 404: Yankee takes the second empire. The empire update lands between the
+/// drop and the login, and the save the drop queued never touches the account's empire.
+/// Yankee's vid is its player id, so it survives; Alice reads the relink fan and the
+/// view pair, with the revive-expiry look update allowed throughout (her own revive ends
+/// mid-relog).
+fn forest_yankee_takes_the_second_empire(
+    server: &Server,
+    database: &ScratchDatabase,
+    party: ForestParty,
+) -> ForestParty {
+    let ForestParty {
+        mut alice,
+        yankee,
+        alpha,
+        yankee_listed,
+        alice_key,
+        yankee_key: _,
+        alpha_vid,
+        yankee_vid,
+        port,
+    } = party;
+    forest_yankee_disconnects(&mut alice, yankee, yankee_vid);
+    sql(
+        database,
+        "UPDATE account SET empire = 2 WHERE login = 'bob'",
+    );
+    let (_auth, yankee_key) = login_key(server, b"bob");
+    let mut yankee = Keyed::channel(server.channel(1));
+    let (_empire, list) =
+        login_by_key(&mut yankee, b"bob", yankee_key, CLIENT_KEY).expect("yankee logs in again");
+    let (again, quickslots, _items) = load_selected(&mut yankee, &list, 0);
+    assert_eq!(again.id, yankee_listed.id, "the same Yankee");
+    assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
+    let own = enter_game_view(&mut yankee);
+    assert_eq!(
+        own.add[1..5],
+        yankee_vid.to_le_bytes(),
+        "the vid is the player id"
+    );
+    // The relink fan lands before the view pair; the revive's entry is the timer's own
+    // and filtered, and its restate and expiry reads wait for the dialog's own loops.
+    for head in [GC_PARTY_ADD, GC_PARTY_LINK, GC_PARTY_UPDATE] {
+        let record = loop {
+            let record = alice.read_game();
+            if record[0] == GC_CHARACTER_UPDATE {
+                continue;
+            }
+            break record;
+        };
+        assert_eq!(record[0], head, "the relink fans {head}");
+    }
+    // Alice's own revive ends mid-relog, so its expiry look update is allowed past.
+    let mut record = loop {
+        let record = alice.read_game();
+        if record[0] == GC_CHARACTER_UPDATE {
+            continue;
+        }
+        break record;
+    };
+    if record[0] == GC_WALK_MODE {
+        assert_eq!(
+            record,
+            walk_mode_of(&yankee_vid.to_le_bytes()),
+            "the newcomer walks"
+        );
+        record = loop {
+            let record = alice.read_game();
+            if record[0] == GC_CHARACTER_UPDATE {
+                continue;
+            }
+            break record;
+        };
+    }
+    assert_eq!(record[0], GC_CHARACTER_ADD, "{record:02x?}");
+    assert_eq!(&record[1..5], &yankee_vid.to_le_bytes(), "the insert's vid");
+    let info = loop {
+        let record = alice.read_game();
+        if record[0] == GC_CHARACTER_UPDATE {
+            continue;
+        }
+        break record;
+    };
+    assert_eq!(info[0], GC_CHAR_ADDITIONAL_INFO, "{info:02x?}");
+    assert_eq!(&info[1..5], &yankee_vid.to_le_bytes(), "the summary's vid");
+    ForestParty {
+        alice,
+        yankee,
+        alpha,
+        yankee_listed,
+        alice_key,
+        yankee_key,
+        alpha_vid,
+        yankee_vid,
+        port,
+    }
+}
+
 fn forest_dialog_spends_the_tickets(party: ForestParty, guardian: u32) -> ForestParty {
     let ForestParty {
         mut alice,
         yankee,
         alpha,
+        yankee_listed,
         alice_key,
         yankee_key,
         alpha_vid,
@@ -20852,10 +20994,16 @@ fn forest_dialog_spends_the_tickets(party: ForestParty, guardian: u32) -> Forest
         if record[0] == GC_SCRIPT {
             break record;
         }
+        // Ledger 404's relog replants Yankee's revive, whose expiry look update lands
+        // mid-dialog; its remove is the revive timer's own and filtered.
         assert!(
             matches!(
                 record[0],
-                GC_PARTY_ADD | GC_PARTY_LINK | GC_PARTY_UPDATE | GC_PARTY_PARAMETER
+                GC_PARTY_ADD
+                    | GC_PARTY_LINK
+                    | GC_PARTY_UPDATE
+                    | GC_PARTY_PARAMETER
+                    | GC_CHARACTER_UPDATE
             ),
             "ahead of the dialog: {record:02x?}"
         );
@@ -20910,6 +21058,7 @@ fn forest_dialog_spends_the_tickets(party: ForestParty, guardian: u32) -> Forest
         alice,
         yankee,
         alpha,
+        yankee_listed,
         alice_key,
         yankee_key,
         alpha_vid,
@@ -20927,6 +21076,7 @@ fn forest_jump_lands_at_the_entry(
         mut alice,
         mut yankee,
         alpha,
+        yankee_listed,
         alice_key,
         yankee_key,
         alpha_vid,
@@ -20953,10 +21103,12 @@ fn forest_jump_lands_at_the_entry(
                 );
                 continue;
             }
+            // Ledger 404's relog replants Yankee's revive, whose expiry look update lands
+            // mid-jump; its remove is the revive timer's own and filtered.
             assert!(
                 matches!(
                     record[0],
-                    GC_PARTY_UPDATE | GC_PARTY_UNLINK | GC_PARTY_PARAMETER
+                    GC_PARTY_UPDATE | GC_PARTY_UNLINK | GC_PARTY_PARAMETER | GC_CHARACTER_UPDATE
                 ),
                 "the jump syncs the party first: {record:02x?}"
             );
@@ -21006,6 +21158,7 @@ fn forest_jump_lands_at_the_entry(
         alice,
         yankee,
         alpha,
+        yankee_listed,
         alice_key,
         yankee_key,
         alpha_vid,
@@ -21019,6 +21172,7 @@ fn forest_report_names_the_dungeon(party: ForestParty) -> ForestParty {
         mut alice,
         mut yankee,
         alpha,
+        yankee_listed,
         alice_key,
         yankee_key,
         alpha_vid,
@@ -21073,6 +21227,7 @@ fn forest_report_names_the_dungeon(party: ForestParty) -> ForestParty {
         alice,
         yankee,
         alpha,
+        yankee_listed,
         alice_key,
         yankee_key,
         alpha_vid,
@@ -21086,6 +21241,7 @@ fn forest_dog_stands_at_the_partys_feet(party: ForestParty) -> ForestParty {
         mut alice,
         mut yankee,
         alpha,
+        yankee_listed,
         alice_key,
         yankee_key,
         alpha_vid,
@@ -21125,12 +21281,375 @@ fn forest_dog_stands_at_the_partys_feet(party: ForestParty) -> ForestParty {
         alice,
         yankee,
         alpha,
+        yankee_listed,
         alice_key,
         yankee_key,
         alpha_vid,
         yankee_vid,
         port,
     }
+}
+
+/// Ledger 404: `d.new_jump` (`G/questlua_dungeon.cpp:318-347`). No owner quest calls it —
+/// its only caller is the library's `warpToDungeon`
+/// (`quest/luaLibrary/dungeonFunctions.lua:262`), which no quest calls — so the probe calls
+/// it in the library's global numbers, unscaled, where `d.new_jump_party` scales its own
+/// (`G/dungeon.cpp:398-399`).
+///
+/// Yankee logs in alone and enters map 1; its login takes its own dungeon, and its own
+/// removal and the warp to the forest's entry follow the burst. The row names the first
+/// free copy, and Yankee comes back on the dungeon's map at the entry, where the login
+/// stays quiet.
+#[test]
+fn a_solo_login_takes_its_own_dungeon_at_the_entry() {
+    let Some((server, database, _root)) = forest_world_with_probe(SOLO_PROBE) else {
+        return;
+    };
+    let (_auth, key) = login_key(&server, b"bob");
+    let mut yankee = Keyed::channel(server.channel(1));
+    let (_empire, list) =
+        login_by_key(&mut yankee, b"bob", key, CLIENT_KEY).expect("yankee logs in");
+    let (yankee_listed, quickslots, _items) = load_selected(&mut yankee, &list, 0);
+    assert_eq!(quickslots, Vec::<Vec<u8>>::new(), "no quickslot is stored");
+    let own = enter_game_shown(&mut yankee);
+    read_login_event(&mut yankee);
+    let id = yankee_listed.id.to_le_bytes();
+    assert_eq!(own.add[1..5], id, "the insert's vid");
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&id);
+    assert_eq!(yankee.read_game(), removed, "EncodeRemovePacket(this)");
+    let port = server.channel(1).port();
+    assert_eq!(
+        yankee.read_game(),
+        a_warp_record((782_400, 1_502_100), port),
+        "the solo jump lands at the entry"
+    );
+    wait_for(
+        &database,
+        "(SELECT map_index FROM player WHERE name = 'Yankee') = 2100000",
+    );
+    yankee = Keyed::channel(server.channel(1));
+    let (_empire, list) =
+        login_by_key(&mut yankee, b"bob", key, CLIENT_KEY).expect("the key logs in again");
+    let _loaded = load_selected(&mut yankee, &list, 0);
+    let own = enter_game_shown(&mut yankee);
+    read_login_event(&mut yankee);
+    assert_eq!(
+        inserted_at(&own.add),
+        (782_400, 1_502_100),
+        "Yankee enters its dungeon at the entry"
+    );
+    yankee.quiet("the dungeon login stays quiet");
+}
+
+/// Ledger 404: the tail report's reads. The queues apply notices before spawns, so both
+/// hear `spawned` and `cleared` back to back; then each sees the dog's insert (the
+/// revive-expiry look update is allowed past, as the relog's own), its release, and its
+/// death. Answers the party with the dog's vid.
+fn forest_tail_kills_the_dog(party: ForestParty) -> (ForestParty, u32) {
+    let ForestParty {
+        mut alice,
+        mut yankee,
+        alpha,
+        yankee_listed,
+        alice_key,
+        yankee_key,
+        alpha_vid,
+        yankee_vid,
+        port,
+    } = party;
+    let mut dog = 0;
+    for (who, what, empire) in [(&mut alice, "Alpha", 1), (&mut yankee, "Yankee", 2)] {
+        let spawned = loop {
+            let record = who.read_game();
+            if record[0] == GC_CHAT {
+                break record;
+            }
+            assert!(
+                matches!(
+                    record[0],
+                    GC_PARTY_ADD
+                        | GC_PARTY_LINK
+                        | GC_PARTY_UNLINK
+                        | GC_PARTY_UPDATE
+                        | GC_CHARACTER_ADD
+                        | GC_CHAR_ADDITIONAL_INFO
+                        | GC_CHARACTER_UPDATE
+                        | GC_WALK_MODE
+                ),
+                "{what} hears the party link first: {record:02x?}"
+            );
+        };
+        assert_eq!(
+            spawned,
+            chat_packet(CHAT_TYPE_NOTICE, empire, b"spawned"),
+            "{what} hears the spawn"
+        );
+        assert_eq!(
+            who.read_game(),
+            chat_packet(CHAT_TYPE_NOTICE, empire, b"cleared"),
+            "{what} hears the kill"
+        );
+        // Raw: `read_game` filters a monster's insert as a boot die's doing.
+        let insert = loop {
+            let record = who.read_game_raw();
+            if is_heartbeat_record(&record) {
+                continue;
+            }
+            if record[0] == GC_CHARACTER_ADD {
+                break record;
+            }
+            assert!(
+                matches!(
+                    record[0],
+                    GC_PARTY_ADD
+                        | GC_PARTY_LINK
+                        | GC_PARTY_UNLINK
+                        | GC_PARTY_UPDATE
+                        | GC_PARTY_PARAMETER
+                        | GC_CHARACTER_UPDATE
+                ),
+                "{what} hears nothing else first: {record:02x?}"
+            );
+        };
+        assert_eq!(
+            &insert[22..24],
+            &101u16.to_le_bytes(),
+            "{what} sees the dog: {insert:02x?}"
+        );
+        let vid = u32::from_le_bytes(insert[1..5].try_into().expect("a VID"));
+        if dog == 0 {
+            dog = vid;
+        }
+        assert_eq!(vid, dog, "{what} sees the same dog");
+        assert_eq!(
+            who.read_game(),
+            ownership_of(0, dog),
+            "{what} hears the dog's release"
+        );
+        assert_eq!(who.read_fight(), dead_of(dog), "{what} hears the dog die");
+    }
+    (
+        ForestParty {
+            alice,
+            yankee,
+            alpha,
+            yankee_listed,
+            alice_key,
+            yankee_key,
+            alpha_vid,
+            yankee_vid,
+            port,
+        },
+        dog,
+    )
+}
+
+/// Ledger 404: the home reenter's letter pass. No quest moved, so [`read_login_letters`]
+/// returns after the login pass without its peek; the letter pass's re-sends — the
+/// replaced sash mark and the two letters again — arrive only for a character whose
+/// marks survived: a warp departure keeps them, while the relog's logout forgot them,
+/// so Alpha re-marks and Yankee goes straight to the update. Reads the delete, the
+/// create naming Theowahdan on a nonzero VID, and the letters, or nothing.
+fn read_home_marks(who: &mut Keyed, what: &str) {
+    let next = who
+        .read_game_until(std::time::Instant::now() + QUIET_WINDOW)
+        .expect("the update or the old mark");
+    if next[0] == GC_CHARACTER_UPDATE {
+        who.unread(vec![next]);
+        return;
+    }
+    who.unread(vec![next]);
+    let delete = who.read_game();
+    assert_eq!(
+        delete[0], GC_QUEST_TARGET_DELETE,
+        "{what} drops the old mark: {delete:02x?}"
+    );
+    assert_eq!(delete.len(), 5, "{what} drops one id");
+    let create = who.read_game();
+    assert_eq!(
+        create[0], GC_QUEST_TARGET_CREATE,
+        "{what} marks again: {create:02x?}"
+    );
+    let mut field = [0; 33];
+    field[..b"Theowahdan".len()].copy_from_slice(b"Theowahdan");
+    assert_eq!(&create[5..38], &field[..], "{what} marks Theowahdan");
+    assert_ne!(
+        u32::from_le_bytes(create[38..42].try_into().expect("a VID")),
+        0,
+        "{what} marks a VID that stands"
+    );
+    read_letter(who, QUEST_SASH, b"A special cloth", "the sash's return");
+    read_letter(
+        who,
+        QUEST_YOHARA,
+        b"Statuia Razboinicului",
+        "the statue's return",
+    );
+}
+
+/// Ledger 404: a home reenter after the tail exit: the key logs in again, the load
+/// selects, and the enter reads the burst with the home letter pass, landing rewarped
+/// off the blocked cell.
+fn forest_home_reenter(server: &Server, login: &[u8], key: u32, what: &str) -> Keyed {
+    let mut who = Keyed::channel(server.channel(1));
+    let (_empire, list) =
+        login_by_key(&mut who, login, key, CLIENT_KEY).expect("the key logs in again");
+    let _loaded = load_selected(&mut who, &list, 0);
+    let own = enter_game_shown(&mut who);
+    read_login_lines(&mut who, 0, None);
+    let _marks = read_login_letters(&mut who, true);
+    read_home_marks(&mut who, what);
+    read_login_update(&mut who);
+    assert_eq!(
+        inserted_at(&own.add),
+        (470_100, 950_000),
+        "{what} enters back home, rewarped off the blocked cell"
+    );
+    who
+}
+
+/// Ledger 404: the tail exit's reads. Both hear `going` (the dungeon revives end in the
+/// wait, so the expiry look update is allowed past; the dead dog goes a second after it
+/// died, its release and removal read past), leave, land back home, and come back on
+/// map 1.
+fn forest_tail_sends_the_party_home(
+    server: &Server,
+    database: &ScratchDatabase,
+    party: ForestParty,
+    dog: u32,
+) -> ForestParty {
+    let ForestParty {
+        mut alice,
+        mut yankee,
+        alpha,
+        yankee_listed,
+        alice_key,
+        yankee_key,
+        alpha_vid,
+        yankee_vid,
+        port,
+    } = party;
+    for (who, what, empire) in [(&mut alice, "Alpha", 1), (&mut yankee, "Yankee", 2)] {
+        let going = loop {
+            let record = who.read_game();
+            if record[0] == GC_CHAT {
+                break record;
+            }
+            if record[0] == GC_OWNERSHIP {
+                assert_eq!(
+                    record,
+                    ownership_of(0, dog),
+                    "{what} hears the dead dog's release"
+                );
+                continue;
+            }
+            if record[0] == GC_CHARACTER_DEL {
+                assert_eq!(
+                    &record[1..5],
+                    &dog.to_le_bytes(),
+                    "{what} hears the dead dog go"
+                );
+                continue;
+            }
+            assert!(
+                matches!(
+                    record[0],
+                    GC_PARTY_ADD
+                        | GC_PARTY_LINK
+                        | GC_PARTY_UNLINK
+                        | GC_PARTY_UPDATE
+                        | GC_CHARACTER_UPDATE
+                ),
+                "{what} hears no exit but the tail's: {record:02x?}"
+            );
+        };
+        assert_eq!(
+            going,
+            chat_packet(CHAT_TYPE_NOTICE, empire, b"going"),
+            "{what} hears the tail exit"
+        );
+        let removal = who.read_game();
+        assert_eq!(
+            removal[0], GC_CHARACTER_DEL,
+            "{what} leaves: {removal:02x?}"
+        );
+        assert_eq!(
+            who.read_game(),
+            a_warp_record((470_000, 950_000), port),
+            "{what} lands back home"
+        );
+    }
+    wait_for(
+        database,
+        "(SELECT map_index FROM player WHERE name = 'Alpha') = 1 AND (SELECT map_index FROM          player WHERE name = 'Yankee') = 1",
+    );
+    alice = forest_home_reenter(server, b"alice", alice_key, "Alpha");
+    yankee = forest_home_reenter(server, b"bob", yankee_key, "Yankee");
+    ForestParty {
+        alice,
+        yankee,
+        alpha,
+        yankee_listed,
+        alice_key,
+        yankee_key,
+        alpha_vid,
+        yankee_vid,
+        port,
+    }
+}
+
+/// Ledger 404: `d.clear_regen`, `d.kill_all`, `d.set_damage_from_race` and
+/// `d.set_damage_from_affect` (`G/questlua_dungeon.cpp:235-243`, `:1231-1246`, `:902-938`).
+/// Like `d.new_jump`, no owner quest calls them — only the library's uncalled `ClearDungeon`
+/// and the never-loaded `questlib_extra.lua`'s uncalled tables — so the probe calls them:
+/// at its dungeon login Alpha flags itself with all eight race bits and the polymorph
+/// affect, and the report spawns a dog, clears the empty regen list, kills the dog, and
+/// notices.
+///
+/// Yankee takes the second empire after the party forms (a relog: the PK policy runs in
+/// its peaceful form, so only empires apart let a hit through), the party enters, the
+/// tail kills the dog and sends both home. Back home Alpha's hit on the unflagged
+/// Yankee lands, which proves the policy lets the next one through; Yankee's hit on the
+/// flagged Alpha sends nothing.
+#[test]
+fn the_tail_kills_the_dog_and_the_flagged_hit_is_silent() {
+    let Some((server, database, _root)) = forest_world_with_probe(TAIL_PROBE) else {
+        return;
+    };
+    let (party, guardian) = forest_party_forms(&server);
+    let party = forest_yankee_takes_the_second_empire(&server, &database, party);
+    let party = forest_dialog_spends_the_tickets(party, guardian);
+    let party = forest_jump_lands_at_the_entry(&server, &database, party);
+    let (party, dog) = forest_tail_kills_the_dog(party);
+    let party = forest_tail_sends_the_party_home(&server, &database, party, dog);
+    let ForestParty {
+        mut alice,
+        mut yankee,
+        yankee_vid,
+        alpha_vid,
+        ..
+    } = party;
+    // The control: Alpha's hit on the unflagged Yankee lands, past whatever the dice
+    // proc first.
+    alice.send_record(&client_attack(yankee_vid));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let landed = loop {
+        let Some(record) = alice.read_game_until(deadline) else {
+            break false;
+        };
+        if record[0] == GC_DAMAGE_INFO && record[1..5] == yankee_vid.to_le_bytes() {
+            break true;
+        }
+    };
+    assert!(landed, "the unflagged hit lands");
+    while yankee
+        .read_game_until(std::time::Instant::now() + QUIET_WINDOW)
+        .is_some()
+    {}
+    // The flagged hit: Yankee's swing at Alpha sends nothing.
+    yankee.send_record(&client_attack(alpha_vid));
+    yankee.quiet("the flagged hit sends nothing");
 }
 
 #[test]
@@ -22696,8 +23215,8 @@ fn a_sync_claim_on_an_npc_is_skipped_and_a_player_still_lands() {
     );
     stamina(&database, "Yankee", 12_345);
     let (mut alice, _alpha, entered) = enter_world_seeing(&server, b"alice", 0);
-    let (mut yankee, yankee_id) = enter_world(&server, b"bob", 0);
-    alice.sees_enter(yankee_id.id, false, None);
+    let (mut yankee, yankee_listed) = enter_world(&server, b"bob", 0);
+    alice.sees_enter(yankee_listed.id, false, None);
     let npc = entered
         .shown
         .inserts()
@@ -22714,7 +23233,7 @@ fn a_sync_claim_on_an_npc_is_skipped_and_a_player_still_lands() {
     // The NPC's claim beside a player's: the player lands, the NPC stays silent.
     alice.send_record(&client_sync_position(&[
         (npc, 470_010, 950_010),
-        (yankee_id.id, 470_010, 950_010),
+        (yankee_listed.id, 470_010, 950_010),
     ]));
     let claimed = yankee.read_game();
     assert_eq!(claimed[0], GC_OWNERSHIP, "the player's claim lands");
@@ -22722,7 +23241,7 @@ fn a_sync_claim_on_an_npc_is_skipped_and_a_player_still_lands() {
     assert_eq!(relayed[0], GC_SYNC_POSITION);
     assert_eq!(
         &relayed[3..7],
-        &yankee_id.id.to_le_bytes(),
+        &yankee_listed.id.to_le_bytes(),
         "the player only"
     );
     // `SetSyncOwner`'s `PacketAround` has no exception, so the claimer reads
@@ -33555,6 +34074,56 @@ const DUNGEON_PROBE: &[u8] = b"quest dungeon_probe begin\n\
     d.notice(\"second\")\n\
     d.set_warp_location(1, 4700, 9500)\n\
     d.exit_all()\n\
+    end\n\
+    end\n\
+    end\n\
+    end\n";
+/// Ledger 404: the probe of the tail names. At a login in the dungeon Alpha flags itself: all
+/// eight race bits and the polymorph affect. The `tail_report` timer spawns one stray dog,
+/// notices, clears a regen list that holds none, kills the dog and notices again; eight
+/// seconds on `tail_exit` sends everybody home.
+const TAIL_PROBE: &[u8] = b"quest dungeon_tail_probe begin\n\
+    state start begin\n\
+    when login begin\n\
+    if pc.in_dungeon() then\n\
+    if pc.get_name() == \"Alpha\" then\n\
+    for race=0,7 do d.set_damage_from_race(race, pc.get_vid()) end\n\
+    d.set_damage_from_affect(36, pc.get_vid())\n\
+    end\n\
+    server_timer(\"tail_report\", 2, d.get_map_index())\n\
+    server_timer(\"tail_exit\", 8, d.get_map_index())\n\
+    end\n\
+    end\n\
+    when tail_report.server_timer begin\n\
+    if d.select(get_server_timer_arg()) then\n\
+    d.spawn_mob(101, 144, 941)\n\
+    d.notice(\"spawned\")\n\
+    d.clear_regen()\n\
+    d.kill_all()\n\
+    d.notice(\"cleared\")\n\
+    end\n\
+    end\n\
+    when tail_exit.server_timer begin\n\
+    if d.select(get_server_timer_arg()) then\n\
+    d.notice(\"going\")\n\
+    d.set_warp_location(1, 4700, 9500)\n\
+    d.exit_all()\n\
+    end\n\
+    end\n\
+    end\n\
+    end\n";
+/// Ledger 404: the probe of the solo jump. No owner quest calls `d.new_jump` (its only
+/// caller is the library's `warpToDungeon`, which no quest calls), so the probe jumps
+/// itself: a login outside the dungeon plants the entry flag the dialog plants
+/// (`enchanted_forest_zone.lua:179`), which the forest's login trigger clears instead of
+/// correcting the warp (`:35-41`), and takes its own dungeon at the forest's entry, in
+/// the library's global numbers; a login in the dungeon stays quiet.
+const SOLO_PROBE: &[u8] = b"quest solo_probe begin\n\
+    state start begin\n\
+    when login begin\n\
+    if not pc.in_dungeon() then\n\
+    pc.setf(\"enchanted_forest_zone\", \"dungeon_enter\", 1)\n\
+    d.new_jump(210, 782400, 1502100)\n\
     end\n\
     end\n\
     end\n\

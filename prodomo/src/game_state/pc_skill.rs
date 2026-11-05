@@ -4885,12 +4885,20 @@ mod tests {
         (reader, mover, card, pc_level)
     }
 
-    fn grand_read(
-        world: &mut GameState,
-        vnum: u32,
-        total: i32,
-    ) -> (bool, super::super::quests::QuestStepOutcome) {
-        let (reader, mover, card, pc_level) = grand_card(world);
+    /// The session's world borrows: the characters, locale, dice, skill states,
+    /// affect events, skill tables and bodies.
+    type GrandParts<'w> = (
+        &'w mut world::character::CharacterManager,
+        &'w gamedata::locale_string::LocaleStrings,
+        &'w mut world::character::Pcg32,
+        &'w mut std::collections::HashMap<u32, PcSkillState>,
+        &'w mut std::collections::HashMap<Vid, super::super::affect::AffectEvent>,
+        &'w gamedata::pc_skill_data::PcSkills,
+        &'w std::collections::HashMap<Vid, super::super::motion::Body>,
+    );
+
+    /// The session's world borrows, destructured from the world.
+    fn grand_parts(world: &mut GameState) -> GrandParts<'_> {
         let GameState {
             characters,
             locale,
@@ -4901,6 +4909,25 @@ mod tests {
             bodies,
             ..
         } = world;
+        (
+            characters,
+            locale,
+            dice,
+            pc_skills,
+            affect_events,
+            pc_skill_tables,
+            bodies,
+        )
+    }
+
+    fn grand_read(
+        world: &mut GameState,
+        vnum: u32,
+        total: i32,
+    ) -> (bool, super::super::quests::QuestStepOutcome) {
+        let (reader, mover, card, pc_level) = grand_card(world);
+        let (characters, locale, dice, pc_skills, affect_events, pc_skill_tables, bodies) =
+            grand_parts(world);
         let session = super::super::quests::Session {
             map_index: 0,
             war_map: 0,
@@ -4912,6 +4939,11 @@ mod tests {
             dungeon_warps: Vec::new(),
             dungeon_exits: Vec::new(),
             dungeon_spawns: Vec::new(),
+            dungeon_singles: Vec::new(),
+            dungeon_clears: Vec::new(),
+            dungeon_kills: Vec::new(),
+            damage_race_sets: Vec::new(),
+            damage_affect_sets: Vec::new(),
             server_timer_ops: Vec::new(),
             event_sets: Vec::new(),
             takes: Vec::new(),

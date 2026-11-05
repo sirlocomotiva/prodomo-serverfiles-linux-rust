@@ -223,6 +223,12 @@ pub struct Npc {
     /// `IsDead`: `POS_DEAD`, which `Dead` sets (`G/char_battle.cpp:1369`). Its insert then carries
     /// `ADD_CHARACTER_STATE_DEAD` until it is destroyed.
     pub dead: bool,
+    /// `m_dwNDRFlag` (`G/char.h:2128-2140`): the attacker races `battle_is_icedamage`
+    /// refuses (`d.set_damage_from_race`), bit `1 << race`.
+    pub ndr: u32,
+    /// `m_setNDAFlag`: the attacker affect flags `battle_is_icedamage` requires
+    /// (`d.set_damage_from_affect`), every one of which the attacker must hold.
+    pub nda: std::collections::BTreeSet<u32>,
 }
 
 impl Npc {
@@ -844,6 +850,8 @@ impl<'a> NpcSpawner<'a> {
             immune_flag: proto.immune_flag,
             stunned: false,
             dead: false,
+            ndr: 0,
+            nda: std::collections::BTreeSet::new(),
         });
         self.report.spawned += 1;
         if proto.mob_type == CHAR_TYPE_STONE {
@@ -1503,6 +1511,8 @@ mod tests {
                 immune_flag: 0b10_1011,
                 stunned: false,
                 dead: false,
+                ndr: 0,
+                nda: std::collections::BTreeSet::new(),
             }]
         );
         assert_eq!(report.spawned, 1);

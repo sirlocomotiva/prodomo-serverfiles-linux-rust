@@ -225,6 +225,17 @@ pub(super) struct NpcCombat {
     pub(super) chain: u8,
 }
 
+/// A player's no-damage flags: `m_dwNDRFlag` and `m_setNDAFlag`
+/// (`G/char.h:2128-2140`), which `d.set_damage_from_race` and
+/// `d.set_damage_from_affect` write and `battle_is_icedamage` reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct NoDamage {
+    /// The attacker races refused, bit `1 << race`.
+    pub(super) race: u32,
+    /// The attacker affect flags every one of which the attacker must hold.
+    pub(super) affects: std::collections::BTreeSet<u32>,
+}
+
 /// A live `mob_skill_hit_event` (`G/char_skill.cpp:3389-3412`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SkillEvent {
@@ -681,10 +692,11 @@ impl GameState {
     }
 
     /// `battle_is_attackable` of the player `attacker` standing at `(map, x, y)` on `npc`
-    /// (`G/battle.cpp:99-152`): the victim is alive, neither cell is `ATTR_BANPK`, the attacker
-    /// is neither stunned nor dead (`:122`), and the victim is no fake hydra. No castle, arena
-    /// or ship-defence map is hosted, and `CPVPManager::CanAttack` lets a player hit every
-    /// non-player that reaches here unless it rides a grade-1 horse (`G/pvp.cpp:394-398`).
+    /// (`G/battle.cpp:99-152`): the victim is alive, neither cell is `ATTR_BANPK`, the
+    /// icedamage holds (`:117-119`), the attacker is neither stunned nor dead (`:122`),
+    /// and the victim is no fake hydra. No castle, arena or ship-defence map is hosted,
+    /// and `CPVPManager::CanAttack` lets a player hit every non-player that reaches here
+    /// unless it rides a grade-1 horse (`G/pvp.cpp:394-398`).
     pub(super) fn is_attackable(
         &self,
         attacker: Vid,
@@ -694,9 +706,55 @@ impl GameState {
         !npc.dead
             && !self.is_banpk(map, x, y)
             && !self.is_banpk(map, npc.x, npc.y)
+            && self.ice_damage_allows(attacker, npc.ndr, &npc.nda)
             && !self.is_down(attacker.raw())
             && !FAKE_HYDRAS.contains(&npc.vnum)
             && !self.rides_a_grade_one_horse(attacker.raw())
+    }
+
+    /// `battle_is_icedamage` (`G/battle.cpp:70-97`): the player `attacker` may damage a
+    /// victim holding the no-damage race bits and the no-damage affect set.
+    /// A set race bit of the attacker's own race refuses (`GetRaceNum`: the polymorph
+    /// vnum while morphed, else the job, and only below `MAIN_RACE_MAX_NUM`), and
+    /// every set affect flag the attacker does not hold refuses
+    /// (`TAffectFlag::IsSet`, `G/affect_flag.h:27-33`).
+    pub(super) fn ice_damage_allows(
+        &self,
+        attacker: Vid,
+        race_bits: u32,
+        required: &std::collections::BTreeSet<u32>,
+    ) -> bool {
+        let race = self
+            .characters
+            .find_by_vid(attacker)
+            .ok()
+            .and_then(|character| character.points())
+            .filter(|points| points.is_polymorphed())
+            .map_or_else(
+                || {
+                    self.bodies
+                        .get(&attacker)
+                        .map_or(0, |body| u32::from(body.card.job))
+                },
+                world::character::Points::polymorph_race,
+            );
+        if race_bits != 0 && race < 8 && race_bits & (1 << race) != 0 {
+            return false;
+        }
+        if required.is_empty() {
+            return true;
+        }
+        let flags = self.affect_flags_of(attacker);
+        required.iter().all(|flag| {
+            let Some(bit) = flag.checked_sub(1) else {
+                return false;
+            };
+            *flag < crate::loading_phase::AFF_BITS_MAX
+                && usize::try_from(bit / 32)
+                    .ok()
+                    .and_then(|word| flags.get(word))
+                    .is_some_and(|word| word & (1 << (bit % 32)) != 0)
+        })
     }
 
     /// `battle_hit` of the player under `vid` on the non-player under `target`.
@@ -747,12 +805,16 @@ impl GameState {
         if victim_place.1 != place.1 {
             return AttackAnswer::default();
         }
-        // `battle_is_attackable` (`G/battle.cpp:99-153`): the dead, the `ATTR_BANPK` cells
-        // and the PK policy.
+        // `battle_is_attackable` (`G/battle.cpp:99-153`): the dead, the `ATTR_BANPK` cells,
+        // the icedamage (`:117-119`, before the war arm's accept) and the PK policy.
         if self.is_down(vid.raw())
             || self.is_banpk(place.1, spot.x, spot.y)
             || self.is_banpk(victim_place.1, victim_spot.x, victim_spot.y)
         {
+            return AttackAnswer::default();
+        }
+        let iced = self.no_damage.get(&victim).cloned().unwrap_or_default();
+        if !self.ice_damage_allows(vid, iced.race, &iced.affects) {
             return AttackAnswer::default();
         }
         let Some(empire) = self.bodies.get(&vid).map(|body| body.card.empire) else {
@@ -2078,6 +2140,26 @@ mod tests {
             after < before,
             "the victim's hit points fall: {before} -> {after}"
         );
+    }
+
+    /// `battle_is_icedamage` (`G/battle.cpp:117-119`) on a player: a victim whose race
+    /// bit names the attacker's race refuses the hit, before the war arm's accept.
+    #[test]
+    fn a_player_with_the_attackers_race_bit_refuses_the_hit() {
+        let (_clock, mut world, _inbox) = a_fight(a_monster(100), (0, 0));
+        let _attacker = a_player(&mut world, 101, (0, 0));
+        let _victim = a_player(&mut world, 102, (1, 0));
+        world.bodies.get_mut(&Vid::new(101)).unwrap().card.empire = 1;
+        world.bodies.get_mut(&Vid::new(102)).unwrap().card.empire = 2;
+        world.bodies.get_mut(&Vid::new(101)).unwrap().card.pk_mode = PK_MODE_PEACE;
+        world.bodies.get_mut(&Vid::new(102)).unwrap().card.pk_mode = PK_MODE_PEACE;
+        world.start_pc_recovery(Vid::new(101));
+        world.start_pc_recovery(Vid::new(102));
+        world.dungeon_set_damage_race(0, 102);
+        let before = world.pc_points_mut(102).unwrap().hp();
+        hit(&mut world, 101, 102);
+        let after = world.pc_points_mut(102).unwrap().hp();
+        assert_eq!(after, before, "the race bit refuses the hit");
     }
 
     /// `CanAttack` (`G/pvp.cpp:196-215`): a player in `PK_MODE_PROTECT` may not hit a
@@ -4030,6 +4112,53 @@ mod tests {
                 "{band:?}"
             );
         }
+    }
+
+    /// `battle_is_icedamage` (`G/battle.cpp:70-97`) on a monster: its race bit of the
+    /// attacker's race refuses the hit before any draw, another race's bit hits, and a
+    /// morphed attacker reads its vnum, so the job's bit hits again.
+    #[test]
+    fn a_monster_with_the_attackers_race_bit_refuses_the_hit() {
+        let (_clock, mut world, mut alpha) = a_fight(a_monster(MAX_HP), NEAR);
+        world.dungeon_set_damage_race(0, ME);
+        let dice = world.dice.clone();
+        hit(&mut world, 1, ME);
+        assert_eq!(world.dice, dice, "refused before any draw");
+        assert_eq!(world.npc_by_vid(ME).unwrap().hp, MAX_HP);
+        assert!(drained(&mut alpha).is_empty());
+        world.npc_mut(ME).unwrap().ndr = 0;
+        world.dungeon_set_damage_race(1, ME);
+        hit(&mut world, 1, ME);
+        assert!(
+            world.npc_by_vid(ME).unwrap().hp < MAX_HP,
+            "another race hits"
+        );
+        points_of(&mut world, 1).set_polymorph(101, false);
+        world.npc_mut(ME).unwrap().ndr = 0;
+        world.dungeon_set_damage_race(0, ME);
+        let hp = world.npc_by_vid(ME).unwrap().hp;
+        hit(&mut world, 1, ME);
+        assert!(
+            world.npc_by_vid(ME).unwrap().hp < hp,
+            "morphed past the job bit"
+        );
+    }
+
+    /// `battle_is_icedamage`'s affect set: every required flag the attacker does not
+    /// hold refuses, flag 0 and a flag past `AFF_BITS_MAX` refuse, and an empty set
+    /// holds.
+    #[test]
+    fn a_monster_with_a_missing_affect_flag_refuses_the_hit() {
+        let (_clock, world, _inbox) = a_fight(a_monster(MAX_HP), NEAR);
+        let attacker = Vid::new(1);
+        let set = |flags: &[u32]| flags.iter().copied().collect();
+        assert!(world.ice_damage_allows(attacker, 0, &set(&[])));
+        assert!(!world.ice_damage_allows(attacker, 0, &set(&[3])));
+        assert!(!world.ice_damage_allows(attacker, 0, &set(&[0])));
+        assert!(!world.ice_damage_allows(attacker, 0, &set(&[51])));
+        assert!(!world.ice_damage_allows(attacker, 0, &set(&[52])));
+        assert!(world.ice_damage_allows(attacker, 1 << 1, &set(&[])));
+        assert!(!world.ice_damage_allows(attacker, 1, &set(&[])));
     }
 
     /// `battle_is_attackable`'s attacker arm (`G/battle.cpp:122`): a stunned or a dead player
