@@ -34118,6 +34118,104 @@ fn a_quest_mounts_and_unmounts_and_a_login_takes_the_mount_off() {
     assert_eq!(removed, expected, "then the removes");
 }
 
+/// A seal probe: using the 71114 seal says so, takes it and mounts 20201 for 30 seconds;
+/// using the 71116 seal says `late` and takes it.
+const SEAL_PROBE: &[u8] = b"quest seal_probe begin\n\
+    state start begin\n\
+    when 71114.use begin\n\
+    syschat(\"seal\")\n\
+    pc.remove_item(71114)\n\
+    pc.mount(20201, 30)\n\
+    end\n\
+    when 71116.use begin\n\
+    syschat(\"late\")\n\
+    pc.remove_item(71116)\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// A morph may not mount, whatever it holds.
+fn ride_refuses_a_morph(alice: &mut Keyed) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polymorph 101"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ride"));
+    let _morph = read_up_to(
+        alice,
+        &an_info_line(b"Nu poti folosi un mount atat timp cat esti transformat."),
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/polymorph 3"));
+}
+
+/// `/ride` uses the first seal it finds, whose quest takes it and mounts; the next `/ride`
+/// dismounts, the one after uses the later seal, and with neither a horse nor a seal left
+/// the last names none.
+fn ride_uses_the_seal_and_dismounts(alice: &mut Keyed, vid: u32) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ride"));
+    let _unmorph = read_up_to(alice, &an_info_line(b"seal"));
+    let read = read_affect_moves(alice, GC_AFFECT_ADD, 2);
+    let (added, _) = affect_moves(&read);
+    assert_eq!(
+        added,
+        [(221, 109, 20_201), (221, 19, 30)],
+        "the seal's mount"
+    );
+    assert_eq!(shown_mount(&read, vid), 20_201);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ride"));
+    let read = read_affect_moves(alice, GC_AFFECT_REMOVE, 2);
+    let (_, removed) = affect_moves(&read);
+    assert_eq!(removed, [(221, 109), (221, 19)], "the dismount");
+    assert_eq!(shown_mount(&read, vid), 0);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ride"));
+    let _dismount_tail = read_up_to(alice, &an_info_line(b"late"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ride"));
+    let _late_tail = read_up_to(alice, &an_info_line(b"[LS;501]"));
+}
+
+/// With a summoned horse `/ride` rides it; riding, `/ride` stops, and the re-show unmounts.
+fn ride_toggles_the_horse(alice: &mut Keyed, vid: u32) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_level Alpha 25"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"horse level set (Alpha: 25)")
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_summon"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ride"));
+    let read = read_until_headed(alice, GC_CHARACTER_UPDATE, vid);
+    assert_eq!(shown_mount(&read, vid), 20_107, "the ride");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/ride"));
+    let read = read_until_headed(alice, GC_CHARACTER_UPDATE, vid);
+    assert_eq!(shown_mount(&read, vid), 0, "the ride stops");
+}
+
+/// `cmd.ride`: the morph's refusal, the seal it uses, the mount it takes off, the line
+/// with nothing to ride, and the horse it rides and stops riding.
+#[test]
+fn ride_uses_a_seal_dismounts_and_toggles_the_horse() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, _) = vein_stage(&database, SEAL_PROBE);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 7, \
+         1, 71114 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 20, \
+         1, 71116 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 2);
+    let vid = u32::from_le_bytes(entered.add[1..5].try_into().expect("four bytes"));
+    ride_refuses_a_morph(&mut alice);
+    ride_uses_the_seal_and_dismounts(&mut alice, vid);
+    ride_toggles_the_horse(&mut alice, vid);
+}
+
 const HORSE_NAME_PROBE: &[u8] = b"quest horse_name_probe begin\n\
     state start begin\n\
     when 20047.click begin\n\

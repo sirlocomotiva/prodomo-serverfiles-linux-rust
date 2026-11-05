@@ -167,6 +167,7 @@ impl CommandEntry {
             "do_horse_ride" => Command::Horse(HorseLine::Ride),
             "do_user_horse_ride" => Command::Horse(HorseLine::UserRide),
             "do_unmount" => Command::Horse(HorseLine::Unmount),
+            "do_ride" => Command::Ride,
             _ => self.mid_name(),
         }
     }
@@ -793,6 +794,9 @@ pub enum Command {
     /// `do_use_item`: the cell the line names runs through `UseItem`
     /// (`G/cmd_gm.cpp:4999-5016`).
     UseItem,
+    /// `do_ride`: the ride toggle, which may use a ride item
+    /// (`G/cmd_general.cpp:3516-3642`).
+    Ride,
     /// `do_clear_affect`: `ClearAffect(true)` on the caller
     /// (`G/cmd_gm.cpp:5019-5022`).
     ClearAffect,

@@ -45874,3 +45874,64 @@ set: 4754 passed, 0 failed in 41 targets. `cargo test --workspace --doc`: 1 pass
 `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are clean.
 `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
 Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 400. The `/ride` toggle
+
+`ACMD(do_ride)` (`G/cmd_general.cpp:3516-3642`) is ported as `GameState::run_ride_line`
+(`prodomo/src/game_state/horse_ride.rs`). Its arms are in `ride_toggle`:
+- the dead and the stunned (`is_down`) and the OX map (113) are silent;
+- a morph hears "Nu poti folosi un mount atat timp cat esti transformat.";
+- a horse rider stops riding;
+- a mount rider dismounts through `do_unmount` (ledger 399's `unmount`);
+- with a summoned horse the caller rides.
+
+Otherwise the first inventory cell (0 to 179, in order) holding one of the following runs
+through `UseItem`:
+- a ride item (`CItem::IsRideItem`, now `pub` as `world::character::is_ride_item`);
+- one of the quest seals 71114, 71116, 71118 and 71120;
+- a mount seal 52001-52090.
+
+With none, `[LS;501]` answers. The mount-costume arm and the ride item's three-cell condition
+never act: every mount costume in the owner's data (52001-52090 and 71118 among them) carries
+the first-use timer the item use refuses, so none is ever worn.
+
+The line runs `/use_item`'s path: `Command::Ride` → `ride_line_step` (`main.rs`) →
+`GameCommand::RideLine` → the kit-line dispatch. Its answer lands through `finish_use_line`,
+split out of `use_item_line_step`, so a seal's quest climbs and guild stores are stored as a
+used item's are. `GameState::nothing_used`, split out of `run_use_item_line`, answers the
+empty step.
+
+Scenario `ride_uses_a_seal_dismounts_and_toggles_the_horse`. A probe quest says `seal`, takes
+71114 and mounts 20201 on its use, and says `late` and takes 71116 on that one's use. The
+store seeds 71114 in cell 7 and 71116 in cell 20.
+- A morph's `/ride` hears the refusal and uses nothing.
+- `/ride` uses 71114 first: `seal`, then the mount's two adds and its re-show.
+- `/ride` dismounts: the two removes and the unmounted re-show.
+- `/ride` uses 71116: `late`.
+- With nothing left, `/ride` answers `[LS;501]`.
+- With a level-25 horse summoned, `/ride` rides (the re-show carries 20107) and the next
+  `/ride` stops (the re-show unmounts).
+
+Unit test `the_down_and_the_ox_map_ride_nothing`: the same caller hears `[LS;501]` standing,
+and nothing while dead or on map 113.
+
+Nine mutants were applied to the pristine files and restored by checksum.
+- Eight are semantic kills: the morph arm dead, the mount arm dropped, the summoned arm dropped,
+  the seal vnum, the `[LS;501]` line dropped, the scan order reversed, the down gate dropped,
+  and the OX map at 114. The scan order first survived and was killed once the second seal
+  was added.
+- One is equivalent: dropping the horse rider's arm. A rider has a mount vnum, so the dismount
+  arm's `unmount` stops the ride, and with no mount rows it sends no affect record.
+
+The scenario passed 8 of 8 parallel runs.
+
+Inventory: `cmd.ride` is ported, and the `sys.char.horse` note names the slice. Commands: 219
+ported, 46 missing.
+
+Gates (2026-11-05): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4756 passed, 0 failed in 41 targets. `cargo test --workspace --doc`: 1 passed.
+`cargo clippy --workspace --all-targets --locked --offline -- -D warnings` and
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked --offline` are clean.
+`rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No width was measured.
+Afterwards no `prodomo\_%` database remained. No ADR changed.

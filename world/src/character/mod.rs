@@ -67,9 +67,9 @@ pub use drop_item::{
     DropRefused, Gauss, UnportedDrop, ITEM_FLAG_MAKECOUNT,
 };
 pub use equip::{
-    find_equip_cell, is_equipable, is_female, is_skill_book, look_of, recompute_points,
-    unequip_points, use_checks, use_item, use_source, wear_full_set, wear_of, wear_pos,
-    worn_system_not_ported, CharacterLook, Gear, WornSystem, PICKUP_AFFECT_ITEM,
+    find_equip_cell, is_equipable, is_female, is_ride_item, is_skill_book, look_of,
+    recompute_points, unequip_points, use_checks, use_item, use_source, wear_full_set, wear_of,
+    wear_pos, worn_system_not_ported, CharacterLook, Gear, WornSystem, PICKUP_AFFECT_ITEM,
 };
 pub use equipment::{
     accessory_socket_grade, is_set_item, item_applies, removal_applies, Equipment, PartChange,

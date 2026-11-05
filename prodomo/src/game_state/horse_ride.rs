@@ -1,7 +1,8 @@
 //! The ride: `CHARACTER::StartRiding` and `StopRiding` (`G/char_horse.cpp:16-113`),
 //! `MountVnum` (`G/char.cpp:7852-7883`), the GM line `/horse_ride`
-//! (`G/cmd_gm.cpp:3800-3806`) and the player's `/user_horse_ride`
-//! (`G/cmd_general.cpp:58-86`).
+//! (`G/cmd_gm.cpp:3800-3806`), the player's `/user_horse_ride`
+//! (`G/cmd_general.cpp:58-86`), `/ride` and `/unmount`, and the quest mount (`pc.mount`,
+//! `pc.mount_bonus`, `pc.unmount`).
 //!
 //! Starting a ride needs a living caller, no morph, no body armour 11901 to 11904, a horse
 //! of level 1 or more with health and stamina, and none ridden: the failures say `[LS;1936]`,
@@ -25,10 +26,13 @@ use common::item_slots::{EWindows, INVENTORY_MAX_NUM};
 use common::point_slot as point;
 use common::vid::Vid;
 use protocol::gc_chat::CHAT_TYPE_INFO;
+use protocol::item_pos::ItemPos;
+use world::character::is_ride_item;
 
 use super::affect::Affect;
 use super::view::{Effect, EntityKey};
 use super::GameState;
+use crate::item_move::{MoveItemRefused, MovedItems, Mover};
 use crate::loading_phase::{AFFECT_MOUNT, AFFECT_MOUNT_BONUS};
 
 impl GameState {
@@ -244,6 +248,77 @@ impl GameState {
         self.add_pc_affect_keyed(vid, row(point::POINT_MOV_SPEED, speed), true, true);
     }
 
+    /// `ACMD(do_ride)` (`G/cmd_general.cpp:3516-3642`) for the player under `vid`: the dead,
+    /// the stunned and the OX map (113) are silent and a morph hears it may not mount; a
+    /// horse rider stops, a mount rider dismounts (`do_unmount`), and with a summoned horse
+    /// the caller rides. Otherwise the first inventory cell holding a ride item, one of the
+    /// four quest seals 71114-71120 or a mount seal 52001-52090 runs through `UseItem`, and
+    /// with none `[LS;501]` answers.
+    ///
+    /// The mount-costume arm never runs: every mount costume in the owner's data carries the
+    /// first-use timer the use refuses, so none is worn, and the ride item's three-cell
+    /// condition always holds for the same reason.
+    ///
+    /// # Errors
+    ///
+    /// As [`GameState::use_item`].
+    pub(super) fn run_ride_line(
+        &mut self,
+        vid: Vid,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        match self.ride_toggle(vid) {
+            Some(cell) => self.use_item(vid, ItemPos::new(EWindows::Inventory as u8, cell), actor),
+            None => self.nothing_used(vid, actor),
+        }
+    }
+
+    /// `do_ride`'s arms before its item use: the inventory cell to use, if any.
+    fn ride_toggle(&mut self, vid: Vid) -> Option<u16> {
+        if self.is_down(vid.raw()) || self.place_of(vid.raw()).is_some_and(|(_, map)| map == 113) {
+            return None;
+        }
+        let points = self.pc_points_mut(vid.raw())?;
+        let (polymorphed, mount) = (points.is_polymorphed(), points.mount_vnum());
+        let (riding, summoned) = (points.horse().riding(), points.horse().summoned());
+        if polymorphed {
+            if let Some(mover) = self.own_mover(vid) {
+                let line = b"Nu poti folosi un mount atat timp cat esti transformat.";
+                self.tell(vid, mover, CHAT_TYPE_INFO, line, &[]);
+            }
+            return None;
+        }
+        if riding {
+            self.stop_riding(vid);
+            return None;
+        }
+        if mount != 0 {
+            self.unmount(vid);
+            return None;
+        }
+        if summoned {
+            self.start_riding(vid);
+            return None;
+        }
+        let found = self.characters.find_by_vid(vid).ok().and_then(|character| {
+            (0..INVENTORY_MAX_NUM).find(|&cell| {
+                let at = ItemPos::new(EWindows::Inventory as u8, cell);
+                character.items().item_at(at).is_some_and(|item| {
+                    matches!(
+                        item.vnum,
+                        71_114 | 71_116 | 71_118 | 71_120 | 52_001..=52_090
+                    ) || self.protos.get(item.vnum).is_some_and(is_ride_item)
+                })
+            })
+        });
+        if found.is_none() {
+            if let Some(mover) = self.own_mover(vid) {
+                self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;501]", &[]);
+            }
+        }
+        found
+    }
+
     /// `pc_unmount` (`G/questlua_pc.cpp:1481-1489`) for the player under `vid`: the mount
     /// affect and its bonus go, and a horse ride stops.
     pub(super) fn unmount(&mut self, vid: Vid) {
@@ -380,5 +455,41 @@ impl GameState {
                 INVENTORY_MAX_NUM + EWearPositions::Body as u16,
             ))
             .is_some_and(|armor| (11_901..=11_904).contains(&armor.vnum))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc::UnboundedReceiver;
+
+    use super::super::fixtures::{enter, open_cells, stand_field, TestClock};
+    use super::*;
+
+    /// The caller's VID.
+    const ME: u32 = 1;
+
+    fn drained(inbox: &mut UnboundedReceiver<Vec<u8>>) -> Vec<Vec<u8>> {
+        std::iter::from_fn(|| inbox.try_recv().ok()).collect()
+    }
+
+    /// `do_ride`'s silent gates (`G/cmd_general.cpp:3519-3523`): with nothing to ride the
+    /// caller hears `[LS;501]`, but dead (`IsDead() || IsStun()`) or on the OX map (113) it
+    /// hears nothing and is handed no cell.
+    #[test]
+    fn the_down_and_the_ox_map_ride_nothing() {
+        let clock = TestClock::default();
+        clock.set(1_000);
+        let mut world = stand_field(&clock, Vec::new(), open_cells(), true);
+        let mut mine = enter(&mut world, ME, (3200, 3200), 12_345);
+        drained(&mut mine);
+        assert_eq!(world.ride_toggle(Vid::new(ME)), None);
+        assert_eq!(drained(&mut mine).len(), 1, "the [LS;501] line");
+        world.pc_combat.entry(ME).or_default().dead = true;
+        assert_eq!(world.ride_toggle(Vid::new(ME)), None);
+        assert!(drained(&mut mine).is_empty(), "the dead are silent");
+        world.pc_combat.entry(ME).or_default().dead = false;
+        world.bodies.get_mut(&Vid::new(ME)).expect("a body").map = 113;
+        assert_eq!(world.ride_toggle(Vid::new(ME)), None);
+        assert!(drained(&mut mine).is_empty(), "the OX map is silent");
     }
 }

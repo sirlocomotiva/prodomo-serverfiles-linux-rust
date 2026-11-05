@@ -1744,6 +1744,16 @@ pub enum GameCommand {
         /// Where the game thread reports the moved items.
         reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
     },
+    /// Run one `/ride` line: the ride toggle, or the use of the ride item or mount seal it
+    /// finds. See `GameState::run_ride_line`.
+    RideLine {
+        /// The VID of the player whose client sent the line.
+        vid: common::vid::Vid,
+        /// What the descriptor knows of the character that the line reads.
+        mover: Mover,
+        /// Where the game thread reports the moved items.
+        reply: oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+    },
     /// Run one `/dragon_soul` line (`do_dragon_soul`, `G/cmd_gm.cpp:5024-5047`): the
     /// named deck activates, or every deck deactivates. See
     /// `game_state::dragon_soul::run_dragon_soul`.
@@ -2492,6 +2502,7 @@ impl GameCommand {
                 | GameCommand::FullSet { .. }
                 | GameCommand::ToolRefineLine { .. }
                 | GameCommand::UseItemLine { .. }
+                | GameCommand::RideLine { .. }
                 | GameCommand::ClearAffect { .. }
                 | GameCommand::DragonSoul { .. }
                 | GameCommand::Costume { .. }
@@ -5922,6 +5933,23 @@ impl GameLoopController {
         })
         .await
         .map_err(|_| MoveItemError::NotSent)?;
+        answer.await.map_err(|_| MoveItemError::NoAnswer)
+    }
+
+    /// Asks the world to run one `/ride` line.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::move_item`].
+    pub async fn run_ride_line(
+        &self,
+        vid: common::vid::Vid,
+        mover: Mover,
+    ) -> Result<Result<MovedItems, MoveItemRefused>, MoveItemError> {
+        let (reply, answer) = oneshot::channel();
+        self.send_command(GameCommand::RideLine { vid, mover, reply })
+            .await
+            .map_err(|_| MoveItemError::NotSent)?;
         answer.await.map_err(|_| MoveItemError::NoAnswer)
     }
 

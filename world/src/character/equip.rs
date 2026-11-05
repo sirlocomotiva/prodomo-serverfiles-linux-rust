@@ -275,15 +275,16 @@ pub fn wear_pos(wear: u16) -> ItemPos {
     ItemPos::new(EWindows::Inventory as u8, INVENTORY_MAX_NUM + wear)
 }
 
-/// The item a wear cell holds.
 /// `CItem::IsRideItem` (`G/item.cpp:2389-2400`, with `ENABLE_MOUNT_COSTUME_SYSTEM`): a
 /// unique of `UNIQUE_SPECIAL_RIDE` (2) or `UNIQUE_SPECIAL_MOUNT_RIDE` (3), or a mount
 /// costume.
-fn is_ride_item(proto: &ItemProto) -> bool {
+#[must_use]
+pub fn is_ride_item(proto: &ItemProto) -> bool {
     (proto.item_type == ITEM_UNIQUE && matches!(proto.sub_type, 2 | 3))
         || (proto.item_type == ITEM_COSTUME && proto.sub_type == COSTUME_MOUNT)
 }
 
+/// The item a wear cell holds.
 fn worn_at(items: &CharacterItems, wear: u16) -> Option<Item> {
     items.item_at(wear_pos(wear)).cloned()
 }

@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-05, after ledger section 399 (`RefreshAffect` and the quest mount).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 400
+Last reviewed: 2026-11-05, after ledger section 400 (the `/ride` toggle).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 401
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -398,7 +398,8 @@ but arrows; and `pc.is_riding` is bridged, so its row is `ported`. A target-less
 no monster and, outside a guild war, no player (`CanAttack`'s horse gate). Since 399 a
 computation lays every held affect's point again (`RefreshAffect`), and `pc.mount`,
 `pc.mount_bonus`, `pc.unmount` and `/unmount` mount and dismount; a login takes a saved mount
-off again. The
+off again. Since 400 `/ride` stops a ride, dismounts, rides a summoned horse or uses the first
+ride item or seal it holds. The
 next slice is the owner's call: the forest's leader branch waits on the `d.*` manager names,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

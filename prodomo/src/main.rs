@@ -9199,6 +9199,7 @@ where
         LineCommand::AttrFullSet => attr_full_set_step(session, addr, context, held).await,
         LineCommand::FullSet => full_set_step(session, addr, context, held).await,
         LineCommand::UseItem => use_item_line_step(session, addr, context, held, rest).await,
+        LineCommand::Ride => ride_line_step(session, addr, context, held).await,
         command @ (LineCommand::RefineRod | LineCommand::RefinePick | LineCommand::MaxPick) => {
             tool_refine_line_step(command, session, addr, context, held, rest).await
         }
@@ -10045,6 +10046,43 @@ where
     };
     let actor = item_actor(held);
     let answer = context.game.run_use_item_line(vid, rest, actor).await;
+    finish_use_line(session, addr, context, held, answer).await
+}
+
+/// `do_ride` (`G/cmd_general.cpp:3516-3642`): the ride toggle runs in the world, and a ride
+/// item or a mount seal it uses lands as `/use_item`'s use does.
+async fn ride_line_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(vid) = held.world else {
+        info!(%addr, "Ride without a character in the world; ignoring");
+        return true;
+    };
+    let answer = context.game.run_ride_line(vid, item_actor(held)).await;
+    finish_use_line(session, addr, context, held, answer).await
+}
+
+/// A use line's answer: a book's climbed skill and the quest's climbs and guild stores are
+/// stored, then the item step finishes.
+async fn finish_use_line<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    held: &mut Held,
+    answer: Result<
+        Result<prodomo::item_move::MovedItems, MoveItemRefused>,
+        prodomo::game_loop_messages::MoveItemError,
+    >,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     if let Ok(Ok(moved)) = &answer {
         if let Some((vnum, level, next_read)) = moved.climbed {
             let Some(character) = held.character.as_ref() else {

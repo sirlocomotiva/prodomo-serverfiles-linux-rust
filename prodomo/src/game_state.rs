@@ -1383,6 +1383,7 @@ impl GameState {
                 | GameCommand::FullSet { .. }
                 | GameCommand::ToolRefineLine { .. }
                 | GameCommand::UseItemLine { .. }
+                | GameCommand::RideLine { .. }
                 | GameCommand::ClearAffect { .. }
                 | GameCommand::DragonSoul { .. }
                 | GameCommand::Costume { .. }
@@ -1513,6 +1514,7 @@ impl GameState {
             | GameCommand::FullSet { .. }
             | GameCommand::ToolRefineLine { .. }
             | GameCommand::UseItemLine { .. }
+            | GameCommand::RideLine { .. }
             | GameCommand::ClearAffect { .. }
             | GameCommand::DragonSoul { .. }
             | GameCommand::Costume { .. }
@@ -1627,6 +1629,7 @@ impl GameState {
             | GameCommand::SetAttr { .. }
             | GameCommand::ToolRefineLine { .. }
             | GameCommand::UseItemLine { .. }
+            | GameCommand::RideLine { .. }
             | GameCommand::DragonSoul { .. }
             | GameCommand::Costume { .. }
             | GameCommand::DsChangeAttr { .. }) => self.apply_kit_line(command),
@@ -1701,6 +1704,9 @@ impl GameState {
                 reply,
             } => {
                 answer_item_step(vid, reply, self.run_use_item_line(vid, &rest, mover));
+            }
+            GameCommand::RideLine { vid, mover, reply } => {
+                answer_item_step(vid, reply, self.run_ride_line(vid, mover));
             }
             GameCommand::DragonSoul { vid, rest, reply } => {
                 answer_item_step(vid, reply, self.run_dragon_soul(vid, &rest));
@@ -3290,26 +3296,40 @@ impl GameState {
                     &[],
                 );
             }
-            let character = self
-                .characters
-                .find_by_vid(vid)
-                .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
-            let mut empty = MovedItems::new(
-                character.player_id(),
-                vid.raw(),
-                world::character::MoveDone {
-                    kind: world::character::MoveKind::Used,
-                    records: Vec::new(),
-                    changes: Vec::new(),
-                },
-                actor,
-                &self.protos,
-                &self.locale,
-            );
-            empty.points = character.points().cloned();
-            return Ok(empty);
+            return self.nothing_used(vid, actor);
         }
         self.use_item(vid, at, actor)
+    }
+
+    /// A use line's answer when nothing was used: an empty step with the points as they
+    /// stand.
+    ///
+    /// # Errors
+    ///
+    /// [`MoveItemRefused::NoSuchCharacter`] when nobody is under `vid`.
+    pub(super) fn nothing_used(
+        &self,
+        vid: common::vid::Vid,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let character = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let mut empty = MovedItems::new(
+            character.player_id(),
+            vid.raw(),
+            world::character::MoveDone {
+                kind: world::character::MoveKind::Used,
+                records: Vec::new(),
+                changes: Vec::new(),
+            },
+            actor,
+            &self.protos,
+            &self.locale,
+        );
+        empty.points = character.points().cloned();
+        Ok(empty)
     }
 
     /// Run one `/refine_rod`, `/refine_pick` or `/max_pick` line against the storage of
