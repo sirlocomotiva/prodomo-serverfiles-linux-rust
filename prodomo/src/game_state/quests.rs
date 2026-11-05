@@ -328,6 +328,7 @@ struct WorldMoves {
     sash_opens: Vec<bool>,
     changelooks: u32,
     minings: Vec<u32>,
+    horse_ops: Vec<super::horse_summon::HorseOp>,
     ds_refines: u32,
     ds_attrs: u32,
     party_sets: Vec<(Vec<u8>, i32)>,
@@ -346,6 +347,7 @@ impl WorldMoves {
             sash_opens: std::mem::take(&mut session.sash_opens),
             changelooks: session.changelooks,
             minings: std::mem::take(&mut session.minings),
+            horse_ops: std::mem::take(&mut session.horse_ops),
             ds_refines: session.ds_refines,
             ds_attrs: session.ds_attrs,
             party_sets: std::mem::take(&mut session.party_sets),
@@ -502,6 +504,9 @@ pub(super) struct Session<'s> {
     /// Every `pc.mining` call's NPC VID, in order, for the digs after the step (legacy runs
     /// `CHARACTER::mining` in the call).
     pub(super) minings: Vec<u32>,
+    /// The `horse.summon`, `horse.unsummon`, `horse.revive` and `pc.revive_horse` calls, in
+    /// order, which the world runs after the step: the summoned horse is the world's.
+    pub(super) horse_ops: Vec<super::horse_summon::HorseOp>,
     /// Whether `ds.give_qualification` ran this step: the grant itself already landed
     /// in the call (an `AddAffect` of kind 540, legacy's `DragonSoul_GiveQualification`
     /// at the call, `G/char_dragonsoul.cpp:75-85`), so a later `ds.is_qualified` in the
@@ -796,17 +801,23 @@ impl<'s> Session<'s> {
         };
         let lines = points.horse_mut().take_info_lines();
         let to = self.mover.recipient(self.locale);
-        for [level, health, stamina] in lines {
-            self.records.push(chat_packet(
-                to,
-                CHAT_TYPE_COMMAND,
-                b"horse_state %d %d %d",
-                &[
-                    Arg::Int(i64::from(level)),
-                    Arg::Int(i64::from(health)),
-                    Arg::Int(i64::from(stamina)),
-                ],
-            ));
+        for line in lines {
+            let record = match line {
+                world::character::HorseLine::State([level, health, stamina]) => chat_packet(
+                    to,
+                    CHAT_TYPE_COMMAND,
+                    b"horse_state %d %d %d",
+                    &[
+                        Arg::Int(i64::from(level)),
+                        Arg::Int(i64::from(health)),
+                        Arg::Int(i64::from(stamina)),
+                    ],
+                ),
+                world::character::HorseLine::Hide => {
+                    chat_packet(to, CHAT_TYPE_COMMAND, b"hide_horse_state", &[])
+                }
+            };
+            self.records.push(record);
         }
     }
 
@@ -1549,6 +1560,7 @@ impl Game for Session<'_> {
                     max_health: horse.max_health(),
                     max_stamina: horse.max_stamina(),
                     riding: horse.riding(),
+                    summoned: horse.summoned_vid().unwrap_or(0),
                 }
             })
     }
@@ -1582,6 +1594,19 @@ impl Game for Session<'_> {
             let _fed = points.horse_mut().feed(now);
         }
         self.send_horse_lines();
+    }
+
+    fn summon_horse(&mut self, from_far: bool, vnum: u32) {
+        self.horse_ops
+            .push(super::horse_summon::HorseOp::Summon { from_far, vnum });
+    }
+
+    fn unsummon_horse(&mut self) {
+        self.horse_ops.push(super::horse_summon::HorseOp::Unsummon);
+    }
+
+    fn revive_horse(&mut self) {
+        self.horse_ops.push(super::horse_summon::HorseOp::Revive);
     }
 
     fn number(&mut self, from: i32, to: i32) -> i32 {
@@ -2904,6 +2929,7 @@ impl GameState {
         for npc in queued.minings {
             self.mining(reader, npc, mover);
         }
+        self.apply_horse_ops(reader, queued.horse_ops);
         self.apply_ds_calls(reader, queued.ds_refines, queued.ds_attrs);
         for (flag, value) in queued.party_sets {
             self.parties.set_flag(pid, flag, value);
@@ -3526,6 +3552,7 @@ fn session_head<'s>(
         sash_opens: Vec::new(),
         changelooks: 0,
         minings: Vec::new(),
+        horse_ops: Vec::new(),
         ds_gives: 0,
         ds_refines: 0,
         ds_attrs: 0,
@@ -3632,6 +3659,7 @@ mod tests {
             sash_opens: Vec::new(),
             changelooks: 0,
             minings: Vec::new(),
+            horse_ops: Vec::new(),
             ds_gives: 0,
             ds_refines: 0,
             ds_attrs: 0,
@@ -4009,6 +4037,7 @@ mod tests {
             sash_opens: Vec::new(),
             changelooks: 0,
             minings: Vec::new(),
+            horse_ops: Vec::new(),
             ds_gives: 0,
             ds_refines: 0,
             ds_attrs: 0,
@@ -4123,8 +4152,7 @@ mod tests {
         let items_protos = ItemProtos::from_rows(protos);
         let (mobs, names) = (MobProtos::default(), MobNamesByLanguage::default());
         let item_names = ItemNamesByLanguage::default();
-        let locale = LocaleStrings::default();
-        let mut dice = Pcg32::new(1, 1);
+        let (locale, mut dice) = (LocaleStrings::default(), Pcg32::new(1, 1));
         let tables = gamedata::pc_skill_data::PcSkills::default();
         let mut slots = super::super::pc_skill::PcSkillState::default();
         let mut targets = QuestTargets::default();
@@ -4213,6 +4241,7 @@ mod tests {
             sash_opens: Vec::new(),
             changelooks: 0,
             minings: Vec::new(),
+            horse_ops: Vec::new(),
             ds_gives: 0,
             ds_refines: 0,
             ds_attrs: 0,
@@ -4610,6 +4639,7 @@ mod tests {
             sash_opens: Vec::new(),
             changelooks: 0,
             minings: Vec::new(),
+            horse_ops: Vec::new(),
             ds_gives: 0,
             ds_refines: 0,
             ds_attrs: 0,
@@ -4724,6 +4754,7 @@ mod tests {
             sash_opens: Vec::new(),
             changelooks: 0,
             minings: Vec::new(),
+            horse_ops: Vec::new(),
             ds_gives: 0,
             ds_refines: 0,
             ds_attrs: 0,

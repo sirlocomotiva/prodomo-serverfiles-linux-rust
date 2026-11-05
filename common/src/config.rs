@@ -314,7 +314,7 @@ pub struct GameSettings {
     pub guild_mark_server: bool,
     /// Minimum guild level for a guild mark.
     pub guild_mark_min_level: u8,
-    /// Monsters do not wander.
+    /// Monsters do not wander, and neither does a summoned horse near its rider.
     pub no_wander: bool,
     /// Player limit; `0` or less is unlimited.
     pub user_limit: i32,

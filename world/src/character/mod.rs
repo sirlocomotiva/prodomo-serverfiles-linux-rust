@@ -89,7 +89,7 @@ pub use ground::{
     pickup_item, AutoGiven, DropAt, GroundItem, Picker, DROPPED_NOTICE, GOLD_DROPPED_NOTICE,
 };
 pub use horse::{
-    Horse, HorseInfo, HorseInfoLine, HorseStat, HorseTimer, HORSE_HEALTH_DROP_INTERVAL,
+    Horse, HorseInfo, HorseInfoLine, HorseLine, HorseStat, HorseTimer, HORSE_HEALTH_DROP_INTERVAL,
     HORSE_MAX_LEVEL, HORSE_STAMINA_CONSUME_INTERVAL, HORSE_STAMINA_REGEN_INTERVAL, HORSE_STATS,
 };
 pub use inventory::{

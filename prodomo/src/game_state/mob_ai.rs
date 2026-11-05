@@ -61,8 +61,8 @@
 //!   waits for a hit on a stone, which is refused until its spawns are ported.
 //! - **A stone's spawns** at each tenth of its hit points wait for a hit on a stone, which is
 //!   refused until they are ported.
-//! - **Santa, the war flags and the horses** (`StateHorse`) wait for their systems; no spawn file
-//!   stands a horse race.
+//! - **Santa and the war flags** wait for their systems. A horse runs `StateHorse`
+//!   ([`super::horse_summon`]).
 //! - **The monster clips.** Every NPC moves at the fall-back motion speed of 300 (V2), as no
 //!   monster `.msa` is loaded.
 //!
@@ -415,7 +415,7 @@ impl GameState {
             return;
         };
         if who.char_type == CHAR_TYPE_HORSE || HORSE_RACES.contains(&who.race) {
-            // `StateHorse` is not ported.
+            self.idle_horse(vid);
             return;
         }
         match who.char_type {
@@ -671,7 +671,7 @@ impl GameState {
 
     /// The idle walk's point `distance` ahead of the NPC's heading, when both it and the
     /// half-way point are movable (`G/char_state.cpp:592-598`, `:730-735`).
-    fn wander_target(&self, vid: u32, map: i32, distance: f32) -> Option<(i32, i32)> {
+    pub(super) fn wander_target(&self, vid: u32, map: i32, distance: f32) -> Option<(i32, i32)> {
         let spot = self.npc_spot(vid)?;
         let rotation = self.minds.get(vid)?.rotation;
         let (fx, fy) = delta_by_degree(rotation, distance);
@@ -721,7 +721,7 @@ impl GameState {
     }
 
     /// `SetRotation(number(0, 359))`.
-    fn turn_at_random(&mut self, vid: u32) {
+    pub(super) fn turn_at_random(&mut self, vid: u32) {
         let degrees = number(&mut self.dice, 0, 359);
         if let Some(mind) = self.minds.machines.get_mut(&vid) {
             mind.rotation = i32_to_f32(degrees);
@@ -736,7 +736,7 @@ impl GameState {
 
     /// `SetNowWalking` (`G/char.cpp:7345-7380`): a change tells the view, and a non-player's
     /// change logs the walk or the run (`:7371-7376`).
-    fn set_now_walking(&mut self, vid: u32, walking: bool) {
+    pub(super) fn set_now_walking(&mut self, vid: u32, walking: bool) {
         let Some(mind) = self.minds.machines.get_mut(&vid) else {
             return;
         };
@@ -1364,7 +1364,8 @@ mod tests {
 
     /// The idle waits: a non-player 5 seconds, a guard and a held NPC never walking even on dice
     /// that walk, a monster 1 to 3 seconds when aggressive and 3 to 5 when not, a held one never
-    /// walking, and a horse race running nothing; each draws only what legacy draws.
+    /// walking, and a horse with no rider gone at its first `StateHorse`, by race or by type;
+    /// each draws only what legacy draws.
     #[test]
     fn each_kind_of_npc_waits_its_own_idle_time() {
         // A non-player's draws: its chat's, a miss with no quests, then its walk's.
@@ -1384,15 +1385,11 @@ mod tests {
             assert_eq!(drained(&mut inbox), Vec::<Vec<u8>>::new());
         }
         let (world, _, dice) = first_idle(an_npc(ME, CHAR_TYPE_NPC, 20_105, 0), walking);
-        assert_eq!(
-            mind(&world).next_pulse,
-            2,
-            "a horse keeps the first duration"
-        );
-        assert_eq!(world.dice, dice, "a horse draws nothing");
+        assert!(world.npc_by_vid(ME).is_none(), "a horse with no rider goes");
+        assert_eq!(world.dice, dice, "a horse with no rider draws nothing");
         // A horse by its type, whatever its race.
         let (world, _, dice) = first_idle(an_npc(ME, CHAR_TYPE_HORSE, 101, 0), walking);
-        assert_eq!(mind(&world).next_pulse, 2);
+        assert!(world.npc_by_vid(ME).is_none(), "a horse by type goes too");
         assert_eq!(world.dice, dice, "a horse by type draws nothing");
         for (flags, low, high) in [
             (AIFLAG_NOMOVE | AIFLAG_AGGRESSIVE, 1, 3),

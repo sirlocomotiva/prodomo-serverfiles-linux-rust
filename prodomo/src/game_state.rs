@@ -84,6 +84,7 @@ mod gm_lines;
 mod guild;
 mod guild_mark;
 mod horse;
+mod horse_summon;
 mod item_penalty;
 mod item_purge;
 mod letters;
@@ -565,6 +566,9 @@ pub struct GameState {
     /// The Pulse each character's horse stamina event fires on (`m_eventStaminaRegen`,
     /// `m_eventStaminaConsume`, `G/horse_rider.h:84-85`); which one runs is the horse's.
     horse_timers: HashMap<common::vid::Vid, u64>,
+    /// Each summoned horse standing, by its VID (`m_chRider`, its `m_pkDeadEvent` and its
+    /// wander clock).
+    horse_npcs: HashMap<u32, horse_summon::HorseNpc>,
     /// The dragon soul table, which `/ds_change_attr` redraws a stone's attributes from.
     dragon_soul_table: Arc<gamedata::dragon_soul_table::DragonSoulTable>,
     /// The cached second Gaussian of the next `gauss_random` call, if one waits.
@@ -779,6 +783,7 @@ impl GameState {
             fishing_events: HashMap::new(),
             mining_events: HashMap::new(),
             horse_timers: HashMap::new(),
+            horse_npcs: HashMap::new(),
             dragon_soul_table: Arc::default(),
             gauss: world::character::Gauss::new(),
             shop_price_3x_disabled: false,
@@ -3005,6 +3010,8 @@ impl GameState {
         let _mining = self.mining_events.remove(&vid);
         // `CHorseRider::Destroy` cancels both stamina events (`G/horse_rider.cpp:81-85`).
         let _horse = self.horse_timers.remove(&vid);
+        // `HorseSummon(false)` in `CHARACTER::Destroy` (`G/char.cpp:632`).
+        self.horse_unsummon(vid, false);
         // `m_sortInventoryPulse` is the `CHARACTER`'s: the next login starts at 0.
         let _sorted = self.sort_inventory_until.remove(&vid);
         self.stop_browsing(vid);
@@ -4282,10 +4289,11 @@ impl GameState {
     /// `TakeItem` log line first.
     ///
     /// `CanHandleItem` is the windows this build has, as in [`Self::destroy_item`]; the
-    /// observer gate is the descriptor's. The smiths open their refine window. The grill,
-    /// the horse and the Meley statue are not ported, so a gift that judges to one is
-    /// refused with a log line and the item stays. The count byte rides the record unread,
-    /// as legacy never reads it.
+    /// observer gate is the descriptor's. The smiths open their refine window, and a horse
+    /// takes its grade's herb or feed for the giver's own horse (`IsDead()` is the NPC's
+    /// dead flag). The grill and the Meley statue are not ported, so a gift that judges to
+    /// one is refused with a log line and the item stays. The count byte rides the record
+    /// unread, as legacy never reads it.
     ///
     /// # Errors
     ///
@@ -4355,7 +4363,7 @@ impl GameState {
                 .push(self.give_line(actor, GIVE_NOBODY_NOTICE));
             return Ok(moved);
         };
-        let (race, npc_x, npc_y, npc_dead) = (u32::from(npc.race), npc.x, npc.y, npc.hp <= 0);
+        let (race, npc_x, npc_y, npc_dead) = (u32::from(npc.race), npc.x, npc.y, npc.dead);
         if distance_approx(place.x - npc_x, place.y - npc_y) > world::character::GIVE_DISTANCE {
             return Ok(moved);
         }
@@ -4378,6 +4386,11 @@ impl GameState {
                 Ok(moved)
             }
             GiveAnswer::Refused => Ok(moved),
+            answer @ (GiveAnswer::HorseRevive | GiveAnswer::HorseFeed) => {
+                let revive = answer == GiveAnswer::HorseRevive;
+                self.horse_gift(vid, (target, id), revive, (actor, &mut moved));
+                Ok(moved)
+            }
             answer @ (GiveAnswer::RefineNormal | GiveAnswer::RefineMoneyOnly) => {
                 let money_only = answer == GiveAnswer::RefineMoneyOnly;
                 let records = self.smith_gift(vid, at, money_only, proto.refine_set, actor);
@@ -4832,6 +4845,7 @@ impl PulseProcessor for GameState {
         self.run_fishing_events(pulse);
         self.run_mining_events(pulse);
         self.run_horse_timers(pulse);
+        self.run_horse_dead_events(pulse);
         self.run_duel_sweep(pulse);
         self.run_war_map_ticks(pulse);
         self.run_party_ticks(pulse);

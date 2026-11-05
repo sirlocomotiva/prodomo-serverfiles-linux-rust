@@ -1,7 +1,7 @@
 # Rewrite status
 
-Last reviewed: 2026-11-05, after ledger section 392 (the horse's state).
-Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 393
+Last reviewed: 2026-11-05, after ledger section 393 (the summoned horse).
+Steps 1, 2 and 3 are done; step 4 is in progress, and its next work is 394
 onwards. The
 messenger is `ported`; since 257 a session's quest `login` event restores the block byte its
 `game_option` flags name, since 258 the level-30 letter titles its quest in the client's
@@ -371,7 +371,12 @@ time on `player`, regenerates from `EnterHorse`, and is refilled at every login 
 130 planted again (`__FIX_NIVEL_CAL__`, owner question 35); `/horse_state`, `/horse_level` and
 `/horse_set_stat` and the quest's horse readers, `horse.set_level`, `horse.advance` and
 `horse.feed` run over the wire, so those rows are `ported` and `sys.char.horse` is `partial`
-(the summon, riding, the consume and death events, revive and the names wait). The
+(the summon, riding, the consume and death events, revive and the names wait). Since 393 the
+horse is summoned and sent off by `/horse_summon`, `/horse_unsummon`, `/user_horse_back` and
+the quest's `horse.summon` and `horse.unsummon`, follows and wanders by `StateHorse`, lies a
+minute when summoned dead, goes when it dies, and is revived by `horse.revive`,
+`pc.revive_horse` and the herb and fed by a gift, so those rows and
+`event.char_horse.horse_dead_event` are `ported` (riding and the names wait). The
 next slice is the owner's call: the forest's leader branch waits on the `d.*` manager names,
 the sash's and the changelook's add, remove and refine wait on the windows' records, the sash
 quest's reward waits on 85000's missing proto, which is Game data, not code, and the Hydra

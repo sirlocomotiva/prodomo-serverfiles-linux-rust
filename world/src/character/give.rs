@@ -100,8 +100,6 @@ pub enum GiveAnswer {
 pub enum GiveUnported {
     /// The campfire grill (`fishing::Grill`).
     Grill,
-    /// The horse revive and feed.
-    Horse,
     /// The Meley statue.
     MeleyStatue,
 }
@@ -111,13 +109,14 @@ pub enum GiveUnported {
 pub fn unported_of(answer: GiveAnswer) -> Option<GiveUnported> {
     match answer {
         GiveAnswer::Grill => Some(GiveUnported::Grill),
-        GiveAnswer::HorseRevive | GiveAnswer::HorseFeed => Some(GiveUnported::Horse),
         GiveAnswer::MeleyStatue => Some(GiveUnported::MeleyStatue),
         GiveAnswer::Take
         | GiveAnswer::Refused
         | GiveAnswer::RefusedWith(_)
         | GiveAnswer::RefineNormal
-        | GiveAnswer::RefineMoneyOnly => None,
+        | GiveAnswer::RefineMoneyOnly
+        | GiveAnswer::HorseRevive
+        | GiveAnswer::HorseFeed => None,
     }
 }
 
@@ -380,14 +379,8 @@ mod tests {
         assert_eq!(unported_of(GiveAnswer::Grill), Some(GiveUnported::Grill));
         assert_eq!(unported_of(GiveAnswer::RefineNormal), None);
         assert_eq!(unported_of(GiveAnswer::RefineMoneyOnly), None);
-        assert_eq!(
-            unported_of(GiveAnswer::HorseRevive),
-            Some(GiveUnported::Horse)
-        );
-        assert_eq!(
-            unported_of(GiveAnswer::HorseFeed),
-            Some(GiveUnported::Horse)
-        );
+        assert_eq!(unported_of(GiveAnswer::HorseRevive), None);
+        assert_eq!(unported_of(GiveAnswer::HorseFeed), None);
         assert_eq!(
             unported_of(GiveAnswer::MeleyStatue),
             Some(GiveUnported::MeleyStatue)

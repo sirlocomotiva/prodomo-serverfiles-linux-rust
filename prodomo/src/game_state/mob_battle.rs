@@ -1007,7 +1007,7 @@ impl GameState {
     }
 
     /// `Follow` (`G/char.cpp:6882-7034`) of `target` to `min_distance`.
-    fn follow(&mut self, mob: u32, target: Vid, min_distance: f32) -> bool {
+    pub(super) fn follow(&mut self, mob: u32, target: Vid, min_distance: f32) -> bool {
         let Some(fighter) = self.fighter(mob) else {
             return false;
         };

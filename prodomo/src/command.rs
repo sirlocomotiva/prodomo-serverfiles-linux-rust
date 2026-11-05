@@ -161,6 +161,9 @@ impl CommandEntry {
             "do_horse_state" => Command::Horse(HorseLine::State),
             "do_horse_level" => Command::Horse(HorseLine::Level),
             "do_horse_set_stat" => Command::Horse(HorseLine::SetStat),
+            "do_horse_summon" => Command::Horse(HorseLine::Summon),
+            "do_horse_unsummon" => Command::Horse(HorseLine::Unsummon),
+            "do_user_horse_back" => Command::Horse(HorseLine::Back),
             _ => self.mid_name(),
         }
     }

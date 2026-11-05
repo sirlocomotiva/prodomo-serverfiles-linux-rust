@@ -45414,3 +45414,74 @@ parallel runs on their own, so it is a load flake recorded here and left open.
 --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 --locked --offline` clean. `rustfmt` and `cargo-clippy` are the `/usr/bin` pair (1.85.1). No
 width was measured. Afterwards no `prodomo\_%` database remained. No ADR changed.
+
+## 393. The summoned horse
+
+The horse leaves the character's sheet and stands in the world: `CHARACTER::HorseSummon`
+(`G/char_horse.cpp:122-260`), `StateHorse` (`G/char_state.cpp`), `horse_dead_event`
+(`G/char_horse.cpp:111`), `ReviveHorse` (`G/horse_rider.cpp`) and the horse arm of
+`CanReceiveItem`/`ReceiveItem` (`G/char_item.cpp:9483-9520`).
+
+- `world`: `HorseRider` keeps the summoned horse's VID; `summon` speaks the state, `unsummon`
+  hides it from a rider not riding, a death is taken once by the world, and the lines the rider
+  hears are `HorseLine::State` or `HorseLine::Hide`. `GiveUnported::Horse` is gone: the herb and
+  the feed reach the horse arm.
+- `prodomo`: the new `game_state::horse_summon` module.
+  - The summon: a horse of level 1 or more, none summoned, no mount ridden and not on the OX
+    map, stands 2000 to 2500 away on each axis with a random sign (the draws left to right,
+    `[INFERENCE]`: C++ leaves the operand order open), or within 100 when called near or dead;
+    its race is the level's horse plus the guild and master steps, it faces its rider's
+    rotation plus 180, and it is named `<rider>'s `. A dead horse lies with `GC_DEAD` and
+    `horse_dead_event` sends it back 60 seconds later. A failed spawn says `[LS;887]`.
+  - The unsummon: a dead horse, or one not sent off from far, is destroyed at once; a living one
+    runs 3500 straight away from its rider and goes at its next Idle (`StateHorse` with no rider).
+  - `StateHorse` every 12 Pulses: no rider destroys; at 400 or more it follows, running past 700;
+    otherwise it wanders 200 to 400 every 5 to 12 seconds, unless `no_wander` holds (the test
+    switch; its doc now says so).
+  - `/horse_summon`, `/horse_unsummon` and `/user_horse_back` (`[LS;501]`, `[LS;502]`,
+    `[LS;504]`); the horse's death unsummons it; leaving the world unsummons it; a purge spares a
+    horse with a rider; a destroyed horse forgets its rider and its dead event.
+  - The gift: a herb of the horse's grade revives the giver's horse, spends one and says
+    `[LS;452]`; feed of the grade feeds it, spends one, says `[LS;453]` and shows `SE_HPUP_RED` on
+    the horse; a dead horse refuses feed. `IsDead()` now reads the NPC's dead flag, not its hit
+    points. Owner question 36 asks whether a herb spent on another rider's horse is a Quirk.
+- `quest`: the `Game` trait gains `summon_horse`, `unsummon_horse` and `revive_horse`;
+  `HorseView` gains `summoned`. `horse.is_summon`, `horse.is_mine`, `horse.summon`,
+  `horse.unsummon`, `horse.revive` and `pc.revive_horse` are bridged (`BRIDGED` is 209 names). The
+  summon, unsummon and revive are queued as `HorseOp`s and run in the world after the step, since
+  the horse belongs to the world, so `horse.is_summon` read in the same step sees the horse as it
+  was.
+- Two unit tests were rewritten for `StateHorse`: `each_kind_of_npc_waits_its_own_idle_time` now
+  reads a horse with no rider gone at its first Idle, and `only_a_monster_is_hit` refuses a hit
+  on a horse that has its rider. Two test session builders were tightened by one line each to
+  stay under Clippy's `too_many_lines`.
+
+Scenario: `a_horse_is_summoned_dies_revives_and_goes` (`/horse_summon` from far with the ADD,
+the name and `horse_state`, the horse running up to within 300 of its rider, a second summon
+answered by nothing, `/user_horse_back`, `/horse_unsummon` with the hide, the run-off and the
+delete; `/horse_set_stat 0 5` kills the summoned horse, which hides and goes; a dead horse
+summoned lies with `GC_DEAD` and goes a minute later; a probe quest summons the dead horse,
+the feed is refused and the herb revives it; the horse's own click reads `horse.is_mine`; the
+quest unsummons, `horse.revive` and `pc.revive_horse` stand it again; the store keeps one herb,
+one feed, level 25 and health 40). Eight runs passed. Five mutants were applied to pristine
+files and restored by checksum, all semantic kills: the summoned dead horse not lying dead, the
+follow distance at 40000, the far offset at 200 to 250, the death not unsummoning, and the dead
+event at 6 seconds. New unit tests: `a_summoned_horse_speaks_dies_and_hides` in `world` and
+`the_horse_summon_names_read_their_arguments_and_the_npc` in `quest`.
+
+Inventory: `cmd.horse_summon`, `cmd.horse_unsummon`, `cmd.user_horse_back`,
+`lua.horse.is_summon`, `lua.horse.is_mine`, `lua.horse.summon`, `lua.horse.unsummon`,
+`lua.horse.revive`, `lua.pc.revive_horse` and `event.char_horse.horse_dead_event` are
+`ported`; the `cg.game.item_give` and `sys.char.horse` notes name the slice (riding, the
+consume event and the horse names wait). Counts: commands 214 ported / 51 missing / 1 partial /
+1 unused; quest-api 129 ported / 84 partial / 485 missing / 1 unused; timed-events 14 ported /
+5 partial / 80 missing.
+
+Gates (2026-11-05): `cargo fmt --all -- --check`, `cargo build --workspace --locked --offline`,
+`cargo test --workspace --all-targets --locked --offline --no-fail-fast` with `DATABASE_URL`
+set: 4734 passed, 0 failed in 41 targets (the first full run failed the two unit tests above,
+which still pinned the old horse stub). `cargo test --workspace --doc`: 1 passed; `cargo clippy
+--workspace --all-targets --locked --offline -- -D warnings` and `RUSTDOCFLAGS="-D warnings"
+cargo doc --workspace --no-deps --locked --offline` clean. `rustfmt` and `cargo-clippy` are the
+`/usr/bin` pair (1.85.1). No width was measured. Afterwards no `prodomo\_%` database remained. No
+ADR changed.

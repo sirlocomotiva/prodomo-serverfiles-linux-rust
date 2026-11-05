@@ -320,6 +320,18 @@ pub trait Game {
     /// `FeedHorse` on the character the script runs for (`G/questlua_horse.cpp:231-240`).
     fn feed_horse(&mut self);
 
+    /// `horse.summon` (`G/questlua_horse.cpp:72-90`): `HorseSummon(true, from_far, vnum)` on
+    /// the character the script runs for, unless it rides a mount or stands on the OX map.
+    /// The world runs it when the step ends.
+    fn summon_horse(&mut self, from_far: bool, vnum: u32);
+
+    /// `horse.unsummon` (`G/questlua_horse.cpp:92-97`): `HorseSummon(false)`, run when the
+    /// step ends.
+    fn unsummon_horse(&mut self);
+
+    /// `ReviveHorse` (`horse.revive`, `pc.revive_horse`), run when the step ends.
+    fn revive_horse(&mut self);
+
     /// `GetEmpire()` of the character the script runs for (`G/questlua_pc.cpp:1304-1308`).
     fn empire(&self) -> u8;
 
@@ -592,6 +604,8 @@ pub struct HorseView {
     pub max_stamina: i16,
     /// `IsHorseRiding`.
     pub riding: bool,
+    /// The VID of the summoned horse (`GetHorse()`), 0 with none.
+    pub summoned: u32,
 }
 
 impl HorseView {
@@ -3680,10 +3694,11 @@ fn party_api(
     Ok(Some(result.into_iter().collect()))
 }
 
-/// The `horse.*` calls that need no summoned horse (`G/questlua_horse.cpp:24-228`), and
-/// `pc.get_horse_level` and `pc.is_horse_alive` (`G/questlua_pc.cpp:1491-1525`). The pools
-/// and their percentages read 0 without a horse. Returns `None` for a name this table does
-/// not hold.
+/// The `horse.*` calls but riding and the names (`G/questlua_horse.cpp:24-228`), and
+/// `pc.get_horse_level`, `pc.is_horse_alive` and `pc.revive_horse`
+/// (`G/questlua_pc.cpp:1491-1531`). The pools and their percentages read 0 without a horse;
+/// the summon, unsummon and revive run in the world when the step ends. Returns `None` for
+/// a name this table does not hold.
 fn horse_api(
     lua: &Lua,
     cx: &mut Cx<'_>,
@@ -3731,6 +3746,34 @@ fn horse_api(
             if horse.level > 0 && horse.health > 0 {
                 cx.game.feed_horse();
             }
+            None
+        }
+        b"horse.is_summon" => Some(Value::Boolean(horse.summoned != 0)),
+        b"horse.is_mine" => Some(Value::Boolean(
+            horse.summoned != 0 && horse.summoned == cx.npc_vid,
+        )),
+        // `horse_summon`: a boolean first argument, a number (or numeric string) second as
+        // `(DWORD)`; the name third is never read.
+        b"horse.summon" => {
+            let from_far = matches!(args.front(), Some(Value::Boolean(true)));
+            let second = args.get(1).cloned().unwrap_or(Value::Nil);
+            let vnum = host::c_int(lua, second)?;
+            cx.game
+                .summon_horse(from_far, u32::from_ne_bytes(vnum.to_ne_bytes()));
+            None
+        }
+        b"horse.unsummon" => {
+            cx.game.unsummon_horse();
+            None
+        }
+        b"horse.revive" => {
+            if horse.level > 0 && horse.health <= 0 {
+                cx.game.revive_horse();
+            }
+            None
+        }
+        b"pc.revive_horse" => {
+            cx.game.revive_horse();
             None
         }
         _ => return Ok(None),
@@ -4407,6 +4450,8 @@ mod tests {
         horse_levels: Vec<i32>,
         /// The `feed_horse` calls.
         horse_feeds: u32,
+        /// The `summon_horse`, `unsummon_horse` and `revive_horse` calls, in order.
+        horse_calls: Vec<(&'static str, bool, u32)>,
         /// Whether the character rides a mount.
         mounted: bool,
         /// Whether the character stands in a party.
@@ -4617,6 +4662,18 @@ mod tests {
 
         fn feed_horse(&mut self) {
             self.horse_feeds += 1;
+        }
+
+        fn summon_horse(&mut self, from_far: bool, vnum: u32) {
+            self.horse_calls.push(("summon", from_far, vnum));
+        }
+
+        fn unsummon_horse(&mut self) {
+            self.horse_calls.push(("unsummon", false, 0));
+        }
+
+        fn revive_horse(&mut self) {
+            self.horse_calls.push(("revive", false, 0));
         }
 
         fn empire(&self) -> u8 {
@@ -6401,6 +6458,7 @@ mod tests {
             max_health: 1,
             max_stamina: 1,
             riding: false,
+            summoned: 0,
         };
         assert_eq!(probe.call("horse.get_health", &[]).unwrap(), number(0.0));
         assert_eq!(
@@ -6418,6 +6476,7 @@ mod tests {
             max_health: 40,
             max_stamina: 140,
             riding: true,
+            summoned: 0,
         };
         assert_eq!(probe.call("horse.get_health", &[]).unwrap(), number(13.0));
         assert_eq!(
@@ -6461,6 +6520,63 @@ mod tests {
         );
         probe.call("horse.feed", &[]).unwrap();
         assert_eq!(probe.game.horse_feeds, 1, "a dead horse is not fed");
+    }
+
+    /// The summon names: `horse.summon` reads a boolean and a number, `horse.revive` revives
+    /// only a dead horse with a level, `pc.revive_horse` always asks, and `is_summon` and
+    /// `is_mine` read the summoned horse against the quest's NPC.
+    #[test]
+    fn the_horse_summon_names_read_their_arguments_and_the_npc() {
+        let manager = manager().lock().unwrap();
+        let lua = manager.host.lua();
+        let mut probe = Probe {
+            manager: &manager,
+            game: Fake::at_ox_manager(),
+            output: Output::default(),
+            borrowed: BTreeMap::new(),
+            current: PID,
+            stack: Vec::new(),
+            window: Window::default(),
+        };
+        probe.game.horse = HorseView {
+            level: 21,
+            health: 13,
+            stamina: 250,
+            max_health: 40,
+            max_stamina: 140,
+            riding: false,
+            summoned: 0x0102_0304,
+        };
+        let word = Value::String(lua.create_string(b"20103").unwrap());
+        probe
+            .call("horse.summon", &[Value::Boolean(true), word])
+            .unwrap();
+        probe
+            .call("horse.summon", &[Value::Number(1.0), Value::Nil])
+            .unwrap();
+        probe.call("horse.unsummon", &[]).unwrap();
+        probe.call("horse.revive", &[]).unwrap();
+        probe.game.horse.health = 0;
+        probe.call("horse.revive", &[]).unwrap();
+        probe.call("pc.revive_horse", &[]).unwrap();
+        assert_eq!(
+            probe.game.horse_calls,
+            [
+                ("summon", true, 20103),
+                ("summon", false, 0),
+                ("unsummon", false, 0),
+                ("revive", false, 0),
+                ("revive", false, 0),
+            ]
+        );
+        assert_eq!(
+            probe.call("horse.is_summon", &[]).unwrap(),
+            [Value::Boolean(true)]
+        );
+        assert_eq!(
+            probe.call("horse.is_mine", &[]).unwrap(),
+            [Value::Boolean(false)]
+        );
     }
 
     /// The character-reader names: gold under its four spellings, empire, hp/sp and their

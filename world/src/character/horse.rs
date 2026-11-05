@@ -15,8 +15,9 @@
 //! and the world schedules it in Pulses.
 //!
 //! `SendHorseInfo` speaks only while the horse is summoned or ridden, and only when the level
-//! or one of the two grades moved since the last line it sent. The horse queues those lines
-//! ([`Horse::take_info_lines`]) for the world to send as `horse_state` command chat.
+//! or one of the two grades moved since the last line it sent; `ClearHorseInfo` hides the
+//! state when a summoned horse goes and the horse is not ridden. The horse queues those
+//! lines ([`Horse::take_info_lines`]) for the world to send as command chat.
 
 /// `HORSE_MAX_LEVEL` (`G/horse_rider.h:11`).
 pub const HORSE_MAX_LEVEL: u8 = 30;
@@ -159,19 +160,31 @@ impl HorseTimer {
 /// One `horse_state %d %d %d` line: the level, the health grade and the stamina grade.
 pub type HorseInfoLine = [u8; 3];
 
+/// One command line the horse queues for its rider's client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HorseLine {
+    /// `horse_state %d %d %d` (`SendHorseInfo`, `G/char_horse.cpp:369-376`).
+    State(HorseInfoLine),
+    /// `hide_horse_state` (`ClearHorseInfo`, `G/char_horse.cpp:315-326`).
+    Hide,
+}
+
 /// A character's horse (`CHorseRider`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Horse {
     info: HorseInfo,
-    /// `m_chHorse != NULL`: whether the horse stands summoned. Not stored.
-    summoned: bool,
+    /// `m_chHorse`: the VID of the summoned horse, when one stands. Not stored.
+    summoned: Option<u32>,
+    /// Whether the horse died since the world last asked ([`Horse::take_died`]):
+    /// `CHARACTER::HorseDie` unsummons it.
+    died: bool,
     timer: HorseTimer,
     /// Whether [`Horse::timer`] was created since the world last scheduled it.
     new_timer: bool,
     /// `m_bSendHorseLevel`, `m_bSendHorseHealthGrade`, `m_bSendHorseStaminaGrade`
     /// (`G/char.cpp:364-366`): what the last `horse_state` line said.
     sent: HorseInfoLine,
-    info_lines: Vec<HorseInfoLine>,
+    info_lines: Vec<HorseLine>,
 }
 
 impl Horse {
@@ -217,7 +230,35 @@ impl Horse {
     /// Whether the horse stands summoned.
     #[must_use]
     pub const fn summoned(&self) -> bool {
+        self.summoned.is_some()
+    }
+
+    /// The VID of the summoned horse (`GetHorse()`).
+    #[must_use]
+    pub const fn summoned_vid(&self) -> Option<u32> {
         self.summoned
+    }
+
+    /// `SetRider(this)` on the horse under `vid` (`G/char_horse.cpp:120-129`): it stands as
+    /// this rider's, and `SendHorseInfo` speaks.
+    pub fn summon(&mut self, vid: u32) {
+        self.summoned = Some(vid);
+        self.send_info();
+    }
+
+    /// `ClearHorseInfo` (`G/char_horse.cpp:315-326`): the summoned horse goes; a rider not
+    /// riding is told to hide the state, and the sent grades start over.
+    pub fn unsummon(&mut self) {
+        if !self.info.riding {
+            self.info_lines.push(HorseLine::Hide);
+            self.sent = [0; 3];
+        }
+        self.summoned = None;
+    }
+
+    /// Whether the horse died since the last call.
+    pub fn take_died(&mut self) -> bool {
+        std::mem::take(&mut self.died)
     }
 
     /// The level's row of `c_aHorseStat`. The store keeps the level within 0 to 30; a wider
@@ -262,8 +303,8 @@ impl Horse {
         std::mem::take(&mut self.new_timer)
     }
 
-    /// The `horse_state` lines queued since the last call, oldest first.
-    pub fn take_info_lines(&mut self) -> Vec<HorseInfoLine> {
+    /// The command lines queued since the last call, oldest first.
+    pub fn take_info_lines(&mut self) -> Vec<HorseLine> {
         std::mem::take(&mut self.info_lines)
     }
 
@@ -477,11 +518,12 @@ impl Horse {
 
     /// `CHorseRider::HorseDie` (`G/horse_rider.cpp:366-371`): the stamina empties and both
     /// events end. `CHARACTER::HorseDie` unsummons too; the world does that on reading
-    /// [`Horse::summoned`].
+    /// [`Horse::take_died`].
     fn die(&mut self) {
         self.update_stamina(-i32::from(self.info.stamina), true);
         self.timer = HorseTimer::None;
         self.new_timer = false;
+        self.died = true;
     }
 
     /// `StartStaminaConsumeEvent` (`G/horse_rider.cpp:285-303`).
@@ -517,12 +559,12 @@ impl Horse {
     /// `CHARACTER::SendHorseInfo` (`G/char_horse.cpp:330-385`): while summoned or ridden, a
     /// line when the level or a grade moved.
     fn send_info(&mut self) {
-        if !self.summoned && !self.info.riding {
+        if self.summoned.is_none() && !self.info.riding {
             return;
         }
         let line = self.grades();
         if line != self.sent {
-            self.info_lines.push(line);
+            self.info_lines.push(HorseLine::State(line));
             self.sent = line;
         }
     }
@@ -531,7 +573,8 @@ impl Horse {
 #[cfg(test)]
 mod tests {
     use super::{
-        Horse, HorseInfo, HorseTimer, HORSE_HEALTH_DROP_INTERVAL, HORSE_STAMINA_REGEN_INTERVAL,
+        Horse, HorseInfo, HorseLine, HorseTimer, HORSE_HEALTH_DROP_INTERVAL,
+        HORSE_STAMINA_REGEN_INTERVAL,
     };
 
     const NOW: u32 = 0x6000_0000;
@@ -638,10 +681,36 @@ mod tests {
         horse.set_stat(30, 120);
         assert!(horse.take_info_lines().is_empty(), "not ridden");
         assert!(horse.start_riding());
-        assert_eq!(horse.take_info_lines(), [[21, 3, 3]]);
+        assert_eq!(horse.take_info_lines(), [HorseLine::State([21, 3, 3])]);
         horse.set_stat(29, 120);
         assert!(horse.take_info_lines().is_empty(), "still grade 3");
         horse.set_stat(10, 12);
-        assert_eq!(horse.take_info_lines(), [[21, 1, 3], [21, 1, 0]]);
+        assert_eq!(
+            horse.take_info_lines(),
+            [HorseLine::State([21, 1, 3]), HorseLine::State([21, 1, 0])]
+        );
+    }
+
+    /// A summon speaks the state; a death empties the stamina, speaks, and is reported once;
+    /// the unsummon hides the state and the next summon speaks again.
+    #[test]
+    fn a_summoned_horse_speaks_dies_and_hides() {
+        let mut horse = Horse::default();
+        horse.set_level(25, NOW);
+        horse.summon(7);
+        assert_eq!(horse.summoned_vid(), Some(7));
+        assert_eq!(horse.take_info_lines(), [HorseLine::State([25, 3, 3])]);
+        horse.set_stat(0, 50);
+        assert!(horse.take_died());
+        assert!(!horse.take_died(), "reported once");
+        assert_eq!(
+            horse.take_info_lines(),
+            [HorseLine::State([25, 0, 0]), HorseLine::State([25, 0, 2])]
+        );
+        horse.unsummon();
+        assert!(!horse.summoned());
+        assert_eq!(horse.take_info_lines(), [HorseLine::Hide]);
+        horse.summon(8);
+        assert_eq!(horse.take_info_lines(), [HorseLine::State([25, 0, 2])]);
     }
 }

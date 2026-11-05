@@ -1997,6 +1997,19 @@ mod tests {
         (clock, world, inbox)
     }
 
+    /// As [`a_fight`] at [`NEAR`], with `npc` the summoned horse of player 1.
+    fn a_ridden_horse(npc: Npc) -> (TestClock, GameState, UnboundedReceiver<Vec<u8>>) {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut world = a_field_on(&clock, vec![npc], open_cells());
+        let ridden = super::super::horse_summon::HorseNpc::ridden_by(Vid::new(1));
+        world.horse_npcs.insert(ME, ridden);
+        let mut inbox = enter(&mut world, 1, NEAR, 12_345);
+        world.process_pulse(P0);
+        drained(&mut inbox);
+        (clock, world, inbox)
+    }
+
     /// A map hosted at `place`, a Channel and map, with a monster of 1 hit point under `vid` at
     /// [`SPOT`].
     fn a_monster_on(world: &mut GameState, place: (u8, i32), vid: u32) {
@@ -3673,10 +3686,10 @@ mod tests {
     }
 
     /// Only a monster or a stone standing on the attacker's Channel and map is hit (V17a):
-    /// any other kind of non-player, race 5001, a fake hydra (`G/battle.cpp:134-139`), a
-    /// player, the attacker itself, a monster on another Channel or on another map of this
-    /// one, a VID that names nothing and a skill's type are refused before any draw, with
-    /// nothing sent.
+    /// any other kind of non-player (a horse with its rider, since one without goes at its
+    /// first Idle), race 5001, a fake hydra (`G/battle.cpp:134-139`), a player, the attacker
+    /// itself, a monster on another Channel or on another map of this one, a VID that names
+    /// nothing and a skill's type are refused before any draw, with nothing sent.
     #[test]
     fn only_a_monster_is_hit() {
         let refused = [
@@ -3695,7 +3708,11 @@ mod tests {
             let mut npc = a_monster(1);
             npc.char_type = char_type;
             npc.vnum = vnum;
-            let (_clock, mut world, mut alpha) = a_fight(npc, NEAR);
+            let (_clock, mut world, mut alpha) = if char_type == CHAR_TYPE_HORSE {
+                a_ridden_horse(npc)
+            } else {
+                a_fight(npc, NEAR)
+            };
             world.target(Vid::new(1), ME);
             drained(&mut alpha);
             let dice = world.dice.clone();

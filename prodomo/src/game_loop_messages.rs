@@ -2539,7 +2539,7 @@ pub enum EventLine {
     EventHelper,
 }
 
-/// The GM horse lines (`G/cmd_gm.cpp:3745-3833`) that run without a summoned horse.
+/// The GM horse lines (`G/cmd_gm.cpp:3745-3833`) and the player's `/user_horse_back`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HorseLine {
     /// `/horse_state` (`do_horse_state`).
@@ -2548,6 +2548,12 @@ pub enum HorseLine {
     Level,
     /// `/horse_set_stat` (`do_horse_set_stat`).
     SetStat,
+    /// `/horse_summon` (`do_horse_summon`).
+    Summon,
+    /// `/horse_unsummon` (`do_horse_unsummon`).
+    Unsummon,
+    /// `/user_horse_back` (`do_user_horse_back`).
+    Back,
 }
 
 /// The small GM lines `game_state::gm_lines` runs, and the player's `/conqueror_point`,

@@ -236,7 +236,7 @@ pub const BRIDGE: &str = "quest bridge";
 /// The API names that reach the game through [`BRIDGE`], in [`crate::api::NAMES`] order: the
 /// dialog (`say`, `raw_script`, the skins and the images), the chat lines, the quest window's
 /// title and begin byte, the quest targets, and the lookups the ported systems can answer.
-pub const BRIDGED: [&str; 203] = [
+pub const BRIDGED: [&str; 209] = [
     "ds.open_refine_window",
     "ds.open_attr_change_window",
     "ds.give_qualification",
@@ -301,7 +301,11 @@ pub const BRIDGED: [&str; 203] = [
     "guild.get_exp_level0",
     "guild.offer_exp0",
     "guild.give_exp0",
+    "horse.is_mine",
     "horse.is_riding",
+    "horse.is_summon",
+    "horse.summon",
+    "horse.unsummon",
     "horse.advance",
     "horse.get_level",
     "horse.set_level",
@@ -311,6 +315,7 @@ pub const BRIDGED: [&str; 203] = [
     "horse.get_stamina_pct",
     "horse.get_grade",
     "horse.is_dead",
+    "horse.revive",
     "horse.feed",
     "item.get_id",
     "item.get_cell",
@@ -407,6 +412,7 @@ pub const BRIDGED: [&str; 203] = [
     "pc.enough_inventory",
     "pc.get_horse_level",
     "pc.is_horse_alive",
+    "pc.revive_horse",
     "pc.get_war_map",
     "pc.get_skill_level",
     "pc.is_gm",

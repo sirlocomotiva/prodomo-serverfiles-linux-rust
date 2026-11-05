@@ -453,9 +453,10 @@ impl GameState {
     /// `ACMD(do_purge)` and `ACMD(do_weaken)` (`G/cmd_gm.cpp:816-868`,
     /// `:2824-2861`): every NPC of the sectrees around the caller is destroyed
     /// (`purge`) or set to 10 hit points (`weaken`), `all` or within
-    /// `DISTANCE_APPROX` 1000. An NPC is `char_type != CHAR_TYPE_PC`; the
-    /// pet, mount, auto-shaman and rider gates are dead (no ported path sets
-    /// them). With no sectree legacy logs and destroys nothing (`:857-861`).
+    /// `DISTANCE_APPROX` 1000. An NPC is `char_type != CHAR_TYPE_PC`; `purge`
+    /// spares a summoned horse that has its rider (`GetRider() == NULL`), and the
+    /// pet, mount and auto-shaman gates are dead (no ported path sets them).
+    /// With no sectree legacy logs and destroys nothing (`:857-861`).
     /// `weaken`'s set is `PointChange(POINT_HP)`: dead or stunned refuses,
     /// the change caps at the maximum, and the targeters hear it.
     pub(super) fn purge_around(&mut self, vid: Vid, all: bool, weaken: bool) {
@@ -486,6 +487,9 @@ impl GameState {
             if !all
                 && crate::sync_position::distance_approx(found.x - spot.x, found.y - spot.y) >= 1000
             {
+                continue;
+            }
+            if !weaken && self.has_rider(npc) {
                 continue;
             }
             swept.push(npc);
@@ -752,6 +756,31 @@ impl GameState {
             Ok(Some(stood)) => self.stand_runtime(place, vec![stood], pulse),
             Ok(None) => {}
             Err(error) => warn!(?place, %error, "an event spawn outnumbered the VIDs left"),
+        }
+    }
+
+    /// `SpawnMob(race, map, x, y, z, false, dir, false)` on `place` for the summoned horse:
+    /// the NPC, not yet shown.
+    pub(super) fn spawn_horse(
+        &mut self,
+        place: (u8, i32),
+        race: u32,
+        at: (i32, i32),
+        dir: i32,
+    ) -> Option<world::npc::Npc> {
+        let (Some(region), Some(cells), Some(respawner)) = (
+            self.regens.regions.get(&place).cloned(),
+            self.regens.cells.get(place.1).cloned(),
+            self.regens.respawner.as_mut(),
+        ) else {
+            return None;
+        };
+        match respawner.spawn_directed((&region, &cells), race, at, dir, false, &mut self.dice) {
+            Ok(stood) => stood,
+            Err(error) => {
+                tracing::warn!(?place, %error, "a horse outnumbered the VIDs left");
+                None
+            }
         }
     }
 
@@ -1133,6 +1162,8 @@ impl GameState {
             return;
         };
         let key = (channel, map);
+        // `HorseSummon(false)` and `GetRider()->ClearHorseInfo()` (`G/char.cpp:632-635`).
+        self.forget_horse_npc(vid);
         let Some(list) = self.npcs.get_mut(&key) else {
             return;
         };

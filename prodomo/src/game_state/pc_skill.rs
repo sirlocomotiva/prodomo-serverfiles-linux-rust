@@ -4819,14 +4819,13 @@ mod tests {
             sash_opens: Vec::new(),
             changelooks: 0,
             minings: Vec::new(),
+            horse_ops: Vec::new(),
             ds_gives: 0,
             ds_refines: 0,
             ds_attrs: 0,
         };
         let climbed = session.learn_grand_master_skill(vnum, total);
-        let super::super::quests::Session {
-            records, climbs, ..
-        } = session;
+        let (records, climbs) = (session.records, session.climbs);
         (climbed, (records, climbs, Vec::new(), Vec::new(), None))
     }
 

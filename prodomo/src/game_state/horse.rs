@@ -27,7 +27,7 @@
 
 use common::vid::Vid;
 use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO};
-use world::character::HorseTimer;
+use world::character::{HorseLine as Said, HorseTimer};
 
 use super::skill_admin::{str_to_wrapping_int, SetSkillLanded, SetSkillOtherLanded};
 use super::GameState;
@@ -60,6 +60,18 @@ impl GameState {
             HorseLine::Level => self.run_horse_level(vid, rest),
             HorseLine::SetStat => {
                 self.run_horse_set_stat(vid, rest);
+                None
+            }
+            HorseLine::Summon => {
+                self.horse_summon(vid, true, 0);
+                None
+            }
+            HorseLine::Unsummon => {
+                self.horse_unsummon(vid, true);
+                None
+            }
+            HorseLine::Back => {
+                self.user_horse_back(vid);
                 None
             }
         };
@@ -225,14 +237,27 @@ impl GameState {
             return;
         };
         points.horse_mut().set_stat(health, stamina);
+        self.settle_horse(vid);
+    }
+
+    /// After a step that moved the horse: its stamina event follows, a death unsummons the
+    /// summoned horse (`CHARACTER::HorseDie`, `G/char_horse.cpp:300-305`), and the queued
+    /// lines go out.
+    pub(super) fn settle_horse(&mut self, vid: Vid) {
         self.sync_horse_timer(vid);
+        let died = self
+            .pc_points_mut(vid.raw())
+            .is_some_and(|points| points.horse_mut().take_died());
+        if died {
+            self.horse_unsummon(vid, false);
+        }
         self.flush_horse(vid);
     }
 
     /// Schedule the horse's stamina event after a step that may have started, switched or
     /// ended it: a fresh event fires one period from now, a running one keeps its Pulse, and a
     /// horse with none leaves the schedule.
-    fn sync_horse_timer(&mut self, vid: Vid) {
+    pub(super) fn sync_horse_timer(&mut self, vid: Vid) {
         let pulse = self.last_pulse;
         let Some(horse) = self
             .pc_points_mut(vid.raw())
@@ -279,14 +304,13 @@ impl GameState {
                 let period = u64::from(timer.interval_secs()) * u64::from(PASSES_PER_SEC);
                 self.horse_timers.insert(vid, pulse + period);
             }
-            self.sync_horse_timer(vid);
-            self.flush_horse(vid);
+            self.settle_horse(vid);
         }
     }
 
-    /// Send the `horse_state %d %d %d` command lines the horse queued (`SendHorseInfo`,
-    /// `G/char_horse.cpp:369-376`).
-    fn flush_horse(&mut self, vid: Vid) {
+    /// Send the command lines the horse queued: `horse_state %d %d %d` (`SendHorseInfo`,
+    /// `G/char_horse.cpp:369-376`) and `hide_horse_state` (`ClearHorseInfo`, `:315-326`).
+    pub(super) fn flush_horse(&mut self, vid: Vid) {
         let Some(lines) = self
             .pc_points_mut(vid.raw())
             .map(|points| points.horse_mut().take_info_lines())
@@ -299,18 +323,21 @@ impl GameState {
         let Some(mover) = self.own_mover(vid) else {
             return;
         };
-        for [level, health, stamina] in lines {
-            self.tell(
-                vid,
-                mover,
-                CHAT_TYPE_COMMAND,
-                b"horse_state %d %d %d",
-                &[
-                    Arg::Int(i64::from(level)),
-                    Arg::Int(i64::from(health)),
-                    Arg::Int(i64::from(stamina)),
-                ],
-            );
+        for line in lines {
+            match line {
+                Said::State([level, health, stamina]) => self.tell(
+                    vid,
+                    mover,
+                    CHAT_TYPE_COMMAND,
+                    b"horse_state %d %d %d",
+                    &[
+                        Arg::Int(i64::from(level)),
+                        Arg::Int(i64::from(health)),
+                        Arg::Int(i64::from(stamina)),
+                    ],
+                ),
+                Said::Hide => self.tell(vid, mover, CHAT_TYPE_COMMAND, b"hide_horse_state", &[]),
+            }
         }
     }
 }

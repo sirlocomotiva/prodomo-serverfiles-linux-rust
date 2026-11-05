@@ -33445,3 +33445,293 @@ fn relogs_to_a_refilled_horse(server: &Server) {
         assert_eq!(alice.read_game(), an_info_line(line));
     }
 }
+
+/// A vein click that counts its clicks in a quest flag, says the count and whether a horse
+/// is summoned and is the clicked NPC, then by the count summons, unsummons, revives through
+/// `horse.revive` and revives through `pc.revive_horse`. A click on a grade-three horse says
+/// whether it is the clicker's.
+const HORSE_SUMMON_PROBE: &[u8] = b"quest horse_summon_probe begin\n\
+    state start begin\n\
+    when 20047.click begin\n\
+    local n = pc.getqf(\"n\") + 1\n\
+    pc.setqf(\"n\", n)\n\
+    syschat(\"q \" .. n .. \" \" .. tostring(horse.is_summon()) .. \" \" .. \
+    tostring(horse.is_mine()))\n\
+    if n == 1 then\n\
+    horse.summon()\n\
+    elseif n == 2 then\n\
+    horse.unsummon()\n\
+    elseif n == 3 then\n\
+    horse.revive()\n\
+    else\n\
+    pc.revive_horse()\n\
+    end\n\
+    end\n\
+    when 20107.click begin\n\
+    syschat(\"mine \" .. tostring(horse.is_mine()))\n\
+    end\n\
+    end\n\
+    end\n";
+
+/// Reads records until every one of `wants` came, answering every record read.
+fn read_until_all(keyed: &mut Keyed, wants: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut read = Vec::new();
+    while !wants.iter().all(|want| read.contains(want)) {
+        read.push(keyed.read_game());
+    }
+    read
+}
+
+/// Where in `records` the record `want` stands.
+fn position_of(records: &[Vec<u8>], want: &[u8]) -> usize {
+    records
+        .iter()
+        .position(|record| record == want)
+        .unwrap_or_else(|| panic!("{want:02x?} among {records:02x?}"))
+}
+
+/// The one grade-three horse (race 20107) `records` add: its VID and point, after checking
+/// that its additional record names it after Alpha.
+fn added_horse(records: &[Vec<u8>]) -> (u32, (i32, i32)) {
+    let adds: Vec<&Vec<u8>> = records
+        .iter()
+        .filter(|record| record[0] == GC_CHARACTER_ADD && record[22..24] == 20_107u16.to_le_bytes())
+        .collect();
+    let [add] = adds[..] else {
+        panic!("one horse added, not {adds:02x?}");
+    };
+    let info = records
+        .iter()
+        .find(|record| record[0] == GC_CHAR_ADDITIONAL_INFO && record[1..5] == add[1..5])
+        .expect("the horse's additional record");
+    assert_eq!(&info[5..14], b"Alpha's \0", "named after its rider");
+    let vid = u32::from_le_bytes(add[1..5].try_into().expect("four bytes"));
+    (vid, inserted_at(add))
+}
+
+/// A record of a header and the VID `vid`, as `GC_DEAD` and `GC_CHARACTER_DEL` are.
+fn header_and_vid_record(header: u8, vid: u32) -> Vec<u8> {
+    let mut record = vec![header];
+    record.extend_from_slice(&vid.to_le_bytes());
+    record
+}
+
+/// `/horse_summon` calls the horse from far: it stands 2000 to 2500 from `digger` on each
+/// axis, and a second summon does nothing while it stands. `/horse_unsummon` hides the state
+/// and sends it running off; it goes on its next Idle, finding no rider, and
+/// `/user_horse_back` then finds no horse.
+fn summons_and_sends_off_from_far(alice: &mut Keyed, digger: (i32, i32)) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_summon"));
+    let read = read_until_all(alice, &[a_command_line(b"horse_state 25 3 3")]);
+    let (far, at) = added_horse(&read);
+    for offset in [at.0 - digger.0, at.1 - digger.1] {
+        assert!(
+            (2000..=2500).contains(&offset.abs()),
+            "called from far: {at:?} against {digger:?}"
+        );
+    }
+    // `StateHorse`: past 700 from its rider the horse runs to 150 to 300 of it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let to = loop {
+        let record = alice.read_wire_until(deadline).expect("the horse follows");
+        if record[0] == GC_MOVE && record[4..8] == far.to_le_bytes() {
+            let word =
+                |at: usize| i32::from_le_bytes(record[at..at + 4].try_into().expect("four bytes"));
+            break (word(8), word(12));
+        }
+    };
+    let away = f64::from(to.0 - digger.0).hypot(f64::from(to.1 - digger.1));
+    assert!(
+        away <= 310.0,
+        "the horse runs up to its rider: {to:?}, {away}"
+    );
+    alice.unanswered(&client_chat(CHAT_TALKING, b"/horse_summon"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_unsummon"));
+    assert_eq!(alice.read_game(), a_command_line(b"hide_horse_state"));
+    // It goes as every moving NPC does: its view hears it has no owner, then the delete.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut released = vec![62, 0, 0, 0, 0];
+    released.extend_from_slice(&far.to_le_bytes());
+    assert_eq!(alice.read_game_until(deadline), Some(released));
+    assert_eq!(
+        alice.read_game(),
+        header_and_vid_record(GC_CHARACTER_DEL, far),
+        "the horse sent off goes"
+    );
+    alice.send_record(&client_chat(CHAT_TALKING, b"/user_horse_back"));
+    assert_eq!(alice.read_game(), an_info_line(b"[LS;501]"));
+}
+
+/// A summoned horse that dies (`/horse_set_stat 0 5`) speaks its dead state, hides it, and
+/// goes (`CHARACTER::HorseDie`).
+fn a_summoned_horse_dies(alice: &mut Keyed) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_summon"));
+    let read = read_until_all(alice, &[a_command_line(b"horse_state 25 3 3")]);
+    let (summoned, _) = added_horse(&read);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_set_stat 0 5"));
+    let read = read_until_all(
+        alice,
+        &[
+            a_command_line(b"horse_state 25 0 0"),
+            a_command_line(b"hide_horse_state"),
+            header_and_vid_record(GC_CHARACTER_DEL, summoned),
+        ],
+    );
+    assert!(
+        position_of(&read, &a_command_line(b"horse_state 25 0 0"))
+            < position_of(&read, &a_command_line(b"hide_horse_state")),
+        "the dead state, then the hide: {read:02x?}"
+    );
+}
+
+/// `/horse_summon` of the dead horse stands it near, lying dead, with `GC_DEAD`; a minute
+/// later `horse_dead_event` sends it back: the state hides and the horse goes.
+fn a_dead_horse_goes_after_a_minute(alice: &mut Keyed) {
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_summon"));
+    let read = read_until_all(alice, &[a_command_line(b"horse_state 25 0 0")]);
+    let (dead, _) = added_horse(&read);
+    assert!(read.contains(&header_and_vid_record(GC_DEAD, dead)));
+    let summoned = std::time::Instant::now();
+    alice.quiet("a dead horse lies still");
+    let deadline = summoned + Duration::from_secs(75);
+    let mut gone = Vec::new();
+    while !gone.contains(&header_and_vid_record(GC_CHARACTER_DEL, dead)) {
+        gone.push(
+            alice
+                .read_game_until(deadline)
+                .expect("the dead horse goes"),
+        );
+    }
+    let waited = summoned.elapsed();
+    assert!(
+        waited >= Duration::from_secs(59),
+        "a minute passes first: {waited:?}"
+    );
+    assert_eq!(gone[0], a_command_line(b"hide_horse_state"), "{gone:02x?}");
+}
+
+/// The quest's summon of the dead horse: it stands near and dead, its view hears `GC_DEAD`
+/// and the dead state. A feed is refused at it; the revive herb revives it, and the horse
+/// stands again alive; a feed then shows the red effect on it, and a click on it says it is
+/// Alpha's.
+fn a_quest_summons_the_dead_horse_and_gifts_revive_it(
+    alice: &mut Keyed,
+    vein: u32,
+    digger: (i32, i32),
+) -> u32 {
+    alice.send_record(&client_click(vein));
+    assert_eq!(alice.read_game(), an_info_line(b"q 1 false false"));
+    let read = read_until_all(alice, &[a_command_line(b"horse_state 25 0 0")]);
+    let (dead, at) = added_horse(&read);
+    assert!(read.contains(&header_and_vid_record(GC_DEAD, dead)));
+    for offset in [at.0 - digger.0, at.1 - digger.1] {
+        assert!(offset.abs() <= 100, "a dead horse stands near: {at:?}");
+    }
+    alice.send_record(&client_give(dead, 1));
+    assert_eq!(alice.read_game(), an_info_line(b"[LS;453]"));
+    alice.quiet("a feed at a dead horse is refused");
+    alice.send_record(&client_give(dead, 0));
+    let read = read_until_all(
+        alice,
+        &[
+            a_command_line(b"hide_horse_state"),
+            header_and_vid_record(GC_CHARACTER_DEL, dead),
+            a_command_line(b"horse_state 25 3 3"),
+            an_info_line(b"[LS;452]"),
+        ],
+    );
+    let (revived, _) = added_horse(&read);
+    alice.send_record(&client_give(revived, 1));
+    let mut effect = Vec::new();
+    protocol::gc_vid::GcSpecialEffect {
+        effect_type: 1,
+        vid: revived,
+    }
+    .encode_into(&mut effect);
+    read_until_all(alice, &[an_info_line(b"[LS;453]"), effect]);
+    alice.send_record(&client_click(revived));
+    assert_eq!(alice.read_game(), an_info_line(b"mine true"));
+    revived
+}
+
+/// `cmd.horse_summon`, `cmd.horse_unsummon`, `cmd.user_horse_back`, `lua.horse.summon`,
+/// `lua.horse.unsummon`, `lua.horse.is_summon`, `lua.horse.is_mine`, `lua.horse.revive`,
+/// `lua.pc.revive_horse`, `event.char_horse.horse_dead_event`: the summoned horse from the
+/// GM lines, its death and its sending off; the quest's summon of a dead horse, revived by
+/// the herb and fed; the quest's unsummon, and both revives, each standing the horse again.
+/// The herb and the feed each spend one.
+#[test]
+fn a_horse_is_summoned_dies_revives_and_goes() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (server, digger) = vein_stage(&database, HORSE_SUMMON_PROBE);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, \
+         2, 50059 FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1, \
+         2, 50056 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, entered) = enter_equipped_world_with(&server, b"alice", 2);
+    let vein = shown_vein(&entered);
+    alice.unanswered(&client_chat(CHAT_TALKING, b"/horse_summon"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/user_horse_back"));
+    assert_eq!(alice.read_game(), an_info_line(b"[LS;501]"));
+    alice.send_record(&client_chat(CHAT_TALKING, b"/horse_level Alpha 25"));
+    assert_eq!(
+        alice.read_game(),
+        an_info_line(b"horse level set (Alpha: 25)")
+    );
+    summons_and_sends_off_from_far(&mut alice, digger);
+    a_summoned_horse_dies(&mut alice);
+    a_dead_horse_goes_after_a_minute(&mut alice);
+    let revived = a_quest_summons_the_dead_horse_and_gifts_revive_it(&mut alice, vein, digger);
+    quest_unsummons_and_revives(&mut alice, vein, revived);
+    drop(alice);
+    wait_for(
+        &database,
+        "(SELECT count FROM item WHERE id = 60) = 1 AND (SELECT count FROM item WHERE id = 61) \
+         = 1 AND (SELECT horse_level = 25 AND horse_hp = 40 FROM player WHERE name = 'Alpha')",
+    );
+}
+
+/// The quest's unsummon hides the state and the horse goes; a dead horse not summoned dies
+/// silently; `horse.revive` and then `pc.revive_horse` each stand it again, alive.
+fn quest_unsummons_and_revives(alice: &mut Keyed, vein: u32, revived: u32) {
+    alice.send_record(&client_click(vein));
+    assert_eq!(alice.read_game(), an_info_line(b"q 2 true false"));
+    read_until_all(
+        alice,
+        &[
+            a_command_line(b"hide_horse_state"),
+            header_and_vid_record(GC_CHARACTER_DEL, revived),
+        ],
+    );
+    for (count, killed) in [(3, &b"q 3 false false"[..]), (4, b"q 4 false false")] {
+        alice.unanswered(&client_chat(CHAT_TALKING, b"/horse_set_stat 0 5"));
+        alice.send_record(&client_click(vein));
+        assert_eq!(alice.read_game(), an_info_line(killed), "click {count}");
+        let read = read_until_all(alice, &[a_command_line(b"horse_state 25 3 3")]);
+        let (standing, _) = added_horse(&read);
+        if count == 3 {
+            alice.send_record(&client_chat(CHAT_TALKING, b"/horse_set_stat 0 5"));
+            read_until_all(
+                alice,
+                &[
+                    a_command_line(b"horse_state 25 0 0"),
+                    a_command_line(b"hide_horse_state"),
+                    header_and_vid_record(GC_CHARACTER_DEL, standing),
+                ],
+            );
+        }
+    }
+}

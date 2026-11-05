@@ -335,3 +335,11 @@ owner answers.
     within one session. The Rewrite ports it as written and treats it as a Quirk. The other choice
     is to call it a Defect and keep the stored pools, planting only the skill. Waits on it:
     nothing blocks; a change is one call in `enter_horse`.
+36. **A revive herb given to any dead horse (ledger 393).** `CanReceiveItem` lets a herb of the
+    right grade reach any dead horse NPC, and `ReceiveItem` then calls the giver's own
+    `ReviveHorse()`, spends one herb and says `[LS;452]` whatever the call answered
+    (`G/char_item.cpp:9483-9499`). So a herb given to another player's dead horse revives the
+    giver's horse if it is dead, and is spent with the line even when the giver's horse is alive
+    or the giver has none. The Rewrite ports it as written and treats it as a Quirk. The other
+    choice is to call it a Defect and spend the herb only on the giver's own horse when it
+    revives. Waits on it: nothing blocks; a change is one guard in `horse_gift`.
